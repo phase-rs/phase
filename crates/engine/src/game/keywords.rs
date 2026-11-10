@@ -72,25 +72,16 @@ pub fn has_keyword(obj: &GameObject, keyword: &Keyword) -> bool {
 /// Object-scoped keyword-kind query — same battlefield-only caveat as
 /// [`has_keyword`]; prefer [`object_has_effective_keyword_kind`] for objects
 /// that can be off-battlefield.
-/// Attachment legality needs every effective protection quality with its
-/// surviving provenance; this is the authority that scans the host's keywords.
-pub(crate) fn effective_protection_qualities(
-    state: &GameState,
-    object_id: ObjectId,
-) -> Vec<crate::types::keywords::ProtectionTarget> {
-    let Some(obj) = state.objects.get(&object_id) else {
-        return Vec::new();
-    };
-    if obj.zone != Zone::Battlefield {
-        return Vec::new();
-    }
-    obj.keywords
-        .iter()
-        .filter_map(|keyword| match keyword {
-            Keyword::Protection(quality) => Some(quality.clone()),
-            _ => None,
-        })
-        .collect()
+/// CR 702.16: borrowed traversal over an object's protection qualities.
+/// Shared by targeting and attachment legality so both read the same list
+/// without cloning or re-looking-up the host.
+pub(crate) fn protection_qualities(
+    obj: &GameObject,
+) -> impl Iterator<Item = &crate::types::keywords::ProtectionTarget> {
+    obj.keywords.iter().filter_map(|keyword| match keyword {
+        Keyword::Protection(quality) => Some(quality),
+        _ => None,
+    })
 }
 
 pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
@@ -689,21 +680,19 @@ pub fn protection_prevents_from_with_source_name(
     source: Option<&GameObject>,
     source_name: Option<&str>,
 ) -> bool {
-    for kw in &target.keywords {
-        if let Keyword::Protection(ref pt) = kw {
-            match pt {
-                ProtectionTarget::ChosenCardName => {
-                    if target.chosen_card_name().is_some_and(|chosen| {
-                        crate::game::filter::source_has_chosen_name(source, source_name, chosen)
-                    }) {
-                        return true;
-                    }
+    for pt in protection_qualities(target) {
+        match pt {
+            ProtectionTarget::ChosenCardName => {
+                if target.chosen_card_name().is_some_and(|chosen| {
+                    crate::game::filter::source_has_chosen_name(source, source_name, chosen)
+                }) {
+                    return true;
                 }
-                _ => {
-                    if let Some(source_obj) = source {
-                        if source_matches_protection_target(pt, target, source_obj) {
-                            return true;
-                        }
+            }
+            _ => {
+                if let Some(source_obj) = source {
+                    if source_matches_protection_target(pt, target, source_obj) {
+                        return true;
                     }
                 }
             }

@@ -2243,31 +2243,29 @@ fn protection_blocks_attachment(
     host: &crate::game::game_object::GameObject,
     attachment: &crate::game::game_object::GameObject,
 ) -> bool {
-    crate::game::keywords::effective_protection_qualities(state, host_id)
-        .iter()
-        .any(|quality| {
-            if !crate::game::keywords::source_matches_protection_target(quality, host, attachment) {
-                return false;
-            }
-            let mut instances = host
-                .protection_provenance
-                .iter()
-                .filter(|entry| entry.quality == *quality)
-                .peekable();
-            instances.peek().is_none()
-                || instances.any(|entry| {
-                    !entry.rider.as_ref().is_some_and(|rider| {
-                        protection_grant_exempts_attachment(
-                            state,
-                            attachment_id,
-                            rider.source,
-                            (rider.def_index, rider.mod_index, host_id),
-                            quality,
-                            &rider.does_not_remove,
-                        )
-                    })
+    crate::game::keywords::protection_qualities(host).any(|quality| {
+        if !crate::game::keywords::source_matches_protection_target(quality, host, attachment) {
+            return false;
+        }
+        let mut instances = host
+            .protection_provenance
+            .iter()
+            .filter(|entry| entry.quality == *quality)
+            .peekable();
+        instances.peek().is_none()
+            || instances.any(|entry| {
+                !entry.rider.as_ref().is_some_and(|rider| {
+                    protection_grant_exempts_attachment(
+                        state,
+                        attachment_id,
+                        rider.source,
+                        (rider.def_index, rider.mod_index, host_id),
+                        quality,
+                        &rider.does_not_remove,
+                    )
                 })
-        })
+            })
+    })
 }
 
 /// Composite key for one protection modification on a host:
@@ -5647,6 +5645,74 @@ mod tests {
     /// the source is controlled by P1, who has no commander (CR 903.4f: no colors).
     /// Another grant's CR 702.16n rider (Flickering Ward, chosen White) exempts only
     /// itself, so the white Aura must still be illegal through the transient grant.
+    /// CR 702.16m + CR 702.16n: a later chosen-keyword grant of the same
+    /// quality is its own surviving instance. With only the ridered grant,
+    /// attachment legality allows the Aura; the independent grant changes it.
+    #[test]
+    fn chosen_grant_changes_rider_only_attachment_legality() {
+        use crate::types::ability::{
+            ChosenAttribute, ContinuousModification, ProtectionDoesNotRemove,
+        };
+        use crate::types::keywords::{Keyword, ProtectionTarget};
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        let host = spawn_creature(&mut state, "Black Knight");
+        let aura = create_object(
+            &mut state,
+            CardId(77),
+            PlayerId(0),
+            "Flickering Ward".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.color.push(ManaColor::White);
+        }
+        attach_to(&mut state, aura, host);
+        apply_protection_grant(
+            &mut state,
+            aura,
+            host,
+            ProtectionTarget::Color(ManaColor::White),
+            Some(ProtectionDoesNotRemove::Source),
+        );
+        persist_last_static(&mut state, aura);
+        evaluate_protection_layers(&mut state);
+        assert_eq!(
+            attachment_illegality(&state, aura, host),
+            None,
+            "the rider-only grant must exempt its own Aura"
+        );
+
+        let chooser = spawn_grant_source(&mut state, "Chosen Ward", 78);
+        {
+            let obj = state.objects.get_mut(&chooser).unwrap();
+            obj.chosen_attributes
+                .push(ChosenAttribute::Keyword(Keyword::Protection(
+                    ProtectionTarget::Color(ManaColor::White),
+                )));
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: host })
+                    .modifications(vec![ContinuousModification::AddChosenKeyword]),
+            );
+        }
+        persist_last_static(&mut state, chooser);
+        evaluate_protection_layers(&mut state);
+        assert_eq!(
+            state.objects[&host].protection_provenance.len(),
+            2,
+            "the chosen grant adds an independent rider-less instance"
+        );
+        assert_eq!(
+            attachment_illegality(&state, aura, host),
+            Some(AttachIllegality::Protection),
+            "the independent instance changes attachment legality"
+        );
+    }
+
     #[test]
     fn transient_each_color_grant_uses_creating_controller_identity() {
         use crate::types::ability::ProtectionDoesNotRemove;

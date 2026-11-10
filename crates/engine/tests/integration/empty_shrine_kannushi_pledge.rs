@@ -1103,6 +1103,11 @@ fn kannushi_pledge_humility_then_flickering_ward_keeps_only_surviving_rider() {
     let mut restored = GameRunner::from_state(restored);
     prepare(&mut restored, P1);
     restored.advance_until_stack_empty();
+    // Attachment legality must consume the same restored surviving-rider state:
+    // a rebuilt layer pass and state-based check keep Ward attached, while the
+    // removed Pledge instance is gone.
+    let mut events = Vec::new();
+    engine::game::sba::check_state_based_actions(restored.state_mut(), &mut events);
     attached(&restored, ward, host);
     // Reach guard: the restored state really derives the surviving protection,
     // so Pacifism has no legal target on this host.
