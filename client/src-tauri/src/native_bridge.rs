@@ -1,9 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    net::Ipv4Addr,
-    sync::{Mutex, OnceLock},
-    time::Duration,
-};
+use std::{collections::BTreeMap, net::Ipv4Addr, sync::OnceLock, time::Duration};
 
 use futures_util::{
     future::{AbortHandle, AbortRegistration, Abortable},
@@ -11,13 +6,13 @@ use futures_util::{
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex as StdMutex,
 };
 use tauri::{ipc::Channel, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tokio::sync::{
     mpsc::{self, UnboundedReceiver, UnboundedSender},
-    oneshot,
+    oneshot, Mutex as AsyncMutex, Notify,
 };
 use tokio_tungstenite::{
     connect_async_with_config,
@@ -68,6 +63,73 @@ pub(crate) struct OutboundFrame {
 }
 
 pub(crate) type OutboundSender = UnboundedSender<OutboundFrame>;
+
+/// Per-bridge admission order for the sequenced (current web) commands. A
+/// frame with sequence N is enqueued only after every earlier sequence, no
+/// matter how the shell scheduled the command tasks.
+pub(crate) struct AdmissionOrder {
+    next: AsyncMutex<u64>,
+    notify: Notify,
+}
+
+impl AdmissionOrder {
+    fn new() -> Self {
+        Self {
+            next: AsyncMutex::new(0),
+            notify: Notify::new(),
+        }
+    }
+}
+
+/// Enqueues the message at its sequence turn and returns its sink receipt.
+async fn enqueue_in_order(
+    order: Arc<AdmissionOrder>,
+    sequence: u64,
+    outbound: OutboundSender,
+    message: Message,
+) -> Result<oneshot::Receiver<Result<(), String>>, NativeEngineBridgeError> {
+    loop {
+        let notified = order.notify.notified();
+        {
+            let mut next = order.next.lock().await;
+            if *next == sequence {
+                let (ack, written) = oneshot::channel();
+                outbound
+                    .send(OutboundFrame {
+                        message,
+                        ack: Some(ack),
+                    })
+                    .map_err(|error| NativeEngineBridgeError::Send {
+                        detail: error.to_string(),
+                    })?;
+                *next += 1;
+                drop(next);
+                order.notify.notify_waiters();
+                return Ok(written);
+            }
+            if *next > sequence {
+                return Err(NativeEngineBridgeError::Send {
+                    detail: format!("duplicate bridge sequence {sequence}"),
+                });
+            }
+        }
+        notified.await;
+    }
+}
+
+/// Waits until every earlier sequence was enqueued.
+async fn await_turn(order: Arc<AdmissionOrder>, sequence: u64) {
+    loop {
+        let notified = order.notify.notified();
+        {
+            let next = order.next.lock().await;
+            if *next >= sequence {
+                return;
+            }
+        }
+        notified.await;
+    }
+}
 pub(crate) type OutboundReceiver = UnboundedReceiver<OutboundFrame>;
 
 pub(crate) struct BridgeHandle {
@@ -76,6 +138,7 @@ pub(crate) struct BridgeHandle {
     /// Cancellation admitted at the writer: frames still queued for a retired
     /// candidate are acknowledged as cancelled and never written.
     abandoned: Arc<AtomicBool>,
+    order: Arc<AdmissionOrder>,
 }
 
 impl BridgeHandle {
@@ -84,11 +147,16 @@ impl BridgeHandle {
             abort,
             outbound,
             abandoned: Arc::new(AtomicBool::new(false)),
+            order: Arc::new(AdmissionOrder::new()),
         }
     }
 
     pub(crate) fn abandoned(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.abandoned)
+    }
+
+    pub(crate) fn order(&self) -> Arc<AdmissionOrder> {
+        Arc::clone(&self.order)
     }
 
     pub(crate) fn abort(&self) {
@@ -102,6 +170,7 @@ impl BridgeHandle {
             abort,
             outbound,
             abandoned: _,
+            order: _,
         } = self;
         drop(outbound);
         tauri::async_runtime::spawn(async move {
@@ -193,19 +262,66 @@ pub async fn connect_native_engine(
     Ok(bridge_id)
 }
 
-/// Sends a JSON text frame over a shell-pinned bridge and waits for the sink
-/// write. Queue admission is not success.
+/// Legacy send: admits the frame to the bridge FIFO immediately and returns
+/// on queue admission. Older deployed web builds use this contract.
 #[tauri::command]
-pub async fn native_engine_bridge_send(
+pub fn native_engine_bridge_send(id: u64, text: String) -> Result<(), NativeEngineBridgeError> {
+    let outbound = native_engine::native_engine_bridge_sender(id).ok_or_else(|| {
+        NativeEngineBridgeError::UnknownBridge {
+            detail: format!("native engine bridge {id} is not open"),
+        }
+    })?;
+    outbound
+        .send(OutboundFrame {
+            message: Message::Text(text.into()),
+            ack: None,
+        })
+        .map_err(|error| NativeEngineBridgeError::Send {
+            detail: error.to_string(),
+        })
+}
+
+/// Sequenced send: admitted in sequence order, resolves after the sink write.
+#[tauri::command]
+pub async fn native_engine_bridge_write(
     id: u64,
     text: String,
+    sequence: u64,
 ) -> Result<(), NativeEngineBridgeError> {
     let outbound = native_engine::native_engine_bridge_sender(id).ok_or_else(|| {
         NativeEngineBridgeError::UnknownBridge {
             detail: format!("native engine bridge {id} is not open"),
         }
     })?;
-    enqueue_frame(outbound, Message::Text(text.into())).await
+    let order = native_engine::native_engine_bridge_order(id).ok_or_else(|| {
+        NativeEngineBridgeError::UnknownBridge {
+            detail: format!("native engine bridge {id} is not open"),
+        }
+    })?;
+    let written = enqueue_in_order(order, sequence, outbound, Message::Text(text.into())).await?;
+    await_written(written).await
+}
+
+/// Sequenced close: admits after every earlier sequence, then retires the
+/// bridge so the native watchdog drains what was already accepted.
+#[tauri::command]
+pub async fn native_engine_bridge_finish(
+    id: u64,
+    sequence: u64,
+) -> Result<(), NativeEngineBridgeError> {
+    let order = native_engine::native_engine_bridge_order(id).ok_or_else(|| {
+        NativeEngineBridgeError::UnknownBridge {
+            detail: format!("native engine bridge {id} is not open"),
+        }
+    })?;
+    await_turn(order, sequence).await;
+    if native_engine::close_native_engine_bridge(id) {
+        Ok(())
+    } else {
+        Err(NativeEngineBridgeError::UnknownBridge {
+            detail: format!("native engine bridge {id} is not open"),
+        })
+    }
 }
 
 /// Enqueues one frame and resolves with the forwarder\u0027s sink result.
@@ -555,10 +671,10 @@ impl LanConsent {
     }
 }
 
-static LAN_BRIDGES: OnceLock<Mutex<LanBridges>> = OnceLock::new();
+static LAN_BRIDGES: OnceLock<StdMutex<LanBridges>> = OnceLock::new();
 
-fn lan_bridges() -> &'static Mutex<LanBridges> {
-    LAN_BRIDGES.get_or_init(|| Mutex::new(LanBridges::default()))
+fn lan_bridges() -> &'static StdMutex<LanBridges> {
+    LAN_BRIDGES.get_or_init(|| StdMutex::new(LanBridges::default()))
 }
 
 // Parse the authority as an IPv4 literal before constructing a URL. This
@@ -779,15 +895,30 @@ impl LanBridges {
             })
     }
 
-    #[cfg(test)]
     fn send(
         &self,
         id: u64,
         client: &LanClient,
         text: String,
     ) -> Result<(), NativeEngineBridgeError> {
-        let _ = self.enqueue(id, client, Message::Text(text.into()))?;
-        Ok(())
+        self.owned_bridge(id, client)?
+            .handle
+            .outbound()
+            .send(OutboundFrame {
+                message: Message::Text(text.into()),
+                ack: None,
+            })
+            .map_err(|error| NativeEngineBridgeError::Send {
+                detail: error.to_string(),
+            })
+    }
+
+    fn order(
+        &self,
+        id: u64,
+        client: &LanClient,
+    ) -> Result<Arc<AdmissionOrder>, NativeEngineBridgeError> {
+        Ok(self.owned_bridge(id, client)?.handle.order())
     }
 
     /// Enqueues one frame and returns the receipt for its sink write.
@@ -833,17 +964,55 @@ impl LanBridges {
 }
 
 #[tauri::command]
-pub async fn lan_bridge_send(
+pub fn lan_bridge_send(
     window: WebviewWindow,
     id: u64,
     text: String,
 ) -> Result<(), NativeEngineBridgeError> {
     let client = invoking_lan_client(&window)?;
-    let written = lan_bridges()
+    lan_bridges()
         .lock()
         .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
-        .enqueue(id, &client, Message::Text(text.into()))?;
+        .send(id, &client, text)
+}
+
+#[tauri::command]
+pub async fn lan_bridge_write(
+    window: WebviewWindow,
+    id: u64,
+    text: String,
+    sequence: u64,
+) -> Result<(), NativeEngineBridgeError> {
+    let client = invoking_lan_client(&window)?;
+    let (outbound, order) = {
+        let state = lan_bridges()
+            .lock()
+            .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?;
+        (
+            state.owned_bridge(id, &client)?.handle.outbound(),
+            state.order(id, &client)?,
+        )
+    };
+    let written = enqueue_in_order(order, sequence, outbound, Message::Text(text.into())).await?;
     await_written(written).await
+}
+
+#[tauri::command]
+pub async fn lan_bridge_finish(
+    window: WebviewWindow,
+    id: u64,
+    sequence: u64,
+) -> Result<(), NativeEngineBridgeError> {
+    let client = invoking_lan_client(&window)?;
+    let order = lan_bridges()
+        .lock()
+        .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
+        .order(id, &client)?;
+    await_turn(order, sequence).await;
+    lan_bridges()
+        .lock()
+        .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
+        .close(id, &client)
 }
 
 #[tauri::command]
@@ -1520,6 +1689,56 @@ mod tests {
     }
 
     #[test]
+    fn sequenced_frames_are_admitted_in_sequence_order_across_out_of_order_tasks() {
+        tauri::async_runtime::block_on(async {
+            let order = Arc::new(AdmissionOrder::new());
+            let (outbound, mut receiver) = mpsc::unbounded_channel();
+            // Sequence 1 starts first and must wait for sequence 0.
+            let later = {
+                let order = Arc::clone(&order);
+                let outbound = outbound.clone();
+                tauri::async_runtime::spawn(async move {
+                    enqueue_in_order(order, 1, outbound, Message::Text("second".into())).await
+                })
+            };
+            tokio::task::yield_now().await;
+            let earlier = {
+                let order = Arc::clone(&order);
+                let outbound = outbound.clone();
+                tauri::async_runtime::spawn(async move {
+                    enqueue_in_order(order, 0, outbound, Message::Text("first".into())).await
+                })
+            };
+            let first = receiver.recv().await.unwrap();
+            assert_eq!(first.message, Message::Text("first".into()));
+            let _ = first.ack.unwrap().send(Ok(()));
+            let second = receiver.recv().await.unwrap();
+            assert_eq!(second.message, Message::Text("second".into()));
+            let _ = second.ack.unwrap().send(Ok(()));
+            earlier.await.unwrap().unwrap();
+            later.await.unwrap().unwrap();
+        });
+    }
+
+    #[test]
+    fn sequenced_close_waits_for_every_earlier_admission() {
+        tauri::async_runtime::block_on(async {
+            let order = Arc::new(AdmissionOrder::new());
+            let waiting = {
+                let order = Arc::clone(&order);
+                tauri::async_runtime::spawn(async move { await_turn(order, 1).await })
+            };
+            tokio::task::yield_now().await;
+            {
+                let mut next = order.next.lock().await;
+                *next = 1;
+            }
+            order.notify.notify_waiters();
+            waiting.await.unwrap();
+        });
+    }
+
+    #[test]
     fn abandoning_a_lan_bridge_retires_it_and_its_queue_immediately() {
         let (outbound, mut receiver) = mpsc::unbounded_channel();
         let (abort, _) = AbortHandle::new_pair();
@@ -1639,10 +1858,7 @@ mod tests {
         let unknown_bridge_id = u64::MAX;
 
         assert!(matches!(
-            tauri::async_runtime::block_on(native_engine_bridge_send(
-                unknown_bridge_id,
-                "frame".to_owned()
-            )),
+            native_engine_bridge_send(unknown_bridge_id, "frame".to_owned()),
             Err(NativeEngineBridgeError::UnknownBridge { .. })
         ));
         assert!(matches!(

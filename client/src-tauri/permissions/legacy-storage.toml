@@ -62,3 +62,13 @@ commands.allow = ["bridge_capabilities"]
 identifier = "allow-native-engine-bridge-abandon"
 description = "Allows first-party remote content to cancel and retire its unadopted native-engine bridge candidate."
 commands.allow = ["native_engine_bridge_abandon"]
+
+[[permission]]
+identifier = "allow-native-engine-bridge-write"
+description = "Allows first-party remote content to send a sequenced frame and wait for its sink write."
+commands.allow = ["native_engine_bridge_write"]
+
+[[permission]]
+identifier = "allow-native-engine-bridge-finish"
+description = "Allows first-party remote content to close its bridge after every earlier sequenced write was admitted."
+commands.allow = ["native_engine_bridge_finish"]

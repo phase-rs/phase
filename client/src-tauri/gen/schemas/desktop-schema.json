@@ -405,10 +405,22 @@
           "markdownDescription": "Allows first-party remote content to close its native-engine bridge."
         },
         {
+          "description": "Allows first-party remote content to close its bridge after every earlier sequenced write was admitted.",
+          "type": "string",
+          "const": "allow-native-engine-bridge-finish",
+          "markdownDescription": "Allows first-party remote content to close its bridge after every earlier sequenced write was admitted."
+        },
+        {
           "description": "Allows first-party remote content to send JSON text through its native-engine bridge.",
           "type": "string",
           "const": "allow-native-engine-bridge-send",
           "markdownDescription": "Allows first-party remote content to send JSON text through its native-engine bridge."
+        },
+        {
+          "description": "Allows first-party remote content to send a sequenced frame and wait for its sink write.",
+          "type": "string",
+          "const": "allow-native-engine-bridge-write",
+          "markdownDescription": "Allows first-party remote content to send a sequenced frame and wait for its sink write."
         },
         {
           "description": "Allows first-party remote content to read the latest native-engine provisioning progress.",

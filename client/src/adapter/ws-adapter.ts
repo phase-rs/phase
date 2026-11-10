@@ -3125,17 +3125,6 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     this.reconnectInFlight = true;
     this.reconnectAttempt++;
-    // The initialization is the single surface of an initial fallback: its
-    // attempts are not announced as a reconnect episode.
-    if (!this.initialFallbackActive()) {
-      this.emit({
-        type: "reconnecting",
-        attempt: this.reconnectAttempt,
-        // Only the loopback schedule is bounded by attempts; a remote episode
-        // ends on its time budget, so no denominator is reported (0 = unbounded).
-        maxAttempts: Number.isFinite(policy.budgetMs) ? 0 : this.maxReconnectAttempts,
-      });
-    }
     const scheduledGeneration = this.attachGeneration;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -3153,6 +3142,19 @@ export class WebSocketAdapter implements EngineAdapter {
         this.tryReconnect(session);
       }
     }, delay);
+    // The timer is installed before the notification: a listener that starts
+    // a successor retires this timer instead of leaving it under the successor.
+    // The initialization is the single surface of an initial fallback: its
+    // attempts are not announced as a reconnect episode.
+    if (!this.initialFallbackActive()) {
+      this.emit({
+        type: "reconnecting",
+        attempt: this.reconnectAttempt,
+        // Only the loopback schedule is bounded by attempts; a remote episode
+        // ends on its time budget, so no denominator is reported (0 = unbounded).
+        maxAttempts: Number.isFinite(policy.budgetMs) ? 0 : this.maxReconnectAttempts,
+      });
+    }
   }
 
   private failReconnect(outcome: "gave-up" | "failed" = "gave-up"): void {

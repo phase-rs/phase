@@ -75,38 +75,63 @@ describe("NativeEngineSocket", () => {
     const socket = new NativeEngineSocket();
     await resolveConnection(connection);
     await vi.waitFor(() => expect(socket.readyState).toBe(NativeEngineSocket.OPEN));
-    const first = deferred<void>();
-    const second = deferred<void>();
-    const admitted: string[] = [];
-    invokeMock.mockImplementation((command: string, args: { text?: string }) => {
-      if (command !== "native_engine_bridge_send") return Promise.resolve(undefined);
-      admitted.push(args.text ?? "");
-      return admitted.length === 1 ? first.promise : second.promise;
-    });
-    const receipt = socket.sendReceipt;
-    expect(receipt).toBeTypeOf("function");
-    socket.send("hello");
-    const setup = receipt!("setup");
-    // Admission is serialized: setup waits for hello to settle.
-    await vi.waitFor(() => expect(admitted).toEqual(["hello"]));
-    await Promise.resolve();
-    expect(admitted).toEqual(["hello"]);
-    first.resolve();
-    await vi.waitFor(() => expect(admitted).toEqual(["hello", "setup"]));
-
-    const closed: number[] = [];
-    invokeMock.mockImplementation((command: string, args: { id?: number }) => {
-      if (command === "native_engine_bridge_close") closed.push(args.id ?? -1);
+    const writes: Array<{ text: string; sequence: number }> = [];
+    const finished: number[] = [];
+    let held!: () => void;
+    invokeMock.mockImplementation((command: string, args: { text?: string; sequence?: number }) => {
+      if (command === "native_engine_bridge_write") {
+        writes.push({ text: args.text ?? "", sequence: args.sequence ?? -1 });
+        // The first write's sink is held; later admissions must not wait on it.
+        if (writes.length === 1) return new Promise<void>((resolve) => { held = resolve; });
+        return Promise.resolve(undefined);
+      }
+      if (command === "native_engine_bridge_finish") {
+        finished.push(args.sequence ?? -1);
+      }
       return Promise.resolve(undefined);
     });
+    const receipt = socket.sendReceipt;
+    socket.send("hello");
+    const setup = receipt("setup");
     socket.close();
-    expect(closed).toEqual([]);
-    second.resolve();
+    await vi.waitFor(() => expect(writes).toEqual([
+      { text: "hello", sequence: 0 },
+      { text: "setup", sequence: 1 },
+    ]));
+    expect(finished).toEqual([2]);
+    held();
     await setup;
-    await vi.waitFor(() => expect(closed).toEqual([7]));
   });
 
-  it("falls back to the legacy send contract when the shell lacks sink receipts", async () => {
+  it("cancels an in-flight setup write through writer abandonment", async () => {
+    const connection = deferred<number>();
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "connect_native_engine") return connection.promise;
+      if (command === "bridge_capabilities") {
+        return Promise.resolve({ sinkReceipt: true, abandon: true });
+      }
+      return Promise.resolve(undefined);
+    });
+    const socket = new NativeEngineSocket();
+    await resolveConnection(connection);
+    await vi.waitFor(() => expect(socket.readyState).toBe(NativeEngineSocket.OPEN));
+    const sink = deferred<void>();
+    const commands: string[] = [];
+    invokeMock.mockImplementation((command: string) => {
+      commands.push(command);
+      if (command === "native_engine_bridge_write") return sink.promise;
+      return Promise.resolve(undefined);
+    });
+    const controller = new AbortController();
+    const setup = socket.sendReceipt("setup", controller.signal);
+    expect(commands).toContain("native_engine_bridge_write");
+    controller.abort();
+    await vi.waitFor(() => expect(commands).toContain("native_engine_bridge_abandon"));
+    sink.resolve();
+    await expect(setup).rejects.toThrow("abandoned");
+  });
+
+  it("keeps the legacy admission contract when the shell lacks sink receipts", async () => {
     const connection = deferred<number>();
     invokeMock.mockImplementation((command: string) => {
       if (command === "connect_native_engine") return connection.promise;
@@ -116,17 +141,23 @@ describe("NativeEngineSocket", () => {
     const socket = new NativeEngineSocket();
     await resolveConnection(connection);
     await vi.waitFor(() => expect(socket.readyState).toBe(NativeEngineSocket.OPEN));
-    expect(socket.sendReceipt).toBeUndefined();
+    // Admission receipts still exist; they mean queue admission, as before.
+    expect(socket.sendReceipt).toBeTypeOf("function");
+    const commands: Array<{ type: string; text?: string }> = [];
+    invokeMock.mockImplementation((command: string, args: { text?: string }) => {
+      commands.push({ type: command, text: args.text });
+      return Promise.resolve(undefined);
+    });
     socket.send("hello");
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
-      "native_engine_bridge_send",
-      { id: 7, text: "hello" },
-    ));
-    // The capability probe ran and its rejection selected the legacy contract.
+    await socket.sendReceipt("setup");
+    await vi.waitFor(() => expect(commands).toEqual([
+      { type: "native_engine_bridge_send", text: "hello" },
+      { type: "native_engine_bridge_send", text: "setup" },
+    ]));
     expect(invokeMock).toHaveBeenCalledWith("bridge_capabilities", {});
   });
 
-  it("admits a same-turn send before the close command and bounds a stalled sink", async () => {
+  it("admits every accepted write before the sequenced close, even past a held sink", async () => {
     const connection = deferred<number>();
     invokeMock.mockImplementation((command: string) => {
       if (command === "connect_native_engine") return connection.promise;
@@ -138,61 +169,31 @@ describe("NativeEngineSocket", () => {
     const socket = new NativeEngineSocket();
     await resolveConnection(connection);
     await vi.waitFor(() => expect(socket.readyState).toBe(NativeEngineSocket.OPEN));
-    const stalled = deferred<void>();
-    const commands: string[] = [];
-    invokeMock.mockImplementation((command: string) => {
-      commands.push(command);
-      return command === "native_engine_bridge_send" ? stalled.promise : Promise.resolve(undefined);
-    });
-    try {
-      vi.useFakeTimers();
-      socket.send("hello");
-      socket.close();
-      await vi.waitFor(() => expect(commands).toEqual(["native_engine_bridge_send"]));
-      // The close is bounded: a stalled sink must not postpone it forever.
-      await vi.advanceTimersByTimeAsync(1000);
-      await vi.waitFor(() => expect(commands).toContain("native_engine_bridge_close"));
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("cancels a queued setup before admission when its signal aborts", async () => {
-    const connection = deferred<number>();
-    invokeMock.mockImplementation((command: string) => {
-      if (command === "connect_native_engine") return connection.promise;
-      if (command === "bridge_capabilities") {
-        return Promise.resolve({ sinkReceipt: true, abandon: true });
+    let releaseA!: () => void;
+    const writes: Array<{ text: string; sequence: number }> = [];
+    let finishSequence = -1;
+    invokeMock.mockImplementation((command: string, args: { text?: string; sequence?: number }) => {
+      if (command === "native_engine_bridge_write") {
+        writes.push({ text: args.text ?? "", sequence: args.sequence ?? -1 });
+        if (writes.length === 1) return new Promise<void>((resolve) => { releaseA = resolve; });
+        return Promise.resolve(undefined);
+      }
+      if (command === "native_engine_bridge_finish") {
+        finishSequence = args.sequence ?? -1;
       }
       return Promise.resolve(undefined);
     });
-    const socket = new NativeEngineSocket();
-    await resolveConnection(connection);
-    await vi.waitFor(() => expect(socket.readyState).toBe(NativeEngineSocket.OPEN));
-    const first = deferred<void>();
-    const admitted: string[] = [];
-    invokeMock.mockImplementation((command: string, args: { text?: string }) => {
-      if (command !== "native_engine_bridge_send") return Promise.resolve(undefined);
-      admitted.push(args.text ?? "");
-      return admitted.length === 1 ? first.promise : Promise.resolve(undefined);
-    });
-    const receipt = socket.sendReceipt;
-    expect(receipt).toBeTypeOf("function");
-    socket.send("hello");
-    const controller = new AbortController();
-    const setup = receipt!("setup", controller.signal);
-    await vi.waitFor(() => expect(admitted).toEqual(["hello"]));
-    controller.abort();
-    first.resolve();
-    await expect(setup).rejects.toThrow("cancelled before admission");
-    expect(admitted).toEqual(["hello"]);
-    // The writer is told to retire any frame the client can no longer own.
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith(
-      "native_engine_bridge_abandon",
-      { id: 7 },
-    ));
+    socket.send("A");
+    socket.send("B");
+    socket.close();
+    // A's sink is still held; B and the close must already be admitted.
+    await vi.waitFor(() => expect(writes).toEqual([
+      { text: "A", sequence: 0 },
+      { text: "B", sequence: 1 },
+    ]));
+    expect(finishSequence).toBe(2);
+    releaseA();
   });
-
 
   it("does not construct a channel or invoke commands outside desktop Tauri", async () => {
     isDesktopTauriMock.mockReturnValue(false);
