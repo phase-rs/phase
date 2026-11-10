@@ -16833,7 +16833,9 @@ mod tests {
     /// pure inert board growth; recipient relations are the FODDER cover's quotient.
     #[test]
     fn object_growth_ignores_retained_damage_witnesses() {
-        use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
+        use crate::types::ability::{
+            Effect, EffectScope, ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
+        };
         use crate::types::events::GameEvent;
         use crate::types::game_state::{DamageRecord, StackEntry, StackEntryKind};
 
@@ -16855,7 +16857,12 @@ mod tests {
             kind: StackEntryKind::TriggeredAbility {
                 source_id: grown,
                 ability: Box::new(ResolvedAbility::new(
-                    Effect::NoOp,
+                    // CR 608.2k: a recipient reader, so the relation is observable at all.
+                    Effect::SetTapState {
+                        target: TargetFilter::EventTarget,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
                     vec![],
                     grown,
                     PlayerId(0),
@@ -16888,7 +16895,9 @@ mod tests {
     /// that recipient across the period still refuses the growth cover.
     #[test]
     fn object_growth_keeps_non_grown_recipient_relation() {
-        use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
+        use crate::types::ability::{
+            Effect, EffectScope, ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
+        };
         use crate::types::events::GameEvent;
         use crate::types::game_state::{DamageRecord, StackEntry, StackEntryKind};
 
@@ -16900,7 +16909,13 @@ mod tests {
                 kind: StackEntryKind::TriggeredAbility {
                     source_id: target,
                     ability: Box::new(ResolvedAbility::new(
-                        Effect::NoOp,
+                        // CR 608.2k: a recipient reader, so the live/stale relation is
+                        // observable and the cover must judge it.
+                        Effect::SetTapState {
+                            target: TargetFilter::EventTarget,
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
+                        },
                         vec![],
                         target,
                         PlayerId(0),

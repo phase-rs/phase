@@ -35440,7 +35440,11 @@ impl GameState {
     /// impl compares zeroed/canonicalized, so two states reached at different
     /// times can compare equal on everything a mandatory action could change.
     ///
-    /// Full strict form: transient pruning AND identity ranking.
+    /// Full strict form: transient pruning AND identity ranking. Production ranks a
+    /// candidate pair through [`loop_states_equal`] instead of normalizing a whole beat,
+    /// so today this entry is the documented strict contract used by comparand tests and
+    /// by any future caller that genuinely needs one fully-ranked frame.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn normalize_for_loop(&self) -> GameState {
         self.normalize_for_loop_with_rank(LoopIdentityRank::Ranked)
     }
