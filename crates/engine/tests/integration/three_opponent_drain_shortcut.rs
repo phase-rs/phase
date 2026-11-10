@@ -58,7 +58,6 @@ fn fc_path() -> std::path::PathBuf {
         .join(FC_FILE)
 }
 
-// Read at run time: the regenerator lives in this binary, so it must build without F-C.
 pub(crate) fn load_fc() -> GameState {
     let gz = std::fs::read(fc_path()).expect("F-C is committed beside S");
     restore_dump(&gunzip_dump(&gz))

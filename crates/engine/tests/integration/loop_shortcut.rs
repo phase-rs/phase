@@ -12509,8 +12509,8 @@ fn r28_nonempty_schema_offer(runner: &mut GameRunner, slot: DecisionSlot) {
 /// another seat is refused AT DECLARE.**
 ///
 /// `template.owner` arrives VERBATIM from the client (`GameAction::DeclareShortcut { template }`
-/// is forwarded whole) and only the declare-time binding to the engine-issued
-/// `LoopShortcutOffer.proposer` refuses a foreign owner.
+/// is forwarded whole); the declare-time binding to the engine-issued
+/// `LoopShortcutOffer.proposer` refuses a foreign owner before any proposal is built.
 ///
 /// **(a′) is the reach-guard**: the byte-identical declaration with `owner = P0` builds the
 /// proposal and opens APNAP, proving the fixture reaches the firewall and that (a) is keyed to
