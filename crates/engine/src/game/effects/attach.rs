@@ -322,12 +322,9 @@ fn resolve_bound_attachment_operation(
     let attachment_ids =
         resolve_attachment_ids(state, ability, attachment_filter, &mut target_slots);
     if attachment_ids.is_empty() {
-        // CR 400.7: a source that left play is a new object, so "attach ~" attaches
-        // nothing and the instruction still resolved.
-        if matches!(
-            attachment_filter,
-            TargetFilter::SelfRef | TargetFilter::OriginalSource
-        ) {
+        // CR 400.7: a referent that left play is a new object, so the attach
+        // attaches nothing and the instruction still resolved.
+        if attachment_referent_departed(state, ability, attachment_filter) {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id,
@@ -919,6 +916,10 @@ fn prompt_described_host_choice(
     let mut no_slots = std::iter::empty();
     let attachment_ids = resolve_attachment_ids(state, ability, attachment_filter, &mut no_slots);
     if attachment_ids.is_empty() {
+        // CR 400.7: the executor resolves a departed referent as a no-op.
+        if attachment_referent_departed(state, ability, attachment_filter) {
+            return Ok(AttachPromptOutcome::Execute);
+        }
         return Ok(AttachPromptOutcome::Completed);
     }
     // CR 115.1d + CR 608.2d: the host candidates are the BATTLEFIELD objects
@@ -1719,6 +1720,34 @@ fn resolve_parent_target_attachment_from_trigger(state: &GameState) -> Option<Ob
             None
         }
     })
+}
+
+/// CR 400.7 + CR 608.2b: whether an attachment operand that resolved to nothing names a
+/// specific object that has since become a new object or an illegal target. An operand
+/// naming no specific object (a scan, or a granter never stamped) has not departed.
+fn attachment_referent_departed(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> bool {
+    let trigger_source = ability
+        .trigger_source
+        .as_ref()
+        .map(|s| s.identity.reference);
+    let referent = match filter {
+        TargetFilter::SelfRef => trigger_source.or_else(|| ability.source_ref(state)),
+        TargetFilter::OriginalSource => trigger_source,
+        TargetFilter::GrantingObject { bound } => bound.or(ability.context.granting_object),
+        // The live slot read already dropped it: a declared object departed or became illegal.
+        TargetFilter::ParentTargetSlot { index } => {
+            return matches!(
+                crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index),
+                Some(TargetRef::Object(_))
+            );
+        }
+        _ => None,
+    };
+    referent.is_some_and(|referent| !referent.is_current(state))
 }
 
 fn resolve_object_filter<'a>(

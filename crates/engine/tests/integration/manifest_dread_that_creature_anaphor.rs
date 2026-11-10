@@ -1007,3 +1007,154 @@ fn ancestral_blade_flickered_before_its_trigger_resolves_equips_only_the_new_tri
     // The new incarnation's trigger is stacked above the departed one, so it resolves first.
     assert_eq!(host_of(&runner, blade), Some(soldiers[0]));
 }
+
+const NETTLEVINE_BLIGHT: &str = "Enchant creature or land\nEnchanted permanent has \"At the beginning of your end step, sacrifice this permanent and attach Nettlevine Blight to a creature or land you control.\"";
+
+const NATURALIZE: &str = "Destroy target artifact or enchantment.";
+
+/// Nettlevine Blight enchants a Bearer and its granted end-step trigger waits; when
+/// `destroy`, Naturalize destroys the Blight in response. Returns the runner, the Blight,
+/// the Bearer, the other creature, and the events.
+fn nettlevine_blight(destroy: bool) -> (GameRunner, ObjectId, ObjectId, ObjectId, Vec<GameEvent>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PostCombatMain);
+    let bearer = scenario.add_creature(P0, "Bearer", 2, 2).id();
+    let other = scenario.add_creature(P0, "Other", 1, 1).id();
+    let blight = scenario
+        .add_enchantment_from_oracle(P0, "Nettlevine Blight", NETTLEVINE_BLIGHT)
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let naturalize = scenario
+        .add_spell_to_hand_from_oracle(P0, "Naturalize", true, NATURALIZE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    engine::game::effects::attach::attach_to(runner.state_mut(), blight, bearer);
+    layers::mark_layers_full(runner.state_mut());
+    layers::flush_layers(runner.state_mut());
+    runner.advance_to_end_step();
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: the granted end-step trigger waits"
+    );
+    if destroy {
+        runner.cast(naturalize).target_object(blight).commit();
+    }
+    let (events, _) = settle(&mut runner, true, &[other]);
+    (runner, blight, bearer, other, events)
+}
+
+fn attach_subjects(events: &[GameEvent]) -> Vec<Option<ObjectId>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::EffectResolved {
+                kind: EffectKind::Attach,
+                subject,
+                ..
+            } => Some(subject.as_ref().map(|s| s.identity.object_id)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 400.7: Naturalize destroys Nettlevine Blight while its granted trigger waits, so the
+/// trigger still sacrifices the Bearer but attaches nothing.
+#[test]
+fn nettlevine_blight_destroyed_before_its_trigger_resolves_attaches_nothing() {
+    let (runner, blight, bearer, _, events) = nettlevine_blight(true);
+
+    assert_eq!(runner.state().objects[&blight].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&bearer].zone,
+        Zone::Graveyard,
+        "reach guard: the trigger resolved and sacrificed the Bearer"
+    );
+    assert_eq!(
+        attach_subjects(&events),
+        vec![None],
+        "the attach resolved as a no-op"
+    );
+}
+
+/// CR 701.3a: with the Blight still on the battlefield, the trigger moves it to the other
+/// creature.
+#[test]
+fn nettlevine_blight_moves_to_another_creature_after_its_trigger_resolves() {
+    let (runner, blight, bearer, other, events) = nettlevine_blight(false);
+
+    assert_eq!(runner.state().objects[&bearer].zone, Zone::Graveyard);
+    assert_eq!(host_of(&runner, blight), Some(other));
+    assert_eq!(attach_subjects(&events), vec![Some(blight)]);
+}
+
+const STOLEN_UNIFORM: &str = "Choose target creature you control and target Equipment. Gain control of that Equipment until end of turn. Attach it to the chosen creature. When you lose control of that Equipment this turn, if it's attached to a creature you control, unattach it.";
+
+/// Stolen Uniform targets a Wearer and an Equipment; when `flicker`, Ghostly Flicker
+/// returns the Equipment as a new object in response. Returns the runner, the Equipment,
+/// the Wearer, and the events.
+fn stolen_uniform(flicker: bool) -> (GameRunner, ObjectId, ObjectId, Vec<GameEvent>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let wearer = scenario.add_creature(P0, "Wearer", 2, 2).id();
+    let bystander = scenario.add_creature(P0, "Bystander", 2, 2).id();
+    let equipment = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Plain Sword",
+            "Equipped creature gets +1/+1.\nEquip {1}",
+        )
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let uniform = scenario
+        .add_spell_to_hand_from_oracle(P0, "Stolen Uniform", true, STOLEN_UNIFORM)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let ghostly = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ghostly Flicker", true, GHOSTLY_FLICKER)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .cast(uniform)
+        .target_objects(&[wearer, equipment])
+        .commit();
+    let departed = runner.state().objects[&equipment].incarnation;
+    if flicker {
+        runner
+            .cast(ghostly)
+            .target_objects(&[equipment, bystander])
+            .commit();
+    }
+    let (events, _) = settle(&mut runner, true, &[]);
+    assert_eq!(
+        runner.state().objects[&equipment].incarnation != departed,
+        flicker,
+        "reach guard: only the flicker makes the Equipment a new object"
+    );
+    (runner, equipment, wearer, events)
+}
+
+/// CR 400.7 + CR 608.2b: Ghostly Flicker makes Stolen Uniform's Equipment a new object, so
+/// its attach attaches nothing and still resolves.
+#[test]
+fn stolen_uniform_whose_equipment_was_flickered_attaches_nothing() {
+    let (runner, equipment, _, events) = stolen_uniform(true);
+
+    assert_eq!(host_of(&runner, equipment), None);
+    assert_eq!(
+        attach_subjects(&events),
+        vec![None],
+        "the attach resolved as a no-op"
+    );
+}
+
+/// CR 701.3a: Stolen Uniform attaches the Equipment to the chosen creature.
+#[test]
+fn stolen_uniform_attaches_the_equipment_to_the_chosen_creature() {
+    let (runner, equipment, wearer, events) = stolen_uniform(false);
+
+    assert_eq!(host_of(&runner, equipment), Some(wearer));
+    assert_eq!(attach_subjects(&events), vec![Some(equipment)]);
+}
