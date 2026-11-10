@@ -42,14 +42,17 @@ pub const MAX_ATTRACTION_DECK_ENTRIES: usize = 200;
 /// Max supplementary Contraption-deck entries accepted on the wire (Contraptions are
 /// outside the Comprehensive Rules, CR 701.45a; 200 mirrors the other supplementary decks).
 pub const MAX_CONTRAPTION_DECK_ENTRIES: usize = 200;
-/// Max sticker-sheet entries accepted on the wire. Sticker play is a supplemental
-/// mechanic (not covered by the Comprehensive Rules snapshot in `docs/`), where a
-/// player brings a small chosen set of sticker sheets; 10 is a generous wire
-/// ceiling. Bounding this closes the only `DeckData` name list left unbounded by
-/// [`validate_deck_payload`] — each entry is still capped at
-/// [`MAX_DECK_CARD_NAME_LEN`], so the worst-case sticker list is ~2.5 KB, not the
-/// multi-hundred-KB single entry an unbounded `Vec<String>` would admit.
-pub const MAX_STICKER_SHEET_ENTRIES: usize = 10;
+/// Max sticker-sheet entries accepted on the wire. CR 123.2a: a player playing
+/// with stickers "must start the game with at least ten sticker sheets... There is
+/// no maximum number of sticker sheets a player may start the game with." So the
+/// legal floor is ten and there is no legal ceiling — a hard cap at ten would
+/// reject the eleven-sheet pool the rules permit. 200 mirrors the other
+/// no-maximum supplementary name lists (attraction/planar/scheme/contraption) as a
+/// pure anti-abuse wire ceiling far above any real pool, not a rules bound. Each
+/// entry is still capped at [`MAX_DECK_CARD_NAME_LEN`] and the whole tournament
+/// payload at [`crate::tournament::MAX_SINGLE_DECK_ENCODED_BYTES`], so the encoded
+/// size — not this count — is what actually bounds the DoS surface.
+pub const MAX_STICKER_SHEET_ENTRIES: usize = 200;
 /// Max byte length of a single card name string inside a deck payload. Defined once
 /// in the engine (`engine::types::card_printing`), where the printings sidecar's
 /// bound reads it too; re-exported so this path stays valid.

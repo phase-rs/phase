@@ -773,7 +773,7 @@ mod tests {
             (
                 "sticker_sheets",
                 DeckData {
-                    sticker_sheets: vec!["Sheet".into(); 11],
+                    sticker_sheets: vec!["Sheet".into(); 201],
                     ..Default::default()
                 },
             ),
@@ -788,6 +788,22 @@ mod tests {
             .unwrap_err();
             assert!(err.contains(field), "{err}");
         }
+
+        // CR 123.2a: a constructed sticker pool is "at least ten sticker sheets...
+        // There is no maximum". Eleven distinct supported sheets — one past the
+        // legal floor — must pass the shared guard; only an abusive count (above)
+        // is refused. REVERT-FAIL: a sticker cap of ten rejects this legal pool.
+        let legal_stickers = DeckData {
+            sticker_sheets: (0..11).map(|i| format!("Sticker Sheet {i}")).collect(),
+            ..Default::default()
+        };
+        guard_inbound(&M::SubmitTournamentDeck {
+            code: "T".into(),
+            player_token: "tok".into(),
+            deck: legal_stickers,
+            request_id: None,
+        })
+        .expect("eleven distinct sticker sheets are a legal pool (CR 123.2a)");
 
         let mut invalid_name = empty_deck();
         invalid_name.commander = vec!["x".repeat(MAX_DECK_CARD_NAME_LEN + 1)];
