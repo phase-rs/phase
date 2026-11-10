@@ -5090,6 +5090,34 @@ describe("WebSocketAdapter — negotiated StateCodecV1 identity and teardown", (
     }
   });
 
+  it("declines an older same-key recovery GameStarted instead of reopening submissions", async () => {
+    const codec = scriptedCodec();
+    const { adapter, raw, events } = await establishCodecAdapter(() => Promise.resolve(codec.session));
+    // Test-only probe: the revision baseline has no public surface.
+    const internals = adapter as unknown as { cachedStateRevision: number | null };
+    try {
+      // Baseline: published revision 6.
+      deliverCodec(raw, "Delta", codecStateUpdate(6, 6));
+      await vi.waitFor(() => expect(internals.cachedStateRevision).toBe(6));
+      events.length = 0;
+      // Recovery opens on a rejected Delta.
+      codec.rejectNext(1);
+      deliverCodec(raw, "Delta", codecStateUpdate(7, 7));
+      await vi.waitFor(() => expect(resyncRequests(raw)).toBe(1));
+      await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects
+        .toMatchObject({ code: "ACTION_NOT_SENT" });
+      // An older GameStarted recovery Full is not a receipt: it neither applies
+      // nor reopens submissions, and the codec closes instead.
+      deliverCodec(raw, "Full", codecGameStarted(3, 3));
+      await vi.waitFor(() => expect(raw.close).toHaveBeenCalled());
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "stateChanged" }));
+      expect(internals.cachedStateRevision).toBe(6);
+      expect((await adapter.getSnapshot()).state.turn_number).toBe(6);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
   it("reports an adapter dispose, not a lost connection, to a pending action in codec mode", async () => {
     const codec = scriptedCodec();
     const { adapter, raw } = await establishCodecAdapter(() => Promise.resolve(codec.session));
@@ -5828,23 +5856,34 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       });
       failed.dispatchSynthetic("message", CODEC_SESSION_HELLO);
       await vi.waitFor(() => expect(initialization).toBeDefined());
+      // The incumbent is still live: B's failed setup settled nothing on it.
       for (const outcome of old) {
-        expect(outcome.value()).toMatchObject({ code: "WS_CLOSED" });
-        expect(outcome.settled).toHaveBeenCalledOnce();
+        expect(outcome.value()).toBe("never settled");
+        expect(outcome.settled).not.toHaveBeenCalled();
       }
+      expect(raw.close).not.toHaveBeenCalled();
+      expect(codec.leases[0]!.close).not.toHaveBeenCalled();
+      // An incumbent request still completes after the candidate failed.
+      deliverCodec(raw, "Delta", codecStateUpdate(6, 6, { command_id: lastSubmissionCommandId(raw) }));
+      await vi.waitFor(() => expect(old[0]!.value()).toMatchObject({ resolvedWith: { events: [] } }));
+      expect(submissionTypes(failed)).toEqual([]);
+      // A stays open and leased until C actually supersedes it.
+      expect(raw.close).not.toHaveBeenCalled();
+      expect(failed.close).toHaveBeenCalledOnce();
+      expect(codec.leases[0].close).not.toHaveBeenCalled();
+      expect(codec.leases[1].close).toHaveBeenCalledOnce();
+      const current = await codecHandshake("JoinGameWithPassword", failed);
+      deliverCodec(current, "Full", codecGameStarted(5, 5));
+      await vi.waitFor(() => expect(initialization!.value()).toEqual({ resolvedWith: undefined }));
+      // C superseded A: the work attempted from B's failure listener settles
+      // on A's retirement, not on B's failed setup.
       for (const outcome of attempted) {
         expect(outcome.value()).not.toBe("never settled");
         expect(outcome.settled).toHaveBeenCalledOnce();
       }
-      expect(submissionTypes(failed)).toEqual([]);
       expect(raw.close).toHaveBeenCalledOnce();
-      expect(failed.close).toHaveBeenCalledOnce();
       expect(codec.leases[0].close).toHaveBeenCalledOnce();
-      expect(codec.leases[1].close).toHaveBeenCalledOnce();
       expect(baseline.free).toHaveBeenCalledOnce();
-      const current = await codecHandshake("JoinGameWithPassword", failed);
-      deliverCodec(current, "Full", codecGameStarted(5, 5));
-      await vi.waitFor(() => expect(initialization!.value()).toEqual({ resolvedWith: undefined }));
       const command = observe(adapter.submitAction({ type: "PassPriority" }, 0));
       deliverCodec(current, "Delta", codecStateUpdate(6, 6, { command_id: lastSubmissionCommandId(current) }));
       await vi.waitFor(() => expect(command.value()).toMatchObject({ resolvedWith: { events: [] } }));

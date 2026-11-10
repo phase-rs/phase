@@ -2440,11 +2440,17 @@ export class WebSocketAdapter implements EngineAdapter {
           // parked when B is retired, and never touch an already-adopted C.
           previousPending = this.rejectSocketRequests(false) || previousPending;
         }
-        if (!this.disposed && this.ws === null
-          && this.stateCodecPreparation === preparation && bootstrap.failure !== null) {
-          // A closed, unexposed candidate still owns sticky codec-failure
-          // evidence for the next attempt, not an unsafe public hello.
-          this.stateCodec.adopt(bootstrap, socket.ws);
+        if (!this.disposed && this.stateCodecPreparation === preparation
+          && bootstrap.failure !== null) {
+          if (this.ws === null) {
+            // No incumbent: record the notice as this adapter's latest
+            // attachment, exactly as before.
+            this.stateCodec.adopt(bootstrap, socket.ws);
+          } else {
+            // An incumbent keeps its binding, bootstrap status and recovery
+            // gate; only the sticky delivery policy moves.
+            this.stateCodec.consumeFailure(bootstrap);
+          }
         }
         if (previousPending) {
           previousPending = false;
@@ -2480,25 +2486,9 @@ export class WebSocketAdapter implements EngineAdapter {
       const previous = this.ws;
       const closePrevious = this.closeSocket;
       // Keep the candidate private until setup has entered its transport's
-      // serialized write order. Neither an error callback nor a synchronous
-      // setup response may expose an unauthenticated replacement.
-      this.ws = null;
-      this.closeSocket = null;
-      this.stateCodec.clearRecovery();
-      if (this.pingInterval) {
-        clearInterval(this.pingInterval);
-        this.pingInterval = null;
-      }
-      if (previous) {
-        previous.onmessage = null;
-        previous.onerror = null;
-        previous.onclose = null;
-        try {
-          previousPending = this.rejectSocketRequests(false);
-        } finally {
-          closePrevious?.();
-        }
-      }
+      // serialized write order. This also keeps the incumbent usable: its
+      // transport, pending requests, recovery gate and codec lease are not
+      // touched unless this candidate's setup actually commits.
       if (this.disposed || this.stateCodecPreparation !== preparation) return;
 
       const handleSocketMessage = (event: MessageEvent<string>) => {
@@ -2645,6 +2635,24 @@ export class WebSocketAdapter implements EngineAdapter {
       this.closeSocket = closeSocket;
       this.stateCodec.adopt(bootstrap, socket.ws);
       this._serverInfo = socket.serverInfo;
+      // Setup is on the wire, so the incumbent is now genuinely replaced:
+      // detach it, settle its owned requests, release its decoder and stop its
+      // keepalive. A candidate that never reached this point left all of that
+      // untouched and the incumbent usable.
+      if (previous) {
+        previous.onmessage = null;
+        previous.onerror = null;
+        previous.onclose = null;
+        try {
+          previousPending = this.rejectSocketRequests(false) || previousPending;
+        } finally {
+          closePrevious?.();
+        }
+        if (this.pingInterval) {
+          clearInterval(this.pingInterval);
+          this.pingInterval = null;
+        }
+      }
       if (previousPending) {
         previousPending = false;
         this.emit({ type: "actionPendingChanged", pending: false });
@@ -3828,6 +3836,14 @@ export class WebSocketAdapter implements EngineAdapter {
 
       case "GameStarted": {
         const data = msg.data as { state_revision: number; state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"]; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; activation_block_reasons?: Record<string, AbilityBlockEntry[]>; viewer_interaction?: LegalActionsResult["viewerInteraction"]; derived?: GameState["derived"]; player_token?: string; full_key?: FullSessionKey; events?: GameEvent[]; rewind_targets?: RewindOption[] };
+        if (this.stateCodec.recovering
+          && this.cachedStateRevision !== null && data.state_revision < this.cachedStateRevision) {
+          // A recovery Full older than the applied revision is not accepted
+          // evidence: declining it keeps the recovery gate closed instead of
+          // publishing a backwards snapshot as the receipt that reopens it.
+          // An ordinary bootstrap is still allowed to reseed the baseline.
+          break;
+        }
         const nativeReconnect = this.options.nativePregame?.kind === "reconnect"
           ? this.options.nativePregame
           : null;

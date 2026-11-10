@@ -1417,11 +1417,14 @@ export class ServerDraftAdapter implements EngineAdapter {
         this._gameCode = data.game_code;
         this.draftToken = data.player_token;
         this.activeFullKey = data.full_key;
+        let releasedPending = false;
         if (!sameMatch) {
           // A command already SENT for the outgoing match on this same socket
           // can never complete: its addressed reply is fenced by the new match
-          // key above. Release the slot before listeners can observe it. A
+          // key above. Release the slot before listeners can observe it; a
           // command still being claimed is released unsent by its own recheck.
+          // The notification itself is deferred until this transition's own
+          // setup frame is on the wire, so a throwing subscriber cannot skip it.
           if (this.submission.occupied && this.submissionSocket === sourceSocket
             && this.submissionSent) {
             const revoked = this.submission.drop();
@@ -1434,7 +1437,7 @@ export class ServerDraftAdapter implements EngineAdapter {
                 "The draft match changed before this command completed",
                 true,
               ));
-              this.emit({ type: "actionPendingChanged", pending: false });
+              releasedPending = true;
             }
           }
         }
@@ -1460,6 +1463,9 @@ export class ServerDraftAdapter implements EngineAdapter {
             opponentName: data.opponent_name,
             gameCode: data.game_code,
           });
+        }
+        if (releasedPending) {
+          this.emit({ type: "actionPendingChanged", pending: false });
         }
         break;
       }

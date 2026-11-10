@@ -263,6 +263,11 @@ export class StateCodecAttachment {
     this.recovery = null;
   }
 
+  /** True while the codec requires a Full before submissions can resume. */
+  get recovering(): boolean {
+    return this.recovery !== null;
+  }
+
   /**
    * While codec state is being resynced, a new command would be sent into a
    * stream whose completions are suppressed. Refuse it before it is stamped.

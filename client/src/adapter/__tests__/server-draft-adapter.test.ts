@@ -2552,6 +2552,48 @@ describe("draft attachment settlement", () => {
     expect(submissionTypes(established)).toHaveLength(sentAfterCommand);
   });
 
+  it("sends the reconnect setup before a throwing pending listener can skip it", async () => {
+    enterAcceptedFullMatch(adapter, established);
+    const nextKey = { game_code: "GAME05", generation: 11 };
+    const pending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+    const off = adapter.onEvent((event) => {
+      if (event.type === "actionPendingChanged" && !event.pending) {
+        throw new Error("pending listener failed");
+      }
+    });
+    try {
+      expect(() => receive(established, "DraftMatchStart", {
+        match_id: "r5-t0", round: 5, game_code: nextKey.game_code, full_key: nextKey,
+        player_token: "match-draft-token", your_player: 0, opponent_name: "Next opponent",
+      })).toThrow("pending listener failed");
+    } finally {
+      off();
+    }
+    expect(await pending()).toMatchObject({ code: "REQUEST_FAILED" });
+    const setups = () => established.send.mock.calls.filter(([raw]) =>
+      (JSON.parse(String(raw)) as { type?: string }).type === "ReconnectDraft").length;
+    // The setup left before the notification threw; a repeated announcement
+    // already sees the new match and sends nothing further.
+    expect(setups()).toBe(1);
+    receive(established, "DraftMatchStart", {
+      match_id: "r5-t0", round: 5, game_code: nextKey.game_code, full_key: nextKey,
+      player_token: "match-draft-token", your_player: 0, opponent_name: "Next opponent",
+    });
+    expect(setups()).toBe(1);
+    // The next match's first command succeeds through the new authority.
+    receive(established, "GameStarted", {
+      state: matchState("throwing-retry"), your_player: 0, full_key: nextKey,
+    });
+    const retried = adapter.submitAction({ type: "PassPriority" }, 0);
+    receive(established, "StateUpdate", {
+      state: matchState("throwing-complete"),
+      events: [{ marker: "throwing-complete" }], full_key: nextKey,
+    });
+    await expect(retried).resolves.toMatchObject({
+      events: [{ marker: "throwing-complete" }],
+    });
+  });
+
   it.each(["serverHello", "draftViewUpdated"] as const)(
     "drains older reconnect views before the synchronous selected-inventory reply from a %s pick consumer",
     async (trigger) => {
