@@ -260,17 +260,24 @@ fn resolve_fight(
     if source_power > 0 {
         let source_ctx = DamageContext::from_source(state, source_id)
             .unwrap_or_else(|| DamageContext::fallback(source_id, source_controller));
-        if let DamageResult::NeedsChoice = apply_damage_to_target(
+        let first = apply_damage_to_target(
             state,
             &source_ctx,
             TargetRef::Object(target_id),
             source_power as u32,
             false,
             events,
-        )? {
-            // CR 701.14a: First direction is waiting on a replacement choice.
-            // Stash a continuation so the second direction (target → source) resumes
-            // after the choice resolves. The parent's sub_ability (if any) is appended
+        )?;
+        // CR 608.2c + CR 616.1: the first direction waits on a player's answer: a replacement
+        // choice on its own event, or a choice its rider asks (Dralnu, Lich Lord: "If damage would
+        // be dealt to Dralnu, sacrifice that many permanents instead."). One prompt stands at a
+        // time, so the second direction waits behind that answer instead of opening its own
+        // prompt over it.
+        if matches!(first, DamageResult::NeedsChoice)
+            || crate::game::replacement::damage_batch_has_paused_rider(state)
+        {
+            // CR 701.14a: Stash a continuation so the second direction (target → source)
+            // resumes after the answer. The parent's sub_ability (if any) is appended
             // to the continuation's tail so downstream effects still fire.
             if target_power > 0 {
                 // Second direction: target_id (the fight target) deals damage equal

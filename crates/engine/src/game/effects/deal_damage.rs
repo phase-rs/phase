@@ -528,6 +528,12 @@ pub(crate) fn pre_replacement_damage_gate(
     is_combat: bool,
     events: &mut Vec<GameEvent>,
 ) -> Option<ProposedEvent> {
+    // CR 104.1: "A game ends immediately when a player wins": once an earlier recipient of the
+    // same instruction ended the game (Flame Rift's 4 to its caster under Nefarious Lich, "If
+    // you can't, you lose the game"), no later damage event exists to replace or deal.
+    if state.game_end.is_some() {
+        return None;
+    }
     // CR 120.8: If a source would deal 0 damage, it does not deal damage at all.
     if amount == 0 {
         return None;
@@ -1445,6 +1451,23 @@ fn cast_tail_with_parent_targets(
         tail.mirror_targets_from(ability);
     }
     crate::game::effects::apply_parent_chain_context(&mut tail, ability, None, state);
+    // CR 608.2c: an unswapped "instead" sub's base clause is this node's next instruction, and
+    // the non-pause path binds it against this node (`resolve_chain_body`), not against the
+    // override it is parked under. Bind it here the same way, so the parked base clause meets
+    // the recipient the unpaused one does (Searing Blaze's second clause after a pause in its
+    // first, under Furnace of Rath).
+    if tail
+        .condition
+        .as_ref()
+        .is_some_and(|condition| condition.is_instead_override())
+    {
+        if let Some(base) = tail.else_ability.as_deref_mut() {
+            if crate::game::effects::should_propagate_parent_targets(ability, base) {
+                base.mirror_targets_from(ability);
+            }
+            crate::game::effects::apply_parent_chain_context(base, ability, None, state);
+        }
+    }
     tail
 }
 

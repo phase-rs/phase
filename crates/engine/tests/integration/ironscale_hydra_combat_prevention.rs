@@ -467,8 +467,8 @@ fn prevented(events: &[GameEvent]) -> usize {
 
 /// CR 616.1 + CR 510.2: the Hydra's one counter meets its controller's Hardened Scales and
 /// Doubling Season, an order that controller chooses: 3 (Doubling Season first) or 4 (Hardened
-/// Scales first). Combat can't ask it yet (Command Zone #140), so the rider's event takes one
-/// legal order inside the batch. Nothing is left parked, so the state-based actions run: the
+/// Scales first). Combat can't ask it yet (Command Zone #140), so the engine takes the first
+/// candidate inside the batch, not the controller's pick (a strict failure). Nothing is left parked, so the state-based actions run: the
 /// blocking Centaur Courser dies to its 5 damage (CR 704.3, CR 704.5g), and so does a Grizzly
 /// Bears to Lightning Bolt afterwards.
 #[test]

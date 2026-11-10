@@ -3399,6 +3399,15 @@ pub(crate) fn settled_damage_guards(state: &GameState) -> Vec<SettledDamageGuard
         .unwrap_or_default()
 }
 
+/// CR 608.2c + CR 615.5: whether a rider in the open noncombat damage batch left its prompt
+/// standing (`drain_damage_rider`): the batch's later instructions wait behind that answer.
+pub(crate) fn damage_batch_has_paused_rider(state: &GameState) -> bool {
+    state
+        .damage_batch_ledger
+        .as_ref()
+        .is_some_and(|ledger| ledger.paused_rider.is_some())
+}
+
 /// CR 608.2f + CR 700.1: run `body` as one simultaneous noncombat damage batch: under the
 /// guards `ability` carries (a remaining portion after a CR 616.1 pause, or a clause of a
 /// joined run), else under a fresh read. A rider's damage carries none, so it opens its own
@@ -13659,7 +13668,8 @@ enum CombatRiderPause {
     /// Jouster" with two attached). A rider that ended the game (Nefarious Lich: "If you can't,
     /// you lose the game") lands here too: restoring the caller's wait overwrites its
     /// `GameOver`, and the action boundary restores it from `game_end`
-    /// (`elimination::ensure_game_over_if_terminal`, CR 104.1).
+    /// (`elimination::ensure_game_over_if_terminal`, CR 104.1); the batch skips its remaining
+    /// portions (`replace_combat_damage_batch`).
     OwnPrompt,
 }
 
@@ -13692,15 +13702,15 @@ fn settle_combat_rider_pauses(
         pause = match CombatRiderPause::of(state) {
             // strict-failure: CR 616.1 gives the affected player this order (Hardened Scales
             // ruling: "you choose the order to apply those effects"), and CR 510.2's batch can't
-            // ask yet (Command Zone #140), so the rider's event takes one legal order. CR 616.1f:
-            // an answer can leave candidates still in order, so repeat.
+            // ask yet (Command Zone #140), so the engine takes the first candidate in the player's
+            // place. CR 616.1f: an answer can leave candidates still in order, so repeat.
             CombatRiderPause::Order => {
                 answer_combat_rider_park(state, 0, rider_depth, waiting_before, events)
             }
             // strict-failure: CR 510.2 + CR 616.1: a "may" on the rider's event is its
-            // controller's to answer, and combat can't ask it yet (Command Zone #140), so it is
-            // declined, a legal answer that keeps the rider's event (Swans of Bryn Argoll under
-            // Abundance: the source's controller still draws the cards).
+            // controller's to answer, and combat can't ask it yet (Command Zone #140), so the engine
+            // declines it in the controller's place, which keeps the rider's event (Swans of Bryn
+            // Argoll under Abundance: the source's controller still draws the cards).
             CombatRiderPause::May { decline } => {
                 answer_combat_rider_park(state, decline, rider_depth, waiting_before, events)
             }
@@ -13842,6 +13852,25 @@ pub(crate) fn replace_combat_damage_batch(
 
     let mut survivors = Vec::with_capacity(proposed.len());
     for event in proposed {
+        // CR 104.1: a game that ended inside the batch (Nefarious Lich: "If you can't, you lose
+        // the game") ends immediately, so no later portion is replaced or dealt.
+        if state.game_end.is_some() {
+            survivors.push(None);
+            continue;
+        }
+        // CR 800.4a + CR 800.4e: with three or more players a loss inside the batch isn't the
+        // game's end, and the player leaves "as soon as" they lose. A later portion assigned to
+        // that player has no recipient left in the game, so it is neither replaced nor dealt.
+        if let ProposedEvent::Damage {
+            target: TargetRef::Player(recipient),
+            ..
+        } = &event
+        {
+            if !super::players::is_alive(state, *recipient) {
+                survivors.push(None);
+                continue;
+            }
+        }
         prepare_replacement_index_for_pipeline(state);
         let result = pipeline_loop(state, event, 0, registry, events);
         clear_replacement_index_pipeline(state);

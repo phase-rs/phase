@@ -12,9 +12,10 @@
 //! - A rider that picks from a population acts on what the player picks, and the spell's next
 //!   instruction follows all of it (CR 608.2c, CR 608.2d): Lightning Helix's "and you gain 3
 //!   life" under Nefarious Lich.
-//! - Combat damage can't pause for a CR 616.1 order choice yet (Command Zone #140), so each
-//!   order park inside a batch takes one legal order instead of dropping the damage (CR 510.2).
-//!   Candidate order is scan order, so those rows assert the legal set, never one member.
+//! - Combat damage can't pause for a CR 616.1 order choice yet (Command Zone #140), so the engine
+//!   answers each order park inside a batch with its first candidate instead of dropping the
+//!   damage (CR 510.2). That is not the player's pick, so those rows are strict failures; candidate
+//!   order is scan order, so they assert the set the player could reach, never one member.
 //! - A spell's later instruction runs once, behind its remaining recipients, whichever
 //!   replacement answer reaches it.
 
@@ -1735,9 +1736,13 @@ fn a_paused_rider_keeps_the_batchs_later_riders_behind_it() {
             }
         }
         assert_eq!(orders, vec![0, 4]);
-        // The order between Dralnu's substitution and the Bear's counters is not asserted: by
-        // CR 614.6 + CR 615.5 the substitution comes first, which the engine doesn't yet do in
-        // every creation order (Command Zone #172).
+        // strict-failure: the order between Dralnu's substitution and the Bear's counters is not
+        // asserted: by CR 614.6 + CR 615.5 the substitution comes first, which the engine doesn't
+        // yet do in every creation order (Command Zone #172). That order decides what P1 can
+        // sacrifice (Hardened Scales before or after the Bear's counters). Dralnu's sacrifice is a
+        // choice, so the card reports unsupported
+        // (`ResolverFeature:structural:damage_replacement_choice_unasked_in_combat`), which keeps
+        // this order outside the claimed coverage.
         assert!(sacrificed_at.is_some());
         assert_eq!(plus_counters(&runner, bear), 8);
         assert_eq!(zone(&runner, id), Zone::Battlefield);
@@ -2710,8 +2715,9 @@ fn lifelink_has_nothing_to_gain_from_replaced_damage() {
     }
 }
 
-/// Force Bubble under Furnace of Rath in combat takes one legal order (CR 510.2, CR 616.1),
-/// under ordinary and unpreventable damage alike.
+/// Force Bubble under Furnace of Rath in combat: the engine takes the order's first candidate
+/// (CR 510.2, CR 616.1; a strict failure, not its controller's pick), under ordinary and
+/// unpreventable damage alike.
 #[test]
 fn combat_order_park_keeps_force_bubbles_damage() {
     let mut scenario = scenario();
@@ -2983,8 +2989,7 @@ fn a_repeated_answer_puts_a_noncombat_batch_on_one_force_bubble() {
 }
 
 /// Battletide Alchemist: "you may prevent X of that damage". A "may" is not an order, so combat
-/// gives it no automatic yes. Its life total is deliberately unasserted: the card wants a prompt
-/// combat can't offer yet (Command Zone #140).
+/// gives it no automatic yes.
 #[test]
 fn a_parked_may_gets_no_automatic_yes_in_combat() {
     // Reach: the same board offers the "may" in a noncombat event.
@@ -3016,4 +3021,10 @@ fn a_parked_may_gets_no_automatic_yes_in_combat() {
     ));
     assert!(runner.state().pending_replacement.is_none());
     assert_eq!(prevented(&events), 0);
+    // strict-failure: the card has P1, the Alchemist's controller, choose: prevent 1 of the Ogre's
+    // 3 (X is 1, the Alchemist itself is the one Cleric) and take 2, or take all 3. Combat can't ask
+    // yet (Command Zone #140), and the source's damage is skipped: P1 takes none. This is not a
+    // reading of the card, and the card reports unsupported for it
+    // (`ResolverFeature:structural:damage_replacement_choice_unasked_in_combat`).
+    assert_eq!(life(&runner, P1), 20);
 }

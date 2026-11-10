@@ -253,6 +253,15 @@ fn finish_combat_damage_sub_step(
     damage_events: &[GameEvent],
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    // CR 104.1: a rider ended the game inside the batch ("A game ends immediately when a player
+    // wins"), so nothing after the batch happens: no sub-step bookkeeping, no state-based
+    // actions, no ability put on the stack, and no later combat damage step. A rider's drain
+    // restored the caller's wait over the batch's `GameOver`, so restore it from `game_end`.
+    if state.game_end.is_some() {
+        crate::game::elimination::ensure_game_over_if_terminal(state, events);
+        return pending_combat_damage_waiting(state);
+    }
+
     // CR 500.6: "at the beginning of that step" abilities trigger when the step
     // begins. `process_combat_damage_triggers` synthesizes the PhaseChanged
     // marker for that batch, so the FIRST-STRIKE sub-step always carries it, and
@@ -1927,6 +1936,11 @@ pub(crate) fn apply_combat_damage(
     // --- Phase B: Batch replacement (CR 510.2 + CR 615.7) ---
     let (survivors, prevention_tally) =
         replacement::replace_combat_damage_batch(state, &mut events, proposed_events);
+    // CR 104.1: a rider ended the game inside the batch, so nothing more happens: no damage is
+    // dealt, no life is gained, and no prevention rider runs.
+    if state.game_end.is_some() {
+        return CombatDamageBatch::Complete(events);
+    }
 
     // Deterministic order: the tally arrives as a `HashMap`, but it is stored in
     // `PendingCombatLifelink` (which is `Serialize`/`Deserialize`, so a parked

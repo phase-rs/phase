@@ -18,8 +18,11 @@
 //!
 //! A rider's pause inside a combat damage batch is settled before the batch moves on, at the
 //! per-portion drain and at the aggregate drain after it (CR 510.2). Combat damage can't pause for
-//! a rider's choice yet (Command Zone #140), so an order the rider's event meets takes one legal
-//! order (CR 616.1, CR 616.1f), a "may" on it is declined, and the rider's own choice is cleared.
+//! a player's answer yet (Command Zone #140), so the engine answers in the player's place: an
+//! order the rider's event meets takes its first candidate (CR 616.1, CR 616.1f), a "may" on it is
+//! declined, and the rider's own choice is cleared. None of these is the player's answer, so those
+//! rows are strict failures, not readings of the cards. A card whose own replacement asks such a
+//! choice reports unsupported (`ResolverFeature:structural:damage_replacement_choice_unasked_in_combat`).
 //! The last section holds those rows; the Ironscale Hydra rows are in
 //! `ironscale_hydra_combat_prevention`.
 
@@ -896,6 +899,11 @@ fn every_stashed_portion_carries_the_batch_reading() {
 /// The Champion's printed shield and Acolyte's Reward's resolved shield, as the prompt names them.
 const CHAMPION_SHIELD: &str = "If damage would be dealt to ~ while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from ~.";
 const ACOLYTES_REWARD_SHIELD: &str = "Prevent damage";
+/// The summary Test of Faith's shield shows under the creature it protects.
+const TEST_OF_FAITH_SHIELD: &str = "Prevent damage";
+/// Phytohydra's substitution as its prompt shows it.
+const PHYTOHYDRA_SUBSTITUTION: &str =
+    "If damage would be dealt to ~, put that many +1/+1 counters on it instead.";
 
 /// CR 700.1: a rider's damage is a new event and reads the guard live. Acolyte's Reward: "If damage
 /// is prevented this way, Acolyte's Reward deals that much damage to any target." Its rider at the
@@ -1058,6 +1066,188 @@ fn a_paused_fight_keeps_its_guard_reading() {
     assert_eq!(prevented(&events), 2);
     assert!(damage_dealt_to(&events, champion).is_empty());
     assert_shielded_once(&runner, champion);
+}
+
+const TEST_OF_FAITH: &str = "Prevent the next 3 damage that would be dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.";
+
+/// CR 701.14a + CR 608.2c: one fight, two answers, one prompt at a time. Pit Fight: "Target
+/// creature you control fights another target creature." P0's Phytohydra ("If damage would be
+/// dealt to this creature, put that many +1/+1 counters on it instead."), under P0's Test of Faith,
+/// fights P1's Dralnu, Lich Lord ("If damage would be dealt to Dralnu, sacrifice that many
+/// permanents instead."). Phytohydra's 1 to Dralnu becomes P1's sacrifice of one of its four
+/// permanents, P1's choice (CR 608.2d). Dralnu's 3 back meets Phytohydra and Test of Faith, an order
+/// P0 chooses (CR 616.1); either order puts 3 counters on Phytohydra. The second direction waits
+/// behind P1's answer instead of opening its prompt over it, so neither answer is lost. Both
+/// answers are given, in either order of P0's, and the sacrifice is a Grizzly Bears or Dralnu
+/// itself: fight damage is dealt simultaneously, so Dralnu's 3 is still dealt after P1 sacrifices
+/// it.
+///
+/// strict-failure: the prompt order is not the cards' reading. Both directions are one
+/// simultaneous damage event (CR 701.14a), so the reverse direction's replacements apply before
+/// anything happens (CR 614.6), and Dralnu's ruling has the sacrifice happen with the damage: "If
+/// any of the sacrificed permanents would deal or be dealt damage at the same time as Dralnu,
+/// they deal or are dealt damage at the same time that they're sacrificed." The cards ask P0's
+/// order first, then P1's sacrifice; the engine asks P1's sacrifice first and applies the reverse
+/// direction's replacements after it. The counters agree here; the Gratuitous Violence row below
+/// shows where they don't. Dralnu reports unsupported for it
+/// (`ResolverFeature:structural:damage_replacement_choice_unasked_in_combat`).
+#[test]
+fn a_fight_waits_behind_dralnus_sacrifice() {
+    for sacrifice_dralnu in [false, true] {
+        for test_of_faith_first in [false, true] {
+            let mut scenario = main_phase();
+            let hydra = scenario
+                .add_creature_from_oracle(P0, "Phytohydra", 1, 1, PHYTOHYDRA)
+                .id();
+            let dralnu = scenario
+                .add_creature_from_oracle(P1, "Dralnu, Lich Lord", 3, 3, DRALNU_LICH_LORD)
+                .id();
+            let bears: Vec<ObjectId> = (0..3)
+                .map(|_| scenario.add_creature(P1, "Grizzly Bears", 2, 2).id())
+                .collect();
+            let test_of_faith = spell(&mut scenario, "Test of Faith", TEST_OF_FAITH, true);
+            let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
+            let mut runner = scenario.build();
+            cast(&mut runner, test_of_faith, vec![TargetRef::Object(hydra)]);
+
+            let mut events = cast(
+                &mut runner,
+                pit_fight,
+                vec![TargetRef::Object(hydra), TargetRef::Object(dralnu)],
+            );
+
+            // P1's sacrifice comes first, and nothing else is asked over it.
+            let WaitingFor::EffectZoneChoice {
+                player,
+                count,
+                cards,
+                ..
+            } = runner.state().waiting_for.clone()
+            else {
+                panic!(
+                    "expected Dralnu's sacrifice, got {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!((player, count), (P1, 1));
+            let mut offered = cards.clone();
+            offered.sort_by_key(|id| id.0);
+            let mut permanents = bears.clone();
+            permanents.push(dralnu);
+            permanents.sort_by_key(|id| id.0);
+            assert_eq!(offered, permanents);
+            assert_eq!(
+                plus_counters(&runner, hydra),
+                0,
+                "the second direction waits"
+            );
+            let sacrificed = if sacrifice_dralnu { dralnu } else { bears[0] };
+            events.extend(
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![sacrificed],
+                    })
+                    .expect("P1 sacrifices one permanent")
+                    .events,
+            );
+            drive(&mut runner, &mut Vec::new(), &mut events);
+
+            // Then P0's order for Dralnu's 3.
+            let pick = if test_of_faith_first {
+                Pick::Described(TEST_OF_FAITH_SHIELD)
+            } else {
+                Pick::Described(PHYTOHYDRA_SUBSTITUTION)
+            };
+            let prompts = answer(&mut runner, &[pick], hydra, &mut events);
+
+            assert_eq!(prompts.len(), 1, "{prompts:?}");
+            assert_settled(&runner);
+            let state = runner.state();
+            assert!(state.pending_replacement.is_none());
+            assert!(state.resolution_stack.is_empty());
+            assert_eq!(state.objects[&pit_fight].zone, Zone::Graveyard);
+            assert_eq!(state.objects[&sacrificed].zone, Zone::Graveyard);
+            for other in permanents.iter().filter(|&&id| id != sacrificed) {
+                assert_eq!(state.objects[other].zone, Zone::Battlefield);
+            }
+            assert_eq!(state.objects[&dralnu].damage_marked, 0);
+            assert_eq!(state.objects[&hydra].damage_marked, 0);
+            assert_eq!(
+                plus_counters(&runner, hydra),
+                3,
+                "sacrifice Dralnu: {sacrifice_dralnu}, Test of Faith first: {test_of_faith_first}"
+            );
+        }
+    }
+}
+
+const GRATUITOUS_VIOLENCE: &str = "If a creature you control would deal damage to a permanent or player, it deals double that damage instead.";
+
+/// strict-failure: Pit Fight: P0's Siege Mastodon (3/5) fights P1's Dralnu, Lich Lord; P1 controls
+/// Gratuitous Violence ("If a creature you control would deal damage to a permanent or player, it
+/// deals double that damage instead.") and two Grizzly Bears. The Mastodon's 3 becomes P1's
+/// sacrifice of three permanents, and P1 sacrifices Gratuitous Violence and both Bears. The cards
+/// give 6: the reverse direction is part of the same damage event (CR 701.14a), so Gratuitous
+/// Violence doubles Dralnu's 3 before anything happens (CR 614.6), and Dralnu's ruling deals that
+/// damage at the same time as the sacrifice ("If any of the sacrificed permanents would deal or be
+/// dealt damage at the same time as Dralnu, they deal or are dealt damage at the same time that
+/// they're sacrificed."), so the Mastodon dies. The engine sacrifices first and applies the reverse
+/// direction's replacements after it, with Gratuitous Violence gone: Dralnu deals 3 and the
+/// Mastodon survives. This row asserts that result; Dralnu reports unsupported for it.
+#[test]
+fn a_fight_applies_the_reverse_replacements_after_dralnus_sacrifice() {
+    let mut scenario = main_phase();
+    let mastodon = scenario.add_creature(P0, "Siege Mastodon", 3, 5).id();
+    let dralnu = scenario
+        .add_creature_from_oracle(P1, "Dralnu, Lich Lord", 3, 3, DRALNU_LICH_LORD)
+        .id();
+    let violence = scenario
+        .add_enchantment_from_oracle(P1, "Gratuitous Violence", GRATUITOUS_VIOLENCE)
+        .id();
+    let bears: Vec<ObjectId> = (0..2)
+        .map(|_| scenario.add_creature(P1, "Grizzly Bears", 2, 2).id())
+        .collect();
+    let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
+    let mut runner = scenario.build();
+
+    let mut events = cast(
+        &mut runner,
+        pit_fight,
+        vec![TargetRef::Object(mastodon), TargetRef::Object(dralnu)],
+    );
+
+    let WaitingFor::EffectZoneChoice { player, count, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected Dralnu's sacrifice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((player, count), (P1, 3));
+    let mut sacrificed = bears.clone();
+    sacrificed.push(violence);
+    events.extend(
+        runner
+            .act(GameAction::SelectCards {
+                cards: sacrificed.clone(),
+            })
+            .expect("P1 sacrifices three permanents")
+            .events,
+    );
+    drive(&mut runner, &mut Vec::new(), &mut events);
+
+    assert_settled(&runner);
+    let state = runner.state();
+    // Reach guard: the sacrifice happened and the reverse direction was dealt.
+    for id in &sacrificed {
+        assert_eq!(state.objects[id].zone, Zone::Graveyard);
+    }
+    assert_eq!(state.objects[&dralnu].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&pit_fight].zone, Zone::Graveyard);
+    // strict-failure: the cards deal 6 and the Mastodon dies; the engine deals 3.
+    assert_eq!(damage_dealt_to(&events, mastodon), vec![3]);
+    assert_eq!(state.objects[&mastodon].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&mastodon].damage_marked, 3);
 }
 
 /// CR 608.2c + CR 700.1: a later instruction is a new event and reads the guard live. Misthios's
@@ -1445,9 +1635,10 @@ fn a_clause_in_an_else_branch_joins_the_run() {
 }
 
 /// The same spell under Furnace of Rath pauses in its first clause. The forwarded "instead" sub,
-/// whose else clause is the run's second clause, carries the reading in the paused continuation.
-/// (After the pause the else clause's damage goes to the planeswalker, at base too; that is Command Zone #175,
-/// so this row asserts the carrier, not the second clause's recipient.)
+/// whose else clause is the run's second clause, carries the reading in the paused continuation,
+/// and the parked second clause meets the recipient the unpaused one meets (CR 608.2b, CR 608.2c):
+/// its damage reaches the Champion and is prevented under the run's reading, and the planeswalker
+/// is untouched.
 #[test]
 fn a_pause_in_the_first_clause_keeps_the_runs_reading() {
     for furnace_first in [true, false] {
@@ -1491,6 +1682,19 @@ fn a_pause_in_the_first_clause_keeps_the_runs_reading() {
             readings(&else_clause.context.settled_damage_guards),
             vec![(champion, DamageGuardReading::Holds)]
         );
+        // strict-failure: the printed second target is "target creature that player or that
+        // planeswalker's controller controls", the Champion. Searing Blaze's parse (Command Zone
+        // #175, and a listed confirmed misparse) announces no target for that clause, and the
+        // engine binds it to the first target, P1, as the unpaused spell does; P1's Pariah brings
+        // that damage to the Champion. This row holds the parked clause to the unpaused binding.
+        assert_eq!(else_clause.targets, vec![TargetRef::Player(P1)]);
+        let walker = runner
+            .state()
+            .objects
+            .values()
+            .find(|object| object.name == "Planeswalker Filler")
+            .map(|object| object.id)
+            .expect("the planeswalker");
 
         let first = if furnace_first {
             Pick::NotFrom(aura)
@@ -1505,8 +1709,21 @@ fn a_pause_in_the_first_clause_keeps_the_runs_reading() {
         );
 
         assert_settled(&runner);
+        assert!(runner.state().pending_replacement.is_none());
+        assert!(runner.state().resolution_stack.is_empty());
         assert_shielded_once(&runner, champion);
         assert_eq!(runner.state().players[1].life, 20);
+        // Both clauses' damage reached the Champion, doubled, and was prevented there.
+        let at_champion = events
+            .iter()
+            .filter(|e| {
+                matches!(e, GameEvent::DamagePrevented { target: TargetRef::Object(id), amount: 2, .. }
+                    if *id == champion)
+            })
+            .count();
+        assert_eq!(at_champion, 2, "furnace first: {furnace_first}");
+        assert!(damage_dealt_to(&events, walker).is_empty());
+        assert_eq!(runner.state().objects[&walker].loyalty, Some(5));
     }
 }
 
@@ -1716,6 +1933,9 @@ const SWANS_OF_BRYN_ARGOLL: &str = "Flying\nIf a source would deal damage to thi
 const ABUNDANCE: &str = "If you would draw a card, you may instead choose land or nonland and reveal cards from the top of your library until you reveal a card of the chosen kind. Put that card into your hand and put all other cards revealed this way on the bottom of your library in any order.";
 const NEW_WAY_FORWARD: &str = "The next time a source of your choice would deal damage to you this turn, prevent that damage. When damage is prevented this way, New Way Forward deals that much damage to that source's controller and you draw that many cards.";
 const NEFARIOUS_LICH: &str = "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game.";
+const SHEOLDRED: &str = "Deathtouch\nWhenever you draw a card, you gain 2 life.\nWhenever an opponent draws a card, they lose 2 life.";
+const EXQUISITE_BLOOD: &str = "Whenever an opponent loses life, you gain that much life.";
+const FLAME_RIFT: &str = "Flame Rift deals 4 damage to each player.";
 const DRALNU_LICH_LORD: &str = "If damage would be dealt to Dralnu, sacrifice that many permanents instead.\n{T}: Target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost. (You may cast that card from your graveyard for its flashback cost. Then exile it.)";
 const BOROS_SWIFTBLADE: &str = "Double strike";
 
@@ -1943,10 +2163,10 @@ fn swans_of_bryn_argoll(scenario: &mut GameScenario) -> ObjectId {
 /// CR 616.1 at the per-portion drain, on a substitution's rider. Phytohydra: "If damage would be
 /// dealt to this creature, put that many +1/+1 counters on it instead." Blocking a 2/2 under its
 /// controller's Hardened Scales and Doubling Season, its 2 counters meet both: 5 (Doubling Season
-/// first) or 6 (Hardened Scales first), one legal order. Nothing outlives the batch, and the
-/// state-based actions after it run (Lightning Bolt kills a 3/3).
+/// first) or 6 (Hardened Scales first), its controller's choice. Nothing outlives the batch, and
+/// the state-based actions after it run (Lightning Bolt kills a 3/3).
 #[test]
-fn phytohydras_counters_take_one_legal_order_inside_the_batch() {
+fn phytohydras_counter_order_is_settled_inside_the_batch() {
     for scales in [true, false] {
         let mut scenario = rider_board();
         let hydra = scenario
@@ -1966,6 +2186,8 @@ fn phytohydras_counters_take_one_legal_order_inside_the_batch() {
         assert!(combat.prompts.is_empty());
         let counters = plus_counters(&runner, hydra);
         if scales {
+            // strict-failure: the order is P1's to choose (CR 616.1), and combat can't ask it yet
+            // (Command Zone #140); the engine takes the first candidate, not P1's pick.
             assert!([5, 6].contains(&counters), "got {counters} counters");
         } else {
             // Reach guard: the 2 damage became 2 counters.
@@ -1983,7 +2205,7 @@ fn phytohydras_counters_take_one_legal_order_inside_the_batch() {
 /// this turn, prevent that damage and put that many +1/+1 counters on it." Its chosen Grizzly
 /// Bears, blocked by a 2/2 under its controller's Hardened Scales and Doubling Season.
 #[test]
-fn gatta_and_luzzus_counters_take_one_legal_order_after_the_batch() {
+fn gatta_and_luzzus_counter_order_is_settled_after_the_batch() {
     for scales in [true, false] {
         let mut scenario = rider_board();
         let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
@@ -2010,7 +2232,8 @@ fn gatta_and_luzzus_counters_take_one_legal_order_after_the_batch() {
             // order (CR 616.1, CR 616.1f; Hardened Scales' ruling: "you choose the order to apply
             // those effects"). "Put that many +1/+1 counters on it" parses as one counter repeated
             // per damage (Command Zone #174, with Brace for Impact, Temper and Test of Faith), so
-            // each counter takes its own legal order, 3 or 4.
+            // each counter meets its own order, 3 or 4, and combat can't ask it (Command Zone
+            // #140): the engine takes the first candidate each time, not P0's pick.
             assert!([6, 7, 8].contains(&counters), "got {counters} counters");
         } else {
             assert_eq!(counters, 2);
@@ -2062,7 +2285,8 @@ fn a_lifelink_answer_then_gatta_and_luzzus_rider() {
         if scales {
             // strict-failure: the card reads one event of 2 counters, 5 or 6 by its controller's
             // order (CR 616.1, CR 616.1f; Hardened Scales' ruling); the per-counter parse (Command
-            // Zone #174) gives each counter its own legal order, 3 or 4.
+            // Zone #174) gives each counter its own order, 3 or 4, which the engine answers with the
+            // first candidate, not P0's pick (Command Zone #140).
             assert!([6, 7, 8].contains(&counters), "got {counters} counters");
         } else {
             assert_eq!(counters, 2);
@@ -2074,10 +2298,9 @@ fn a_lifelink_answer_then_gatta_and_luzzus_rider() {
 }
 
 /// The rider's own prompt at the aggregate drain. Channel Harm: "If damage is prevented this way,
-/// you may have Channel Harm deal that much damage to target creature." Its ruling: either player
-/// can break the loop "by choosing to not have Channel Harm try to deal damage", so the declined
-/// "may" is a legal answer: the Hill Giant keeps only the Bears' 2. Unblocked, nothing is
-/// prevented and P1 takes 2.
+/// you may have Channel Harm deal that much damage to target creature." Blocked, the Hill Giant's
+/// 3 to the Bears is prevented and P0 may have Channel Harm deal 3 to the Giant. Unblocked, nothing
+/// is prevented and P1 takes 2. The card reports unsupported for the unasked "may".
 #[test]
 fn channel_harms_may_is_settled_after_the_batch() {
     for block in [true, false] {
@@ -2093,8 +2316,9 @@ fn channel_harms_may_is_settled_after_the_batch() {
 
         let combat = fight(&mut runner, &[bears], &blocks, None);
 
-        // strict-failure: CR 510.2: whether Channel Harm deals the 3 is P0's choice, and combat
-        // can't ask it yet (Command Zone #140); the "may" is cleared, as declined.
+        // strict-failure: CR 608.2d: whether Channel Harm deals the 3 is P0's choice, and combat
+        // can't ask it yet (Command Zone #140). The engine clears the "may" unasked, so the Hill
+        // Giant is never dealt the 3; that is not P0's answer.
         assert_batch_settled(&runner);
         assert!(combat.prompts.is_empty());
         assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
@@ -2145,8 +2369,9 @@ fn a_may_park_and_a_riders_own_prompt_settle_in_one_batch() {
 
         // strict-failure: CR 510.2 + CR 616.1: Abundance's "you may instead" on each draw and
         // Channel Harm's "you may" are P0's to answer, and combat can't ask them yet (Command
-        // Zone #140). Each Abundance "may" is declined, which keeps the draw; Channel Harm's is
-        // cleared, as declined. CR 121.2: the Swans' 2 is two draws, so 2 cards.
+        // Zone #140). The engine declines each Abundance "may", which keeps the draw, and clears
+        // Channel Harm's unasked; neither is P0's answer. CR 121.2: the Swans' 2 is two draws, so 2
+        // cards.
         assert_batch_settled(&runner);
         assert!(combat.prompts.is_empty());
         assert_eq!(prevented(&combat.events), 2);
@@ -2356,12 +2581,13 @@ fn nefarious_lich_ends_the_game_inside_the_batch() {
     }
 }
 
-/// A second rider pauses in the batch after Nefarious Lich ended the game (P1's graveyard is
-/// empty). Outfitted Jouster wearing Steelclaw Lance and Brawler's Plate, blocked: its own
-/// prompt. Ironscale Hydra under P0's Hardened Scales and Doubling Season, blocked: an order park.
-/// The game's result stands, and the second pause is still settled.
+/// Nothing happens after the game ends (CR 104.1: "A game ends immediately when a player wins").
+/// Nefarious Lich ends it at the first portion of the batch: P0's unblocked Hill Giant deals its 3
+/// to P1, whose graveyard is empty. The later portions are never dealt: Outfitted Jouster wearing
+/// Steelclaw Lance and Brawler's Plate, blocked, would prevent and sacrifice; Ironscale Hydra under
+/// P0's Hardened Scales and Doubling Season, blocked, would prevent and gain a counter.
 #[test]
-fn a_rider_pause_after_the_game_ended_inside_the_batch() {
+fn nothing_happens_in_the_batch_after_the_game_ends() {
     // The Jouster's board.
     let mut scenario = rider_board();
     scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
@@ -2379,11 +2605,12 @@ fn a_rider_pause_after_the_game_ended_inside_the_batch() {
     let combat = fight(&mut runner, &[giant, jouster], &[(blocker, jouster)], None);
 
     assert_p1_lost_inside_the_batch(&runner, &combat.events);
-    assert_eq!(prevented(&combat.events), 1);
-    assert_eq!(runner.state().objects[&jouster].damage_marked, 0);
+    assert_nothing_after_the_game_ended(&runner, &combat.events);
+    assert_eq!(prevented(&combat.events), 0);
     for equipment in [lance, plate] {
         assert_eq!(runner.state().objects[&equipment].zone, Zone::Battlefield);
     }
+    assert_eq!(runner.state().objects[&blocker].damage_marked, 0);
 
     // The Hydra's board.
     let mut scenario = rider_board();
@@ -2399,10 +2626,222 @@ fn a_rider_pause_after_the_game_ended_inside_the_batch() {
     let combat = fight(&mut runner, &[giant, hydra], &[(courser, hydra)], None);
 
     assert_p1_lost_inside_the_batch(&runner, &combat.events);
-    assert_eq!(prevented(&combat.events), 1);
-    // CR 616.1: one counter, Doubling Season first (3) or Hardened Scales first (4).
+    assert_nothing_after_the_game_ended(&runner, &combat.events);
+    assert_eq!(prevented(&combat.events), 0);
+    assert_eq!(plus_counters(&runner, hydra), 0);
+    assert_eq!(runner.state().objects[&courser].damage_marked, 0);
+
+    // The Hydra declared first: its 5 to the Courser is replaced before the Giant's portion
+    // ends the game, and still isn't dealt.
+    let mut scenario = rider_board();
+    scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let hydra = scenario
+        .add_creature_from_oracle(P0, "Ironscale Hydra", 5, 5, IRONSCALE_HYDRA)
+        .id();
+    let courser = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
+    let mut runner = scenario.build();
+
+    let combat = fight(&mut runner, &[hydra, giant], &[(courser, hydra)], None);
+
+    assert_p1_lost_inside_the_batch(&runner, &combat.events);
+    assert_nothing_after_the_game_ended(&runner, &combat.events);
+    assert_eq!(runner.state().objects[&courser].damage_marked, 0);
+
+    // A combat damage trigger: P0's Grizzly Bears, declared first, is blocked by P1's Swans of
+    // Bryn Argoll, and P0 controls Sheoldred, the Apocalypse ("Whenever you draw a card, you gain
+    // 2 life."). Nothing triggered by the batch is put on the stack after the game ends.
+    let mut scenario = rider_board();
+    scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
+    scenario.add_creature_from_oracle(P0, "Sheoldred, the Apocalypse", 4, 5, SHEOLDRED);
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let swans = swans_of_bryn_argoll(&mut scenario);
+    let mut runner = scenario.build();
+    let hand_before = hand_size(&runner, P0);
+
+    let combat = fight(&mut runner, &[bears, giant], &[(swans, bears)], None);
+
+    assert_p1_lost_inside_the_batch(&runner, &combat.events);
+    assert_nothing_after_the_game_ended(&runner, &combat.events);
+    assert_eq!(life(&runner, P0), 20);
+    // strict-failure: CR 615.5 runs the Swans' rider "immediately afterward", after the whole
+    // damage event, which the game's end comes first in; the engine runs it in its own portion,
+    // before the Giant's portion ends the game, so P0 draws 2 (riders aren't held to the end of
+    // the batch, Command Zone #172).
+    assert_eq!(hand_size(&runner, P0) - hand_before, 2);
+}
+
+/// No damage, prevention, counter, life change or zone change follows the `GameOver` event, no
+/// ability is put on the stack after it, and the stack is empty.
+fn assert_nothing_after_the_game_ended(runner: &GameRunner, events: &[GameEvent]) {
+    let over = events
+        .iter()
+        .position(|e| matches!(e, GameEvent::GameOver { .. }))
+        .expect("the game ended");
+    let after: Vec<&GameEvent> = events[over + 1..]
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                GameEvent::DamageDealt { .. }
+                    | GameEvent::DamagePrevented { .. }
+                    | GameEvent::CounterAdded { .. }
+                    | GameEvent::LifeChanged { .. }
+                    | GameEvent::ZoneChanged { .. }
+                    | GameEvent::ReplacementApplied { .. }
+                    | GameEvent::StackPushed { .. }
+            )
+        })
+        .collect();
+    assert!(after.is_empty(), "after the game ended: {after:?}");
+    assert!(
+        runner.state().stack.is_empty(),
+        "{:?}",
+        runner.state().stack
+    );
+}
+
+/// CR 104.1 outside combat: Flame Rift ("Flame Rift deals 4 damage to each player.") cast by P0,
+/// who controls Nefarious Lich with an empty graveyard. P0's portion ends the game, and P1's 4 is
+/// never dealt.
+#[test]
+fn nothing_happens_after_a_noncombat_portion_ends_the_game() {
+    let mut scenario = rider_board();
+    scenario.add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH);
+    let rift = spell(&mut scenario, "Flame Rift", FLAME_RIFT, false);
+    let mut runner = scenario.build();
+
+    let events = cast(&mut runner, rift, Vec::new());
+
+    let state = runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::GameOver { winner: Some(winner) } if winner == P1),
+        "got {:?}",
+        state.waiting_for
+    );
+    assert!(state.players[0].is_eliminated);
+    assert_nothing_after_the_game_ended(&runner, &events);
+    assert!(damage_dealt_to_player(&events, P1).is_empty());
+    assert_eq!(life(&runner, P1), 20);
+}
+
+fn damage_dealt_to_player(events: &[GameEvent], player: PlayerId) -> Vec<u32> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::DamageDealt {
+                target: TargetRef::Player(target),
+                amount,
+                ..
+            } if *target == player => Some(*amount),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 800.4a: with three players the loss isn't the game's end. P1 leaves inside the batch, and
+/// the rest of the batch still happens for the players left: P2 takes the Grizzly Bears' 2, and
+/// Ironscale Hydra, blocked by P2's Centaur Courser, prevents its damage and gains its counter.
+/// A second Grizzly Bears attacking P1 after the Hill Giant has no recipient left (CR 800.4a,
+/// CR 800.4e): P1 isn't dealt its 2, so P0's Exquisite Blood ("Whenever an opponent loses life,
+/// you gain that much life.") sees only P2's loss.
+#[test]
+fn a_player_who_loses_inside_the_batch_leaves_and_the_batch_goes_on() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, p2] {
+        for index in 0..8 {
+            scenario.add_spell_to_library_top(player, &format!("Library Filler {index}"), true);
+        }
+    }
+    scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
+    scenario.add_enchantment_from_oracle(P0, "Exquisite Blood", EXQUISITE_BLOOD);
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let second_bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let hydra = scenario
+        .add_creature_from_oracle(P0, "Ironscale Hydra", 5, 5, IRONSCALE_HYDRA)
+        .id();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    scales_and_season(&mut scenario, P0);
+    let courser = scenario.add_creature(p2, "Centaur Courser", 3, 3).id();
+    let mut runner = scenario.build();
+
+    let attacks = [
+        (giant, AttackTarget::Player(P1)),
+        (second_bears, AttackTarget::Player(P1)),
+        (hydra, AttackTarget::Player(p2)),
+        (bears, AttackTarget::Player(p2)),
+    ];
+    let events = combat_at(&mut runner, &attacks, p2, &[(courser, hydra)]);
+
+    let state = runner.state();
+    assert!(state.players[1].is_eliminated);
+    assert_eq!(state.game_end, None);
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, GameEvent::GameOver { .. })));
+    assert_eq!(state.players[2].life, 18);
+    assert!(damage_dealt_to_player(&events, P1).is_empty());
+    assert_eq!(state.players[1].life, 20);
+    assert_eq!(state.players[0].life, 22);
+    assert_eq!(prevented(&events), 1);
+    // strict-failure: CR 616.1: the counter's order (Doubling Season first: 3; Hardened Scales
+    // first: 4) is P0's to choose, and combat can't ask it yet (Command Zone #140); the engine takes
+    // the first candidate, not P0's pick.
     let counters = plus_counters(&runner, hydra);
     assert!([3, 4].contains(&counters), "got {counters} counters");
+    assert_eq!(state.objects[&courser].zone, Zone::Graveyard);
+    assert!(state.pending_replacement.is_none());
+    assert!(state.resolution_stack.is_empty());
+    assert_eq!(state.phase, Phase::EndCombat);
+}
+
+/// Drive one combat with per-attacker targets: `defender` blocks with `blocks`, every other
+/// defending player blocks nothing.
+fn combat_at(
+    runner: &mut GameRunner,
+    attacks: &[(ObjectId, AttackTarget)],
+    defender: PlayerId,
+    blocks: &[(ObjectId, ObjectId)],
+) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    let mut attacked = false;
+    for _ in 0..400 {
+        let state = runner.state();
+        if matches!(state.phase, Phase::EndCombat | Phase::PostCombatMain) {
+            return events;
+        }
+        let action = match &state.waiting_for {
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+                order: (0..triggers.len()).collect(),
+            },
+            WaitingFor::DeclareAttackers { .. } => {
+                let attacks = if attacked {
+                    Vec::new()
+                } else {
+                    attacks.to_vec()
+                };
+                attacked = true;
+                GameAction::DeclareAttackers {
+                    attacks,
+                    bands: vec![],
+                }
+            }
+            WaitingFor::DeclareBlockers { player, .. } => GameAction::DeclareBlockers {
+                assignments: if *player == defender {
+                    blocks.to_vec()
+                } else {
+                    Vec::new()
+                },
+            },
+            other => panic!("combat stopped at {other:?}"),
+        };
+        events.extend(runner.act(action).expect("combat action").events);
+    }
+    panic!("combat did not end");
 }
 
 /// Dralnu, Lich Lord: "If damage would be dealt to Dralnu, sacrifice that many permanents
@@ -2424,7 +2863,8 @@ fn dralnus_sacrifice_choice_is_cleared_inside_the_batch() {
     let combat = fight(&mut runner, &[bears], &[(dralnu, bears)], None);
 
     // strict-failure: the card has P1 sacrifice 2 permanents of its choice; combat can't ask yet
-    // (CR 510.2, Command Zone #140), and nothing is sacrificed (an engine limit, not derived).
+    // (CR 510.2, Command Zone #140), and nothing is sacrificed (an engine limit, not derived). The
+    // card reports unsupported for it.
     assert_batch_settled(&runner);
     assert!(combat.prompts.is_empty());
     // Reach guard: the substitution applied and Dralnu dealt its damage.
