@@ -202,6 +202,20 @@ function statementMayPoint(group: number, subjectId: string, answerId: string) {
   });
 }
 
+/** A read-only replacement-order statement point: the effects' sources in the engine's order. */
+function statementOrderPoint(group: number, ids: string[]): InteractionShortcutPoint {
+  return {
+    group,
+    kind: "order",
+    min: 0,
+    max: 0,
+    unique: true,
+    ordered: true,
+    readOnly: true,
+    candidateIds: ids.map(cid),
+  };
+}
+
 /** A read-only point: `readOnly` is the field the routing rule turns on. */
 function readOnlyPoint(group: number, kind: "convokeTaps" | "manaColor"): InteractionShortcutPoint {
   return {
@@ -1150,6 +1164,35 @@ describe("LoopShortcutModal", () => {
     expect(screen.getByText("P2 — ×2")).toBeInTheDocument();
     expect(screen.getByText("P3 — ×5")).toBeInTheDocument();
     expect(screen.queryByText(/^Repeating /)).not.toBeInTheDocument();
+  });
+
+  // CR 732.2b: the replacement order a declaration names is stated in the engine's own candidate
+  // order, beside the announced-target order rows.
+  it("states a declared replacement order in the order the engine publishes it", () => {
+    for (const [ids, first, second] of [
+      [["g", "d"], "Palisade Giant", "Fiendish Duo"],
+      [["d", "g"], "Fiendish Duo", "Palisade Giant"],
+    ] as const) {
+      seed(
+        buildRespondToShortcutWaitingFor(),
+        {},
+        respondInteraction(
+          { points: [statementTargetsPoint(0, ["r0", "r1"]), statementOrderPoint(1, [...ids])] },
+          [
+            seatCandidate("r0", 2),
+            seatCandidate("r1", 0),
+            objectCandidate("g", "Palisade Giant", "5"),
+            objectCandidate("d", "Fiendish Duo", "6"),
+          ],
+        ),
+      );
+      render(<RespondToShortcutModal />);
+
+      expect(screen.getByText("1. P3")).toBeInTheDocument();
+      expect(screen.getByText(`1. ${first}'s replacement effect`)).toBeInTheDocument();
+      expect(screen.getByText(`2. ${second}'s replacement effect`)).toBeInTheDocument();
+      cleanup();
+    }
   });
 
   // The client half of the answered-optional-decision claim. An engine test renders nothing, and

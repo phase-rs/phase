@@ -66,6 +66,7 @@
     "respondDeclaredTitle": "Proponowana deklaracja:",
     "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. Efekt zastępujący: {{subject}}",
     "respondDecision": {
       "take": "{{subject}} — wykorzystanie w każdej iteracji",
       "decline": "{{subject}} — odrzucenie w każdej iteracji"

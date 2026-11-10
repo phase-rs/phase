@@ -218,6 +218,7 @@ fn point_named_by(
         K::MayChoice => Some(ChoicePoint::MayGate),
         K::UnlessBreak => Some(ChoicePoint::UnlessBreak),
         K::ManaColor { .. } => Some(ChoicePoint::ManaColor),
+        K::Order { .. } => Some(ChoicePoint::ReplacementOrder),
     }
 }
 
@@ -587,6 +588,7 @@ fn kind_tag(kind: &engine::analysis::decision_template::DecisionPointKind) -> &'
         K::MayChoice => "MayChoice",
         K::UnlessBreak => "UnlessBreak",
         K::ManaColor { .. } => "ManaColor",
+        K::Order { .. } => "Order",
     }
 }
 

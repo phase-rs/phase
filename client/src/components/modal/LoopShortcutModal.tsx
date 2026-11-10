@@ -862,7 +862,9 @@ function RespondToShortcut({
   // position. No group is named exactly when no allocation is stated, and then every decision
   // states its order — reading only the first would show the responder half the proposal.
   const allocationGroup = spec?.allocationGroup ?? null;
-  const orderPoints = points.filter((p) => p.kind === "targets" && p.group !== allocationGroup);
+  const orderPoints = points.filter(
+    (p) => (p.kind === "targets" && p.group !== allocationGroup) || p.kind === "order",
+  );
   const allocation = declared?.allocation ?? [];
   // One authority for whether a may row exists, so the panel's predicate and its render cannot
   // drift: a point this modal has no wording for contributes neither a row nor a title.
@@ -952,10 +954,15 @@ function RespondToShortcut({
                   key={`${point.group}:${id}`}
                   className="text-sm text-slate-200 tabular-nums"
                 >
-                  {t("comboShortcut.respondOrderEntry", {
-                    position: index + 1,
-                    subject: candidateLabel(t, candidates, id),
-                  })}
+                  {t(
+                    point.kind === "order"
+                      ? "comboShortcut.respondReplacementOrderEntry"
+                      : "comboShortcut.respondOrderEntry",
+                    {
+                      position: index + 1,
+                      subject: candidateLabel(t, candidates, id),
+                    },
+                  )}
                 </p>
               )),
             )}

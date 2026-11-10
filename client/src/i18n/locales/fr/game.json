@@ -66,6 +66,7 @@
     "respondDeclaredTitle": "Déclaration proposée :",
     "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. Effet de remplacement de {{subject}}",
     "respondDecision": {
       "take": "{{subject}} — utilisation à chaque itération",
       "decline": "{{subject}} — refus à chaque itération"

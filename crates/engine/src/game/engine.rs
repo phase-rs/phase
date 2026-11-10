@@ -3643,7 +3643,8 @@ fn pin_observed_declaration(
                 DecisionPointKind::Mode { .. }
                 | DecisionPointKind::UnlessBreak
                 | DecisionPointKind::ConvokeTaps { .. }
-                | DecisionPointKind::ManaColor { .. },
+                | DecisionPointKind::ManaColor { .. }
+                | DecisionPointKind::Order { .. },
                 LoopAnswerValue::May(_) | LoopAnswerValue::Targets(_),
             ) => return None,
         });
@@ -3678,6 +3679,25 @@ pub(crate) fn pinned_decisions_to_points(
     let mut points = Vec::with_capacity(pins.len());
     for pin in pins {
         let point = match pin {
+            // CR 616.1: a replacement order's place among the effects the prompt orders.
+            PinnedDecision::Order { slot, pos }
+                if slot.point
+                    == crate::analysis::decision_template::ChoicePoint::ReplacementOrder =>
+            {
+                let positions = pins
+                    .iter()
+                    .filter(|pin| {
+                        matches!(pin, PinnedDecision::Order { slot: other, .. } if other.point == slot.point)
+                    })
+                    .count();
+                DecisionPoint {
+                    slot: slot.clone(),
+                    kind: DecisionPointKind::Order {
+                        pos: *pos,
+                        positions: u8::try_from(positions).ok()?,
+                    },
+                }
+            }
             // CR 603.3b: trigger ordering is not a loop-declaration choice — no read-side peer.
             PinnedDecision::Order { .. } => continue,
             // CR 702.51a: the untapped creatures the controller may tap for convoke. Sorted by
@@ -7407,9 +7427,9 @@ fn handle_declare_shortcut(
     // `ManaColor` / `ConvokeTaps`) and is therefore looked up against `schema.points`.
     // `pin_slot` synthesizes no slot for `Order`, so the term is exact rather than approximate.
     //
-    // CLOSED FOR `PinnedDecision::Order`, ON EVERY SCHEMA SIZE. `pin_slot` returns `None` for
-    // an ordering pin, so it covers no published point — coverage is kind-aware via
-    // `pin_answers_point` — and `validate_pins` refuses it outright as `NotALoopDecision`
+    // CLOSED FOR A TRIGGER-ORDER `PinnedDecision::Order`, ON EVERY SCHEMA SIZE. No published
+    // point carries `ChoicePoint::TriggerOrder`, so it covers no published point — coverage is
+    // kind-aware via `pin_answers_point` — and `validate_pins` refuses it outright as `NotALoopDecision`
     // (CR 603.3b: trigger ordering is a different decision kind from the CR 732.2a
     // per-iteration choices a loop declaration answers). `PinnedDecision` derives
     // `Deserialize` and rides `GameAction::DeclareShortcut` verbatim, so that refusal is what

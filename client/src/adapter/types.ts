@@ -4341,6 +4341,7 @@ export type DecisionPointKind =
   | { ConvokeTaps: { tappable: ObjectId[] } }
   | { Mode: { available_modes: number[] } }
   | { ManaColor: { color: ManaColor } }
+  | { Order: { pos: number; positions: number } }
   | "MayChoice"
   | "UnlessBreak";
 

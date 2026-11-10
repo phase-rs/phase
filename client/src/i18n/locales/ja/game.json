@@ -66,6 +66,7 @@
     "respondDeclaredTitle": "提案された宣言:",
     "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. {{subject}}の置換効果",
     "respondDecision": {
       "take": "{{subject}} — 各反復で実行",
       "decline": "{{subject}} — 各反復で実行しない"

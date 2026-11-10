@@ -890,6 +890,7 @@ pub enum InteractionShortcutPointKind {
     MayChoice,
     UnlessBreak,
     ManaColor,
+    Order,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -3714,6 +3714,19 @@ fn declared_targets_statement(
     Some((values, declared_segments(&starts, declared_count)?))
 }
 
+/// CR 616.1: the replacement effects one order names, in the order the affected player applies
+/// them; `None` when a source names no live object.
+fn replacement_order_statement<'a>(
+    places: impl Iterator<Item = (&'a crate::analysis::decision_template::DecisionSource, u8)>,
+) -> Option<Vec<LoopShortcutCandidateValue>> {
+    let mut places: Vec<_> = places.collect();
+    places.sort_by_key(|(_, pos)| *pos);
+    places
+        .into_iter()
+        .map(|(source, _)| declared_object_candidate(source))
+        .collect()
+}
+
 /// CR 732.2b: the declaration a responder is being asked to accept or shorten, decoded into the
 /// OFFER side's own projection vocabulary so every surface below it is minted by the offer's
 /// producers rather than by a second copy of them.
@@ -3721,8 +3734,8 @@ fn declared_targets_statement(
 /// # The publication posture, stated once for all seven pin kinds
 ///
 /// A decision this projection can state nothing about publishes NO POINT, and the rest of the
-/// declaration publishes anyway — `Mode`, `UnlessBreak`, `ManaColor`, `ConvokeTaps`, `Order`, an
-/// unmintable `MayChoice` and an unstatable `Targets` decision alike, each for its own reason.
+/// declaration publishes anyway — `Mode`, `UnlessBreak`, `ManaColor`, `ConvokeTaps`, a trigger
+/// `Order`, an unmintable `MayChoice` and an unstatable `Targets` decision alike, each for its own reason.
 ///
 /// The ONE thing a skip may not do is move the ALLOCATION'S DOMAIN. `allocation_point` names the
 /// FIRST published `Targets` point, so what a skipped announced-target decision owes is not
@@ -3739,7 +3752,7 @@ fn declared_targets_statement(
 /// statement helpers above, are wildcard-free, so a future variant carrying an identity or an
 /// answer gets a compile-time visit rather than a silent omission.
 fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequence> {
-    use crate::analysis::decision_template::{IterationCount, PinnedDecision};
+    use crate::analysis::decision_template::{ChoicePoint, IterationCount, PinnedDecision};
 
     let WaitingFor::RespondToShortcut { proposal, .. } = waiting_for else {
         return None;
@@ -3813,7 +3826,7 @@ fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequ
                 //
                 // A slot source naming a CARD identity mints no subject, so this decision states
                 // nothing and publishes NO POINT — the same answer `Mode`, `UnlessBreak`,
-                // `ManaColor`, `ConvokeTaps` and `Order` give below, and the declaration's other
+                // `ManaColor`, `ConvokeTaps` and a trigger `Order` give below, and the declaration's other
                 // decisions are unaffected. `AllCopies` is not hidden information
                 // (`game::visibility`'s redaction arm answers `false` for it: a card identity,
                 // not a live object), so nothing here is a redaction and the all-or-nothing rule
@@ -3853,8 +3866,37 @@ fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequ
             // Its own doc records that the concrete creatures are re-bound LIVE each iteration
             // and no per-iteration creature is latched, so the pin states no answer to publish.
             PinnedDecision::ConvokeTaps { .. } => {}
-            // CR 603.3b trigger ordering under the static replay mode, not a loop-shortcut
-            // per-iteration decision, so this projection publishes nothing for it.
+            // CR 616.1 + CR 732.2b: the order a declaration names for a replacement prompt is
+            // stated to every responder, chooser or not, once, at place 0.
+            PinnedDecision::Order { slot, pos: 0 }
+                if slot.point == ChoicePoint::ReplacementOrder =>
+            {
+                let places = template
+                    .decisions
+                    .iter()
+                    .filter_map(PinnedDecision::replacement_place);
+                let Some(order) = replacement_order_statement(places) else {
+                    continue;
+                };
+                let start = candidates.len();
+                candidates.extend(order);
+                published.push((
+                    LoopShortcutPointProjection {
+                        slot: slot.clone(),
+                        kind: InteractionShortcutPointKind::Order,
+                        min: 0,
+                        max: 0,
+                        unique: true,
+                        ordered: true,
+                        read_only: true,
+                        candidate_indices: (start..candidates.len()).collect(),
+                    },
+                    Vec::new(),
+                ));
+            }
+            // CR 603.3b trigger ordering under the static replay mode is not a loop-shortcut
+            // per-iteration decision, and a replacement order's later place is stated at place 0,
+            // so this projection publishes nothing for either.
             PinnedDecision::Order { .. } => {}
         }
     }
@@ -4205,6 +4247,21 @@ fn loop_shortcut_projection(
                     false,
                     true,
                 )
+            }
+            // CR 616.1: the declared place of a replacement effect is a statement, not an option.
+            DecisionPointKind::Order { pos, .. } => {
+                if *pos == 0 {
+                    candidates.extend(
+                        replacement_order_statement(schema.points.iter().filter_map(|point| {
+                            let DecisionPointKind::Order { pos, .. } = point.kind else {
+                                return None;
+                            };
+                            Some((&point.slot.source, pos))
+                        }))
+                        .unwrap_or_default(),
+                    );
+                }
+                (InteractionShortcutPointKind::Order, 0, 0, true, true, true)
             }
         };
         if candidates.len() > MAX_INTERACTION_LIST_LEN {
@@ -11038,11 +11095,22 @@ fn materialize_loop_shortcut_response(
                     });
                 }
                 // CR 732.2a: the confirmed period's own answer is the one its take performs.
-                InteractionShortcutPointKind::MayChoice => {
+                InteractionShortcutPointKind::MayChoice | InteractionShortcutPointKind::Order => {
                     let answer = period
                         .recorded_answers()
                         .and_then(|recorded| recorded_answer(recorded, &point.slot))
-                        .filter(|pin| matches!(pin, PinnedDecision::MayChoice { .. }))
+                        .filter(|pin| {
+                            matches!(
+                                (pin, point.kind),
+                                (
+                                    PinnedDecision::MayChoice { .. },
+                                    InteractionShortcutPointKind::MayChoice
+                                ) | (
+                                    PinnedDecision::Order { .. },
+                                    InteractionShortcutPointKind::Order
+                                )
+                            )
+                        })
                         .ok_or(InteractionReasonCode::InvalidAuthorityState)?;
                     decisions.push(answer.clone());
                 }
@@ -11190,7 +11258,9 @@ fn materialize_loop_shortcut_response(
                     pay: *pay,
                 });
             }
-            InteractionShortcutPointKind::ConvokeTaps | InteractionShortcutPointKind::ManaColor => {
+            InteractionShortcutPointKind::ConvokeTaps
+            | InteractionShortcutPointKind::ManaColor
+            | InteractionShortcutPointKind::Order => {
                 return Err(InteractionReasonCode::InvalidAuthorityState);
             }
         }

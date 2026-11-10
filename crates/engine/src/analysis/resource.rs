@@ -2113,12 +2113,12 @@ impl PeriodicDelta {
     /// declaration the publisher already validated in exactly the aim.
     ///
     /// Each segment aims at one living reachable seat, and each re-aimed slot switches to the next
-    /// segment at its first resolution after the previous seat's departure, so no segment aims at
-    /// a seat an earlier segment crossed. With a leading slot ([`AnnouncedLead`]) announcement
+    /// segment at its first resolution after the departure of the seat it last aimed at, so a seat
+    /// already gone by then gets no segment from it. With a leading slot ([`AnnouncedLead`]) announcement
     /// index `i` resolves at repetition `i + 1 + lead`; a slot ranked after the killing
     /// resolution, or any slot when that resolution is unknown, switches in the departure's own
     /// repetition, every other slot in the next. A seat that crosses at or before the previous
-    /// departure gets no segment. Seats are taken in the charged point's published
+    /// departure still departs at its crossing. Seats are taken in the charged point's published
     /// `legal_targets` order, except that a slot measured taking nothing — at the observation's
     /// own seat for a non-taking slot, or at a seat `seat_takes` measured at 0 for a taking one —
     /// follows its zero chain unless the witness is built with `WitnessParking::Never`: pinned at
@@ -2310,15 +2310,14 @@ impl PeriodicDelta {
         };
 
         // Segment by segment, because a segment's own END is the crossing the segments BEFORE it
-        // produce — the switch point is not knowable without them. Each step carries the
-        // departure that ended the segment before it.
-        let mut steps: Vec<(Option<SeatDeparture>, PlayerId)> = Vec::new();
+        // produce — the switch point is not knowable without them.
+        let mut steps: Vec<PlayerId> = Vec::new();
         let mut witness: Option<DecisionTemplate> = None;
         let mut boundary: Option<SeatDeparture> = None;
         let mut departed: Vec<(u32, PlayerId)> = Vec::new();
         let mut departures: Vec<(PlayerId, SeatDeparture)> = Vec::new();
         for (_, seat) in order {
-            steps.push((boundary, seat));
+            steps.push(seat);
             let mut candidate = observed.clone();
             for decision in &mut candidate.decisions {
                 if let PinnedDecision::Targets { slot, targets } = decision {
@@ -2347,12 +2346,20 @@ impl PeriodicDelta {
                         let clip = zero.and_then(|zero| Some((zero.seats[0], zero.lasts?)));
                         let mut segments: Vec<(u32, Ranking)> = Vec::new();
                         let mut previous: Option<PlayerId> = None;
-                        for (earlier, at_seat) in &steps {
-                            let mut at = slot_start(slot, *earlier);
+                        let left = |at: &PlayerId| {
+                            departures.iter().find(|(s, _)| s == at).map(|(_, d)| *d)
+                        };
+                        for at_seat in &steps {
+                            // CR 704.5a + CR 800.4a: a slot leaves a seat when that seat leaves,
+                            // so its next segment starts after that departure.
+                            let mut at = previous.map_or(0, |p| slot_start(slot, left(&p)));
                             if let Some((zero_seat, lasts)) = clip {
                                 if previous == Some(zero_seat) {
                                     at = at.min(lasts);
                                 }
+                            }
+                            if left(at_seat).is_some_and(|d| slot_start(slot, Some(d)) <= at) {
+                                continue;
                             }
                             previous = Some(*at_seat);
                             segments.retain(|(start, _)| *start < at);
@@ -2386,8 +2393,8 @@ impl PeriodicDelta {
                 steps.pop();
                 break;
             };
-            // Crossed at or before the departure that ended the previous segment: no segment
-            // for it.
+            // Crossed at or before the departure that ended the previous segment: the seat still
+            // leaves at its crossing, and no witness ends at it.
             let crossed_before = boundary.is_some_and(|(repetition, killer)| {
                 crossing < repetition
                     || (crossing == repetition
@@ -2397,7 +2404,8 @@ impl PeriodicDelta {
                         })
             });
             if crossed_before {
-                steps.pop();
+                departed.push((crossing, seat));
+                departures.push((seat, (crossing, rank)));
                 continue;
             }
             boundary = Some((crossing, rank));

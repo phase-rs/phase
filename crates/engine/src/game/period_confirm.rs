@@ -1665,6 +1665,20 @@ fn replay_cycle_ordered(
             }
         };
         if !answered {
+            // CR 616.1 + CR 732.2a: an order among replacement effects the record never made is
+            // the declaration's.
+            if let Some((action, seat)) =
+                declared_replacement(replay, declared).zip(replay.waiting_for.acting_player())
+            {
+                step(
+                    replay,
+                    seat,
+                    action,
+                    OfferRefusal::UnanswerablePrompt,
+                    events,
+                )?;
+                continue;
+            }
             // CR 603.3b + CR 732.2a: after a departure an order the record made answers the
             // triggers that remain.
             if let Some((order, seat)) = end
@@ -1701,6 +1715,61 @@ fn replay_cycle_ordered(
         }
     }
     Err(OfferRefusal::NoRecurrence)
+}
+
+/// CR 616.1: the answer to the replacement prompt at `replay` that applies first the candidate
+/// `declared` places first; `None` unless `declared` places every candidate the prompt lists.
+fn declared_replacement(replay: &GameState, declared: Declared<'_>) -> Option<GameAction> {
+    let (template, _) = declared?;
+    let WaitingFor::ReplacementChoice { candidates, .. } = &replay.waiting_for else {
+        return None;
+    };
+    let (index, _) = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            template.decisions.iter().find_map(|pin| {
+                let (source, pos) = pin.replacement_place()?;
+                crate::game::engine::slot_source_prompted(replay, source, candidate.source_id)
+                    .then_some((index, pos))
+            })
+        })
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .min_by_key(|(_, pos)| *pos)?;
+    Some(GameAction::ChooseReplacement { index })
+}
+
+/// CR 616.1 + CR 616.1e: one declaration per effect at the order prompt at `replay`, each placing
+/// that effect first and the rest as the prompt lists them.
+fn replacement_orders(replay: &GameState) -> Vec<Vec<PinnedDecision>> {
+    let WaitingFor::ReplacementChoice { candidates, .. } = &replay.waiting_for else {
+        return Vec::new();
+    };
+    if replay.waiting_for.option_point() != Some(ChoicePoint::ReplacementOrder) {
+        return Vec::new();
+    }
+    let Some(sources) = candidates
+        .iter()
+        .map(|candidate| object_decision_source(replay, candidate.source_id))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Vec::new();
+    };
+    (0..sources.len())
+        .map(|first| {
+            let mut order = sources.clone();
+            order.rotate_left(first);
+            order
+                .into_iter()
+                .zip(0u8..)
+                .map(|(source, pos)| PinnedDecision::Order {
+                    slot: DecisionSlot::first(source, ChoicePoint::ReplacementOrder),
+                    pos,
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// The unmade items from the first one up to the next unmade play: the answers the current
@@ -2399,7 +2468,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         performance,
         library_cost,
         end,
-        choices,
+        mut choices,
         #[cfg(any(test, feature = "test-support"))]
         performed,
         s_n,
@@ -2563,23 +2632,65 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
                 == ObjectGrowthVerdict::ResourceRecurrence(Some(RecurrenceCover::TurnCycle)))
             .then(|| CleanupPair::measure(&frames, holder))
             .flatten();
-            let takes = if grows {
-                (Vec::new(), Vec::new())
+            let (takes, orders) = if grows {
+                ((Vec::new(), Vec::new()), Vec::new())
             } else {
                 measure_seat_takes(frame, holder, &s_n, &items, &end, &frames, &choices)
             };
-            match replay_bounded_offer(
-                frame,
-                holder,
-                &frames,
-                &choices,
-                cleanup,
-                repetition_growth,
-                takes,
-            )? {
-                Some(mut parts) => {
-                    (performed_reaches, recorded) =
-                        perform_published(&mut parts, &s_n, &items, span.reach, holder);
+            // CR 732.2a + CR 616.1e: a replacement order the record never made is a choice the
+            // proposal names, so each order is declared, measured and performed, and the offer
+            // publishes whichever reaches furthest.
+            let mut runs = vec![(choices.clone(), takes)];
+            for order in orders {
+                let mut declared = choices.clone();
+                declared.extend(order);
+                let (takes, _) =
+                    measure_seat_takes(frame, holder, &s_n, &items, &end, &frames, &declared);
+                runs.push((declared, takes));
+            }
+            let reach = |parts: &BoundedOfferParts| match parts.schema.iteration_count {
+                crate::analysis::decision_template::IterationCount::Fixed(n) => n,
+                crate::analysis::decision_template::IterationCount::WithoutEnd => 0,
+            };
+            type Run = (
+                Vec<PinnedDecision>,
+                BoundedOfferParts,
+                Vec<PerformedReach>,
+                Option<PerformedReach>,
+            );
+            let mut best: Option<Run> = None;
+            for (run, (declared, takes)) in runs.into_iter().enumerate() {
+                let offered = match replay_bounded_offer(
+                    frame,
+                    holder,
+                    &frames,
+                    &declared,
+                    cleanup,
+                    repetition_growth.clone(),
+                    takes,
+                ) {
+                    // A declared order the offer cannot state leaves the record's offer standing.
+                    Err(_) if run > 0 => continue,
+                    offered => offered?,
+                };
+                let Some(mut parts) = offered else {
+                    continue;
+                };
+                let (reaches, record) =
+                    perform_published(&mut parts, &s_n, &items, span.reach, holder);
+                if best
+                    .as_ref()
+                    .is_none_or(|(_, kept, ..)| reach(&parts) > reach(kept))
+                {
+                    best = Some((declared, parts, reaches, record));
+                }
+            }
+            match best.map(|(declared, parts, reaches, record)| {
+                choices = declared;
+                (parts, reaches, record)
+            }) {
+                Some((parts, reaches, record)) => {
+                    (performed_reaches, recorded) = (reaches, record);
                     let delta = ResourceVector::period(prior, current);
                     (delta, None, Some(parts), growth, CountedBy::Threshold)
                 }
@@ -3448,7 +3559,8 @@ pub(crate) fn perform_declared_on(
 /// CR 119.3 + CR 601.2c + CR 800.4a: per slot that took life at an opponent, the life one
 /// resolution takes at its recorded aim and at each reachable living opponent, replayed from the
 /// offer frame with the slot declared there, and again with each set of opponents that leaves one
-/// in the game eliminated first, and how many repetitions each offer-frame zero lasts.
+/// in the game eliminated first, and how many repetitions each offer-frame zero lasts. Beside them,
+/// the [`replacement_orders`] at the first order prompt a probe could not answer.
 fn measure_seat_takes(
     frame: &GameState,
     holder: PlayerId,
@@ -3457,7 +3569,10 @@ fn measure_seat_takes(
     end: &FrameEnd,
     frames: &[GameState],
     choices: &[PinnedDecision],
-) -> crate::analysis::resource::MeasuredTakes {
+) -> (
+    crate::analysis::resource::MeasuredTakes,
+    Vec<Vec<PinnedDecision>>,
+) {
     use crate::analysis::decision_template::{
         AnnouncementSubject, DecisionGroupKey, DecisionKind, IterationCount, Ranking, ReplayMode,
         TargetSchedule,
@@ -3480,7 +3595,7 @@ fn measure_seat_takes(
         )
     };
     let Some(recorded) = charges(frames) else {
-        return (Vec::new(), Vec::new());
+        return ((Vec::new(), Vec::new()), Vec::new());
     };
     let record: Vec<(DecisionSlot, PlayerId, i64)> = recorded
         .iter()
@@ -3532,6 +3647,7 @@ fn measure_seat_takes(
             .map(|(_, seat)| *seat)
             .collect::<BTreeSet<PlayerId>>()
     });
+    let mut orders = Vec::new();
     for gone in departed_sets {
         let mut start = s_n.clone();
         for seat in &gone {
@@ -3575,6 +3691,9 @@ fn measure_seat_takes(
                     Some((&template, 1)),
                 ) == CycleEnd::CameRound;
             let Some(at) = charges(&measured).filter(|_| came_round) else {
+                if orders.is_empty() {
+                    orders = replacement_orders(&replay);
+                }
                 continue;
             };
             takes.extend(at.into_iter().filter_map(|charge| {
@@ -3623,7 +3742,7 @@ fn measure_seat_takes(
             lifetimes.push((seat, came));
         }
     }
-    (takes, lifetimes)
+    ((takes, lifetimes), orders)
 }
 
 /// CR 732.2a: performs the offer's own declaration and its suggestion — of two witnesses, the one

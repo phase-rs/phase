@@ -2521,7 +2521,11 @@ fn four_seat_altar_offer(
 /// dealt to this creature instead.") takes Prankster's damage in its controller's place until a
 /// seventh destroys it (CR 614.1a + CR 704.5g), so Prankster leaves the Giant's seat after the hits
 /// it survives while Blood Artist drains that seat first: 32 under P3 with the record aimed at P1,
-/// and 32 under P1 or P2 aimed there, the Giant already marked once.
+/// and 32 under P1 or P2 aimed there, the Giant already marked once. Beside P1's Fiendish Duo,
+/// Prankster's damage at P3 meets the Duo's doubling and the Giant's redirection and P3 orders them
+/// (CR 616.1): the offer names the Giant first, which reaches 32 where the Duo first reaches 31, and
+/// P3 may shorten where it would order them otherwise (CR 732.2b). With P1 at 12 and the Giant under
+/// P3, P1 leaves at 15, before the Giant's seat, and Prankster moves on when P1 leaves: 28.
 /// The record aims at one seat alone, so its own declaration reaches that seat's departure: 19, 9
 /// when both slots take 1, 6 when P1 or P2 takes 3, or 5 when the Giant shares that seat.
 #[test]
@@ -2650,30 +2654,128 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
             end,
         );
     }
-    for (giant, aim, frame, own) in [
-        (P3, P1, [21, 18, 20, 20], 9),
-        (P1, P1, [21, 19, 20, 20], 5),
-        (P2, P2, [21, 20, 19, 20], 5),
-    ] {
-        let mut runner = four_seat_altar_offer(
-            db,
-            prankster_artist,
-            &[(giant, "Palisade Giant")],
-            None,
-            &[],
-            aim,
-        );
-        assert_suggestion_wins(
-            &mut runner,
-            &format!("Palisade Giant under {giant:?}, aim {aim:?}"),
-            2,
-            frame,
+    let giant_first: &[(&str, u8)] = &[("Palisade Giant", 0), ("Fiendish Duo", 1)];
+    for (placements, starting, aim, frame, count, own, end, orders) in [
+        (
+            &[(P3, "Palisade Giant")][..],
+            &[][..],
+            P1,
+            [21, 18, 20, 20],
             32,
-            None,
-            own,
+            9,
             [53, 0, 0, 0],
+            &[][..],
+        ),
+        (
+            &[(P1, "Palisade Giant")][..],
+            &[][..],
+            P1,
+            [21, 19, 20, 20],
+            32,
+            5,
+            [53, 0, 0, 0],
+            &[][..],
+        ),
+        (
+            &[(P2, "Palisade Giant")][..],
+            &[][..],
+            P2,
+            [21, 20, 19, 20],
+            32,
+            5,
+            [53, 0, 0, 0],
+            &[][..],
+        ),
+        (
+            &[(P3, "Palisade Giant"), (P1, "Fiendish Duo")][..],
+            &[][..],
+            P1,
+            [21, 18, 20, 20],
+            32,
+            9,
+            [53, 0, 0, 0],
+            giant_first,
+        ),
+        (
+            &[(P3, "Palisade Giant")][..],
+            &[(P1, 12)][..],
+            P1,
+            [21, 10, 20, 20],
+            28,
+            5,
+            [49, 0, 0, 0],
+            &[][..],
+        ),
+    ] {
+        let label = format!("{placements:?} {starting:?}, aim {aim:?}");
+        let mut runner =
+            four_seat_altar_offer(db, prankster_artist, placements, None, starting, aim);
+        let WaitingFor::LoopShortcut { schema, .. } = &runner.state().waiting_for else {
+            panic!("{label}: no offer: {:?}", latest_verdict(runner.state()));
+        };
+        let positions = orders.len() as u8;
+        assert_eq!(
+            replacement_places(
+                runner.state(),
+                schema
+                    .suggested_declaration
+                    .as_ref()
+                    .map_or(&[][..], |suggestion| &suggestion.decisions),
+                &schema.points,
+            ),
+            (
+                orders
+                    .iter()
+                    .map(|&(name, pos)| (name.to_string(), pos))
+                    .collect(),
+                orders
+                    .iter()
+                    .map(|&(name, pos)| (name.to_string(), pos, positions))
+                    .collect(),
+            ),
+            "{label}: the suggestion's replacement order and its published points"
         );
+        assert_suggestion_wins(&mut runner, &label, 2, frame, count, None, own, end);
     }
+}
+
+/// Each CR 616.1 replacement-order pin among `pins`, as its effect source's name and place, and each
+/// published `Order` point among `points`, as its source's name, place and number of places.
+#[allow(clippy::type_complexity)]
+fn replacement_places(
+    state: &GameState,
+    pins: &[PinnedDecision],
+    points: &[engine::analysis::decision_template::DecisionPoint],
+) -> (Vec<(String, u8)>, Vec<(String, u8, u8)>) {
+    use engine::analysis::decision_template::{ChoicePoint, DecisionPointKind};
+    use engine::types::game_state::YieldTarget;
+    let name = |source: &YieldTarget| {
+        let YieldTarget::ThisObject { source_id, .. } = source else {
+            panic!("an object source, got {source:?}");
+        };
+        state.objects[source_id].name.clone()
+    };
+    (
+        pins.iter()
+            .filter_map(|pin| match pin {
+                PinnedDecision::Order { slot, pos }
+                    if slot.point == ChoicePoint::ReplacementOrder =>
+                {
+                    Some((name(&slot.source), *pos))
+                }
+                _ => None,
+            })
+            .collect(),
+        points
+            .iter()
+            .filter_map(|point| match point.kind {
+                DecisionPointKind::Order { pos, positions } => {
+                    Some((name(&point.slot.source), pos, positions))
+                }
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 /// Asserts the offer standing in `runner` (`label`) at its frame — `stack` triggers, lives `frame`
@@ -2774,6 +2876,410 @@ fn take_suggestion(runner: &mut GameRunner) -> Vec<GameEvent> {
     let mut events = act_events(runner, GameAction::DeclareShortcut { count, template });
     events.extend(accept(runner));
     events
+}
+
+/// P0's four-seat Altar loop with Blood Artist and Spiteful Prankster, Palisade Giant under P3 and
+/// Fiendish Duo under P1, every trigger aimed at P1, at its offer.
+fn giant_and_duo_offer(db: &CardDatabase) -> GameRunner {
+    four_seat_altar_offer(
+        db,
+        &["Blood Artist", "Spiteful Prankster"],
+        &[(P3, "Palisade Giant"), (P1, "Fiendish Duo")],
+        None,
+        &[],
+        P1,
+    )
+}
+
+/// The object on `state`'s battlefield named `name` under `controller`, as a published candidate
+/// names it.
+fn object_named(state: &GameState, name: &str, controller: PlayerId) -> (String, String) {
+    let (id, _) = state
+        .objects
+        .iter()
+        .find(|(_, object)| object.name == name && object.controller == controller)
+        .unwrap_or_else(|| panic!("{name} under {controller:?}"));
+    (id.0.to_string(), name.to_string())
+}
+
+/// Each published `Order` point among `points`, as whether it is read-only and the objects its
+/// candidates name among `candidates`, in order.
+fn order_statements(
+    points: &[InteractionShortcutPoint],
+    candidates: &[engine::types::interaction::InteractionChoice],
+) -> Vec<(bool, Vec<(String, String)>)> {
+    use engine::types::interaction::InteractionPresentationSurface;
+    points
+        .iter()
+        .filter(|point| point.kind == InteractionShortcutPointKind::Order)
+        .map(|point| {
+            let named = point
+                .candidate_ids
+                .iter()
+                .map(|id| {
+                    candidates
+                        .iter()
+                        .find(|choice| choice.id == *id)
+                        .and_then(|choice| {
+                            choice.surfaces.iter().find_map(|surface| match surface {
+                                InteractionPresentationSurface::Object {
+                                    reference,
+                                    name: Some(name),
+                                    ..
+                                } => Some((reference.clone(), name.clone())),
+                                _ => None,
+                            })
+                        })
+                        .unwrap_or_else(|| panic!("candidate {id:?} names an object"))
+                })
+                .collect();
+            (point.read_only, named)
+        })
+        .collect()
+}
+
+/// The candidates an interaction opportunity publishes.
+fn opportunity_candidates(
+    opportunity: &InteractionOpportunity,
+) -> &[engine::types::interaction::InteractionChoice] {
+    match &opportunity.response {
+        InteractionOpportunityResponse::Schema { candidates, .. } => candidates,
+        other => panic!("a schema opportunity, got {other:?}"),
+    }
+}
+
+/// CR 616.1 + CR 732.2a: Spiteful Prankster's damage at P3 meets Fiendish Duo's "If a source would
+/// deal damage to an opponent, it deals double that damage to that player instead." and Palisade
+/// Giant's "All damage that would be dealt to you and other permanents you control is dealt to this
+/// creature instead.", an order the record never made. The offer publishes that order as read-only
+/// points, so accepting the suggestion through the interaction response declares it from the
+/// confirmed period and the take wins at 32.
+#[test]
+fn a_replacement_order_the_record_never_made_is_declared_through_the_ingress() {
+    use engine::analysis::decision_template::{
+        AnnouncementSubject, DecisionPointKind, TargetPin, TargetSchedule,
+    };
+    use engine::types::interaction::AmountAssignment;
+    let Some(db) = shared_card_db() else { return };
+    let offered = giant_and_duo_offer(db).state().clone();
+    assert_eq!(
+        (offered.stack.len(), lives(&offered)),
+        (2, vec![21, 18, 20, 20]),
+        "reach: the triggers stand at the offer frame"
+    );
+    let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
+        panic!("no offer: {:?}", latest_verdict(&offered));
+    };
+    let IterationCount::Fixed(count) = schema.iteration_count else {
+        panic!("a counted offer, got {:?}", schema.iteration_count);
+    };
+    assert_eq!(count, 32);
+    let suggestion = schema.suggested_declaration.clone().expect("a suggestion");
+    let giant = object_named(&offered, "Palisade Giant", P3);
+    let duo = object_named(&offered, "Fiendish Duo", P1);
+
+    let (bound, view) = published_to_p0(&offered);
+    let (opportunity, points) = shortcut_schema(&view).expect("a shortcut schema");
+    assert_eq!(
+        order_statements(points, opportunity_candidates(opportunity)),
+        vec![(true, vec![giant, duo]), (true, Vec::new())],
+        "the place-0 point states the order; the place-1 point states nothing"
+    );
+    // The suggestion's own announcement sequences, named through the published candidates.
+    let pins: Vec<InteractionShortcutPin> = points
+        .iter()
+        .zip(&schema.points)
+        .filter_map(|(point, published)| {
+            let DecisionPointKind::Targets { legal_targets, .. } = &published.kind else {
+                return None;
+            };
+            let targets = suggestion
+                .decisions
+                .iter()
+                .find_map(|decision| match decision {
+                    PinnedDecision::Targets { slot, targets } if *slot == published.slot => {
+                        Some(targets)
+                    }
+                    _ => None,
+                })?;
+            let [TargetPin::Scheduled(TargetSchedule::Piecewise(segments))] = targets.as_slice()
+            else {
+                panic!("a piecewise suggestion, got {targets:?}");
+            };
+            let named: Vec<AmountAssignment> = segments
+                .iter()
+                .enumerate()
+                .filter_map(|(k, (start, ranking))| {
+                    let end = segments.get(k + 1).map_or(count, |(next, _)| *next);
+                    let amount = count.min(end).saturating_sub(*start);
+                    let AnnouncementSubject::Seat(seat) = ranking.head() else {
+                        panic!("a seat segment, got {ranking:?}");
+                    };
+                    let at = legal_targets
+                        .iter()
+                        .position(|target| *target == TargetRef::Player(*seat))?;
+                    (amount > 0).then(|| AmountAssignment {
+                        choice_id: point.candidate_ids[at].clone(),
+                        amount,
+                    })
+                })
+                .collect();
+            Some(InteractionShortcutPin {
+                group: point.group,
+                choice_ids: named.iter().map(|part| part.choice_id.clone()).collect(),
+                amounts: named,
+            })
+        })
+        .collect();
+    assert_eq!(
+        pins.len(),
+        2,
+        "reach: both announced-target points are answered"
+    );
+    let submission = InteractionSubmission {
+        interaction_id: opportunity.interaction_id.clone(),
+        response: InteractionResponse::Shortcut {
+            decision: InteractionShortcutDecision::AcceptSuggested,
+            pins,
+        },
+    };
+    let template = match resolve_interaction_response(&bound, P0, &submission) {
+        Ok(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(32),
+            template: Some(template),
+        }) => template,
+        other => panic!(
+            "the response mints a declaration of 32; got {:?}",
+            other.map_err(|error| error.code)
+        ),
+    };
+    let orders = |decisions: &[PinnedDecision]| -> Vec<PinnedDecision> {
+        decisions
+            .iter()
+            .filter(|decision| matches!(decision, PinnedDecision::Order { .. }))
+            .cloned()
+            .collect()
+    };
+    let suggested = orders(&suggestion.decisions);
+    assert_eq!(
+        suggested.len(),
+        2,
+        "reach: the suggestion declares the order"
+    );
+    assert_eq!(orders(&template.decisions), suggested);
+
+    let mut declared = bound.clone();
+    assert!(submit_interaction(&mut declared, P0, submission).is_ok());
+    let mut runner = GameRunner::from_state(declared);
+    accept(&mut runner);
+    let taken = runner.state();
+    assert_eq!(taken.waiting_for, WaitingFor::GameOver { winner: Some(P0) });
+    assert_eq!(lives(taken), [53, 0, 0, 0]);
+}
+
+/// CR 616.1 + CR 732.2a: a second Palisade Giant under P2 gives P2 the order the offer names, and
+/// none for P3. Its suggestion reaches 28 with no winner: P2 leaves at 21 and P1 at 22, and a 29th
+/// Prankster hit would destroy P3's Giant and break the period (CR 704.5g). Re-aimed at P3 while P1
+/// lives, Prankster's damage meets Fiendish Duo and P3's Giant, an order the declaration names for
+/// P2 alone; it describes no choice of P3's, so nothing is performed and the declaration is handed
+/// back with P3's Giant unmarked.
+#[test]
+fn a_second_seats_order_the_offer_does_not_name_is_never_answered_from_the_first() {
+    use engine::analysis::decision_template::{
+        AnnouncementSubject, Ranking, TargetPin, TargetSchedule,
+    };
+    use engine::types::game_state::YieldTarget;
+    let Some(db) = shared_card_db() else { return };
+    let mut runner = four_seat_altar_offer(
+        db,
+        &["Blood Artist", "Spiteful Prankster"],
+        &[
+            (P3, "Palisade Giant"),
+            (P1, "Fiendish Duo"),
+            (P2, "Palisade Giant"),
+        ],
+        None,
+        &[],
+        P1,
+    );
+    let offered = runner.state().clone();
+    assert_eq!(
+        (offered.stack.len(), lives(&offered)),
+        (2, vec![21, 18, 20, 20]),
+        "reach: the triggers stand at the offer frame"
+    );
+    let WaitingFor::LoopShortcut {
+        schema,
+        predicted_winner,
+        declaration,
+        ..
+    } = &offered.waiting_for
+    else {
+        panic!("no offer: {:?}", latest_verdict(&offered));
+    };
+    assert_eq!(
+        (&schema.iteration_count, *predicted_winner),
+        (&IterationCount::Fixed(28), None)
+    );
+    assert_eq!(
+        declaration.as_ref().map(|own| own.replay.clone()),
+        Some(ReplayMode::Scheduled {
+            count: IterationCount::Fixed(9)
+        })
+    );
+    let suggestion = schema.suggested_declaration.clone().expect("a suggestion");
+    let p2_giant = object_named(&offered, "Palisade Giant", P2).0;
+    let duo = object_named(&offered, "Fiendish Duo", P1).0;
+    let places: Vec<(String, u8)> = suggestion
+        .decisions
+        .iter()
+        .filter_map(|decision| match decision {
+            PinnedDecision::Order { slot, pos } => match &slot.source {
+                YieldTarget::ThisObject { source_id, .. } => Some((source_id.0.to_string(), *pos)),
+                other => panic!("an object source, got {other:?}"),
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(places, [(p2_giant, 0), (duo, 1)], "P2's order, Giant first");
+
+    let events = take_suggestion(&mut runner);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::GameOver { .. })),
+        "the take ends no game"
+    );
+    let taken = runner.state();
+    assert_eq!(
+        (lives(taken), eliminated(taken)),
+        (vec![49, 0, 0, 14], vec![P1, P2])
+    );
+
+    let prankster = offered
+        .objects
+        .iter()
+        .find(|(_, object)| object.name == "Spiteful Prankster")
+        .map(|(id, _)| *id)
+        .expect("Spiteful Prankster");
+    let p3_giant = offered
+        .objects
+        .iter()
+        .find(|(_, object)| object.name == "Palisade Giant" && object.controller == P3)
+        .map(|(id, _)| *id)
+        .expect("P3's Palisade Giant");
+    let mut partial = suggestion.clone();
+    let mut re_aimed = 0;
+    for decision in &mut partial.decisions {
+        if let PinnedDecision::Targets { slot, targets } = decision {
+            if matches!(slot.source, YieldTarget::ThisObject { source_id, .. } if source_id == prankster)
+            {
+                *targets = vec![TargetPin::Scheduled(TargetSchedule::Constant(
+                    Ranking::one(AnnouncementSubject::Seat(P3)),
+                ))];
+                re_aimed += 1;
+            }
+        }
+    }
+    assert_eq!(
+        re_aimed, 1,
+        "reach: Prankster's announced target is re-aimed at P3"
+    );
+    let mut runner = GameRunner::from_state(offered.clone());
+    act(
+        &mut runner,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(3),
+            template: Some(partial),
+        },
+    );
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "the declaration is handed back, no reply window"
+    );
+    let handed_back = runner.state();
+    assert_eq!(lives(handed_back), [21, 18, 20, 20]);
+    assert_eq!(handed_back.objects[&p3_giant].damage_marked, 0);
+}
+
+/// CR 732.2b: P3, whose order Spiteful Prankster's damage meets (Fiendish Duo's "If a source would
+/// deal damage to an opponent, it deals double that damage to that player instead." and Palisade
+/// Giant's "All damage that would be dealt to you and other permanents you control is dealt to this
+/// creature instead."), needs the order the proposal names for it to shorten where it would choose
+/// otherwise. It is public proposal text, so each responder, chooser or not, is shown Palisade Giant
+/// then Fiendish Duo, as the proposer's offer states it.
+#[test]
+fn a_declared_replacement_order_is_stated_to_every_responder() {
+    let Some(db) = shared_card_db() else { return };
+    let mut runner = giant_and_duo_offer(db);
+    let offered = runner.state().clone();
+    assert_eq!(
+        (offered.stack.len(), lives(&offered)),
+        (2, vec![21, 18, 20, 20]),
+        "reach: the triggers stand at the offer frame"
+    );
+    let stated = vec![
+        object_named(&offered, "Palisade Giant", P3),
+        object_named(&offered, "Fiendish Duo", P1),
+    ];
+    let (_, view) = published_to_p0(&offered);
+    let (opportunity, points) = shortcut_schema(&view).expect("a shortcut schema");
+    assert_eq!(
+        order_statements(points, opportunity_candidates(opportunity)),
+        vec![(true, stated.clone()), (true, Vec::new())],
+        "the proposer's offer states the order at place 0"
+    );
+
+    let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
+        panic!("no offer: {:?}", latest_verdict(&offered));
+    };
+    let count = schema.iteration_count.clone();
+    let template = schema.suggested_declaration.clone();
+    act(&mut runner, GameAction::DeclareShortcut { count, template });
+    let mut responders = Vec::new();
+    while let WaitingFor::RespondToShortcut { player, .. } = runner.state().waiting_for.clone() {
+        let mut bound = runner.state().clone();
+        bind_interaction_authority(&mut bound, InteractionSessionId("respond".into()))
+            .expect("valid interaction authority binding");
+        let filtered = filter_state_for_viewer(&bound, player);
+        let view = derive_viewer_interaction(&bound, &filtered, player);
+        let (opportunity, points) = view
+            .opportunities
+            .iter()
+            .find_map(|opportunity| match &opportunity.response {
+                InteractionOpportunityResponse::Schema {
+                    spec: InteractionResponseSpec::ShortcutReply { points, .. },
+                    ..
+                } => Some((opportunity, points.as_slice())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{player:?} is asked to reply"));
+        assert_eq!(
+            points
+                .iter()
+                .filter(|point| point.kind == InteractionShortcutPointKind::Targets)
+                .count(),
+            2,
+            "reach: {player:?} is shown both announced-target decisions"
+        );
+        assert_eq!(
+            order_statements(points, opportunity_candidates(opportunity)),
+            vec![(true, stated.clone())],
+            "{player:?} is shown the order once"
+        );
+        responders.push(player);
+        act(
+            &mut runner,
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            },
+        );
+    }
+    assert_eq!(responders, [P1, P2, P3]);
+    let taken = runner.state();
+    assert_eq!(taken.waiting_for, WaitingFor::GameOver { winner: Some(P0) });
+    assert_eq!(lives(taken), [53, 0, 0, 0]);
 }
 
 /// CR 613.1b + CR 800.4a: P2's Confiscate ("Enchant permanent / You control enchanted

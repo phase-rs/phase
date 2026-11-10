@@ -127,7 +127,7 @@ export type InteractionShortcutPreview = { count: number, entries: Array<Interac
  */
 allocation?: Array<AmountAssignment>, };
 
-export type InteractionShortcutPointKind = "targets" | "convokeTaps" | "mode" | "mayChoice" | "unlessBreak" | "manaColor";
+export type InteractionShortcutPointKind = "targets" | "convokeTaps" | "mode" | "mayChoice" | "unlessBreak" | "manaColor" | "order";
 
 export type InteractionShortcutPoint = { group: number, kind: InteractionShortcutPointKind, min: number, max: number, unique: boolean, ordered: boolean, readOnly: boolean, candidateIds: Array<InteractionChoiceId>, };
 

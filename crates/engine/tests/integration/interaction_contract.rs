@@ -8492,6 +8492,7 @@ fn point_of_published_kind(kind: &DecisionPointKind) -> ChoicePoint {
         DecisionPointKind::Mode { .. } => ChoicePoint::Mode,
         DecisionPointKind::UnlessBreak => ChoicePoint::UnlessBreak,
         DecisionPointKind::ManaColor { .. } => ChoicePoint::ManaColor,
+        DecisionPointKind::Order { .. } => ChoicePoint::ReplacementOrder,
     }
 }
 

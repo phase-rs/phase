@@ -194,8 +194,8 @@ impl DecisionTemplate {
 }
 
 /// CR 732.2a: WHICH CHOICE a [`DecisionSlot`] names, typed rather than numbered. One
-/// variant per choice point a CR 732.2a proposal can name; `ReplacementOrder` is the one no
-/// slot producer mints, read only by the every-option proof. The set is closed by the
+/// variant per choice point a CR 732.2a proposal can name; `ReplacementOrder` is minted only for
+/// a replacement order the record never made. The set is closed by the
 /// exhaustive, wildcard-free matches in `GameState::record_point_answer` and
 /// `period_confirm::decision_prompt`, so a new variant build-breaks there, where the
 /// decision about it is then taken explicitly.
@@ -358,9 +358,10 @@ pub enum LoopAnswerValue {
 /// modal / optional-"may" / "[A] unless [B]" break), not a parameterization axis.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PinnedDecision {
-    /// CR 603.3b: place this slot's trigger at ordering position `pos`. Its slot is minted
-    /// at [`ChoicePoint::TriggerOrder`] and nowhere else, which is what keeps an ordering
-    /// pin outside a declaration's slot space: no PUBLISHED point carries `TriggerOrder`.
+    /// CR 603.3b: place this slot's trigger at ordering position `pos`, or, at
+    /// [`ChoicePoint::ReplacementOrder`], CR 616.1: apply this source's replacement effect at
+    /// place `pos`. No PUBLISHED point carries `TriggerOrder`, which keeps a trigger order
+    /// outside a declaration's slot space.
     Order { slot: DecisionSlot, pos: u8 },
     /// CR 608.2b: targets for a slot; each re-resolved to a live legal ObjectId per
     /// iteration.
@@ -551,8 +552,8 @@ pub struct DecisionPoint {
 }
 
 /// Legal option set for one decision-point. EXHAUSTIVE, wildcard-free 1:1 read-side peer of
-/// the loop-declaration [`PinnedDecision`] variants (`Order` is CR 603.3b trigger-ordering,
-/// not a loop-declaration choice — it has no read-side peer). Externally tagged → FE-consumable
+/// the loop-declaration [`PinnedDecision`] variants (`Order`'s peer is a CR 616.1 replacement
+/// order; a CR 603.3b trigger order has none). Externally tagged → FE-consumable
 /// JSON (`{"ConvokeTaps":{"tappable":[..]}}`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DecisionPointKind {
@@ -581,6 +582,9 @@ pub enum DecisionPointKind {
     /// the FE renders it read-only, there is no per-iteration re-selection). Externally
     /// tagged → `{"ManaColor":{"color":"Blue"}}`.
     ManaColor { color: ManaColor },
+    /// CR 616.1: the place `pos` among `positions` replacement effects at which the affected
+    /// player applies this slot's effect.
+    Order { pos: u8, positions: u8 },
 }
 
 /// CR 115.2 + CR 601.2c: WHO one announcement names, stored in re-bindable form. The
@@ -907,10 +911,10 @@ fn resolve_pin(
         // WHAT IS LOAD-BEARING AND STILL HOLDS: an `Order` element grants no capability at the
         // `DeclareShortcut` wire, and the ground is `validate_pins`, not a claim about who
         // reads the payload. `validate_pins` returns `PinValidation::NotALoopDecision` for ANY
-        // `Order` pin in a declared template (CR 603.3b), so an ordering payload is readable
+        // trigger-order pin in a declared template (CR 603.3b), so an ordering payload is readable
         // only on the engine-written record path and never from anything a player submits. No
         // PUBLISHED point carries `ChoicePoint::TriggerOrder` and `pinned_decisions_to_points`
-        // mints none, so the `Order` pin stays unaddressable by a declaration. The record
+        // mints none, so a trigger-order pin stays unaddressable by a declaration. The record
         // drive's identity-aware `OrderTriggers` arm DOES read an `Order` element's `pos` —
         // from the step's own record, which no player wrote.
         PinnedDecision::Order { slot, pos } => Ok(ConcreteDecision::Order {
@@ -1302,7 +1306,7 @@ impl PinnedDecision {
     /// the absence of a slot: an `Order` pin's slot is minted at
     /// [`ChoicePoint::TriggerOrder`], and no PUBLISHED point carries `TriggerOrder`
     /// (`bounded_cycle_pin_slots` mints only `AnnouncedTarget` and `MayGate`;
-    /// `pinned_decisions_to_points` mints no point for an `Order` pin at all). So the old
+    /// `pinned_decisions_to_points` mints no point for a `TriggerOrder` pin). So the old
     /// collision — a synthesized `{source, index: 0}` letting one ordering pin cover a
     /// published targeting point — is unrepresentable, `TriggerOrder != AnnouncedTarget`
     /// being a type fact rather than a numbering convention.
@@ -1315,6 +1319,22 @@ impl PinnedDecision {
             | PinnedDecision::UnlessBreak { slot, .. }
             | PinnedDecision::ManaColor { slot, .. }
             | PinnedDecision::ConvokeTaps { slot } => slot,
+        }
+    }
+
+    /// CR 616.1: the source and place of a replacement-order pin; `None` for any other pin.
+    pub(crate) fn replacement_place(&self) -> Option<(&DecisionSource, u8)> {
+        match self {
+            PinnedDecision::Order { slot, pos } if slot.point == ChoicePoint::ReplacementOrder => {
+                Some((&slot.source, *pos))
+            }
+            PinnedDecision::Order { .. }
+            | PinnedDecision::Targets { .. }
+            | PinnedDecision::Mode { .. }
+            | PinnedDecision::MayChoice { .. }
+            | PinnedDecision::UnlessBreak { .. }
+            | PinnedDecision::ManaColor { .. }
+            | PinnedDecision::ConvokeTaps { .. } => None,
         }
     }
 
@@ -1355,11 +1375,11 @@ fn pin_answers_point(pin: &PinnedDecision, point: &DecisionPoint) -> bool {
         | (PinnedDecision::MayChoice { .. }, DecisionPointKind::MayChoice)
         | (PinnedDecision::UnlessBreak { .. }, DecisionPointKind::UnlessBreak)
         | (PinnedDecision::ManaColor { .. }, DecisionPointKind::ManaColor { .. })
-        | (PinnedDecision::ConvokeTaps { .. }, DecisionPointKind::ConvokeTaps { .. }) => true,
+        | (PinnedDecision::ConvokeTaps { .. }, DecisionPointKind::ConvokeTaps { .. })
+        | (PinnedDecision::Order { .. }, DecisionPointKind::Order { .. }) => true,
         // A right-slot pin of the wrong kind answers a different question than the point
-        // asks. An `Order` pin now reaches this match — its slot is total — and is refused
-        // by the slot test above, because no published point carries
-        // `ChoicePoint::TriggerOrder`; it is listed here so the product stays total.
+        // asks. A trigger-order pin is refused by the slot test above, because no published
+        // point carries `ChoicePoint::TriggerOrder`.
         (
             PinnedDecision::Order { .. }
             | PinnedDecision::Targets { .. }
@@ -1373,7 +1393,8 @@ fn pin_answers_point(pin: &PinnedDecision, point: &DecisionPoint) -> bool {
             | DecisionPointKind::MayChoice
             | DecisionPointKind::UnlessBreak
             | DecisionPointKind::ManaColor { .. }
-            | DecisionPointKind::ConvokeTaps { .. },
+            | DecisionPointKind::ConvokeTaps { .. }
+            | DecisionPointKind::Order { .. },
         ) => false,
     }
 }
@@ -1448,8 +1469,8 @@ pub(crate) fn resolve_target_ref(
 /// COVERS the drive is the CALLER's obligation, discharged by
 /// `game::engine::shortcut_validated_range`, which reads the range off the declared count
 /// rather than off the schedule's own length. EXHAUSTIVE over [`PinnedDecision`] with no
-/// wildcard: `Order` (CR 603.3b trigger-ordering) is not a loop-declaration point and is
-/// refused as `NotALoopDecision`;
+/// wildcard: a CR 616.1 replacement `Order` must name its exposed point's place; a CR 603.3b
+/// trigger `Order` is not a loop-declaration point and is refused as `NotALoopDecision`;
 /// `ConvokeTaps` must still address an exposed matching point even though its concrete taps are
 /// re-bound live by `select_convoke_taps`. Runs once at declare (the board is frozen through Accept); the drive's
 /// per-iteration [`resolve`] is the runtime CR 608.2b backstop.
@@ -1591,6 +1612,18 @@ pub fn validate_pins(
                     .find(|point| point.slot == *slot)
                     .ok_or_else(|| PinValidation::UnexposedSlot { slot: slot.clone() })?;
                 if !matches!(point.kind, DecisionPointKind::ConvokeTaps { .. }) {
+                    return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
+                }
+            }
+            // CR 616.1: a replacement order addresses its exposed point at that point's place.
+            PinnedDecision::Order { slot, pos } if slot.point == ChoicePoint::ReplacementOrder => {
+                let point = schema
+                    .points
+                    .iter()
+                    .find(|point| point.slot == *slot)
+                    .ok_or_else(|| PinValidation::UnexposedSlot { slot: slot.clone() })?;
+                if !matches!(point.kind, DecisionPointKind::Order { pos: at, positions } if at == *pos && *pos < positions)
+                {
                     return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
                 }
             }
@@ -3733,6 +3766,58 @@ mod tests {
             validate_pins(&schema, &declared(targeting), 1, &state).is_ok(),
             "positive control: the announcement pin declared against its own point validates"
         );
+    }
+
+    #[test]
+    fn a_replacement_order_pin_must_name_its_points_place() {
+        let giant = all_copies(11);
+        let duo = all_copies(12);
+        let point = |source: &DecisionSource, pos: u8| DecisionPoint {
+            slot: DecisionSlot::first(source.clone(), ChoicePoint::ReplacementOrder),
+            kind: DecisionPointKind::Order { pos, positions: 2 },
+        };
+        let pin = |source: &DecisionSource, pos: u8| PinnedDecision::Order {
+            slot: DecisionSlot::first(source.clone(), ChoicePoint::ReplacementOrder),
+            pos,
+        };
+        let schema = ShortcutDecisionSchema {
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
+            iteration_count: IterationCount::Fixed(1),
+            measured_repetition_bound: Some(1),
+            deliverable_capacity: 1,
+            convoke_tappable_count: 0,
+            points: vec![point(&giant, 0), point(&duo, 1)],
+        };
+        let declared = |decisions: Vec<PinnedDecision>| DecisionTemplate {
+            owner: PlayerId(0),
+            decisions,
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(1),
+            },
+            key: DecisionGroupKey::from_sources(
+                &[giant.clone(), duo.clone()],
+                DecisionKind::LoopChoice,
+            ),
+        };
+        let state = GameState::new_two_player(1);
+        let swapped = validate_pins(
+            &schema,
+            &declared(vec![pin(&giant, 1), pin(&duo, 0)]),
+            1,
+            &state,
+        );
+        assert!(matches!(
+            swapped,
+            Err(PinValidation::IllegalPinValue { .. })
+        ));
+        let matching = validate_pins(
+            &schema,
+            &declared(vec![pin(&giant, 0), pin(&duo, 1)]),
+            1,
+            &state,
+        );
+        assert!(matching.is_ok());
     }
 
     /// **R9 leg 5 — repetition is ANSWERED under a declared identity, not refused.**

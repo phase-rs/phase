@@ -1194,6 +1194,7 @@
     },
     "respondDeclaredTitle": "提议的宣告：",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. {{subject}}的替代性效应",
     "respondSubtitle": "对手提议使用循环捷径。你可以接受，或指定该序列停止的位置。",
     "respondTitle": "有人提议循环捷径",
     "shorten": "缩短循环",
