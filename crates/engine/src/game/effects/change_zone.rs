@@ -630,23 +630,39 @@ fn any_typed_leg<F: Fn(&TypedFilter) -> bool>(filter: &TargetFilter, pred: &F) -
 /// distributes over a nested `Or`.
 fn filter_names_library_owner(filter: &TargetFilter, origin_zones: &[Zone]) -> bool {
     let reach = owner_reach(filter, &ControllerRef::ScopedPlayer);
-    let library_scanned = origin_zones.is_empty() || origin_zones.contains(&Zone::Library);
-    let elsewhere_scanned =
-        origin_zones.is_empty() || origin_zones.iter().any(|zone| *zone != Zone::Library);
-    reach.named & REACH_LIBRARY != 0
-        && library_scanned
-        && !(reach.named & REACH_ELSEWHERE != 0 && elsewhere_scanned)
+    if reach.named == 0 {
+        return false;
+    }
+    let scanned = if origin_zones.is_empty() {
+        ALL_ZONES_MASK
+    } else {
+        zones_mask(origin_zones.iter())
+    };
+    let reachable = reach.named & scanned;
+    reachable != 0 && reachable & !zone_mask(Zone::Library) == 0
 }
 
-/// The two distinctions this classification needs. The zone set is finite, so a
-/// library/elsewhere bitmask answers "confined to the library" without
-/// enumerating or cloning Boolean alternatives.
-const REACH_LIBRARY: u8 = 0b01;
-const REACH_ELSEWHERE: u8 = 0b10;
-const REACH_BOTH: u8 = REACH_LIBRARY | REACH_ELSEWHERE;
+/// The zone universe this classification needs. It is finite (`Zone::ALL`), so
+/// a bitmask answers "confined to the library" without enumerating or cloning
+/// Boolean alternatives, and it keeps Hand, Graveyard and the rest distinct
+/// instead of collapsing them into one "elsewhere" bit.
+const ALL_ZONES_MASK: u8 = (1u8 << Zone::ALL.len()) - 1;
+
+fn zone_mask(zone: Zone) -> u8 {
+    Zone::ALL
+        .iter()
+        .position(|candidate| *candidate == zone)
+        .map_or(0, |index| 1u8 << index)
+}
+
+fn zones_mask<'a>(zones: impl IntoIterator<Item = &'a Zone>) -> u8 {
+    zones
+        .into_iter()
+        .fold(0, |mask, zone| mask | zone_mask(*zone))
+}
 
 /// Zones admitted by the alternatives that name `player` (`named`) and by every
-/// alternative (`all`), each reduced to the library/elsewhere bitmask.
+/// alternative (`all`), each as a bitmask over `Zone::ALL`.
 #[derive(Clone, Copy)]
 struct OwnerReach {
     named: u8,
@@ -654,7 +670,7 @@ struct OwnerReach {
 }
 
 /// A typed leg's own zone constraints, intersected: `InAnyZone { Library,
-/// Graveyard }` plus `InZone { Library }` in one leaf requires both, i.e. the
+/// Hand }` plus `InZone { Library }` in one leaf requires both, i.e. the
 /// library alone.
 fn leg_zone_constraints(leg: &TypedFilter) -> Option<std::collections::BTreeSet<Zone>> {
     leg.properties.iter().fold(
@@ -673,32 +689,20 @@ fn leg_zone_constraints(leg: &TypedFilter) -> Option<std::collections::BTreeSet<
     )
 }
 
-fn zone_reach_bits(zones: &std::collections::BTreeSet<Zone>) -> u8 {
-    let mut bits = 0;
-    for zone in zones {
-        bits |= if *zone == Zone::Library {
-            REACH_LIBRARY
-        } else {
-            REACH_ELSEWHERE
-        };
-    }
-    bits
-}
-
-/// The scoped-owner reach of one filter, over the finite zone partition.
+/// The scoped-owner reach of one filter, over the finite set of zones.
 ///
-/// `And` conjoins, so an alternative of the conjunction names the player when
-/// any operand's naming alternative does, and it reaches a zone only when every
-/// operand reaches that zone: `named = all & OR(child.named)`. `Or` alternates,
-/// so both unions are plain disjunctions. A negation excludes a set rather than
-/// confining its subject to the zones it names, so it keeps the naming fact and
-/// drops the positive reach.
+/// `And` conjoins: an alternative of the conjunction names the player when any
+/// operand's naming alternative does, and it reaches a zone only when every
+/// operand reaches that zone, so `named = all & OR(child.named)`. `Or`
+/// alternates, so both unions are plain disjunctions. A negation excludes a set
+/// rather than confining its subject to the zones it names, so it keeps the
+/// naming fact and drops the positive reach.
 fn owner_reach(filter: &TargetFilter, player: &ControllerRef) -> OwnerReach {
     match filter {
         TargetFilter::Typed(leg) => {
             let bits = leg_zone_constraints(leg)
                 .as_ref()
-                .map_or(REACH_BOTH, zone_reach_bits);
+                .map_or(ALL_ZONES_MASK, |zones| zones_mask(zones.iter()));
             OwnerReach {
                 named: if leg_names_player(leg, player) {
                     bits
@@ -709,7 +713,7 @@ fn owner_reach(filter: &TargetFilter, player: &ControllerRef) -> OwnerReach {
             }
         }
         TargetFilter::And { filters } => {
-            let mut all = REACH_BOTH;
+            let mut all = ALL_ZONES_MASK;
             let mut naming = 0;
             for child in filters {
                 let child = owner_reach(child, player);
@@ -735,8 +739,8 @@ fn owner_reach(filter: &TargetFilter, player: &ControllerRef) -> OwnerReach {
         TargetFilter::Not { filter } => {
             let inner = owner_reach(filter, player);
             OwnerReach {
-                named: if inner.named == 0 { 0 } else { REACH_BOTH },
-                all: REACH_BOTH,
+                named: if inner.named == 0 { 0 } else { ALL_ZONES_MASK },
+                all: ALL_ZONES_MASK,
             }
         }
         TargetFilter::TrackedSetFiltered { filter, .. } => owner_reach(filter, player),
@@ -744,7 +748,7 @@ fn owner_reach(filter: &TargetFilter, player: &ControllerRef) -> OwnerReach {
         // name and no zone constraint, so they are neutral in a conjunction.
         _ => OwnerReach {
             named: 0,
-            all: REACH_BOTH,
+            all: ALL_ZONES_MASK,
         },
     }
 }
@@ -13808,6 +13812,129 @@ mod tests {
         FilterProp::InAnyZone {
             zones: vec![Zone::Library, Zone::Graveyard],
         }
+    }
+
+    /// Runs `ChangeZoneAll { any -> Exile }` scoped to P1 over one P1 card in
+    /// each of the library, hand and graveyard, returning every card's actual
+    /// selection and exiling actor.
+    fn mass_three_zone_exile_outcome(
+        target: TargetFilter,
+    ) -> Vec<(ObjectId, Zone, Option<PlayerId>)> {
+        let mut state = GameState::new_two_player(42);
+        let cards: Vec<ObjectId> = [
+            ("Library Card", Zone::Library),
+            ("Hand Card", Zone::Hand),
+            ("Graveyard Card", Zone::Graveyard),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (name, zone))| {
+            create_object(
+                &mut state,
+                CardId(9740 + index as u64),
+                PlayerId(1),
+                name.to_string(),
+                zone,
+            )
+        })
+        .collect();
+        let mut ability = performer_test_mass_exile(None, target, PlayerId(0));
+        ability.scoped_player = Some(PlayerId(1));
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).expect("scoped mass exile resolves");
+        cards
+            .into_iter()
+            .map(|id| (id, state.objects[&id].zone, state.objects[&id].exiled_by))
+            .collect()
+    }
+
+    /// CR 608.2c: composing concrete zone sets must keep Hand and Graveyard
+    /// distinct. A scoped library leaf and `And(scoped Library-or-Hand,
+    /// Library-or-Graveyard)` select the same library card and must credit the
+    /// same exiling player; collapsing every non-library zone to one bit made
+    /// the second form reach the graveyard and credit the scoped player.
+    #[test]
+    fn hand_and_graveyard_reach_stay_distinct_across_equivalent_filters() {
+        let leaf = card_leg(
+            Some(ControllerRef::ScopedPlayer),
+            vec![FilterProp::InZone {
+                zone: Zone::Library,
+            }],
+        );
+        let composed = TargetFilter::And {
+            filters: vec![
+                card_leg(
+                    Some(ControllerRef::ScopedPlayer),
+                    vec![FilterProp::InAnyZone {
+                        zones: vec![Zone::Library, Zone::Hand],
+                    }],
+                ),
+                card_leg(
+                    None,
+                    vec![FilterProp::InAnyZone {
+                        zones: vec![Zone::Library, Zone::Graveyard],
+                    }],
+                ),
+            ],
+        };
+        let scan = [Zone::Library, Zone::Hand, Zone::Graveyard];
+        assert!(
+            filter_names_library_owner(&leaf, &scan),
+            "the scoped library leaf is the caster's instruction"
+        );
+        assert_eq!(
+            filter_names_library_owner(&leaf, &scan),
+            filter_names_library_owner(&composed, &scan),
+            "equivalent filters over the same card must agree"
+        );
+        let leaf_outcome = mass_three_zone_exile_outcome(leaf);
+        let composed_outcome = mass_three_zone_exile_outcome(composed);
+        assert_eq!(
+            leaf_outcome, composed_outcome,
+            "equivalent filters select and attribute identically"
+        );
+        assert_eq!(
+            leaf_outcome
+                .iter()
+                .filter(|(_, zone, actor)| *zone == Zone::Exile && *actor == Some(PlayerId(0)))
+                .count(),
+            1,
+            "the library card is the caster's exile; got {leaf_outcome:?}"
+        );
+        assert_eq!(
+            leaf_outcome
+                .iter()
+                .filter(
+                    |(_, zone, actor)| (*zone == Zone::Hand || *zone == Zone::Graveyard)
+                        && actor.is_none()
+                )
+                .count(),
+            2,
+            "hand and graveyard cards are untouched; got {leaf_outcome:?}"
+        );
+
+        // A named zone the resolver does not scan cannot be selected, so it does
+        // not change the reach of the scanned alternatives.
+        let unscanned_branch = TargetFilter::Or {
+            filters: vec![
+                card_leg(
+                    Some(ControllerRef::ScopedPlayer),
+                    vec![FilterProp::InZone {
+                        zone: Zone::Library,
+                    }],
+                ),
+                card_leg(
+                    Some(ControllerRef::ScopedPlayer),
+                    vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                ),
+            ],
+        };
+        assert!(
+            filter_names_library_owner(&unscanned_branch, &[Zone::Library, Zone::Hand]),
+            "a named-but-unscanned graveyard alternative stays out of the reach"
+        );
     }
 
     /// CR 608.2c + CR 109.4: who exiles is a function of the composed
