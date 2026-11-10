@@ -4094,27 +4094,30 @@ pub(super) fn handle_resolution_choice(
                     return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
                 }
                 PayableResource::Energy => {
-                    // CR 107.14: Remove N energy counters from the player.
-                    if let Some(energy) = state
+                    // CR 107.14: Remove N energy counters from the player. The bound is the
+                    // SHARED representable-payment maximum the prompt mint publishes, so a
+                    // restored or stale prompt can never submit an amount its checked
+                    // settlement would refuse (the same edit also advances the per-turn
+                    // paid-or-lost tally and casts the delta to `i32`).
+                    if let Some(candidate) = state
                         .players
                         .iter()
                         .find(|candidate| candidate.id == player)
-                        .map(|candidate| candidate.energy)
                     {
-                        if energy < amount {
+                        if candidate.energy < amount {
                             return Err(EngineError::InvalidAction(format!(
                                 "Player {:?} has {} energy, cannot pay {}",
-                                player, energy, amount
+                                player, candidate.energy, amount
                             )));
                         }
-                        // The delta passed to apply_final_player_resource_edit is i32;
-                        // amount is u32. If amount > i32::MAX, the cast would wrap and
-                        // produce a positive delta (energy gain instead of loss).
-                        if amount > i32::MAX as u32 {
-                            return Err(EngineError::InvalidAction(format!(
-                                "Energy payment amount {} exceeds i32::MAX, would overflow",
-                                amount
-                            )));
+                        // Beyond the reserve, the shared maximum accounts for the per-turn
+                        // tally and the `i32` delta; an amount past it is the same
+                        // engine-capacity refusal the checked edit reports, not an
+                        // out-of-range choice (the prompt already publishes this bound).
+                        if amount
+                            > crate::game::effects::life::max_representable_energy_spend(candidate)
+                        {
+                            return Err(EngineError::LifeChangeUnrepresentable { player });
                         }
                         if amount > 0 {
                             crate::game::effects::life::apply_final_player_resource_edit(

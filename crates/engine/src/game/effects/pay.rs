@@ -209,11 +209,14 @@ pub fn resolve(
         // player's chosen value. This X-prompt stays adapter-side; the authority
         // pays a concrete `PayEnergy` amount only.
         AbilityCost::PayEnergy { amount } if is_pay_any_amount(amount) => {
+            // CR 107.14: the maximum is what one CHECKED payment can remove — the reserve AND
+            // the per-turn paid-or-lost tally's remaining room — not the bare reserve, so the
+            // prompt never offers an amount its own settlement would refuse.
             let max = state
                 .players
                 .iter()
                 .find(|p| p.id == payer)
-                .map(|p| p.energy)
+                .map(crate::game::effects::life::max_representable_energy_spend)
                 .unwrap_or(0);
             state.waiting_for = WaitingFor::PayAmountChoice {
                 player: payer,
@@ -1645,6 +1648,35 @@ mod tests {
                 .any(|e| matches!(e, GameEvent::EnergyChanged { .. })),
             "no EnergyChanged event until the player commits an amount"
         );
+    }
+
+    /// CR 107.14: the "pay any amount of {E}" prompt publishes the maximum ONE checked
+    /// payment can remove, not the bare reserve: the same edit advances the per-turn
+    /// paid-or-lost tally, so a reserve larger than that tally's remaining room is not payable.
+    #[test]
+    fn pay_any_amount_of_energy_publishes_only_the_representable_maximum() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 9;
+        state.players[0].energy_paid_or_lost_this_turn = u32::MAX - 4;
+        let ability = make_ability(Effect::PayCost {
+            cost: AbilityCost::PayEnergy {
+                amount: crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { max, .. } => {
+                assert_eq!(*max, 4, "only four more pays fit the paid-or-lost tally")
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
     }
 
     /// CR 107.1c + CR 107.14 + CR 603.7c: Galvanic Discharge chain shape —

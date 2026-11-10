@@ -1476,9 +1476,19 @@ pub fn materialization_count_is_representable(
     if count == 0 {
         return true;
     }
+    // CR 614.1 + CR 732.2a: a stash axis the settlement boundary DECLINES is never applied, so
+    // it must not bound the count the prompt offers either. Ask the boundary's own selection
+    // authority (`boundary_declines` over the same `ObservedGrowth`) rather than re-deriving
+    // which axes settle: a live observer of the life-growth class leaves that axis ∞ while the
+    // other axes still collapse, and probing its replacement-doubled gain here would withhold
+    // counts the boundary would settle exactly.
+    let observed = crate::game::engine_resolution_choices::ObservedGrowth::at_boundary(state);
     let mut probe_state = state.clone();
     let mut probe_events = Vec::new();
     for item in items {
+        if crate::game::engine_resolution_choices::boundary_declines(item, observed) {
+            continue;
+        }
         if let crate::types::game_state::PersistentAxisMaterialization::Life {
             player,
             per_cycle_delta,
@@ -1507,14 +1517,18 @@ pub fn materialization_count_is_representable(
 /// limits it. Evaluates individual signed edits through live replacements (CR 614.1).
 pub fn materialization_representable_bound(state: &GameState, controller: PlayerId) -> Option<u32> {
     let items = state.pending_unbounded_materialization.get(&controller)?;
+    // Only a life axis the settlement boundary will actually apply limits the count — the same
+    // selection `materialization_count_is_representable` probes with.
+    let observed = crate::game::engine_resolution_choices::ObservedGrowth::at_boundary(state);
     let has_life = items.iter().any(|item| {
-        matches!(
-            item,
-            crate::types::game_state::PersistentAxisMaterialization::Life {
-                per_cycle_delta,
-                ..
-            } if *per_cycle_delta > 0
-        )
+        !crate::game::engine_resolution_choices::boundary_declines(item, observed)
+            && matches!(
+                item,
+                crate::types::game_state::PersistentAxisMaterialization::Life {
+                    per_cycle_delta,
+                    ..
+                } if *per_cycle_delta > 0
+            )
     });
     if !has_life {
         return None;

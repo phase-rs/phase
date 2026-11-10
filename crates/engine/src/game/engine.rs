@@ -2945,26 +2945,37 @@ fn interactive_loop_bridge_paths(
             // them as a fixed count rather than withholding the offer and making the player play
             // a thousand repetitions by hand. A `Fixed` count states its own ending point, so it
             // promises no crossing.
-            let iteration_count = match shortcut_iteration_count(certificate.win_kind) {
-                crate::analysis::decision_template::IterationCount::UntilLethal
-                    if !lethal_within_reach && reachable > 0 =>
-                {
-                    crate::analysis::decision_template::IterationCount::Fixed(reachable)
-                }
-                crate::analysis::decision_template::IterationCount::UntilLethal
-                    if !lethal_within_reach =>
-                {
-                    return;
-                }
-                // CR 732.2a: a non-lethal suggestion keeps the producer's own ending point;
-                // `cycles_to_lethal` bounds no promise it makes, so the old gate stays.
-                _ if !lethal_within_reach => return,
-                other => other,
-            };
+            //
+            // The ending travels WITH the offer: `predicted_winner` is the offer's proven crossing,
+            // and it is named only where that crossing lies inside the offer. A fixed fallback
+            // names nobody, so the declare handler refuses a raw `UntilLethal` against it (an
+            // offer naming no winner has no ending point where a player loses), the AI's
+            // candidate generator emits none, and settlement crowns no winner the offer never
+            // proved — the same contract every other fixed-count producer keeps.
+            let (iteration_count, predicted_winner) =
+                match shortcut_iteration_count(certificate.win_kind) {
+                    crate::analysis::decision_template::IterationCount::UntilLethal
+                        if !lethal_within_reach && reachable > 0 =>
+                    {
+                        (
+                            crate::analysis::decision_template::IterationCount::Fixed(reachable),
+                            None,
+                        )
+                    }
+                    crate::analysis::decision_template::IterationCount::UntilLethal
+                        if !lethal_within_reach =>
+                    {
+                        return;
+                    }
+                    // CR 732.2a: a non-lethal suggestion keeps the producer's own ending point;
+                    // `cycles_to_lethal` bounds no promise it makes, so the old gate stays.
+                    _ if !lethal_within_reach => return,
+                    other => (other, Some(winner)),
+                };
             let schema = build_shortcut_schema(Vec::new(), iteration_count, None, representable);
             state.waiting_for = WaitingFor::LoopShortcut {
                 proposer,
-                predicted_winner: Some(winner),
+                predicted_winner,
                 certificate,
                 schema,
                 // CR 732.2a: Path A publishes no decision points at all (the pin list above is
@@ -4195,12 +4206,14 @@ fn bounded_offer_tail(
         0,
         crate::analysis::resource::EliminationCascade::capacity_count,
     );
-    // THE LARGER OF THE TWO, and that is not an optimisation. `handle_declare_shortcut` refuses
-    // any `Fixed(n)` above `deliverable_capacity`, so a ceiling below the suggestion would have it
-    // refuse the offer's own suggestion; and nothing about the witness's greedy aim guarantees its
-    // count exceeds the own-declaration count. Both members are legal declarations, so the max
-    // keeps "the ceiling is what SOME legal declaration may specify" true and keeps
-    // `deliverable_capacity >= iteration_count` true by construction rather than by luck.
+    // CR 732.2a: each suggestion is SIZED BY ITS OWN SCHEDULE. The two declarations pin
+    // different targets, so their scalar headroom is measured separately: a count the own
+    // declaration represents proves nothing about the witness's schedule, and vice versa.
+    // The published capacity below is the LARGER of the two per-schedule ceilings — a legal
+    // declaration may name either count, and `handle_declare_shortcut` refuses a `Fixed(n)`
+    // above `deliverable_capacity`, so a ceiling below either suggestion would have it refuse
+    // a count the engine will drive. Each published count is then clamped to ITS OWN ceiling,
+    // never to that shared maximum.
     //
     // CR 732.2a: evaluate representability under each piecewise schedule segment so later pins
     // cannot escape the scalar headroom cap.
@@ -4232,14 +4245,15 @@ fn bounded_offer_tail(
     // this. It reaches the schema through `representable` below, beside whatever the frame
     // source measured, which is the constructor's stated contract.
     let measured_bound = own_cap.max(witness_bound);
+    // Each declaration's own schedule-aware ceiling. `None` states that the whole count fits,
+    // so the cascade's own count is that ceiling.
+    let own_ceiling = own_representable.map_or(own_cap, |r| own_cap.min(r));
+    let witness_ceiling = witness_representable.map_or(witness_bound, |r| witness_bound.min(r));
     // The schedule-aware ceiling is the largest count a declaration the offer admits may
-    // specify, so the max of the two declarations' representable counts is the narrowing this
-    // producer contributes — never below what either of them can take.
-    let schedule_representable = Some(
-        own_representable
-            .map_or(own_cap, |r| own_cap.min(r))
-            .max(witness_representable.map_or(witness_bound, |r| witness_bound.min(r))),
-    );
+    // specify, so the max of the two per-schedule ceilings is the narrowing this producer
+    // contributes — never below what either of them can take. Each published count is clamped
+    // to its own schedule below, so this shared maximum only bounds what an ACCEPT may name.
+    let schedule_representable = Some(own_ceiling.max(witness_ceiling));
     let representable = [representable, schedule_representable]
         .into_iter()
         .flatten()
@@ -4291,7 +4305,9 @@ fn bounded_offer_tail(
         Some(measured_bound),
         representable,
     );
-    let own_survived = own.survived_count(proposer, schema.deliverable_capacity);
+    // The own declaration's count, sized by the own declaration's schedule: the shared
+    // capacity may be the witness's larger ceiling, which proves nothing about these pins.
+    let own_survived = own.survived_count(proposer, schema.deliverable_capacity.min(own_ceiling));
     // CR 704.5a / CR 704.5b / CR 704.5c + CR 732.2a: no offer when the proposer survives no
     // repetition of its own declaration, the count that declaration would be stamped at.
     if own_survived == 0 {
@@ -4316,8 +4332,11 @@ fn bounded_offer_tail(
     // (11) The SUGGESTION: the witness at the most repetitions the proposer survives, within the
     // capacity, cut to the segments that count reaches, stamped and validated at that count, and
     // published only where it drives further than the declaration's own count and conforms there.
+    // The witness suggestion is sized by the WITNESS's schedule for the same reason: the
+    // shared capacity may be the own declaration's ceiling, and a witness count above its own
+    // representable repetitions is one its take would refuse.
     let suggested_count = witness_cascade.as_ref().map_or(0, |cascade| {
-        cascade.survived_count(proposer, schema.deliverable_capacity)
+        cascade.survived_count(proposer, schema.deliverable_capacity.min(witness_ceiling))
     });
     let suggested = IterationCount::Fixed(suggested_count);
     let suggestion = witness
@@ -9396,7 +9415,7 @@ fn handle_declare_shortcut(
         road: offer.road,
         counted_take: offer.counted_take,
         period: offer.period.clone(),
-        deliverable_capacity,
+        deliverable_capacity: Some(deliverable_capacity),
     };
     // CR 732.2b: living opponents in APNAP turn order, starting after the proposer.
     let opps: Vec<PlayerId> = crate::game::players::apnap_order_from(
@@ -23830,7 +23849,7 @@ mod stage2_injector_tests {
             road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
-            deliverable_capacity: MAX_SHORTCUT_CYCLES,
+            deliverable_capacity: Some(MAX_SHORTCUT_CYCLES),
         };
         let mut result =
             crate::types::game_state::ActionResult::applied(Vec::new(), state.waiting_for.clone());
@@ -23988,7 +24007,7 @@ mod stage2_injector_tests {
             road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
-            deliverable_capacity: MAX_SHORTCUT_CYCLES,
+            deliverable_capacity: Some(MAX_SHORTCUT_CYCLES),
         };
         let mut result =
             crate::types::game_state::ActionResult::applied(Vec::new(), state.waiting_for.clone());

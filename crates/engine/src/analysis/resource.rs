@@ -21662,7 +21662,7 @@ mod tests {
             road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
-            deliverable_capacity: crate::game::engine::MAX_SHORTCUT_CYCLES,
+            deliverable_capacity: Some(crate::game::engine::MAX_SHORTCUT_CYCLES),
         };
         let wait = WaitingFor::RespondToShortcut {
             player: PlayerId(1),

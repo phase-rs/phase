@@ -16182,19 +16182,20 @@ fn delayed_trigger_install_command_mut(
 /// over-refusal this phase exists to remove. The zero in the OFFER'S BOUND and the zero
 /// in a DECLARED COUNT are different values at different seams.
 ///
-/// SCOPED TO `LoopShortcut` ONLY, deliberately. `WaitingFor::RespondToShortcut` carries a
-/// `ShortcutProposal`, which has no `schema` and so no capacity at all — there is no
-/// ceiling to check. Its only reachable zero is `proposal.count`, the ALREADY-DECLARED
-/// count, where `Fixed(0)` is legal; re-refusing it here would re-break the same
-/// over-refusal at a seam no row can see.
+/// SCOPED TO `LoopShortcut`'s schema here. `WaitingFor::RespondToShortcut` carries a
+/// `ShortcutProposal`, whose proved capacity `reject_unproved_shortcut_proposal` checks on its
+/// own host. Its other reachable zero is `proposal.count`, the ALREADY-DECLARED count, where
+/// `Fixed(0)` is legal; re-refusing it here would re-break the same over-refusal at a seam no
+/// row can see.
 ///
 /// `== 0` is the COMPLETE rejection predicate and must not be widened: the capacity is `u32`,
 /// so negatives fail serde before this runs; a capacity AT the budget is the ordinary offer
 /// whose producer measured no threshold, a legitimate state; boundedness is not read off this
 /// value at all any more — `is_bounded()` asks the measured field — so no comparison against
-/// the budget belongs here; and an ABSENT capacity key decodes to the budget through its own
-/// `#[serde(default)]`, while a save written in the pre-split shape has its single legacy count
-/// mapped onto both fields by `migrate_legacy_shortcut_repetition_bound` before serde runs.
+/// the budget belongs here; an ABSENT capacity on the PROPOSAL host is refused by
+/// `reject_unproved_shortcut_proposal` instead of defaulting to the budget; and a save written
+/// in the pre-split shape has its single legacy count mapped onto both fields by
+/// `migrate_legacy_shortcut_repetition_bound` before serde runs.
 /// CR 732.2a: a certified period spanning ZERO frames is not a period.
 ///
 /// Single authority for the field so both wire hosts enforce identically — the offer's
@@ -16211,6 +16212,25 @@ fn reject_zero_frames_per_period(
         return Err(format!(
             "persisted {host} states frames_per_period 0, which delimits every committed cycle \
              at the first priority beat rather than at the certified CR 732.2a period"
+        ));
+    }
+    Ok(())
+}
+
+/// CR 732.2a: a pending proposal states "a specified number of times" the loop repeats, and
+/// the count an accept may drive is the capacity its declaration PROVED
+/// (`ShortcutProposal::deliverable_capacity`). A saved proposal that carries no capacity — written
+/// before the field existed — or one outside `1..=MAX_SHORTCUT_CYCLES` states no proof, and
+/// reading the absence as the engine budget would let an accept drive a count the declaration
+/// never measured. The load fails closed instead.
+fn reject_unproved_shortcut_proposal(
+    proposal: &crate::analysis::loop_check::ShortcutProposal,
+) -> Result<(), String> {
+    if proposal.effective_deliverable_capacity().is_none() {
+        return Err(format!(
+            "persisted RespondToShortcut proposal states deliverable_capacity {:?}, which proves \
+             no count CR 732.2a admits an accept to drive",
+            proposal.deliverable_capacity
         ));
     }
     Ok(())
@@ -16283,6 +16303,7 @@ fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
     // the offer would leave the consumed path open — the restored `RespondToShortcut` state is
     // reached without ever re-entering `LoopShortcut`.
     if let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for {
+        reject_unproved_shortcut_proposal(proposal)?;
         reject_zero_frames_per_period(&proposal.per_cycle, "RespondToShortcut proposal")?;
         reject_period_on_the_ring_road(
             proposal.road,
@@ -39277,7 +39298,7 @@ mod forced_cascade_window_tests {
                         road: crate::analysis::loop_check::OfferRoad::Ring,
                         counted_take: Default::default(),
                         period: Default::default(),
-                        deliverable_capacity: crate::game::engine::MAX_SHORTCUT_CYCLES,
+                        deliverable_capacity: Some(crate::game::engine::MAX_SHORTCUT_CYCLES),
                     },
                 },
             ),
@@ -42269,7 +42290,7 @@ mod tests {
             road: OfferRoad::Ring,
             counted_take,
             period: Default::default(),
-            deliverable_capacity: crate::game::engine::MAX_SHORTCUT_CYCLES,
+            deliverable_capacity: Some(crate::game::engine::MAX_SHORTCUT_CYCLES),
         };
         let proposed = serde_json::to_value(proposal(unperformable)).unwrap();
         assert_eq!(

@@ -309,11 +309,17 @@ pub struct ShortcutProposal {
     /// so a responder's preview splits the declaration by the lead the proposer's preview used.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub leading_aims: Vec<(crate::analysis::decision_template::DecisionSlot, PlayerId)>,
-    /// CR 732.2a: the highest count an accept may legally specify against this offer, copied
-    /// off `ShortcutDecisionSchema::deliverable_capacity` at declare so the proposal carries the
-    /// same resource and representability proof across declaration, response, restore, and settlement.
-    #[serde(default = "default_deliverable_capacity")]
-    pub deliverable_capacity: u32,
+    /// CR 732.2a: the highest count an accept may legally specify against this offer, derived at
+    /// declare from `ShortcutDecisionSchema::deliverable_capacity` under the declared schedule, so
+    /// the proposal carries the same resource and representability proof across declaration,
+    /// response, restore, and settlement.
+    ///
+    /// `None` is a proposal that carries NO proof — a save written before the field existed —
+    /// and is never read as the engine budget: checked restore refuses it
+    /// (`types::game_state::reject_unproved_shortcut_proposal`) and the drivability gate drives
+    /// nothing against it. Only `Some(n)` with `1..=MAX_SHORTCUT_CYCLES` is a proved capacity.
+    #[serde(default)]
+    pub deliverable_capacity: Option<u32>,
     /// CR 732.2a: the declaration the offer PUBLISHED — `game::engine::build_bounded_declaration`'s
     /// validated output, copied off the offer at declare — beside `template`, the declaration the
     /// drive replays. The two differ wherever the declarer overrode the published aim, and
@@ -327,29 +333,19 @@ pub struct ShortcutProposal {
     pub published_declaration: Option<DecisionTemplate>,
 }
 
-fn default_deliverable_capacity() -> u32 {
-    crate::game::engine::MAX_SHORTCUT_CYCLES
-}
-
 impl ShortcutProposal {
     /// CR 732.2a: the count ceiling the DRIVE enforces for this proposal, read by the
     /// consumption-time bound and the drivability gate. Never the published range: the engine's
     /// budget is not a rule, so `shortening_places` keeps a restored proposal's own ends and the
     /// reducer alone refuses a place the board cannot take.
     ///
-    /// Returns `None` if the proposal carries no valid deliverable capacity (zero or exceeding
-    /// the engine maximum). A restored proposal from a save written before this field existed
-    /// will have the default `MAX_SHORTCUT_CYCLES`, which is not a proven capacity and must be
-    /// treated as invalid — the capacity must come from the offer's `ShortcutDecisionSchema`
-    /// at declare time, not from a fallback.
+    /// Returns `None` if the proposal carries no proved capacity: an absent one (a save written
+    /// before the field existed), zero, or one past the engine maximum. An absent capacity is
+    /// never defaulted to the budget — the capacity comes from the offer's
+    /// `ShortcutDecisionSchema` at declare time, not from a fallback.
     pub fn effective_deliverable_capacity(&self) -> Option<u32> {
-        if self.deliverable_capacity > 0
-            && self.deliverable_capacity <= crate::game::engine::MAX_SHORTCUT_CYCLES
-        {
-            Some(self.deliverable_capacity)
-        } else {
-            None
-        }
+        self.deliverable_capacity
+            .filter(|&capacity| (1..=crate::game::engine::MAX_SHORTCUT_CYCLES).contains(&capacity))
     }
 
     /// CR 732.2b: every place a responder may name to shorten this proposal — "a place where

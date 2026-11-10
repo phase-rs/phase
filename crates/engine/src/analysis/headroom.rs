@@ -323,6 +323,14 @@ impl PeriodExcursions {
     /// The player-resource excursions of one declared period repetition, from the seat charges
     /// [`Self::declared_charges_at`] read for it and the period's own net life and poison deltas.
     /// Declared victim relocations are accounted for in the charges themselves.
+    ///
+    /// BOTH PER-TURN TALLIES ARE CHARGED BY THE SAME GROSS BOUND. `types::game_state`'s checked
+    /// life edit advances the gained tally for a gain and the lost tally for a loss, so one
+    /// repetition whose leg gains 1 and loses 2 advances BOTH — charging only the net loss would
+    /// let an offer overrun a gained tally already near its stored maximum. `net` and `dip` are
+    /// the charge model's per-repetition life movement bounds (the end-of-repetition loss and the
+    /// deepest fall inside it); their maximum is the conservative gross bound this proof carries
+    /// for either direction.
     fn of_declared_iteration(
         per_cycle: &crate::analysis::resource::PeriodicDelta,
         charges: &BTreeMap<(PlayerId, u32), crate::analysis::resource::DeclaredLifeCharge>,
@@ -336,19 +344,28 @@ impl PeriodExcursions {
                 .copied()
                 .unwrap_or(crate::analysis::resource::DeclaredLifeCharge { net: 0, dip: 0 });
             if charge.net != 0 || charge.dip != 0 {
+                let gross = charge.dip.max(charge.net);
                 excursions.by_scalar.insert(
                     (player.id, PlayerScalar::Life),
                     Excursion {
                         net: -charge.net,
                         highest: 0,
-                        lowest: -charge.dip,
+                        lowest: -gross,
                     },
                 );
                 excursions.by_scalar.insert(
                     (player.id, PlayerScalar::LifeLostThisTurn),
                     Excursion {
                         net: charge.net,
-                        highest: charge.dip.max(charge.net),
+                        highest: gross,
+                        lowest: 0,
+                    },
+                );
+                excursions.by_scalar.insert(
+                    (player.id, PlayerScalar::LifeGainedThisTurn),
+                    Excursion {
+                        net: gross,
+                        highest: gross,
                         lowest: 0,
                     },
                 );
@@ -756,6 +773,43 @@ mod tests {
             PeriodExcursions::representable_over_frames(&[&before, &after], &before, BUDGET),
             Some(1),
             "one more increment fits a tally at the counter's last value"
+        );
+    }
+
+    /// A repetition whose leg gains some life and loses more advances BOTH per-turn tallies.
+    /// The charge model's gross bound is charged to each, so a gained tally already near its
+    /// stored maximum bounds the count even though the repetition NETS a loss.
+    #[test]
+    fn a_gross_life_leg_charges_both_per_turn_tallies() {
+        use crate::analysis::resource::{AnnouncedLead, PeriodicDelta, ResourceVector};
+        let mut delta = ResourceVector::default();
+        delta.life.insert(P0, -1);
+        let period = PeriodicDelta {
+            frames_per_period: 1,
+            delta,
+            victim_slot: vec![],
+            declarable_victims: vec![],
+            seat_life_charge: vec![(P0, 2)],
+            cleanup: None,
+        };
+        let representable = |state: &GameState| {
+            PeriodExcursions::representable_under_schedule(
+                &period,
+                None,
+                None,
+                &[],
+                state,
+                AnnouncedLead::None,
+                BUDGET,
+            )
+        };
+        let mut state = state_at(20);
+        assert_eq!(representable(&state), None, "reach guard: the budget fits");
+        state.players[0].life_gained_this_turn = u32::MAX - 3;
+        assert_eq!(
+            representable(&state),
+            Some(1),
+            "the gain inside the net-loss repetition still advances the gained tally"
         );
     }
 

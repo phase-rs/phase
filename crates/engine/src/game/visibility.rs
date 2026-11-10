@@ -14361,7 +14361,7 @@ mod tests {
                 road: crate::analysis::loop_check::OfferRoad::Ring,
                 counted_take: Default::default(),
                 period: Default::default(),
-                deliverable_capacity: 3,
+                deliverable_capacity: Some(3),
             },
         };
         state

@@ -4051,7 +4051,7 @@ pub(crate) mod tests {
                 road: engine::analysis::loop_check::OfferRoad::Ring,
                 counted_take: Default::default(),
                 period: Default::default(),
-                deliverable_capacity: 1_000,
+                deliverable_capacity: Some(1_000),
             },
         };
         let accept = GameAction::RespondToShortcut {

@@ -4378,7 +4378,7 @@ fn respond_window_on(
             road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
-            deliverable_capacity: 1000,
+            deliverable_capacity: Some(1000),
         },
     };
     bind(&mut state, "respond-declared");
@@ -11213,7 +11213,7 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
             road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
-            deliverable_capacity: 1000,
+            deliverable_capacity: Some(1000),
         },
     };
     let wire = serde_json::to_string(&carrying).expect("serialize the pending proposal");
