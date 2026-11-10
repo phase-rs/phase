@@ -2543,6 +2543,41 @@ impl ResolvedRulesJournal {
         self.node_index(node).is_ok()
     }
 
+    /// CR 702.132a + CR 118.3a: every unit `payer` is recorded as having spent
+    /// toward this exact `recipient`, in recorded consumption order.
+    ///
+    /// This is the journal's own copy of ONE payment — the command
+    /// [`Self::record_mana_spend`] wrote, which carries the payer, the recipient and
+    /// the exact units removed. CR 118.3a makes paying "removing the indicated mana
+    /// from a player's mana pool", so those recorded units ARE the payment, and this
+    /// reader answers the payer-attribution question the journal alone can answer:
+    /// which units this player, rather than any other, removed for this spell.
+    ///
+    /// `None` means the journal records no spend by this payer on this recipient —
+    /// "no record", which is not the same fact as "spent nothing" and must not be
+    /// read as one. `Some(units)` is those units, concatenated across the commands
+    /// recorded for the pair (a resumed payment records one command per attempt that
+    /// reached its spend, in order).
+    pub fn spent_units_for_payer_and_recipient(
+        &self,
+        payer: PlayerId,
+        recipient: &ManaPaymentRecipient,
+    ) -> Option<Vec<ManaUnit>> {
+        let mut units: Vec<ManaUnit> = Vec::new();
+        let mut recorded = false;
+        for entry in &self.entries {
+            let Some(ResolvedRulesCommand::ManaSpend(command)) = &entry.command else {
+                continue;
+            };
+            if command.payer != payer || &command.recipient != recipient {
+                continue;
+            }
+            recorded = true;
+            units.extend(command.units.iter().map(|spent| spent.unit.clone()));
+        }
+        recorded.then_some(units)
+    }
+
     /// CR 106.3 + CR 118.3a: the mana unit this journal recorded as PRODUCED under
     /// `pip` — the unit-keyed record production wrote, as opposed to the
     /// storage-id-keyed history that has to guess which of a source's tenures made

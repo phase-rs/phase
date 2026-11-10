@@ -37,7 +37,8 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedS
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{
     ActivationManaColorConstraint, ManaColor, ManaCost, ManaCostShard, ManaSourceOutput,
-    ManaSourceSelection, ManaSpellGrant, ManaType, PaymentContext, SpecialAction, SpellMeta,
+    ManaSourceSelection, ManaSpellGrant, ManaType, ManaUnit, PaymentContext, SpecialAction,
+    SpellMeta,
 };
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::ManaPaymentRecipient;
@@ -24526,6 +24527,54 @@ fn pay_life_components(
     Ok(None)
 }
 
+/// CR 702.132a + CR 118.3a: the units a committed Assist helper spent on the cast
+/// being finalized, from the ONE typed contribution claim the spend boundary captured.
+///
+/// Both payment finalizers record this cast's payment, and the helper's units are
+/// part of it: CR 702.132a has the helper pay "before you begin to pay the total
+/// cost", so their units precede the caster's in the recorded payment, and CR 118.3a
+/// makes paying mana "removing the indicated mana from a player's mana pool" — so
+/// the units the helper removed ARE mana spent to cast this spell. Recording only
+/// the caster's would drop the pips a source-qualified predicate reads (Rain of
+/// Riches' "mana from a Treasure was spent to cast has cascade").
+///
+/// The claim states its own cast, helper and amount, so this reader can refuse one
+/// that does not describe the payment it asserts instead of splicing whatever
+/// happens to be there:
+///
+/// * a claim captured for a different cast is not this cast's payment;
+/// * a claim whose unit count disagrees with the generic amount it says was paid is
+///   not the payment it claims to be (CR 118.3a: one unit per point of generic mana).
+///
+/// Restore binds the claim to the journal before a finalizer ever runs
+/// (`GameState::bind_or_reject_assist_contribution_provenance`), so this is the
+/// consumer-side half of the same rule: a paid contribution that lost its units must
+/// surface as a refusal, never as a silent zero.
+fn assist_contributed_units_for(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Result<Vec<ManaUnit>, EngineError> {
+    let Some(contribution) = state.active_assist_contribution.as_deref() else {
+        return Ok(Vec::new());
+    };
+    if contribution.source_id != source_id {
+        return Err(EngineError::ActionNotAllowed(format!(
+            "an Assist contribution captured for {:?} cannot be recorded on {source_id:?}",
+            contribution.source_id
+        )));
+    }
+    if !contribution.is_backed_by_its_units() {
+        return Err(EngineError::ActionNotAllowed(format!(
+            "the Assist contribution to {source_id:?} records {:?} as having paid {} generic \
+             mana but carries {} spent units",
+            contribution.helper,
+            contribution.generic,
+            contribution.units.len()
+        )));
+    }
+    Ok(contribution.units.clone())
+}
+
 /// CR 107.4f + CR 601.2f-h + CR 605.3b + CR 616.1: A submitted Phyrexian
 /// payment can be interrupted by a costed auto-tapped mana source. Preserve
 /// the finalization root rather than deriving a generic priority resume.
@@ -24580,7 +24629,7 @@ pub(super) fn pay_mana_cost_with_choices_and_resume(
     // THIS spell. CR 702.132a has the helper pay "before you begin to pay the total
     // cost", so their units come FIRST in payment order, and recording only the
     // caster's would drop the pips a source-qualified predicate reads.
-    mana_spent_units.splice(0..0, state.active_assist_contributed_units.iter().cloned());
+    mana_spent_units.splice(0..0, assist_contributed_units_for(state, source_id)?);
 
     // CR 106.6: Apply mana spell grants to the spell being cast.
     apply_mana_spell_grants(state, source_id, &mana_spent_units);
@@ -24712,7 +24761,7 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
         .collect::<Vec<_>>();
     // CR 702.132a + CR 118.3a: the committed Assist helper's units are mana spent to
     // cast this spell, beside the caster's (see the sibling finalizer).
-    mana_spent_units.splice(0..0, state.active_assist_contributed_units.iter().cloned());
+    mana_spent_units.splice(0..0, assist_contributed_units_for(state, source_id)?);
 
     apply_mana_spell_grants(state, source_id, &mana_spent_units);
 
