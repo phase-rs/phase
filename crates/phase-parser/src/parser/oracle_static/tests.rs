@@ -43359,17 +43359,42 @@ fn static_ordinary_cost_modifier_carries_no_target_scope() {
     // carry Baral's printed restriction ("Instant and sorcery spells…") and must
     // NOT gain any target scope the Oracle text never asks for. Asserting only the
     // affected filter would leave the value the price reads unchecked.
-    let pricing = spell_filter
-        .as_ref()
-        .expect("Baral's discount must carry a pricing filter");
-    let rendered = format!("{pricing:?}");
-    assert!(
-        rendered.contains("Instant") && rendered.contains("Sorcery"),
-        "the pricing filter must keep Baral's printed instant-or-sorcery restriction, got {rendered}"
+    // A debug-string check would accept an intersection, an extra restriction, or a
+    // reordered shape; this asserts the TYPED filter, so any of those fails here.
+    let Some(pricing) = spell_filter.as_ref() else {
+        panic!("Baral's discount must carry a pricing filter");
+    };
+    let TargetFilter::Or { filters } = pricing else {
+        panic!("Baral's pricing filter must be a union of instant and sorcery, got {pricing:?}");
+    };
+    assert_eq!(
+        filters.len(),
+        2,
+        "Baral's pricing filter is exactly two members (instant, sorcery), got {filters:?}"
     );
-    assert!(
-        !rendered.contains("Targets") && !rendered.contains("InZone"),
-        "an untargeted cost modifier must not gain a target or zone scope on its PRICING \
-         filter either; got {rendered}"
+    let mut kinds = Vec::new();
+    for filter in filters {
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("each member of the union must be a typed filter, got {filter:?}");
+        };
+        assert!(
+            typed.properties.is_empty(),
+            "neither member of Baral's union may carry a property (no target or zone scope for \
+             an untargeted cost modifier), got {:?}",
+            typed.properties
+        );
+        assert_eq!(
+            typed.controller, None,
+            "the caster scope lives on the affected filter, not inside the pricing union; got \
+             {:?}",
+            typed.controller
+        );
+        kinds.push(format!("{:?}", typed.type_filters));
+    }
+    kinds.sort();
+    assert_eq!(
+        kinds,
+        vec!["[Instant]".to_string(), "[Sorcery]".to_string()],
+        "Baral prices exactly instant and sorcery spells, got {kinds:?}"
     );
 }
