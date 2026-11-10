@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "commander",
   "version": 1,
-  "updated": "2026-11-09T00:00:00Z",
+  "updated": "2026-11-10T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/commander",
   "decks": [
     {
@@ -2856,12 +2856,12 @@
       "sideboard": []
     },
     {
-      "name": "Fire Lord Azula",
+      "name": "Cloud, Ex-SOLDIER",
       "author": "MTGGoldfish",
       "colors": [
+        "G",
         "R",
-        "U",
-        "B"
+        "W"
       ],
       "tags": [
         "metagame"
@@ -2869,39 +2869,15 @@
       "main": [
         {
           "count": 1,
-          "name": "Fire Lord Azula"
+          "name": "Aerith, Last Ancient"
         },
         {
           "count": 1,
-          "name": "Longshot, Rebel Bowman"
+          "name": "Aggravated Assault"
         },
         {
           "count": 1,
-          "name": "Vindictive Warden"
-        },
-        {
-          "count": 1,
-          "name": "Fire Nation Archers"
-        },
-        {
-          "count": 1,
-          "name": "Fated Firepower"
-        },
-        {
-          "count": 1,
-          "name": "Fiery Confluence"
-        },
-        {
-          "count": 1,
-          "name": "Torment of Hailfire"
-        },
-        {
-          "count": 1,
-          "name": "Fire Nation Turret"
-        },
-        {
-          "count": 1,
-          "name": "Sol Ring"
+          "name": "Akroma's Will"
         },
         {
           "count": 1,
@@ -2909,207 +2885,87 @@
         },
         {
           "count": 1,
-          "name": "Fellwar Stone"
+          "name": "Armored Skyhunter"
         },
         {
           "count": 1,
-          "name": "Cursed Mirror"
+          "name": "Barret, Avalanche Leader"
         },
         {
           "count": 1,
-          "name": "Bender's Waterskin"
+          "name": "Battlefield Forge"
         },
         {
           "count": 1,
-          "name": "Braid of Fire"
+          "name": "Behemoth Sledge"
         },
         {
           "count": 1,
-          "name": "Firebender Ascension"
+          "name": "Blackblade Reforged"
         },
         {
           "count": 1,
-          "name": "Zuko, Firebending Master"
+          "name": "Bonders' Enclave"
         },
         {
           "count": 1,
-          "name": "Zuko, Exiled Prince"
+          "name": "Brotherhood Regalia"
         },
         {
           "count": 1,
-          "name": "Avatar Roku, Firebender"
+          "name": "Brushland"
         },
         {
           "count": 1,
-          "name": "Ozai, the Phoenix King"
+          "name": "Bugenhagen, Wise Elder"
         },
         {
           "count": 1,
-          "name": "Training Grounds"
+          "name": "Buster Sword"
         },
         {
           "count": 1,
-          "name": "Mystic Remora"
+          "name": "Canopy Vista"
         },
         {
           "count": 1,
-          "name": "Chakra Meditation"
+          "name": "Champion's Helm"
         },
         {
           "count": 1,
-          "name": "The Unagi of Kyoshi Island"
+          "name": "Chromatic Lantern"
         },
         {
           "count": 1,
-          "name": "Wan Shi Tong, Librarian"
+          "name": "Cid, Freeflier Pilot"
         },
         {
           "count": 1,
-          "name": "Katara, Waterbending Master"
+          "name": "Cinder Glade"
         },
         {
           "count": 1,
-          "name": "The Mechanist, Aerial Artisan"
+          "name": "Clever Concealment"
         },
         {
           "count": 1,
-          "name": "Brainstorm"
+          "name": "Clifftop Retreat"
         },
         {
           "count": 1,
-          "name": "Consider"
+          "name": "Cloud, Ex-SOLDIER"
         },
         {
           "count": 1,
-          "name": "Accumulate Wisdom"
+          "name": "Cloud, Midgar Mercenary"
         },
         {
           "count": 1,
-          "name": "Abandon Attachments"
+          "name": "Codsworth, Handy Helper"
         },
         {
           "count": 1,
-          "name": "Frantic Search"
-        },
-        {
-          "count": 1,
-          "name": "Solstice Revelations"
-        },
-        {
-          "count": 1,
-          "name": "Past in Flames"
-        },
-        {
-          "count": 1,
-          "name": "Spirit Water Revival"
-        },
-        {
-          "count": 1,
-          "name": "Zuko's Conviction"
-        },
-        {
-          "count": 1,
-          "name": "Lost in Memories"
-        },
-        {
-          "count": 1,
-          "name": "Dutiful Knowledge Seeker"
-        },
-        {
-          "count": 1,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Sakashima of a Thousand Faces"
-        },
-        {
-          "count": 1,
-          "name": "Ember Island Production"
-        },
-        {
-          "count": 1,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 1,
-          "name": "Deny Entry"
-        },
-        {
-          "count": 1,
-          "name": "Bolt Bend"
-        },
-        {
-          "count": 1,
-          "name": "Octopus Form"
-        },
-        {
-          "count": 1,
-          "name": "Waterbender's Restoration"
-        },
-        {
-          "count": 1,
-          "name": "Chain of Vapor"
-        },
-        {
-          "count": 1,
-          "name": "Swiftfoot Boots"
-        },
-        {
-          "count": 1,
-          "name": "Katara's Reversal"
-        },
-        {
-          "count": 1,
-          "name": "Sokka's Haiku"
-        },
-        {
-          "count": 1,
-          "name": "Lightning Bolt"
-        },
-        {
-          "count": 1,
-          "name": "Lightning Strike"
-        },
-        {
-          "count": 1,
-          "name": "Feed the Swarm"
-        },
-        {
-          "count": 1,
-          "name": "Price of Freedom"
-        },
-        {
-          "count": 1,
-          "name": "Blasphemous Act"
-        },
-        {
-          "count": 1,
-          "name": "Day of Black Sun"
-        },
-        {
-          "count": 1,
-          "name": "Lost Days"
-        },
-        {
-          "count": 1,
-          "name": "Raven Eagle"
-        },
-        {
-          "count": 1,
-          "name": "The Last Agni Kai"
-        },
-        {
-          "count": 1,
-          "name": "Yue, the Moon Spirit"
-        },
-        {
-          "count": 1,
-          "name": "Fire Nation Occupation"
-        },
-        {
-          "count": 1,
-          "name": "Cruel Tutor"
+          "name": "Colossus Hammer"
         },
         {
           "count": 1,
@@ -3117,59 +2973,275 @@
         },
         {
           "count": 1,
-          "name": "Fabled Passage"
+          "name": "Conformer Shuriken"
         },
         {
           "count": 1,
-          "name": "Tarnished Citadel"
+          "name": "Conqueror's Flail"
         },
         {
           "count": 1,
-          "name": "Thriving Bluff"
+          "name": "Cultivate"
         },
         {
           "count": 1,
-          "name": "Thriving Isle"
+          "name": "Danitha Capashen, Paragon"
         },
         {
           "count": 1,
-          "name": "Thriving Moor"
+          "name": "Dispatch"
         },
         {
           "count": 1,
-          "name": "Airship Engine Room"
+          "name": "Excalibur, Sword of Eden"
         },
         {
           "count": 1,
-          "name": "Boiling Rock Prison"
+          "name": "Exotic Orchard"
         },
         {
           "count": 1,
-          "name": "Serpent's Pass"
+          "name": "Farewell"
         },
         {
           "count": 1,
-          "name": "Agna Qel'a"
+          "name": "Fire-Lit Thicket"
         },
         {
           "count": 1,
-          "name": "Fire Nation Palace"
+          "name": "Firion, Wild Rose Warrior"
+        },
+        {
+          "count": 3,
+          "name": "Forest"
         },
         {
           "count": 1,
-          "name": "Realm of Koh"
+          "name": "Forge Anew"
         },
         {
-          "count": 10,
+          "count": 1,
+          "name": "Fortified Village"
+        },
+        {
+          "count": 1,
+          "name": "Furycalm Snarl"
+        },
+        {
+          "count": 1,
+          "name": "Game Trail"
+        },
+        {
+          "count": 1,
+          "name": "Genji Glove"
+        },
+        {
+          "count": 1,
+          "name": "Gilgamesh, Master-at-Arms"
+        },
+        {
+          "count": 1,
+          "name": "Godo, Bandit Warlord"
+        },
+        {
+          "count": 1,
+          "name": "Hammer of Nazahn"
+        },
+        {
+          "count": 1,
+          "name": "Helm of the Host"
+        },
+        {
+          "count": 1,
+          "name": "Inventory Management"
+        },
+        {
+          "count": 1,
+          "name": "Jungle Shrine"
+        },
+        {
+          "count": 1,
+          "name": "Kaldra Compleat"
+        },
+        {
+          "count": 1,
+          "name": "Kutzil, Malamet Exemplar"
+        },
+        {
+          "count": 1,
+          "name": "Lightning Greaves"
+        },
+        {
+          "count": 1,
+          "name": "Lightning, Army of One"
+        },
+        {
+          "count": 1,
+          "name": "Mossfire Valley"
+        },
+        {
+          "count": 3,
           "name": "Mountain"
         },
         {
-          "count": 10,
-          "name": "Island"
+          "count": 1,
+          "name": "Nature's Lore"
         },
         {
-          "count": 7,
-          "name": "Swamp"
+          "count": 1,
+          "name": "Nibelheim Aflame"
+        },
+        {
+          "count": 1,
+          "name": "Open the Armory"
+        },
+        {
+          "count": 1,
+          "name": "Path of Ancestry"
+        },
+        {
+          "count": 3,
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Professional Face-Breaker"
+        },
+        {
+          "count": 1,
+          "name": "Puresteel Paladin"
+        },
+        {
+          "count": 1,
+          "name": "Radiant Grove"
+        },
+        {
+          "count": 1,
+          "name": "Red XIII, Proud Warrior"
+        },
+        {
+          "count": 1,
+          "name": "Rootbound Crag"
+        },
+        {
+          "count": 1,
+          "name": "Rugged Prairie"
+        },
+        {
+          "count": 1,
+          "name": "Sacred Peaks"
+        },
+        {
+          "count": 1,
+          "name": "Scavenger Grounds"
+        },
+        {
+          "count": 1,
+          "name": "Sephiroth, Fallen Hero"
+        },
+        {
+          "count": 1,
+          "name": "Serah Farron"
+        },
+        {
+          "count": 1,
+          "name": "Shadowspear"
+        },
+        {
+          "count": 1,
+          "name": "Sigarda's Aid"
+        },
+        {
+          "count": 1,
+          "name": "Slayers' Stronghold"
+        },
+        {
+          "count": 1,
+          "name": "Sol Ring"
+        },
+        {
+          "count": 1,
+          "name": "Spire of Industry"
+        },
+        {
+          "count": 1,
+          "name": "Sram, Senior Edificer"
+        },
+        {
+          "count": 1,
+          "name": "Steelshaper's Gift"
+        },
+        {
+          "count": 1,
+          "name": "Stoneforge Mystic"
+        },
+        {
+          "count": 1,
+          "name": "Stroke of Midnight"
+        },
+        {
+          "count": 1,
+          "name": "Sunforger"
+        },
+        {
+          "count": 1,
+          "name": "Sungrass Prairie"
+        },
+        {
+          "count": 1,
+          "name": "Sunpetal Grove"
+        },
+        {
+          "count": 1,
+          "name": "Sunscorched Divide"
+        },
+        {
+          "count": 1,
+          "name": "Sword of Feast and Famine"
+        },
+        {
+          "count": 1,
+          "name": "Sword of the Animist"
+        },
+        {
+          "count": 1,
+          "name": "Swords to Plowshares"
+        },
+        {
+          "count": 1,
+          "name": "The Reaver Cleaver"
+        },
+        {
+          "count": 1,
+          "name": "Tifa, Martial Artist"
+        },
+        {
+          "count": 1,
+          "name": "Vanquish the Horde"
+        },
+        {
+          "count": 1,
+          "name": "Venat, Heart of Hydaelyn"
+        },
+        {
+          "count": 1,
+          "name": "Vincent, Vengeful Atoner"
+        },
+        {
+          "count": 1,
+          "name": "Wooded Ridgeline"
+        },
+        {
+          "count": 1,
+          "name": "Wrecking Ball Arm"
+        },
+        {
+          "count": 1,
+          "name": "Yuffie, Materia Hunter"
+        },
+        {
+          "count": 1,
+          "name": "Zack Fair"
         }
       ],
       "sideboard": []
