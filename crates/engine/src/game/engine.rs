@@ -3638,7 +3638,8 @@ fn pin_observed_declaration(
             // CR 608.2d + CR 605.3b mana color: kinds this offer's publisher
             // (`bounded_cycle_pin_slots_for_window`, which mints only `Targets` and
             // `MayChoice`) cannot produce today. `LoopAnswerValue` carries no answer shape for
-            // any of them, so there is nothing to pin even when the slot IS journalled.
+            // any of them, so there is nothing to pin even when the slot IS journalled; a CR 616.1
+            // replacement `Order` point is pinned only from `recorded` above.
             (
                 DecisionPointKind::Mode { .. }
                 | DecisionPointKind::UnlessBreak
@@ -7422,10 +7423,9 @@ fn handle_declare_shortcut(
     // `PinValidation::UnexposedSlot` arm is that refusal for every SLOT-ADDRESSING pin, so a
     // points-empty offer needs no second predicate for those.
     //
-    // SLOT-ADDRESSING is this path's term throughout, in `pin_slot`'s own sense: a pin that
-    // CARRIES an explicit `DecisionSlot` (`Targets` / `Mode` / `MayChoice` / `UnlessBreak` /
-    // `ManaColor` / `ConvokeTaps`) and is therefore looked up against `schema.points`.
-    // `pin_slot` synthesizes no slot for `Order`, so the term is exact rather than approximate.
+    // SLOT-ADDRESSING is this path's term throughout: a pin looked up against `schema.points`
+    // (`Targets` / `Mode` / `MayChoice` / `UnlessBreak` / `ManaColor` / `ConvokeTaps` / a CR 616.1
+    // replacement `Order`).
     //
     // CLOSED FOR A TRIGGER-ORDER `PinnedDecision::Order`, ON EVERY SCHEMA SIZE. No published
     // point carries `ChoicePoint::TriggerOrder`, so it covers no published point — coverage is

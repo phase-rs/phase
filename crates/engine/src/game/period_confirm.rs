@@ -1717,13 +1717,18 @@ fn replay_cycle_ordered(
     Err(OfferRefusal::NoRecurrence)
 }
 
-/// CR 616.1: the answer to the replacement prompt at `replay` that applies first the candidate
-/// `declared` places first; `None` unless `declared` places every candidate the prompt lists.
+/// CR 616.1: the answer to the replacement-order prompt at `replay` that applies first the
+/// candidate `declared` places first; `None` unless `declared` places every candidate the prompt
+/// lists.
 fn declared_replacement(replay: &GameState, declared: Declared<'_>) -> Option<GameAction> {
     let (template, _) = declared?;
     let WaitingFor::ReplacementChoice { candidates, .. } = &replay.waiting_for else {
         return None;
     };
+    // CR 732.2a: an order pin describes no answer to a "may" or a destination choice.
+    if replay.waiting_for.option_point() != Some(ChoicePoint::ReplacementOrder) {
+        return None;
+    }
     let (index, _) = candidates
         .iter()
         .enumerate()
@@ -4138,6 +4143,78 @@ mod tests {
         )
         .expect("both pins resolve");
         assert_eq!(done, [true, false]);
+    }
+
+    /// CR 616.1 + CR 732.2a: Fiendish Duo's doubling applied first leaves Battletide Alchemist's
+    /// "may prevent" as an accept/decline prompt on the source the order places first; the order
+    /// answers the order prompt and not that "may".
+    #[test]
+    fn a_replacement_order_pin_answers_the_order_prompt_and_not_its_sources_may() {
+        use crate::analysis::decision_template::{
+            DecisionGroupKey, DecisionKind, IterationCount, ReplayMode,
+        };
+        use crate::types::game_state::{ReplacementCandidateSummary, ReplacementChoiceKind};
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+        let mut state = with_stack(&[]);
+        let mut source = |name: &str| {
+            crate::game::zones::create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            )
+        };
+        let (duo, alchemist) = (source("Fiendish Duo"), source("Battletide Alchemist"));
+        let pin = |source_id, pos| PinnedDecision::Order {
+            slot: DecisionSlot::first(
+                object_decision_source(&state, source_id).expect("on the battlefield"),
+                ChoicePoint::ReplacementOrder,
+            ),
+            pos,
+        };
+        let template = DecisionTemplate {
+            owner: PlayerId(0),
+            decisions: vec![pin(duo, 1), pin(alchemist, 0)],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(1),
+            },
+            key: DecisionGroupKey::from_sources(&[], DecisionKind::LoopChoice),
+        };
+        let candidate = |source_id, source_name: &str| ReplacementCandidateSummary {
+            source_id,
+            source_name: source_name.to_string(),
+            description: String::new(),
+        };
+        let prompt =
+            |kind, candidates: Vec<ReplacementCandidateSummary>| WaitingFor::ReplacementChoice {
+                player: PlayerId(1),
+                candidate_count: candidates.len(),
+                candidates,
+                kind,
+                last_applied_decides: false,
+                remember_identity: None,
+            };
+        state.waiting_for = prompt(
+            ReplacementChoiceKind::Order,
+            vec![
+                candidate(duo, "Fiendish Duo"),
+                candidate(alchemist, "Battletide Alchemist"),
+            ],
+        );
+        assert_eq!(
+            declared_replacement(&state, Some((&template, 0))),
+            Some(GameAction::ChooseReplacement { index: 1 })
+        );
+        state.waiting_for = prompt(
+            ReplacementChoiceKind::OptionalBranch,
+            vec![
+                candidate(alchemist, "Battletide Alchemist"),
+                candidate(alchemist, "Battletide Alchemist"),
+            ],
+        );
+        assert_eq!(declared_replacement(&state, Some((&template, 0))), None);
     }
 
     /// CR 603.3d + CR 732.2a: a mandatory answer is excused only when the replay went past it to
