@@ -1176,9 +1176,9 @@ pub(crate) fn emit_damage_dealt_and_record(
         // damage KIND on the source object's `dealt_damage_kinds` latch (read by
         // the "hasn't dealt combat damage yet" gate), so a non-battlefield source
         // leaves neither store stale. Both stores are written by the two `let`s
-        // above; the dirty flag must OR both, because `newly_any` alone misses
-        // the first combat hit after noncombat damage. Keep `|` for parity with
-        // the PR (bool-bool, clippy-clean).
+        // below; the dirty flag must OR both, because `newly_any` alone misses
+        // the first combat hit after noncombat damage. `|` (not `||`) so both
+        // stores are always written.
         let on_battlefield = state
             .objects
             .get(&source_id)
