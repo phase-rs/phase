@@ -2448,30 +2448,38 @@ fn repeatable_mana_ability_multiplier(
         return 1;
     }
 
-    // Each activation chooses its own objects (CR 118.10), so the supply of
-    // eligible objects bounds how many times the ability can resolve.
-    let supply = mana_abilities::sacrifice_cost_choice(state, controller, object_id, ability)
-        .or_else(|| mana_abilities::discard_cost_choice(state, controller, object_id, ability))
-        .or_else(|| {
-            mana_abilities::exile_cost_choice(state, controller, object_id, ability)
-                .map(|(count, _, cards)| (count, cards))
-        });
-    if let Some(activations) = supply.and_then(|(count, objects)| objects.len().checked_div(count))
-    {
-        return u32::try_from(activations).unwrap_or(u32::MAX);
-    }
+    // Each activation chooses its own objects (CR 118.10), so every supply-
+    // limited component bounds how many times the ability can resolve; a
+    // composite cost is limited by its scarcest resource.
+    let object_limits = [
+        mana_abilities::sacrifice_cost_choice(state, controller, object_id, ability),
+        mana_abilities::discard_cost_choice(state, controller, object_id, ability),
+        mana_abilities::exile_cost_choice(state, controller, object_id, ability)
+            .map(|(count, _, cards)| (count, cards)),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|(count, objects)| objects.len().checked_div(count));
 
     // CR 119.4: each activation pays its life from the total that is left.
-    if let Some(life_needed) = ability.cost.as_ref().and_then(|cost| {
-        super::casting::find_pay_life_cost(cost, state, controller, object_id)
-            .filter(|&needed| needed > 0)
-    }) {
-        let life = state
-            .players
-            .iter()
-            .find(|p| p.id == controller)
-            .map_or(0, |p| p.life);
-        return u32::try_from(life).unwrap_or(0) / life_needed;
+    let life_limit = ability
+        .cost
+        .as_ref()
+        .and_then(|cost| {
+            super::casting::find_pay_life_cost(cost, state, controller, object_id)
+                .filter(|&needed| needed > 0)
+        })
+        .map(|life_needed| {
+            let life = state
+                .players
+                .iter()
+                .find(|p| p.id == controller)
+                .map_or(0, |p| p.life);
+            usize::try_from(life).unwrap_or(0) / usize::try_from(life_needed).unwrap_or(usize::MAX)
+        });
+
+    if let Some(activations) = object_limits.chain(life_limit).min() {
+        return u32::try_from(activations).unwrap_or(u32::MAX);
     }
 
     1

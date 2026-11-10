@@ -4695,7 +4695,7 @@ fn a_manual_offer_counts_an_imposed_tax_as_the_mana_leg() {
     assert_eq!(life(&runner, P1), 19, "the damage resolved");
 }
 
-/// CR 605.3c (#10190 review): a mana ability can't be activated again only
+/// CR 605.3c (#10190 review): a mana ability can't be activated again
 /// until it has resolved, so one Ashnod's Altar with two creatures makes four
 /// mana. Jayemdae Tome's "{4}, {T}: Draw a card." is offered for a manual
 /// payment and completes with the Altar activated twice.
@@ -4739,7 +4739,7 @@ fn one_repeatable_altar_funds_an_activation_through_the_production_offer() {
     assert_eq!(hand_size(&runner, P0), hand_before + 1, "the draw resolved");
 }
 
-/// CR 601.2g + CR 605.3b (#10190 review): the window's mana abilities can be
+/// CR 601.2g + CR 605.3a (#10190 review): the window's mana abilities can be
 /// activated in any order. Ashnod's Altar is listed before Goblin Clearcutter,
 /// but Clearcutter must go first — sacrificing the Forest for three mana —
 /// and then be sacrificed to the Altar for two more. Emmessi Tome's "{5}, {T}:
@@ -4791,18 +4791,15 @@ fn a_later_listed_mana_ability_can_fund_an_earlier_listed_altar() {
     assert!(is_priority(&waiting_for), "{waiting_for:?}");
     assert!(tapped(&runner, tome));
 
+    // The first pass resolves the draw ability; the second resolves the
+    // trigger that asks for the discard.
     pass(&mut runner);
     let waiting_for = pass(&mut runner);
-    let discarded: Vec<ObjectId> = runner.state().players[P0.0 as usize]
-        .hand
-        .iter()
-        .take(1)
-        .copied()
-        .collect();
-    let waiting_for = match waiting_for {
-        WaitingFor::Priority { .. } => waiting_for,
-        _ => select_cards(&mut runner, &discarded),
+    let WaitingFor::DiscardChoice { cards, .. } = &waiting_for else {
+        panic!("the discard prompt appears before it is answered: {waiting_for:?}");
     };
+    let discarded: Vec<ObjectId> = cards.iter().take(1).copied().collect();
+    let waiting_for = select_cards(&mut runner, &discarded);
     assert!(is_priority(&waiting_for), "{waiting_for:?}");
     assert!(runner.state().stack.is_empty());
     assert_eq!(
@@ -4855,7 +4852,7 @@ fn a_manual_offer_combines_mana_ability_life_and_sacrifice_mana() {
     assert_eq!(pool_total(&runner), 1, "the {{2}} left one mana floating");
 }
 
-/// CR 701.59a + CR 605.3b (#10190 review): the witness answers a mana
+/// CR 701.59a + CR 605.3a + CR 602.2b (#10190 review): the witness answers a mana
 /// ability's collect-evidence prompt as the player would. Cryptex ("{T},
 /// Collect evidence 3: Add one mana of any color.") and Ashnod's Altar together
 /// make Arcane Encyclopedia's "{3}, {T}: Draw a card.", neither alone. It is
