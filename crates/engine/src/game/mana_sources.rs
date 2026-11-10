@@ -384,28 +384,81 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
     let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
     let mut actions = Vec::new();
     for &object_id in &state.battlefield {
-        push_object_mana_actions(
-            state,
-            player,
-            object_id,
-            &aura_sources,
-            &mana_activation_gates,
-            &mut actions,
-        );
+        let Some(object) = state.objects.get(&object_id) else {
+            continue;
+        };
+        if object.controller != player {
+            continue;
+        }
+
+        let mut handled_indices = std::collections::HashSet::new();
+        if object.card_types.core_types.contains(&CoreType::Land) {
+            let options = activatable_land_mana_options_indexed_gated(
+                state,
+                object_id,
+                player,
+                &aura_sources,
+                &mana_activation_gates,
+            );
+            for option in options {
+                if let Some(ability_index) = option.ability_index {
+                    handled_indices.insert(ability_index);
+                }
+                if let Some(selection) = option.semantic_selection(state) {
+                    actions.push(GameAction::TapLandForMana { selection });
+                }
+            }
+        }
+
+        for (ability_index, ability) in object.abilities.iter().enumerate() {
+            if handled_indices.contains(&ability_index)
+                || ability.kind != AbilityKind::Activated
+                || !mana_abilities::is_mana_ability(ability)
+            {
+                continue;
+            }
+            if has_tap_component(&ability.cost)
+                && (object.tapped || restrictions::summoning_sick_for_tap_ability(state, object))
+            {
+                continue;
+            }
+            if activation_condition_satisfied(state, player, object_id, ability_index, ability)
+                && mana_abilities::can_activate_mana_ability_now_gated(
+                    state,
+                    player,
+                    object_id,
+                    ability_index,
+                    ability,
+                    &mana_activation_gates,
+                )
+            {
+                // Interactive costs (for example, "Sacrifice an artifact")
+                // deliberately remain the ordinary activation action during a
+                // normal ManaPayment window. Its established cost resolver is
+                // the authority for the subsequent PayCost choice.
+                actions.push(GameAction::ActivateAbility {
+                    source_id: object_id,
+                    ability_index,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                });
+            }
+        }
     }
     actions
 }
 
 /// CR 605.3a + CR 701.26b + CR 122.1d: whether untapping `object` gives `player`
-/// its mana a second time, read from public facts only. `object` must have a
-/// {T} mana ability `player` can activate now (it is untapped, the action is
-/// listed), whose cost doesn't move it off the battlefield (Treasure, Lotus
-/// Petal, Mirrored Lotus), and no stun counter, which an untap removes instead.
-/// What a use might reveal or cost later (a tap trigger, a color choice, the
-/// mana left for a second payment) isn't read, so the answer can hold once
-/// where a second use turns out impossible, and never passes a real one. Only
-/// `object`'s rows are listed, without the `TapsForMana` triggers: an aura's
-/// bonus mana doesn't decide whether a row is there.
+/// its mana a second time, read from public facts about `object` only, with
+/// nothing activated, paid or copied. `object` needs a {T} mana ability
+/// `player` could activate now: its readiness gates pass (untapped, not
+/// summoning sick, no activation prohibition) with its non-mana costs payable,
+/// and its cost doesn't move it off the battlefield (Treasure, Lotus Petal,
+/// Mirrored Lotus); or, as a land, the intrinsic "{T}: Add" of a basic land
+/// type (CR 305.6). A stun counter means the untap removes it instead. A mana
+/// part of the cost (Celestial Prism's {2}) isn't settled here, because that
+/// would run the auto-payment; it reads as payable, so the hold errs toward
+/// stopping: it can stop once where a second use turns out impossible, and
+/// never passes a real one.
 pub(crate) fn untap_would_repeat_mana(
     state: &GameState,
     player: PlayerId,
@@ -414,32 +467,46 @@ pub(crate) fn untap_would_repeat_mana(
     let Some(source) = state.objects.get(&object) else {
         return false;
     };
-    if source
-        .counters
-        .get(&crate::types::counter::CounterType::Stun)
-        .is_some_and(|stun| *stun > 0)
+    if source.zone != Zone::Battlefield
+        || source.controller != player
+        || source
+            .counters
+            .get(&crate::types::counter::CounterType::Stun)
+            .is_some_and(|stun| *stun > 0)
     {
         return false;
     }
-    let mut actions = Vec::new();
-    push_object_mana_actions(
-        state,
-        player,
-        object,
-        &[],
-        &mana_abilities::ManaActivationGates::compute(state),
-        &mut actions,
-    );
-    actions.iter().any(|action| {
-        let ability_index = match action {
-            GameAction::TapLandForMana { selection } => selection.ability_index,
-            GameAction::ActivateAbility { ability_index, .. } => Some(*ability_index),
-            _ => return false,
-        };
-        // CR 305.6: a land's intrinsic "{T}: Add" row names no ability.
-        ability_index.is_none_or(|ability_index| {
-            source.abilities.get(ability_index).is_some_and(|ability| {
-                has_tap_component(&ability.cost)
+    let gates = mana_abilities::ManaActivationGates::compute(state);
+    let has_explicit_mana_ability = source
+        .abilities
+        .iter()
+        .any(|ability| matches!(*ability.effect, Effect::Mana { .. }));
+    let intrinsic_land_mana = source.card_types.core_types.contains(&CoreType::Land)
+        && !has_explicit_mana_ability
+        && source
+            .card_types
+            .subtypes
+            .iter()
+            .filter_map(|subtype| super::mana_payment::land_subtype_to_mana_type(subtype))
+            .filter_map(mana_type_to_color)
+            .any(|color| {
+                !mana_abilities::intrinsic_land_mana_ability_blocked(
+                    state,
+                    player,
+                    object,
+                    color,
+                    Some(&gates),
+                )
+            });
+    intrinsic_land_mana
+        || source
+            .abilities
+            .iter()
+            .enumerate()
+            .any(|(ability_index, ability)| {
+                ability.kind == AbilityKind::Activated
+                    && mana_abilities::is_mana_ability(ability)
+                    && has_tap_component(&ability.cost)
                     && mana_abilities::is_renewable_mana_ability(ability)
                     && !cost_has_component(&ability.cost, |component| {
                         matches!(
@@ -450,78 +517,17 @@ pub(crate) fn untap_would_repeat_mana(
                             }
                         )
                     })
+                    && activation_condition_satisfied(state, player, object, ability_index, ability)
+                    && mana_abilities::mana_ability_ready_without_simulation_gated(
+                        state,
+                        player,
+                        object,
+                        ability_index,
+                        ability,
+                        ManaPayabilityMode::Planning,
+                        &gates,
+                    )
             })
-        })
-    })
-}
-
-fn push_object_mana_actions(
-    state: &GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-    aura_sources: &[ObjectId],
-    mana_activation_gates: &mana_abilities::ManaActivationGates,
-    actions: &mut Vec<GameAction>,
-) {
-    let Some(object) = state.objects.get(&object_id) else {
-        return;
-    };
-    if object.controller != player {
-        return;
-    }
-
-    let mut handled_indices = std::collections::HashSet::new();
-    if object.card_types.core_types.contains(&CoreType::Land) {
-        let options = activatable_land_mana_options_indexed_gated(
-            state,
-            object_id,
-            player,
-            aura_sources,
-            mana_activation_gates,
-        );
-        for option in options {
-            if let Some(ability_index) = option.ability_index {
-                handled_indices.insert(ability_index);
-            }
-            if let Some(selection) = option.semantic_selection(state) {
-                actions.push(GameAction::TapLandForMana { selection });
-            }
-        }
-    }
-
-    for (ability_index, ability) in object.abilities.iter().enumerate() {
-        if handled_indices.contains(&ability_index)
-            || ability.kind != AbilityKind::Activated
-            || !mana_abilities::is_mana_ability(ability)
-        {
-            continue;
-        }
-        if has_tap_component(&ability.cost)
-            && (object.tapped || restrictions::summoning_sick_for_tap_ability(state, object))
-        {
-            continue;
-        }
-        if activation_condition_satisfied(state, player, object_id, ability_index, ability)
-            && mana_abilities::can_activate_mana_ability_now_gated(
-                state,
-                player,
-                object_id,
-                ability_index,
-                ability,
-                mana_activation_gates,
-            )
-        {
-            // Interactive costs (for example, "Sacrifice an artifact")
-            // deliberately remain the ordinary activation action during a
-            // normal ManaPayment window. Its established cost resolver is
-            // the authority for the subsequent PayCost choice.
-            actions.push(GameAction::ActivateAbility {
-                source_id: object_id,
-                ability_index,
-                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
-            });
-        }
-    }
 }
 
 /// The `TapLandForMana` rows [`activatable_mana_actions_for_player`] emits for

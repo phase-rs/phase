@@ -45,16 +45,18 @@ use engine::game::effects::attach::attach_to;
 use engine::game::engine::apply_verified_ai_priority_pass;
 use engine::game::layers::flush_layers;
 use engine::game::mana_abilities::is_mana_ability;
+use engine::game::perf_counters;
 use engine::game::period_confirm::performed_for_tests;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::zones::move_to_zone;
 use engine::types::ability::{Effect, TapStateChange, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::parse_counter_type;
 use engine::types::game_state::{
-    AutoPassMode, AutoPassRequest, CastPaymentMode, LoopDetectionMode, PriorityPassingMode,
-    StackEntryKind, StackResolutionPolicy, WaitingFor,
+    AutoPassMode, AutoPassRequest, CastPaymentMode, ExileLink, ExileLinkKind, LoopDetectionMode,
+    PriorityPassingMode, StackEntryKind, StackResolutionPolicy, TurnBoundary, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType};
@@ -713,6 +715,155 @@ fn the_hold_reads_no_hidden_card() {
             "Deceiver over a {top_card}: the pass stays"
         );
     }
+}
+
+/// Staff of Compleation, verbatim.
+const STAFF_OF_COMPLEATION: &str = "{T}, Pay 1 life: Destroy target permanent you own.\n{T}, Pay 2 life: Add one mana of any color.\n{T}, Pay 3 life: Proliferate.\n{T}, Pay 4 life: Draw a card.\n{5}: Untap this artifact.";
+/// Soliton, verbatim.
+const SOLITON: &str = "{U}: Untap this creature.";
+/// Celestial Prism, verbatim.
+const CELESTIAL_PRISM: &str = "{2}, {T}: Add one mana of any color.";
+
+/// Exiles `cards` with Myr Welder ("This creature has all activated abilities of
+/// all cards exiled with it."), so it has their activated abilities, and readies
+/// it to tap.
+fn lend_to_welder(runner: &mut GameRunner, welder: ObjectId, cards: &[ObjectId]) {
+    for &exiled_id in cards {
+        move_to_zone(runner.state_mut(), exiled_id, Zone::Exile, &mut Vec::new());
+        runner.state_mut().exile_links.push(ExileLink {
+            exiled_id,
+            source_id: welder,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+    }
+    runner.state_mut().layers_dirty.mark_full();
+    flush_layers(runner.state_mut());
+    clear_summoning_sickness(runner, welder);
+}
+
+/// A costed source's untap on top: Staff of Compleation ("{T}, Pay 2 life: Add
+/// one mana of any color.") with its own "{5}: Untap this artifact.", or Myr
+/// Welder with Soliton's "{U}: Untap this creature." and Celestial Prism's
+/// "{2}, {T}: Add one mana of any color." exiled with it, floating the Prism's
+/// {2} beyond the untap's {U}.
+fn costed_source_untap(db: &CardDatabase, prism: bool) -> GameRunner {
+    let mut scenario = main_phase_scenario();
+    let (source, exiled, lands) = if prism {
+        let welder = scenario.add_real_card(P0, "Myr Welder", Zone::Battlefield, db);
+        let exiled = vec![
+            scenario
+                .add_creature_to_hand_from_oracle(P0, "Soliton", 3, 4, SOLITON)
+                .id(),
+            scenario
+                .add_artifact_to_hand_from_oracle(P0, "Celestial Prism", CELESTIAL_PRISM)
+                .id(),
+        ];
+        let islands: Vec<_> = (0..3)
+            .map(|_| scenario.add_real_card(P0, "Island", Zone::Battlefield, db))
+            .collect();
+        (welder, exiled, islands)
+    } else {
+        let staff = scenario
+            .add_artifact_from_oracle(P0, "Staff of Compleation", STAFF_OF_COMPLEATION)
+            .id();
+        let mountains: Vec<_> = (0..5)
+            .map(|_| scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db))
+            .collect();
+        (staff, Vec::new(), mountains)
+    };
+    let mut runner = scenario.build();
+    if prism {
+        lend_to_welder(&mut runner, source, &exiled);
+    }
+    for land in lands {
+        tap_for_mana(&mut runner, land);
+    }
+    let untap = untap_ability_index(&runner, source);
+    activate(&mut runner, source, untap, &[]);
+    assert!(mana_action(&runner, source).is_some() && !is_tapped(&runner, source));
+    runner
+}
+
+/// The hold reads a costed source without running its mana ability or a
+/// payment: the recommendation P0's client receives holds for the Staff's "Pay
+/// 2 life" and for the Prism's {2}, whose mana part reads as payable without
+/// running the payment, taking no legality, readiness or auto-payment copy of
+/// the game.
+#[test]
+fn a_costed_source_is_read_without_running_it() {
+    let Some(db) = shared_card_db() else { return };
+    for prism in [false, true] {
+        let runner = costed_source_untap(db, prism);
+        let state = runner.state();
+        let actions = legal_actions(state);
+        perf_counters::reset();
+        assert!(
+            !auto_pass_recommended_for_viewer(state, P0, &actions),
+            "Prism: {prism}: the window holds"
+        );
+        let work = perf_counters::snapshot();
+        assert_eq!(
+            (
+                work.state_clone_for_legality,
+                work.grouped_mana_readiness_state_clones,
+                work.strict_fast_path_mana_readiness_state_clones,
+                work.auto_payment_owned_state_clones,
+                work.priority_cast_probe_state_clones,
+            ),
+            (0, 0, 0, 0, 0),
+            "Prism: {prism}: no copy of the game"
+        );
+    }
+}
+
+/// The engine's own auto-pass reads the same hold. P0 taps Staff of Compleation
+/// ("{T}, Pay 2 life"), activates its "{5}: Untap this artifact." and copies it
+/// with Rings of Brighthearth, then sets auto-pass to the end of the turn over
+/// the copy, where the Staff is tapped. The copy untaps the Staff, and
+/// auto-pass stops at the original's window.
+#[test]
+fn auto_pass_stops_for_a_costed_source() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = main_phase_scenario();
+    let staff = scenario
+        .add_artifact_from_oracle(P0, "Staff of Compleation", STAFF_OF_COMPLEATION)
+        .id();
+    scenario.add_real_card(P0, "Rings of Brighthearth", Zone::Battlefield, db);
+    let mountains: Vec<_> = (0..6)
+        .map(|_| scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db))
+        .collect();
+    let mut runner = scenario.build();
+    for mountain in mountains {
+        tap_for_mana(&mut runner, mountain);
+    }
+    tap_for_mana(&mut runner, staff);
+    if !p0_has_priority(&runner) {
+        let choose = legal_actions(runner.state())
+            .into_iter()
+            .next()
+            .expect("the Staff's color choice offers an answer");
+        runner.act(choose).expect("choose a color");
+    }
+    let untap = untap_ability_index(&runner, staff);
+    activate(&mut runner, staff, untap, &[]);
+    client_drive(&mut runner, Rings::Pay, original_and_copy);
+    assert!(is_tapped(&runner, staff));
+
+    runner
+        .act(GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        })
+        .expect("P0 sets auto-pass");
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    runner.act(GameAction::PassPriority).expect("P1 passes");
+    assert!(p0_has_priority(&runner), "auto-pass stops at the original");
+    assert_eq!(runner.state().stack.len(), 1);
+    assert!(!is_tapped(&runner, staff), "the copy untapped the Staff");
 }
 
 /// Devoted Druid, verbatim.
