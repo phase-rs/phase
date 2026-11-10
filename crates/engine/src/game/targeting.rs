@@ -2997,8 +2997,12 @@ pub fn resolve_effect_player_ref(
                 state
                     .lki_by_incarnation
                     .get(&ability.source_id)
-                    .and_then(|by_incarnation| by_incarnation.values().next())
-                    .map(|source| source.owner)
+                    .and_then(|by_incarnation| {
+                        by_incarnation
+                            .iter()
+                            .max_by_key(|(&incarnation, _)| incarnation)
+                            .map(|(_, source)| source.owner)
+                    })
             }),
         // CR 109.5: The ability's original controller — fixed even when
         // `player_scope` iteration has rebound `ability.controller`.
@@ -9123,7 +9127,7 @@ mod tests {
             .lki_by_incarnation
             .entry(source)
             .or_default()
-            .insert(incarnation, older_snapshot);
+            .insert(incarnation, older_snapshot.clone());
         assert_eq!(
             resolve_effect_player_ref(&state, &ability, &TargetFilter::Owner),
             Some(PlayerId(1))
@@ -9133,7 +9137,7 @@ mod tests {
             .lki_by_incarnation
             .get_mut(&source)
             .unwrap()
-            .insert(incarnation, snapshot);
+            .insert(incarnation, snapshot.clone());
         assert_eq!(
             resolve_effect_player_ref(&state, &ability, &TargetFilter::Owner),
             Some(PlayerId(1))
@@ -9142,6 +9146,18 @@ mod tests {
         assert_eq!(
             resolve_effect_player_ref(&state, &ability, &TargetFilter::Owner),
             None
+        );
+        // CR 400.7 + CR 109.4: the fallback reads the newest incarnation, not an
+        // arbitrary map entry — ownership can be rewritten, so two incarnations
+        // legitimately disagree.
+        state
+            .lki_by_incarnation
+            .entry(source)
+            .or_default()
+            .extend([(incarnation, older_snapshot), (incarnation + 1, snapshot)]);
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::Owner),
+            Some(PlayerId(1))
         );
     }
 

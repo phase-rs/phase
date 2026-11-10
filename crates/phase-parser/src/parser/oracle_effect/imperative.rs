@@ -10377,8 +10377,14 @@ pub(super) fn parse_shuffle_ast(
                 // Shuffle it into its owner's library" must move the chosen
                 // creature, not the source.
                 let target = match target {
+                    // CR 608.2c: only a bare singular "it" has the source
+                    // fallback. A plural or demonstrative phrase ("them",
+                    // "those cards", "that card") names an earlier set/object
+                    // and must not silently become the ability's source.
                     TargetFilter::ParentTarget
-                        if !ctx.parent_target_available && !owner_context =>
+                        if !ctx.parent_target_available
+                            && !owner_context
+                            && object.trim().eq_ignore_ascii_case("it") =>
                     {
                         Some(TargetFilter::SelfRef)
                     }

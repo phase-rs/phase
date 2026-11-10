@@ -28226,6 +28226,27 @@ fn shuffle_compound_subject_into_owners_libraries() {
     );
 }
 
+/// CR 400.7e + CR 608.2c: only a bare singular "it" falls back to the ability's
+/// source when the chain established no chosen referent. A demonstrative or
+/// plural object phrase names an earlier set and must not become the source.
+#[test]
+fn shuffle_owner_library_source_fallback_is_bare_singular_it_only() {
+    for (text, expect_self_ref) in [
+        ("shuffle it into its owner's library", true),
+        ("shuffle that card into its owner's library", false),
+        ("shuffle them into their owners' libraries", false),
+    ] {
+        let clause = parse_effect_clause(text, &mut ParseContext::default());
+        let target = clause.effect.target_filter().cloned();
+        let has_self_ref = matches!(target, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            has_self_ref, expect_self_ref,
+            "{text:?} target={target:?} effect={:?}",
+            clause.effect
+        );
+    }
+}
+
 // -----------------------------------------------------------------------
 // Item 1: "It can't be regenerated" continuation
 // -----------------------------------------------------------------------

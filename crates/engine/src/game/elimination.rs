@@ -2036,6 +2036,12 @@ fn retire_pending_zone_change_contexts_owned_by(state: &mut GameState, player: P
             .logical_zone_change_group
             .retire_contexts_owned_by(player);
     }
+    // CR 800.4a: a staged owner can be hidden below the top
+    // `PostReplacement` delivery child, where the active-pair visitor cannot
+    // reach it. Identify the bounded owner first, retire the active pair, then
+    // retire that exact owner; retirement is idempotent, so an owner visited by
+    // both paths is not harmed.
+    let staged_owner = state.resolution_stack.staged_owner_identity();
     state
         .resolution_stack
         .visit_active_component_delivery_pair_mut(|pending| {
@@ -2044,6 +2050,15 @@ fn retire_pending_zone_change_contexts_owned_by(state: &mut GameState, player: P
                 .retire_contexts_owned_by(player);
         })
         .expect("context retirement visits only an identified component delivery pair");
+    if let Some(identity) = staged_owner {
+        state
+            .resolution_stack
+            .visit_staged_batch_owner_mut(&identity, |pending| {
+                pending
+                    .logical_zone_change_group
+                    .retire_contexts_owned_by(player);
+            });
+    }
 }
 
 /// CR 800.4a: A response prompt owned by a player who left cannot retain a
