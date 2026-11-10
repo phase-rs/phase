@@ -280,15 +280,21 @@ fn drain_priority_preferring_observed(
             WaitingFor::EffectZoneChoice { cards, .. } => {
                 consumed_effect_zone_choice = true;
                 observations.zone_choices.push(cards.clone());
-                let pick = preferred
-                    .iter()
-                    .copied()
-                    .find(|id| cards.contains(id))
-                    .or_else(|| cards.first().copied())
-                    .expect("zone choice candidate");
-                runner
-                    .act(GameAction::SelectCards { cards: vec![pick] })
-                    .expect("choose zone cards");
+                if cards.is_empty() {
+                    runner
+                        .act(GameAction::SelectCards { cards: vec![] })
+                        .expect("decline the empty private-scope choice");
+                } else {
+                    let pick = preferred
+                        .iter()
+                        .copied()
+                        .find(|id| cards.contains(id))
+                        .or_else(|| cards.first().copied())
+                        .expect("zone choice candidate");
+                    runner
+                        .act(GameAction::SelectCards { cards: vec![pick] })
+                        .expect("choose zone cards");
+                }
             }
             WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
                 if let Some(pref) = preferred.first() {
@@ -1121,6 +1127,69 @@ fn next_of_kin_singleton_prompt_presence_does_not_leak_hand_match() {
     }
 }
 
+/// CR 402.3 + CR 107.1c: with no public Aura, zero vs one hidden Aura must
+/// still present the same observable prompt. The chooser selects none in both,
+/// so the public result is identical and the opponent envelope is identical.
+#[test]
+fn stormkeld_zero_public_matches_keeps_the_same_observer_sequence() {
+    let zero_eligible = open_stormkeld_choice(0, 2, 0);
+    let one_eligible = open_stormkeld_choice(1, 1, 0);
+
+    for runner in [&zero_eligible, &one_eligible] {
+        let WaitingFor::EffectZoneChoice {
+            cards,
+            count,
+            min_count,
+            up_to,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("a mixed private scope must prompt even with zero public matches");
+        };
+        assert!(*up_to && *min_count == 0, "the chooser may select none");
+        assert!(
+            cards.len() <= 1,
+            "the chooser sees the hidden eligibility privately; got {cards:?}"
+        );
+        if cards.is_empty() {
+            assert_eq!(*count, 0);
+        }
+
+        let opponent = filter_state_for_viewer(runner.state(), P1);
+        let WaitingFor::EffectZoneChoice {
+            cards: opponent_cards,
+            count: opponent_count,
+            min_count: opponent_min_count,
+            ..
+        } = &opponent.waiting_for
+        else {
+            panic!("opponent must still see the prompt envelope");
+        };
+        assert!(opponent_cards.is_empty());
+        assert_eq!((*opponent_count, *opponent_min_count), (0, 0));
+    }
+
+    for mut runner in [zero_eligible, one_eligible] {
+        runner
+            .act(GameAction::SelectCards { cards: vec![] })
+            .expect("the chooser may select none");
+        runner.advance_until_stack_empty();
+        assert!(
+            !runner
+                .state()
+                .objects
+                .values()
+                .any(|object| object.zone == Zone::Battlefield
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Aura")),
+            "selecting none must not put a hidden Aura onto the battlefield"
+        );
+    }
+}
+
 /// Invalid-zone control: a lesser-mana-value creature that is only in exile is
 /// not named by Next of Kin, so the optional trigger must find no legal card,
 /// move nothing, and install no delayed reattachment.
@@ -1161,8 +1230,13 @@ fn next_of_kin_ignores_a_creature_outside_hand_and_command() {
         "the dies trigger must reach its \"you may\" prompt before the no-legal-card assertion"
     );
     assert!(
-        !consumed_choice && observations.zone_choices.is_empty(),
-        "no legal card means no card-selection prompt"
+        consumed_choice,
+        "a mixed private scope must keep the prompt present even with no legal card"
+    );
+    assert_eq!(
+        observations.zone_choices,
+        vec![Vec::new()],
+        "the empty prompt must offer no candidates"
     );
     assert_eq!(
         runner.state().objects[&exiled].zone,
@@ -1354,8 +1428,8 @@ fn next_of_kin_mixed_choice_redacts_private_eligibility() {
 /// hidden eligibility difference.
 #[test]
 fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
-    let zero_eligible = open_stormkeld_choice(0, 2);
-    let one_eligible = open_stormkeld_choice(1, 1);
+    let zero_eligible = open_stormkeld_choice(0, 2, 1);
+    let one_eligible = open_stormkeld_choice(1, 1, 1);
 
     for runner in [&zero_eligible, &one_eligible] {
         let WaitingFor::EffectZoneChoice { zone, cards, .. } = &runner.state().waiting_for else {
@@ -1490,13 +1564,15 @@ fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
 /// Aura. The parsed target is `InAnyZone [Graveyard, Hand]` — a public-first
 /// mixed scope — so this fixture exercises the producer's private-zone
 /// selection rather than Next of Kin's already-Hand-first order.
-fn open_stormkeld_choice(hand_auras: usize, lands: usize) -> GameRunner {
+fn open_stormkeld_choice(hand_auras: usize, lands: usize, graveyard_auras: usize) -> GameRunner {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    scenario
-        .add_creature_to_graveyard(P0, "Grave Aura", 0, 0)
-        .as_enchantment()
-        .with_subtypes(vec!["Aura"]);
+    for index in 0..graveyard_auras {
+        scenario
+            .add_creature_to_graveyard(P0, &format!("Grave Aura {index}"), 0, 0)
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"]);
+    }
     for index in 0..hand_auras {
         scenario
             .add_creature_to_hand(P0, &format!("Hand Aura {index}"), 0, 0)

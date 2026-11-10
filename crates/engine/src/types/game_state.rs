@@ -16449,16 +16449,13 @@ impl GameState {
     fn migrate_restored_effect_zone_choice_scope(&mut self) {
         let current_is_public = match &self.waiting_for {
             WaitingFor::EffectZoneChoice {
-                zone, effect_kind, ..
-            } if matches!(
-                effect_kind,
-                crate::types::ability::EffectKind::ChangeZone
+                zone,
+                effect_kind:
+                    crate::types::ability::EffectKind::ChangeZone
                     | crate::types::ability::EffectKind::ChangeZoneAll
-                    | crate::types::ability::EffectKind::BounceAll
-            ) =>
-            {
-                zone.is_public()
-            }
+                    | crate::types::ability::EffectKind::BounceAll,
+                ..
+            } => zone.is_public(),
             // A sacrifice/discard/attach prompt is validated against its own
             // zone; a later ChangeZone instruction in the same chain must not
             // rewrite it (Strefan's Blood-token sacrifice).
@@ -16468,46 +16465,31 @@ impl GameState {
             return;
         }
 
-        fn walk(ability: &crate::types::ability::ResolvedAbility, private: &mut Option<Zone>) {
-            if private.is_some() {
-                return;
-            }
+        // Only the EXACT paused instruction may supply the scope. Walking
+        // later/nested instructions would let a public prompt (a BounceAll
+        // ordering, say) inherit a private zone from a following ChangeZone
+        // and reject its own offered ids.
+        fn producer_private_zone(ability: &crate::types::ability::ResolvedAbility) -> Option<Zone> {
             let target = match &ability.effect {
                 crate::types::ability::Effect::ChangeZone { target, .. }
-                | crate::types::ability::Effect::ChangeZoneAll { target, .. } => Some(target),
-                _ => None,
+                | crate::types::ability::Effect::ChangeZoneAll { target, .. } => target,
+                _ => return None,
             };
-            if let Some(target) = target {
-                if let Some(zone) = target
-                    .extract_zones()
-                    .into_iter()
-                    .find(|zone| !zone.is_public())
-                {
-                    *private = Some(zone);
-                    return;
-                }
-            }
-            if let Some(sub) = ability.sub_ability.as_deref() {
-                walk(sub, private);
-            }
-            if let Some(else_ability) = ability.else_ability.as_deref() {
-                walk(else_ability, private);
-            }
+            target
+                .extract_zones()
+                .into_iter()
+                .find(|zone| !zone.is_public())
         }
 
-        let mut private = None;
-        if let Some(continuation) = self.active_ability_continuation() {
-            walk(&continuation.chain, &mut private);
-        }
-        if private.is_none() {
-            if let Some(ability) = self
-                .resolving_stack_entry
-                .as_ref()
-                .and_then(|entry| entry.ability())
-            {
-                walk(ability, &mut private);
-            }
-        }
+        let private = self
+            .active_ability_continuation()
+            .and_then(|continuation| producer_private_zone(&continuation.chain))
+            .or_else(|| {
+                self.resolving_stack_entry
+                    .as_ref()
+                    .and_then(|entry| entry.ability())
+                    .and_then(producer_private_zone)
+            });
         if let Some(private) = private {
             if let WaitingFor::EffectZoneChoice { zone, .. } = &mut self.waiting_for {
                 *zone = private;
