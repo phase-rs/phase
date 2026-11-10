@@ -5002,14 +5002,23 @@ fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<E
 /// after the head; production descends into declared children, so the head's
 /// single filter is not the whole declaration.
 fn clause_has_child_targets(clause: &super::ParsedEffectClause) -> bool {
-    let mut child = clause.sub_ability.as_deref();
-    while let Some(definition) = child {
+    let mut children: Vec<&crate::types::ability::AbilityDefinition> = Vec::new();
+    if let Some(child) = clause.sub_ability.as_deref() {
+        children.push(child);
+    }
+    while let Some(definition) = children.pop() {
         if definition.target_choice_timing == TargetChoiceTiming::Stack
             && (definition.effect.target_filter().is_some() || definition.multi_target.is_some())
         {
             return true;
         }
-        child = definition.sub_ability.as_deref();
+        if let Some(child) = definition.sub_ability.as_deref() {
+            children.push(child);
+        }
+        if let Some(child) = definition.else_ability.as_deref() {
+            children.push(child);
+        }
+        children.extend(definition.mode_abilities.iter());
     }
     false
 }
@@ -11373,10 +11382,10 @@ mod tests {
         let effect = "Target creature you control deals damage equal to its power to target creature or planeswalker you don't control";
         let clause =
             crate::parser::oracle_effect::parse_effect_clause(effect, &mut ctx.clone_throwaway());
-        assert!(clause
-            .sub_ability
-            .as_ref()
-            .is_some_and(|child| { child.effect.target_filter().is_some() }));
+        assert!(clause.sub_ability.as_ref().is_some_and(|child| {
+            child.target_choice_timing == super::TargetChoiceTiming::Stack
+                && (child.effect.target_filter().is_some() || child.multi_target.is_some())
+        }));
         assert!(
             probe_declared_target_slot(effect, &ctx).is_none(),
             "a separately targeted child is part of the declaration"
