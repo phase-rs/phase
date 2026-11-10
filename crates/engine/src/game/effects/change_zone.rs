@@ -735,14 +735,14 @@ fn owner_reach(filter: &TargetFilter, player: &ControllerRef) -> OwnerReach {
             OwnerReach {
                 named: 0,
                 all: 0,
-                excluded: ALL_ZONES_MASK,
+                excluded: 0,
             },
             |acc, child| {
                 let child = owner_reach(child, player);
                 OwnerReach {
-                    named: (acc.named | child.named) & !child.excluded,
-                    all: (acc.all | child.all) & !child.excluded,
-                    excluded: acc.excluded & child.excluded,
+                    named: acc.named | child.named,
+                    all: acc.all | child.all,
+                    excluded: 0,
                 }
             },
         ),
@@ -755,9 +755,18 @@ fn owner_reach(filter: &TargetFilter, player: &ControllerRef) -> OwnerReach {
                 TargetFilter::Not { filter: inner } => owner_reach(inner, player),
                 _ => {
                     let excluded = match filter.as_ref() {
-                        TargetFilter::Typed(leg) => leg_zone_constraints(leg)
-                            .as_ref()
-                            .map_or(0, |zones| zones_mask(zones.iter())),
+                        TargetFilter::Typed(leg)
+                            if leg.properties.iter().all(|property| {
+                                matches!(
+                                    property,
+                                    FilterProp::InZone { .. } | FilterProp::InAnyZone { .. }
+                                )
+                            }) =>
+                        {
+                            leg_zone_constraints(leg)
+                                .as_ref()
+                                .map_or(0, |zones| zones_mask(zones.iter()))
+                        }
                         _ => 0,
                     };
                     OwnerReach {
@@ -3890,7 +3899,9 @@ mod tests {
                 properties,
             })
         };
-        let leaf = scoped(vec![FilterProp::InZone { zone: Zone::Library }]);
+        let leaf = scoped(vec![FilterProp::InZone {
+            zone: Zone::Library,
+        }]);
         let composed = TargetFilter::And {
             filters: vec![
                 scoped(vec![FilterProp::InAnyZone {

@@ -25702,6 +25702,10 @@ declare_game_state! {
     /// CR 303.4f: approved Aura entry parked before the host choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_aura_entry: Option<Box<PendingAuraEntry>>,
+    /// Event index where a concession's staged batch suffix begins, so the
+    /// canonical tail scans exactly the unscanned drain output.
+    #[serde(skip)]
+    pub concession_suffix_scan_from: Option<usize>,
     /// Turtle Team-Up: a hero-choice batch parked mid-application by a nested
     /// replacement prompt (regeneration, Library of Leng). Boxed like its
     /// `pending_discard_batch` sibling — `GameState` moves by value under a
@@ -34235,6 +34239,7 @@ impl GameState {
             pending_discard_batch: None,
             pending_entry_attack_event: None,
             pending_aura_entry: None,
+            concession_suffix_scan_from: None,
             pending_hero_event: None,
             pending_horde_reveal: None,
             pending_damage_post_loss: None,
@@ -38395,6 +38400,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolution_source_relatch: _,
         pending_entry_attack_event: _,
         pending_aura_entry: _,
+        concession_suffix_scan_from: _,
     } = s;
 }
 

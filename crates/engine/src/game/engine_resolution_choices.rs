@@ -2321,7 +2321,7 @@ pub(super) fn handle_resolution_choice(
                 WaitingFor::EntryAttackTargetChoice {
                     object_id: parked_object,
                     ..
-                } if parked_object == object_id => {
+                } if parked_object == object_id && state.pending_entry_attack_event.is_none() => {
                     // The resumed delivery completed without surfacing a new
                     // prompt: return to the ordinary boundary.
                     state.waiting_for = WaitingFor::Priority { player };

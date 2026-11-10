@@ -3944,7 +3944,7 @@ fn deliver_replaced_zone_change_inner(
         from,
         to,
         cause,
-        attach_to,
+        mut attach_to,
         enter_transformed: should_transform,
         enter_tapped: should_tap,
         enters_attacking,
@@ -4149,6 +4149,94 @@ fn deliver_replaced_zone_change_inner(
         // redundant check below skip re-marking `Full`. `false` for both the
         // library-placement branch and the merge-survivor branch, neither of
         // which is analyzed by that carve-out.
+        // CR 303.4f + 303.4g: every approved battlefield entry of an unhosted
+        // Aura revalidates the host here, before the move. Named-choice resumes
+        // and replacement resumes reach this same gate.
+        if attach_to.is_none()
+            && to == Zone::Battlefield
+            && from != Zone::Battlefield
+            && from != Zone::Stack
+            && split_component_survivor.is_none()
+        {
+            if let Some(enchant_filter) = aura_enchant_filter(state, object_id) {
+                let aura_controller = ctrl_override
+                    .or_else(|| {
+                        state
+                            .entering_or_live_object(object_id)
+                            .map(|object| object.controller)
+                    })
+                    .unwrap_or(PlayerId(0));
+                let legal_targets = legal_aura_attachment_targets(
+                    state,
+                    object_id,
+                    entering_object_projection(state, object_id),
+                    aura_controller,
+                    &enchant_filter,
+                );
+                match legal_targets.as_slice() {
+                    [] => {
+                        if from == Zone::Stack {
+                            let result = move_object_with_terminal(
+                                state,
+                                ZoneMoveRequest::effect(
+                                    object_id,
+                                    Zone::Graveyard,
+                                    source_id.unwrap_or(object_id),
+                                ),
+                                events,
+                            );
+                            return match result {
+                                ZoneMoveTerminalResult::Completed(_) => ZoneDeliveryResult::Done,
+                                ZoneMoveTerminalResult::NeedsChoice(player) => {
+                                    ZoneDeliveryResult::NeedsChoice(player)
+                                }
+                                ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
+                                    ZoneDeliveryResult::NeedsChoice(aura_controller)
+                                }
+                            };
+                        }
+                        return ZoneDeliveryResult::Done;
+                    }
+                    [TargetRef::Object(id)] => {
+                        attach_to = Some(AttachTarget::Object(*id));
+                    }
+                    [TargetRef::Player(id)] => {
+                        attach_to = Some(AttachTarget::Player(*id));
+                    }
+                    _ => {
+                        let aura_source = source_id.unwrap_or(object_id);
+                        state.pending_aura_entry =
+                            Some(Box::new(crate::types::game_state::PendingAuraEntry {
+                                event: approved_entry_event,
+                                source_id: aura_source,
+                                duration: duration.cloned(),
+                                exile_controller,
+                                track_exiled_by_source,
+                                library_placement: library_placement.clone(),
+                            }));
+                        state.waiting_for = WaitingFor::ReturnAsAuraTarget {
+                            player: aura_controller,
+                            source_id: aura_source,
+                            returned_id: object_id,
+                            legal_targets,
+                            pending_effect: Box::new(ResolvedAbility::new(
+                                Effect::Attach {
+                                    attachment: TargetFilter::SelfRef,
+                                    target: TargetFilter::Any,
+                                    selection: AttachSelection::AtResolution {
+                                        count: AttachCardinality::One,
+                                    },
+                                },
+                                Vec::new(),
+                                aura_source,
+                                aura_controller,
+                            )),
+                        };
+                        return ZoneDeliveryResult::NeedsChoice(aura_controller);
+                    }
+                }
+            }
+        }
         // CR 508.4: the entering creature's defender is chosen as it enters, so
         // the required choice belongs inside the delivery boundary. Pausing here
         // leaves the object in its origin zone; if the intended controller leaves

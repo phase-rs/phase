@@ -222,7 +222,8 @@ pub fn concede(
         DepartureTriggers::CollectedByDeparture,
         events,
     );
-    let scan_from = events.len();
+    let batch_scan = state.concession_suffix_scan_from.take();
+    let scan_from = batch_scan.unwrap_or(events.len());
     let settled_payment = prevented_aura_host
         || if prevented_payment {
             match departing_entry_payment.as_ref() {
@@ -241,8 +242,12 @@ pub fn concede(
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
         return Ok(Some(scan_from));
     }
-    if !resume_canceled_change_zone && !settled_payment {
+    if !resume_canceled_change_zone && !settled_payment && batch_scan.is_none() {
         return Ok(None);
+    }
+    // The canonical tail owns SBA/trigger convergence for the unscanned drain.
+    if batch_scan.is_some() {
+        return Ok(Some(scan_from));
     }
     super::engine::resume_pending_continuation_if_priority(state, events)?;
     Ok(Some(scan_from))
@@ -885,6 +890,7 @@ pub(crate) fn eliminate_players(
                 }
                 let next = players::next_player(state, player);
                 state.waiting_for = WaitingFor::Priority { player: next };
+                state.concession_suffix_scan_from = Some(events.len());
                 for _ in 0..4 {
                     if state.active_batch_delivery().is_none()
                         || !matches!(state.waiting_for, WaitingFor::Priority { .. })
