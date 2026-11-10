@@ -24,6 +24,8 @@
 //! eligible is not offered, so an "If you do" rider stays closed and an "If you
 //! don't" branch runs.
 //! CR 707.2 + CR 613.1: a stored face is that face's copiable values.
+//! CR 707.8a: a token copy of a double-faced object has both faces, up as its
+//! source was, with the copy's exceptions on both (CR 707.9a/b/d).
 
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
@@ -32,16 +34,17 @@ use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::move_to_zone;
-use engine::types::ability::{ChosenAttribute, TargetRef};
+use engine::types::ability::{ChosenAttribute, Effect, TargetFilter, TargetRef, TriggerDefinition};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::resolved_commands::ResolvedRulesCommand;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
@@ -58,6 +61,22 @@ const ANTHEM: &str = "Glorious Anthem";
 const VALENTIN: &str = "Valentin, Dean of the Vein";
 const LISETTE: &str = "Lisette, Dean of the Root";
 const PAINTER: &str = "Painter's Servant";
+const PROWLER: &str = "Kessig Prowler";
+const PREDATOR: &str = "Sinuous Predator";
+const SAGE: &str = "Sage of Ancient Lore";
+const WEREWOLF_OF_ANCIENT_HUNGER: &str = "Werewolf of Ancient Hunger";
+const FELDON: &str = "Feldon of the Third Path";
+const STIFLE: &str = "Stifle";
+const SOUL_SEPARATOR: &str = "Soul Separator";
+const THING: &str = "Thing in the Ice";
+const HORROR: &str = "Awoken Horror";
+const KIKI: &str = "Kiki-Jiki, Mirror Breaker";
+const CACKLING: &str = "Cackling Counterpart";
+const MIRRORWEAVE: &str = "Mirrorweave";
+const MYSTIC_REFLECTION: &str = "Mystic Reflection";
+const RAISE_THE_ALARM: &str = "Raise the Alarm";
+const DOUBLING_SEASON: &str = "Doubling Season";
+const BEARS: &str = "Grizzly Bears";
 
 const AUNTIE_ORACLE: &str = "Menace\nWhenever Grub attacks, you may blight 1. If you do, create a tapped and attacking token that's a copy of the blighted creature, except it has \"At the beginning of the end step, sacrifice this token.\"\nAt the beginning of your first main phase, you may pay {B}. If you do, transform Grub.";
 const NEXUS_ORACLE: &str = "At the beginning of combat on your turn, draw a card. Then you may exile an artifact or creature card from your hand. If you do, create a token that's a copy of the exiled card, except it's a 3/3 Golem artifact creature in addition to its other types.";
@@ -75,6 +94,23 @@ const ANTHEM_ORACLE: &str = "Creatures you control get +1/+1.";
 const VALENTIN_ORACLE: &str = "Menace, lifelink\nIf a nontoken creature an opponent controls would die, exile it instead. When you do, you may pay {2}. If you do, create a 1/1 black and green Pest creature token with \"When this token dies, you gain 1 life.\"";
 const LISETTE_ORACLE: &str = "Whenever you gain life, you may pay {1}. If you do, put a +1/+1 counter on each creature you control and those creatures gain trample until end of turn.";
 const PAINTER_ORACLE: &str = "As this creature enters, choose a color.\nAll cards that aren't on the battlefield, spells, and permanents are the chosen color in addition to their other colors.";
+const PROWLER_ORACLE: &str = "{4}{G}: Transform this creature.";
+const PREDATOR_ORACLE: &str = "This creature can't be blocked by more than one creature.";
+const SAGE_ORACLE: &str = "Sage of Ancient Lore's power and toughness are each equal to the number of cards in your hand.\nWhen this creature enters, draw a card.\nAt the beginning of each upkeep, if no spells were cast last turn, transform this creature.";
+const WEREWOLF_OF_ANCIENT_HUNGER_ORACLE: &str = "Vigilance, trample\nWerewolf of Ancient Hunger's power and toughness are each equal to the total number of cards in all players' hands.\nAt the beginning of each upkeep, if a player cast two or more spells last turn, transform this creature.";
+const FELDON_ORACLE: &str = "{2}{R}, {T}: Create a token that's a copy of target creature card in your graveyard, except it's an artifact in addition to its other types. It gains haste. Sacrifice it at the beginning of the next end step.";
+const STIFLE_ORACLE: &str =
+    "Counter target activated or triggered ability. (Mana abilities can't be targeted.)";
+const SOUL_SEPARATOR_ORACLE: &str = "{5}, {T}, Sacrifice this artifact: Exile target creature card from your graveyard. Create a token that's a copy of that card, except it's 1/1, it's a Spirit in addition to its other types, and it has flying. Create a black Zombie creature token with power equal to that card's power and toughness equal to that card's toughness.";
+const THING_ORACLE: &str = "Defender\nThis creature enters with four ice counters on it.\nWhenever you cast an instant or sorcery spell, remove an ice counter from this creature. Then if it has no ice counters on it, transform it.";
+const HORROR_ORACLE: &str = "When this creature transforms into Awoken Horror, return all non-Horror creatures to their owners' hands.";
+const KIKI_ORACLE: &str = "Haste\n{T}: Create a token that's a copy of target nonlegendary creature you control, except it has haste. Sacrifice it at the beginning of the next end step.";
+const CACKLING_ORACLE: &str = "Create a token that's a copy of target creature you control.\nFlashback {5}{U}{U} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+const MIRRORWEAVE_ORACLE: &str =
+    "Each other creature becomes a copy of target nonlegendary creature until end of turn.";
+const MYSTIC_REFLECTION_ORACLE: &str = "Choose target nonlegendary creature. The next time one or more creatures or planeswalkers enter this turn, they enter as copies of the chosen creature.\nForetell {U} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)";
+const RAISE_THE_ALARM_ORACLE: &str = "Create two 1/1 white Soldier creature tokens.";
+const DOUBLING_SEASON_ORACLE: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
 
 /// A board at `phase`, with stocked libraries so a real draw step can't end the
 /// game (CR 704.5b).
@@ -307,6 +343,10 @@ fn auntie_copies_the_blighted_creature_as_a_tapped_attacking_token() {
         is_attacking(&runner, created[0]),
         "CR 508.4: the token enters attacking"
     );
+    assert!(
+        token.back_face.is_none() && !token.transformed,
+        "CR 707.8a: a copy of a single-faced creature is a single-faced token"
+    );
 }
 
 /// The reported half of #769: the token is gone at the end step, the original
@@ -405,6 +445,15 @@ fn auntie_blighting_herself_leaves_a_token_auntie() {
     assert!(
         token.counters.is_empty(),
         "CR 707.2: counters aren't copied"
+    );
+    assert!(
+        token.transformed,
+        "CR 707.8a: the copy of a transformed Grub enters back face up"
+    );
+    assert_eq!(
+        stored(&runner, created[0]),
+        face(MATRIARCH, 2, 1, false),
+        "CR 707.8a: the token's other face is the Matriarch"
     );
 }
 
@@ -1683,4 +1732,903 @@ fn a_replayed_transform_stores_the_same_printed_face() {
         face(MATRIARCH, 2, 1, false),
         "CR 707.2: both store the printed Matriarch"
     );
+}
+
+// ===== CR 707.8a: a token copy of a double-faced object is double-faced =====
+
+/// The stored face of `id`.
+fn stored_face(runner: &GameRunner, id: ObjectId) -> &BackFaceData {
+    runner.state().objects[&id]
+        .back_face
+        .as_ref()
+        .expect("the other face is stored")
+}
+
+/// CR 707.9a: whether `trigger` is the copy's "At the beginning of the end
+/// step, sacrifice this token."
+fn is_end_step_self_sacrifice(trigger: &TriggerDefinition) -> bool {
+    trigger.mode == TriggerMode::Phase
+        && trigger.phase == Some(Phase::End)
+        && trigger.execute.as_ref().is_some_and(|execute| {
+            matches!(
+                &*execute.effect,
+                Effect::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            )
+        })
+}
+
+/// Whether the face up on `id` has the copy's end-step sacrifice trigger.
+fn shown_sacrifices_itself(runner: &GameRunner, id: ObjectId) -> bool {
+    runner.state().objects[&id]
+        .trigger_definitions
+        .iter_all()
+        .any(|entry| is_end_step_self_sacrifice(entry.definition()))
+}
+
+/// Whether the face stored on `id` has the copy's end-step sacrifice trigger.
+fn stored_sacrifices_itself(runner: &GameRunner, id: ObjectId) -> bool {
+    stored_face(runner, id)
+        .trigger_definitions
+        .iter_all()
+        .any(is_end_step_self_sacrifice)
+}
+
+/// Activates `source`'s first ability, paying automatically.
+fn activate(runner: &mut GameRunner, source: ObjectId) {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the activation must be legal");
+}
+
+/// Passes priority until something is on the stack.
+fn pass_until_stack(runner: &mut GameRunner) {
+    for _ in 0..80 {
+        if !runner.state().stack.is_empty() {
+            return;
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority must succeed");
+    }
+    panic!("nothing reached the stack");
+}
+
+/// Passes into this turn's end step, declaring no attackers. `pass_into`
+/// cannot answer the declare-attackers prompt.
+fn drive_to_end(runner: &mut GameRunner) {
+    for _ in 0..40 {
+        if runner.state().phase == Phase::End {
+            return;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    })
+                    .expect("declaring no attackers must succeed");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority must succeed");
+            }
+            other => panic!("unexpected prompt before the end step: {other:?}"),
+        }
+    }
+    panic!("never reached the end step; at {:?}", runner.state().phase);
+}
+
+/// The id of the top stack entry, asserting the ability's source.
+fn top_of_stack_from(runner: &GameRunner, source: ObjectId) -> ObjectId {
+    let entry = runner.state().stack.back().expect("the stack has an entry");
+    assert_eq!(
+        entry.source_id, source,
+        "the top of the stack is {source:?}'s"
+    );
+    entry.id
+}
+
+/// Grub, Notorious Auntie attacks with a Bear beside her, and her trigger asks
+/// whether to blight. P0 holds two Stifles, two Islands and a Swamp.
+fn auntie_about_to_blight() -> (GameRunner, ObjectId, ObjectId, [ObjectId; 2]) {
+    let (mut runner, grub, (bear, stifles)) = grub_board(Phase::BeginCombat, |scenario, db| {
+        assert_oracle(db, STIFLE, STIFLE_ORACLE);
+        let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+        let stifles = [
+            scenario.add_real_card(P0, STIFLE, Zone::Hand, db),
+            scenario.add_real_card(P0, STIFLE, Zone::Hand, db),
+        ];
+        scenario.add_basic_land(P0, ManaColor::Blue);
+        scenario.add_basic_land(P0, ManaColor::Blue);
+        scenario.add_basic_land(P0, ManaColor::Black);
+        (bear, stifles)
+    });
+    flip(&mut runner, grub);
+    attack_with(&mut runner, &[grub]);
+    both_pass(&mut runner);
+    (runner, grub, bear, stifles)
+}
+
+/// The maintainer's row. CR 707.8a: Grub's copy of herself is back face up with
+/// the Matriarch stored. Stifle ("Counter target activated or triggered
+/// ability.") counters its sacrifice trigger at both end steps ("the end step",
+/// CR 603.2). At P0's next first main phase the token's own trigger pays {B} and
+/// transforms it into Grub, Storied Matriarch, whose "transforms into" trigger
+/// returns Grub's card. CR 707.9a: the sacrifice exception is on both faces, so
+/// the Matriarch is sacrificed at that turn's end step.
+#[test]
+fn grubs_copy_of_herself_transforms_into_the_matriarch() {
+    let (mut runner, grub, bear, stifles) = auntie_about_to_blight();
+    blight(&mut runner, &[grub, bear], grub);
+    assert_settled(&runner);
+    settle(&mut runner);
+    assert_eq!(
+        runner.state().objects[&grub].zone,
+        Zone::Graveyard,
+        "CR 704.5f: the counter kills Grub"
+    );
+    let token = tokens(&runner)[0];
+    assert_eq!(shown(&runner, token), face(AUNTIE, 2, 1, false));
+    assert!(
+        runner.state().objects[&token].transformed,
+        "CR 707.8a: the copy enters back face up"
+    );
+    assert_eq!(stored(&runner, token), face(MATRIARCH, 2, 1, false));
+    assert!(stored_face(&runner, token)
+        .keywords
+        .contains(&Keyword::Menace));
+
+    // P0's end step: the token's sacrifice trigger, Stifled.
+    pass_until_stack(&mut runner);
+    assert_eq!(runner.state().phase, Phase::End);
+    assert_eq!(runner.state().active_player, P0);
+    let entry = top_of_stack_from(&runner, token);
+    runner.cast(stifles[0]).target_object(entry).resolve();
+    assert_eq!(runner.state().objects[&token].zone, Zone::Battlefield);
+
+    // P1's end step: the trigger fires again; P1 passes and P0 Stifles it.
+    pass_until_stack(&mut runner);
+    assert_eq!(runner.state().phase, Phase::End);
+    assert_eq!(runner.state().active_player, P1);
+    let entry = top_of_stack_from(&runner, token);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    runner
+        .act(GameAction::PassPriority)
+        .expect("passing priority must succeed");
+    runner.cast(stifles[1]).target_object(entry).resolve();
+    assert_eq!(runner.state().objects[&token].zone, Zone::Battlefield);
+
+    // P0's next first main phase: the token's own trigger pays {B}.
+    pass_until_stack(&mut runner);
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P0);
+    top_of_stack_from(&runner, token);
+    both_pass(&mut runner);
+    decide(&mut runner, true);
+    settle(&mut runner);
+    let obj = &runner.state().objects[&token];
+    assert_eq!(obj.name, MATRIARCH, "CR 701.27a: the token transforms");
+    assert!(!obj.transformed, "CR 712.8d: the front face is up");
+    assert_eq!(
+        obj.effective_mana_value(),
+        3,
+        "CR 712.8d: the front face's mana value"
+    );
+    assert!(
+        shown_sacrifices_itself(&runner, token),
+        "CR 707.9a: the Matriarch face has the sacrifice exception"
+    );
+    assert_eq!(stored(&runner, token), face(AUNTIE, 2, 1, false));
+    assert!(
+        stored_sacrifices_itself(&runner, token),
+        "CR 707.9a: the stored Auntie keeps the sacrifice exception"
+    );
+    let WaitingFor::TriggerTargetSelection { target_slots, .. } =
+        runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "CR 701.27e: the Matriarch's trigger asks for its target; got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(target_slots[0].legal_targets, vec![TargetRef::Object(grub)]);
+    select_goblin(&mut runner, grub);
+    both_pass(&mut runner);
+    assert_eq!(runner.state().objects[&grub].zone, Zone::Hand);
+
+    // That turn's end step: the Matriarch is sacrificed.
+    drive_to_end(&mut runner);
+    top_of_stack_from(&runner, token);
+    runner.advance_until_stack_empty();
+    assert!(
+        !runner.state().battlefield.contains(&token),
+        "CR 707.9a: the Matriarch face has the sacrifice trigger too"
+    );
+}
+
+/// CR 733: the journal replay of Grub's self-copy installs the same faces as the
+/// birth did, and those are the faces CR 707.8a derives.
+#[test]
+fn a_replayed_double_faced_copy_has_the_same_faces() {
+    let (mut runner, grub, bear, _) = auntie_about_to_blight();
+    decide(&mut runner, true);
+    let mut replay = runner.state().clone();
+    let journal_start = replay.resolved_rules_journal.entries().len();
+    runner
+        .act(GameAction::SelectCards { cards: vec![grub] })
+        .expect("blighting Grub must succeed");
+    assert_settled(&runner);
+    assert_eq!(minus_counters(&runner, bear), 0);
+    let token = tokens(&runner)[0];
+    let command = runner
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(journal_start)
+        .filter_map(|entry| entry.command.clone())
+        .find_map(|command| match command {
+            ResolvedRulesCommand::TokenCreation(command) if command.object.object_id == token => {
+                Some(command)
+            }
+            _ => None,
+        })
+        .expect("reach-guard: the token birth is journaled");
+
+    engine::game::effects::token::apply_resolved_token_creation(&mut replay, &command)
+        .expect("the replay applies");
+
+    let original = &runner.state().objects[&token];
+    let replayed = &replay.objects[&token];
+    assert_eq!(replayed.back_face, original.back_face);
+    assert_eq!(replayed.transformed, original.transformed);
+    assert!(original.transformed);
+    assert_eq!(stored(&runner, token), face(MATRIARCH, 2, 1, false));
+}
+
+/// A saved and reloaded game keeps the copy's faces and the face up.
+#[test]
+fn a_reloaded_double_faced_copy_keeps_its_faces() {
+    let (mut runner, grub, bear, _) = auntie_about_to_blight();
+    blight(&mut runner, &[grub, bear], grub);
+    let token = tokens(&runner)[0];
+    let json = serde_json::to_string(runner.state()).expect("the game serializes");
+    assert!(
+        json.contains("double_faced"),
+        "reach-guard: the journaled copy spec carries the faces"
+    );
+    let mut loaded: GameState = serde_json::from_str(&json).expect("the game deserializes");
+    engine::game::printed_cards::rehydrate_game_from_card_db(
+        &mut loaded,
+        load_db().expect("card db"),
+    );
+
+    let obj = &loaded.objects[&token];
+    assert!(obj.transformed, "the token is still back face up");
+    let stored = obj.back_face.as_ref().expect("the Matriarch is stored");
+    assert_eq!(
+        (stored.name.as_str(), stored.power, stored.toughness),
+        (MATRIARCH, Some(2), Some(1))
+    );
+}
+
+/// CR 707.8a + CR 707.9a: Kessig Prowler ("{4}{G}: Transform this creature.")
+/// is blighted and dies; its copy enters front face up with Sinuous Predator
+/// stored, transforms by its own ability, and keeps the sacrifice exception.
+#[test]
+fn a_front_up_copy_transforms_by_its_own_ability() {
+    let (mut runner, grub, prowler) = grub_board(Phase::BeginCombat, |scenario, db| {
+        assert_oracle(db, PROWLER, PROWLER_ORACLE);
+        assert_oracle(db, PREDATOR, PREDATOR_ORACLE);
+        for _ in 0..5 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        scenario.add_real_card(P0, PROWLER, Zone::Battlefield, db)
+    });
+    flip(&mut runner, grub);
+    attack_with(&mut runner, &[grub]);
+    both_pass(&mut runner);
+    blight(&mut runner, &[grub, prowler], prowler);
+    assert_settled(&runner);
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&prowler].zone, Zone::Graveyard);
+    let token = tokens(&runner)[0];
+    assert_eq!(shown(&runner, token), face(PROWLER, 2, 1, false));
+    assert!(!runner.state().objects[&token].transformed);
+    assert_eq!(stored(&runner, token), face(PREDATOR, 4, 4, false));
+
+    activate(&mut runner, token);
+    top_of_stack_from(&runner, token);
+    both_pass(&mut runner);
+    settle(&mut runner);
+    assert_eq!(shown(&runner, token), face(PREDATOR, 4, 4, false));
+    assert!(runner.state().objects[&token].transformed);
+    assert!(
+        shown_sacrifices_itself(&runner, token),
+        "CR 707.9a: the Sinuous Predator face has the exception"
+    );
+    assert!(
+        stored_sacrifices_itself(&runner, token),
+        "CR 707.9a: the stored Kessig Prowler keeps the exception"
+    );
+    assert!(
+        is_attacking(&runner, token),
+        "CR 712.18: transforming keeps it attacking"
+    );
+
+    pass_into(&mut runner, Phase::End);
+    runner.advance_until_stack_empty();
+    assert!(
+        !runner.state().battlefield.contains(&token),
+        "CR 707.9a: the Sinuous Predator face is sacrificed"
+    );
+}
+
+/// CR 707.2 + CR 613.1: the copy's other face is read from the donor's stored
+/// face, so Goblin Chieftain's bonus on the flipped Grub is not in it. Grub
+/// survives the blight as a 2/1, and the legend rule (CR 704.5j) keeps the
+/// token.
+#[test]
+fn a_double_faced_copy_stores_the_donors_copiable_face() {
+    let (mut runner, grub, chieftain) = grub_board(Phase::BeginCombat, |scenario, db| {
+        assert_oracle(db, CHIEFTAIN, CHIEFTAIN_ORACLE);
+        scenario.add_real_card(P0, CHIEFTAIN, Zone::Battlefield, db)
+    });
+    settle(&mut runner);
+    flip(&mut runner, grub);
+    settle(&mut runner);
+    assert_eq!(shown(&runner, grub), face(AUNTIE, 3, 2, true));
+    attack_with(&mut runner, &[grub]);
+    both_pass(&mut runner);
+    blight(&mut runner, &[grub, chieftain], grub);
+    let token = tokens(&runner)
+        .into_iter()
+        .find(|id| *id != grub)
+        .expect("the token exists");
+    let WaitingFor::ChooseLegend { candidates, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "CR 704.5j: two Grubs ask for the legend rule; got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let mut candidates = candidates;
+    candidates.sort();
+    let mut expected = vec![grub, token];
+    expected.sort();
+    assert_eq!(candidates, expected);
+    runner
+        .act(GameAction::ChooseLegend { keep: token })
+        .expect("keeping the token must succeed");
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&grub].zone, Zone::Graveyard);
+    assert_eq!(stored(&runner, token), face(MATRIARCH, 2, 1, false));
+
+    turn(&mut runner, token, MATRIARCH);
+    let obj = &runner.state().objects[&token];
+    assert_eq!((obj.base_power, obj.base_toughness), (Some(2), Some(1)));
+    assert_eq!(
+        shown(&runner, token),
+        face(MATRIARCH, 3, 2, true),
+        "CR 613.1: the Chieftain applies once, over the printed 2/1"
+    );
+    assert_eq!(stored(&runner, token), face(AUNTIE, 2, 1, false));
+}
+
+/// CR 707.8a + CR 707.9b: Feldon of the Third Path copies Grub's card in the
+/// graveyard, which left the battlefield transformed under Goblin Chieftain. The
+/// token is double-faced with Feldon's artifact exception on both faces; Feldon's
+/// "It gains haste" is an effect on the token, not a face value.
+#[test]
+fn feldons_copy_of_a_double_faced_card_has_the_exception_on_both_faces() {
+    let (mut runner, (grub, chieftain, feldon)) = board(Phase::Upkeep, |scenario, db| {
+        assert_oracle(db, FELDON, FELDON_ORACLE);
+        assert_oracle(db, CHIEFTAIN, CHIEFTAIN_ORACLE);
+        for _ in 0..4 {
+            scenario.add_basic_land(P0, ManaColor::Red);
+        }
+        (
+            scenario.add_real_card(P0, MATRIARCH, Zone::Battlefield, db),
+            scenario.add_real_card(P0, CHIEFTAIN, Zone::Exile, db),
+            scenario.add_real_card(P0, FELDON, Zone::Battlefield, db),
+        )
+    });
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&feldon)
+        .expect("Feldon exists")
+        .summoning_sick = false;
+    flip(&mut runner, grub);
+    put(&mut runner, chieftain, Zone::Battlefield);
+    put(&mut runner, grub, Zone::Graveyard);
+    assert_eq!(shown(&runner, grub), face(MATRIARCH, 2, 1, false));
+    assert_eq!(stored(&runner, grub), face(AUNTIE, 2, 1, false));
+
+    // Grub's card is the only creature card in the graveyard, so it is the
+    // target without a prompt.
+    activate(&mut runner, feldon);
+    top_of_stack_from(&runner, feldon);
+    both_pass(&mut runner);
+    let token = tokens(&runner)[0];
+    select_goblin(&mut runner, grub);
+    both_pass(&mut runner);
+    put(&mut runner, chieftain, Zone::Exile);
+    let obj = &runner.state().objects[&token];
+    assert_eq!(obj.name, MATRIARCH);
+    assert!(obj.card_types.core_types.contains(&CoreType::Artifact));
+    let hidden = stored_face(&runner, token);
+    assert_eq!(stored(&runner, token), face(AUNTIE, 2, 1, false));
+    assert_eq!(
+        hidden.card_types.core_types,
+        vec![CoreType::Creature, CoreType::Artifact]
+    );
+    assert!(hidden.keywords.contains(&Keyword::Menace));
+
+    runner.advance_to_phase(Phase::PreCombatMain);
+    top_of_stack_from(&runner, token);
+    both_pass(&mut runner);
+    decide(&mut runner, true);
+    settle(&mut runner);
+    let obj = &runner.state().objects[&token];
+    assert!(obj.transformed, "the token pays {{R}} and transforms");
+    assert_eq!(shown(&runner, token), face(AUNTIE, 2, 1, true));
+    assert!(obj.card_types.core_types.contains(&CoreType::Artifact));
+
+    drive_to_end(&mut runner);
+    runner.advance_until_stack_empty();
+    assert!(
+        !runner.state().battlefield.contains(&token),
+        "Feldon's delayed trigger sacrifices it"
+    );
+}
+
+/// Nexus of Becoming exiles Kessig Prowler from hand. CR 707.8a + CR 707.9b: the
+/// token is a 3/3 Golem artifact on both faces.
+#[test]
+fn nexus_copy_of_a_double_faced_card_transforms_as_a_golem() {
+    let (mut runner, prowler) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, PROWLER, PROWLER_ORACLE);
+        scenario.add_artifact_from_oracle(P0, "Nexus of Becoming", NEXUS_ORACLE);
+        scenario.add_land_to_library_top(P0, "Forest");
+        for _ in 0..5 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        scenario.add_real_card(P0, PROWLER, Zone::Hand, db)
+    });
+    runner.advance_to_phase(Phase::BeginCombat);
+    both_pass(&mut runner);
+    decide(&mut runner, true);
+    assert_settled(&runner);
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&prowler].zone, Zone::Exile);
+    let token = tokens(&runner)[0];
+    assert_eq!(shown(&runner, token), face(PROWLER, 3, 3, false));
+    let hidden = stored_face(&runner, token);
+    assert_eq!(stored(&runner, token), face(PREDATOR, 3, 3, false));
+    assert!(hidden.card_types.core_types.contains(&CoreType::Artifact));
+    assert!(hidden.card_types.subtypes.iter().any(|s| s == "Golem"));
+
+    activate(&mut runner, token);
+    both_pass(&mut runner);
+    settle(&mut runner);
+    let obj = &runner.state().objects[&token];
+    assert_eq!(shown(&runner, token), face(PREDATOR, 3, 3, false));
+    assert_eq!(
+        obj.card_types.core_types,
+        vec![CoreType::Creature, CoreType::Artifact]
+    );
+    for subtype in ["Golem", "Eldrazi", "Werewolf"] {
+        assert!(
+            obj.card_types.subtypes.iter().any(|s| s == subtype),
+            "{subtype}"
+        );
+    }
+}
+
+/// Soul Separator's ruling: "The listed exceptions will apply to both the front
+/// and back faces of the Spirit token."
+#[test]
+fn soul_separators_exceptions_apply_to_both_faces() {
+    let (mut runner, (separator, prowler)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, SOUL_SEPARATOR, SOUL_SEPARATOR_ORACLE);
+        assert_oracle(db, PROWLER, PROWLER_ORACLE);
+        (
+            scenario.add_real_card(P0, SOUL_SEPARATOR, Zone::Battlefield, db),
+            scenario.add_real_card(P0, PROWLER, Zone::Graveyard, db),
+        )
+    });
+    fund(&mut runner, ManaType::Colorless, 5);
+    // The Prowler is the only creature card in the graveyard, so it is the
+    // target without a prompt.
+    activate(&mut runner, separator);
+    top_of_stack_from(&runner, separator);
+    both_pass(&mut runner);
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&prowler].zone, Zone::Exile);
+    let copies: Vec<_> = tokens(&runner)
+        .into_iter()
+        .filter(|id| runner.state().objects[id].name == PROWLER)
+        .collect();
+    assert_eq!(copies.len(), 1, "one copy of the exiled card");
+    let token = copies[0];
+    let spirit_flier = |types: &engine::types::card_type::CardType, keywords: &[Keyword]| {
+        types.subtypes.iter().any(|s| s == "Spirit") && keywords.contains(&Keyword::Flying)
+    };
+    let obj = &runner.state().objects[&token];
+    assert_eq!(shown(&runner, token), face(PROWLER, 1, 1, false));
+    assert!(spirit_flier(&obj.card_types, &obj.keywords));
+    let hidden = stored_face(&runner, token);
+    assert_eq!(stored(&runner, token), face(PREDATOR, 1, 1, false));
+    assert!(spirit_flier(&hidden.card_types, &hidden.keywords));
+
+    turn(&mut runner, token, PREDATOR);
+    let obj = &runner.state().objects[&token];
+    assert_eq!(shown(&runner, token), face(PREDATOR, 1, 1, false));
+    assert!(spirit_flier(&obj.card_types, &obj.keywords));
+}
+
+/// CR 614.1a: Doubling Season's added batch carries the faces too.
+#[test]
+fn doubled_double_faced_copies_each_have_both_faces() {
+    let (mut runner, grub, prowler) = grub_board(Phase::BeginCombat, |scenario, db| {
+        assert_oracle(db, DOUBLING_SEASON, DOUBLING_SEASON_ORACLE);
+        scenario.add_real_card(P0, DOUBLING_SEASON, Zone::Battlefield, db);
+        scenario.add_real_card(P0, PROWLER, Zone::Battlefield, db)
+    });
+    flip(&mut runner, grub);
+    attack_with(&mut runner, &[grub]);
+    both_pass(&mut runner);
+    blight(&mut runner, &[grub, prowler], prowler);
+    assert_settled(&runner);
+    assert_eq!(
+        runner.state().objects[&prowler].zone,
+        Zone::Graveyard,
+        "CR 704.5f: the doubled counters kill the Prowler"
+    );
+    let created = tokens(&runner);
+    assert_eq!(
+        created.len(),
+        2,
+        "CR 614.1a: Doubling Season doubles the token"
+    );
+    for token in created {
+        assert_eq!(stored(&runner, token), face(PREDATOR, 4, 4, false));
+    }
+}
+
+/// CR 707.9b: Thing in the Ice enters with four ice counters, so its copy is
+/// born on the non-liminal seam, which folds the exception onto the stored face
+/// itself.
+#[test]
+fn a_non_liminal_double_faced_copy_has_the_exception_on_both_faces() {
+    let (mut runner, grub, thing) = grub_board(Phase::BeginCombat, |scenario, db| {
+        assert_oracle(db, THING, THING_ORACLE);
+        assert_oracle(db, HORROR, HORROR_ORACLE);
+        scenario.add_real_card(P0, THING, Zone::Battlefield, db)
+    });
+    flip(&mut runner, grub);
+    attack_with(&mut runner, &[grub]);
+    both_pass(&mut runner);
+    blight(&mut runner, &[grub, thing], thing);
+    assert_settled(&runner);
+    let token = tokens(&runner)[0];
+    assert_eq!(
+        runner.state().objects[&token]
+            .counters
+            .get(&CounterType::Generic("ice".to_string()))
+            .copied(),
+        Some(4),
+        "reach-guard: the copy enters with its ice counters"
+    );
+    assert_eq!(stored_face(&runner, token).name, HORROR);
+    assert!(
+        stored_sacrifices_itself(&runner, token),
+        "CR 707.9b: the stored Awoken Horror has the exception"
+    );
+
+    turn(&mut runner, token, HORROR);
+    pass_into(&mut runner, Phase::End);
+    runner.advance_until_stack_empty();
+    assert!(!runner.state().battlefield.contains(&token));
+    assert_eq!(runner.state().objects[&thing].zone, Zone::Battlefield);
+}
+
+/// CR 707.9a: Kiki-Jiki's "except it has haste" reaches the stored face, so the
+/// copy keeps haste after it transforms.
+#[test]
+fn kiki_jikis_haste_reaches_the_stored_face() {
+    let (mut runner, (kiki, prowler)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, KIKI, KIKI_ORACLE);
+        assert_oracle(db, PROWLER, PROWLER_ORACLE);
+        for _ in 0..5 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        (
+            scenario.add_real_card(P0, KIKI, Zone::Battlefield, db),
+            scenario.add_real_card(P0, PROWLER, Zone::Battlefield, db),
+        )
+    });
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&kiki)
+        .expect("Kiki-Jiki exists")
+        .summoning_sick = false;
+    // The Prowler is the only nonlegendary creature P0 controls, so it is the
+    // target without a prompt.
+    activate(&mut runner, kiki);
+    top_of_stack_from(&runner, kiki);
+    both_pass(&mut runner);
+    settle(&mut runner);
+    let token = tokens(&runner)[0];
+    assert_eq!(shown(&runner, token), face(PROWLER, 2, 1, true));
+    assert_eq!(stored(&runner, token), face(PREDATOR, 4, 4, true));
+    assert_eq!(runner.state().objects[&prowler].zone, Zone::Battlefield);
+
+    activate(&mut runner, token);
+    both_pass(&mut runner);
+    settle(&mut runner);
+    let obj = &runner.state().objects[&token];
+    assert_eq!(obj.name, PREDATOR);
+    assert!(obj.keywords.contains(&Keyword::Haste));
+    assert!(obj.base_keywords.contains(&Keyword::Haste));
+}
+
+/// CR 707.8a: a front-face-up donor whose stored face came from two transforms
+/// still gives a double-faced copy.
+#[test]
+fn a_round_tripped_donor_gives_a_double_faced_copy() {
+    let (mut runner, grub, prowler) = grub_board(Phase::BeginCombat, |scenario, db| {
+        assert_oracle(db, PROWLER, PROWLER_ORACLE);
+        scenario.add_real_card(P0, PROWLER, Zone::Battlefield, db)
+    });
+    flip(&mut runner, grub);
+    turn(&mut runner, prowler, PREDATOR);
+    turn(&mut runner, prowler, PROWLER);
+    assert_eq!(
+        stored_face(&runner, prowler).layout_kind,
+        None,
+        "reach-guard: the stored face came from a transform"
+    );
+    attack_with(&mut runner, &[grub]);
+    both_pass(&mut runner);
+    blight(&mut runner, &[grub, prowler], prowler);
+    assert_settled(&runner);
+    let token = tokens(&runner)[0];
+    assert!(!runner.state().objects[&token].transformed);
+    assert_eq!(stored(&runner, token), face(PREDATOR, 4, 4, false));
+}
+
+/// CR 707.8a + CR 613.2: under Mirrorweave ("Each other creature becomes a copy
+/// of target nonlegendary creature until end of turn.") Kessig Prowler is a
+/// Grizzly Bears, so Cackling Counterpart's copy has a Grizzly Bears on both
+/// faces.
+#[test]
+fn a_copy_of_a_copied_double_faced_permanent_has_the_copied_values_on_both_faces() {
+    let (mut runner, (prowler, bears, weave, cackling)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, PROWLER, PROWLER_ORACLE);
+            assert_oracle(db, MIRRORWEAVE, MIRRORWEAVE_ORACLE);
+            assert_oracle(db, CACKLING, CACKLING_ORACLE);
+            assert_eq!(
+                db.get_face_by_name(BEARS)
+                    .expect("Grizzly Bears is in the fixture")
+                    .oracle_text,
+                None,
+                "Grizzly Bears is vanilla"
+            );
+            (
+                scenario.add_real_card(P0, PROWLER, Zone::Battlefield, db),
+                scenario.add_real_card(P0, BEARS, Zone::Battlefield, db),
+                scenario.add_real_card(P0, MIRRORWEAVE, Zone::Hand, db),
+                scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
+            )
+        });
+    fund(&mut runner, ManaType::Blue, 7);
+    runner.cast(weave).target_object(bears).resolve();
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&prowler].name, BEARS);
+    assert_eq!(stored_face(&runner, prowler).name, PREDATOR);
+
+    runner.cast(cackling).target_object(prowler).resolve();
+    settle(&mut runner);
+    let token = tokens(&runner)[0];
+    assert_eq!(shown(&runner, token), face(BEARS, 2, 2, false));
+    assert_eq!(stored(&runner, token), face(BEARS, 2, 2, false));
+    turn(&mut runner, token, BEARS);
+}
+
+/// The equal-values sibling: Mirrorweave targeting a second Kessig Prowler makes
+/// the first a copy of it, so its copiable values equal its own printed ones.
+/// CR 707.8a + CR 613.2: the copy effect still applies, so Cackling
+/// Counterpart's copy stores Kessig Prowler, not Sinuous Predator.
+#[test]
+fn a_copy_of_a_double_faced_permanent_copying_its_twin_stores_the_copied_face() {
+    let (mut runner, (first, second, weave, cackling)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, PROWLER, PROWLER_ORACLE);
+            assert_oracle(db, MIRRORWEAVE, MIRRORWEAVE_ORACLE);
+            assert_oracle(db, CACKLING, CACKLING_ORACLE);
+            (
+                scenario.add_real_card(P0, PROWLER, Zone::Battlefield, db),
+                scenario.add_real_card(P0, PROWLER, Zone::Battlefield, db),
+                scenario.add_real_card(P0, MIRRORWEAVE, Zone::Hand, db),
+                scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
+            )
+        });
+    fund(&mut runner, ManaType::Blue, 7);
+    runner.cast(weave).target_object(second).resolve();
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&first].name, PROWLER);
+    assert_eq!(stored_face(&runner, first).name, PREDATOR);
+
+    runner.cast(cackling).target_object(first).resolve();
+    settle(&mut runner);
+    let token = tokens(&runner)[0];
+    assert_eq!(stored(&runner, token), face(PROWLER, 2, 1, false));
+    turn(&mut runner, token, PROWLER);
+}
+
+/// The last sentence of CR 707.8a: tokens that enter as copies through Mystic
+/// Reflection's replacement are not double-faced. They copy Sinuous Predator,
+/// the face up, whose mana value as a copy of a back face is 0 (CR 202.3b +
+/// CR 712.8e).
+#[test]
+fn tokens_entering_as_copies_of_a_transformed_permanent_are_single_faced() {
+    let (mut runner, (prowler, reflection, alarm)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, PROWLER, PROWLER_ORACLE);
+        assert_oracle(db, MYSTIC_REFLECTION, MYSTIC_REFLECTION_ORACLE);
+        assert_oracle(db, RAISE_THE_ALARM, RAISE_THE_ALARM_ORACLE);
+        (
+            scenario.add_real_card(P0, PROWLER, Zone::Battlefield, db),
+            scenario.add_real_card(P0, MYSTIC_REFLECTION, Zone::Hand, db),
+            scenario.add_real_card(P0, RAISE_THE_ALARM, Zone::Hand, db),
+        )
+    });
+    turn(&mut runner, prowler, PREDATOR);
+    fund(&mut runner, ManaType::Blue, 2);
+    fund(&mut runner, ManaType::White, 2);
+    runner.cast(reflection).target_object(prowler).resolve();
+    runner.cast(alarm).resolve();
+    settle(&mut runner);
+
+    let created = tokens(&runner);
+    assert_eq!(created.len(), 2, "Raise the Alarm makes two tokens");
+    for token in created {
+        let obj = &runner.state().objects[&token];
+        assert_eq!(shown(&runner, token), face(PREDATOR, 4, 4, false));
+        assert!(
+            obj.back_face.is_none(),
+            "CR 707.8a: not a double-faced token"
+        );
+        assert!(!obj.transformed);
+        assert_eq!(obj.effective_mana_value(), 0);
+    }
+}
+
+/// CR 707.8a + CR 712.8f: a copy of Valentin, Dean of the Vein cast as Lisette,
+/// Dean of the Root is Lisette with Valentin stored, and the legend rule then
+/// applies (CR 704.5j).
+#[test]
+fn a_copy_of_a_modal_card_cast_back_face_up_is_back_face_up() {
+    let (mut runner, (card, cackling)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
+        assert_oracle(db, LISETTE, LISETTE_ORACLE);
+        assert_oracle(db, CACKLING, CACKLING_ORACLE);
+        (
+            scenario.add_real_card(P0, VALENTIN, Zone::Hand, db),
+            scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
+        )
+    });
+    cast_as_lisette(&mut runner, card);
+    assert_eq!(shown(&runner, card), face(LISETTE, 4, 4, false));
+    fund(&mut runner, ManaType::Blue, 3);
+    runner.cast(cackling).target_object(card).commit();
+    both_pass(&mut runner);
+    settle(&mut runner);
+
+    let token = tokens(&runner)[0];
+    let obj = &runner.state().objects[&token];
+    assert_eq!(obj.name, LISETTE);
+    assert!(obj.modal_back_face, "CR 712.8f: the back face is up");
+    assert!(!obj.transformed);
+    assert_eq!(stored(&runner, token), face(VALENTIN, 1, 1, false));
+    let WaitingFor::ChooseLegend { candidates, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "CR 704.5j: two Lisettes ask for the legend rule; got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let mut candidates = candidates;
+    candidates.sort();
+    let mut expected = vec![card, token];
+    expected.sort();
+    assert_eq!(candidates, expected);
+    runner
+        .act(GameAction::ChooseLegend { keep: card })
+        .expect("keeping the original must succeed");
+    assert!(!runner.state().battlefield.contains(&token));
+    assert_eq!(runner.state().objects[&card].zone, Zone::Battlefield);
+}
+
+/// CR 707.9d + Soul Separator's ruling: "If the copied creature card has an
+/// ability that defines its power and toughness, such as that of Sage of
+/// Ancient Lore, the Spirit token will still have base power and toughness
+/// 1/1." The exceptions apply to both faces, so Werewolf of Ancient Hunger's
+/// power/toughness ability is not copied either.
+#[test]
+fn soul_separators_copy_of_sage_of_ancient_lore_stays_1_1_on_both_faces() {
+    let (mut runner, (separator, sage)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, SOUL_SEPARATOR, SOUL_SEPARATOR_ORACLE);
+        assert_oracle(db, SAGE, SAGE_ORACLE);
+        assert_oracle(
+            db,
+            WEREWOLF_OF_ANCIENT_HUNGER,
+            WEREWOLF_OF_ANCIENT_HUNGER_ORACLE,
+        );
+        scenario.add_real_card(P1, BEARS, Zone::Hand, db);
+        scenario.add_real_card(P1, BEARS, Zone::Hand, db);
+        (
+            scenario.add_real_card(P0, SOUL_SEPARATOR, Zone::Battlefield, db),
+            scenario.add_real_card(P0, SAGE, Zone::Graveyard, db),
+        )
+    });
+    let has_cda = |obj: &engine::game::game_object::GameObject| {
+        obj.static_definitions
+            .iter_all()
+            .any(|definition| definition.characteristic_defining)
+    };
+    let face_has_cda = |face: &BackFaceData| {
+        face.static_definitions
+            .iter_all()
+            .any(|definition| definition.characteristic_defining)
+    };
+    assert!(
+        has_cda(&runner.state().objects[&sage]) && face_has_cda(stored_face(&runner, sage)),
+        "reach-guard: both printed faces define their power and toughness"
+    );
+    fund(&mut runner, ManaType::Colorless, 5);
+    // Sage is the only creature card in the graveyard, so it is the target
+    // without a prompt.
+    activate(&mut runner, separator);
+    top_of_stack_from(&runner, separator);
+    both_pass(&mut runner);
+    let token = tokens(&runner)
+        .into_iter()
+        .find(|id| runner.state().objects[id].name == SAGE)
+        .expect("the copy of Sage exists");
+    // The copy's own "When this creature enters, draw a card."
+    top_of_stack_from(&runner, token);
+    both_pass(&mut runner);
+    assert_settled(&runner);
+    settle(&mut runner);
+    let in_hands: usize = runner.state().players.iter().map(|p| p.hand.len()).sum();
+    assert_eq!(in_hands, 3, "reach-guard: a CDA would read 3 here");
+    assert_eq!(shown(&runner, token), face(SAGE, 1, 1, false));
+    assert!(!has_cda(&runner.state().objects[&token]));
+    assert!(!face_has_cda(stored_face(&runner, token)));
+
+    turn(&mut runner, token, WEREWOLF_OF_ANCIENT_HUNGER);
+    assert_eq!(
+        shown(&runner, token),
+        face(WEREWOLF_OF_ANCIENT_HUNGER, 1, 1, false)
+    );
+    assert!(!has_cda(&runner.state().objects[&token]));
 }

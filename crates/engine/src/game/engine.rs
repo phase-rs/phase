@@ -8901,6 +8901,10 @@ fn seed_representative_fodder(
             controller: owner,
             // Source-less fodder mint from a captured profile; empty mods are stamp-proof.
             donor: None,
+            // CR 732.2a + CR 707.8a: `derived_fodder_class` admits no class with a member
+            // that is double-faced by `transform::stored_double_face`, so no minted member
+            // has an other face for CR 707.8a to carry.
+            double_faced: None,
         }),
     };
     crate::game::effects::token_copy::drive_copy_token_batches(

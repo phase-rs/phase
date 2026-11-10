@@ -1,6 +1,8 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::ObjectIncarnationRefExt;
-use crate::game::game_object::{DisplayIdentity, DisplaySource, GameObject};
+use crate::game::game_object::{
+    BackFaceData, DisplayIdentity, DisplaySource, GameObject, MergeKind,
+};
 use crate::game::layers::{compute_current_copiable_values, remove_core_type, remove_subtype_set};
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
@@ -9,7 +11,7 @@ use crate::types::ability::{
     EntryAttackDestination, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
     TriggerCondition, TriggerDefinition,
 };
-use crate::types::card::PrintedLoyalty;
+use crate::types::card::{LayoutKind, PrintedLoyalty};
 #[cfg(test)]
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::GameEvent;
@@ -18,8 +20,11 @@ use crate::types::game_state::{
     PendingCounterPostAction, PendingLiminalEntryResume, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
+use crate::types::keywords::Keyword;
+use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
+    CopiedDoubleFaces, CopiedFaceUp, CopyTokenSpec, EtbTapState, ProposedEvent,
+    TokenCharacteristics,
 };
 use crate::types::resolution::ChildStackDepth;
 use crate::types::resolved_commands::{
@@ -260,6 +265,8 @@ pub fn resolve(
     // CR 616.1 choice.
     let mut remaining = VecDeque::with_capacity(copy_sources.len());
     for source in copy_sources {
+        // CR 707.8a: read before `source.values` moves into the spec.
+        let double_faced = copied_double_faces(state, &source);
         remaining.push_back(PendingCopyTokenBatch {
             owner: token_owner,
             count,
@@ -283,6 +290,7 @@ pub fn resolve(
                 // CR 608.2h + CR 707.9b: carry the donor incarnation Step 1
                 // bound so donor-referential exceptions halve donor values.
                 donor: Some(source.incarnation),
+                double_faced,
             }),
         });
     }
@@ -385,6 +393,130 @@ pub(crate) fn copy_source(
             CopySource::last_known(state, captured_own_source(ability)?)
         }
     }
+}
+
+/// CR 707.8a: the faces a token copy of `source` gets. `None` unless the copy
+/// source is a live double-faced permanent or double-faced card whose faces the
+/// token can carry; the token is then single-faced, with the copiable values of
+/// the face that's up (CR 707.8).
+///
+/// [`transform::stored_double_face`](crate::game::transform::stored_double_face)
+/// answers whether the donor is double-faced. The checks here are the copy's own:
+/// the donor must still be the object the copy read, a meld card's back face is
+/// not an other face a token can have, and the copied values must leave the
+/// token's one stored-face slot free.
+pub(crate) fn copied_double_faces(
+    state: &GameState,
+    source: &CopySource,
+) -> Option<CopiedDoubleFaces> {
+    // CR 400.7: the faces are read from the object the copy read its values
+    // from; a departed donor read through last-known information gives none.
+    let obj = state
+        .objects
+        .get(&source.incarnation.object_id)
+        .filter(|obj| ObjectIncarnationRef::from_object(obj) == source.incarnation)?;
+    // CR 712.1 + CR 111.10i: only a double-faced card or double-faced token has an
+    // other face. `stored_double_face` refuses a face-down stash (CR 708.2), a
+    // merged permanent (CR 730.2i), a Room and every single-faced alternative.
+    let stored = crate::game::transform::stored_double_face(obj)?;
+    // Meld is refused. CR 712.4b: a meld card's back face determines
+    // characteristics only as half of a melded permanent; CR 712.4c: meld cards
+    // can't transform. `Mutate | Augment` were already refused above (CR 730.2i).
+    match obj.merge_kind {
+        Some(MergeKind::Meld) => return None,
+        Some(MergeKind::Mutate | MergeKind::Augment) | None => {}
+    }
+    if stored.layout_kind == Some(LayoutKind::Meld) {
+        return None;
+    }
+    // CR 709.5b + CR 722.2b: values copied from a Room or a preparation creature
+    // carry their alternative characteristics, which the token stores in the same
+    // slot an other face would take.
+    if source.values.room_halves.is_some() || source.values.prepare_face.is_some() {
+        return None;
+    }
+    // CR 712.8d/e/f: the token is up on the face its source showed.
+    let up = match (obj.transformed, obj.modal_back_face) {
+        (false, false) => CopiedFaceUp::Front,
+        (true, false) => CopiedFaceUp::TransformedBack,
+        (false, true) => CopiedFaceUp::ModalBack,
+        // CR 701.27c + CR 707.8a: reachable when Valentin, Dean of the Vein is cast
+        // as Lisette, Dean of the Root and Moonmist ("Transform all Humans.")
+        // transforms her: `transform::swap_displayed_face` sets `transformed`
+        // without clearing `modal_back_face`, so the front face is up with both
+        // flags set. Refused, keeping the single-faced copy, rather than guessed.
+        (true, true) => return None,
+    };
+    let hidden = if obj.layer1_copy_effect.is_some() {
+        // CR 707.8a + CR 613.2: each face is the copied object's face "as modified
+        // by any other copy effects that apply to that object", so under a Layer-1
+        // copy effect the other face takes the copied values, as the face up does.
+        let mut scratch = scratch_face_object();
+        crate::game::printed_cards::install_copiable_values_as_base(&mut scratch, &source.values);
+        let mut face = crate::game::printed_cards::snapshot_object_base_face(&scratch);
+        face.layout_kind = stored.layout_kind;
+        face.is_swap_snapshot = stored.is_swap_snapshot;
+        face
+    } else {
+        // CR 707.2: the stored face is that face's copiable values.
+        stored.clone()
+    };
+    Some(CopiedDoubleFaces {
+        hidden: Box::new(hidden),
+        up,
+    })
+}
+
+/// CR 707.8a + CR 707.9a/b/d: a double-faced copy token's stored face with the
+/// copy's exceptions applied, as they apply to the face that's up. Soul
+/// Separator's rulings: "If you copy a double-faced creature card with Soul
+/// Separator's ability, the resulting Spirit token will be a double-faced token.
+/// The listed exceptions will apply to both the front and back faces of the
+/// Spirit token." and "If the copied creature card has an ability that defines
+/// its power and toughness, such as that of Sage of Ancient Lore, the Spirit
+/// token will still have base power and toughness 1/1."
+///
+/// `cda_overriding` prunes the characteristic-defining abilities the exceptions
+/// override (CR 707.9d), `extra_keywords` are granted (CR 707.9a) and `stamped`
+/// are stamped through the one copy-exception folder (CR 707.9b). Every one of
+/// them writes the face's base, so the exceptions survive the token's own
+/// transforms. Returns the face unchanged when all three are empty.
+pub(crate) fn fold_copy_exceptions_into_face(
+    face: &BackFaceData,
+    cda_overriding: &[ContinuousModification],
+    extra_keywords: &[Keyword],
+    stamped: &[ContinuousModification],
+    all_creature_types: &[String],
+) -> BackFaceData {
+    if cda_overriding.is_empty() && extra_keywords.is_empty() && stamped.is_empty() {
+        return face.clone();
+    }
+    let mut scratch = scratch_face_object();
+    crate::game::printed_cards::apply_back_face_to_object(&mut scratch, face.clone());
+    let pruned = super::copy_exception::prune_copy_exception_overridden_cdas(
+        &scratch.base_static_definitions,
+        cda_overriding,
+    );
+    scratch.base_static_definitions = Arc::new(pruned.definitions.clone());
+    scratch.static_definitions = Arc::new(pruned.definitions).into();
+    super::token::grant_copy_extra_keywords(&mut scratch, extra_keywords);
+    apply_immediate_copy_token_modifications_to_object(&mut scratch, stamped, all_creature_types);
+    let mut folded = crate::game::printed_cards::snapshot_object_base_face(&scratch);
+    folded.layout_kind = face.layout_kind;
+    folded.is_swap_snapshot = face.is_swap_snapshot;
+    folded
+}
+
+/// A detached object a stored face is installed on to be read back as a face. It
+/// never enters `GameState`.
+fn scratch_face_object() -> GameObject {
+    GameObject::new(
+        ObjectId(0),
+        CardId(0),
+        PlayerId(0),
+        String::new(),
+        Zone::Battlefield,
+    )
 }
 
 /// CR 707.2: whether `effect` copies its ability's own source: "a copy of
@@ -743,6 +875,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         source_id,
         controller,
         donor,
+        double_faced,
     } = copy;
     let name = values.name.clone();
     // CR 508.4: a resume carries the earlier ids so they are republished, but a
@@ -814,6 +947,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 source_id,
                 controller,
                 donor,
+                double_faced: double_faced.clone(),
             });
             // CR 707.9b/9c: this seam only runs when every exception is
             // stampable onto copiable values before entry, so the body is
@@ -945,6 +1079,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             source_id,
             controller,
             donor,
+            double_faced: double_faced.clone(),
         });
         // CR 707.9: unlike the liminal seam, this one applies its exceptions
         // AFTER the birth through `apply_token_modifications`, which is pausable,
@@ -971,6 +1106,21 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 entry_timestamp,
                 resulting_tapped,
             );
+            // CR 707.9b: this seam applies its exceptions to the displayed face
+            // later, through the pausable `apply_token_modifications`, so the
+            // stored face takes them here, at the birth, before any of that
+            // path's pause points.
+            if copy_spec.double_faced.is_some() && !copy_spec.additional_modifications.is_empty() {
+                if let Some(face) = token.back_face.take() {
+                    token.back_face = Some(fold_copy_exceptions_into_face(
+                        &face,
+                        &[],
+                        &[],
+                        &copy_spec.additional_modifications,
+                        &all_creature_types,
+                    ));
+                }
+            }
             ObjectIncarnationRef::from_object(token)
         });
 
@@ -2399,6 +2549,7 @@ mod tests {
             source_id,
             controller: PlayerId(0),
             donor: None,
+            double_faced: None,
         };
         let mut events = Vec::new();
         let status = apply_copy_token_after_replacement(
@@ -2515,6 +2666,7 @@ mod tests {
             source_id,
             controller: PlayerId(0),
             donor: None,
+            double_faced: None,
         }
     }
 
@@ -6459,6 +6611,229 @@ mod tests {
         assert!(
             state.battlefield.contains(&squirrel),
             "the Squirrel survives the end step"
+        );
+    }
+
+    /// A front-face-up transform card on the battlefield whose stored face is
+    /// `layout`, as Kessig Prowler // Sinuous Predator stores it.
+    fn double_faced_donor(state: &mut GameState, layout: Option<LayoutKind>) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            "Kessig Prowler".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().back_face = Some(BackFaceData {
+            name: "Sinuous Predator".to_string(),
+            power: Some(4),
+            toughness: Some(4),
+            card_types: CardType {
+                core_types: vec![CoreType::Creature],
+                ..CardType::default()
+            },
+            layout_kind: layout,
+            ..BackFaceData::default()
+        });
+        id
+    }
+
+    /// The copy source as `CopySource::live` reads it.
+    fn live_source(state: &GameState, id: ObjectId) -> CopySource {
+        let obj = &state.objects[&id];
+        CopySource {
+            incarnation: ObjectIncarnationRef::from_object(obj),
+            values: crate::game::printed_cards::intrinsic_copiable_values(obj),
+            display: obj.display_identity(),
+        }
+    }
+
+    fn capture_after(
+        layout: Option<LayoutKind>,
+        tweak: impl FnOnce(&mut GameObject, &mut CopySource),
+    ) -> Option<CopiedDoubleFaces> {
+        let mut state = GameState::new_two_player(42);
+        let id = double_faced_donor(&mut state, layout);
+        let mut source = live_source(&state, id);
+        tweak(state.objects.get_mut(&id).unwrap(), &mut source);
+        copied_double_faces(&state, &source)
+    }
+
+    /// CR 707.8a + CR 712.8d/e/f: the capture's up face follows the donor's
+    /// flags, and its hidden face is the donor's stored face, whether that face
+    /// has a printed layout (Kessig Prowler) or came from a transform (no layout).
+    #[test]
+    fn copied_double_faces_follows_the_up_face() {
+        for layout in [Some(LayoutKind::Transform), None] {
+            let faces = capture_after(layout, |_, _| {}).expect("a front-up donor has faces");
+            assert_eq!(faces.up, CopiedFaceUp::Front);
+            assert_eq!(faces.hidden.name, "Sinuous Predator");
+            assert_eq!(faces.hidden.layout_kind, layout);
+        }
+        let faces = capture_after(Some(LayoutKind::Transform), |obj, _| obj.transformed = true)
+            .expect("a transformed donor has faces");
+        assert_eq!(faces.up, CopiedFaceUp::TransformedBack);
+        let faces = capture_after(Some(LayoutKind::Modal), |obj, _| obj.modal_back_face = true)
+            .expect("a modal donor cast back face up has faces");
+        assert_eq!(faces.up, CopiedFaceUp::ModalBack);
+    }
+
+    /// CR 707.8a + CR 613.2: under a Layer-1 copy effect the hidden face is the
+    /// copied values (Mirrorweave making Kessig Prowler a Grizzly Bears), and it
+    /// keeps the stored face's layout.
+    #[test]
+    fn copied_double_faces_under_a_layer1_copy_takes_the_copied_values() {
+        let faces = capture_after(Some(LayoutKind::Transform), |obj, source| {
+            obj.layer1_copy_effect = Some(crate::types::ability::CopyEffectInstanceRef {
+                continuous_effect_id: 1,
+                modification_index: 0,
+            });
+            source.values.name = "Grizzly Bears".to_string();
+            source.values.power = Some(2);
+            source.values.toughness = Some(2);
+        })
+        .expect("a copied double-faced donor has faces");
+        assert_eq!(faces.hidden.name, "Grizzly Bears");
+        assert_eq!(
+            (faces.hidden.power, faces.hidden.toughness),
+            (Some(2), Some(2))
+        );
+        assert_eq!(faces.hidden.layout_kind, Some(LayoutKind::Transform));
+    }
+
+    // The copy-only refusals. Each changes one thing on the donor of the positive
+    // captures above, so each refusal is that one check's.
+
+    /// CR 400.7: a donor that has become a new object (last-known information).
+    #[test]
+    fn copied_double_faces_refuses_a_departed_donor() {
+        let faces = capture_after(Some(LayoutKind::Transform), |_, source| {
+            source.incarnation.incarnation += 1;
+        });
+        assert!(faces.is_none());
+    }
+
+    /// CR 712.4b: a melded permanent.
+    #[test]
+    fn copied_double_faces_refuses_a_melded_permanent() {
+        let faces = capture_after(Some(LayoutKind::Transform), |obj, _| {
+            obj.merge_kind = Some(MergeKind::Meld);
+        });
+        assert!(faces.is_none());
+    }
+
+    /// CR 712.4b: a meld card's stored back face.
+    #[test]
+    fn copied_double_faces_refuses_a_meld_back_face() {
+        assert!(capture_after(Some(LayoutKind::Meld), |_, _| {}).is_none());
+    }
+
+    /// CR 709.5b: values copied from a Room.
+    #[test]
+    fn copied_double_faces_refuses_room_values() {
+        let faces = capture_after(Some(LayoutKind::Transform), |_, source| {
+            source.values.room_halves = Some(crate::types::ability::RoomCopiableHalves {
+                left: crate::types::ability::RoomHalfIdentity {
+                    name: "Left".to_string(),
+                    mana_cost: crate::types::mana::ManaCost::NoCost,
+                },
+                right: None,
+            });
+        });
+        assert!(faces.is_none());
+    }
+
+    /// CR 722.2b: values copied from a preparation creature.
+    #[test]
+    fn copied_double_faces_refuses_preparation_values() {
+        let faces = capture_after(Some(LayoutKind::Transform), |_, source| {
+            source.values.prepare_face = Some(Arc::new(BackFaceData::default()));
+        });
+        assert!(faces.is_none());
+    }
+
+    /// CR 701.27c: both back-face flags set (nearest printed board: Valentin,
+    /// Dean of the Vein cast as Lisette, Dean of the Root, then Moonmist).
+    #[test]
+    fn copied_double_faces_refuses_both_back_face_flags() {
+        let faces = capture_after(Some(LayoutKind::Modal), |obj, _| {
+            obj.transformed = true;
+            obj.modal_back_face = true;
+        });
+        assert!(faces.is_none());
+    }
+
+    /// CR 708.2: a face-down donor's `back_face` is its face-down stash, which
+    /// `transform::stored_double_face` refuses.
+    #[test]
+    fn copied_double_faces_refuses_a_face_down_donor() {
+        let faces = capture_after(Some(LayoutKind::Transform), |obj, _| obj.face_down = true);
+        assert!(faces.is_none());
+    }
+
+    /// CR 707.9a/b/d: the fold lands each exception in the stored face's base:
+    /// a type, a trigger, a P/T value and a keyword, and prunes the CDA the P/T
+    /// exception overrides while keeping a non-CDA static.
+    #[test]
+    fn fold_copy_exceptions_into_face_lands_exceptions_in_the_face() {
+        let cda = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .cda()
+            .modifications(vec![ContinuousModification::SetDynamicPower {
+                value: QuantityExpr::Fixed { value: 3 },
+            }]);
+        let non_cda = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            }]);
+        let face = BackFaceData {
+            name: "Werewolf of Ancient Hunger".to_string(),
+            power: Some(0),
+            toughness: Some(0),
+            card_types: CardType {
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Werewolf".to_string()],
+                ..CardType::default()
+            },
+            static_definitions: Arc::new(vec![cda, non_cda.clone()]).into(),
+            layout_kind: Some(LayoutKind::Transform),
+            is_swap_snapshot: false,
+            ..BackFaceData::default()
+        };
+        let set_power = ContinuousModification::SetPower { value: 1 };
+        let trigger = TriggerDefinition::new(TriggerMode::Phase);
+        let stamped = vec![
+            ContinuousModification::AddType {
+                core_type: CoreType::Artifact,
+            },
+            ContinuousModification::GrantTrigger {
+                trigger: Box::new(trigger),
+            },
+            set_power.clone(),
+        ];
+
+        let folded = fold_copy_exceptions_into_face(
+            &face,
+            std::slice::from_ref(&set_power),
+            &[Keyword::Haste],
+            &stamped,
+            &[],
+        );
+
+        assert!(folded.card_types.core_types.contains(&CoreType::Artifact));
+        assert_eq!(folded.trigger_definitions.iter_all().count(), 1);
+        assert_eq!(folded.power, Some(1));
+        assert!(folded.keywords.contains(&Keyword::Haste));
+        let statics: Vec<_> = folded.static_definitions.iter_all().cloned().collect();
+        assert_eq!(statics, vec![non_cda], "CR 707.9d: only the CDA is pruned");
+        assert_eq!(folded.layout_kind, Some(LayoutKind::Transform));
+        assert!(!folded.is_swap_snapshot);
+
+        assert_eq!(
+            fold_copy_exceptions_into_face(&face, &[], &[], &[], &[]),
+            face,
+            "no exceptions leave the face as it is"
         );
     }
 }

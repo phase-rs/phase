@@ -40068,6 +40068,7 @@ mod tests {
             source_id: object_id,
             controller: PlayerId(0),
             donor: None,
+            double_faced: None,
         });
         check(
             |attack_destination| CopyTokenEntryTail {
@@ -40378,6 +40379,8 @@ mod tests {
                         controller: PlayerId(0),
                         // Test batch: no donor in scope (no dynamic P/T mods).
                         donor: None,
+                        // Single-faced fixture values: no other face to carry.
+                        double_faced: None,
                     }),
                 }]),
                 effect_kind: EffectKind::CopyTokenOf,

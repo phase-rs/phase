@@ -38,7 +38,8 @@ use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CopyTokenSpec, EntryChoices, ProposedEvent, TokenAttackRequest, TokenHostRequest, TokenSpec,
+    CopiedFaceUp, CopyTokenSpec, EntryChoices, ProposedEvent, TokenAttackRequest, TokenHostRequest,
+    TokenSpec,
 };
 use crate::types::resolution::ChildStackDepth;
 use crate::types::resolved_commands::{
@@ -2061,18 +2062,7 @@ pub(crate) fn materialize_token_copy_body(
     values.static_definitions = Arc::new(cda_pruning.definitions);
     apply_copiable_values_to_liminal_object(object, &values, &copy.display);
 
-    // CR 707.9a + CR 702: "except it has [keyword]" — grant additional keywords
-    // on top of the copied characteristics. Twinflame's haste copies are the
-    // canonical case. Idempotent under repeats.
-    for kw in &copy.extra_keywords {
-        let already_live = object.keywords.contains(kw); // allow-raw-authority: structural live keyword insertion de-dupe, not an effective keyword query
-        if !already_live {
-            object.keywords.push(kw.clone());
-        }
-        if !object.base_keywords.contains(kw) {
-            object.base_keywords.push(kw.clone());
-        }
-    }
+    grant_copy_extra_keywords(object, &copy.extra_keywords);
 
     match modifications {
         // CR 707.2: the copiable values are the whole body.
@@ -2094,10 +2084,65 @@ pub(crate) fn materialize_token_copy_body(
         ResolvedCopyBodyModifications::DeferredToUnjournaledSeam { .. } => {}
     }
 
+    // CR 707.8a: a token copy of a double-faced object is a double-faced token, up
+    // on the face its source showed, with the copy's exceptions on both faces
+    // (CR 707.9a/b/d). The non-liminal seam folds its deferred stamps onto the
+    // stored face itself, right after this call.
+    if let Some(faces) = &copy.double_faced {
+        // CR 709.5b + CR 722.2b: the capture refuses values carrying a Room's other
+        // half or a preparation face, so the one `back_face` slot is free here.
+        debug_assert!(
+            copy.values.room_halves.is_none() && copy.values.prepare_face.is_none(),
+            "a double-faced copy's values carry no Room half or preparation face"
+        );
+        let (stamped, all_creature_types): (&[ContinuousModification], &[String]) =
+            match modifications {
+                ResolvedCopyBodyModifications::Folded {
+                    modifications,
+                    all_creature_types,
+                } => (modifications.as_slice(), all_creature_types.as_slice()),
+                ResolvedCopyBodyModifications::NoExceptions
+                | ResolvedCopyBodyModifications::DeferredToUnjournaledSeam { .. } => (&[], &[]),
+            };
+        object.back_face = Some(super::token_copy::fold_copy_exceptions_into_face(
+            &faces.hidden,
+            &copy.additional_modifications,
+            &copy.extra_keywords,
+            stamped,
+            all_creature_types,
+        ));
+        match faces.up {
+            // CR 712.8d: the front face is up.
+            CopiedFaceUp::Front => {}
+            // CR 712.8e: a transformed permanent's back face is up.
+            CopiedFaceUp::TransformedBack => object.transformed = true,
+            // CR 712.8f: a modal double-faced permanent's back face is up.
+            CopiedFaceUp::ModalBack => object.modal_back_face = true,
+        }
+    }
+
     // CR 400.7 + CR 302.6: Single authority for ETB state. Haste granted via
     // `extra_keywords` is folded in at query time by `has_summoning_sickness`.
     object.reset_for_battlefield_entry(turn_number, entry_timestamp);
     object.tapped = tapped;
+}
+
+/// CR 707.9a + CR 702: "except it has [keyword]" — grants a copy's additional
+/// keywords on top of the copied characteristics, live and base. Twinflame's
+/// haste copies are the canonical case. Idempotent under repeats. The copy
+/// materializer applies it to the token, and
+/// `token_copy::fold_copy_exceptions_into_face` to a double-faced copy's stored
+/// face (CR 707.8a), so the grant has one authority.
+pub(crate) fn grant_copy_extra_keywords(object: &mut GameObject, keywords: &[Keyword]) {
+    for kw in keywords {
+        let already_live = object.keywords.contains(kw); // allow-raw-authority: structural live keyword insertion de-dupe, not an effective keyword query
+        if !already_live {
+            object.keywords.push(kw.clone());
+        }
+        if !object.base_keywords.contains(kw) {
+            object.base_keywords.push(kw.clone());
+        }
+    }
 }
 
 pub(crate) fn reserve_liminal_token_object(
@@ -9542,6 +9587,8 @@ mod tests {
                     controller: PlayerId(0),
                     // Liminal resume carries values only; empty mods are stamp-proof.
                     donor: None,
+                    // Single-faced fixture values: no other face to carry.
+                    double_faced: None,
                 })),
                 spec_resume: None,
                 enter_tapped: EtbTapState::Unspecified,
