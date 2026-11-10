@@ -31929,6 +31929,14 @@ fn extract_player_anchor(
             target_player: Some(filter),
             ..
         } => (filter, true),
+        // CR 400.3 + CR 608.2c: a source-owner shuffle ("this creature's owner
+        // shuffles it …") establishes the owner as the actor for a following
+        // "that player"/"they" clause. `Owner` is not a targetable player filter,
+        // but it is a valid antecedent, so register it before the player-slot
+        // predicate below.
+        Effect::Shuffle {
+            target: TargetFilter::Owner,
+        } => return Some(TargetFilter::Owner),
         Effect::Shuffle { target } => (target, false),
         Effect::ChangeZoneAll { target, .. } => (target, false),
         _ => return None,
@@ -32369,7 +32377,7 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherit
     // shared predicate because it can otherwise name an object.
     if !matches!(
         anchor,
-        TargetFilter::ParentTarget | TargetFilter::DeclaredPlayer { .. }
+        TargetFilter::ParentTarget | TargetFilter::DeclaredPlayer { .. } | TargetFilter::Owner
     ) && !target_filter_can_target_player(anchor)
     {
         return;
@@ -32395,6 +32403,20 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherit
             ..
         } => {
             *tp = Some(anchor.clone());
+        }
+        // CR 608.2c: "If that player does, they reveal …" after a source-owner
+        // shuffle names the same owner. The chain anchor is the parser's shared
+        // actor authority; bind it here, at the clause that resolves the
+        // subject, instead of rewriting the completed ability tree.
+        Effect::RevealUntil { player, .. }
+            if matches!(
+                *player,
+                TargetFilter::ParentTarget
+                    | TargetFilter::Controller
+                    | TargetFilter::ParentTargetController
+            ) =>
+        {
+            *player = anchor.clone();
         }
         // A `ParentTarget` anchor is provenance-safe only for the nested mass
         // library move that established it. Search result collection uses a

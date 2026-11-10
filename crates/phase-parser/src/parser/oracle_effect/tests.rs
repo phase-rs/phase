@@ -47020,6 +47020,42 @@ fn reveal_until_passive_has_chosen_name_tv_pattern() {
     );
 }
 
+/// CR 608.2c + CR 400.3: Mirror-Mad's reflexive "that player" reveal binds to
+/// the source-owner shuffle through the chain's player anchor, not to the
+/// activator.
+#[test]
+fn mirror_mad_reveal_uses_the_owner_chain_anchor() {
+    let def = parse_effect_chain(
+        "This creature's owner shuffles it into their library. If that player does, they reveal cards from the top of that library until a card named Mirror-Mad Phantasm is revealed.",
+        AbilityKind::Activated,
+    );
+    let shuffle = def
+        .sub_ability
+        .as_deref()
+        .expect("the terminal owner shuffle");
+    assert!(matches!(
+        &*shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::Owner
+        }
+    ));
+    let reveal = shuffle
+        .sub_ability
+        .as_deref()
+        .expect("the reflexive reveal");
+    assert!(
+        matches!(
+            &*reveal.effect,
+            Effect::RevealUntil {
+                player: TargetFilter::Owner,
+                ..
+            }
+        ),
+        "expected the reveal actor to inherit the owner anchor, got {:?}",
+        reveal.effect
+    );
+}
+
 /// CR 701.20a: Active form with "that library" possessive arm (Mirror-Mad Phantasm class).
 #[test]
 fn reveal_until_active_that_library_possessive() {
