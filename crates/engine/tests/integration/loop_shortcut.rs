@@ -1433,6 +1433,49 @@ fn a_lethal_drain_beyond_the_horizon_is_offered_at_the_reachable_count() {
          instead of withholding the shortcut — and names no winner, because a fixed count \
          promises no crossing"
     );
+
+    // CR 732.2a + CR 704.5a: the long fixed count is not only OFFERED — its take COMMITS. The
+    // full-budget take drives every repetition it states and hands priority back with the
+    // drained seat still alive, because the count promises no crossing.
+    let (mut runner, kickoff, _bolt, _cleric) =
+        setup_2p_optional_drain(LoopDetectionMode::Interactive);
+    runner.state_mut().players[P1.0 as usize].life = 1500;
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    let WaitingFor::LoopShortcut {
+        proposer, schema, ..
+    } = wf
+    else {
+        panic!("the long drain must offer its reachable count, got {wf:?}");
+    };
+    assert_eq!(proposer, P0);
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(budget));
+    let p1_before = runner.state().players[P1.0 as usize].life;
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(budget),
+            template: None,
+        })
+        .expect("the offered count is admitted");
+    runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("accept the offered count");
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        p1_before - budget as i32,
+        "each stated repetition committed its drain"
+    );
+    assert!(
+        runner.state().players[P1.0 as usize].life > 0,
+        "the fixed count ends short of lethal"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the long take completed and handed priority back, got {:?}",
+        runner.state().waiting_for
+    );
 }
 
 /// #10464: validating a responder's `Accept` must not TAKE the shortcut.
@@ -19726,6 +19769,94 @@ fn a_declined_life_axis_does_not_bound_the_parked_prompt_or_restore() {
     assert_eq!(
         max, 2,
         "a declined axis proves no limit, so restore leaves the prompt's maximum as it was"
+    );
+}
+
+/// CR 614.1 + CR 732.2a: a MIXED stash settles the axes the boundary accepts and leaves a
+/// declined axis ∞. Boon Reflection makes the life axis observed (so the boundary declines it),
+/// while the counter axis has no observer and applies; the prompt's maximum is sized from the
+/// boundary's own selection rather than from the declined growth.
+#[test]
+fn a_mixed_stash_settles_its_unobserved_axis_through_public_submit() {
+    use engine::analysis::resource::{CounterClass, ObjectClass, ResourceAxis};
+    use engine::types::counter::CounterType;
+    use engine::types::game_state::{CounterGrowth, PersistentAxisMaterialization};
+
+    let controller = P0;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(controller, "Boon Reflection", BOON_REFLECTION);
+    let bear = scenario
+        .add_creature_from_oracle(controller, "Test Bear", 2, 2, "")
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().players[controller.0 as usize].life = i32::MAX - 2;
+    let life_before = runner.state().players[controller.0 as usize].life;
+
+    let axes = [
+        ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
+        ResourceAxis::Life(controller),
+    ];
+    runner
+        .state_mut()
+        .mark_unbounded_loop(controller, &axes, &axes);
+    runner.state_mut().register_pending_materialization(
+        controller,
+        PersistentAxisMaterialization::Counters(vec![CounterGrowth {
+            object: bear,
+            counter: CounterType::Plus1Plus1,
+            per_cycle_delta: 1,
+        }]),
+    );
+    runner.state_mut().register_pending_materialization(
+        controller,
+        PersistentAxisMaterialization::Life {
+            player: controller,
+            per_cycle_delta: 1,
+        },
+    );
+    runner
+        .state_mut()
+        .pending_materialization_count
+        .insert(controller, 2);
+    runner.state_mut().waiting_for = WaitingFor::PayAmountChoice {
+        player: controller,
+        resource: engine::types::game_state::PayableResource::LoopCollapse {
+            axis: engine::types::game_state::LoopCollapseAxis::Mixed,
+        },
+        min: 0,
+        max: 2,
+        accumulated: 0,
+        source_id: ObjectId(0),
+        pending_mana_ability: None,
+    };
+
+    let submitted = runner.act(GameAction::SubmitPayAmount { amount: 2 });
+    assert!(
+        submitted.is_ok(),
+        "the mixed stash's own maximum must be admitted, got {submitted:?}"
+    );
+    assert_eq!(
+        runner.state().players[controller.0 as usize].life,
+        life_before,
+        "the declined life axis applies nothing"
+    );
+    let counters = runner.state().objects[&bear]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(
+        counters, 2,
+        "the unobserved counter axis settles its two repetitions"
+    );
+    assert!(
+        runner
+            .state()
+            .unbounded_resources
+            .get(&controller)
+            .is_some_and(|axes| axes.contains(&ResourceAxis::Life(controller))),
+        "the declined life axis stays ∞ for manual play"
     );
 }
 
