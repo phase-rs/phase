@@ -4145,9 +4145,8 @@ mod tests {
         assert_eq!(done, [true, false]);
     }
 
-    /// CR 616.1 + CR 732.2a: Fiendish Duo's doubling applied first leaves Battletide Alchemist's
-    /// "may prevent" as an accept/decline prompt on the source the order places first; the order
-    /// answers the order prompt and not that "may".
+    /// CR 616.1 + CR 732.2a: placing Battletide Alchemist before Fiendish Duo re-parks its
+    /// "may prevent" as an accept/decline prompt; the order answers the order prompt, not that "may".
     #[test]
     fn a_replacement_order_pin_answers_the_order_prompt_and_not_its_sources_may() {
         use crate::analysis::decision_template::{
