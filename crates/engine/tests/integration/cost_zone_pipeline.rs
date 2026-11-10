@@ -12,8 +12,8 @@ use engine::types::ability::{
     ContinuousModification, DelayedTriggerCondition, DelayedTriggerLifetime, DigRestOrder,
     DigSource, DiscardSelfScope, Effect, EffectKind, FilterProp, ForEachCategoryAction,
     IterationCategory, ManaContribution, ManaProduction, ManaSpendRestriction, ModalChoice,
-    OpponentMayScope, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
-    ResolvedAbility, SacrificeCost, SpellCastingOption, TargetFilter, TargetRef,
+    OpponentMayScope, QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition,
+    ReplacementMode, ResolvedAbility, SacrificeCost, SpellCastingOption, TargetFilter, TargetRef,
     TargetSelectionMode, TriggerConstraint, TriggerDefinition, TriggerLimitSpend, TypeFilter,
     TypedFilter, UnlessPayModifier, WheneverEventExpiry,
 };
@@ -29,9 +29,10 @@ use engine::types::game_state::{
     PendingCostMoveResume, PendingReplacement, PersistedGameState, StackEntryKind, WaitingFor,
     ZoneDeliveryExileTracking,
 };
+use engine::types::game_state::{DeferredLifeCostResume, ShardChoice};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::proposed_event::{ProposedEvent, ReplacementId};
 use engine::types::replacements::ReplacementEvent;
@@ -9507,6 +9508,630 @@ fn restore_recovers_a_paid_assist_contribution_from_the_journal() {
                     .is_some_and(|ability| matches!(ability.effect, Effect::Cascade))
         }),
         "CR 702.85a: the granted cascade still enqueues its trigger"
+    );
+}
+
+/// CR 118.3a: the save's copy of the helper's spend is not the binding record — the
+/// journal's is. A save that keeps every pip ID of the proven payment and changes a
+/// unit's SOURCE is still describing one payment, so admission restores the units the
+/// journal recorded at the removal and the resumed cast consumes those.
+///
+/// This is the maintainer's exact case: identical pips, different source.
+#[test]
+fn restore_binds_the_journal_units_over_a_save_that_kept_the_pips_and_moved_the_source() {
+    let BringDownBoard {
+        mut runner,
+        bring_down,
+        victim,
+        helper_treasures,
+        ..
+    } = bring_down_board();
+    announce_bring_down_with_helper(&mut runner, bring_down, victim, BRING_DOWN_ASSIST_GENERIC);
+    drive_to_caster_source_pause(&mut runner);
+
+    // The journal's record of the helper's spend, captured before the payload is edited
+    // so the test can prove the restore came from there.
+    let recipient = assist_payment_recipient(runner.state(), bring_down, P1);
+    let journal_units = runner
+        .state()
+        .resolved_rules_journal
+        .spent_units_for_payer_and_recipient(P1, &recipient)
+        .expect("the journal recorded the helper's spend at the spend boundary");
+    assert_eq!(
+        journal_units.len(),
+        BRING_DOWN_ASSIST_GENERIC as usize,
+        "reach-guard: the journal proves one unit per point of generic mana"
+    );
+
+    // --- The save under test: the SAME pips, a DIFFERENT source on every unit.
+    let mut state = runner.state().clone();
+    let mut pending = state
+        .pending_cast
+        .take()
+        .expect("the cast is parked mid-payment");
+    let impostor = victim;
+    for unit in pending.assist_contributed_units.iter_mut() {
+        assert!(
+            helper_treasures.contains(&unit.source_id),
+            "reach-guard: the saved units start out naming the helper's Treasures"
+        );
+        unit.source_id = impostor;
+    }
+    assert_eq!(
+        pending
+            .assist_contributed_units
+            .iter()
+            .map(|unit| unit.pip_id)
+            .collect::<Vec<_>>(),
+        journal_units
+            .iter()
+            .map(|unit| unit.pip_id)
+            .collect::<Vec<_>>(),
+        "reach-guard: the saved payload keeps every pip ID the journal recorded"
+    );
+    assert_ne!(
+        pending.assist_contributed_units, journal_units,
+        "reach-guard: and disagrees with the journal about what those pips were"
+    );
+    state.pending_cast = Some(pending);
+
+    let restored = PersistedGameState::capture(state).into_game_state().expect(
+        "a contribution whose pips the journal proves is admitted with the journal's units",
+    );
+    let mut runner = GameRunner::from_state(restored);
+
+    // CR 118.3a: the journal's description of the proven units is the binding one.
+    let restored_units = parked_bring_down(&runner).assist_contributed_units.clone();
+    assert_eq!(
+        restored_units, journal_units,
+        "the restored cast carries the journal's units, not the save's edited copy"
+    );
+    assert!(
+        restored_units
+            .iter()
+            .all(|unit| helper_treasures.contains(&unit.source_id)),
+        "CR 106.3: every restored unit names the Treasure that produced it, got {:?}",
+        restored_units
+            .iter()
+            .map(|unit| unit.source_id)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        restored_units.iter().all(|unit| unit.source_id != impostor),
+        "and none of them names the source the edited save substituted"
+    );
+
+    // And the resumed cast consumes that record: the payment snapshot the finalizers
+    // write names the helper's Treasures, which is exactly what the edited source could
+    // have corrupted.
+    finish_bring_down(&mut runner, bring_down);
+    let spell = &runner.state().objects[&bring_down];
+    assert_eq!(
+        spell
+            .mana_spent_source_snapshots
+            .iter()
+            .filter(|snapshot| helper_treasures.contains(&snapshot.source_id))
+            .count(),
+        BRING_DOWN_ASSIST_GENERIC as usize,
+        "CR 601.2h + CR 106.3: the resumed cast records the journal-proven helper pips; got {:?}",
+        spell
+            .mana_spent_source_snapshots
+            .iter()
+            .map(|snapshot| snapshot.source_id)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        spell.mana_spent_to_cast_amount, 4,
+        "CR 702.132a: {{3}}{{W}} is still four units of mana spent"
+    );
+}
+
+/// CR 702.132a + CR 118.3a: the CONTROL for the row above — an ordinary Assist cast whose
+/// save agrees with the journal in every field still restores, still carries the helper's
+/// own units, and still records the helper pip in the cast's payment snapshot.
+#[test]
+fn restore_keeps_an_assist_save_whose_units_match_the_journal() {
+    let BringDownBoard {
+        mut runner,
+        bring_down,
+        victim,
+        helper_treasures,
+        ..
+    } = bring_down_board();
+    announce_bring_down_with_helper(&mut runner, bring_down, victim, BRING_DOWN_ASSIST_GENERIC);
+    drive_to_caster_source_pause(&mut runner);
+
+    let recipient = assist_payment_recipient(runner.state(), bring_down, P1);
+    let journal_units = runner
+        .state()
+        .resolved_rules_journal
+        .spent_units_for_payer_and_recipient(P1, &recipient)
+        .expect("the journal recorded the helper's spend");
+    assert_eq!(
+        parked_bring_down(&runner).assist_contributed_units,
+        journal_units,
+        "reach-guard: an ordinary save agrees with the journal in every field"
+    );
+
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the paused assisted cast serializes");
+    let restored: PersistedGameState =
+        serde_json::from_str(&saved).expect("the paused assisted cast deserializes");
+    let restored = restored
+        .into_game_state()
+        .expect("a contribution that agrees with the journal needs no correction");
+    let mut runner = GameRunner::from_state(restored);
+    assert_eq!(
+        parked_bring_down(&runner).assist_contributed_units,
+        journal_units,
+        "the admitted save still carries exactly the units that paid"
+    );
+
+    finish_bring_down(&mut runner, bring_down);
+    let spell = &runner.state().objects[&bring_down];
+    assert_eq!(
+        spell.mana_spent_to_cast_amount, 4,
+        "CR 702.132a + CR 118.3a: the helper's three units are still {{3}}{{W}} with the caster's one"
+    );
+    assert_eq!(
+        spell
+            .mana_spent_source_snapshots
+            .iter()
+            .filter(|snapshot| helper_treasures.contains(&snapshot.source_id))
+            .count(),
+        BRING_DOWN_ASSIST_GENERIC as usize,
+        "CR 106.3: the helper pip is recorded on the cast"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CR 118.3a + CR 702.132a + CR 118.11 + CR 616.1: the restore must also write a
+// journal-proven contribution into the carrier a REPLACED LIFE PAYMENT parks.
+//
+// Oracle (verified against Scryfall):
+//
+// * **Gang Up** `{X}{B}` Instant (`bbd` 47) — "Assist (Another player can pay up to
+//   {X} of this spell's cost. You choose the value of X.) / Destroy target creature
+//   with power X or less." Its being an INSTANT is what lets the caster pay life on
+//   an opponent's turn, which is the only turn Bloodletter applies.
+// * **K'rrik, Son of Yawgmoth** `{4}{B/P}{B/P}{B/P}` (`mh3` 274) — "({B/P} can be paid
+//   with either {B} or 2 life.) / Lifelink / For each {B} in a cost, you may pay 2 life
+//   rather than pay that mana. / Whenever you cast a black spell, put a +1/+1
+//   counter on K'rrik." CR 118.11: the cost is paid by modified actions.
+// * **Bloodletter of Aclazotz** `{1}{B}{B}{B}` (`lci` 92) Creature — Vampire Demon —
+//   "Flying / If an opponent would lose life during your turn, they lose twice that
+//   much life instead. (Damage causes loss of life.)" Two of them are two replacement
+//   effects on ONE life-loss event, so CR 616.1 makes the affected player order them —
+//   but two `×2` modifiers are both `Multiplicative` and commute, and the pipeline
+//   deliberately auto-applies a non-material candidate set, so a labelled `+0`
+//   companion (see `life_loss_ordering_tether`) is what keeps the ordering material.
+//
+// CR 702.132a has the helper pay "before you begin to pay the total cost", so the
+// helper's generic is spent BEFORE the caster's {B}, and the caster's life payment is
+// what parks. The cast is then held in `PendingCastOwner::DeferredLifeCost` — a
+// carrier the write-back must reach.
+// ---------------------------------------------------------------------------
+
+/// Printed Gang Up (`bbd` 47), verbatim from Scryfall.
+const GANG_UP: &str = "Assist (Another player can pay up to {X} of this spell's cost. You choose the value of X.)\nDestroy target creature with power X or less.";
+
+/// Printed K'rrik, Son of Yawgmoth (`mh3` 274), verbatim from Scryfall.
+const KRRIK_SON_OF_YAWGMOTH: &str = "({B/P} can be paid with either {B} or 2 life.)\nLifelink\nFor each {B} in a cost, you may pay 2 life rather than pay that mana.\nWhenever you cast a black spell, put a +1/+1 counter on K'rrik.";
+
+/// Printed Bloodletter of Aclazotz (`lci` 92), verbatim from Scryfall.
+const BLOODLETTER_OF_ACLAZOTZ: &str = "Flying\nIf an opponent would lose life during your turn, they lose twice that much life instead. (Damage causes loss of life.)";
+
+/// The X this witness announces: one generic for the helper, and a target of power ≤ X.
+const GANG_UP_X: u32 = 1;
+
+struct GangUpBoard {
+    runner: GameRunner,
+    gang_up: ObjectId,
+    /// A power-1 creature, the only thing Gang Up's "power X or less" admits at X=1.
+    victim: ObjectId,
+    /// The Treasure the HELPER (P1) pays the generic with.
+    helper_treasures: Vec<ObjectId>,
+    /// P1's two Bloodletter of Aclazotz, the two replacement effects CR 616.1 orders.
+    bloodletters: Vec<ObjectId>,
+}
+
+/// CR 616.1: a life-loss replacement whose modification does NOT commute with
+/// Bloodletter's `×2` — an additive `+0`, which leaves the arithmetic untouched but is a
+/// different `CommuteClass`, so `replacement_ordering_is_material` keeps the affected
+/// player's ordering choice. Synthetic on purpose: two `×2` doublers are BOTH
+/// `Multiplicative` and therefore commute (×2 then ×2 is ×2 then ×2 however you order
+/// it), and the engine deliberately auto-applies a non-material candidate set instead of
+/// raising a degenerate prompt. Same device, and same reason, as
+/// `additional_cost_declaration_tail.rs`'s `life_loss_rider`: no printed card applies a
+/// non-commuting life-loss modifier to its own controller's payment here, so the ordering
+/// prompt that CR 616.1 requires is exercised with a labelled synthetic companion.
+fn life_loss_ordering_tether() -> ReplacementDefinition {
+    let mut tether = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+        .quantity_modification(QuantityModification::Plus { value: 0 })
+        .description("Life-loss ordering tether (+0)".to_string());
+    // CR 614.1a: an absent player scope defaults to the source's own controller, and
+    // the life being paid here is the CASTER's (P0), while this permanent belongs to the
+    // helper (P1). Scope it to any player so it is applicable to the payment it orders.
+    tether.valid_player = Some(engine::types::ability::ReplacementPlayerScope::AnyPlayer);
+    tether
+}
+
+/// P1's turn, PreCombatMain: printed Gang Up in P0's hand, printed K'rrik under P0
+/// (CR 118.11 life-for-{B}), and TWO printed Bloodletter of Aclazotz under P1 — an
+/// opponent of P0, so P0's life payment on P1's turn is doubled twice.
+fn gang_up_board() -> GangUpBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+    let victim = scenario.add_creature(P1, "Power One Witness", 1, 1).id();
+    let mut bloodletters = Vec::new();
+    for name in [
+        "Bloodletter of Aclazotz",
+        "Bloodletter of Aclazotz (second copy)",
+    ] {
+        bloodletters.push(
+            scenario
+                .add_creature(P1, name, 4, 4)
+                .from_oracle_text(BLOODLETTER_OF_ACLAZOTZ)
+                .id(),
+        );
+    }
+    scenario
+        .add_creature(P1, "Life-Loss Ordering Tether", 0, 1)
+        .with_replacement_definition(life_loss_ordering_tether());
+    scenario
+        .add_creature(P0, "K'rrik, Son of Yawgmoth", 2, 4)
+        .from_oracle_text(KRRIK_SON_OF_YAWGMOTH);
+    // Colorless mana, so X is affordable and yet the {B} shard can only be paid with
+    // life: the life route is the caster's only route, and no mana is spent by them.
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let gang_up = scenario
+        .add_spell_to_hand_from_oracle(P0, "Gang Up", true, GANG_UP)
+        .from_oracle_text_with_keywords(&["Assist"], GANG_UP)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    // CR 616.1: Bloodletter's condition is "during YOUR turn", so the Bloodletters'
+    // controller (P1) must be the active player for the caster's life payment to be
+    // doubled at all. The caster (P0) holds priority on it, which is where an instant
+    // is announced.
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+    let helper_treasures = (0..GANG_UP_X)
+        .map(|offset| treasure_for(runner.state_mut(), P1, 9610 + u64::from(offset)))
+        .collect();
+    GangUpBoard {
+        runner,
+        gang_up,
+        victim,
+        helper_treasures,
+        bloodletters,
+    }
+}
+
+/// The `PendingCast` a replaced life payment parks: the deferred life-cost resume.
+fn parked_gang_up(runner: &GameRunner) -> &PendingCast {
+    match runner.state().pending_deferred_life_cost_resume.as_ref() {
+        Some(DeferredLifeCostResume::Cast {
+            pending: Some(pending),
+            ..
+        }) => pending,
+        other => panic!("the replaced life payment is not parking a cast: {other:?}"),
+    }
+}
+
+/// Drive the announced Gang Up through X, its target, the helper's commitment and
+/// K'rrik's life-for-{B}, stopping at the ordering prompt the two Bloodletters raise on
+/// the caster's life payment (CR 118.11 + CR 616.1). Returns the `max_generic` the
+/// Assist offer advertised.
+fn announce_gang_up(
+    runner: &mut GameRunner,
+    gang_up: ObjectId,
+    victim: ObjectId,
+    generic: u32,
+) -> u32 {
+    let card_id = runner.state().objects[&gang_up].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: gang_up,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("printed Gang Up is announced");
+    let mut max_generic = None;
+    let mut life_chosen = false;
+    let mut seen = Vec::new();
+    for _ in 0..16 {
+        seen.push(runner.waiting_for_kind());
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ChooseXValue { .. } => {
+                runner
+                    .act(GameAction::ChooseX { value: GANG_UP_X })
+                    .expect("announce X=1");
+            }
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(victim)),
+                    })
+                    .expect("declare the power-1 target");
+            }
+            WaitingFor::AssistChoosePlayer { .. } => {
+                runner
+                    .act(GameAction::ChooseAssistPlayer { player: Some(P1) })
+                    .expect("choose the helper");
+            }
+            WaitingFor::AssistPayment {
+                max_generic: bound, ..
+            } => {
+                runner
+                    .act(GameAction::CommitAssistPayment { generic })
+                    .expect("commit the helper's generic");
+                max_generic = Some(bound);
+            }
+            WaitingFor::PhyrexianPayment { .. } if !life_chosen => {
+                // CR 118.11: K'rrik's permission changes how the {B} is paid.
+                runner
+                    .act(GameAction::SubmitPhyrexianChoices {
+                        choices: vec![ShardChoice::PayLife],
+                    })
+                    .expect("K'rrik pays the black shard with 2 life");
+                life_chosen = true;
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                return max_generic.expect("the Assist offer precedes the life payment");
+            }
+            other => {
+                panic!(
+                    "unexpected prompt while announcing Gang Up: {other:?}; prompts seen: \
+                     {seen:?}; life={:?} zone={:?} deferred={:?} parked={:?} pending_replacement={:?}",
+                    runner.state().players[P0.0 as usize].life,
+                    runner.state().objects[&gang_up].zone,
+                    runner.state().pending_deferred_life_cost_resume.is_some(),
+                    runner.state().pending_cast.is_some(),
+                    runner
+                        .state()
+                        .pending_replacement
+                        .as_ref()
+                        .map(|pending| pending.candidates.len()),
+                )
+            }
+        }
+    }
+    panic!("Gang Up never reached the Bloodletter ordering prompt; prompts seen: {seen:?}");
+}
+
+/// Answer the replacement ordering prompts (and confirm whatever else the resumed cast
+/// needs) until the spell is on the stack.
+fn finish_gang_up(runner: &mut GameRunner, gang_up: ObjectId) {
+    let mut seen = Vec::new();
+    for _ in 0..32 {
+        if runner.state().objects[&gang_up].zone == Zone::Stack {
+            return;
+        }
+        seen.push(runner.waiting_for_kind());
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("apply the next Bloodletter the affected player ordered");
+            }
+            WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("continue the resumed cast");
+            }
+            other => {
+                panic!(
+                    "unexpected prompt while finishing Gang Up: {other:?}; prompts seen: {seen:?}"
+                )
+            }
+        }
+    }
+    panic!("Gang Up never reached the stack; prompts seen: {seen:?}");
+}
+
+/// CR 118.3a + CR 702.132a + CR 118.11 + CR 616.1: a paid contribution the journal
+/// proves is restored into the cast a REPLACED LIFE PAYMENT parked, at the ordering
+/// prompt two Bloodletter of Aclazotz replacements raise, and it survives through
+/// completion — the helper's units reach the cast's payment snapshot.
+#[test]
+fn restore_recovers_a_legacy_contribution_parked_at_a_life_payment_ordering_prompt() {
+    let GangUpBoard {
+        mut runner,
+        gang_up,
+        victim,
+        helper_treasures,
+        bloodletters,
+    } = gang_up_board();
+
+    // Reach guards: the printed text really parsed into the abilities this witness needs.
+    assert!(
+        runner.state().objects[&gang_up]
+            .keywords
+            .contains(&Keyword::Assist),
+        "reach-guard: printed Gang Up carries Assist"
+    );
+    assert!(
+        engine::game::static_abilities::player_life_payment_colors(runner.state(), P0)
+            .contains(ManaColor::Black),
+        "reach-guard: printed K'rrik grants its controller the {{B}} life permission"
+    );
+    assert!(
+        bloodletters
+            .iter()
+            .all(|bloodletter| !runner.state().objects[bloodletter]
+                .replacement_definitions
+                .is_empty()),
+        "reach-guard: both printed Bloodletters carry their life-loss replacement"
+    );
+    assert!(
+        bloodletters
+            .iter()
+            .all(|bloodletter| !runner.state().objects[bloodletter]
+                .base_replacement_definitions
+                .is_empty()),
+        "reach-guard: and the base copy survives a layer flush"
+    );
+
+    let advertised = announce_gang_up(&mut runner, gang_up, victim, GANG_UP_X);
+    assert_eq!(
+        advertised, GANG_UP_X,
+        "reach-guard: printed Gang Up's Assist offers its whole {{X}} generic"
+    );
+
+    // The pause is the Bloodletters' ordering choice, and it is the payload's shape — not
+    // a prompt that carries the cast.
+    match runner.state().waiting_for.clone() {
+        WaitingFor::ReplacementChoice {
+            candidate_count,
+            kind,
+            candidates,
+            ..
+        } => {
+            assert!(
+                candidate_count >= 2,
+                "reach-guard: CR 616.1 orders the life-loss replacements, got {kind:?}"
+            );
+            assert_eq!(
+                kind,
+                engine::types::game_state::ReplacementChoiceKind::Order,
+                "reach-guard: the prompt is an ordering choice"
+            );
+            for bloodletter in &bloodletters {
+                assert!(
+                    candidates
+                        .iter()
+                        .any(|candidate| candidate.source_id == *bloodletter),
+                    "reach-guard: the offered ordering names both Bloodletters"
+                );
+            }
+        }
+        other => panic!("expected the Bloodletter ordering prompt, got {other:?}"),
+    }
+    // The carrier that matters: the cast is NOT in the external root and NOT inline on
+    // the prompt — the replaced life payment is the only thing holding it, which is the
+    // shape the old write-back refused.
+    assert!(
+        runner.state().pending_cast.is_none(),
+        "reach-guard: the external payment root holds no cast"
+    );
+    assert!(
+        runner.state().waiting_for.pending_cast_ref().is_none(),
+        "reach-guard: the ordering prompt carries no inline cast"
+    );
+    {
+        let parked = parked_gang_up(&runner);
+        assert_eq!(
+            parked.assist_state,
+            engine::types::game_state::AssistState::Paid {
+                helper: P1,
+                generic: GANG_UP_X,
+            },
+            "reach-guard: the helper has paid by the time of the ordering prompt"
+        );
+        assert_eq!(
+            parked.assist_contributed_units.len(),
+            GANG_UP_X as usize,
+            "reach-guard: and the spend boundary captured the helper's unit"
+        );
+        assert!(
+            parked
+                .assist_contributed_units
+                .iter()
+                .all(|unit| helper_treasures.contains(&unit.source_id)),
+            "reach-guard: the captured unit names the helper's Treasure"
+        );
+    }
+    assert_eq!(
+        runner.state().objects[&victim].zone,
+        Zone::Battlefield,
+        "reach-guard: the cast has not finished, so its target is still on the battlefield"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        20,
+        "reach-guard: no life has been subtracted yet — the loss is waiting on the ordering"
+    );
+
+    // The journal's record of the helper's spend, kept for comparison.
+    let recipient = assist_payment_recipient(runner.state(), gang_up, P1);
+    let journal_units = runner
+        .state()
+        .resolved_rules_journal
+        .spent_units_for_payer_and_recipient(P1, &recipient)
+        .expect("the journal recorded the helper's spend at the spend boundary");
+    assert_eq!(
+        journal_units.len(),
+        GANG_UP_X as usize,
+        "reach-guard: the journal proves the helper's unit"
+    );
+
+    // --- The legacy save: `Paid`, but its units field predates it.
+    let mut state = runner.state().clone();
+    match state.pending_deferred_life_cost_resume.as_mut() {
+        Some(DeferredLifeCostResume::Cast {
+            pending: Some(pending),
+            ..
+        }) => pending.assist_contributed_units.clear(),
+        other => panic!("the replaced life payment is not parking a cast: {other:?}"),
+    }
+
+    let restored = PersistedGameState::capture(state).into_game_state().expect(
+        "a paid contribution the journal proves is admitted into the carrier that parked it",
+    );
+    let mut runner = GameRunner::from_state(restored);
+    let recovered = parked_gang_up(&runner).assist_contributed_units.clone();
+    assert_eq!(
+        recovered, journal_units,
+        "CR 118.3a: the recovered contribution is the journal's own record, written back \
+         into the deferred life-payment carrier"
+    );
+
+    finish_gang_up(&mut runner, gang_up);
+
+    // CR 616.1f: both doublers applied to the one 2-life payment, so P0 lost 8 life.
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        12,
+        "CR 616.1f + CR 118.11: the ordered Bloodletters doubled the 2-life payment twice"
+    );
+    let spell = &runner.state().objects[&gang_up];
+    assert_eq!(
+        spell.zone,
+        Zone::Stack,
+        "reach-guard: the resumed cast reached the stack"
+    );
+    assert_eq!(
+        spell.mana_spent_to_cast_amount, GANG_UP_X,
+        "CR 702.132a + CR 118.3a: the cast records the helper's unit — the caster paid no \
+         mana for the life-paid {{B}}"
+    );
+    assert_eq!(
+        spell
+            .mana_spent_source_snapshots
+            .iter()
+            .filter(|snapshot| helper_treasures.contains(&snapshot.source_id))
+            .count(),
+        GANG_UP_X as usize,
+        "CR 106.3: and it names the Treasure the helper spent, got {:?}",
+        spell
+            .mana_spent_source_snapshots
+            .iter()
+            .map(|snapshot| snapshot.source_id)
+            .collect::<Vec<_>>()
     );
 }
 
