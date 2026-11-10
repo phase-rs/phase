@@ -1798,55 +1798,42 @@ mod tests {
 
     /// CR 701.12c + CR 616.1: a parked life-total assignment carries a
     /// difference past the `i32` range exactly through serialization, and the
-    /// resume lands every receiver on the other's previous total. "Life
-    /// Shield" is synthetic: no printed card has an optional replacement of a
-    /// life total being reduced whose acceptance leaves the reduction as it is.
-    /// Here it parks the assignment on its first leg, the loss, so the tail
-    /// holds the gain's exact difference. A printed board parks an assignment
-    /// too: Rhox Faithmender and Boon Reflection ("If you would gain life, you
-    /// gain twice that much life instead.") under a gaining receiver ask that
-    /// player to order them (`parked_gain_resume_saturates_at_the_cap`), and
-    /// with that gain listed first the tail holds the loss's exact difference.
-    /// The nearest printed card to Life Shield is Enduring
-    /// Angel, whose "If your life total would be reduced to 0 or less, instead
-    /// transform this creature and your life total becomes 3. Then if this
-    /// creature didn't transform this way, you lose the game." replaces the
-    /// reduction itself.
+    /// resume completes it. P0 at `i32::MAX` and P1 at `i32::MIN` exchange
+    /// totals with P1's gain listed first. P1 controls Rhox Faithmender and
+    /// Boon Reflection, which both print "If you would gain life, you gain
+    /// twice that much life instead.", so P1 orders them and the assignment
+    /// parks on its first leg, the gain; the tail holds the loss's exact
+    /// difference. The resume lands P0 exactly on P1's previous total
+    /// (`i32::MIN`) from that difference. P1's gain, which the two doublers
+    /// make four times the difference (CR 701.12c: "Replacement effects may
+    /// modify these gains and losses"; CR 616.1f), stops at `i32::MAX`, P0's
+    /// previous total, only because a total stops there (an engine limit, not
+    /// a rule), with the gained counter at `u32::MAX`.
     #[test]
     fn life_total_assignment_parks_and_resumes_a_difference_past_i32_exactly() {
         use crate::game::engine::apply_as_current;
-        use crate::types::ability::{ReplacementDefinition, ReplacementMode};
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::game::scenario_db::GameScenarioDbExt;
         use crate::types::actions::GameAction;
         use crate::types::game_state::WaitingFor;
-        use crate::types::replacements::ReplacementEvent;
 
-        let mut state = GameState::new_two_player(42);
-        state.players[0].life = i32::MAX;
-        state.players[1].life = i32::MIN;
-
-        let shield = create_object(
-            &mut state,
-            CardId(950),
-            PlayerId(0),
-            "Life Shield".to_string(),
-            Zone::Battlefield,
-        );
-        state
-            .objects
-            .get_mut(&shield)
-            .unwrap()
-            .replacement_definitions
-            .push(
-                ReplacementDefinition::new(ReplacementEvent::LifeReduced)
-                    .mode(ReplacementMode::Optional { decline: None })
-                    .description("Life Shield".to_string()),
-            );
+        let mut scenario = GameScenario::new();
+        scenario.with_life(P0, i32::MAX).with_life(P1, i32::MIN);
+        let doublers = ["Rhox Faithmender", "Boon Reflection"].map(|name| {
+            scenario.add_real_card(
+                P1,
+                name,
+                Zone::Battlefield,
+                crate::test_support::shared_card_db(),
+            )
+        });
+        let mut state = scenario.state;
 
         let mut events = Vec::new();
         let outcome = apply_life_totals_assignment(
             &mut state,
-            &[(PlayerId(0), i32::MIN), (PlayerId(1), i32::MAX)],
-            PlayerId(0),
+            &[(P1, i32::MAX), (P0, i32::MIN)],
+            P0,
             Some(PendingEffectResolved::new(
                 EffectKind::ExchangeLifeTotals,
                 ObjectId(100),
@@ -1856,30 +1843,42 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome, LifeAssignmentOutcome::Deferred);
-        assert!(matches!(
-            state.waiting_for,
-            WaitingFor::ReplacementChoice { .. }
-        ));
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "reach guard: P1's gain parks the ordering prompt, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(*player, P1, "CR 616.1: the affected player orders them");
+        let mut sources: Vec<ObjectId> = candidates
+            .iter()
+            .map(|candidate| candidate.source_id)
+            .collect();
+        sources.sort();
+        let mut expected = doublers.to_vec();
+        expected.sort();
+        assert_eq!(sources, expected, "the prompt orders the two doublers");
+        let player = *player;
         assert_eq!(state.players[0].life, i32::MAX);
         assert_eq!(state.players[1].life, i32::MIN);
         assert_eq!(
             state
                 .active_life_total_assignment()
                 .map(|pending| pending.remaining.clone()),
-            Some(vec![(PlayerId(1), i64::from(u32::MAX))]),
-            "the tail holds the exact difference from i32::MIN to i32::MAX"
+            Some(vec![(P0, -i64::from(u32::MAX))]),
+            "the tail holds the exact difference from i32::MAX to i32::MIN"
         );
 
-        let WaitingFor::ReplacementChoice { player, .. } = state.waiting_for.clone() else {
-            panic!("expected replacement choice");
-        };
         let serialized = serde_json::to_string(
             &crate::types::resolution::ResolutionStateWire::from_game_state(state),
         )
         .expect("life-total assignment prompt serializes as v2 frames");
         assert!(
-            serialized.contains("4294967295"),
-            "the parked difference serializes exactly"
+            serialized.contains("-4294967295"),
+            "the parked loss difference serializes exactly"
         );
         let mut state =
             serde_json::from_str::<crate::types::resolution::ResolutionStateWire>(&serialized)
@@ -1890,8 +1889,18 @@ mod tests {
         state.priority_player = player;
 
         let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
-            .expect("accept life-loss replacement");
+            .expect("P1's ordering answer is accepted");
 
+        let mut applied: Vec<ObjectId> = result
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ReplacementApplied { source_id, .. } => Some(*source_id),
+                _ => None,
+            })
+            .collect();
+        applied.sort();
+        assert_eq!(applied, expected, "both doublers apply to P1's gain");
         let life_changes: Vec<(PlayerId, i32, Option<i32>)> = result
             .events
             .iter()
@@ -1907,8 +1916,8 @@ mod tests {
         assert_eq!(
             life_changes,
             vec![
-                (PlayerId(0), i32::MIN, Some(i32::MIN)),
-                (PlayerId(1), i32::MAX, Some(i32::MAX)),
+                (P1, i32::MAX, Some(i32::MAX)),
+                (P0, i32::MIN, Some(i32::MIN)),
             ]
         );
         assert_eq!(state.players[0].life, i32::MIN);

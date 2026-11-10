@@ -1555,8 +1555,23 @@ fn accept_for_every_responder(runner: &mut GameRunner, expected: &[PlayerId]) ->
 }
 
 /// Passes to the step boundary and asserts that it asks no collapse amount.
+/// Reach guard: priority is open on entry (`pass_to_next_boundary` returns at
+/// once otherwise), and the pass moves the phase or surfaces a prompt before
+/// the negative check.
 fn pass_to_a_boundary_without_a_collapse(runner: &mut GameRunner) {
+    assert!(
+        is_priority(runner.state()),
+        "reach guard: priority is open before the pass, got {:?}",
+        runner.state().waiting_for
+    );
+    let start_phase = runner.state().phase;
     pass_to_next_boundary(runner);
+    assert!(
+        runner.state().phase != start_phase || !is_priority(runner.state()),
+        "reach guard: the pass reaches a boundary or a prompt, got {:?} in {:?}",
+        runner.state().waiting_for,
+        runner.state().phase
+    );
     assert!(
         !matches!(
             runner.state().waiting_for,

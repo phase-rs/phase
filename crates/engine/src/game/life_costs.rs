@@ -803,13 +803,16 @@ mod tests {
             }
         );
 
-        // (b) A halving replacement cannot make a wide payment affordable.
+        // (b) A halving replacement cannot make a wide payment affordable. At
+        // life 2,000,000,000 the halved 1,500,000,000 would be affordable, so a
+        // check made after halving would accept the payment.
         let mut state = board_with(vec![ReplacementDefinition::new(ReplacementEvent::LoseLife)
             .quantity_modification(QuantityModification::Half)]);
+        state.players[0].life = 2_000_000_000;
         let mut events = Vec::new();
         let result = pay_life_as_cost(&mut state, PlayerId(0), 3_000_000_000, &mut events);
         assert_eq!(result, PayLifeCostResult::InsufficientLife);
-        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.players[0].life, 2_000_000_000);
         assert_eq!(state.players[0].life_lost_this_turn, 0);
         assert!(
             events.is_empty(),
@@ -818,7 +821,7 @@ mod tests {
         // Reach guard: an affordable payment on the same board is halved.
         let result = pay_life_as_cost(&mut state, PlayerId(0), 10, &mut events);
         assert_eq!(result, PayLifeCostResult::Paid { amount: 10 });
-        assert_eq!(state.players[0].life, 15);
+        assert_eq!(state.players[0].life, 1_999_999_995);
     }
 
     /// A printed card: its name, verbatim Oracle text, MTGJSON keywords, card

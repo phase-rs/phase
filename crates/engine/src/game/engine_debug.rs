@@ -4383,11 +4383,14 @@ mod tests {
 
         /// Puts one P0 permanent per entry of `factors` in play, each carrying a
         /// `Multiply { factor, EventContextAmount }` replacement execute of
-        /// `event` (the shape Boon Reflection / Bloodletter of Aclazotz parse to,
-        /// with a chosen factor). Distinct objects with an execute body are
-        /// order-material, so every application but the last is a CR 616.1
-        /// ordering prompt. The factors let a few candidates reach what a dozen
-        /// doubling cards would. Returns the permanents' ids in `factors` order.
+        /// `event` (the shape Boon Reflection's gain doubler parses to, with a
+        /// chosen factor; Bloodletter of Aclazotz's loss doubler parses to a
+        /// `Times` quantity modification instead, see
+        /// `debug_lose_large_multipliers_saturate_at_i32_min`). Distinct objects
+        /// with an execute body are order-material, so every application but the
+        /// last is a CR 616.1 ordering prompt. The factors let a few candidates
+        /// reach what a dozen doubling cards would. Returns the permanents' ids in
+        /// `factors` order.
         fn add_life_multipliers(
             runner: &mut GameRunner,
             event: ReplacementEvent,
@@ -4431,56 +4434,43 @@ mod tests {
             ids
         }
 
-        /// CR 616.1 + CR 616.1f: a parsed Boon Reflection ("If you would gain
-        /// life, you gain twice that much life instead.") and two hand-built
-        /// x1,000 multipliers take a requested 1,000,000 past `u32` in any order:
-        /// the application that passes `u32` lands on `u32::MAX` and the later
-        /// ones keep it there (an engine limit, not a rule), the gain applies in full, the total
-        /// stops at `i32::MAX`, the gained counter at `u32::MAX`, and Ajani's
-        /// Pridemate triggers once. The accepted control (2,000,000,000) applies
-        /// in full.
-        #[test]
-        fn debug_gain_large_multipliers_saturate_past_u32() {
-            // Accepted control: the product 2,000 x 1,000,000 fits an i32.
+        /// Puts Ajani's Pridemate ("Whenever you gain life, put a +1/+1 counter
+        /// on this creature.") and a chain of `doublers` printed life-gain
+        /// doublers under P0 on a debug runner: Rhox Faithmender, Alhammarret's
+        /// Archive and `doublers - 2` copies of Boon Reflection. The Archive is
+        /// legendary, so a chain holds one (the legend rule, CR 704.5j); Boon
+        /// Reflection repeats. Each doubler's replacement is an order-material
+        /// execute on its own object, so every application but the last is a
+        /// CR 616.1 ordering prompt to P0. Returns the runner, the Pridemate's
+        /// id and the doublers' ids.
+        fn printed_gain_doubler_chain(doublers: usize) -> (GameRunner, ObjectId, Vec<ObjectId>) {
+            assert!(
+                doublers >= 2,
+                "the chain holds Rhox Faithmender and Alhammarret's Archive"
+            );
             let mut scenario = scenario();
             let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
-            add_card(&mut scenario, P0, "Boon Reflection");
-            let mut runner = debug_runner(scenario);
-            add_life_multipliers(&mut runner, ReplacementEvent::GainLife, &[10, 100]);
-            act_ok(&mut runner, gain(P0, MAX_DEBUG_LIFE_AMOUNT));
-            assert!(
-                replacement_prompt_open(&runner),
-                "reach guard: three doublers park an ordering prompt, got {:?}",
-                runner.state().waiting_for
-            );
-            answer_to_completion(&mut runner);
-            assert_eq!(life(&runner, P0), 20 + 2_000_000_000);
-            assert_eq!(
-                runner.state().players[0].life_gained_this_turn,
-                2_000_000_000
-            );
-            runner.advance_until_stack_empty();
-            assert_eq!(p1p1(&runner, mate), 1);
+            let mut ids = vec![
+                add_card(&mut scenario, P0, "Rhox Faithmender"),
+                add_card(&mut scenario, P0, "Alhammarret's Archive"),
+            ];
+            for _ in 2..doublers {
+                ids.push(add_card(&mut scenario, P0, "Boon Reflection"));
+            }
+            (debug_runner(scenario), mate, ids)
+        }
 
-            // Past `u32`: the product 2,000,000 x 1,000,000 saturates.
-            let mut scenario = self::scenario();
-            let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
-            add_card(&mut scenario, P0, "Boon Reflection");
-            let mut runner = debug_runner(scenario);
-            add_life_multipliers(&mut runner, ReplacementEvent::GainLife, &[1_000, 1_000]);
-            let mut events = act_ok(&mut runner, gain(P0, MAX_DEBUG_LIFE_AMOUNT)).events;
-            assert_eq!(
-                parked_policy(&runner),
-                Some(UnrepresentablePolicy::Reject),
-                "reach guard: a debug gain's parked proposal is stamped for rejection"
-            );
-            // Prompts are asked while two or more candidates remain (three, then
-            // two); the last candidate applies itself.
-            for candidates in [3, 2] {
+        /// Answers a chain's ordering prompts with index 0, asserting one prompt
+        /// per candidate count from `doublers` down to two (CR 616.1f: after each
+        /// application the choice repeats among the rest) and that the last
+        /// doubler applies itself; returns every answer's events.
+        fn answer_each_ordering_prompt(runner: &mut GameRunner, doublers: usize) -> Vec<GameEvent> {
+            let mut events = Vec::new();
+            for candidates in (2..=doublers).rev() {
                 assert_eq!(
-                    pending_candidate_count(&runner),
+                    pending_candidate_count(runner),
                     Some(candidates),
-                    "reach guard: an ordering prompt over {candidates} candidates"
+                    "{doublers} doublers: an ordering prompt over {candidates} candidates"
                 );
                 events.extend(
                     runner
@@ -4489,50 +4479,93 @@ mod tests {
                         .events,
                 );
             }
-            assert!(!replacement_prompt_open(&runner));
-            assert_eq!(life(&runner, P0), i32::MAX);
-            assert_eq!(runner.state().players[0].life_gained_this_turn, u32::MAX);
-            assert_eq!(life_changes(&events), vec![(P0, i32::MAX, Some(i32::MAX))]);
-            assert_eq!(runner.state().replacement_quantity_overflow, None);
-            runner.advance_until_stack_empty();
-            assert_eq!(p1p1(&runner, mate), 1, "Ajani's Pridemate triggers once");
+            assert!(
+                !replacement_prompt_open(runner),
+                "{doublers} doublers: the last doubler applies itself, got {:?}",
+                runner.state().waiting_for
+            );
+            events
         }
 
-        /// CR 616.1f: four x100 multipliers on 1,000,000 pass `u32` on the
-        /// second application (100,000,000 → 10,000,000,000); every application
-        /// still applies — prompts are asked at four, three and two candidates
-        /// and the last applies itself — and the gain lands on `i32::MAX` with
-        /// the gained counter at `u32::MAX`. (A player-counter or energy count
-        /// still stops at the overflowing replacement:
+        /// CR 616.1 + CR 616.1f: printed doublers take a requested 1,000,000
+        /// past `i32` and then past `u32`. Rhox Faithmender, Alhammarret's
+        /// Archive and copies of Boon Reflection each print "If you would gain
+        /// life, you gain twice that much life instead."; P0 orders them. Eleven
+        /// make 2,048,000,000, which fits an `i32` and applies in full (the
+        /// accepted control). Twelve make 4,096,000,000: the total stops at
+        /// `i32::MAX` and the gained counter counts the gain in full. The
+        /// thirteenth application passes `u32` and lands on `u32::MAX`, and a
+        /// fourteenth keeps it there (an engine limit, not a rule). Each chain
+        /// delivers one gain, and Ajani's Pridemate triggers once.
+        #[test]
+        fn debug_gain_large_multipliers_saturate_past_u32() {
+            // (doublers, P0's life, gained-this-turn counter, `LifeChanged` amount)
+            let cases: [(usize, i32, u32, i32); 4] = [
+                (11, 20 + 2_048_000_000, 2_048_000_000, 2_048_000_000),
+                (12, i32::MAX, 4_096_000_000, i32::MAX),
+                (13, i32::MAX, u32::MAX, i32::MAX),
+                (14, i32::MAX, u32::MAX, i32::MAX),
+            ];
+            for (doublers, life_after, gained, amount) in cases {
+                let (mut runner, mate, _) = printed_gain_doubler_chain(doublers);
+                let mut events = act_ok(&mut runner, gain(P0, MAX_DEBUG_LIFE_AMOUNT)).events;
+                assert_eq!(
+                    parked_policy(&runner),
+                    Some(UnrepresentablePolicy::Reject),
+                    "{doublers} doublers: a debug gain's parked proposal is stamped for rejection"
+                );
+                events.extend(answer_each_ordering_prompt(&mut runner, doublers));
+                assert_eq!(life(&runner, P0), life_after, "{doublers} doublers");
+                assert_eq!(
+                    runner.state().players[0].life_gained_this_turn,
+                    gained,
+                    "{doublers} doublers"
+                );
+                assert_eq!(
+                    life_changes(&events),
+                    vec![(P0, amount, Some(life_after))],
+                    "{doublers} doublers: one gain"
+                );
+                assert_eq!(
+                    runner.state().replacement_quantity_overflow,
+                    None,
+                    "{doublers} doublers"
+                );
+                runner.advance_until_stack_empty();
+                assert_eq!(
+                    p1p1(&runner, mate),
+                    1,
+                    "{doublers} doublers: Ajani's Pridemate triggers once"
+                );
+            }
+        }
+
+        /// CR 616.1f: fourteen printed doublers (Rhox Faithmender, Alhammarret's
+        /// Archive and twelve Boon Reflections, each printing "If you would gain
+        /// life, you gain twice that much life instead.") on 1,000,000: the
+        /// thirteenth application passes `u32`, and every application still
+        /// applies. Prompts are asked at fourteen down to two candidates, the
+        /// last doubler applies itself, and each of the fourteen reports its
+        /// application; the gain lands on `i32::MAX` with the gained counter at
+        /// `u32::MAX`. (A player-counter or energy count still stops at the
+        /// overflowing replacement:
         /// `player_and_energy_times_overflow_stops_the_loop_at_the_overflowing_replacement`.)
         #[test]
         fn debug_gain_multipliers_past_u32_apply_every_replacement() {
-            let mut scenario = scenario();
-            let mate = add_card(&mut scenario, P0, "Ajani's Pridemate");
-            let mut runner = debug_runner(scenario);
-            add_life_multipliers(
-                &mut runner,
-                ReplacementEvent::GainLife,
-                &[100, 100, 100, 100],
-            );
+            let (mut runner, mate, doublers) = printed_gain_doubler_chain(14);
             let mut events = act_ok(&mut runner, gain(P0, MAX_DEBUG_LIFE_AMOUNT)).events;
-            for candidates in [4, 3, 2] {
-                assert_eq!(
-                    pending_candidate_count(&runner),
-                    Some(candidates),
-                    "an ordering prompt over {candidates} candidates"
-                );
-                events.extend(
-                    runner
-                        .act(GameAction::ChooseReplacement { index: 0 })
-                        .expect("every answer must be accepted")
-                        .events,
-                );
-            }
-            assert!(
-                !replacement_prompt_open(&runner),
-                "the last multiplier applies itself"
-            );
+            events.extend(answer_each_ordering_prompt(&mut runner, doublers.len()));
+            let mut applied: Vec<ObjectId> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::ReplacementApplied { source_id, .. } => Some(*source_id),
+                    _ => None,
+                })
+                .collect();
+            applied.sort();
+            let mut expected = doublers.clone();
+            expected.sort();
+            assert_eq!(applied, expected, "every doubler in the chain applies once");
             assert_eq!(life(&runner, P0), i32::MAX);
             assert_eq!(runner.state().players[0].life_gained_this_turn, u32::MAX);
             assert_eq!(life_changes(&events), vec![(P0, i32::MAX, Some(i32::MAX))]);
@@ -4909,7 +4942,17 @@ mod tests {
 
         /// The loss twin: three multipliers (x10, x10, x1,000) take 1,000,000
         /// past `u32`; the loss lands on `u32::MAX`, P1's total stops at
-        /// `i32::MIN`, and P1 loses the game (CR 704.5a).
+        /// `i32::MIN`, and P1 loses the game (CR 704.5a). The multipliers are
+        /// synthetic: the test needs loss multipliers that park an ordering
+        /// prompt (CR 616.1), and no printed card multiplies a loss with an
+        /// ordering prompt in this engine. The nearest printed card, Bloodletter
+        /// of Aclazotz ("If an opponent would lose life during your turn, they
+        /// lose twice that much life instead."), parses to a commuting `Times`
+        /// quantity modification that applies with no prompt
+        /// (`debug_lose_parsed_doublers_past_u32_land_on_u32_max` covers it),
+        /// and the engine leaves unimplemented the "If enchanted player would
+        /// lose life, they lose twice that much life instead." that Selenia,
+        /// the Cursed Heart gives its Selenia's Curse token.
         #[test]
         fn debug_lose_large_multipliers_saturate_at_i32_min() {
             let mut scenario = scenario();

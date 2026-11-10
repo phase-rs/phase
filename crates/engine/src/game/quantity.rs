@@ -10477,16 +10477,22 @@ mod tests {
     }
 
     /// CR 107.1b: Scourge of the Skyclaves reads "20 minus the highest life
-    /// total among players". With every total at `i32::MIN` (Platinum Angel
-    /// keeps both players in the game) that is 2^31 + 20, past the `i32`
-    /// power/toughness range, so it saturates at `i32::MAX`.
+    /// total among players". With every total at `i32::MIN` (Platinum Angel,
+    /// "You can't lose the game and your opponents can't win the game.", keeps
+    /// both players in the game through the state-based-action check of
+    /// CR 704.3) that is 2^31 + 20, past the `i32` power/toughness range, so it
+    /// saturates at `i32::MAX`. Without the Angels the same check eliminates
+    /// both players (CR 704.5a), and the game is a draw (CR 104.4a).
     #[test]
     fn scourge_of_the_skyclaves_power_saturates_when_every_life_total_is_i32_min() {
         use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::game_state::WaitingFor;
 
         const SCOURGE: &str = "Kicker {4}{B}\nWhen you cast this spell, if it was kicked, each player loses half their life, rounded up.\nScourge of the Skyclaves's power and toughness are each equal to 20 minus the highest life total among players.";
 
-        let scourge_after_layers = |lives: [i32; 2], with_angels: bool| {
+        // Builds the board, applies the layers, then runs the CR 704.3
+        // state-based-action check a player getting priority would run.
+        let scourge_after_state_based_actions = |lives: [i32; 2], with_angels: bool| {
             let mut scenario = GameScenario::new();
             scenario.at_phase(Phase::PreCombatMain);
             scenario.with_life(P0, lives[0]).with_life(P1, lives[1]);
@@ -10506,18 +10512,34 @@ mod tests {
                 .id();
             let mut runner = scenario.build();
             crate::game::layers::flush_layers(runner.state_mut());
+            crate::game::sba::check_state_based_actions(runner.state_mut(), &mut Vec::new());
             (runner.state().clone(), scourge)
         };
 
         // Reach guard / control: 20 minus the highest total (15) is 5.
-        let (state, scourge) = scourge_after_layers([12, 15], false);
+        let (state, scourge) = scourge_after_state_based_actions([12, 15], false);
         let object = &state.objects[&scourge];
         assert_eq!((object.power, object.toughness), (Some(5), Some(5)));
 
-        let (state, scourge) = scourge_after_layers([i32::MIN, i32::MIN], true);
+        // Control: without the Platinum Angels the check eliminates both
+        // players, so the elimination assertion below can fail.
+        let (state, _) = scourge_after_state_based_actions([i32::MIN, i32::MIN], false);
+        assert!(state.players.iter().all(|player| player.is_eliminated));
+        assert!(
+            matches!(state.waiting_for, WaitingFor::GameOver { winner: None }),
+            "got {:?}",
+            state.waiting_for
+        );
+
+        let (state, scourge) = scourge_after_state_based_actions([i32::MIN, i32::MIN], true);
         let object = &state.objects[&scourge];
         assert_eq!(object.zone, Zone::Battlefield);
         assert!(state.players.iter().all(|player| !player.is_eliminated));
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "got {:?}",
+            state.waiting_for
+        );
         assert_eq!(
             (object.power, object.toughness),
             (Some(i32::MAX), Some(i32::MAX))
