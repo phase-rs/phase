@@ -25,7 +25,10 @@ use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::card_type::Supertype;
 use crate::types::events::{GameEvent, ManaTapState};
-use crate::types::game_state::{GameState, ManaAbilityResume, ProductionOverride, WaitingFor};
+use crate::types::game_state::{
+    GameState, ManaAbilityResume, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
+    ProductionOverride, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{
     ManaColor, ManaCostShard, ManaPip, ManaRestriction, ManaSourceOutput, ManaSourceQuantity,
@@ -486,16 +489,37 @@ pub(crate) fn untap_repeats_mana(state: &GameState, player: PlayerId, object: Ob
             // discard, a Food to sacrifice, creatures to tap) comes before any of
             // it is paid, so the copy can't tell whether a second payment exists,
             // and the pass stays. The color prompt comes after the cost.
-            let paid = matches!(
-                activate_mana_source_selection(
-                    &mut copy,
-                    player,
-                    selection,
-                    &mut events,
-                    ManaAbilityResume::Priority,
-                ),
-                Ok(WaitingFor::Priority { .. } | WaitingFor::ChooseManaColor { .. })
+            let mut outcome = activate_mana_source_selection(
+                &mut copy,
+                player,
+                selection,
+                &mut events,
+                ManaAbilityResume::Priority,
             );
+            // CR 605.3b + CR 605.3c: the ability resolves, color and all, before it
+            // can be activated again, so its color is chosen here and its effect
+            // after the color (Cryptolith Fragment's "Each player loses 1 life.")
+            // runs before the repeat is read. Any color will do: the color doesn't
+            // decide whether the source survives its use.
+            if let Ok(WaitingFor::ChooseManaColor {
+                choice,
+                context: ManaChoiceContext::ManaAbility(pending),
+                ..
+            }) = &outcome
+            {
+                let (choice, pending) = (choice.clone(), pending.clone());
+                let Some(chosen) = first_mana_choice(&choice) else {
+                    return false;
+                };
+                outcome = mana_abilities::handle_choose_mana_color(
+                    &mut copy,
+                    &pending,
+                    &choice,
+                    chosen,
+                    &mut events,
+                );
+            }
+            let paid = matches!(outcome, Ok(WaitingFor::Priority { .. }));
             // CR 704.5a: the public action's terminal checkpoint
             // (`engine::reconcile_terminal_sba`) ends the game here.
             if !paid
@@ -591,6 +615,21 @@ pub fn activatable_mana_source_selections(
     }
     selections.sort_by(|left, right| left.cmp_stable(right));
     selections
+}
+
+/// The first answer a mana color prompt offers.
+fn first_mana_choice(prompt: &ManaChoicePrompt) -> Option<ManaChoice> {
+    match prompt {
+        ManaChoicePrompt::SingleColor { options } => {
+            options.first().copied().map(ManaChoice::SingleColor)
+        }
+        ManaChoicePrompt::Combination { options } => {
+            options.first().cloned().map(ManaChoice::Combination)
+        }
+        ManaChoicePrompt::AnyCombination { count, options } => options
+            .first()
+            .map(|&mana| ManaChoice::Combination(vec![mana; *count])),
+    }
 }
 
 /// [`activatable_mana_source_selections`] for one object: its rows, without

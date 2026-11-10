@@ -47,11 +47,13 @@ use engine::game::perf_counters;
 use engine::game::period_confirm::performed_for_tests;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::zones::move_to_zone;
 use engine::types::ability::{Effect, TapStateChange, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::parse_counter_type;
 use engine::types::game_state::{
-    CastPaymentMode, LoopDetectionMode, PriorityPassingMode, StackEntry, StackEntryKind, WaitingFor,
+    CastPaymentMode, ExileLink, ExileLinkKind, LoopDetectionMode, PriorityPassingMode, StackEntry,
+    StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType};
@@ -657,6 +659,64 @@ fn a_use_that_ends_the_game_leaves_no_second_one() {
         assert!(
             mana_action(&runner, staff).is_some(),
             "{life} life: the Staff can tap for mana now"
+        );
+        assert_eq!(
+            !recommends_pass(&runner),
+            holds,
+            "{life} life: whether the untap window holds"
+        );
+    }
+}
+
+/// Cryptolith Fragment, verbatim.
+const CRYPTOLITH_FRAGMENT: &str = "This artifact enters tapped.\n{T}: Add one mana of any color. Each player loses 1 life.\nAt the beginning of your upkeep, if each player has 10 or less life, transform this artifact.";
+
+/// CR 605.3b + CR 605.3c + CR 704.5a: Myr Welder ("This creature has all
+/// activated abilities of all cards exiled with it.") with Staff of Compleation
+/// and Cryptolith Fragment ("{T}: Add one mana of any color. Each player loses
+/// 1 life.") exiled with it. At 1 life the Staff's "Pay 2 life" can't be paid,
+/// and the Fragment's mana, once its color is chosen, costs the game, so the
+/// Staff's "{5}: Untap this artifact." has no second use to wait for. At 2 life
+/// the Fragment's use leaves 1, and the window holds.
+#[test]
+fn a_mana_ability_is_read_after_its_color_and_rider() {
+    let Some(db) = shared_card_db() else { return };
+    for (life, holds) in [(1, false), (2, true)] {
+        let mut scenario = main_phase_scenario();
+        let welder = scenario.add_real_card(P0, "Myr Welder", Zone::Battlefield, db);
+        let exiled = [
+            scenario
+                .add_artifact_to_hand_from_oracle(P0, "Staff of Compleation", STAFF_OF_COMPLEATION)
+                .id(),
+            scenario
+                .add_artifact_to_hand_from_oracle(P0, "Cryptolith Fragment", CRYPTOLITH_FRAGMENT)
+                .id(),
+        ];
+        let mountains: Vec<_> = (0..5)
+            .map(|_| scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db))
+            .collect();
+        let mut runner = scenario.build();
+        for exiled_id in exiled {
+            move_to_zone(runner.state_mut(), exiled_id, Zone::Exile, &mut Vec::new());
+            runner.state_mut().exile_links.push(ExileLink {
+                exiled_id,
+                source_id: welder,
+                kind: ExileLinkKind::TrackedBySource,
+            });
+        }
+        runner.state_mut().layers_dirty.mark_full();
+        flush_layers(runner.state_mut());
+        clear_summoning_sickness(&mut runner, welder);
+        runner.state_mut().players[0].life = life;
+        for mountain in mountains {
+            tap_for_mana(&mut runner, mountain);
+        }
+        let untap = untap_ability_index(&runner, welder);
+        activate(&mut runner, welder, untap, &[]);
+        assert_eq!(top_source_name(&runner).as_deref(), Some("Myr Welder"));
+        assert!(
+            mana_action(&runner, welder).is_some() && !is_tapped(&runner, welder),
+            "{life} life: the Welder can tap for mana now"
         );
         assert_eq!(
             !recommends_pass(&runner),
