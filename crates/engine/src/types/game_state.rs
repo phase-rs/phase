@@ -37925,6 +37925,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         rng: _,
         combat: _,
         waiting_for: _,
+        effect_zone_choice_privacy_zones: _,
         // `game_end` (CR 104.1 terminal record): EXCLUDED from `impl PartialEq for
         // GameState`, and that is the SAFE direction. It is written once, when the game
         // ends, and never cleared or grown, so it cannot be a per-cycle accumulator; and the
