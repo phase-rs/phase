@@ -31945,6 +31945,7 @@ mod tests {
     fn a_stack_entry_is_scanned_under_the_loop_firewall() {
         use crate::types::ability::{Effect, TargetFilter, TypedFilter};
         let particular_move = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::ParentTarget,

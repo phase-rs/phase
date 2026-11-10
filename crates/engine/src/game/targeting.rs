@@ -8500,6 +8500,7 @@ mod tests {
         let second = TargetRef::Object(ObjectId(2));
         let body = ResolvedAbility::new(
             crate::types::ability::Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTargetSlot { index: 1 },

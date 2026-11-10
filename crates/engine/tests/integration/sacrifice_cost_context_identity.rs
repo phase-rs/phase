@@ -62,6 +62,7 @@ fn fixture(stolen: bool, replacement: bool) -> (GameRunner, ObjectId, ObjectId) 
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::SelfRef,

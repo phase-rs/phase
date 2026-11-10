@@ -3896,6 +3896,37 @@ fn parse_type_phrase_folding_unbound<'a>(
                 }
             }
         }
+        if !consumed_suffix {
+            // CR 205.2a + CR 205.3a: a card-type LIST ends each leg with the same
+            // informational noun immediately before the list separator — "an
+            // Angel card, a Demon card, and/or a Dragon card" (Kaalia, Zenith
+            // Seeker). The table above only matches the noun when a SPACE
+            // follows it, so a comma-separated leg left " card," in the
+            // remainder and the `TYPE_SEPARATORS` fold below never saw its
+            // separator: it published only the leftmost leg (`Angel`) as the
+            // filter, silently narrowing "an Angel, a Demon, and/or a Dragon"
+            // to "an Angel" so every Demon and Dragon became unselectable
+            // (issue #8068).
+            //
+            // Only the NOUN is consumed, never the comma: the separator stays in
+            // the remainder for the fold, and a caller that splits sibling
+            // clauses still sees the clause boundary it expects.
+            static COMMA_LED_NOUNS: &[(&str, bool)] = &[("cards", true), ("card", true)];
+            for (noun, is_card) in COMMA_LED_NOUNS {
+                if let Ok((after_noun, _)) = tag::<_, _, OracleError<'_>>(*noun).parse(rest_trimmed)
+                {
+                    if peek(tag::<_, _, OracleError<'_>>(","))
+                        .parse(after_noun)
+                        .is_ok()
+                    {
+                        pos += ws_len + (rest_trimmed.len() - after_noun.len());
+                        left_card_suffix = *is_card;
+                        left_head_noun = true;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     if let Some(consumed) = parse_token_suffix(&lower[pos..]) {
@@ -18577,6 +18608,86 @@ mod tests {
         assert!(
             !matches!(non_type, TargetFilter::Or { .. }),
             "a non-type right conjunct must not union, got {non_type:?}"
+        );
+    }
+
+    /// CR 205.2a + CR 205.3a: a card-type LIST ends each leg with the
+    /// informational "card"/"cards" noun immediately before the list
+    /// separator, so the noun must be consumed there too. Issue #8068: the noun
+    /// scanner only recognized a SPACE after the noun, which left the leftmost
+    /// leg's " card," in the remainder; the comma was then invisible to the
+    /// `TYPE_SEPARATORS` fold below and only the first leg survived.
+    ///
+    /// Paired positive: the same union without the comma-noun form (no noun at
+    /// all) already folds, so the assertion below is about the noun and not
+    /// about unions in general.
+    #[test]
+    fn comma_separated_card_noun_legs_fold_into_one_union() {
+        let (nounless, nounless_rest) =
+            parse_type_phrase_folding("angel, a demon, and/or a dragon");
+        assert_eq!(
+            nounless_rest.trim(),
+            "",
+            "reach-guard: a noun-less list already folds"
+        );
+        assert!(
+            matches!(nounless, TargetFilter::Or { .. }),
+            "reach-guard: a noun-less list already folds, got {nounless:?}"
+        );
+
+        let (filter, rest) =
+            parse_type_phrase_folding("angel card, a demon card, and/or a dragon card");
+        assert_eq!(
+            rest.trim(),
+            "",
+            "the comma-led list must be consumed whole, got remainder {rest:?}"
+        );
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected a three-leg union, got {filter:?}");
+        };
+        let legs: Vec<&str> = filters
+            .iter()
+            .filter_map(|leg| match leg {
+                TargetFilter::Typed(tf) => match tf.type_filters.as_slice() {
+                    [TypeFilter::Subtype(subtype)] => Some(subtype.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(legs, vec!["Angel", "Demon", "Dragon"]);
+
+        // The same list with core types and the plural noun.
+        let (core, core_rest) =
+            parse_type_phrase_folding("creature cards, a land card, and/or an artifact card");
+        assert_eq!(core_rest.trim(), "");
+        let TargetFilter::Or { filters } = core else {
+            panic!("expected a three-leg union, got {core:?}");
+        };
+        assert_eq!(filters.len(), 3, "got {filters:?}");
+    }
+
+    /// Paired negative: consuming the comma-noun form must not eat the clause
+    /// separator. A card-type leg followed by a sibling instruction keeps its
+    /// comma in the remainder for the caller's own clause grammar.
+    ///
+    /// SYNTHETIC PROBE: no printed card pairs a "<type> card" leg with a
+    /// "then …" sibling, so the input is a grammar probe for the separator-
+    /// retention contract rather than a printed-card reading. The contract is
+    /// what the real card (Kaalia, Zenith Seeker) depends on: its legs are ALSO
+    /// followed by a comma (the next leg), and the clause splitter must still
+    /// see the boundary after the final leg.
+    #[test]
+    fn comma_led_card_noun_keeps_a_sibling_clause_separator() {
+        let (filter, rest) = parse_type_phrase_folding("creature card, then draw a card");
+        assert!(
+            matches!(filter, TargetFilter::Typed(_)),
+            "a sibling instruction is not a union leg, got {filter:?}"
+        );
+        assert_eq!(
+            rest.trim_start(),
+            ", then draw a card",
+            "the clause separator must stay in the remainder"
         );
     }
 

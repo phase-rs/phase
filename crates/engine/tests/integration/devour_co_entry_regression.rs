@@ -320,6 +320,7 @@ fn single_pick_devour_does_not_leak_snapshot_to_later_sacrifice() {
 
     let change_zone = ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),

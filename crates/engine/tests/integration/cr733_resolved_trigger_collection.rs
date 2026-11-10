@@ -103,6 +103,7 @@ fn redirect_self_moved_to(destination: Zone, redirected_to: Zone) -> Replacement
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 destination: redirected_to,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -332,6 +333,7 @@ fn real_change_zone_resolver_journals_its_collected_trigger_occurrences() {
 
     let ability = ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Graveyard,
             target: TargetFilter::Any,
