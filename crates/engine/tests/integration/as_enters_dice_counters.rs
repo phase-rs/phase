@@ -8295,25 +8295,44 @@ impl ResidentPixieCase {
     }
 }
 
-/// Answer the roll's ordering prompt, if one is asked, with Pixie Guide first,
-/// after checking it was rendered with both resident replacements.
-fn answer_roll_order_with_pixie(runner: &mut GameRunner, events: &mut Vec<GameEvent>, what: &str) {
-    let state = runner.state();
+/// The candidates of a pending replacement ordering prompt, by source name and
+/// rendered description, sorted by name.
+fn offered_replacements<'a>(state: &'a GameState, what: &str) -> Vec<(&'a str, &'a str)> {
     let WaitingFor::ReplacementChoice { candidates, .. } = &state.waiting_for else {
         panic!(
             "{what}: expected the roll's ordering prompt, got {:?}",
             state.waiting_for
         );
     };
-    let mut names: Vec<&str> = candidates.iter().map(|c| c.source_name.as_str()).collect();
-    names.sort_unstable();
-    assert_eq!(names, vec!["Barbarian Class", "Pixie Guide"], "{what}");
-    let pixie = candidates
+    let mut offered: Vec<(&str, &str)> = candidates
         .iter()
-        .find(|candidate| candidate.source_name == "Pixie Guide")
-        .expect("Pixie Guide is offered");
-    assert!(
-        !pixie.description.is_empty(),
+        .map(|c| (c.source_name.as_str(), c.description.as_str()))
+        .collect();
+    offered.sort_unstable();
+    offered
+}
+
+/// Answer the roll's ordering prompt with Pixie Guide first, after checking it
+/// offers `names` (sorted) and describes Pixie Guide's replacement by its own
+/// text: a render on a board where Humility is on the battlefield finds no
+/// definition, and falls back to "Replacement effect".
+fn answer_roll_order_with_pixie(
+    runner: &mut GameRunner,
+    names: &[&str],
+    events: &mut Vec<GameEvent>,
+    what: &str,
+) {
+    let state = runner.state();
+    let offered = offered_replacements(state, what);
+    let offered_names: Vec<&str> = offered.iter().map(|(name, _)| *name).collect();
+    assert_eq!(offered_names, names, "{what}");
+    let pixie = offered
+        .iter()
+        .find(|(name, _)| *name == "Pixie Guide")
+        .map(|(_, description)| *description);
+    assert_eq!(
+        pixie,
+        Some(PIXIE_GUIDE),
         "{what}: Pixie Guide's replacement is described from the board it applies on"
     );
     let index = replacement_index(state, "Pixie Guide");
@@ -8358,7 +8377,12 @@ fn a_co_entrants_static_does_not_remove_a_residents_roll_replacement() {
                         "{what}: reach: the roll's prompt is inside the batch"
                     );
                 }
-                answer_roll_order_with_pixie(&mut board.festival.runner, &mut events, &what);
+                answer_roll_order_with_pixie(
+                    &mut board.festival.runner,
+                    &["Barbarian Class", "Pixie Guide"],
+                    &mut events,
+                    &what,
+                );
             }
             settle(&mut board.festival.runner, &mut events, DEFAULT_ANSWERS);
             let state = board.festival.runner.state();
@@ -8391,6 +8415,88 @@ fn a_co_entrants_static_does_not_remove_a_residents_roll_replacement() {
             );
         }
     }
+}
+
+fn add_resident_pixie_barbarian_wyll_and_grumgully(scenario: &mut GameScenario) {
+    add_resident_pixie_barbarian_and_grumgully(scenario);
+    CoEntrant::Wyll.resident(scenario);
+}
+
+/// V3b. V3's board with Wyll, Blade of Frontiers resident too, and Humility
+/// delivered first + CR 616.1f + CR 603.6d + CR 614.12: answering Pixie Guide
+/// re-scans the roll on the board before its event, and the next ordering prompt,
+/// between Barbarian Class and Wyll, is rendered from that board, so Wyll's
+/// replacement is described by its own text. Three "plus one and ignore the
+/// lowest" replacements leave three ignored rolls, and Wyll sees the roll.
+#[test]
+fn a_co_entrants_static_does_not_strip_the_next_roll_prompt() {
+    let what = "V3b";
+    reset_triggers_seen();
+    let mut board = pre_entry_board(
+        7,
+        CoEntrant::Humility,
+        CoLayout::CoFirst,
+        add_resident_pixie_barbarian_wyll_and_grumgully,
+    );
+    let wyll = board
+        .festival
+        .runner
+        .state()
+        .objects
+        .values()
+        .find(|object| object.name == CoEntrant::Wyll.name())
+        .map(|object| object.id)
+        .expect("the resident Wyll");
+    let mut events = Vec::new();
+    board.keep(&mut events);
+    assert_eq!(
+        stack_frames(board.festival.runner.state()),
+        vec![FrameKind::BatchDelivery],
+        "{what}: reach: the entry prompt parks the batch before the roll"
+    );
+    order_entry(&mut board.festival.runner, "Hammer Jammer", &mut events);
+    answer_roll_order_with_pixie(
+        &mut board.festival.runner,
+        &["Barbarian Class", "Pixie Guide", CoEntrant::Wyll.name()],
+        &mut events,
+        what,
+    );
+
+    // CR 616.1f: the answer's re-scan asks the next order.
+    let state = board.festival.runner.state();
+    let offered = offered_replacements(state, what);
+    assert_eq!(
+        offered,
+        vec![
+            ("Barbarian Class", BARBARIAN_CLASS_L1),
+            (
+                CoEntrant::Wyll.name(),
+                WYLL.lines().next().expect("Wyll's replacement line")
+            ),
+        ],
+        "{what}: the re-scan's prompt is described from the board it applies on"
+    );
+    let index = replacement_index(state, CoEntrant::Wyll.name());
+    act(
+        &mut board.festival.runner,
+        GameAction::ChooseReplacement { index },
+        &mut events,
+    );
+    settle(&mut board.festival.runner, &mut events, DEFAULT_ANSWERS);
+    let state = board.festival.runner.state();
+    assert_eq!(
+        ignored_rolls(&events),
+        3,
+        "{what}: one ignored roll per replacement that applied"
+    );
+    assert_eq!(die_results(&events).len(), 1, "{what}");
+    assert_eq!(
+        triggers_seen_from(wyll),
+        1,
+        "{what}: Humility is not on the battlefield when the roll is made"
+    );
+    board.assert_delivered_before_the_roll(&events, what);
+    assert_finished(state, &[board.dwarf(), wyll], what);
 }
 
 /// V4. Roaming Throne resident, having chosen Goblin, with a resident Brazen

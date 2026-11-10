@@ -1632,8 +1632,14 @@ pub(crate) fn simultaneous_entrants_of(state: &GameState, entrant: ObjectId) -> 
     // one event with every token its creating effect creates: those its own batch
     // has committed (listed on its liminal entry), and those earlier batches of
     // the resolution committed (published by the inline copy drain, or held on
-    // the parked `CopyToken` frame across a pause).
-    if let Some(entry) = state.liminal_entries.get(&entrant) {
+    // the parked `CopyToken` frame across a pause). A meld or transformed-entry
+    // projection is a card's entry: its event is the publication or the parked
+    // owner's group below.
+    if let Some(entry) = state
+        .liminal_entries
+        .get(&entrant)
+        .filter(|entry| matches!(entry.kind, LiminalEntryKind::Token))
+    {
         let resolution = match &state.active_copy_token_resolution_tokens {
             Some(committed) => committed.as_slice(),
             // The innermost parked owner is the one creating this token.
@@ -8762,5 +8768,91 @@ mod simultaneous_entry_tests {
             "the parked owner answers for its paused member"
         );
         assert!(simultaneous_entrants_of(&state, c).is_empty());
+    }
+
+    /// CR 111.1 + CR 603.6a + CR 614.12: only a token's liminal entry names its
+    /// event's entrants from its creating effect. A meld or transformed-entry
+    /// projection is a card's entry, so a delivering change's publication names
+    /// them, and outside one there are none.
+    #[test]
+    fn only_a_token_liminal_entry_names_its_entrants_from_its_creating_effect() {
+        use crate::types::ability::EntryAttackDestination;
+        use crate::types::game_state::{
+            LiminalEntrant, LiminalEntry, MeldSelection, TokenProjection,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let [a, b, c] = [1, 2, 3].map(|n| {
+            create_object(
+                &mut state,
+                CardId(n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Hand,
+            )
+        });
+        let group = state.allocate_logical_zone_change_group(&[a, b]);
+        let meld = LiminalEntryKind::Meld {
+            context: MeldSelection {
+                source_id: b,
+                partner_id: c,
+                controller: PlayerId(0),
+                expected_source: "Card 2".to_string(),
+                expected_partner: "Card 3".to_string(),
+                result: "Melded".to_string(),
+                entry: Default::default(),
+            },
+            attack_target: None,
+        };
+        for kind in [
+            LiminalEntryKind::Token,
+            LiminalEntryKind::TransformedEntry,
+            meld,
+        ] {
+            let is_token = matches!(kind, LiminalEntryKind::Token);
+            let what = format!("{kind:?}");
+            let projected = state.objects[&b].clone();
+            let object = if is_token {
+                LiminalEntrant::Token(TokenProjection::materialize(projected))
+            } else {
+                LiminalEntrant::Card(projected)
+            };
+            state.liminal_entries.insert(
+                b,
+                LiminalEntry {
+                    object,
+                    name: "Card 2".to_string(),
+                    source_id: b,
+                    controller: PlayerId(0),
+                    enters_attacking: false,
+                    attack_destination: EntryAttackDestination::AnyDefender,
+                    attach_to: None,
+                    sacrifice_at: None,
+                    remaining_count: 0,
+                    created_ids: vec![c],
+                    copy_resume: None,
+                    spec_resume: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enter_with_counters: Vec::new(),
+                    kind,
+                    replacement_applied: HashSet::new(),
+                },
+            );
+            let published = deliver_simultaneous_member(&mut state, &group, |state| {
+                simultaneous_entrants_of(state, b)
+            });
+            let outside = simultaneous_entrants_of(&state, b);
+            if is_token {
+                assert_eq!(
+                    published,
+                    vec![c, b],
+                    "{what}: its creating effect's tokens"
+                );
+                assert_eq!(outside, vec![c, b], "{what}: with no change delivering it");
+            } else {
+                assert_eq!(published, vec![a, b], "{what}: the delivering change's");
+                assert!(outside.is_empty(), "{what}: no change delivers it");
+            }
+        }
     }
 }

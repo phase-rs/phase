@@ -3076,6 +3076,24 @@ pub(crate) fn record_last_created_token(state: &mut GameState, object_id: Object
     exists
 }
 
+/// CR 608.2c + CR 603.7 + CR 111.1: merge the copy batch's ledger
+/// (`last_created_token_ids`, reset per batch) into the active CopyToken owner's
+/// buffer, which holds every token the whole resolution created ("those
+/// tokens"): its earlier batches' first, then this batch's not yet listed, in
+/// creation order. The single authority for that re-sync; an assignment would
+/// drop the earlier batches' tokens once a paused batch resumes. The ledger is
+/// the guarded one, so no id its guard withheld is published.
+pub(crate) fn record_copy_batch_ledger_on_active_copy_token(state: &mut GameState) {
+    let batch = state.last_created_token_ids.clone();
+    if let Some(pending) = state.active_copy_token_mut() {
+        let unlisted: Vec<ObjectId> = batch
+            .into_iter()
+            .filter(|id| !pending.created_ids.contains(id))
+            .collect();
+        pending.created_ids.extend(unlisted);
+    }
+}
+
 /// CR 111.1 + CR 707.2: publish a just-created token into BOTH destinations the
 /// anaphora slot has while a copy batch is in flight — [`record_last_created_token`]'s ledger 3 and
 /// the in-flight `PendingCopyTokenResolution::created_ids` buffer — under ONE evaluation of the
@@ -3098,24 +3116,6 @@ pub(crate) fn record_last_created_token(state: &mut GameState, object_id: Object
 /// drain, it would silently widen what `TargetFilter::LastCreated` names for "the tokens created
 /// this way" — the same widening argument that keeps the predicate out of
 /// `restrictions::record_token_created`.
-/// CR 608.2c + CR 603.7 + CR 111.1: merge the copy batch's ledger
-/// (`last_created_token_ids`, reset per batch) into the active CopyToken owner's
-/// buffer, which holds every token the whole resolution created ("those
-/// tokens"): its earlier batches' first, then this batch's not yet listed, in
-/// creation order. The single authority for that re-sync; an assignment would
-/// drop the earlier batches' tokens once a paused batch resumes. The ledger is
-/// the guarded one, so no id its guard withheld is published.
-pub(crate) fn record_copy_batch_ledger_on_active_copy_token(state: &mut GameState) {
-    let batch = state.last_created_token_ids.clone();
-    if let Some(pending) = state.active_copy_token_mut() {
-        let unlisted: Vec<ObjectId> = batch
-            .into_iter()
-            .filter(|id| !pending.created_ids.contains(id))
-            .collect();
-        pending.created_ids.extend(unlisted);
-    }
-}
-
 pub(crate) fn record_last_created_copy_batch_token(state: &mut GameState, object_id: ObjectId) {
     if !record_last_created_token(state, object_id) {
         return;
