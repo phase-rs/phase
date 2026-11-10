@@ -8,7 +8,8 @@
 //! here.
 //!
 //! A staged root is a fresh payment choice at `begin` and a latched re-entry on
-//! every replay (CR 118.12).
+//! every replay (CR 118.12). An outside action that changes the base keeps the
+//! accepted prefix and its cursor in a hidden recovery checkpoint.
 
 use crate::game::effects;
 use crate::game::engine::{self, EngineError};
