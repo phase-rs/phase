@@ -47020,6 +47020,60 @@ fn reveal_until_passive_has_chosen_name_tv_pattern() {
     );
 }
 
+/// CR 608.2c: an explicit "You reveal" after an owner shuffle keeps the
+/// activator; the owner anchor must not overwrite a printed subject.
+#[test]
+fn explicit_you_reveal_after_owner_shuffle_keeps_the_controller() {
+    let def = parse_effect_chain(
+        "This creature's owner shuffles it into their library. You reveal cards from the top of your library until you reveal a creature card.",
+        AbilityKind::Activated,
+    );
+    let reveal = def
+        .sub_ability
+        .as_deref()
+        .and_then(|shuffle| shuffle.sub_ability.as_deref())
+        .expect("the reveal follows the owner shuffle");
+    assert!(
+        matches!(
+            &*reveal.effect,
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                ..
+            }
+        ),
+        "an explicit you reveal keeps the controller, got {:?}",
+        reveal.effect
+    );
+}
+
+/// CR 608.2c: a distinct intervening player becomes the nearer antecedent, so
+/// the owner anchor from the earlier shuffle does not capture the reveal.
+#[test]
+fn intervening_player_reveal_does_not_inherit_the_owner_anchor() {
+    let def = parse_effect_chain(
+        "This creature's owner shuffles it into their library. Target player draws a card. They reveal cards from the top of their library until they reveal a creature card.",
+        AbilityKind::Activated,
+    );
+    let mut node = def.sub_ability.as_deref();
+    let mut reveal = None;
+    while let Some(def) = node {
+        if matches!(&*def.effect, Effect::RevealUntil { .. }) {
+            reveal = Some(def);
+            break;
+        }
+        node = def.sub_ability.as_deref();
+    }
+    let reveal = reveal.expect("the reveal is present");
+    let Effect::RevealUntil { player, .. } = &*reveal.effect else {
+        unreachable!()
+    };
+    assert_ne!(
+        *player,
+        TargetFilter::Owner,
+        "the nearer player must win over the earlier owner anchor: {player:?}"
+    );
+}
+
 /// CR 608.2c + CR 400.3: Mirror-Mad's reflexive "that player" reveal binds to
 /// the source-owner shuffle through the chain's player anchor, not to the
 /// activator.

@@ -11257,6 +11257,19 @@ fn lower_target_referenced_search_library(
     clause
 }
 
+/// CR 400.3 + CR 701.24c: whether an owner-routed move's target set can name
+/// more than one owner. A bare parent-target anaphor, an untargeted any-filter,
+/// or a compound that explicitly includes the source/parent target spans owners;
+/// a pure `Or` of typed single-object alternatives (Cathartic Parting's
+/// "artifact or enchantment") is still one object with one owner.
+fn owner_move_spans_owners(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::ParentTarget | TargetFilter::Any | TargetFilter::And { .. } => true,
+        TargetFilter::Or { filters } => filters.iter().any(owner_move_spans_owners),
+        _ => false,
+    }
+}
+
 /// Wrap an effect with a `Shuffle` sub_ability for compound "X into library" operations.
 pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause {
     let shuffle_target = match &effect {
@@ -11325,13 +11338,29 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
     // `ParentTargetOwner` shuffle covers that owner, so the member delivery must
     // not shuffle a second time. Ambiguous `ParentTarget`/`SelfRef` shapes keep
     // their existing routing (source self-moves are handled above).
-    let single_target_owner_move = matches!(
+    // CR 701.24c + CR 400.3: a typed single-object owner move has one exact
+    // owner (Chaos Warp/Oblation); the terminal ParentTargetOwner shuffle covers
+    // it. Every other owner-routed move — parent-target cards, compound
+    // "source and target", multiple selected cards — can span owners, so it uses
+    // the tracked-owner population terminal below.
+    let scoped_owner_move = matches!(
         &effect,
         Effect::ChangeZone {
             owner_library: true,
             target,
             ..
-        } if !matches!(target, TargetFilter::SelfRef | TargetFilter::ParentTarget)
+        } if owner_move_spans_owners(target)
+    );
+    // Everything else with one object (Typed, attached, prevention recipient,
+    // specific object) has one exact owner; its terminal owner shuffle covers
+    // that owner and the delivery is suppressed.
+    let specific_owner_move = matches!(
+        &effect,
+        Effect::ChangeZone {
+            owner_library: true,
+            target,
+            ..
+        } if !matches!(target, TargetFilter::SelfRef) && !scoped_owner_move
     );
     match &mut effect {
         // CR 701.24a + CR 701.24d: every parser-emitted compound move into a
@@ -11365,8 +11394,13 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
             target: shuffle_target,
         },
     );
-    if tracks_owner_population {
+    if tracks_owner_population || scoped_owner_move {
         shuffle.player_scope = Some(owner_library_shuffle_scope());
+    }
+    if scoped_owner_move {
+        shuffle.effect = Box::new(Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer,
+        });
     }
     ParsedEffectClause {
         optional_targeting: false,
@@ -27880,6 +27914,34 @@ mod tests {
             }
         ));
         assert!(shuffle.sub_ability.is_none());
+    }
+
+    /// CR 701.24c + CR 400.3: "shuffle that card into its owner's library"
+    /// captures the parent target's owner before delivery and settles through
+    /// the tracked-owner terminal Shuffle.
+    #[test]
+    fn parse_shuffle_parent_target_into_owners_library_uses_owner_scope() {
+        let text = "shuffle that card into its owner's library";
+        let ast = parse_shuffle_ast(text, text).expect("parent-target shuffle parses");
+        let clause = lower_shuffle_ast(ast);
+        match &clause.effect {
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                target: TargetFilter::ParentTarget,
+                owner_library: true,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                ..
+            } => {}
+            other => panic!("expected terminal parent-target owner move, got {other:?}"),
+        }
+        let shuffle = clause.sub_ability.as_deref().expect("terminal shuffle");
+        assert!(matches!(
+            &*shuffle.effect,
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer
+            }
+        ));
+        assert!(shuffle.player_scope.is_some());
     }
 
     /// CR 701.24c + CR 400.3: "shuffle ~ into its owner's library" — the
