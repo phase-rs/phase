@@ -5923,6 +5923,7 @@ mod tests {
         );
         ability.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -5962,6 +5963,7 @@ mod tests {
 
     fn parent_target_move(destination: Zone) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination,
             target: TargetFilter::ParentTarget,
@@ -6284,6 +6286,7 @@ mod tests {
         let mut grant = paid_during_resolution_grant(source, target);
         let mut destination_rider = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -6404,6 +6407,7 @@ mod tests {
         let mut grant = paid_during_resolution_grant(source, ObjectId(9212));
         let mut destination_rider = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,

@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4504
-- **Total card appearances across root causes:** 4537 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4503
+- **Total card appearances across root causes:** 4536 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -25,7 +25,7 @@ Cards listed in `crates/phase-ast/data/confirmed-misparses.toml` are held unsupp
 | 6 | Disjunctive (or-list) collapsed to first branch | 225 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 207 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 208 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
-| 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 178 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
+| 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 177 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 164 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 151 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 132 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
@@ -47,7 +47,7 @@ Cards listed in `crates/phase-ast/data/confirmed-misparses.toml` are held unsupp
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2397/4537 ≈ 52.8% of all misparse appearances; the top 10 cover 3379/4537 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped below row 8 as cards were fixed.
+> The top **5** root causes cover 2397/4536 ≈ 52.8% of all misparse appearances; the top 10 cover 3378/4536 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped below row 8 as cards were fixed.
 
 ## Full card lists per root cause
 
@@ -3178,7 +3178,7 @@ Cards listed in `crates/phase-ast/data/confirmed-misparses.toml` are held unsupp
 
 </details>
 
-### 9. Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed)  (178 cards)
+### 9. Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed)  (177 cards)
 
 **Signature.** Effect recipient / filter controller / chooser uses You/Controller where Opponent/TargetPlayer/ScopedPlayer/DefendingPlayer is required, or per-player fan-out is dropped.
 
@@ -3280,7 +3280,6 @@ Cards listed in `crates/phase-ast/data/confirmed-misparses.toml` are held unsupp
 - Lembas
 - Liliana's Indignation
 - Liliana's Triumph
-- Loaming Shaman
 - Lobelia, Defender of Bag End
 - Lord of Tresserhorn
 - Lozhan, Dragons' Legacy

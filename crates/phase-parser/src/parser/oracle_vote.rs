@@ -551,6 +551,7 @@ fn parse_object_vote_block(
     // template target is `Any` ("exile it") — the enumeration already applied
     // `candidate_filter`, and a top tie exiles exactly the tied winners.
     let exile = Effect::ChangeZone {
+        library_shuffle: Default::default(),
         origin: Some(Zone::Battlefield),
         destination: Zone::Exile,
         target: TargetFilter::Any,

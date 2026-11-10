@@ -555,6 +555,7 @@ fn optional_graveyard_exile_replacement() -> ReplacementDefinition {
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
                 owner_library: false,
+                library_shuffle: Default::default(),
                 enter_transformed: false,
                 enters_under: None,
                 enter_tapped: engine::types::zones::EtbTapState::Unspecified,

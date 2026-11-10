@@ -932,6 +932,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             enter_tapped: _,
             enters_attacking: _,
             up_to: _,
+            library_shuffle: _,
         } => match mode {
             ScanMode::Conservative => Axes::CONSERVATIVE,
             ScanMode::LoopFirewall
@@ -11804,6 +11805,7 @@ mod tests {
 
     fn move_onto_battlefield_with(edit: impl FnOnce(&mut Effect)) -> (bool, bool, bool) {
         let mut effect = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::ParentTarget,
