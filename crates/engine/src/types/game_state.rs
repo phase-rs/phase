@@ -16439,62 +16439,46 @@ impl GameState {
         }
     }
 
-    /// CR 402.3: a restored mixed-zone choice must remember its private scan
-    /// scope even when the saved prompt predates the producer's private-zone
-    /// selection. Older saves stored the first scan zone (often a public
-    /// Graveyard); reconstruct the scope from the paused ability chain and
-    /// move the prompt's zone to the first private leg so viewer projection
-    /// cannot infer hidden hand eligibility from an empty-vs-public candidate
-    /// set. No paused ChangeZone scope means nothing to migrate.
-    fn migrate_restored_effect_zone_choice_scope(&mut self) {
-        let current_is_public = match &self.waiting_for {
-            WaitingFor::EffectZoneChoice {
-                zone,
-                effect_kind:
-                    crate::types::ability::EffectKind::ChangeZone
-                    | crate::types::ability::EffectKind::ChangeZoneAll
-                    | crate::types::ability::EffectKind::BounceAll,
-                ..
-            } => zone.is_public(),
-            // A sacrifice/discard/attach prompt is validated against its own
-            // zone; a later ChangeZone instruction in the same chain must not
-            // rewrite it (Strefan's Blood-token sacrifice).
-            _ => return,
+    /// CR 402.3: the exact paused producer's scan scope for an
+    /// `EffectZoneChoice`, used by viewer projection so privacy is decided
+    /// independently of the prompt's validation `zone`.
+    ///
+    /// Only the current paused instruction (active continuation root or
+    /// resolving stack ability) may answer. Walking later instructions would
+    /// let a public ordering/sacrifice prompt inherit a following operation's
+    /// private zone.
+    pub(crate) fn effect_zone_choice_privacy_scope(&self) -> Option<Vec<Zone>> {
+        let WaitingFor::EffectZoneChoice { effect_kind, .. } = &self.waiting_for else {
+            return None;
         };
-        if !current_is_public {
-            return;
+        if !matches!(
+            effect_kind,
+            crate::types::ability::EffectKind::ChangeZone
+                | crate::types::ability::EffectKind::ChangeZoneAll
+                | crate::types::ability::EffectKind::BounceAll
+        ) {
+            return None;
         }
 
-        // Only the EXACT paused instruction may supply the scope. Walking
-        // later/nested instructions would let a public prompt (a BounceAll
-        // ordering, say) inherit a private zone from a following ChangeZone
-        // and reject its own offered ids.
-        fn producer_private_zone(ability: &crate::types::ability::ResolvedAbility) -> Option<Zone> {
+        fn scope(ability: &crate::types::ability::ResolvedAbility) -> Option<Vec<Zone>> {
             let target = match &ability.effect {
                 crate::types::ability::Effect::ChangeZone { target, .. }
-                | crate::types::ability::Effect::ChangeZoneAll { target, .. } => target,
+                | crate::types::ability::Effect::ChangeZoneAll { target, .. }
+                | crate::types::ability::Effect::BounceAll { target, .. } => target,
                 _ => return None,
             };
-            target
-                .extract_zones()
-                .into_iter()
-                .find(|zone| !zone.is_public())
+            let zones = target.extract_zones();
+            (!zones.is_empty()).then_some(zones)
         }
 
-        let private = self
-            .active_ability_continuation()
-            .and_then(|continuation| producer_private_zone(&continuation.chain))
+        self.active_ability_continuation()
+            .and_then(|continuation| scope(&continuation.chain))
             .or_else(|| {
                 self.resolving_stack_entry
                     .as_ref()
                     .and_then(|entry| entry.ability())
-                    .and_then(producer_private_zone)
-            });
-        if let Some(private) = private {
-            if let WaitingFor::EffectZoneChoice { zone, .. } = &mut self.waiting_for {
-                *zone = private;
-            }
-        }
+                    .and_then(scope)
+            })
     }
 
     /// CR 109.5 + CR 611.2a: drop any restored restriction whose affected player
@@ -16875,10 +16859,6 @@ impl PersistedGameState {
         // the repair — a legacy save restored through either one would
         // otherwise present an optional or search-found prompt as an ordering.
         state.migrate_restored_replacement_choice_kind();
-        // CR 402.3: older saves of a mixed public/private choice may still name
-        // the public first scan zone; reconstruct the private scope before the
-        // state is exposed to viewers.
-        state.migrate_restored_effect_zone_choice_scope();
         // `pending_trigger_event_batch` is a construction carrier for the
         // corresponding `pending_trigger`. A historical save can retain the
         // carrier after its trigger was dropped; it cannot represent live

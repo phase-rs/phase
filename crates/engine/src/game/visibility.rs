@@ -3138,6 +3138,13 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         // is cleared even when unmixed because the eligible subset's size is
         // hand information CR 402.3 withholds; a pure public set is not
         // redacted at all.
+        let privacy_scope = state.effect_zone_choice_privacy_scope();
+        let scope_private = privacy_scope
+            .as_ref()
+            .is_some_and(|zones| zones.iter().any(|zone| !zone.is_public()));
+        let scope_public = privacy_scope
+            .as_ref()
+            .is_some_and(|zones| zones.iter().any(|zone| zone.is_public()));
         let has_private_card = cards.iter().any(|id| {
             state
                 .objects
@@ -3150,8 +3157,12 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 .get(id)
                 .is_some_and(|object| object.zone.is_public())
         });
-        let mixed_private_public = has_private_card && has_public_card;
-        let private_scope = !zone.is_public() || has_private_card;
+        // The producer's exact scan scope is authoritative. Candidate-zone
+        // inspection remains only as a fallback for prompts restored from
+        // saves that predate the scope-carrying producer.
+        let private_scope = scope_private || (privacy_scope.is_none() && has_private_card);
+        let mixed_private_public = (scope_private && scope_public)
+            || (privacy_scope.is_none() && has_private_card && has_public_card);
         let redact_bounds = private_scope;
         if !can_view_private_for_player(player) && private_scope {
             filtered.waiting_for = WaitingFor::EffectZoneChoice {
@@ -3163,7 +3174,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 },
                 count: if redact_bounds { 0 } else { count },
                 min_count: if redact_bounds { 0 } else { min_count },
-                up_to,
+                // Normalize the selection mode too: an empty mixed prompt and
+                // a singleton/ordinary private prompt must not differ through
+                // `up_to` in the observer envelope.
+                up_to: if redact_bounds { true } else { up_to },
                 source_id,
                 effect_kind,
                 zone,

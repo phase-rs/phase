@@ -11,7 +11,7 @@ use engine::game::visibility::filter_state_for_viewer;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect, FilterProp,
-    OriginConstraint, QuantityExpr, ReplacementCondition, ReplacementDefinition,
+    OriginConstraint, QuantityExpr, ReplacementCondition, ReplacementDefinition, ResolvedAbility,
     TargetChoiceTiming, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
@@ -1160,13 +1160,18 @@ fn stormkeld_zero_public_matches_keeps_the_same_observer_sequence() {
             cards: opponent_cards,
             count: opponent_count,
             min_count: opponent_min_count,
+            up_to: opponent_up_to,
             ..
         } = &opponent.waiting_for
         else {
             panic!("opponent must still see the prompt envelope");
         };
         assert!(opponent_cards.is_empty());
-        assert_eq!((*opponent_count, *opponent_min_count), (0, 0));
+        assert_eq!(
+            (*opponent_count, *opponent_min_count, *opponent_up_to),
+            (0, 0, true),
+            "the observer envelope must be normalized even with no public matches"
+        );
     }
 
     for mut runner in [zero_eligible, one_eligible] {
@@ -1251,6 +1256,79 @@ fn next_of_kin_ignores_a_creature_outside_hand_and_command() {
     assert!(
         runner.state().delayed_triggers.is_empty(),
         "the if-you-do delayed reattach must not install without a performed put"
+    );
+}
+
+/// Replacement witness for a public-only singleton origin: gain 1 life when a
+/// creature would enter from a graveyard.
+fn graveyard_entry_life_replacement() -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+        .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+        .destination_zone(Zone::Battlefield)
+        .condition(ReplacementCondition::EnteredFromZone {
+            origin_constraint: Some(OriginConstraint::Equals(Zone::Graveyard)),
+            cast_origin: None,
+        })
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        ))
+}
+
+/// CR 400.6: the public-only singleton shortcut must propose the chosen
+/// object's actual Graveyard origin to replacement consultation. This path is
+/// not the mixed Hand/Command prompt, so it exercises the shortcut branch.
+#[test]
+fn public_singleton_shortcut_applies_graveyard_origin_replacement() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let buried = scenario
+        .add_creature_to_graveyard(P0, "Buried Bear", 2, 2)
+        .with_mana_cost(generic_cost(2))
+        .id();
+    let watcher = scenario
+        .add_creature(P0, "Grave-Entry Watcher", 1, 1)
+        .with_replacement_definition(graveyard_entry_life_replacement())
+        .id();
+    let mut runner = scenario.build();
+
+    let target =
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+            zone: Zone::Graveyard,
+        }]));
+    let ability = ResolvedAbility::new(
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Battlefield,
+            target,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            library_shuffle: Default::default(),
+            enters_modified_if: None,
+        },
+        vec![],
+        watcher,
+        P0,
+    );
+    let mut events = Vec::new();
+    engine::game::effects::change_zone::resolve(runner.state_mut(), &ability, &mut events)
+        .expect("singleton ChangeZone resolves");
+
+    assert_eq!(runner.state().objects[&buried].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().players[0].life,
+        21,
+        "the shortcut's proposed event origin must be Graveyard"
     );
 }
 
@@ -1370,6 +1448,9 @@ fn next_of_kin_mixed_choice_redacts_private_eligibility() {
     let opponent_one = filter_state_for_viewer(one_eligible.state(), P1);
     let WaitingFor::EffectZoneChoice {
         cards: opponent_cards_zero,
+        count: opponent_count_zero,
+        min_count: opponent_min_zero,
+        up_to: opponent_up_to_zero,
         ..
     } = &opponent_zero.waiting_for
     else {
@@ -1377,6 +1458,9 @@ fn next_of_kin_mixed_choice_redacts_private_eligibility() {
     };
     let WaitingFor::EffectZoneChoice {
         cards: opponent_cards_one,
+        count: opponent_count_one,
+        min_count: opponent_min_one,
+        up_to: opponent_up_to_one,
         ..
     } = &opponent_one.waiting_for
     else {
@@ -1385,6 +1469,18 @@ fn next_of_kin_mixed_choice_redacts_private_eligibility() {
     assert!(
         opponent_cards_zero.is_empty() && opponent_cards_one.is_empty(),
         "equal-sized hands with different eligible counts must have identical, empty opponent payloads; got {opponent_cards_zero:?} and {opponent_cards_one:?}"
+    );
+    assert_eq!(
+        (
+            *opponent_count_zero,
+            *opponent_min_zero,
+            *opponent_up_to_zero,
+            *opponent_count_one,
+            *opponent_min_one,
+            *opponent_up_to_one,
+        ),
+        (0, 0, true, 0, 0, true),
+        "the full observer envelope must be normalized independently of hidden eligibility"
     );
 
     let chooser_zero = filter_state_for_viewer(zero_eligible.state(), P0);
@@ -1456,6 +1552,7 @@ fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
         cards: opponent_cards_zero,
         count: opponent_count_zero,
         min_count: opponent_min_zero,
+        up_to: opponent_up_to_zero,
         ..
     } = &opponent_zero.waiting_for
     else {
@@ -1465,6 +1562,7 @@ fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
         cards: opponent_cards_one,
         count: opponent_count_one,
         min_count: opponent_min_one,
+        up_to: opponent_up_to_one,
         ..
     } = &opponent_one.waiting_for
     else {
@@ -1478,11 +1576,13 @@ fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
         (
             *opponent_count_zero,
             *opponent_min_zero,
+            *opponent_up_to_zero,
             *opponent_count_one,
-            *opponent_min_one
+            *opponent_min_one,
+            *opponent_up_to_one
         ),
-        (0, 0, 0, 0),
-        "candidate-derived bounds must be redacted for non-choosers"
+        (0, 0, true, 0, 0, true),
+        "the full observer envelope must be normalized for non-choosers"
     );
 
     let chooser_zero = filter_state_for_viewer(zero_eligible.state(), P0);
@@ -1533,16 +1633,27 @@ fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
         let restored = PersistedGameState::capture(legacy)
             .into_game_state()
             .expect("legacy choice restores through the production chokepoint");
-        let WaitingFor::EffectZoneChoice { zone, .. } = &restored.waiting_for else {
+        let WaitingFor::EffectZoneChoice {
+            zone,
+            cards: offered,
+            ..
+        } = &restored.waiting_for
+        else {
             panic!("restored state must retain the choice");
         };
-        assert_eq!(*zone, Zone::Hand, "restore must recover the private leg");
+        assert_eq!(
+            *zone,
+            Zone::Graveyard,
+            "validation keeps the legacy public zone; privacy is derived from the producer scope"
+        );
+        let offered = offered.clone();
 
         let opponent = filter_state_for_viewer(&restored, P1);
         let WaitingFor::EffectZoneChoice {
             cards: opponent_cards,
             count: opponent_count,
             min_count: opponent_min_count,
+            up_to: opponent_up_to,
             ..
         } = &opponent.waiting_for
         else {
@@ -1553,9 +1664,25 @@ fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
             "{label}: restored opponent cards must be empty; got {opponent_cards:?}"
         );
         assert_eq!(
-            (*opponent_count, *opponent_min_count),
-            (0, 0),
-            "{label}: restored opponent bounds must not reveal eligibility"
+            (*opponent_count, *opponent_min_count, *opponent_up_to),
+            (0, 0, true),
+            "{label}: restored observer envelope must be normalized"
+        );
+
+        // Submit exactly the ids the restored prompt offered and settle it.
+        let mut restored_runner = GameRunner::from_state(restored);
+        restored_runner
+            .act(GameAction::SelectCards {
+                cards: offered.clone(),
+            })
+            .expect("restored prompt accepts its originally offered ids");
+        restored_runner.advance_until_stack_empty();
+        assert!(
+            !matches!(
+                restored_runner.state().waiting_for,
+                WaitingFor::EffectZoneChoice { .. }
+            ),
+            "{label}: the restored prompt settles after its offered ids are submitted"
         );
     }
 }
