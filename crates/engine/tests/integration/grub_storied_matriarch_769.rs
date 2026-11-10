@@ -29,13 +29,17 @@
 
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
-use engine::game::game_object::BackFaceData;
+use engine::game::derived_views::derive_views;
+use engine::game::game_object::{BackFaceData, RoomDoor};
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::transform::is_double_faced_permanent;
 use engine::game::zones::move_to_zone;
-use engine::types::ability::{ChosenAttribute, Effect, TargetFilter, TargetRef, TriggerDefinition};
+use engine::types::ability::{
+    ChosenAttribute, Effect, RoomCopiableHalves, RoomHalfIdentity, TargetFilter, TargetRef,
+    TriggerDefinition,
+};
 use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
 use engine::types::card_type::CoreType;
@@ -43,7 +47,7 @@ use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, GameState, ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::resolved_commands::ResolvedRulesCommand;
 use engine::types::triggers::TriggerMode;
@@ -87,6 +91,10 @@ const STOMP: &str = "Stomp";
 const WAXING_MOON: &str = "Waxing Moon";
 const CONVERTER_BEAST: &str = "Converter Beast";
 const KARNS_TOUCH: &str = "Karn's Touch";
+const MIRROR_ROOM: &str = "Mirror Room";
+const FRACTURED_REALM: &str = "Fractured Realm";
+const OPALESCENCE: &str = "Opalescence";
+const GIDEON: &str = "Gideon, Ally of Zendikar";
 
 const AUNTIE_ORACLE: &str = "Menace\nWhenever Grub attacks, you may blight 1. If you do, create a tapped and attacking token that's a copy of the blighted creature, except it has \"At the beginning of the end step, sacrifice this token.\"\nAt the beginning of your first main phase, you may pay {B}. If you do, transform Grub.";
 const NEXUS_ORACLE: &str = "At the beginning of combat on your turn, draw a card. Then you may exile an artifact or creature card from your hand. If you do, create a token that's a copy of the exiled card, except it's a 3/3 Golem artifact creature in addition to its other types.";
@@ -130,6 +138,10 @@ const CONVERTER_BEAST_ORACLE: &str = "When this creature enters, incubate 5. (Cr
 const KARNS_TOUCH_ORACLE: &str = "Target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value until end of turn. (It retains its abilities.)";
 const STOMP_ORACLE: &str =
     "Damage can't be prevented this turn. Stomp deals 2 damage to any target.";
+const MIRROR_ROOM_ORACLE: &str = "When you unlock this door, create a token that's a copy of target creature you control, except it's a Reflection in addition to its other creature types.\n(You may cast either half. That door unlocks on the battlefield. As a sorcery, you may pay the mana cost of a locked door to unlock it.)";
+const FRACTURED_REALM_ORACLE: &str = "If a triggered ability of a permanent you control triggers, that ability triggers an additional time.\n(You may cast either half. That door unlocks on the battlefield. As a sorcery, you may pay the mana cost of a locked door to unlock it.)";
+const OPALESCENCE_ORACLE: &str = "Each other non-Aura enchantment is a creature in addition to its other types and has base power and base toughness each equal to its mana value.";
+const GIDEON_ORACLE: &str = "[+1]: Until end of turn, Gideon becomes a 5/5 Human Soldier Ally creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.\n[0]: Create a 2/2 white Knight Ally creature token.\n[−4]: You get an emblem with \"Creatures you control get +1/+1.\"";
 const DOUBLING_SEASON_ORACLE: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
 
 /// A board at `phase`, with stocked libraries so a real draw step can't end the
@@ -3116,4 +3128,279 @@ fn an_animated_incubator_token_cannot_be_turned_face_down() {
     settle(&mut runner);
     assert_not_turned_face_down(&runner, incubator, &name, &stored_before);
     assert_settled(&runner);
+}
+
+/// Door-stamped (CR 709.5) definitions in `id`'s base sets: left-door triggers,
+/// right-door triggers, left-door statics, right-door statics.
+fn door_text(runner: &GameRunner, id: ObjectId) -> (usize, usize, usize, usize) {
+    let obj = &runner.state().objects[&id];
+    let triggers = |door| {
+        obj.base_trigger_definitions
+            .iter()
+            .filter(|definition| definition.room_door == Some(door))
+            .count()
+    };
+    let statics = |door| {
+        obj.base_static_definitions
+            .iter()
+            .filter(|definition| definition.room_door == Some(door))
+            .count()
+    };
+    (
+        triggers(RoomDoor::Left),
+        triggers(RoomDoor::Right),
+        statics(RoomDoor::Left),
+        statics(RoomDoor::Right),
+    )
+}
+
+/// CR 709.5e: P0 pays `door`'s unlock cost as a special action.
+fn unlock(runner: &mut GameRunner, room: ObjectId, door: RoomDoor) {
+    runner
+        .act(GameAction::UnlockRoomDoor {
+            object_id: room,
+            door,
+        })
+        .expect("unlocking the door must be legal");
+    settle(runner);
+}
+
+/// The printed Room board for a double-faced copy token whose copied values are
+/// a Room's. Mirror Room // Fractured Realm is cast as Mirror Room, so its left
+/// half is unlocked (CR 709.5d); its "When you unlock this door" trigger has no
+/// creature to target yet. Opalescence ("Each other non-Aura enchantment is a
+/// creature in addition to its other types and has base power and base
+/// toughness each equal to its mana value.") animates it, and the emblem from
+/// Gideon, Ally of Zendikar's "−4: You get an emblem with "Creatures you control
+/// get +1/+1."" keeps a fully locked copy of it alive: a locked half has no mana
+/// cost (CR 709.5), so that copy is 0/0 before the emblem (CR 704.5f).
+/// `enter` puts the double-faced card `creature` onto the battlefield, then
+/// Mirrorweave ("Each other creature becomes a copy of target nonlegendary
+/// creature until end of turn.") makes it a copy of the Room and Cackling
+/// Counterpart ("Create a token that's a copy of target creature you control.")
+/// copies it. Returns the Room, the creature and the token.
+fn mirror_room_copied_through(
+    creature: &'static str,
+    enter: fn(&mut GameRunner, ObjectId),
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let (mut runner, (room, opalescence, gideon, creature, weave, cackling)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, MIRROR_ROOM, MIRROR_ROOM_ORACLE);
+            assert_oracle(db, FRACTURED_REALM, FRACTURED_REALM_ORACLE);
+            assert_oracle(db, OPALESCENCE, OPALESCENCE_ORACLE);
+            assert_oracle(db, GIDEON, GIDEON_ORACLE);
+            assert_oracle(db, MIRRORWEAVE, MIRRORWEAVE_ORACLE);
+            assert_oracle(db, CACKLING, CACKLING_ORACLE);
+            (
+                scenario.add_real_card(P0, MIRROR_ROOM, Zone::Hand, db),
+                scenario.add_real_card(P0, OPALESCENCE, Zone::Hand, db),
+                scenario.add_real_card(P0, GIDEON, Zone::Hand, db),
+                scenario.add_real_card(P0, creature, Zone::Hand, db),
+                scenario.add_real_card(P0, MIRRORWEAVE, Zone::Hand, db),
+                scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
+            )
+        });
+    fund(&mut runner, ManaType::Blue, 3);
+    runner.cast(room).modal_back_face(false).resolve();
+    settle(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(runner.state().objects[&room].name, MIRROR_ROOM);
+
+    fund(&mut runner, ManaType::White, 4);
+    runner.cast(opalescence).resolve();
+    fund(&mut runner, ManaType::White, 4);
+    runner.cast(gideon).resolve();
+    settle(&mut runner);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: gideon,
+            ability_index: 2,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Gideon's −4 must be legal");
+    both_pass(&mut runner);
+    settle(&mut runner);
+    assert_settled(&runner);
+
+    enter(&mut runner, creature);
+    fund(&mut runner, ManaType::Blue, 4);
+    runner.cast(weave).target_object(room).resolve();
+    settle(&mut runner);
+    let copied = &runner.state().objects[&creature];
+    assert_eq!(
+        copied.zone,
+        Zone::Battlefield,
+        "reach-guard: the emblem keeps the locked copy of the Room alive"
+    );
+    assert!(
+        copied.card_types.subtypes.iter().any(|s| s == "Room"),
+        "reach-guard: Mirrorweave made the creature a copy of the Room"
+    );
+
+    fund(&mut runner, ManaType::Blue, 3);
+    runner.cast(cackling).target_object(creature).resolve();
+    settle(&mut runner);
+    assert_settled(&runner);
+    let made = tokens(&runner);
+    assert_eq!(made.len(), 1, "Cackling Counterpart makes one token");
+    let token = made[0];
+    assert!(
+        is_double_faced_permanent(&runner.state().objects[&token]),
+        "CR 707.8a: a copy of a double-faced permanent is a double-faced token"
+    );
+    assert_eq!(
+        runner.state().objects[&token]
+            .double_faced_token_alternative
+            .as_ref()
+            .map(|half| half.name.as_str()),
+        Some(FRACTURED_REALM),
+        "CR 709.5b: the token keeps the copied Room's other half beside its other face"
+    );
+    (runner, room, creature, token)
+}
+
+/// CR 709.5b + CR 707.8a: Cackling Counterpart's copy of a Kessig Prowler that
+/// Mirrorweave made a copy of Mirror Room // Fractured Realm is a double-faced
+/// token, front face up, with Mirror Room's "When you unlock this door, create
+/// a token that's a copy of target creature you control, except it's a
+/// Reflection in addition to its other creature types." once, under the left
+/// door, and Fractured Realm's "If a triggered ability of a permanent you
+/// control triggers, that ability triggers an additional time." once, under the
+/// right door. Unlocking Mirror Room fires its trigger (CR 709.5h); unlocking
+/// Fractured Realm afterwards fires nothing.
+#[test]
+fn a_double_faced_copy_of_mirror_room_has_each_doors_text_once() {
+    let (mut runner, room, prowler, token) =
+        mirror_room_copied_through(PROWLER, |runner, prowler| {
+            fund(runner, ManaType::Green, 1);
+            runner.cast(prowler).resolve();
+            settle(runner);
+            assert_eq!(runner.state().objects[&prowler].zone, Zone::Battlefield);
+        });
+    assert_eq!(stored_face(&runner, prowler).name, PREDATOR);
+    let obj = &runner.state().objects[&token];
+    assert!(!obj.transformed && !obj.modal_back_face, "CR 712.8d");
+    assert_eq!(
+        door_text(&runner, room),
+        (1, 0, 0, 1),
+        "reach-guard: the Room has Mirror Room's trigger and Fractured Realm's static"
+    );
+    assert_eq!(
+        door_text(&runner, token),
+        door_text(&runner, room),
+        "CR 709.5 + CR 707.2: the token has each door's copied text exactly once"
+    );
+
+    // Positive reach: Mirror Room's door fires its own trigger.
+    fund(&mut runner, ManaType::Blue, 3);
+    unlock(&mut runner, token, RoomDoor::Left);
+    assert_eq!(runner.state().objects[&token].name, MIRROR_ROOM);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "CR 709.5h: unlocking Mirror Room triggers it; got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(room)],
+        })
+        .expect("targeting the Room must succeed");
+    both_pass(&mut runner);
+    settle(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(tokens(&runner).len(), 2, "Mirror Room made its Reflection");
+
+    // CR 709.5h: Fractured Realm's door has no trigger to fire.
+    fund(&mut runner, ManaType::Blue, 7);
+    unlock(&mut runner, token, RoomDoor::Right);
+    assert_eq!(
+        runner.state().objects[&token].name,
+        format!("{MIRROR_ROOM} // {FRACTURED_REALM}")
+    );
+    assert_settled(&runner);
+    assert_eq!(tokens(&runner).len(), 2, "no second Reflection");
+}
+
+/// CR 707.8a: "If the token is a copy of a double-faced permanent with its back
+/// face up, the token enters the battlefield with its back face up." Valentin,
+/// Dean of the Vein cast as Lisette, Dean of the Root is made a copy of Mirror
+/// Room // Fractured Realm by Mirrorweave, and Cackling Counterpart copies it.
+/// The token is back face up, and its halves are still Mirror Room {2}{U} and
+/// then Fractured Realm {5}{U}{U}, in printed order (CR 709.5b), with each
+/// door's text once. Unlocking Fractured Realm costs exactly {5}{U}{U}
+/// (CR 709.5e).
+#[test]
+fn a_back_face_up_copy_of_mirror_room_keeps_its_halves_in_printed_order() {
+    let (mut runner, room, lisette, token) = mirror_room_copied_through(VALENTIN, cast_as_lisette);
+    assert!(runner.state().objects[&lisette].modal_back_face);
+    assert_eq!(stored_face(&runner, lisette).name, VALENTIN);
+    assert!(
+        runner.state().objects[&token].modal_back_face,
+        "CR 707.8a + CR 712.8f: the token enters back face up"
+    );
+
+    let printed = RoomCopiableHalves {
+        left: RoomHalfIdentity {
+            name: MIRROR_ROOM.to_string(),
+            mana_cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            },
+        },
+        right: Some(RoomHalfIdentity {
+            name: FRACTURED_REALM.to_string(),
+            mana_cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                generic: 5,
+            },
+        }),
+    };
+    let views = derive_views(runner.state(), Some(P0));
+    assert_eq!(
+        views.room_half_identities.get(&room),
+        Some(&printed),
+        "reach-guard: the Room's halves"
+    );
+    assert_eq!(
+        views.room_half_identities.get(&token),
+        Some(&printed),
+        "CR 709.5b + CR 709.5e: the token's halves and door costs are in printed order"
+    );
+    assert_eq!(
+        door_text(&runner, token),
+        (1, 0, 0, 1),
+        "CR 709.5: the token has each door's copied text exactly once"
+    );
+
+    fund(&mut runner, ManaType::Blue, 7);
+    unlock(&mut runner, token, RoomDoor::Right);
+    assert!(
+        runner.state().players[0].mana_pool.is_empty(),
+        "CR 709.5e: Fractured Realm's door costs {{5}}{{U}}{{U}}"
+    );
+    assert_eq!(runner.state().objects[&token].name, FRACTURED_REALM);
+    assert_settled(&runner);
+
+    // CR 701.27a + CR 712.9: setup transform. Both faces are the copied Room, so the
+    // halves, door costs and door text read the same.
+    turn(&mut runner, token, FRACTURED_REALM);
+    assert_eq!(
+        derive_views(runner.state(), Some(P0))
+            .room_half_identities
+            .get(&token),
+        Some(&printed),
+        "CR 709.5b: a transformed token keeps its halves in printed order"
+    );
+    assert_eq!(door_text(&runner, token), (1, 0, 0, 1));
+
+    // CR 712.8a: setup zone exit. In the graveyard the token has its front face up,
+    // and still each door's copied text once, until it ceases to exist (CR 704.5d).
+    put(&mut runner, token, Zone::Graveyard);
+    let obj = &runner.state().objects[&token];
+    assert_eq!(obj.zone, Zone::Graveyard);
+    assert!(!obj.transformed && !obj.modal_back_face, "CR 712.8a");
+    assert_eq!(door_text(&runner, token), (1, 0, 0, 1));
 }

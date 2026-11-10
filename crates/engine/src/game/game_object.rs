@@ -3674,33 +3674,36 @@ impl GameObject {
     /// records that the right half is showing — the CR 709.5d mapping,
     /// see `room::live_face_door`). Idempotent: a `None` stamp is claimed
     /// once, and the other half is merged only while absent.
+    ///
+    /// CR 709.5b + CR 707.8a: the other half is read where the object stores its
+    /// alternative characteristics (`printed_cards::stored_alternative_face`). A
+    /// double-faced copy token keeps a copied Room's other half there as identity
+    /// only, because its copied values already carry both halves' door-stamped
+    /// text; its `back_face` is its other face, whose text is that same copied
+    /// text, so installing from it would give the token a second copy of a door's
+    /// text under the other door.
     fn install_room_door_text(&mut self) {
         let live_door = crate::game::room::live_face_door(self);
         let other_door = match live_door {
             RoomDoor::Left => RoomDoor::Right,
             RoomDoor::Right => RoomDoor::Left,
         };
-        let should_install_other_door = {
+        let other_half = crate::game::printed_cards::stored_alternative_face(self).cloned();
+        let other_door_triggers_absent = {
             let base = Arc::make_mut(&mut self.base_trigger_definitions);
             for definition in base.iter_mut() {
                 if definition.room_door.is_none() {
                     definition.room_door = Some(live_door);
                 }
             }
-            self.back_face.as_ref().is_some_and(|_| {
-                !base
-                    .iter()
-                    .any(|definition| definition.room_door == Some(other_door))
-            })
+            !base
+                .iter()
+                .any(|definition| definition.room_door == Some(other_door))
         };
-        if should_install_other_door {
+        if let Some(back) = other_half.as_ref().filter(|_| other_door_triggers_absent) {
             let mut origins = crate::game::printed_cards::base_trigger_printed_origins(self)
                 .as_ref()
                 .clone();
-            let back = self
-                .back_face
-                .as_ref()
-                .expect("other Room door requires a stored face");
             let back_origins =
                 back.trigger_definitions
                     .iter_all()
@@ -3739,7 +3742,7 @@ impl GameObject {
                 definition.room_door = Some(live_door);
             }
         }
-        if let Some(back) = &self.back_face {
+        if let Some(back) = &other_half {
             if !base_statics
                 .iter()
                 .any(|definition| definition.room_door == Some(other_door))
@@ -5096,6 +5099,87 @@ mod tests {
         object
             .validate_trigger_definitions()
             .expect("Room trigger definitions and origins remain aligned");
+    }
+
+    /// CR 709.5b + CR 707.8a: a double-faced copy token of a Room keeps the
+    /// Room's other half beside its other face, as identity only. Its copied
+    /// values already carry both halves' door-stamped text, and so does its other
+    /// face, so battlefield entry installs nothing more: each door keeps exactly
+    /// one copy of its text. The control is a Room whose other half is in
+    /// `back_face`, whose text is installed under the other door.
+    #[test]
+    fn room_door_install_reads_a_double_faced_tokens_room_half_beside_its_other_face() {
+        let left_trigger = TriggerDefinition {
+            room_door: Some(RoomDoor::Left),
+            ..TriggerDefinition::new(TriggerMode::Attacks)
+        };
+        let right_static = StaticDefinition {
+            room_door: Some(RoomDoor::Right),
+            ..StaticDefinition::new(crate::types::statics::StaticMode::Continuous)
+        };
+        let copied_face = BackFaceData {
+            name: "Left Door".to_string(),
+            trigger_definitions: vec![left_trigger.clone()].into(),
+            static_definitions: vec![right_static.clone()].into(),
+            layout_kind: Some(LayoutKind::Transform),
+            ..Default::default()
+        };
+        let door_count = |object: &GameObject| {
+            let triggers = |door| {
+                object
+                    .base_trigger_definitions
+                    .iter()
+                    .filter(|definition| definition.room_door == Some(door))
+                    .count()
+            };
+            let statics = |door| {
+                object
+                    .base_static_definitions
+                    .iter()
+                    .filter(|definition| definition.room_door == Some(door))
+                    .count()
+            };
+            (
+                triggers(RoomDoor::Left),
+                triggers(RoomDoor::Right),
+                statics(RoomDoor::Left),
+                statics(RoomDoor::Right),
+            )
+        };
+        let token = |alternative: Option<BackFaceData>| {
+            let mut object = trigger_test_object();
+            object.is_token = true;
+            object.card_types.subtypes.push("Room".to_string());
+            object.base_trigger_definitions = Arc::new(vec![left_trigger.clone()]);
+            object.base_static_definitions = Arc::new(vec![right_static.clone()]);
+            object.back_face = Some(copied_face.clone());
+            object.double_faced_token_alternative = alternative;
+            object
+        };
+
+        let mut slotted = token(Some(BackFaceData {
+            name: "Right Door".to_string(),
+            ..Default::default()
+        }));
+        slotted.install_room_door_text();
+        assert_eq!(
+            door_count(&slotted),
+            (1, 0, 0, 1),
+            "CR 709.5: each door keeps exactly its own copied text"
+        );
+        // CR 707.8a + CR 712.8f: a back-face-up token reads the same doors.
+        let mut back_up = token(Some(BackFaceData {
+            name: "Right Door".to_string(),
+            ..Default::default()
+        }));
+        back_up.modal_back_face = true;
+        back_up.install_room_door_text();
+        assert_eq!(door_count(&back_up), (1, 0, 0, 1));
+
+        // Control: a stored face in `back_face` is read as the other half.
+        let mut unslotted = token(None);
+        unslotted.install_room_door_text();
+        assert_eq!(door_count(&unslotted), (1, 1, 0, 1));
     }
 
     #[test]

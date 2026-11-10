@@ -2114,7 +2114,9 @@ pub(crate) fn materialize_token_copy_body(
             CopiedFaceUp::Front => {}
             // CR 712.8e: a transformed permanent's back face is up.
             CopiedFaceUp::TransformedBack => object.transformed = true,
-            // CR 712.8f: a modal double-faced permanent's back face is up.
+            // CR 712.8f: a modal double-faced permanent's back face is up. CR 707.8a:
+            // also when the copied values are a Room's; `room::live_face_door` then
+            // reads the halves from the slot above, not from this orientation.
             CopiedFaceUp::ModalBack => object.modal_back_face = true,
         }
     }

@@ -3375,7 +3375,26 @@ mod tests {
             Some("Right".to_string())
         );
 
+        // CR 707.8a + CR 712.8f: a token copying a modal double-faced permanent
+        // with its back face up enters back face up, and the slot keeps the
+        // halves in printed order.
+        token.modal_back_face = true;
+        let halves = crate::game::room::own_room_halves(&token);
+        assert_eq!(halves.left.name, "Left");
+        assert_eq!(
+            halves.right.map(|half| half.name),
+            Some("Right".to_string()),
+            "CR 709.5b: a back-face-up token's halves stay in printed order"
+        );
+
+        // Control: a Room with no slot whose right half was cast reads its live
+        // half as the right one.
         token.double_faced_token_alternative = None;
+        let halves = crate::game::room::own_room_halves(&token);
+        assert_eq!(halves.left.name, "Encouraging Aviator");
+        assert_eq!(halves.right.map(|half| half.name), Some("Left".to_string()));
+
+        token.modal_back_face = false;
         assert_eq!(
             crate::game::room::own_room_halves(&token)
                 .right

@@ -110,11 +110,19 @@ pub(crate) fn cast_half_designation(
 /// `modal_back_face` records that the right (second printed) half was cast —
 /// the same mapping CR 709.5d entry-unlocking uses. Single authority: the
 /// unlock-cost lookup and the door-text install both resolve through this.
+///
+/// CR 707.8a + CR 709.5b: a double-faced copy token whose copied values are a
+/// Room's stores them in printed order on both faces: the left half in its base
+/// and the right half in `double_faced_token_alternative`
+/// (`printed_cards::install_copiable_values_as_base`). Its `modal_back_face`
+/// then records only that the token entered with its back face up, as a copy
+/// of a modal double-faced permanent with its back face up does (CR 707.8a,
+/// CR 712.8f), so its live face is the left half. (The slot holds a prepare
+/// spell instead only on a token that is no Room, which has no door to ask for.)
 pub fn live_face_door(obj: &crate::game::game_object::GameObject) -> RoomDoor {
-    if obj.modal_back_face {
-        RoomDoor::Right
-    } else {
-        RoomDoor::Left
+    match (obj.modal_back_face, &obj.double_faced_token_alternative) {
+        (true, None) => RoomDoor::Right,
+        (false, _) | (true, Some(_)) => RoomDoor::Left,
     }
 }
 
