@@ -6646,9 +6646,9 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
             EpochReading::SelectionTime => {
                 selected_token_identity(state, object_id, snapshot_zone, &lki.name)
             }
-            // A look-back projection is not a selection epoch: it reads only the
-            // row that belongs to the snapshot's own epoch, and otherwise keeps
-            // the projection's conservative bit.
+            // A look-back projection is not a selection epoch: it has no
+            // selection to date, so it answers from the engine's capture for the
+            // object and otherwise keeps the projection's conservative bit.
             EpochReading::Projection => projected_token_identity(state, object_id, snapshot_zone),
         },
         reading,
@@ -7921,40 +7921,39 @@ fn selected_token_identity(
     None
 }
 
-/// CR 111.7 + CR 400.7 + CR 608.2h: token identity for a LOOK-BACK projection —
-/// a snapshot the caller holds for another epoch (a departed subject, a spent
-/// mana source, a tracked-set member), not a CR 115.9 selection-time reading.
+/// CR 111.1 + CR 111.7 + CR 400.7 + CR 608.2h: token identity for a LOOK-BACK
+/// projection — a snapshot the caller holds for another epoch (a departed
+/// subject, a spent mana source, a tracked-set member), NOT a CR 115.9
+/// selection-time reading of a chosen target.
 ///
-/// A projection has no selection epoch to date, so it must not read "the latest
-/// zone-change row by object id": that row can belong to a later epoch of the
-/// object than the snapshot does. What it may read is the row that belongs to the
-/// snapshot's OWN epoch — the departure row, whose `from_zone` is the zone the
-/// snapshot was taken in and whose token bit was captured as the object left it.
-/// Any other row states a different epoch and answers nothing, which lets the
-/// projection keep its own conservative bit
-/// ([`CapturedEpoch::token_identity`]) rather than a claim about some row.
+/// The two readings differ in exactly one way. A selection-time reading has an
+/// epoch to date, so it must not take "the latest zone-change row for this id"
+/// as the answer unless that row is proven to be that epoch's
+/// ([`selected_token_identity`]). A projection has no selection epoch to date:
+/// it holds a snapshot for some other moment and nothing that places that moment
+/// against the object's zone changes. The engine's own capture for the object is
+/// therefore the only historical evidence there is, and this leaf answers from it
+/// — never from the live object and never from the ObjectId-keyed exit cache.
+///
+/// With no capture at all, `None` lets the projection keep its own conservative
+/// bit ([`CapturedEpoch::token_identity`]). That is what keeps every tracked-set
+/// aggregate countable: members are read through this projection with no epoch
+/// stated, and a refusal there drops members the chain must still count
+/// (`destroy_all_chain_counts_filtered_tracked_set_for_token_followup`).
 fn projected_token_identity(
     state: &GameState,
     object_id: ObjectId,
     snapshot_zone: Option<Zone>,
 ) -> Option<bool> {
-    // A capture that states no zone states no epoch to key a row on.
-    let zone = snapshot_zone?;
-    // CR 111.7: a token in a zone other than the battlefield ceases to exist, so
-    // a subject projected in any other zone is certainly not one.
-    if zone != Zone::Battlefield {
-        return Some(false);
+    if let Some(zone) = snapshot_zone {
+        // CR 111.7: a token in a zone other than the battlefield ceases to exist,
+        // so a subject projected in a stated non-battlefield zone is certainly
+        // not one.
+        if zone != Zone::Battlefield {
+            return Some(false);
+        }
     }
-    state
-        .zone_changes_this_turn
-        .iter()
-        .rev()
-        .find(|record| {
-            record.object_id == object_id
-                && record.from_zone == Some(zone)
-                && record.to_zone != zone
-        })
-        .map(|record| record.is_token)
+    latest_zone_change_record(state, object_id).map(|record| record.is_token)
 }
 
 /// CR 115.9 + CR 608.2h + CR 400.7: the selection-time facts a captured
@@ -7990,10 +7989,11 @@ struct CapturedEpoch<'a> {
     /// them at all.
     snapshot_zone: Option<Zone>,
     /// CR 111.1 + CR 111.7 + CR 730.2d: token identity, dated to this epoch by
-    /// [`selected_token_identity`] (a selection-time reading) or to the
-    /// snapshot's own departure row ([`projected_token_identity`]). `None` means
-    /// no capture dates it to this epoch; [`Self::token_identity`] decides what
-    /// that means for the reading being answered.
+    /// [`selected_token_identity`] (a selection-time reading) or read from the
+    /// engine's capture for the object ([`projected_token_identity`], a look-back
+    /// projection, which has no selection to date). `None` means no capture
+    /// states it; [`Self::token_identity`] decides what that means for the
+    /// reading being answered.
     token: Option<bool>,
     /// CR 115.9: which reading of this capture is being answered.
     reading: EpochReading,
@@ -25011,6 +25011,60 @@ mod tests {
                 &ctx,
             ),
             "a selection-time reading refuses what the capture cannot state"
+        );
+    }
+
+    /// CR 111.1 + CR 400.7 + CR 608.2h: the conservative bit above is the one a
+    /// projection falls back to when NO capture names the object — not a claim
+    /// that a projection cannot read a capture at all. A projection over a member
+    /// the engine DID capture as a token answers token, because a look-back
+    /// projection has no selection epoch to date and its capture is the only
+    /// historical evidence there is.
+    ///
+    /// This is exactly the shape a tracked-set aggregate reads: members are
+    /// projected with no epoch stated, so a refusal (or a defaulted non-token
+    /// bit) here admits a token into a `NonToken` member filter and inflates the
+    /// count — `destroy_all_chain_counts_filtered_tracked_set_for_token_followup`
+    /// (R2 regression: token member counted, 2 where 1 is correct).
+    #[test]
+    fn projection_reading_answers_a_captured_token_bit() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Projection Source");
+        let member = add_creature(&mut state, PlayerId(0), "Projected Token");
+        state.objects.get_mut(&member).unwrap().is_token = true;
+        // The engine's own capture for this object as it left the battlefield.
+        let capture = state
+            .objects
+            .get(&member)
+            .unwrap()
+            .snapshot_for_zone_change(member, Some(Zone::Battlefield), Zone::Graveyard);
+        assert!(
+            capture.is_token,
+            "fixture precondition: the capture observed a token leaving"
+        );
+        state.zone_changes_this_turn.push_back(capture);
+
+        let ctx = FilterContext::from_source(&state, source);
+        let lki = epoch_snapshot(&[], false);
+        assert!(
+            super::matches_target_filter_on_lki_snapshot(
+                &state,
+                member,
+                &lki,
+                &prop_filter(FilterProp::Token),
+                &ctx,
+            ),
+            "a projection answers the token bit its capture holds"
+        );
+        assert!(
+            !super::matches_target_filter_on_lki_snapshot(
+                &state,
+                member,
+                &lki,
+                &prop_filter(FilterProp::NonToken),
+                &ctx,
+            ),
+            "so a nontoken member filter must not admit it"
         );
     }
 
