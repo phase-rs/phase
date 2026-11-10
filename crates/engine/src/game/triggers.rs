@@ -18036,11 +18036,18 @@ fn evaluate_trigger_condition_with_source(
         TriggerCondition::DuringPlayersTurn { player } => match player {
             // CR 102.1: "your turn" — the controller's side is the active side.
             PlayerFilter::Controller => {
-                super::topology::normalize_shared_turn_recipient(state, controller)
-                    == super::topology::normalize_shared_turn_recipient(
-                        state,
-                        state.active_player,
-                    )
+                if state.format_config.topology().has_shared_team_turns() {
+                    super::topology::normalize_shared_turn_recipient(state, controller)
+                        == super::topology::normalize_shared_turn_recipient(
+                            state,
+                            state.active_player,
+                        )
+                } else {
+                    // CR 102.1: individual-turn formats have no team
+                    // representative to normalize; the existing equality path
+                    // is exact and allocates no side vectors.
+                    controller == state.active_player
+                }
             }
             // CR 102.3 + CR 805.4a: "an opponent's turn" is team-aware. Under
             // shared team turns, a teammate holding `active_player` remains on

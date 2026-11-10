@@ -10543,9 +10543,8 @@ pub(super) fn parse_shuffle_ast(
     .parse(lower)
     .is_ok()
     {
-        return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+        return Some(ShuffleImperativeAst::OwnersChangeZoneToLibrary {
             target: TargetFilter::ParentTarget,
-            owner_library: true,
         });
     }
     if tag::<_, _, OracleError<'_>>("shuffle")
@@ -10876,6 +10875,28 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 enters_modified_if: None,
             };
             with_shuffle_sub_ability(effect)
+        }
+        ShuffleImperativeAst::OwnersChangeZoneToLibrary { target } => {
+            // CR 701.24c: the declared cards may have different owners, so each
+            // owner's library is randomized by that member's own delivery tail.
+            // A single terminal Shuffle cannot cover every owner (and would
+            // double-shuffle the first one).
+            parsed_clause(Effect::ChangeZone {
+                library_shuffle: Default::default(),
+                origin: None,
+                destination: Zone::Library,
+                target,
+                owner_library: true,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            })
         }
         ShuffleImperativeAst::ChangeZoneAllToLibrary { origins } => {
             // CR 400.6 + CR 400.3: "shuffle {possessive} {zone} into {possessive}
@@ -11284,6 +11305,11 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
             }
         ))
     );
+    // CR 701.24a + CR 701.24c: the terminal Shuffle covers the move's owner
+    // population for a source self-move, a typed declared-player population, or
+    // a mass move. The plural-owner subject ("the owners of those cards") uses
+    // its own delivery-only lowering instead, because one terminal owner lookup
+    // cannot cover multiple owners.
     match &mut effect {
         // CR 701.24a + CR 701.24d: every parser-emitted compound move into a
         // library appends the terminal `Shuffle` below. Randomizing during

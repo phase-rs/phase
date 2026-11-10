@@ -63,7 +63,12 @@ fn turn_the_earth_puts_each_target_into_its_owners_library_then_each_owner_shuff
     assert!(state.players[P0.0 as usize].library.contains(&mine));
     assert_eq!(state.objects[&theirs].zone, Zone::Library);
     assert!(state.players[P1.0 as usize].library.contains(&theirs));
-    assert!(shuffles_for(events, P0) >= 1, "{events:?}");
-    assert!(shuffles_for(events, P1) >= 1, "{events:?}");
+    // CR 701.24a + CR 701.24c: "The owners of those cards shuffle them into
+    // their libraries" is one shuffle instruction for each affected owner, so
+    // each owner's library is randomized exactly once even though two owners are
+    // involved. A single terminal owner shuffle cannot cover both owners; the
+    // per-owner delivery shuffles are the authority here.
+    assert_eq!(shuffles_for(events, P0), 1, "{events:?}");
+    assert_eq!(shuffles_for(events, P1), 1, "{events:?}");
     outcome.assert_life_delta(P0, 2);
 }
