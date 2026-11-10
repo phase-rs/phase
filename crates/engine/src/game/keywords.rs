@@ -72,6 +72,27 @@ pub fn has_keyword(obj: &GameObject, keyword: &Keyword) -> bool {
 /// Object-scoped keyword-kind query — same battlefield-only caveat as
 /// [`has_keyword`]; prefer [`object_has_effective_keyword_kind`] for objects
 /// that can be off-battlefield.
+/// Attachment legality needs every effective protection quality with its
+/// surviving provenance; this is the authority that scans the host's keywords.
+pub(crate) fn effective_protection_qualities(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Vec<crate::types::keywords::ProtectionTarget> {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+    if obj.zone != Zone::Battlefield {
+        return Vec::new();
+    }
+    obj.keywords
+        .iter()
+        .filter_map(|keyword| match keyword {
+            Keyword::Protection(quality) => Some(quality.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
     // allow-raw-authority: this IS the object-scoped authority
     obj.keywords.iter().any(|keyword| keyword.kind() == kind)

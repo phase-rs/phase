@@ -2243,34 +2243,31 @@ fn protection_blocks_attachment(
     host: &crate::game::game_object::GameObject,
     attachment: &crate::game::game_object::GameObject,
 ) -> bool {
-    use crate::types::keywords::Keyword;
-
-    host.keywords.iter().any(|keyword| { // allow-raw-authority: attachment legality needs the specific protection quality and its surviving provenance; host is the live battlefield object
-        let Keyword::Protection(quality) = keyword else {
-            return false;
-        };
-        if !crate::game::keywords::source_matches_protection_target(quality, host, attachment) {
-            return false;
-        }
-        let mut instances = host
-            .protection_provenance
-            .iter()
-            .filter(|entry| entry.quality == *quality)
-            .peekable();
-        instances.peek().is_none()
-            || instances.any(|entry| {
-                !entry.rider.as_ref().is_some_and(|rider| {
-                    protection_grant_exempts_attachment(
-                        state,
-                        attachment_id,
-                        rider.source,
-                        (rider.def_index, rider.mod_index, host_id),
-                        quality,
-                        &rider.does_not_remove,
-                    )
+    crate::game::keywords::effective_protection_qualities(state, host_id)
+        .iter()
+        .any(|quality| {
+            if !crate::game::keywords::source_matches_protection_target(quality, host, attachment) {
+                return false;
+            }
+            let mut instances = host
+                .protection_provenance
+                .iter()
+                .filter(|entry| entry.quality == *quality)
+                .peekable();
+            instances.peek().is_none()
+                || instances.any(|entry| {
+                    !entry.rider.as_ref().is_some_and(|rider| {
+                        protection_grant_exempts_attachment(
+                            state,
+                            attachment_id,
+                            rider.source,
+                            (rider.def_index, rider.mod_index, host_id),
+                            quality,
+                            &rider.does_not_remove,
+                        )
+                    })
                 })
-            })
-    })
+        })
 }
 
 /// Composite key for one protection modification on a host:
