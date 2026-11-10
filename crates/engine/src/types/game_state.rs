@@ -26043,12 +26043,27 @@ declare_game_state! {
     /// (CR 706.3a). After a no-table multi-die roll, it stamps the aggregate
     /// total so an inline "equal to the result(s)" sub_ability consumes the
     /// rolled value rather than the numeric amount of the triggering event
-    /// (e.g. combat damage). Resolution-scoped: cleared at `apply()` entry and
-    /// at cross-resolution stack boundaries. Follows the `last_effect_amount`
+    /// (e.g. combat damage). Context snapshots replay this scalar without
+    /// publishing; only `roll_die` writes `die_result_publication` to preserve
+    /// instruction results across caller-context restoration. Paused resolutions
+    /// retain their scalar through the existing serialized context carriers.
+    /// Resolution-scoped: cleared at `apply()` entry and at cross-resolution
+    /// stack boundaries. Follows the `last_effect_amount`
     /// PartialEq-OMISSION pattern: NOT compared in the hand-written `PartialEq`
     /// (safe — always cleared at comparison boundaries).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub die_result_this_resolution: Option<i32>,
+
+    /// Synchronous handoff written only by the die-instruction result publisher.
+    /// `None` means no write; `Some(None)` is an explicit clear; `Some(Some(n))`
+    /// publishes `n`, even when it equals the replayed scalar. Continuation drains
+    /// isolate this slot and propagate the latest child write, or retain the
+    /// enclosing write if the child does not publish. Context replay and rollback
+    /// are transfers, not publications. Paused state uses the existing scalar and
+    /// trigger-context carriers instead; this slot is never serialized or compared
+    /// by PartialEq and is cleared with player-action transients.
+    #[serde(skip)]
+    pub(crate) die_result_publication: Option<Option<i32>>,
 
     /// Count from the most recent interactive effect resolution (e.g., number of cards
     /// actually discarded in a DiscardChoice). Used as fallback for EventContextAmount
@@ -34184,6 +34199,7 @@ impl GameState {
             last_effect_amount: None,
             last_effect_excess_amount: None,
             die_result_this_resolution: None,
+            die_result_publication: None,
             last_effect_count: None,
             last_effect_counts_by_player: HashMap::new(),
             clause_minimum_snapshot: None,
@@ -35725,6 +35741,7 @@ impl GameState {
         self.last_effect_counts_by_player.clear();
         self.exiled_from_hand_this_resolution = 0;
         self.die_result_this_resolution = None;
+        self.die_result_publication = None;
         self.consumed_before_priority_trigger_events.clear();
         self.ingress_life_window = None;
         self.replacement_quantity_overflow = None;
@@ -38129,6 +38146,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         last_effect_amount: _,
         last_effect_excess_amount: _,
         die_result_this_resolution: _,
+        die_result_publication: _,
         last_effect_count: _,
         last_effect_counts_by_player: _,
         clause_minimum_snapshot: _,
