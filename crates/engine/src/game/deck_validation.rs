@@ -1314,6 +1314,7 @@ fn validate_scheme_deck(
     let mut counts: HashMap<String, u32> = HashMap::new();
     let mut non_scheme = BTreeSet::new();
     let mut unsupported = BTreeSet::new();
+    let valid_subtypes = db.valid_subtypes();
     for name in scheme_deck {
         let Some(face) = db.get_face_by_name(name) else {
             continue;
@@ -1322,7 +1323,9 @@ fn validate_scheme_deck(
         if !face.card_type.core_types.contains(&CoreType::Scheme) {
             non_scheme.insert(face.name.clone());
         }
-        if !crate::game::coverage::card_face_gaps(face).is_empty() {
+        if !crate::game::coverage::card_face_coverage_with_subtypes(face, valid_subtypes)
+            .is_supported()
+        {
             unsupported.insert(face.name.clone());
         }
     }
@@ -3695,13 +3698,13 @@ fn evaluate_deck_coverage(db: &CardDatabase, request: &DeckCompatibilityRequest)
     let mut resolved_unique = 0usize;
     // Same database-derived subtype lexicon `analyze_coverage` uses, so the
     // deck verdict matches coverage-report for valid subtypes printed elsewhere.
-    let valid_subtypes = crate::game::coverage::collect_valid_subtypes(db);
+    let valid_subtypes = db.valid_subtypes();
 
     for (canonical, name) in &unique_names {
         if let Some(face) = db.get_face_by_name(name) {
             resolved_unique += 1;
             let coverage =
-                crate::game::coverage::card_face_coverage_with_subtypes(face, &valid_subtypes);
+                crate::game::coverage::card_face_coverage_with_subtypes(face, valid_subtypes);
             if coverage.is_supported() {
                 supported_count += 1;
             } else {
@@ -11076,7 +11079,7 @@ mod tests {
         );
     }
 
-    /// CR 100.2a: Deck coverage must surface cards that coverage-report marks unsupported,
+    /// Deck coverage must surface cards that coverage-report marks unsupported,
     /// including those whose only gaps are parse warnings (e.g. SwallowedClause) or
     /// unhandled resolver features (issue #9972).
     #[test]
