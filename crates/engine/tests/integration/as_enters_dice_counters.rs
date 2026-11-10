@@ -22,7 +22,9 @@
 //! Ever After, Myojin of Life's Web, Oblation, Llanowar Elves and Roaming Throne
 //! are verbatim.
 //! Humility, Maskwood Nexus, Twinflame and Second Harvest are verbatim, and so is
-//! Pixie Guide where a row composes its Flying line. Wyll, Blade of Frontiers
+//! Pixie Guide where a row composes its Flying line. Saw in Half, Littjara
+//! Mirrorlake, Vizier of Many Faces, Dress Down and Overwhelming Splendor are
+//! verbatim. Wyll, Blade of Frontiers
 //! carries its first two lines, without Choose a Background (commander-only).
 //! Dice-dependent rows choose their RNG seed by search and assert against the
 //! emitted `DieRolled` results, never a hard-coded total.
@@ -8146,7 +8148,9 @@ impl PreEntryBoard {
 /// is made before Humility is on the battlefield, whichever was delivered first.
 /// Humility's effect does not apply yet, and the Dwarf triggers on the roll. Once
 /// Humility is on the battlefield (a later roll, or Humility resident) the Dwarf
-/// has no abilities.
+/// has no abilities. With Humility resident, Hammer Jammer as it would exist on
+/// the battlefield has no abilities either (CR 614.12 + CR 613.1f), so its
+/// as-enters roll does not apply: no roll, and no counters.
 #[test]
 fn a_co_entrants_static_does_not_reach_a_resident_at_the_roll() {
     for seed in [7, 0] {
@@ -8161,10 +8165,18 @@ fn a_co_entrants_static_does_not_reach_a_resident_at_the_roll() {
             settle(&mut board.festival.runner, &mut events, DEFAULT_ANSWERS);
             let state = board.festival.runner.state();
             let rolls = die_results(&events);
-            assert_eq!(rolls.len(), 1, "{what}");
             let seen = match layout {
-                CoLayout::CoFirst | CoLayout::JammerFirst => 1,
-                CoLayout::Resident => 0,
+                CoLayout::CoFirst | CoLayout::JammerFirst => {
+                    assert_eq!(rolls.len(), 1, "{what}");
+                    assert_eq!(plus_counters(state, board.jammer), rolls[0], "{what}");
+                    1
+                }
+                CoLayout::Resident => {
+                    assert!(rolls.is_empty(), "{what}: no roll is made");
+                    assert_eq!(roll_resolved_for(&events, board.jammer), 0, "{what}");
+                    assert_eq!(plus_counters(state, board.jammer), 0, "{what}");
+                    0
+                }
             };
             assert_eq!(
                 triggers_seen_from(dwarf),
@@ -8174,11 +8186,6 @@ fn a_co_entrants_static_does_not_reach_a_resident_at_the_roll() {
             assert_eq!(p1_before - life(state, P1), seen as i32, "{what}");
             if layout == CoLayout::CoFirst {
                 board.assert_delivered_before_the_roll(&events, &what);
-            }
-            if layout != CoLayout::Resident {
-                // CR 614.12: under a resident Humility the entrant's own as-enters
-                // replacement is a separate, disclosed question; not asserted.
-                assert_eq!(plus_counters(state, board.jammer), rolls[0], "{what}");
             }
             assert_finished(state, &[dwarf], &what);
 
@@ -8349,7 +8356,9 @@ fn answer_roll_order_with_pixie(
 /// replacement applies to it, both when the roll asks the replacement order and
 /// on the answer's re-scan, and behind an entry prompt that parks the batch. Two
 /// "plus one and ignore the lowest" replacements leave two ignored rolls. Once
-/// Humility is on the battlefield, Pixie Guide's replacement is gone.
+/// Humility is on the battlefield, Pixie Guide's replacement is gone. With
+/// Humility resident, Hammer Jammer's own as-enters roll does not apply
+/// (CR 614.12), so no roll is made at all.
 #[test]
 fn a_co_entrants_static_does_not_remove_a_residents_roll_replacement() {
     for case in ResidentPixieCase::ALL {
@@ -8394,10 +8403,10 @@ fn a_co_entrants_static_does_not_remove_a_residents_roll_replacement() {
                 // Humility is not on the battlefield: Pixie Guide applies.
                 (false, true) => 2,
                 (false, false) => 1,
-                // Humility removes Pixie Guide's ability; Barbarian Class is no
-                // creature.
-                (true, true) => 1,
-                (true, false) => 0,
+                // CR 614.12 + CR 613.1f: a resident Humility removes Hammer
+                // Jammer's own as-enters roll, so no roll is made for any
+                // replacement to modify.
+                (true, _) => 0,
             };
             assert_eq!(
                 ignored_rolls(&events),
@@ -9703,3 +9712,540 @@ fn mill_batch_wall_time_profile() {
         eprintln!("L-scale mill n={n} elapsed_ms={}", elapsed.as_millis());
     }
 }
+
+// ---------------------------------------------------------------------------
+// The split boundary: copy routes that cannot run a copied roll, and the
+// resident view of the entrant's own roll
+// ---------------------------------------------------------------------------
+
+const SAW_IN_HALF: &str = "Destroy target creature. If that creature dies this way, its controller creates two tokens that are copies of that creature, except their power is half that creature's power and their toughness is half that creature's toughness. Round up each time.";
+const LITTJARA_MIRRORLAKE: &str = "This land enters tapped.\n{T}: Add {U}.\n{2}{G}{G}{U}, {T}, Sacrifice this land: Create a token that's a copy of target creature you control, except it enters with an additional +1/+1 counter on it. Activate only as a sorcery.";
+const VIZIER_OF_MANY_FACES: &str = "You may have this creature enter as a copy of any creature on the battlefield, except if this creature was embalmed, the token has no mana cost, it's white, and it's a Zombie in addition to its other types.\nEmbalm {3}{U}{U}";
+const DRESS_DOWN: &str = "Flash\nWhen this enchantment enters, draw a card.\nCreatures lose all abilities.\nAt the beginning of the end step, sacrifice this enchantment.";
+const OVERWHELMING_SPLENDOR: &str = "Enchant player\nCreatures enchanted player controls lose all abilities and have base power and toughness 1/1.\nEnchanted player can't activate abilities that aren't mana abilities or loyalty abilities.";
+
+/// The game's runtime "unsupported" record (`unimplemented_oracle_ids`), sorted.
+/// This file's cards carry no printed oracle id, so each entry is the name the
+/// object had when it was recorded.
+fn recorded_unsupported(state: &GameState) -> Vec<&str> {
+    state
+        .unimplemented_oracle_ids
+        .iter()
+        .map(String::as_str)
+        .collect()
+}
+
+/// The creature a copy row copies, on P0's battlefield.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Donor {
+    /// Hammer Jammer, carrying one +1/+1 counter (`resident_jammer`).
+    Jammer,
+    /// Triskelion, with the three +1/+1 counters it entered with: a copied
+    /// "enters with" that is not a roll.
+    Triskelion,
+    /// A vanilla 2/2.
+    Vanilla,
+}
+
+impl Donor {
+    const ALL: [Donor; 3] = [Donor::Jammer, Donor::Triskelion, Donor::Vanilla];
+
+    fn name(self) -> &'static str {
+        match self {
+            Donor::Jammer => "Hammer Jammer",
+            Donor::Triskelion => "Triskelion",
+            Donor::Vanilla => "Vanilla Bear",
+        }
+    }
+
+    fn resident(self, scenario: &mut GameScenario) -> ObjectId {
+        match self {
+            Donor::Jammer => resident_jammer(scenario, P0),
+            Donor::Triskelion => {
+                let id = scenario
+                    .add_creature_from_oracle(P0, self.name(), 1, 1, TRISKELION)
+                    .id();
+                scenario.with_counter(id, CounterType::Plus1Plus1, 3);
+                id
+            }
+            Donor::Vanilla => scenario.add_creature(P0, self.name(), 2, 2).id(),
+        }
+    }
+
+    /// What the runtime record holds once a copy of this donor entered: only a
+    /// copied as-enters roll is recorded unsupported.
+    fn recorded(self) -> Vec<&'static str> {
+        match self {
+            Donor::Jammer => vec!["Hammer Jammer"],
+            Donor::Triskelion | Donor::Vanilla => Vec::new(),
+        }
+    }
+}
+
+/// S1. Saw in Half destroys a resident creature, and its controller creates two
+/// token copies of it, with Brazen Dwarf resident + CR 707.5 + CR 614.1c: a token
+/// copy of Hammer Jammer copies its "As this creature enters, roll a six-sided
+/// die" ability, which should take effect. This copy route does not run copied
+/// entry replacements, so no roll is made and the route records the copied roll
+/// as unsupported instead of skipping it silently. A copied "enters with three
+/// +1/+1 counters" (Triskelion) is supported on this route, and nothing is
+/// recorded for it or for a vanilla creature.
+#[test]
+fn a_saw_in_half_copy_records_its_copied_roll_unsupported() {
+    for donor in Donor::ALL {
+        let what = format!("{donor:?}");
+        reset_triggers_seen();
+        let mut scenario = board(7);
+        let dwarf = add_dwarf(&mut scenario);
+        let target = donor.resident(&mut scenario);
+        let saw = free_spell(&mut scenario, "Saw in Half", true, SAW_IN_HALF);
+        let mut runner = scenario.build();
+        let mut events = Vec::new();
+        cast_and_pass(&mut runner, saw, None, Some(target), &mut events);
+        settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+        let state = runner.state();
+        let tokens = tokens_named(state, donor.name());
+        assert_eq!(tokens.len(), 2, "{what}: reach: two token copies entered");
+        assert!(die_results(&events).is_empty(), "{what}: no roll is made");
+        assert_eq!(triggers_seen_from(dwarf), 0, "{what}");
+        let counters = match donor {
+            Donor::Jammer | Donor::Vanilla => 0,
+            Donor::Triskelion => 3,
+        };
+        for token in &tokens {
+            assert_eq!(plus_counters(state, *token), counters, "{what}");
+        }
+        assert_eq!(recorded_unsupported(state), donor.recorded(), "{what}");
+        assert_finished(state, &[dwarf], &what);
+    }
+}
+
+/// Littjara Mirrorlake on P0's battlefield, untapped, with the {2}{G}{G}{U} its
+/// copy ability costs, and that ability's index.
+fn littjara(scenario: &mut GameScenario) -> ObjectId {
+    let land = scenario
+        .add_land_from_oracle(P0, "Littjara Mirrorlake", LITTJARA_MIRRORLAKE)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Green,
+            ManaType::Green,
+            ManaType::Blue,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .map(|mana| ManaUnit::new(mana, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    land
+}
+
+fn copy_ability_index(state: &GameState, source: ObjectId) -> usize {
+    state.objects[&source]
+        .abilities
+        .iter()
+        .position(|ability| matches!(*ability.effect, Effect::CopyTokenOf { .. }))
+        .expect("the source's copy ability")
+}
+
+/// S1l + A4. Littjara Mirrorlake copies a resident creature, alone and under
+/// Hardened Scales + CR 707.5 + CR 707.9b + CR 122.6: the copy "enters with an
+/// additional +1/+1 counter" on the same route as Saw in Half, so a copy of
+/// Hammer Jammer makes no roll and records it unsupported. Its counters are
+/// Littjara's one, modified once by Hardened Scales: with no roll, there are no
+/// dice counters of the same kind to place separately (A4). A vanilla copy gets
+/// the same counters and records nothing.
+#[test]
+fn a_littjara_copy_records_its_copied_roll_unsupported() {
+    for donor in [Donor::Jammer, Donor::Vanilla] {
+        for scales in [false, true] {
+            let what = format!("{donor:?} scales {scales}");
+            let mut scenario = board(7);
+            if scales {
+                scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
+            }
+            let target = donor.resident(&mut scenario);
+            let land = littjara(&mut scenario);
+            let mut runner = scenario.build();
+            let index = copy_ability_index(runner.state(), land);
+            let outcome = runner.activate(land, index).target_object(target).resolve();
+            let mut events = outcome.events().to_vec();
+            settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+            let state = runner.state();
+            let tokens = tokens_named(state, donor.name());
+            assert_eq!(tokens.len(), 1, "{what}: reach: the copy entered");
+            assert_eq!(zone(state, land), Zone::Graveyard, "{what}: reach");
+            assert!(die_results(&events).is_empty(), "{what}: no roll is made");
+            assert_eq!(
+                plus_counters(state, tokens[0]),
+                1 + u32::from(scales),
+                "{what}"
+            );
+            assert_eq!(recorded_unsupported(state), donor.recorded(), "{what}");
+            assert_finished(state, &[], &what);
+        }
+    }
+}
+
+/// S2. Clone enters as a copy of a resident Hammer Jammer or Triskelion, with
+/// Brazen Dwarf resident + CR 707.5 + CR 614.1c: the copied "As this creature
+/// enters, roll a six-sided die" should take effect. The copy-choice route
+/// applies the copied "enters with" counters (Triskelion's three) but never the
+/// copied roll, so Clone makes no roll, enters as a 0/0 and dies, and the route
+/// records the roll unsupported, once. The Triskelion copy records nothing.
+#[test]
+fn a_clone_copy_records_its_copied_roll_unsupported() {
+    for donor in [Donor::Jammer, Donor::Triskelion] {
+        let what = format!("{donor:?}");
+        reset_triggers_seen();
+        let mut scenario = board(7);
+        let dwarf = add_dwarf(&mut scenario);
+        let target = donor.resident(&mut scenario);
+        let clone = free_creature(&mut scenario, "Clone", 0, 0, CLONE);
+        let mut runner = scenario.build();
+        let mut events = Vec::new();
+        clone_until_copied(&mut runner, clone, target, &mut events);
+        settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+        let state = runner.state();
+        assert!(die_results(&events).is_empty(), "{what}: no roll is made");
+        assert_eq!(triggers_seen_from(dwarf), 0, "{what}");
+        match donor {
+            Donor::Jammer => assert_eq!(
+                zone(state, clone),
+                Zone::Graveyard,
+                "{what}: a 0/0 with no counters (CR 704.5f)"
+            ),
+            Donor::Triskelion => {
+                assert_eq!(zone(state, clone), Zone::Battlefield, "{what}");
+                assert_eq!(plus_counters(state, clone), 3, "{what}");
+            }
+            Donor::Vanilla => unreachable!("not a Clone row"),
+        }
+        assert_eq!(recorded_unsupported(state), donor.recorded(), "{what}");
+        assert_finished(state, &[dwarf], &what);
+    }
+}
+
+/// S2v. Vizier of Many Faces is embalmed, and its token enters as a copy of a
+/// resident Hammer Jammer + CR 702.128a + CR 707.5: the token copies the roll it
+/// should make. It finishes on the same copy-choice route as Clone, so it makes
+/// no roll, enters as a 0/0 and dies, and the roll is recorded unsupported.
+#[test]
+fn an_embalmed_vizier_copy_records_its_copied_roll_unsupported() {
+    let mut scenario = board(7);
+    let jammer = resident_jammer(&mut scenario, P0);
+    let vizier = scenario
+        .add_creature_to_graveyard(P0, "Vizier of Many Faces", 0, 0)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+        })
+        .from_oracle_text_with_keywords(&["Embalm"], VIZIER_OF_MANY_FACES)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Blue,
+            ManaType::Blue,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .map(|mana| ManaUnit::new(mana, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+    let ability_index = copy_ability_index(runner.state(), vizier);
+    let mut events = Vec::new();
+    act(
+        &mut runner,
+        GameAction::ActivateAbility {
+            source_id: vizier,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        },
+        &mut events,
+    );
+    pass_until_prompt(&mut runner, &mut events);
+    accept_replacement(&mut runner, &mut events);
+    choose_copy_target(&mut runner, jammer, &mut events);
+    settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+    let state = runner.state();
+    assert_eq!(
+        zone(state, vizier),
+        Zone::Exile,
+        "reach: Vizier was embalmed"
+    );
+    assert!(die_results(&events).is_empty(), "no roll is made");
+    assert!(
+        tokens_named(state, "Hammer Jammer").is_empty(),
+        "a 0/0 with no counters (CR 704.5f)"
+    );
+    assert_eq!(recorded_unsupported(state), vec!["Hammer Jammer"]);
+    assert_finished(state, &[], "S2v");
+}
+
+/// S3. Stolen Identity copies a resident Hammer Jammer under Grumgully, the
+/// Generous + CR 707.5 + CR 616.1: the token's copied roll and Grumgully's
+/// "enters with an additional +1/+1 counter" should both apply, in an order P0
+/// chooses. Grumgully's counter is given to the token as it is created, so the
+/// copy takes the route that does not run copied entry replacements, as Saw in
+/// Half's does: no roll, Grumgully's one counter, and the copied roll recorded
+/// unsupported.
+#[test]
+fn a_stolen_identity_copy_under_grumgully_records_its_copied_roll_unsupported() {
+    let mut scenario = board(7);
+    add_grumgully(&mut scenario);
+    let resident = resident_jammer(&mut scenario, P0);
+    let spell = free_spell(&mut scenario, "Stolen Identity", false, STOLEN_IDENTITY);
+    let mut runner = scenario.build();
+    let mut events = Vec::new();
+    cast_and_pass(&mut runner, spell, None, Some(resident), &mut events);
+    settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+    let state = runner.state();
+    let token = the_token_copy(state, "Hammer Jammer");
+    assert!(die_results(&events).is_empty(), "no roll is made");
+    assert_eq!(plus_counters(state, token), 1, "Grumgully's only");
+    assert_eq!(recorded_unsupported(state), vec!["Hammer Jammer"]);
+    assert_finished(state, &[resident], "S3");
+}
+
+/// A lone-copy guard case: its label, the permanents it adds, and each token's
+/// counters for its roll.
+type LoneCopyCase = (&'static str, fn(&mut GameScenario), fn(u32) -> u32);
+
+/// S3g (guard). Stolen Identity copies a resident Hammer Jammer alone, under
+/// Doubling Season, or under Hardened Scales + Stolen Identity's ruling +
+/// CR 707.5 + CR 614.1a: none of these is another entry replacement of the
+/// token (they replace the token creation or the counter placement), so each
+/// token makes its own roll and nothing is recorded.
+#[test]
+fn a_lone_liminal_copy_keeps_its_roll_and_records_nothing() {
+    let cases: [LoneCopyCase; 3] = [
+        ("alone", no_extras, |roll| roll),
+        (
+            "Doubling Season",
+            |scenario| {
+                scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
+            },
+            |roll| 2 * roll,
+        ),
+        (
+            "Hardened Scales",
+            |scenario| {
+                scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
+            },
+            |roll| roll + 1,
+        ),
+    ];
+    for (what, extras, counters) in cases {
+        let mut scenario = board(7);
+        extras(&mut scenario);
+        let resident = resident_jammer(&mut scenario, P0);
+        let spell = free_spell(&mut scenario, "Stolen Identity", false, STOLEN_IDENTITY);
+        let mut runner = scenario.build();
+        let mut events = Vec::new();
+        cast_and_pass(&mut runner, spell, None, Some(resident), &mut events);
+        settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+        let state = runner.state();
+        let tokens = tokens_named(state, "Hammer Jammer");
+        assert!(!tokens.is_empty(), "{what}: reach");
+        let rolls = rolls_by_token(&events, what);
+        assert_eq!(
+            rolls.iter().map(|(token, _)| *token).collect::<Vec<_>>(),
+            tokens,
+            "{what}: each token rolls"
+        );
+        for (token, roll) in &rolls {
+            assert_eq!(plus_counters(state, *token), counters(*roll), "{what}");
+        }
+        assert!(recorded_unsupported(state).is_empty(), "{what}");
+    }
+}
+
+/// An ability-removing permanent a B row puts on P0's battlefield before Hammer
+/// Jammer enters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AbilityRemover {
+    Humility,
+    DressDown,
+    /// Overwhelming Splendor, controlled by P1 and enchanting this player.
+    Splendor(PlayerId),
+}
+
+impl AbilityRemover {
+    fn add(self, scenario: &mut GameScenario) -> ObjectId {
+        match self {
+            AbilityRemover::Humility => scenario
+                .add_enchantment_from_oracle(P0, "Humility", HUMILITY)
+                .id(),
+            AbilityRemover::DressDown => scenario
+                .add_enchantment_from_oracle(P0, "Dress Down", DRESS_DOWN)
+                .id(),
+            AbilityRemover::Splendor(_) => scenario
+                .add_enchantment_from_oracle(P1, "Overwhelming Splendor", OVERWHELMING_SPLENDOR)
+                .with_subtypes(vec!["Aura", "Curse"])
+                .id(),
+        }
+    }
+
+    /// Attach what needs attaching once the game is built.
+    fn attach(self, runner: &mut GameRunner, remover: ObjectId) {
+        if let AbilityRemover::Splendor(player) = self {
+            // Returns the previous host: a first attach has none.
+            let _ = engine::game::effects::attach::attach_to_player(
+                runner.state_mut(),
+                remover,
+                player,
+            );
+            assert_eq!(
+                runner.state().objects[&remover].attached_to,
+                Some(engine::game::game_object::AttachTarget::Player(player)),
+                "reach: Overwhelming Splendor enchants the player"
+            );
+        }
+    }
+
+    /// Whether Hammer Jammer, entering under P0's control, would have no
+    /// abilities on the battlefield.
+    fn strips_p0s_jammer(self) -> bool {
+        match self {
+            AbilityRemover::Humility | AbilityRemover::DressDown => true,
+            AbilityRemover::Splendor(player) => player == P0,
+        }
+    }
+}
+
+/// B1 + B2 + Overwhelming Splendor. Hammer Jammer is cast with Humility, Dress
+/// Down or Overwhelming Splendor already on the battlefield, and Brazen Dwarf
+/// resident + CR 614.12 + CR 613.1f: whether its "As this creature enters, roll"
+/// applies is checked against the creature as it would exist on the
+/// battlefield, with the continuous effects that already exist. Under Humility,
+/// Dress Down, or Overwhelming Splendor enchanting P0 it has no abilities there,
+/// so it rolls nothing and enters with no counters: a 1/1 under Humility and
+/// Splendor, a 0/0 that dies under Dress Down (CR 704.5f). This is the
+/// rules-correct outcome, so nothing is recorded unsupported. Splendor
+/// enchanting P1 does not reach P0's creature: it rolls and gets its counters.
+#[test]
+fn an_as_enters_roll_does_not_apply_without_the_ability_on_the_battlefield() {
+    for remover in [
+        AbilityRemover::Humility,
+        AbilityRemover::DressDown,
+        AbilityRemover::Splendor(P0),
+        AbilityRemover::Splendor(P1),
+    ] {
+        let what = format!("{remover:?}");
+        reset_triggers_seen();
+        let mut scenario = board(7);
+        let source = remover.add(&mut scenario);
+        let dwarf = add_dwarf(&mut scenario);
+        let jammer = free_jammer(&mut scenario);
+        let box_of_goblins = free_spell(
+            &mut scenario,
+            "Box of Free-Range Goblins",
+            false,
+            BOX_OF_FREE_RANGE_GOBLINS,
+        );
+        let mut runner = scenario.build();
+        remover.attach(&mut runner, source);
+        let mut events = Vec::new();
+        cast_and_pass(&mut runner, jammer, None, None, &mut events);
+        settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+        let state = runner.state();
+        let rolls = die_results(&events);
+        if remover.strips_p0s_jammer() {
+            assert!(rolls.is_empty(), "{what}: no roll is made");
+            assert_eq!(roll_resolved_for(&events, jammer), 0, "{what}");
+            assert_eq!(plus_counters(state, jammer), 0, "{what}");
+            match remover {
+                AbilityRemover::DressDown => {
+                    assert_eq!(zone(state, jammer), Zone::Graveyard, "{what}");
+                }
+                AbilityRemover::Humility | AbilityRemover::Splendor(_) => {
+                    assert_eq!(zone(state, jammer), Zone::Battlefield, "{what}");
+                    let jammer_object = &state.objects[&jammer];
+                    assert_eq!(
+                        (jammer_object.power, jammer_object.toughness),
+                        (Some(1), Some(1)),
+                        "{what}"
+                    );
+                }
+            }
+        } else {
+            assert_eq!(rolls.len(), 1, "{what}: the control rolls");
+            assert_eq!(plus_counters(state, jammer), rolls[0], "{what}");
+            assert_eq!(zone(state, jammer), Zone::Battlefield, "{what}");
+        }
+        assert!(recorded_unsupported(state).is_empty(), "{what}");
+        assert_finished(state, &[dwarf], &what);
+
+        // Reach: a later roll by P0 is made, and the ability-removing effect
+        // applies to the resident Dwarf.
+        let _ = take_triggers_seen_from(dwarf);
+        let mut box_events = Vec::new();
+        cast_and_pass(&mut runner, box_of_goblins, None, None, &mut box_events);
+        settle(&mut runner, &mut box_events, DEFAULT_ANSWERS);
+        assert_eq!(die_results(&box_events).len(), 1, "{what}: reach");
+        let dwarf_sees = usize::from(!remover.strips_p0s_jammer());
+        assert_eq!(triggers_seen_from(dwarf), dwarf_sees, "{what}: reach");
+        if remover == AbilityRemover::Humility {
+            assert_eq!(
+                triggers_seen_from(jammer),
+                0,
+                "{what}: reach: Hammer Jammer's own trigger is gone too"
+            );
+        }
+    }
+}
+
+/// B3 + B4. Under a resident Humility + CR 614.12 + CR 613.1f + CR 107.3m:
+/// Neverwinter Hydra cast with X = 2 rolls no dice and enters with no counters,
+/// and Zombify returning Hammer Jammer puts it onto the battlefield with no roll
+/// and no counters. Each is a 1/1, and nothing is recorded unsupported.
+#[test]
+fn an_as_enters_roll_does_not_apply_under_a_resident_humility_on_any_entry() {
+    for zombify in [false, true] {
+        let what = if zombify {
+            "Zombify"
+        } else {
+            "Neverwinter Hydra"
+        };
+        let mut scenario = board(7);
+        scenario.add_enchantment_from_oracle(P0, "Humility", HUMILITY);
+        let (entrant, spell, x, target) = if zombify {
+            let jammer = graveyard_creature(&mut scenario, "Hammer Jammer", HAMMER_JAMMER);
+            let spell = free_spell(&mut scenario, "Zombify", false, ZOMBIFY);
+            (jammer, spell, None, Some(jammer))
+        } else {
+            let hydra = x_creature(&mut scenario, "Neverwinter Hydra", NEVERWINTER_HYDRA, 2);
+            (hydra, hydra, Some(2), None)
+        };
+        let mut runner = scenario.build();
+        let mut events = Vec::new();
+        cast_and_pass(&mut runner, spell, x, target, &mut events);
+        settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+        let state = runner.state();
+        assert!(die_results(&events).is_empty(), "{what}: no dice");
+        assert_eq!(roll_resolved_for(&events, entrant), 0, "{what}");
+        assert_eq!(plus_counters(state, entrant), 0, "{what}");
+        assert_eq!(zone(state, entrant), Zone::Battlefield, "{what}: reach");
+        let object = &state.objects[&entrant];
+        assert_eq!(
+            (object.power, object.toughness),
+            (Some(1), Some(1)),
+            "{what}"
+        );
+        assert!(recorded_unsupported(state).is_empty(), "{what}");
+        assert_finished(state, &[], what);
+    }
+}
+
+// BL (disclosed, not gated). A liminal token copy of Hammer Jammer (Stolen
+// Identity, Twinflame, Second Harvest) under a resident Humility still rolls and
+// gets its counters: the entrant projection cannot place a token that does not
+// exist yet (`BattlefieldEntrantProjection::new` refuses liminal entrants). The
+// CR 614.12 view of a liminal entrant is the liminal half of the resident-view
+// follow-up (PR-B), which lands first.

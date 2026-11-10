@@ -13448,24 +13448,31 @@ fn resolve_legacy_effect(
             choose_counter_adjustment::resolve(state, ability, events)
         }
         Effect::Unimplemented { name, .. } => {
-            // Log warning and return Ok (no-op) for unimplemented effects
-            eprintln!("Warning: Unimplemented effect: {}", name);
-            // Diagnostics: record the source card so the telemetry `game_summary`
-            // surface can report which cards hit an unimplemented effect this game.
-            // Oracle id when available; object name fallback covers tokens/emblems
-            // (`printed_ref == None`).
-            if let Some(obj) = state.objects.get(&ability.source_id) {
-                let id = obj
-                    .printed_ref
-                    .as_ref()
-                    .map(|p| p.oracle_id.clone())
-                    .unwrap_or_else(|| obj.name.clone());
-                state.unimplemented_oracle_ids.insert(id);
-            }
+            // A no-op for unimplemented effects, recorded as unsupported.
+            record_runtime_unimplemented(state, ability.source_id, name);
             Ok(())
         }
     }?;
     Ok(None)
+}
+
+/// The game's one runtime "unsupported" record: log `name` and record
+/// `source_id`'s card in `unimplemented_oracle_ids`, so the telemetry
+/// `game_summary` surface can report which cards hit an unsupported behaviour
+/// this game. Oracle id when available; the object's name covers tokens and
+/// emblems (`printed_ref == None`). Used by the `Effect::Unimplemented`
+/// resolver arm and by any engine route that meets a card behaviour it cannot
+/// run, so the outcome is reported rather than silently skipped.
+pub(crate) fn record_runtime_unimplemented(state: &mut GameState, source_id: ObjectId, name: &str) {
+    eprintln!("Warning: Unimplemented effect: {}", name);
+    if let Some(obj) = state.objects.get(&source_id) {
+        let id = obj
+            .printed_ref
+            .as_ref()
+            .map(|p| p.oracle_id.clone())
+            .unwrap_or_else(|| obj.name.clone());
+        state.unimplemented_oracle_ids.insert(id);
+    }
 }
 
 /// Returns true if the given effect has a handler in the engine.

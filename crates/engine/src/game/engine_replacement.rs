@@ -3413,6 +3413,18 @@ fn finish_copy_target_choice_entry(
     // characteristics below (enter-tapped, ETB counters) read post-copy state.
     crate::game::layers::mark_layers_full(state);
     crate::game::layers::flush_layers(state);
+    // CR 707.5: a copied "as [this] enters" roll should take effect. This route
+    // dispatches only the copy's enter modifiers and choices, never its copied
+    // entry instructions (follow-up A), so the roll is recorded unsupported
+    // rather than silently skipped.
+    if state.objects.get(&source_id).is_some_and(|entrant| {
+        entrant
+            .replacement_definitions
+            .iter_all()
+            .any(super::replacement::replacement_rolls_as_it_enters)
+    }) {
+        effects::record_runtime_unimplemented(state, source_id, "copied_as_enters_roll");
+    }
     let enter_modifiers =
         super::replacement::current_self_enter_replacement_modifiers(state, source_id);
     if let Some(tapped) = enter_modifiers.enter_tapped {

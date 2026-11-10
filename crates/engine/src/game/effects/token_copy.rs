@@ -802,6 +802,12 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             ))
             .chain(enter_with_counters.iter().cloned())
             .collect();
+    // CR 707.5: whether the copiable values carry an "as [this] enters" roll,
+    // which each copy should make as it enters. Loop-invariant.
+    let copies_an_as_enters_roll = values
+        .replacement_definitions
+        .iter()
+        .any(crate::game::replacement::replacement_rolls_as_it_enters);
 
     // Liminal choice is loop-invariant; compute once so the terminal drain below
     // can mirror the former continue_liminal_copy_token_batch tail for this path.
@@ -993,6 +999,12 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             );
             ObjectIncarnationRef::from_object(token)
         });
+        // CR 707.5: the copied as-enters roll should take effect; this route does
+        // not run copied entry instructions (follow-up A), so the roll is
+        // recorded unsupported rather than silently skipped.
+        if copies_an_as_enters_roll {
+            super::record_runtime_unimplemented(state, token_id, "copied_as_enters_roll");
+        }
 
         // CR 508.4: the tail resumes the rest of the batch counting its own
         // tokens from zero, so its request starts past the tokens created so

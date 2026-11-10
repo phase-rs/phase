@@ -117,6 +117,12 @@ impl PreEntryRulesView {
         PreEntryReplacement { result, choice }
     }
 
+    /// The view, for a reader that judges an entrant against the board before
+    /// its event (CR 614.12 + CR 603.6d).
+    pub(crate) fn board(&self) -> &GameState {
+        &self.board
+    }
+
     /// The view, for a collection whose ledger operations are committed to the
     /// game afterwards.
     pub(crate) fn board_mut(&mut self) -> &mut GameState {
