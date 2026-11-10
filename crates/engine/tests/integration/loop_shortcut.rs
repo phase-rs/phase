@@ -1049,10 +1049,9 @@ fn shortcut_accept_validation_does_not_take_the_shortcut() {
         validation_clones, 0,
         "deciding whether the Accept is legal must not reach the clone-and-apply probe"
     );
-    // MEASURED, same fixture, same window: base `bf584d6bd` answers this call with
-    // `validation_clones=1, state_copies=50`; head with `0` and `1`. The copies above the one the
-    // candidate probe makes are the simulated Accept driving the shortcut — `GameState::clone`
-    // accounts every copy, so the take's snapshots land in this counter.
+    // The copies above the one the candidate probe makes are the simulated Accept driving the
+    // shortcut — `GameState::clone` accounts every copy, so the take's snapshots land in this
+    // counter.
     assert_eq!(
         during.state_copies, 1,
         "one copy, the candidate probe's; the legality verdict must not add a take's snapshot"

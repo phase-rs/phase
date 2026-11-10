@@ -2099,7 +2099,8 @@ pub(crate) enum PromptAnswerValidation {
     /// Simulate each answer on a state copy, as the gate's catch-all does. The
     /// gate's verdict is final.
     EachCandidate,
-    /// Admit the answer without a state copy. The root search simulates such
+    /// Admit the answer without simulating it on a state copy (a `Shorten` still pays the
+    /// authority's own scratch take to its place). The root search simulates such
     /// answers in its beam on its first rung, in beam order, and returns the
     /// first that fails (`search::FailedAdmittedAnswer`) instead of scores,
     /// simulating no answer after it, and the root scorer scores the decision

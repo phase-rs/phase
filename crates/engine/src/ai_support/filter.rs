@@ -3614,7 +3614,9 @@ mod tests {
         }
     }
 
-    /// The refused half of the same authority: a row per `Shorten` shape the reducer rejects,
+    /// The refused half of the same authority: a row per `Shorten` shape the reducer rejects on
+    /// a synthetic board (`NoDifferentChoice` needs a real take;
+    /// `loop_shortcut::a_shorten_by_a_seat_with_no_other_choice_at_its_place_is_refused` pins it),
     /// paired with the probe. `cheap ⊆ sim` is pinned here in the direction that would otherwise
     /// OFFER a place the reducer refuses — the failure the hatch would produce by admitting a
     /// place after skipping the clone that used to reject it.
