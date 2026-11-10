@@ -4467,7 +4467,7 @@ fn entry_announces(
 /// of those choices — neither disambiguates instances of the ABILITY
 /// ([`crate::analysis::decision_template::DecisionSlot`]'s own doc). Publishing the same
 /// slot N times would make the frontend render N identical pickers and
-/// `predictability_gate` demand N pins for a choice [`inject_pinned_answer`] answers ONCE
+/// `predictability_gate` demand N pins for a choice answered ONCE
 /// per source (`take_answer` keys on the slot's CHOICE POINT and SOURCE, and a published point
 /// carries one answer whatever its instance ordinal). So the
 /// offer publishes the SET of open choices; one state-independent pin ("always target
@@ -5268,8 +5268,7 @@ fn apply_confirmed_shortcut(
             .predicted_winner
             .is_some_and(|winner| !crate::game::players::is_alive(state, winner))
         // CR 732.2a + CR 603.5: `template.owner` decides WHOSE CR 603.5 choice a pin may
-        // answer (the drive's seat guard in `inject_pinned_answer`). The two live ingresses
-        // bind it at declare; a RESTORED `WaitingFor::RespondToShortcut` is plain serde and
+        // answer. The two live ingresses bind it at declare; a RESTORED `WaitingFor::RespondToShortcut` is plain serde and
         // the untrusted-restore scrubber rewrites only the two PRE-CAST waits, so it never
         // ran that firewall. Re-validate the SAME invariant at the one point every drive
         // passes through, so the seat guard is meaningful on every ingress and not only the
@@ -5392,17 +5391,6 @@ fn schedule_bound(
 /// `WithoutEnd` names no count, and a CR 732.2b shorten may name any index, so they take the
 /// schedule's extent, past which every schedule repeats its value.
 ///
-/// THIS IS NOT `shortcut_drive_period`, and the difference is the whole point of the fix.
-/// That helper answers "how many cycles must one measurement aggregate" — a schedule property
-/// with nothing to do with the declared count. Validating over it both ACCEPTED a pin whose
-/// driven image leaves the offer's PUBLISHED legal set at an index the count reaches, and
-/// REFUSED conforming declarations whose count is shorter than the schedule.
-///
-/// NO CONSERVATIVE PADDING. Widening the range with `.max(shortcut_drive_period(..))` is
-/// bug-preserving — it re-imports the schedule-derived period the invariant exists to remove,
-/// and at a count of 1 over a length-2 rotation `Ok` is the CORRECT answer. Do not re-derive
-/// and re-add that term.
-///
 /// PRECONDITION, DISCHARGED BY EACH CALLER: the count handed in is already bounded. A caller
 /// that has not bounded it must not call this — an unchecked `Fixed(4e9)` becomes a
 /// four-billion-iteration validation loop. `handle_declare_shortcut` discharges it by running
@@ -5477,17 +5465,10 @@ pub(crate) enum DepartureVerdict {
 /// CR 704.5a + CR 732.2a + CR 800.4a: the single authority on whether the seats that left the
 /// game across one driven cycle are the ones the re-derived cascade named for that repetition.
 ///
-/// ONE AUTHORITY, ASKED BY BOTH ARMS THAT CAN OBSERVE A CROSSING, and that is the design rather
-/// than tidiness: WHERE IN THE PUBLISHED PERIOD a crossing falls decides which `CycleOutcome` the
-/// drive classifies the crossing cycle as. A period that completes at the forced-window ANSWER
-/// beat returns `Recurred` and never reaches the departure arm, while one that completes at the
-/// settle beat after the removal returns `SeatLeft`. Both routes occur on tracked boards, so a
-/// discriminator living in only one arm is one the other board silently skips.
-///
 /// TWO CONJUNCTS, AND NEITHER FOLLOWS FROM THE OTHER.
 ///
 /// * The SEAT SET, by equality — never a length check plus a membership test, which admits a
-///   swap. `CycleOutcome::SeatLeft` reports that A seat left, never which or how many.
+///   swap.
 /// * The REPETITION. `PeriodicDelta::conforms` compares TOTALS under the CR 601.2c re-aim licence
 ///   its own doc states, so a conforming cycle may concentrate the period's whole charge onto a
 ///   named seat and cross it EARLIER than the entry that named it, with the set still matching.
@@ -6620,7 +6601,7 @@ fn try_offer_object_growth_shortcut(
     // player accepts, "the shortcut is taken" at that count, which then caps the CR 500.5
     // collapse prompt. An offer that measures no threshold must therefore STATE the capacity it
     // publishes as its ceiling; stating less silently caps the controller's collapse choice. The
-    // coercion below is what states it: `build_shortcut_schema` only ever NARROWS a suggestion
+    // assignment below states it: `build_shortcut_schema` only ever NARROWS a suggestion
     // to the capacity. This mirrors `bounded_offer_tail`, which states its own measured
     // threshold as its suggestion.
     //
@@ -7399,10 +7380,9 @@ fn handle_declare_shortcut(
     // restored save may carry `None`.
     let template = template.or_else(|| offer.schema.suggestion(offer.declaration).cloned());
     // CR 732.2a + CR 603.5: the declared template's `owner` is CLIENT-SUPPLIED — the
-    // `GameAction::DeclareShortcut { template }` payload arrives here verbatim — and it is
-    // the comparand `inject_pinned_answer` uses to decide WHOSE CR 603.5 choice a pin may
-    // answer. Bind it to the engine-issued seat here, at declare, or that seat guard
-    // compares an attacker-chosen value against itself. `offer.proposer` is engine state,
+    // `GameAction::DeclareShortcut { template }` payload arrives here verbatim — and it
+    // decides WHOSE CR 603.5 choice a pin may answer. Bind it to the engine-issued seat here,
+    // at declare, or that seat guard compares an attacker-chosen value against itself. `offer.proposer` is engine state,
     // copied from `WaitingFor::LoopShortcut { proposer }`.
     //
     // Runs on EVERY resolved declaration, whatever the schema published, and it is the SOLE
@@ -7461,11 +7441,7 @@ fn handle_declare_shortcut(
         match &template {
             Some(t) => {
                 // CR 732.2a: validate over the range the ACCEPTED COUNT will drive, not
-                // over the schedule's own period. `shortcut_drive_period` answers a
-                // different question (how many cycles one measurement must aggregate), and
-                // using it here both ACCEPTED a pin whose driven image leaves the published
-                // set at an index the count reaches, and REFUSED conforming declarations
-                // whose count is shorter than the schedule.
+                // over the schedule's own period.
                 let validated_range = shortcut_validated_range(&count, Some(t));
                 // Coverage + value legality + aim survival via the shared authority, so the
                 // predicate this handler ACCEPTS under is the same one `build_bounded_declaration`
@@ -9550,8 +9526,8 @@ fn advance_stack_resolution_session_after_priority_pass(
 
 // CR 732.2a SAFETY LIMIT: a shortcut is "a loop that repeats a specified number of times";
 // the CR places NO board-relative upper bound, so this is an engine implementation cap
-// against an absurd/hostile count — NOT a rules constraint. It bounds both a `Fixed(n)`
-// cycle count (handle_declare_shortcut) and a template drive period (shortcut_drive_period).
+// against an absurd/hostile count — NOT a rules constraint. It bounds a `Fixed(n)`
+// cycle count (handle_declare_shortcut).
 // Motivating vector: a `u32` count scalar-encodes up to ~4.3e9 cycles in ~10 JSON bytes, so
 // it sails through the inbound WS frame cap (`phase-server`'s `MAX_WS_MESSAGE_BYTES`, 64 KB) yet
 // would force ~4.3e9 GameState clones — a byte cap cannot see it, only this count cap can.
@@ -16304,10 +16280,7 @@ fn apply_non_priority_pass_action(
         // accumulation alone rather than wipe it. CONSEQUENCE, accepted: a forced-window
         // answer that resolves nothing but leaves the stack non-shrinking records a frame
         // whose stack duplicates its predecessor's. That costs one ring slot and a zero
-        // frame-delta; it cannot desynchronize the count,
-        // because MINT AND DRIVE ARE SYMMETRIC — `drive_one_shortcut_cycle` answers its prompts
-        // through `inject_pinned_answer`: three of its FOUR arms dispatch `apply_action` and walk
-        // this very branch, advancing `frames_this_cycle`; the fourth `Err`s before any advance.
+        // frame-delta.
         //
         // ORDERING, NOW SYNCHRONIZED (maintainer call on PR #7005; previously carried here
         // as a documented latent asymmetry). `game::public_state::sync_waiting_for` is the
@@ -16331,18 +16304,16 @@ fn apply_non_priority_pass_action(
         // and copies the outcome back into the result, and the reorder
         // never changes `ActionResult.waiting_for` itself. That is an argument about
         // RE-DERIVATION, not reachability, because `apply_action_boundary` is not the only
-        // route: `inject_pinned_answer`'s three dispatches reach `apply_action` directly, and
-        // `apply_interaction_pre_reconciliation_for_life_safety` returns `raw.result` without
-        // ever calling `finish_action_boundary` (`apply_action_boundary_core`'s own comment
-        // records it). Both drive a CLONE — `drive_one_shortcut_cycle`'s `work` and
-        // `preview_candidate_life_safety`'s `preview` — never the settled board.
+        // route: `apply_interaction_pre_reconciliation_for_life_safety` returns `raw.result`
+        // without ever calling `finish_action_boundary` (`apply_action_boundary_core`'s own
+        // comment records it). It drives a CLONE — `preview_candidate_life_safety`'s `preview` —
+        // never the settled board.
         //
         // ONE CONSEQUENCE OF USING THE SYNCHRONIZER RATHER THAN A RAW CLONE:
         // `normalize_legacy_attach_waiting_for` can now edit `state.waiting_for` on this
         // path, so it may differ from the returned `ActionResult.waiting_for`, where the raw
         // clone made the two exactly equal. Benign — the boundary re-normalizes and copies
-        // back, and `inject_pinned_answer` fails closed on every prompt
-        // kind it has no pin producer for.
+        // back.
         sync_waiting_for(state, &wf);
         if answering_forced_window
             && !in_simulation_probe()
@@ -21732,9 +21703,7 @@ mod stage2_injector_tests {
     /// CR 114.4 + CR 608.2b: a pinned SLOT whose source is a command-zone emblem must match
     /// the prompt that emblem raised; a graveyard or exile source must NOT.
     ///
-    /// This is the zone predicate `inject_pinned_answer`'s `TriggerTargetSelection` arm
-    /// dispatches on. The shipped BATTLEFIELD arm is
-    /// exercised end-to-end by `injector_routes_pinned_targets_per_source` above and by the
+    /// The shipped BATTLEFIELD arm is exercised end-to-end by `injector_routes_pinned_targets_per_source` above and by the
     /// `kilo_live_offer_from_real_dump` rows, and this row asserts that arm is unchanged.
     ///
     /// The zone disjuncts this row pins now live one call down, in
@@ -21746,8 +21715,7 @@ mod stage2_injector_tests {
     /// assertion below.)
     ///
     /// REVERT-PROBES: (a) delete the command-zone disjunct ⇒ the
-    /// Command assertion FAILS (and `inject_pinned_answer` would `RecastAbort` on an
-    /// emblem-pinned drive); (b) widen the disjunct to accept any zone ⇒ the graveyard and
+    /// Command assertion FAILS; (b) widen the disjunct to accept any zone ⇒ the graveyard and
     /// exile assertions FAIL; (c) drop the incarnation conjunct ⇒ the CR 400.7 assertion
     /// FAILS.
     #[test]
@@ -21776,7 +21744,7 @@ mod stage2_injector_tests {
             slot_source_prompted(&state, &pin(emblem, Some(3)), emblem),
             "CR 114.4: a command-zone emblem's slot must match the prompt it raised"
         );
-        // Fail-closed: every other off-battlefield zone still misses ⇒ `RecastAbort`.
+        // Fail-closed: every other off-battlefield zone still misses.
         assert!(
             !slot_source_prompted(&state, &pin(graveyard, Some(3)), graveyard),
             "a graveyard-sourced slot must NOT match — the drive aborts to manual"
@@ -22258,7 +22226,7 @@ mod stage2_injector_tests {
     /// instances of the ABILITY, so N
     /// entries from one source would mint N byte-identical slots: N identical frontend
     /// pickers, and `predictability_gate` demanding N pins for a choice
-    /// `inject_pinned_answer` answers ONCE per source (`take_answer` keys on the slot's CHOICE
+    /// answered ONCE per source (`take_answer` keys on the slot's CHOICE
     /// POINT and SOURCE, and a published point carries one answer whatever its instance ordinal). Real boards reach this shape — this very dump carries 35
     /// entries on source 25, 34 on 126 and 34 on 208.
     ///
@@ -22644,8 +22612,7 @@ mod stage2_injector_tests {
 
     /// **The PRODUCER census, so a new producer is a COUNTED event.** What bounds the mint
     /// conjunct's reach is how many things PRODUCE `WaitingFor::OptionalEffectChoice`: the
-    /// conjunct is a fail-closed pre-filter on ONE of them, and `inject_pinned_answer` refuses
-    /// a template whose owner is not the seat the prompt names. Exactly one of the four sits
+    /// conjunct is a fail-closed pre-filter on ONE of them. Exactly one of the four sits
     /// inside the CR 603.5 gate that consults the recipient authority (the repeated-payment
     /// offer consults it too, but mints no may-trigger key), so if a fifth appears this row
     /// fails and whoever added it must decide where its recipient is bound.
@@ -22893,10 +22860,8 @@ mod stage2_injector_tests {
     /// question, and the mint must refuse to it.**
     ///
     /// Without the conjunct the pin is minted, then the gate consumes the stored choice and
-    /// **returns before setting any prompt** — so `inject_pinned_answer` is never entered and
-    /// the fail-closed `_ => Err(RecastAbort)` arm the design leans on cannot fire on a prompt
-    /// that is never raised. The declared `Take` would be silently replaced by the stored
-    /// `Decline`. `MayTriggerAutoChoiceKey`/`Record` are `Serialize + Deserialize`, so a real
+    /// **returns before setting any prompt**. The declared `Take` would be silently replaced by
+    /// the stored `Decline`. `MayTriggerAutoChoiceKey`/`Record` are `Serialize + Deserialize`, so a real
     /// dump can carry one.
     ///
     /// MATCHED POSITIVE, differing ONLY in the seeded record, so no upstream conjunct can

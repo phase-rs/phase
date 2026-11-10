@@ -869,10 +869,10 @@ pub fn resolve(
 
 /// CR 732.2a + CR 608.2b: the declared answer THIS prompt occurrence takes, RESOLVED against this
 /// iteration's board. A declaration holds one answer per point and CR 732.2a applies it at every
-/// occurrence of the point's prompt. The two refusals are different questions and both become
-/// `Err(RecastAbort)` at every seam, never a default: `None` is "the template does not answer this
-/// prompt", `Err` is "the pin that answers it is illegal this iteration". Selecting and resolving
-/// in ONE call keeps a pin's CR 608.2b re-check on the beat that answers it.
+/// occurrence of the point's prompt. The two refusals are different questions: `None` is "the
+/// template does not answer this prompt", `Err` is "the pin that answers it is illegal this
+/// iteration". Selecting and resolving in ONE call keeps a pin's CR 608.2b re-check on the beat
+/// that answers it.
 ///
 /// The CHOICE POINT is supplied by the beat, never hard-coded by the seam.
 pub(crate) fn take_answer(
@@ -1045,16 +1045,6 @@ fn resolve_target(
         // Same class as the wire-sourced `deliverable_capacity` defect
         // `reject_zero_bound_shortcut_offer` closes: a load-seam value the in-process producer
         // census cannot see.
-        //
-        // DAMAGE MODE if a wire producer does that: `CycleOutcome::Abort` rolls back only
-        // the crossing cycle, so cycles `0..k` stay committed under a pin no authority ever
-        // validated. Note what is NOT the damage mode, because the two are easy to conflate:
-        // a correctly-spelled ranked seat that becomes an illegal target mid-drive is
-        // handled BY CONSTRUCTION and is not a residual at all — `evaluate_schedule`
-        // resolves `head()` only and never slides to a later entry, so the drive aborts at
-        // the boundary (CR 115.7a: "if a target can't be changed to another legal target,
-        // the original target is unchanged, even if the original target is itself illegal by
-        // then"; CR 732.2a bars the conditional action sliding would be).
         TargetPin::Player(p) => crate::game::players::player_exists_for_choice(state, *p)
             .then_some(ConcreteTarget::Player(*p))
             .ok_or_else(illegal),
@@ -1876,7 +1866,7 @@ pub fn aims_survive_the_crossings(
 ///
 /// All three callers discard the failure KIND (they already spelled `.is_err() || .is_err()`)
 /// and their dispositions have nothing in common: manual-play handback via
-/// `reject_shortcut_declaration`, `InteractionReasonCode::ConstraintUnsatisfied`, and "publish
+/// `hand_back_shortcut`, `InteractionReasonCode::ConstraintUnsatisfied`, and "publish
 /// no declaration". A union error type would have no reader. [`predictability_gate`] and
 /// [`validate_pins`] stay public and typed for the rows that assert on the specific violation.
 pub fn declaration_conforms(

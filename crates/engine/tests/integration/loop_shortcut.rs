@@ -3549,7 +3549,7 @@ fn object_growth_offer_schema_has_live_convoke_taps() {
 /// Marauding Blight-Priest's drain from P1's 19 seeds the count that ends at P1's crossing (CR
 /// 704.5a). T1's non-empty ConvokeTaps set is the reach-guard against "the schema is always empty".
 #[test]
-fn drain_offer_schema_is_empty_until_lethal() {
+fn drain_offer_schema_is_empty_and_counts_to_the_crossing() {
     let (runner, _l0, _priest) = reach_2p_blight_priest_drain_offer();
     let WaitingFor::LoopShortcut { schema, .. } = &runner.state().waiting_for else {
         panic!(
@@ -9670,14 +9670,13 @@ fn trace_seats(state: &GameState) -> Vec<PlayerId> {
 /// # SCOPE — this row covers the TOTAL-WIPE arm ONLY
 ///
 /// bloodloop3 seats its two opponents at EQUAL life at the offer beat, so they would cross 0 on
-/// the SAME cycle and CR 104.2a would crown — the shape `CycleOutcome::CrossLethal` exists for,
-/// now reached at an honest count on the two-seat board rather than here. The fixture is
+/// the SAME cycle and CR 104.2a would crown. The fixture is
 /// structurally incapable of a terminal single-seat crossing: a symmetric fixture collapses
 /// every such case into a total one. That symmetry is also what holds this board's PUBLISHED
 /// BOUND still — with two seats at the binding value the relief's one-faller conjunct does not
 /// fire, so the bound stays at the strict headroom value, which is why ⓐ's doctoring below is
 /// still a no-op here. The other arm — one seat crosses while ≥2 players survive, no
-/// `GameOver`, `CycleOutcome::SeatLeft`, the crossing cycle COMMITTING and that one seat
+/// `GameOver`, the crossing cycle COMMITTING and that one seat
 /// leaving the game while the survivors keep an intact loop — behaves DIFFERENTLY
 /// and has its own row, [`bounded_fixed_drive_commits_the_terminal_cycle_that_eliminates_one_seat`], which
 /// carries the arm-asymmetry table. On the bound side the two boards differ too: two tied
@@ -9704,9 +9703,6 @@ fn trace_seats(state: &GameState) -> Vec<PlayerId> {
 ///
 /// # What flips
 ///
-/// * delete the frame delimiter from `drive_one_shortcut_cycle` ⇒ arm ⓐ runs to lethal instead
-///   of stopping one period short ⇒ its zero-elimination assertion FAILS. (Arm ⓑ does NOT flip:
-///   it is refused before any cycle runs, so no delimiter is consulted.)
 /// * delete the per-offer disjunct from `apply_confirmed_shortcut`'s guard ⇒ ⓑ drives again and
 ///   its unmoved-life assertion FAILS while ⓐ stays green.
 #[test]
@@ -9841,9 +9837,9 @@ fn bounded_fixed_drive_stops_at_the_first_lethal_cycle() {
 ///
 /// | arm | trigger | outcome |
 /// |---|---|---|
-/// | **total wipe** | every remaining opponent crosses 0 on the same cycle ⇒ `WaitingFor::GameOver` | `CycleOutcome::CrossLethal` — the crossing cycle COMMITS and the game ends when the proposal named that winner or named nobody; otherwise it is dropped whole |
-/// | **terminal crossing** | one seat crosses 0 while **≥2** players survive ⇒ no `GameOver` | `CycleOutcome::SeatLeft` — the crossing cycle COMMITS when `departure_verdict` names it, that seat is eliminated, and the drive continues; where that crossing is the last one the accepted count contains, continuing IS the loop's end and priority is handed back at a living seat |
-/// | **abort** | beat cap, unpinned prompt, engine error | `CycleOutcome::Abort` — that cycle rolls back whole, prior conforming cycles stay committed |
+/// | **total wipe** | every remaining opponent crosses 0 on the same cycle ⇒ `WaitingFor::GameOver` | the crossing cycle COMMITS and the game ends when the proposal named that winner or named nobody; otherwise it is dropped whole |
+/// | **terminal crossing** | one seat crosses 0 while **≥2** players survive ⇒ no `GameOver` | the crossing cycle COMMITS when `departure_verdict` names it, that seat is eliminated, and the drive continues; where that crossing is the last one the accepted count contains, continuing IS the loop's end and priority is handed back at a living seat |
+/// | **abort** | beat cap, unpinned prompt, engine error | that cycle rolls back whole, prior conforming cycles stay committed |
 ///
 /// The terminal crossing is IN CONTRACT for a legitimately-derived bound, and that is what this
 /// row is about: `elimination_bounds` admits a CR 704 crossing as the sequence's FINAL
@@ -9884,9 +9880,6 @@ fn bounded_fixed_drive_stops_at_the_first_lethal_cycle() {
 ///
 /// # REVERT-PROBES
 ///
-/// * delete the `SeatLeft` arm from `drive_one_shortcut_cycle` ⇒ the crossing cycle reaches
-///   `Abort` and rolls back ⇒ the elimination assertion FAILS and the committed-delta
-///   `assert_eq!` reads one period short.
 /// * derive the consumption prediction on the LAST COMMITTED board rather than on the pre-drive
 ///   one ⇒ the spent headroom relieves to a remaining-cycles figure of 1 while the drive's
 ///   terminal index is the crossing ⇒ `departure_verdict`'s repetition comparison refuses ⇒ the
@@ -9950,7 +9943,7 @@ fn bounded_fixed_drive_commits_the_terminal_cycle_that_eliminates_one_seat() {
         first_victims.len(),
         1,
         "REACH-GUARD: this row is about the PARTIAL arm, so exactly ONE seat may cross first. \
-         Equal crossings would make the whole table die together, take `CycleOutcome::CrossLethal` \
+         Equal crossings would make the whole table die together, take the cross-lethal arm \
          and silently re-test the mirror row's total-wipe arm instead; crossings {crossings:?}"
     );
     let survivors = state.players.iter().filter(|p| !p.is_eliminated).count() - first_victims.len();
@@ -11216,8 +11209,7 @@ fn an_unpredicted_departure_is_refused_from_either_drive_arm() {
 /// **V3 — CR 704.5a + CR 800.4a: the admitted member the set equality must refuse — the
 /// co-departure.**
 ///
-/// `CycleOutcome::SeatLeft` reports that A seat left, never which or how many; its own gate is
-/// a drop of at least one. A signature that omits one drained seat's life entry — the shape a
+/// A signature that omits one drained seat's life entry — the shape a
 /// `#[serde(default)]` charge field really produces on the wire — makes the reduction predict
 /// ONE seat while the driven cycle takes TWO. Committing that cycle would apply a removal the
 /// table never agreed to.
@@ -11655,11 +11647,7 @@ fn ai_bounded_declare_candidate_is_generated_legal_and_drives() {
 //
 // INVARIANT: at declare time the firewall must validate the image of the selection function
 // over the range the ACCEPTED COUNT will actually drive (`0..n`), against the offer's
-// PUBLISHED `legal_targets`. Before this fix it validated `0..shortcut_drive_period(..)` — a
-// range derived from the SCHEDULE's own length, which answers a different question — so it
-// both ACCEPTED a pin whose driven image leaves the published set at an index the count
-// reaches (arm A), and REFUSED conforming declarations whose count is shorter than the
-// schedule (arms D1 and E).
+// PUBLISHED `legal_targets`.
 //
 // Every arm drives the PRODUCTION entry `apply_action(GameAction::DeclareShortcut { .. })`
 // and asserts on the published `waiting_for`: `RespondToShortcut` = ingested (CR 732.2b's
@@ -11783,10 +11771,6 @@ fn round_robin_a_b(a: &YieldTarget, b: &YieldTarget) -> TargetSchedule {
 /// * **C (attribution control).** The identical count-8 declaration with B ALSO published is
 ///   ingested — so A's refusal is attributable to the PUBLISHED SET and not to the count, the
 ///   schedule, or the harness.
-///
-/// REVERT-PROBE: pass `shortcut_drive_period(Some(t))` again in place of
-/// `shortcut_validated_range(&count, Some(t))` ⇒ arm A is ingested ⇒ FAILS (and D1 below
-/// FAILS with it), while B and C do not move.
 #[test]
 fn declared_count_beyond_the_published_schedule_window_is_refused() {
     // A — the driven range reaches the unpublished arm.
@@ -12124,13 +12108,13 @@ fn r5_probe_delta() -> i32 {
 /// # The seam, and why hexproof is the ruled refuser
 ///
 /// A `Fixed(n)` drive re-resolves its template per cycle and answers each mid-cycle
-/// `TriggerTargetSelection` through `inject_pinned_answer`, which submits the pinned value as
-/// a real `GameAction::SelectTargets`. That submission is the **drive-time CR 608.2b
-/// re-validation** — the backstop layer, one below the declare-time firewall. Hexproof
-/// (CR 702.11c, "can't be the target of spells or abilities **your opponents control**": the
-/// source is P0's permanent and the pinned seat is P0's opponent) makes the pinned seat
-/// illegal exactly there and nowhere earlier. Phasing was rejected as the refuser precisely
-/// because it fails one layer up, at `resolve_target`'s existence half, double-covering R1.
+/// `TriggerTargetSelection`, submitting the pinned value as a real `GameAction::SelectTargets`.
+/// That submission is the **drive-time CR 608.2b re-validation** — the backstop layer, one below
+/// the declare-time firewall. Hexproof (CR 702.11c, "can't be the target of spells or abilities
+/// **your opponents control**": the source is P0's permanent and the pinned seat is P0's opponent)
+/// makes the pinned seat illegal exactly there and nowhere earlier. Phasing was rejected as the
+/// refuser precisely because it fails one layer up, at `resolve_target`'s existence half,
+/// double-covering R1.
 ///
 /// # Constructed-board deviation, DISCLOSED (constructibility-first)
 ///
@@ -12165,64 +12149,6 @@ fn r5_probe_delta() -> i32 {
 ///   cannot witness "did not re-choose";
 /// * the declare firewall **passed** (`RespondToShortcut` opened) and the offer publishes
 ///   **no points**, so the refusal is attributable to the drive and not to `validate_pins`.
-///
-/// # REVERT-PROBES — every claim below is a MEASUREMENT, with its result INLINED
-///
-/// Nothing here cites a log path: the probe archive is untracked and never ships, so the
-/// measured values are reproduced in full instead.
-///
-/// The headline result is that the anti-retarget OUTCOME is defended by **AT LEAST THREE
-/// independent production guards**, which is why no single-guard probe flips this row. Three
-/// are named and measured below. The enumeration is deliberately open — a fourth, the
-/// pre-drive `decision_template::resolve` re-check at the top of `materialize_fixed_shortcut`'s
-/// `'cycles` loop, exists and simply is not engaged by THIS refuser (measured: it fires in
-/// neither arm, which is exactly the reason for ruling hexproof over phasing).
-///
-/// * **GUARD 1 — the drive's per-slot CR 608.2b target-legality rejection**
-///   (`ability_utils::validate_selected_slots_with_specs`, its "Illegal target selected" arm),
-///   reached through `inject_pinned_answer`'s `GameAction::SelectTargets` submission. Measured
-///   on the UNMUTATED tree, reached exactly ONCE, on the pinned seat, against a live-derived
-///   legal set: `target=Player(P1) live_legal=[Player(P2), Player(P3)] would_reject=true` ⇒
-///   `pinned_submit_ok=false` ⇒ `RecastAbort` ⇒ `CycleOutcome::Abort` ⇒ `break 'cycles` at
-///   `i=0`. This is the layer this row claims to exercise, and it is provably reached.
-/// * **GUARD 2 — the CR 732.2a per-cycle conformance check** in `materialize_fixed_shortcut`
-///   (`!per_cycle.conforms(..)` ⇒ `break 'cycles`).
-/// * **GUARD 3 — `inject_pinned_answer`'s fail-closed catch-all** (CR 732.2a "no conditional
-///   actions": any prompt kind with no Stage-2 pin producer ⇒ `RecastAbort` ⇒
-///   `CycleOutcome::Abort`).
-///
-/// * **RP-1**, the plan-named *"first legal target"* fallback in `inject_pinned_answer` (when
-///   the pinned submission is refused, answer the prompt with the prompt's own first legal
-///   target) ⇒ **this row still PASSES** (`1 passed; 0 failed`, `EXIT=0`). Not a hole in the
-///   assertions — instrumented, the mutation *does* reach and *does* retarget: the prompt's
-///   live legal set is `[P2, P3]` (P1 already dropped by the layer system),
-///   `pinned_submit_ok=false`, `fallback=[Player(P2)]`, `fallback_ok=true`. The retargeted
-///   cycle is then caught by GUARD 2: measured `break=CONFORMANCE i=0 actual={P0:+1, P2:-1}
-///   expected={P0:+1, P1:-1}` ⇒ the divergent cycle is dropped whole.
-/// * **SINGLE-GUARD PROBE on GUARD 1** — disable ONLY the per-slot legality rejection, leaving
-///   GUARD 2 and CR 732.2a conformance fully intact ⇒ **this row still PASSES** (`1 passed`,
-///   `EXIT=0`). Measured: the illegal pinned submission is then ACCEPTED
-///   (`pinned_submit_ok=true`), the cycle never recurs, and the drive walks on to a
-///   `DeclareAttackers` prompt that GUARD 3 fails closed on ⇒ `CycleOutcome::Abort` ⇒
-///   `break 'cycles` at `i=0`, with **zero** conformance breaks.
-/// * **RP-1b**, RP-1 *plus* GUARD 2 disabled ⇒ **FAILS at named assertion (2)**, the
-///   anti-retarget assertion: `left: (997, 1000)  right: (1000, 1000)` (all `N = 3` cycles
-///   committed onto P2), `EXIT=101`. This is the row's discrimination proof. It does not need
-///   to touch GUARD 3: a successfully retargeted cycle RECURS, so the unpinned-prompt arm is
-///   never reached on that path.
-/// * **RP-2**, `CycleOutcome::Abort => continue 'cycles` ⇒ **measured NOT discriminating**
-///   (`1 passed`, `EXIT=0`), disclosed rather than papered over. This row's refuser is
-///   PERMANENT, so every later cycle aborts too and `committed` never advances. A real property
-///   of a permanent refuser, not a gap in the assertions — a transient one is unconstructible
-///   on this harness (no in-drive hook removes a static).
-///
-/// **Read the inertness correctly.** These assertions are insensitive to the removal of any ONE
-/// guard, and that is a property of PRODUCTION'S REDUNDANCY, not a weakness of the row: the row
-/// asserts the observable outcome (stop short, never retarget), and production defends that
-/// outcome three ways over. The row IS a discriminator — it reaches GUARD 1 exactly once with
-/// `would_reject=true` on the pinned seat against a live-derived legal set, and RP-1b flips it
-/// at a named assertion. What it is not is a single-guard regression pin; no probe result here
-/// should be read as claiming otherwise.
 #[test]
 fn a_declared_target_made_illegal_mid_drive_stops_short_and_never_retargets() {
     use engine::types::zones::Zone;

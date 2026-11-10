@@ -1077,8 +1077,8 @@ fn r1b_the_published_point_set_is_exactly_what_the_retained_window_announces() {
 /// A `Fixed(n)` declaration carrying the FULL published pin set is ACCEPTED at declare
 /// (`predictability_gate` + `validate_pins` both pass — the published set is covered), every
 /// living opponent Accepts (CR 732.2c), and the drive then commits **exactly `n`** repetitions
-/// of the published per-cycle delta: cycle 0 answers Sue's `OptionalEffectChoice` from the pin
-/// (U4's `inject_pinned_answer` arm, on the real dump), then Reed's from ITS pin, and the cycle
+/// of the published per-cycle delta: cycle 0 answers Sue's `OptionalEffectChoice` from the pin,
+/// then Reed's from ITS pin, and the cycle
 /// closes at the published period boundary.
 ///
 /// ⚠ **THIS ROW USED TO ASSERT THE OPPOSITE** (`r2_..._commits_zero_cycles_because_reeds_may_
@@ -1468,12 +1468,6 @@ fn r3b_driven_a_loop_choice_carrier_survives_a_whole_accepted_f4_drive() {
 /// §6 R23, the (5-reach) arm — **U4's CR 603.3c beat guard never fires on the acceptance
 /// fixture, and the fire population it guards against is measurably NON-EMPTY on the same
 /// drive.**
-///
-/// The guard is `if work.pending_trigger.is_some() { return Err(RecastAbort) }` at the head of
-/// `inject_pinned_answer`'s `OptionalEffectChoice` arm: a live CR 603.3c construction cursor
-/// means the prompt in hand may be the ANNOUNCEMENT-time optional-modal question rather than
-/// the resolution-time "may" the pin answers, and `slot_source_prompted` matches only the
-/// SOURCE OBJECT, which both questions share.
 ///
 /// ⚠ DISCLOSED INSTRUMENT LIMIT: the guard reads the drive's private `work` board, which no
 /// test can observe. This row asserts the same property on the OUTER drive — every
@@ -3671,7 +3665,7 @@ fn c2_r1_the_browsers_template_free_declaration_reaches_the_accepted_declaration
 /// `template: None` never resolves, reaches site F and lands `Priority`; post-repair the
 /// resolved `Some(hostile)` reaches the owner firewall and lands `Priority`. Same verdict by two
 /// different paths, and the paths are indistinguishable from outside — all six refusal arms call
-/// the same `reject_shortcut_declaration`, which writes a byte-identical `WaitingFor::Priority`
+/// the same `hand_back_shortcut`, which writes a byte-identical `WaitingFor::Priority`
 /// and pushes zero events (`game/engine.rs`, on the count `match`: *"no row can observe which
 /// block refused first"*). No assertion can recover which arm fired, so none is attempted here;
 /// an arm-exclusion assert would read as verification while proving nothing.

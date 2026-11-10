@@ -712,12 +712,8 @@ fn non_pass_actions(state: &GameState, seat: PlayerId) -> Vec<String> {
 /// fetchland, which cannot touch the drain. Stage 2 answers `Accept`.
 ///
 /// **V5 — bounded offers are NOT exempt.** MEASURED on this board: the offer
-/// mints at beat 21 carrying `predicted_winner: None` and a FINITE
-/// `IterationCount::Fixed` count. It is the BOUNDED class, not the
-/// `UntilLethal` class the synthetic rows use, and
-/// `predicted_winner: None` additionally proves arm (A) cannot be what produces
-/// the `Accept` below — only arm (B) can. Re-introducing an `UntilLethal`-only
-/// gate makes this row return `Shorten` and fail.
+/// mints at beat 21 carrying a FINITE `IterationCount::Fixed` count. Arm (A)
+/// cannot be what produces the `Accept` below; only arm (B) can.
 ///
 /// **Why the flip set is exactly {P2}, asserted rather than asserted-about.**
 /// P1 and P3 are polled on the same board and hold nothing, so they answer at
@@ -760,9 +756,8 @@ fn v1_live_path_fetchland_seat_accepts_on_the_real_4p_board() {
     );
     assert!(
         matches!(schema.iteration_count, IterationCount::Fixed(_)),
-        "V5: a FINITE count is the point — stage 2 takes the identical rule for it and for \
-         the UntilLethal class. The VARIANT is the class; the value is the producer's own \
-         suggestion and is deliberately not re-derived here. got {:?}",
+        "V5: a FINITE count is the point; the value is the producer's own suggestion and is \
+         deliberately not re-derived here. got {:?}",
         schema.iteration_count
     );
 

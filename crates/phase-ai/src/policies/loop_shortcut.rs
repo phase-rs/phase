@@ -229,13 +229,7 @@ impl TacticalPolicy for LoopShortcutPolicy {
             // progress whose eliminations the cascade predicted. Never the proposer — the
             // `Some(fatal)` branch below is what refuses that. Game-deciding ⇒ critical band, via the
             // auto-banding `PolicyVerdict::score` (NEVER `preference`, whose `debug_assert!`
-            // band domain panics on this field's default). Both declare kinds route through
-            // the one reused config field on purpose: the winning arm above and this one are
-            // never both scoreable at a single node — a winning offer carries
-            // `predicted_winner: Some(..)` and an unnarrowed bound (so no `Fixed` candidate is
-            // generated), and a bounded offer carries `predicted_winner: None` (so the winning
-            // arm cannot be reached). With no ordering to distort, a second tuned field would
-            // buy nothing and cost the full `UNTUNED_POLICY_PENALTY_FIELDS` protocol.
+            // band domain panics on this field's default).
             // CR 704.5a / CR 704.5c / CR 104.3c: the offered bound is derived from EVERY living
             // seat, and `PeriodicDelta::elimination_cascade` deliberately lets the PROPOSER's
             // crossing bound it — CR 732.2a's shortcut proposer "need not be the player proposing

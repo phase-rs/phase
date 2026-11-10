@@ -7,9 +7,8 @@
 //! S (`exquisite_blood_tenacity_three_opponents_4p.json.gz`) is a saved game standing at the
 //! recorded offer reached by answering P1 then P2; the answer-pattern rows decline it and drive on.
 //!
-//! F-C (`exquisite_blood_tenacity_alternating_offer_4p.json.gz`) is S's offer re-encoded by this
-//! engine. Regenerate it
-//! (gzipped by the writer) with
+//! Regenerate F-C (`exquisite_blood_tenacity_alternating_offer_4p.json.gz`, gzipped by the writer)
+//! with
 //! `PHASE_REGENERATE_FIXTURES=1 cargo nextest run -p phase-engine --features test-support --test integration --run-ignored only -E 'test(/regenerate_alternating_offer_fixture/)'`.
 
 use std::io::Write;
@@ -589,26 +588,55 @@ fn every_answer_pattern_offers_the_card_count_and_each_take_eliminates_every_opp
     }
 }
 
-/// S's offer, with the alternating history, publishes the observed answer at its own count and
-/// the eliminating Piecewise suggestion at the card count; F-C snapshots exactly this offer.
+/// R0's offer, with the alternating history, publishes the observed answer at its own count and
+/// the eliminating Piecewise suggestion at the card count.
 #[test]
 fn the_alternating_offer_publishes_its_observation_and_an_eliminating_suggestion() {
-    let r0 = load_s();
+    let r0 = drive_to_offer(load_s(), &[P1, P2, P1], 0);
+    assert_eq!(opponents_life(&r0), [10, 9, 1]);
+    assert_eq!(in_flight(&r0), Some(P1));
     let (schema, declaration) = offer(&r0);
-    assert_eq!(schema.deliverable_capacity, 9);
+    assert_eq!(schema.deliverable_capacity, 8, "4 + 3 + 1 hits of 3");
     assert_eq!(
         schedule(declaration.expect("published")),
-        (TargetSchedule::Constant(rank(P1)), IterationCount::Fixed(5)),
-        "P1's in-flight hit, then four more, P1 crossing at the fifth"
+        (TargetSchedule::Constant(rank(P1)), IterationCount::Fixed(4)),
+        "P1's in-flight hit, then three more, P1 crossing at the fourth"
     );
     assert_eq!(
         schedule(schema.suggested_declaration.as_ref().expect("suggested")),
         (
-            TargetSchedule::Piecewise(vec![(0, rank(P1)), (4, rank(P2)), (7, rank(P3))]),
-            IterationCount::Fixed(9)
-        )
+            TargetSchedule::Piecewise(vec![(0, rank(P1)), (3, rank(P2)), (6, rank(P3))]),
+            IterationCount::Fixed(8)
+        ),
+        "P1 three past its in-flight hit, P2 three, P3 one and the final unresolved announcement"
     );
-    assert_eq!(offer(&load_fc()), offer(&r0), "F-C is this offer");
+    let mut fc = load_fc();
+    assert_eq!(opponents_life(&fc), [13, 9, 1]);
+    // F-C stands one repetition earlier, so only its board-dependent schema, declaration and
+    // period differ from this offer.
+    let (
+        WaitingFor::LoopShortcut {
+            schema,
+            declaration,
+            period,
+            ..
+        },
+        WaitingFor::LoopShortcut {
+            schema: r0_schema,
+            declaration: r0_declaration,
+            period: r0_period,
+            ..
+        },
+    ) = (&mut fc.waiting_for, &r0.waiting_for)
+    else {
+        panic!("both stand at an offer");
+    };
+    (*schema, *declaration, *period) =
+        (r0_schema.clone(), r0_declaration.clone(), r0_period.clone());
+    assert_eq!(
+        fc.waiting_for, r0.waiting_for,
+        "F-C carries the rest of this offer"
+    );
 }
 
 /// The published declaration declared at its own count is taken and stops where P1 leaves.
@@ -902,7 +930,7 @@ fn latched_triggers_buried_under_the_chain_do_not_lead() {
 #[test]
 #[ignore = "writes F-C; run with PHASE_REGENERATE_FIXTURES=1"]
 fn regenerate_alternating_offer_fixture() {
-    let state = load_s();
+    let state = drive_to_offer(load_s(), &[P1, P2, P1], 0);
     if std::env::var("PHASE_REGENERATE_FIXTURES").as_deref() != Ok("1") {
         return;
     }

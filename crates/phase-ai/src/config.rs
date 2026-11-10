@@ -557,8 +557,8 @@ pub struct PolicyPenalties {
     /// `SelfCostValuePolicy`.
     #[serde(default = "default_self_cost_counter_replacement_prevented_penalty")]
     pub self_cost_counter_replacement_prevented_penalty: f64,
-    /// CR 732.2a / CR 104.2a: bonus for proposing a loop shortcut whose latched
-    /// `predicted_winner` IS the proposer — the crown ends the game in their favor.
+    /// CR 732.2a: bonus for declaring a count within a bounded offer's `deliverable_capacity`,
+    /// committed board progress whose eliminations the cascade predicted.
     /// Game-deciding ⇒ the default lands in the `critical` band (5.0, 15.0]. Consumed by
     /// `LoopShortcutPolicy`; fed through `PolicyVerdict::score`, which auto-bands and clamps to
     /// `CRITICAL_MAX`. (The losing / no-crown cases are `PolicyVerdict::reject`s and take no

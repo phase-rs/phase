@@ -246,9 +246,8 @@ fn the_user_captures_offer_is_reached_with_its_driving_period_cleared() {
 
     // WHICH SITES THIS FIXTURE CAN AND CANNOT HOST, asserted rather than claimed in prose
     // elsewhere. `handle_declare_shortcut`'s `template: None` arm (site F) sits under
-    // `if !offer.schema.points.is_empty()`, and the `UntilLethal` drive (site D) is reachable only
-    // through an offer that states NO narrowed bound. This capture's offer publishes neither, so it
-    // can host neither site — which is why those two rows ride other fixtures. Pinning it here
+    // `if !offer.schema.points.is_empty()`. This capture's offer publishes no point, so it cannot
+    // host site F, which is why that row rides another fixture. Pinning it here
     // means a future capture that DOES publish points reds this line instead of silently making
     // the sibling rows' scope claims stale.
     let WaitingFor::LoopShortcut {
@@ -275,8 +274,7 @@ fn the_user_captures_offer_is_reached_with_its_driving_period_cleared() {
     );
     assert!(
         schema.is_bounded(),
-        "SCOPE: a bounded offer is exactly what makes `handle_declare_shortcut` reject \
-         `UntilLethal`, so site D is unreachable from this capture too"
+        "SCOPE: this capture's offer is bounded"
     );
 }
 
