@@ -52,6 +52,26 @@ pub(crate) struct DepartingEntryPayment {
 }
 
 impl DepartingEntryPayment {
+    fn is_unpaid_owner(replacement: &PendingReplacement, payer: PlayerId) -> bool {
+        replacement.is_optional
+            && replacement.may_cost_paid
+            && replacement.choice_player == Some(payer)
+    }
+
+    fn paused_event_matches(paused: &PendingZoneChangeDelivery, event: &ProposedEvent) -> bool {
+        paused.expected_event == *event
+            || matches!(
+                event,
+                ProposedEvent::ZoneChange {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == paused.member.object_id
+            )
+    }
+
+    /// CR 800.4f: the direct prompt is the outer accepted cost; a nested park
+    /// keeps the interrupted outer record on the active replacement.
     fn owned_prompt(
         state: &GameState,
         payer: PlayerId,
@@ -61,12 +81,7 @@ impl DepartingEntryPayment {
         }
         let pending = state.active_change_zone_frame()?.pending.as_ref()?;
         let paused = pending.paused_current.as_ref()?;
-        let replacement = state.pending_replacement.as_ref()?;
-        if !replacement.is_optional
-            || !replacement.may_cost_paid
-            || replacement.choice_player != Some(payer)
-            || !replacement.parks_delivery(&paused.expected_event)
-            || paused.terminal_completion.is_some()
+        if paused.terminal_completion.is_some()
             || !matches!(
                 paused.expected_event,
                 ProposedEvent::ZoneChange {
@@ -77,7 +92,22 @@ impl DepartingEntryPayment {
         {
             return None;
         }
-        Some((pending, paused))
+        let replacement = state.pending_replacement.as_ref()?;
+        if Self::is_unpaid_owner(replacement, payer)
+            && replacement.parks_delivery(&paused.expected_event)
+        {
+            return Some((pending, paused));
+        }
+        let mut interrupted = replacement.interrupted_entry.as_deref();
+        while let Some(outer) = interrupted {
+            if Self::is_unpaid_owner(outer, payer)
+                && Self::paused_event_matches(paused, outer.delivery_boundary_event())
+            {
+                return Some((pending, paused));
+            }
+            interrupted = outer.interrupted_entry.as_deref();
+        }
+        None
     }
 
     /// An active child or another payer's replacement is deliberately excluded.
@@ -97,43 +127,72 @@ impl DepartingEntryPayment {
         })
     }
 
-    /// The departing payer cannot finish the cost. Run the ordinary unpaid
-    /// branch only after the leave sweep, preserving any unrelated/new child.
-    /// Its normal delivery capture and epilogue terminalize and resume the
-    /// owning family; no fabricated paid cost or field-nulling is involved.
-    pub(crate) fn settle(
+    /// CR 800.4f: called while the payer is still alive, before the departure
+    /// sweep can cancel the paused entry. The unpaid entry is prevented (the
+    /// object stays where it is), and the interrupted cost records are dropped
+    /// so no leave path moves the object or resumes the discard.
+    pub(crate) fn prevent(&self, state: &mut GameState) -> bool {
+        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            return false;
+        }
+        let family_ok = state
+            .active_change_zone_frame()
+            .and_then(|frame| frame.pending.as_ref())
+            .is_some_and(|pending| {
+                pending.logical_zone_change_group.logical_group_id == self.group
+                    && pending.controller == self.controller
+                    && pending.paused_current.as_ref().is_some_and(|paused| {
+                        paused.captures(self.member, &self.proposal)
+                            && paused.terminal_completion.is_none()
+                    })
+            });
+        let payment_ok = state
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|replacement| {
+                Self::is_unpaid_owner(replacement, self.payer) || {
+                    let mut outer = replacement.interrupted_entry.as_deref();
+                    let mut found = false;
+                    while let Some(entry) = outer {
+                        if Self::is_unpaid_owner(entry, self.payer) {
+                            found = true;
+                            break;
+                        }
+                        outer = entry.interrupted_entry.as_deref();
+                    }
+                    found
+                }
+            });
+        if !family_ok || !payment_ok {
+            return false;
+        }
+        if !state.prevent_paused_zone_change_delivery(self.member, &self.proposal) {
+            return false;
+        }
+        state.pending_replacement = None;
+        state.pending_discard_batch = None;
+        state.pending_cost_move_resume = None;
+        state.replacement_may_cost_paused = false;
+        // Drop the accepted cost's queued continuation as well: it would
+        // otherwise deliver the entry this prevention just canceled.
+        state.abandon_active_post_replacement_drains();
+        true
+    }
+
+    /// Finishes the unpaid settlement after the departure sweep: the family
+    /// drain runs before the next priority boundary.
+    pub(crate) fn finish(
         &self,
         state: &mut GameState,
         events: &mut Vec<GameEvent>,
     ) -> Result<bool, EngineError> {
-        if matches!(state.waiting_for, WaitingFor::GameOver { .. })
-            || super::players::is_alive(state, self.payer)
-            || !state
-                .active_change_zone_frame()
-                .and_then(|frame| frame.pending.as_ref())
-                .is_some_and(|pending| {
-                    pending.logical_zone_change_group.logical_group_id == self.group
-                        && pending.controller == self.controller
-                        && pending.paused_current.as_ref().is_some_and(|paused| {
-                            paused.captures(self.member, &self.proposal)
-                                && paused.terminal_completion.is_none()
-                        })
-                })
-            || !state
-                .pending_replacement
-                .as_ref()
-                .is_some_and(|replacement| {
-                    replacement.is_optional
-                        && replacement.may_cost_paid
-                        && replacement.choice_player == Some(self.payer)
-                        && replacement.parks_delivery(&self.proposal)
-                })
-        {
-            return Ok(false);
-        }
-        state.waiting_for = handle_replacement_choice(state, 1, events)?;
-        // CR 117.3 + CR 800.4a: the ordinary replacement epilogue seeds the
-        // active player's priority. A departed active player cannot receive it.
+        let player = if super::players::is_alive(state, state.active_player) {
+            state.active_player
+        } else {
+            super::players::next_player(state, state.active_player)
+        };
+        state.waiting_for = WaitingFor::Priority { player };
+        super::engine::resume_pending_continuation_if_priority(state, events)?;
         if let WaitingFor::Priority { player } = state.waiting_for {
             if !super::players::is_alive(state, player) {
                 state.waiting_for = WaitingFor::Priority {
@@ -5030,6 +5089,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            interrupted_entry: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
 
@@ -5709,6 +5769,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            interrupted_entry: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
         state.priority_player = PlayerId(0);

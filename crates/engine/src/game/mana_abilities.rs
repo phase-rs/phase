@@ -6397,6 +6397,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            interrupted_entry: None,
         });
         let live_prompt = WaitingFor::DiscardChoice {
             player: PlayerId(0),

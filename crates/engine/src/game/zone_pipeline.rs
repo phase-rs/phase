@@ -2025,6 +2025,7 @@ mod paused_search_audience_tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            interrupted_entry: None,
         });
 
         // The owner parks on the unanswered event.

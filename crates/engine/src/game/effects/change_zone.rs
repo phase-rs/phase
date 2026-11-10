@@ -737,16 +737,79 @@ fn owner_reach(filter: &TargetFilter, player: &ControllerRef) -> OwnerReach {
                 })
         }
         TargetFilter::Not { filter } => {
-            let inner = owner_reach(filter, player);
-            OwnerReach {
-                named: if inner.named == 0 { 0 } else { ALL_ZONES_MASK },
-                all: ALL_ZONES_MASK,
+            // CR 608.2c: a negation excludes a set rather than naming whose
+            // objects they are, so it carries no positive reach and no naming
+            // fact. Double negation is the positive leaf again, and must keep
+            // that leaf's exact attribution instead of widening it.
+            match filter.as_ref() {
+                TargetFilter::Not { filter: inner } => owner_reach(inner, player),
+                _ => OwnerReach {
+                    named: 0,
+                    all: ALL_ZONES_MASK,
+                },
             }
         }
         TargetFilter::TrackedSetFiltered { filter, .. } => owner_reach(filter, player),
         // Filters this classification never treats as owner-named: they add no
         // name and no zone constraint, so they are neutral in a conjunction.
-        _ => OwnerReach {
+        // Enumerated (no wildcard) so a new `TargetFilter` variant must decide
+        // its attribution reach here instead of silently becoming neutral.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => OwnerReach {
             named: 0,
             all: ALL_ZONES_MASK,
         },
@@ -3788,6 +3851,33 @@ mod tests {
     // enchant that creature, put it onto the battlefield attached to that creature, then shuffle.")
     // -- Bitterheart Witch: trigger with announced attach host, but its single target fizzles
     // whole. Sovereigns: event-referent host, the unassigned fallback case.
+    /// CR 608.2c: `Not` excludes a set, it does not confine the subject, so
+    /// the naming reach it carries must be the inner leaf's bit-for-bit.
+    /// `Not(Not(Graveyard leaf))` then credits the same player and zones as the
+    /// leaf itself instead of widening to every zone.
+    #[test]
+    fn double_negation_preserves_scoped_leaf_naming_reach() {
+        let leaf = TargetFilter::Typed(crate::types::TypedFilter {
+            type_filters: vec![crate::types::ability::TypeFilter::Creature],
+            controller: Some(ControllerRef::ScopedPlayer),
+            properties: vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }],
+        });
+        let doubled = TargetFilter::Not {
+            filter: Box::new(TargetFilter::Not {
+                filter: Box::new(leaf.clone()),
+            }),
+        };
+        let leaf_reach = owner_reach(&leaf, &ControllerRef::ScopedPlayer);
+        let doubled_reach = owner_reach(&doubled, &ControllerRef::ScopedPlayer);
+        assert_eq!(leaf_reach.named, zone_mask(Zone::Graveyard));
+        assert_eq!(
+            doubled_reach.named, leaf_reach.named,
+            "double negation must not widen the leaf's naming reach"
+        );
+    }
+
     #[test]
     fn unavailable_attachment_host_does_not_use_an_unrelated_event_referent() {
         let mut state = GameState::new_two_player(42);

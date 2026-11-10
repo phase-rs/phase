@@ -29660,6 +29660,12 @@ pub struct PendingReplacement {
         skip_serializing_if = "UnrepresentablePolicy::is_ignore_impossible"
     )]
     pub unrepresentable_life_change: UnrepresentablePolicy,
+    /// CR 800.4f: when a nested replacement park overwrites this record while
+    /// an optional entry payment is still being accepted, the interrupted
+    /// outer record rides here so a departure at the nested prompt can settle
+    /// the unpaid entry instead of losing the cost context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupted_entry: Option<Box<PendingReplacement>>,
 }
 
 /// Who owns a player-resource change (life, player counter, energy) whose final
@@ -32551,6 +32557,26 @@ impl GameState {
     /// [`Self::capture_paused_zone_change_delivery`], but matched by
     /// [`PendingZoneChangeDelivery::captures_resumed`] so a controller/counter
     /// override or a CR 614.6 zone redirect does not defeat the key comparison.
+    /// CR 800.4f: the accepted cost was not paid, so the paused entry is
+    /// prevented without delivering its event. Terminalizes the exact paused
+    /// member as `Remained` so the owning family can drain.
+    pub(crate) fn prevent_paused_zone_change_delivery(
+        &mut self,
+        member: ObjectIncarnationRef,
+        approved_event: &ProposedEvent,
+    ) -> bool {
+        let Some(paused) = self
+            .active_change_zone_frame_mut()
+            .and_then(|frame| frame.pending.as_mut())
+            .and_then(|owner| owner.paused_current.as_mut())
+            .filter(|paused| paused.captures(member, approved_event))
+        else {
+            return false;
+        };
+        let _ = paused.settle_delivery(&[], ZoneMoveCompletion::Remained);
+        true
+    }
+
     pub fn capture_resumed_paused_zone_change_delivery(
         &mut self,
         member: ObjectIncarnationRef,
@@ -57793,6 +57819,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: policy,
+            interrupted_entry: None,
         }
     }
 

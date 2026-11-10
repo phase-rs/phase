@@ -371,6 +371,188 @@ fn beacon_mox_scenario() -> (GameScenario, [ObjectId; 4]) {
     (scenario, [beacon, mox, forest, island])
 }
 
+/// CR 800.4f: the accepted Mox cost pauses on a nested graveyard-redirect
+/// ordering prompt. A departure there must settle the unpaid entry, keep the
+/// selected land in hand, and leave Mox in its owner's graveyard.
+#[test]
+fn departed_nested_mox_redirect_ordering_settles_unpaid_before_priority() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let vaults = scenario
+        .add_spell_to_hand_from_oracle(P0, "Open the Vaults", false, OPEN_THE_VAULTS)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 4,
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+        })
+        .id();
+    let mox = scenario
+        .add_artifact_to_graveyard(P1, "Mox Diamond")
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text(MOX_DIAMOND)
+        .id();
+    let forest = scenario.add_land_to_hand(P1, "Forest").id();
+    let island = scenario.add_land_to_hand(P1, "Island").id();
+    let _ = island;
+    for (name, description) in [
+        (
+            "Rest in Peace",
+            "If a card would be put into a graveyard from anywhere, exile it instead. (RIP)",
+        ),
+        (
+            "Leyline of the Void",
+            "If a card would be put into a graveyard from anywhere, exile it instead. (Leyline)",
+        ),
+    ] {
+        scenario
+            .add_creature(P1, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .destination_zone(Zone::Graveyard)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            library_shuffle: Default::default(),
+                            destination: Zone::Exile,
+                            origin: None,
+                            target: TargetFilter::SelfRef,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: vec![],
+                            conditional_enter_with_counters: vec![],
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    ))
+                    .description(description.to_string()),
+            );
+    }
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::White,
+            ManaType::White,
+        ]
+        .into_iter()
+        .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.cast(vaults).resolve();
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P1 accepts the Mox cost");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DiscardChoice { player: P1, .. }
+        ),
+        "P1 must be asked which land to discard: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![forest],
+        })
+        .expect("P1 selects the land to discard");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the nested graveyard redirect must park the land's ordering choice: {:?}",
+        runner.state().waiting_for
+    );
+    {
+        let pending = runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .expect("the nested land ordering owns the active replacement");
+        assert!(
+            pending
+                .interrupted_entry
+                .as_ref()
+                .is_some_and(|outer| outer.is_optional && outer.may_cost_paid),
+            "the interrupted Mox cost must ride the nested park"
+        );
+    }
+    let result = runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes inside the nested replacement ordering");
+    let state = runner.state();
+    assert!(state.players[P1.0 as usize].is_eliminated);
+    let mox_moves: Vec<_> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged { record, .. } => record
+                .trigger_source_context()
+                .filter(|context| context.identity.reference.object_id == mox)
+                .map(|_| (record.from_zone, record.to_zone)),
+            _ => None,
+        })
+        .collect();
+    let land_graveyard_moves: Vec<_> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged { record, .. } => record
+                .trigger_source_context()
+                .filter(|context| context.identity.reference.object_id == forest)
+                .map(|_| (record.from_zone, record.to_zone)),
+            _ => None,
+        })
+        .filter(|(_, to)| *to == Zone::Graveyard)
+        .collect();
+    // CR 800.4f: the entry is prevented, so Mox never reaches the
+    // battlefield, and the accepted discard cost is not paid, so the chosen
+    // land is never discarded. Both cards leave with their departing owner,
+    // which is why the final zones here are exile rather than graveyard.
+    assert!(
+        !state.battlefield.contains(&mox),
+        "waiting={:?} pending={:?} events={:?}",
+        state.waiting_for,
+        state.pending_replacement.as_ref().map(|p| (
+            &p.proposed,
+            p.is_optional,
+            p.may_cost_paid,
+            p.choice_player
+        )),
+        mox_moves
+    );
+    assert!(
+        land_graveyard_moves.is_empty(),
+        "the unpaid discard must not move the land to a graveyard: {land_graveyard_moves:?}"
+    );
+    assert!(state.pending_replacement.is_none());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "stack={:?}",
+        state.resolution_stack
+    );
+    assert!(state.resolving_stack_entry.is_none());
+    assert!(state.stack.is_empty());
+    assert_eq!(
+        move_count(&result.events, mox, Zone::Graveyard, Zone::Battlefield),
+        0,
+        "the unpaid entry must never put Mox onto the battlefield"
+    );
+    assert!(matches!(
+        result.waiting_for,
+        WaitingFor::Priority { player: P0 | P2 }
+    ));
+    assert_eq!(result.waiting_for, state.waiting_for);
+}
+
 /// CR 800.4f + CR 800.4b + CR 608.2m: a departed player cannot pay an
 /// accepted entry cost. Its real discard choice must settle before the begun
 /// reanimation family completes, without transferring the intended controller.
@@ -415,7 +597,17 @@ fn beacon_of_unrest_departed_mox_discard_payer_completes_family_before_priority(
     assert_eq!(state.objects[&mox].owner, P1);
     assert_eq!(state.objects[&mox].controller, P1);
     assert!(state.players[P1.0 as usize].graveyard.contains(&mox));
-    assert!(state.pending_replacement.is_none());
+    assert!(
+        state.pending_replacement.is_none(),
+        "waiting={:?} pending={:?}",
+        state.waiting_for,
+        state.pending_replacement.as_ref().map(|p| (
+            &p.proposed,
+            p.is_optional,
+            p.may_cost_paid,
+            p.choice_player
+        ))
+    );
     assert!(
         state.resolution_stack.is_empty(),
         "stack={:?}",
@@ -525,7 +717,17 @@ fn open_the_vaults_paid_mox_discard_completes_family_before_priority() {
     assert!(state.players[P1.0 as usize].hand.contains(&island));
     assert_eq!(state.objects[&vaults].zone, Zone::Graveyard);
     assert!(state.players[P0.0 as usize].graveyard.contains(&vaults));
-    assert!(state.pending_replacement.is_none());
+    assert!(
+        state.pending_replacement.is_none(),
+        "waiting={:?} pending={:?}",
+        state.waiting_for,
+        state.pending_replacement.as_ref().map(|p| (
+            &p.proposed,
+            p.is_optional,
+            p.may_cost_paid,
+            p.choice_player
+        ))
+    );
     assert!(
         state.resolution_stack.is_empty(),
         "stack={:?}",
@@ -868,7 +1070,7 @@ fn open_the_vaults_aura_host_chooser_concession_resumes_surviving_member() {
     );
 }
 
-const OLIVIA_CRIMSON_BRIDE: &str = "Flying\nWhenever Olivia, Crimson Bride attacks, return target creature card from your graveyard to the battlefield tapped and attacking.";
+const OLIVIA_CRIMSON_BRIDE: &str = "Flying, haste\nWhenever Olivia, Crimson Bride attacks, return target creature card from your graveyard to the battlefield tapped and attacking. It's a Vampire in addition to its other types.";
 
 /// CR 508.4 + CR 608.2m + CR 800.4a: an entering attacker's defender pick is a
 /// prompt owned by the family's own paused delivery, not a replacement. When

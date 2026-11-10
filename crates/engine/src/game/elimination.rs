@@ -178,6 +178,11 @@ pub fn concede(
 ) -> Result<Option<usize>, super::engine::EngineError> {
     let departing_entry_payment =
         super::engine_replacement::DepartingEntryPayment::capture(state, player);
+    // CR 800.4f: prevent an interrupted unpaid entry before the leave sweep
+    // can cancel its paused member and route the object through replacements.
+    let prevented_payment = departing_entry_payment
+        .as_ref()
+        .is_some_and(|payment| payment.prevent(state));
     let resume_canceled_change_zone = eliminate_players(
         state,
         &[player],
@@ -185,8 +190,11 @@ pub fn concede(
         events,
     );
     let scan_from = events.len();
-    let settled_payment = if let Some(payment) = departing_entry_payment {
-        payment.settle(state, events)?
+    let settled_payment = if prevented_payment {
+        match departing_entry_payment.as_ref() {
+            Some(payment) => payment.finish(state, events)?,
+            None => false,
+        }
     } else {
         false
     };
@@ -826,9 +834,11 @@ pub(crate) fn eliminate_players(
         // concession does this in its fallible, prefix-bounded caller instead.
         if departure_triggers != DepartureTriggers::CollectedByDeparture {
             if let Some(payment) = departing_entry_payment.as_ref() {
-                payment
-                    .settle(state, events)
-                    .expect("a departed entry payer follows the ordinary unpaid branch");
+                if payment.prevent(state) {
+                    payment
+                        .finish(state, events)
+                        .expect("a departed entry payer follows the ordinary unpaid branch");
+                }
             }
         }
 
@@ -2676,6 +2686,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            interrupted_entry: None,
         }
     }
 
@@ -4185,6 +4196,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            interrupted_entry: None,
         });
         // Latched chooser identity — the fix's key. C = P2.
         state.waiting_for = WaitingFor::ReplacementChoice {
@@ -4330,6 +4342,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            interrupted_entry: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -4387,6 +4400,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            interrupted_entry: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -4436,6 +4450,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            interrupted_entry: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -4515,6 +4530,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            interrupted_entry: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
