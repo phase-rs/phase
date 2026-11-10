@@ -29,7 +29,7 @@ use crate::types::ability::{
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
-use crate::types::counter::CounterMatch;
+use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
     ActivationTargetFact, AnnouncedTargetZone, AttackDeclarationRecord, CounterAddedRecord,
@@ -6561,10 +6561,13 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         // never answer this for a source that is already gone.
         attachments: lki.attachments.clone(),
         linked_exile_snapshot: vec![],
-        is_token: state
-            .objects
-            .get(&object_id)
-            .is_some_and(|object| object.is_token),
+        // CR 111.1 + CR 115.9 + CR 400.7: this record is a PROJECTION of `lki`,
+        // and `lki` states no token bit, so the record states none either. It
+        // used to read the live object at `object_id` — a confident answer to a
+        // question the capture never asked, about whatever object holds that
+        // storage id now. The `CapturedEpoch` below answers the token leaves
+        // instead, and refuses them where token-ness is not provable.
+        is_token: false,
         combat_status: Default::default(),
         // The LKI snapshot carries no block pairings; the record-side
         // current-pairing arms fail closed regardless.
@@ -6583,7 +6586,23 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         was_prepared: lki.was_prepared,
         departure: crate::types::game_state::ZoneDeparture::Moved,
     };
-    matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
+    // CR 115.9 + CR 608.2h: `lki` IS the selection-time epoch for this subject,
+    // so the counter set and tap status it captured answer for it — not the live
+    // object and not the ObjectId-keyed exit cache. Token identity is the one
+    // leaf the snapshot cannot state, so it answers from what the engine DID
+    // capture for this object (`captured_token_identity`) or from a zone that
+    // proves non-token-ness, and otherwise refuses.
+    let epoch = CapturedEpoch {
+        counters: &lki.counters,
+        tapped: lki.tapped,
+        is_token: match snapshot_zone {
+            Some(Zone::Battlefield) | None => captured_token_identity(state, object_id),
+            // CR 111.7: a token in a zone other than the battlefield ceases to
+            // exist, so a target announced elsewhere is certainly not one.
+            Some(_) => Some(false),
+        },
+    };
+    zone_change_filter_inner_with_epoch(state, &record, record.from_zone, filter, ctx, Some(epoch))
 }
 
 /// CR 608.2k + CR 608.2h: Evaluate a target filter against an ability's
@@ -7763,12 +7782,85 @@ fn build_battlefield_entry_token_object(
     obj
 }
 
+/// CR 111.1 + CR 400.7: token identity of the exact object a historical subject
+/// names, read from the zone-change record the engine captured when that object
+/// last changed zones ([`crate::game::restrictions::record_zone_change`]).
+///
+/// Token-ness is a property of the object itself, not of a moment: a token is a
+/// marker representing a permanent that no card represents (CR 111.1), and
+/// token-ness is not among the copiable values a copy effect acquires
+/// (CR 707.2), so it is fixed when the object is created. It therefore needs no
+/// epoch of its own — any captured record for that storage id states it for the
+/// object's whole life, which is also why the zone-change path itself answers
+/// `FilterProp::Token` from the departure record after the object has ceased to
+/// exist.
+///
+/// `zone_changes_this_turn` is the per-turn journal every move writes through,
+/// so `None` means the object has not changed zones this turn and no capture
+/// holds a token bit for it. That is an absence of evidence, never evidence of
+/// non-token-ness, and the caller must refuse rather than read the live object.
+fn captured_token_identity(state: &GameState, object_id: ObjectId) -> Option<bool> {
+    state
+        .zone_changes_this_turn
+        .iter()
+        .rev()
+        .find(|record| record.object_id == object_id)
+        .map(|record| record.is_token)
+}
+
+/// CR 115.9 + CR 608.2h + CR 400.7: the selection-time facts a captured
+/// [`LKISnapshot`] can answer for a HISTORICAL subject, and the only authority a
+/// historical evaluation may answer them from.
+///
+/// A `ZoneChangeRecord` projected from an `LKISnapshot`
+/// ([`matches_target_filter_on_lki_snapshot_with_incarnation`]) carries none of
+/// these: counters and tap status live only in the snapshot, and token identity
+/// is not part of an `LKISnapshot` at all. Without this carrier the record walk
+/// reached outside the capture for all three — the LIVE object at the same
+/// storage id (token) and the ObjectId-keyed general exit cache
+/// (`GameState::lki_cache`, counters and tap status). Neither is the epoch the
+/// subject was selected in: CR 400.7 makes the storage id reusable by a later
+/// object, and that cache holds whichever moment last wrote it, or nothing.
+///
+/// A fact this carrier cannot state is answered by REFUSING the leaf, never by
+/// falling back to the present: a missing captured fact is not a live answer.
+#[derive(Clone, Copy)]
+struct CapturedEpoch<'a> {
+    /// CR 122.1: the counters the subject had when it was selected.
+    counters: &'a HashMap<CounterType, u32>,
+    /// CR 110.5: the tap status the subject had when it was selected.
+    tapped: bool,
+    /// CR 111.1 + CR 111.7: token identity, from either of the two captured
+    /// facts that can prove it — the record the engine captured for this object
+    /// at its last zone change ([`captured_token_identity`]), or a zone the
+    /// subject was announced in that is not the battlefield (a token in any
+    /// other zone ceases to exist, so such a subject is certainly not a token).
+    /// `None` means neither capture holds it, and both of its leaves refuse.
+    is_token: Option<bool>,
+}
+
+/// The epoch-free door: a real zone-change record answers from its own capture.
 fn zone_change_filter_inner(
     state: &GameState,
     record: &ZoneChangeRecord,
     licensed: Option<Zone>,
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
+) -> bool {
+    zone_change_filter_inner_with_epoch(state, record, licensed, filter, ctx, None)
+}
+
+/// The epoch-carrying body of [`zone_change_filter_inner`]. `epoch` is `Some`
+/// exactly when the subject is answered from a captured selection-time
+/// [`LKISnapshot`] rather than from a real zone-change record; see
+/// [`CapturedEpoch`].
+fn zone_change_filter_inner_with_epoch(
+    state: &GameState,
+    record: &ZoneChangeRecord,
+    licensed: Option<Zone>,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+    epoch: Option<CapturedEpoch<'_>>,
 ) -> bool {
     let source_id = ctx.source_id;
     let source_controller = ctx.source_controller;
@@ -7826,7 +7918,12 @@ fn zone_change_filter_inner(
             // the invariant on `TypedFilter::type_filters` for why the empty case is
             // load-bearing on both the object and the player axis (#8508).
             if !type_filters.iter().all(|tf| {
-                zone_change_record_matches_type_filter(record, tf, &state.all_creature_types)
+                zone_change_record_matches_type_filter(
+                    record,
+                    tf,
+                    &state.all_creature_types,
+                    epoch,
+                )
             }) {
                 return false;
             }
@@ -7977,18 +8074,24 @@ fn zone_change_filter_inner(
                         owned_axis_admits(state, &source_ctx, controller, owner)
                     })
                 }
-                _ => zone_change_record_matches_property(prop, state, record, &source_ctx),
+                _ => zone_change_record_matches_property(
+                    prop,
+                    state,
+                    record,
+                    &source_ctx,
+                    epoch,
+                ),
             })
         }
         TargetFilter::Not { filter: inner } => {
-            !zone_change_filter_inner(state, record, licensed, inner, ctx)
+            !zone_change_filter_inner_with_epoch(state, record, licensed, inner, ctx, epoch)
         }
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|inner| zone_change_filter_inner(state, record, licensed, inner, ctx)),
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|inner| zone_change_filter_inner(state, record, licensed, inner, ctx)),
+        TargetFilter::Or { filters } => filters.iter().any(|inner| {
+            zone_change_filter_inner_with_epoch(state, record, licensed, inner, ctx, epoch)
+        }),
+        TargetFilter::And { filters } => filters.iter().all(|inner| {
+            zone_change_filter_inner_with_epoch(state, record, licensed, inner, ctx, epoch)
+        }),
         TargetFilter::SpecificObject { id } => record.object_id == *id,
         // SpecificPlayer scopes to players, not objects — a zone-change record
         // is always an object transition.
@@ -8113,7 +8216,7 @@ fn zone_change_filter_inner(
                             .is_some_and(|member_cause| member_cause == cause),
                     }
             });
-            in_set && zone_change_filter_inner(state, record, licensed, inner, ctx)
+            in_set && zone_change_filter_inner_with_epoch(state, record, licensed, inner, ctx, epoch)
         }
         TargetFilter::LastCreated
         | TargetFilter::LastRevealed
@@ -8294,6 +8397,7 @@ fn zone_change_record_matches_type_filter(
     record: &ZoneChangeRecord,
     tf: &TypeFilter,
     all_creature_types: &[String],
+    epoch: Option<CapturedEpoch<'_>>,
 ) -> bool {
     match tf {
         TypeFilter::Creature => record.core_types.contains(&CoreType::Creature),
@@ -8316,10 +8420,17 @@ fn zone_change_record_matches_type_filter(
         }
         // CR 108.2 + CR 108.2b: a card noun excludes tokens, including after
         // cessation when the original departure record is the only authority.
-        TypeFilter::Card => !record.is_token,
+        // CR 111.1 + CR 115.9: a historical subject answers from its captured
+        // epoch — the token bit of the record the engine captured for this
+        // object, or a zone that proves non-token-ness (CR 111.7). Where
+        // neither capture exists the leaf refuses.
+        TypeFilter::Card => match epoch {
+            Some(epoch) => epoch.is_token == Some(false),
+            None => !record.is_token,
+        },
         TypeFilter::Any => true,
         TypeFilter::Non(inner) => {
-            !zone_change_record_matches_type_filter(record, inner, all_creature_types)
+            !zone_change_record_matches_type_filter(record, inner, all_creature_types, epoch)
         }
         // CR 205.3 + CR 702.73a: Subtype match through the Changeling helper —
         // zone-change records snapshot the object's keywords, so Changeling
@@ -8332,9 +8443,9 @@ fn zone_change_record_matches_type_filter(
                 all_creature_types,
             ) || subtype_matches_host_supertype(subtype, &record.supertypes)
         }
-        TypeFilter::AnyOf(filters) => filters
-            .iter()
-            .any(|inner| zone_change_record_matches_type_filter(record, inner, all_creature_types)),
+        TypeFilter::AnyOf(filters) => filters.iter().any(|inner| {
+            zone_change_record_matches_type_filter(record, inner, all_creature_types, epoch)
+        }),
     }
 }
 
@@ -11517,12 +11628,54 @@ pub(crate) fn source_has_chosen_name(
 ///    zone, so these are semantically not applicable and return `false`.
 /// 5. **Not-yet-supported.** Could plausibly be snapshotted or cross-referenced but
 ///    are not currently required. Returning `false` is a known conservative gap.
+///
+/// `epoch` is `Some` exactly when the subject is answered from a captured
+/// selection-time [`LKISnapshot`] rather than from a real zone-change record;
+/// see [`CapturedEpoch`]. Every caller states which epoch it answers from.
 fn zone_change_record_matches_property(
     prop: &FilterProp,
     state: &GameState,
     record: &ZoneChangeRecord,
     source: &SourceContext<'_>,
+    epoch: Option<CapturedEpoch<'_>>,
 ) -> bool {
+    // CR 115.9 + CR 608.2h + CR 400.7: a predicate evaluated against a HISTORICAL
+    // subject answers from the epoch its capture recorded — never from the live
+    // object at the same storage id (CR 400.7: a later object may hold it) and
+    // never from the ObjectId-keyed general exit cache (which holds whatever
+    // moment last wrote it, or nothing at all). These five leaves are exactly the
+    // ones the record arms below reach outside a capture for: `Token`/`NonToken`
+    // read the live token bit, `Counters`/`Tapped`/`Untapped` read `lki_cache`.
+    // `CapturedEpoch` states which of them the capture can answer; a leaf it
+    // cannot answer refuses rather than reporting the present.
+    if let Some(epoch) = epoch {
+        match prop {
+            // CR 111.1: token identity, from the captured record the engine holds
+            // for this object's own life or from a zone that proves it. Neither
+            // the live token bit nor an absence may answer.
+            FilterProp::Token => return epoch.is_token == Some(true),
+            FilterProp::NonToken => return epoch.is_token == Some(false),
+            // CR 122.1: the counter set captured at selection time.
+            FilterProp::Counters {
+                counters,
+                comparator,
+                count,
+            } => {
+                let selector = match counters {
+                    CounterMatch::Any => None,
+                    CounterMatch::OfType(counter_type) => Some(counter_type),
+                };
+                return comparator.evaluate(
+                    counter_count_from_map(epoch.counters, selector),
+                    resolve_filter_threshold(state, count, source),
+                );
+            }
+            // CR 110.5 + CR 110.5d: the tap status captured at selection time.
+            FilterProp::Tapped => return epoch.tapped,
+            FilterProp::Untapped => return !epoch.tapped,
+            _ => {}
+        }
+    }
     match prop {
         // -------- Group 1: snapshot-derivable --------
         // CR 702: Keyword presence on the event-time object.
@@ -11549,7 +11702,13 @@ fn zone_change_record_matches_property(
                 || record.subtypes.iter().any(|s| s == "Saga")
         }
         FilterProp::NotHistoric => {
-            !zone_change_record_matches_property(&FilterProp::Historic, state, record, source)
+            !zone_change_record_matches_property(
+                &FilterProp::Historic,
+                state,
+                record,
+                source,
+                epoch,
+            )
         }
         // CR 201.2: Name match (case-insensitive) on the event-time object.
         FilterProp::Named { name } => card_names_match(&record.name, name),
@@ -12008,12 +12167,12 @@ fn zone_change_record_matches_property(
         | FilterProp::NameMatchesAnyPermanent { .. } => false,
 
         // Disjunctive composite: recurse into inner props under the same record.
-        FilterProp::AnyOf { props } => props
-            .iter()
-            .any(|p| zone_change_record_matches_property(p, state, record, source)),
+        FilterProp::AnyOf { props } => props.iter().any(|p| {
+            zone_change_record_matches_property(p, state, record, source, epoch)
+        }),
         // CR 608.2c: Logical negation — recurse under the same record and invert.
         FilterProp::Not { prop } => {
-            !zone_change_record_matches_property(prop, state, record, source)
+            !zone_change_record_matches_property(prop, state, record, source, epoch)
         }
 
         // -------- Group 4: not-yet-supported (known conservative gaps) --------
@@ -23929,6 +24088,7 @@ mod tests {
             &state,
             &legendary_record,
             &source_ctx,
+            None,
         ));
 
         // Leg 2: non-legendary artifact (e.g. Sol Ring entering).
@@ -23941,6 +24101,7 @@ mod tests {
             &state,
             &artifact_record,
             &source_ctx,
+            None,
         ));
 
         // Leg 3: Saga (non-legendary subtype path — Sagas are typically also
@@ -23955,6 +24116,7 @@ mod tests {
             &state,
             &saga_record,
             &source_ctx,
+            None,
         ));
 
         // Negative: vanilla non-historic creature.
@@ -23967,6 +24129,7 @@ mod tests {
             &state,
             &vanilla_record,
             &source_ctx,
+            None,
         ));
     }
 
@@ -24039,12 +24202,14 @@ mod tests {
             &state,
             &tapped_record,
             &source_ctx,
+            None,
         ));
         assert!(!zone_change_record_matches_property(
             &FilterProp::Tapped,
             &state,
             &untapped_record,
             &source_ctx,
+            None,
         ));
 
         // `Untapped` (new sibling): matches the untapped exit, not the tapped exit.
@@ -24053,12 +24218,14 @@ mod tests {
             &state,
             &untapped_record,
             &source_ctx,
+            None,
         ));
         assert!(!zone_change_record_matches_property(
             &FilterProp::Untapped,
             &state,
             &tapped_record,
             &source_ctx,
+            None,
         ));
 
         // Fail-closed symmetry: no snapshot ⇒ neither predicate matches.
@@ -24069,12 +24236,355 @@ mod tests {
             &state,
             &no_lki_record,
             &source_ctx,
+            None,
         ));
         assert!(!zone_change_record_matches_property(
             &FilterProp::Untapped,
             &state,
             &no_lki_record,
             &source_ctx,
+            None,
+        ));
+    }
+
+    /// A selection-time `LKISnapshot` carrying exactly the facts a capture can
+    /// state: the counter set and tap status the subject had when it was
+    /// selected. Everything else is the empty baseline — these tests ask only
+    /// about the leaves the snapshot can answer.
+    fn epoch_snapshot(counters: &[(CounterType, u32)], tapped: bool) -> LKISnapshot {
+        let mut map = HashMap::new();
+        for (counter_type, count) in counters {
+            map.insert(counter_type.clone(), *count);
+        }
+        LKISnapshot {
+            name: "History Target".to_string(),
+            token_image_ref: None,
+            power: None,
+            toughness: None,
+            base_power: None,
+            base_toughness: None,
+            mana_value: 0,
+            controller: PlayerId(0),
+            owner: PlayerId(0),
+            card_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            chosen_attributes: vec![],
+            counters: map,
+            tapped,
+            is_suspected: false,
+            was_prepared: false,
+            attachments: Vec::new(),
+            intensity: 0,
+        }
+    }
+
+    /// A `TargetFilter` whose only constraint is one property — the shape a
+    /// `FilterProp::Targets` predicate and a bare `matches_target_filter` call
+    /// share, so the history door and the live door are handed the same filter.
+    fn prop_filter(prop: FilterProp) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            properties: vec![prop],
+            ..TypedFilter::default()
+        })
+    }
+
+    fn counters_at_least(count: u32) -> FilterProp {
+        FilterProp::Counters {
+            counters: CounterMatch::Any,
+            comparator: crate::types::ability::Comparator::GE,
+            count: QuantityExpr::Fixed {
+                value: count as i32,
+            },
+        }
+    }
+
+    /// CR 115.9 + CR 608.2h + CR 400.7: a predicate evaluated against a spell's
+    /// HISTORICAL target answers from the facts captured when that target was
+    /// SELECTED. The capture here carries one +1/+1 counter and an untapped
+    /// permanent while the present — both the live object at the same storage id
+    /// and the ObjectId-keyed general exit cache — carries three counters and a
+    /// tapped permanent. Every answer below must be the selection's.
+    ///
+    /// Leaves covered: `FilterProp::Counters` and `FilterProp::Tapped` /
+    /// `FilterProp::Untapped`. The third leaf, `FilterProp::Token`, has no fact
+    /// in an `LKISnapshot` at all; it is covered by
+    /// `history_token_leaf_answers_from_the_captured_record`.
+    ///
+    /// Revert-probe: answering these leaves from `state.lki_cache` (the base
+    /// behavior) makes the `>= 3`, `Tapped`, and `Untapped` assertions fail — the
+    /// present's three counters and tap state come back instead of the
+    /// selection's one counter and untapped status.
+    #[test]
+    fn history_target_predicates_answer_from_the_selection_epoch() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "History Source");
+        let target = add_creature(&mut state, PlayerId(0), "History Target");
+
+        // SELECTION: one +1/+1 counter, untapped.
+        let selected = epoch_snapshot(&[(CounterType::Plus1Plus1, 1)], false);
+
+        // PRESENT: three counters and tapped, on the live object AND in the
+        // general exit cache that the record walk's counter/tap arms consult.
+        {
+            let object = state.objects.get_mut(&target).unwrap();
+            object.counters.insert(CounterType::Plus1Plus1, 3);
+            object.tapped = true;
+        }
+        state.lki_cache.insert(
+            target,
+            epoch_snapshot(&[(CounterType::Plus1Plus1, 3)], true),
+        );
+
+        let ctx = FilterContext::from_source(&state, source);
+        let fact = ActivationTargetFact::Object {
+            id: target,
+            lki: Box::new(selected),
+            zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+        };
+        let history = |prop: FilterProp| {
+            declared_target_facts_match(
+                &state,
+                std::slice::from_ref(&fact),
+                &prop_filter(prop),
+                &ctx,
+            )
+        };
+
+        // CR 122.1: the selection carried ONE counter, so "has a counter" holds …
+        assert!(
+            history(counters_at_least(1)),
+            "the captured selection carried a +1/+1 counter"
+        );
+        // … and the present's three are not the answer to a threshold the
+        // selection did not meet.
+        assert!(
+            !history(counters_at_least(3)),
+            "three counters is the PRESENT count; the selection carried one"
+        );
+
+        // CR 110.5: the selection was UNTAPPED. The present says tapped, in the
+        // live object and in the exit cache alike.
+        assert!(
+            !history(FilterProp::Tapped),
+            "the selection was untapped; the present's tapped status must not answer"
+        );
+        assert!(
+            history(FilterProp::Untapped),
+            "the selection was untapped, so 'was untapped' holds"
+        );
+    }
+
+    /// CR 115.9b + CR 400.7: the CONTROL for the test above — the same filter
+    /// evaluated against the LIVE object still answers from live state. The
+    /// epoch is a property of a historical evaluation, not of filter matching:
+    /// nothing here may make a present-tense question read a past snapshot.
+    #[test]
+    fn live_target_predicates_still_answer_from_live_state() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Live Source");
+        let target = add_creature(&mut state, PlayerId(0), "Live Target");
+        {
+            let object = state.objects.get_mut(&target).unwrap();
+            object.counters.insert(CounterType::Plus1Plus1, 3);
+            object.tapped = true;
+        }
+        let ctx = FilterContext::from_source(&state, source);
+
+        assert!(
+            super::matches_target_filter(&state, target, &prop_filter(counters_at_least(3)), &ctx),
+            "a live evaluation reads the live counter set"
+        );
+        assert!(
+            super::matches_target_filter(&state, target, &prop_filter(FilterProp::Tapped), &ctx),
+            "a live evaluation reads the live tap status"
+        );
+        assert!(
+            !super::matches_target_filter(&state, target, &prop_filter(FilterProp::Untapped), &ctx),
+            "a live tapped permanent is not untapped"
+        );
+    }
+
+    /// CR 115.9 + CR 608.2h + CR 608.2c: the shared predicate walk carries the
+    /// captured epoch all the way down, so a history question nested inside
+    /// `AnyOf` or inverted under `Not` answers exactly as it does at the top
+    /// level — from the selection, never from the live object. The `>= 1`
+    /// branches are the positive control proving the nested walk still ANSWERS
+    /// these leaves rather than blanket-refusing them.
+    #[test]
+    fn nested_history_predicates_answer_from_the_selection_epoch() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Nested Source");
+        let target = add_creature(&mut state, PlayerId(0), "Nested Target");
+        let selected = epoch_snapshot(&[(CounterType::Plus1Plus1, 1)], false);
+        {
+            let object = state.objects.get_mut(&target).unwrap();
+            object.counters.insert(CounterType::Plus1Plus1, 3);
+            object.tapped = true;
+        }
+        state.lki_cache.insert(
+            target,
+            epoch_snapshot(&[(CounterType::Plus1Plus1, 3)], true),
+        );
+
+        let ctx = FilterContext::from_source(&state, source);
+        let fact = ActivationTargetFact::Object {
+            id: target,
+            lki: Box::new(selected),
+            zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+        };
+        let history = |filter: TargetFilter| {
+            declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)
+        };
+
+        // Under `AnyOf`: the untapped leaf is false on the selection and the
+        // one-counter leaf true, so the disjunction is satisfied by the COUNTER
+        // arm — and is not satisfied by the present's three counters.
+        assert!(
+            history(prop_filter(FilterProp::AnyOf {
+                props: vec![
+                    FilterProp::Tapped,
+                    counters_at_least(3),
+                    counters_at_least(1)
+                ],
+            })),
+            "AnyOf must reach the captured counter leaf, not the present tap state"
+        );
+        assert!(
+            !history(prop_filter(FilterProp::AnyOf {
+                props: vec![FilterProp::Tapped, counters_at_least(3)],
+            })),
+            "both nested leaves are answered from the selection, where neither holds"
+        );
+
+        // Under `Not`: the selection was untapped, so `Tapped` is false and its
+        // negation is true — the present's tapped status must not invert back.
+        assert!(
+            history(TargetFilter::Not {
+                filter: Box::new(prop_filter(FilterProp::Tapped)),
+            }),
+            "Not must invert the SELECTION's tap state"
+        );
+        assert!(
+            history(TargetFilter::Not {
+                filter: Box::new(prop_filter(counters_at_least(3))),
+            }),
+            "Not must invert the SELECTION's counter count, not the present's"
+        );
+    }
+
+    /// CR 111.1 + CR 115.9 + CR 608.2h: token identity is the one leaf of the
+    /// three a selection-time `LKISnapshot` captures no fact for, so it answers
+    /// from the record the engine DID capture for the object itself — never from
+    /// the live token bit at the same storage id (CR 400.7). Two shapes:
+    ///
+    /// * a captured on-move record states the object's token identity for its
+    ///   whole life, so a token that has ceased still answers `Token` = true
+    ///   while the live map holds nothing;
+    /// * with no captured record at all, both leaves refuse. The live object is
+    ///   never the answer, and a target announced outside the battlefield is
+    ///   provably not a token (CR 111.7), so that shape is answered rather than
+    ///   refused.
+    ///
+    /// Revert-probe: reading the live `is_token` bit (the base behavior) inverts
+    /// the two token assertions below — it answers `Token` = false for the ceased
+    /// token and `Token` = true for the live one, i.e. exactly the present.
+    #[test]
+    fn history_token_leaf_answers_from_the_captured_record() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Token Source");
+        let ctx = FilterContext::from_source(&state, source);
+
+        // SHAPE 1 — a token that changed zones: the engine captured its identity
+        // in the on-move record, and the object has since ceased to exist. The
+        // live map holds no token bit at all; the capture still answers.
+        let ceased_token = add_creature(&mut state, PlayerId(0), "Ceased Token");
+        state.objects.get_mut(&ceased_token).unwrap().is_token = true;
+        let mut departure =
+            ZoneChangeRecord::test_minimal(ceased_token, Some(Zone::Battlefield), Zone::Graveyard);
+        departure.is_token = true;
+        state.zone_changes_this_turn.push_back(departure);
+        state.objects.remove(&ceased_token);
+
+        let ceased_fact = ActivationTargetFact::Object {
+            id: ceased_token,
+            lki: Box::new(epoch_snapshot(&[], false)),
+            zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+        };
+        assert!(
+            declared_target_facts_match(
+                &state,
+                std::slice::from_ref(&ceased_fact),
+                &prop_filter(FilterProp::Token),
+                &ctx,
+            ),
+            "the captured record says the object was a token, so 'is a token' holds \
+             even though the token has ceased to exist"
+        );
+        assert!(!declared_target_facts_match(
+            &state,
+            std::slice::from_ref(&ceased_fact),
+            &prop_filter(FilterProp::NonToken),
+            &ctx,
+        ));
+
+        // SHAPE 2 — no captured record: the live object still says "token", and
+        // that bit is precisely what must NOT answer.
+        let live_token = add_creature(&mut state, PlayerId(0), "Live Token");
+        state.objects.get_mut(&live_token).unwrap().is_token = true;
+        let live_fact = ActivationTargetFact::Object {
+            id: live_token,
+            lki: Box::new(epoch_snapshot(&[], false)),
+            zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+        };
+        assert!(
+            !declared_target_facts_match(
+                &state,
+                std::slice::from_ref(&live_fact),
+                &prop_filter(FilterProp::Token),
+                &ctx,
+            ),
+            "with no captured token bit the leaf refuses; the live bit is not the answer"
+        );
+        assert!(
+            !declared_target_facts_match(
+                &state,
+                std::slice::from_ref(&live_fact),
+                &prop_filter(FilterProp::NonToken),
+                &ctx,
+            ),
+            "an unproven token bit cannot prove non-token-ness either"
+        );
+
+        // SHAPE 3 — a target announced in a graveyard is provably not a token,
+        // so the capture does answer that shape; refusing it would over-tighten.
+        let graveyard_fact = ActivationTargetFact::Object {
+            id: live_token,
+            lki: Box::new(epoch_snapshot(&[], false)),
+            zone: AnnouncedTargetZone::Known(Zone::Graveyard),
+        };
+        assert!(!declared_target_facts_match(
+            &state,
+            std::slice::from_ref(&graveyard_fact),
+            &prop_filter(FilterProp::Token),
+            &ctx,
+        ));
+        assert!(declared_target_facts_match(
+            &state,
+            std::slice::from_ref(&graveyard_fact),
+            &prop_filter(FilterProp::NonToken),
+            &ctx,
+        ));
+        assert!(declared_target_facts_match(
+            &state,
+            std::slice::from_ref(&graveyard_fact),
+            &TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Card],
+                ..TypedFilter::default()
+            }),
+            &ctx,
         ));
     }
 
@@ -24125,12 +24635,14 @@ mod tests {
             &state,
             &record,
             &source_ctx,
+            None,
         ));
         assert!(zone_change_record_matches_property(
             &pt_filter(PtStat::Toughness, PtValueScope::Base),
             &state,
             &record,
             &source_ctx,
+            None,
         ));
 
         // Current scope reads power/toughness (2) — does NOT match `<= 1`.
@@ -24139,12 +24651,14 @@ mod tests {
             &state,
             &record,
             &source_ctx,
+            None,
         ));
         assert!(!zone_change_record_matches_property(
             &pt_filter(PtStat::Toughness, PtValueScope::Current),
             &state,
             &record,
             &source_ctx,
+            None,
         ));
     }
 
@@ -24246,6 +24760,7 @@ mod tests {
                 &state,
                 &record,
                 &source_ctx,
+                None,
             ),
             "base power 1 <= 1 must match on the look-back path"
         );
@@ -24255,6 +24770,7 @@ mod tests {
                 &state,
                 &record,
                 &source_ctx,
+                None,
             ),
             "current power 2 <= 1 must NOT match — proves base != current on snapshot path"
         );
@@ -24388,6 +24904,7 @@ mod tests {
             &state,
             &token_record,
             &source_ctx,
+            None,
         ));
 
         let nontoken_record = ZoneChangeRecord {
@@ -24400,6 +24917,7 @@ mod tests {
             &state,
             &nontoken_record,
             &source_ctx,
+            None,
         ));
 
         let enchanted_record = ZoneChangeRecord {
@@ -24420,6 +24938,7 @@ mod tests {
             &state,
             &enchanted_record,
             &source_ctx,
+            None,
         ));
         assert!(zone_change_record_matches_property(
             &FilterProp::HasAttachment {
@@ -24430,6 +24949,7 @@ mod tests {
             &state,
             &enchanted_record,
             &source_ctx,
+            None,
         ));
         assert!(!zone_change_record_matches_property(
             &FilterProp::HasAttachment {
@@ -24440,6 +24960,7 @@ mod tests {
             &state,
             &enchanted_record,
             &source_ctx,
+            None,
         ));
     }
 
@@ -24493,6 +25014,7 @@ mod tests {
             &state,
             &attacking_record,
             &source_ctx,
+            None,
         ));
         assert!(zone_change_record_matches_property(
             &FilterProp::BlockStatus {
@@ -24501,6 +25023,7 @@ mod tests {
             &state,
             &attacking_record,
             &source_ctx,
+            None,
         ));
         assert!(zone_change_record_matches_property(
             &FilterProp::Attacking {
@@ -24509,12 +25032,14 @@ mod tests {
             &state,
             &attacking_record,
             &source_ctx,
+            None,
         ));
         assert!(zone_change_record_matches_property(
             &FilterProp::Blocking,
             &state,
             &blocking_record,
             &source_ctx,
+            None,
         ));
 
         // CR 506.5 + CR 603.10a: sole-attacker / sole-blocker look-back reads
@@ -24526,24 +25051,28 @@ mod tests {
             &state,
             &attacking_record,
             &source_ctx,
+            None,
         ));
         assert!(!zone_change_record_matches_property(
             &FilterProp::BlockingAlone,
             &state,
             &attacking_record,
             &source_ctx,
+            None,
         ));
         assert!(zone_change_record_matches_property(
             &FilterProp::BlockingAlone,
             &state,
             &blocking_record,
             &source_ctx,
+            None,
         ));
         assert!(!zone_change_record_matches_property(
             &FilterProp::AttackingAlone,
             &state,
             &blocking_record,
             &source_ctx,
+            None,
         ));
         // CR 506.5 boundary: a record where the creature attacked but NOT alone
         // (co-attacker present at zone-exit) must fail AttackingAlone.
@@ -24565,6 +25094,7 @@ mod tests {
             &state,
             &attacked_with_company,
             &source_ctx,
+            None,
         ));
     }
 
@@ -24963,12 +25493,14 @@ mod tests {
             &record,
             &TypeFilter::Subtype("Goblin".to_string()),
             &all_creature_types,
+            None,
         ));
         // CR 205.3m gate.
         assert!(!zone_change_record_matches_type_filter(
             &record,
             &TypeFilter::Subtype("Plains".to_string()),
             &all_creature_types,
+            None,
         ));
         // Sanity: positive cascade through the public TargetFilter API.
         // (Use the type-filter level here since ZoneChangeRecord doesn't expose
