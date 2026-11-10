@@ -63197,6 +63197,40 @@ fn index_combinations_enumerates_each_selection_once() {
     );
 }
 
+/// CR 701.59a: each minimal collect-evidence answer is offered once, the
+/// greedy one first; a card worth nothing is in none, and an answer with a
+/// member it could do without is not minimal.
+#[test]
+fn minimal_evidence_answers_lists_each_minimal_set_greedy_first() {
+    // Mana values: a 4, a 3, a 0, a 1 and a 2.
+    let values = [4, 3, 0, 1, 2];
+    let (answers, complete) = minimal_evidence_answers(&values, 3, 64);
+    assert!(complete);
+    assert_eq!(
+        answers,
+        vec![vec![0], vec![1], vec![4, 3]],
+        "the 4 alone (greedy), the 3 alone, then the 1 and the 2 together"
+    );
+    assert!(
+        !answers.iter().any(|answer| answer.contains(&2)),
+        "the zero-value card is in no minimal answer"
+    );
+
+    let (answers, complete) = minimal_evidence_answers(&[1, 1], 3, 64);
+    assert!(complete);
+    assert!(answers.is_empty(), "a total of 2 can't reach 3");
+
+    let (answers, complete) = minimal_evidence_answers(&values, 3, 2);
+    assert_eq!(answers, vec![vec![0], vec![1]]);
+    assert!(!complete, "a capped enumeration says it is incomplete");
+
+    assert_eq!(
+        minimal_evidence_answers(&values, 0, 64),
+        (vec![Vec::new()], true),
+        "evidence 0 is collected with no cards"
+    );
+}
+
 #[test]
 fn mana_choice_answers_produces_choices_lazily() {
     let single = ManaChoicePrompt::SingleColor {

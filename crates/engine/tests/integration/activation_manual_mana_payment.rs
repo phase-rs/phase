@@ -5437,9 +5437,8 @@ fn ashnods_altar_puts_the_creature_card_vault_robber_exiles_in_the_graveyard() {
 /// sacrificing a creature token (a token is not a card, so it leaves no card
 /// to exile) and a Wastes. Cryptex can collect a mana-value-4 creature card or
 /// a mana-value-3 sorcery card; only the sorcery leaves the creature card the
-/// Masticore exiles, so the highest-value answer alone would refuse the offer.
-/// It is offered for a manual payment and completes with the sorcery
-/// collected.
+/// Masticore exiles. It is offered for a manual payment only, and the window
+/// completes with the sorcery collected.
 #[test]
 fn cryptex_evidence_that_keeps_the_masticores_creature_card_is_found() {
     let mut scenario = scenario_at_main();
