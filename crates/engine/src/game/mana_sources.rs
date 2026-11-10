@@ -400,7 +400,7 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
 
 /// [`activatable_mana_actions_for_player`]'s actions for one object, without
 /// sweeping the rest of the battlefield. A land's rows read the `TapsForMana`
-/// triggers, found through the trigger index once it is built.
+/// triggers ([`taps_for_mana_trigger_sources`]).
 pub(crate) fn activatable_mana_actions_for_object(
     state: &GameState,
     player: PlayerId,
@@ -411,7 +411,7 @@ pub(crate) fn activatable_mana_actions_for_object(
         .get(&object_id)
         .is_some_and(|object| object.card_types.core_types.contains(&CoreType::Land));
     let aura_sources = if is_land {
-        indexed_taps_for_mana_trigger_sources(state)
+        taps_for_mana_trigger_sources(state)
     } else {
         Vec::new()
     };
@@ -514,8 +514,10 @@ fn push_object_mana_actions(
 /// 3. The same action must be listed again for `player`.
 ///
 /// The copy drops auto-pass settings, any stack-resolution session and loop
-/// detection, so every pass is the player's own. Only `object`'s rows are
-/// listed, so the work grows with neither the stack nor the rest of the board.
+/// detection, so every pass is the player's own, and runs as a simulation probe
+/// whose lifecycle facts are discarded. Only the top entry and `object`'s rows
+/// are read: per {T} mana row, one copy and the applies that play it out, each
+/// costing what that action costs in the game, however deep the stack is.
 pub(crate) fn untap_repeats_mana(
     state: &GameState,
     player: PlayerId,
@@ -539,6 +541,8 @@ pub(crate) fn untap_repeats_mana(
         .any(|action| {
             #[cfg(feature = "test-support")]
             crate::game::perf_counters::record_untap_repeat_probe_clone();
+            let _probe = super::engine::SimulationProbeGuard::enter();
+            let _discarded_facts = super::lifecycle::enter_action_frame();
             let mut copy = state.clone();
             copy.auto_pass.clear();
             copy.stack_resolution_session = None;
@@ -573,10 +577,13 @@ fn use_mana_on_copy(copy: &mut GameState, player: PlayerId, action: &GameAction)
 }
 
 /// Step 2 of [`untap_repeats_mana`]: every player passes until `entry` has left
-/// the stack, each pass the engine's own (CR 117.4). A window that isn't a
+/// the stack, each pass the engine's own (CR 117.4), triggers put above it on
+/// the way (Manabarbs on each side) resolving first. A window that isn't a
 /// priority window means a choice, which the copy can't make for the player.
+/// [`UNTAP_PROBE_PASS_CAP`] passes without the entry resolving read as no
+/// repeat.
 fn pass_until_resolved(copy: &mut GameState, entry: ObjectId) -> bool {
-    for _ in 0..=2 * copy.players.len() {
+    for _ in 0..UNTAP_PROBE_PASS_CAP {
         if !copy.stack.iter().any(|on_stack| on_stack.id == entry) {
             return true;
         }
@@ -590,6 +597,11 @@ fn pass_until_resolved(copy: &mut GameState, entry: ObjectId) -> bool {
     }
     false
 }
+
+/// The most passes [`pass_until_resolved`] makes: a guard against a trigger
+/// cascade above the untap that never empties, far past the passes a few
+/// triggers per player need.
+const UNTAP_PROBE_PASS_CAP: usize = 256;
 
 /// `player` hasn't left the game (CR 800.4a), and the game goes on.
 fn in_game(state: &GameState, player: PlayerId) -> bool {
@@ -4160,7 +4172,23 @@ pub(crate) fn opponent_land_color_options(
 /// their per-land loop and thread it into `taps_for_mana_aura_bonus_indexed`,
 /// turning a per-land full-battlefield scan into a per-land walk over only the
 /// (usually tiny) set of trigger-bearing permanents.
+///
+/// Once the trigger index is built, an empty `TapsForMana` bucket (and empty
+/// unclassified bucket) answers without the scan: the index holds every
+/// battlefield object whose trigger could match, which is also how those
+/// triggers are found when they fire. Otherwise the scan runs, in battlefield
+/// order.
 pub(crate) fn taps_for_mana_trigger_sources(state: &GameState) -> Vec<ObjectId> {
+    let index = &state.trigger_index;
+    if index.readiness == crate::types::game_state::DerivedIndexReadiness::Built
+        && index.unclassified.is_empty()
+        && index
+            .by_key
+            .get(&crate::types::triggers::TriggerEventKey::TapsForMana)
+            .is_none_or(|bucket| bucket.is_empty())
+    {
+        return Vec::new();
+    }
     crate::game::perf_counters::record_mana_aura_trigger_scan();
     state
         .battlefield
@@ -4174,37 +4202,6 @@ pub(crate) fn taps_for_mana_trigger_sources(state: &GameState) -> Vec<ObjectId> 
             })
         })
         .collect()
-}
-
-/// [`taps_for_mana_trigger_sources`] read off the trigger index's `TapsForMana`
-/// bucket and its unclassified bucket once the index is built (CR 603.2: every
-/// object whose trigger could match is in one of them), so no battlefield scan;
-/// the same scan otherwise. The same objects, in the index's order.
-fn indexed_taps_for_mana_trigger_sources(state: &GameState) -> Vec<ObjectId> {
-    let index = &state.trigger_index;
-    if index.readiness != crate::types::game_state::DerivedIndexReadiness::Built {
-        return taps_for_mana_trigger_sources(state);
-    }
-    let mut sources: Vec<ObjectId> = Vec::new();
-    for &object_id in index
-        .by_key
-        .get(&crate::types::triggers::TriggerEventKey::TapsForMana)
-        .into_iter()
-        .flatten()
-        .chain(index.unclassified.iter())
-    {
-        let has_trigger = state.objects.get(&object_id).is_some_and(|object| {
-            object.zone == Zone::Battlefield
-                && object
-                    .trigger_definitions
-                    .iter_all()
-                    .any(|entry| entry.definition.mode == TriggerMode::TapsForMana)
-        });
-        if has_trigger && !sources.contains(&object_id) {
-            sources.push(object_id);
-        }
-    }
-    sources
 }
 
 pub(crate) fn taps_for_mana_aura_bonus(

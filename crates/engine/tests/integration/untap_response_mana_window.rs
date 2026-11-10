@@ -650,47 +650,79 @@ fn the_untap_hold_reads_only_the_top_and_its_source() {
 /// Ashaya, Soul of the Wild, verbatim.
 const ASHAYA: &str = "Ashaya's power and toughness are each equal to the number of lands you control.\nNontoken creatures you control are Forest lands in addition to their other types. (They're still affected by summoning sickness.)";
 
+/// Manabarbs, verbatim.
+const MANABARBS: &str =
+    "Whenever a player taps a land for mana, this enchantment deals 1 damage to that player.";
+
+/// Devoted Druid under Ashaya, its own untap on top, a Manabarbs on each side
+/// when `manabarbs`, and `treasures` Treasures beside it. Returns whether the window
+/// holds and the work the recommendation does.
+fn ashaya_druid_untap(
+    manabarbs: bool,
+    treasures: usize,
+) -> (bool, u64, perf_counters::PerfCounterSnapshot) {
+    let mut scenario = main_phase_scenario();
+    scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+    let druid = scenario
+        .add_creature_from_oracle(P0, "Devoted Druid", 0, 2, DEVOTED_DRUID)
+        .id();
+    if manabarbs {
+        scenario.add_enchantment_from_oracle(P0, "Manabarbs", MANABARBS);
+        scenario.add_enchantment_from_oracle(P1, "Manabarbs", MANABARBS);
+    }
+    for _ in 0..treasures {
+        scenario.add_artifact_from_oracle(P0, "Treasure", TREASURE);
+    }
+    let mut runner = scenario.build();
+    flush_layers(runner.state_mut());
+    clear_summoning_sickness(&mut runner, druid);
+    assert!(
+        runner.state().objects[&druid]
+            .card_types
+            .core_types
+            .contains(&CoreType::Land),
+        "Ashaya makes the Druid a land"
+    );
+    let untap = untap_ability_index(&runner, druid);
+    activate(&mut runner, druid, untap, &[]);
+    assert_eq!(top_source_name(&runner).as_deref(), Some("Devoted Druid"));
+    assert!(mana_action(&runner, druid).is_some() && !is_tapped(&runner, druid));
+    let state = runner.state();
+    let actions = legal_actions(state);
+    perf_counters::reset();
+    let holds = !auto_pass_recommended(state, &actions);
+    (
+        holds,
+        perf_counters::untap_repeat_probe_snapshot().state_clones,
+        perf_counters::snapshot(),
+    )
+}
+
 /// Devoted Druid under Ashaya is a Forest, so its mana comes through the land
-/// rows, which read the mana triggers. Its own untap on top, with sixty
-/// Treasures beside it, does the same work as on a bare board.
+/// rows, which read the battlefield's `TapsForMana` triggers. With none, the
+/// trigger index answers that without a scan, and sixty Treasures beside the
+/// Druid add no work.
 #[test]
 fn a_land_source_reads_no_more_of_a_wide_board() {
-    let Some(db) = shared_card_db() else { return };
-    let work = |treasures: usize| {
-        let mut scenario = main_phase_scenario();
-        scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
-        let druid = scenario
-            .add_creature_from_oracle(P0, "Devoted Druid", 0, 2, DEVOTED_DRUID)
-            .id();
-        for _ in 0..treasures {
-            scenario.add_artifact_from_oracle(P0, "Treasure", TREASURE);
-        }
-        let mut runner = scenario.build();
-        flush_layers(runner.state_mut());
-        clear_summoning_sickness(&mut runner, druid);
-        assert!(
-            runner.state().objects[&druid]
-                .card_types
-                .core_types
-                .contains(&CoreType::Land),
-            "Ashaya makes the Druid a land"
-        );
-        let untap = untap_ability_index(&runner, druid);
-        activate(&mut runner, druid, untap, &[]);
-        assert_eq!(top_source_name(&runner).as_deref(), Some("Devoted Druid"));
-        let state = runner.state();
-        let actions = legal_actions(state);
-        perf_counters::reset();
-        assert!(!auto_pass_recommended(state, &actions), "the window holds");
-        (
-            perf_counters::untap_repeat_probe_snapshot().state_clones,
-            perf_counters::snapshot(),
-        )
-    };
-    let (bare_copies, bare) = work(0);
-    let (wide_copies, wide) = work(60);
-    assert_eq!(bare_copies, wide_copies);
+    let (bare_holds, bare_copies, bare) = ashaya_druid_untap(false, 0);
+    let (wide_holds, wide_copies, wide) = ashaya_druid_untap(false, 60);
+    assert!(bare_holds && wide_holds, "the window holds");
+    assert_eq!((bare_copies, wide_copies), (1, 1));
+    assert_eq!(
+        wide.mana_aura_trigger_scans, 0,
+        "no battlefield trigger scan"
+    );
     assert_eq!(wide, bare, "the board's width adds no work");
+}
+
+/// CR 117.4 + CR 603.3: tapping the Druid triggers both players' Manabarbs, and
+/// both resolve above its untap before the untap does. The copy passes through
+/// them, and the window holds.
+#[test]
+fn triggers_above_the_untap_resolve_first() {
+    let (holds, copies, _) = ashaya_druid_untap(true, 0);
+    assert_eq!(copies, 1);
+    assert!(holds, "two Manabarbs triggers don't hide the second tap");
 }
 
 /// Staff of Compleation, verbatim.
@@ -1025,8 +1057,7 @@ const EATER_OF_THE_DEAD: &str = "{0}: If this creature is tapped, exile target c
 /// Civilized Scholar's front face, verbatim.
 const CIVILIZED_SCHOLAR: &str = "{T}: Draw a card, then discard a card. If a creature card is discarded this way, untap this creature, then transform it.";
 /// Cryptolith Rite, verbatim.
-const CRYPTOLITH_RITE: &str =
-    "Convoke\nCreatures you control have \"{T}: Add one mana of any color.\"";
+const CRYPTOLITH_RITE: &str = "Creatures you control have \"{T}: Add one mana of any color.\"";
 /// Vitalize, verbatim.
 const VITALIZE: &str = "Untap all creatures you control.";
 
@@ -1102,9 +1133,15 @@ fn a_conditional_untap_holds_only_when_its_condition_is_met() {
         Some("Civilized Scholar")
     );
     assert!(mana_action(&runner, scholar).is_some() && !is_tapped(&runner, scholar));
+    perf_counters::reset();
     assert!(
         recommends_pass(&runner),
         "Scholar: the copy discards no creature"
+    );
+    assert_eq!(
+        perf_counters::untap_repeat_probe_snapshot().state_clones,
+        1,
+        "the copy played the Scholar's ability out"
     );
 }
 

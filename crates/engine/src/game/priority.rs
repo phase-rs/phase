@@ -469,8 +469,10 @@ fn resolution_can_remove_activatable_mana_source(
 
 /// CR 701.26b + CR 605.3a: whether resolving `top`, `player`'s own activated
 /// ability, untaps its own source while `player` can tap that source for mana
-/// now. Only tapped permanents can be untapped, so the untap does nothing unless
-/// they tap it first, and this is the window to do it. Basalt Monolith: "{3}:
+/// now, and a copy of the game shows that mana action listed again once the
+/// untap has resolved (`mana_sources::untap_repeats_mana`). Only tapped
+/// permanents can be untapped, so the untap does nothing unless they tap it
+/// first, and this is the window to do it. Basalt Monolith: "{3}:
 /// Untap this artifact." under Rings of Brighthearth, with the copy resolved and
 /// the original still on the stack. Only the top entry and its source are read.
 fn resolution_untaps_ready_mana_source(
