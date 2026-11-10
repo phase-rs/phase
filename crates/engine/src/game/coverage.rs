@@ -26,8 +26,8 @@ use crate::types::ability::{
     ContinuousModification, ControllerRef, CountScope, CounterKindChooser, CounterKindDomain,
     CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
     EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
-    ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition, ManaProduction,
-    MassLibraryShuffleMode, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
+    ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition, LibraryShuffleMode,
+    ManaProduction, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
     ObjectSelectionCardinality, ObjectSelectionEligibility, Parity, ParsedCondition,
     PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, ProhibitedActivity, PtStat,
     PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
@@ -3413,6 +3413,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             destination,
             target,
             owner_library,
+            library_shuffle,
             enter_transformed,
             enters_under,
             enter_tapped,
@@ -3437,6 +3438,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             // only when active, so a plain ChangeZone's signature is unchanged.
             if *owner_library {
                 d.push(("owner_library".into(), "true".into()));
+            }
+            if matches!(library_shuffle, LibraryShuffleMode::TerminalShuffle) {
+                d.push(("library_shuffle".into(), format!("{library_shuffle:?}")));
             }
             if *enter_transformed {
                 d.push(("enter_transformed".into(), "true".into()));
@@ -3514,7 +3518,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if let Some(lp) = library_position {
                 d.push(("library_position".into(), format!("{lp:?}")));
             }
-            if matches!(library_shuffle, MassLibraryShuffleMode::TerminalShuffle) {
+            if matches!(library_shuffle, LibraryShuffleMode::TerminalShuffle) {
                 d.push(("library_shuffle".into(), format!("{library_shuffle:?}")));
             }
             if *random_order {
@@ -15357,6 +15361,7 @@ mod tests {
         let inner = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TrackedSet {
@@ -16536,6 +16541,7 @@ mod tests {
 
         // A graveyard self-return: the shape where the collision bites.
         let graveyard_self_return = || Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Hand,
             target: TargetFilter::SelfRef,
@@ -17298,6 +17304,7 @@ mod tests {
         // parse-diff signature; a plain ChangeZone has no such row.
         let signature_keys = |attacking: bool| -> Vec<String> {
             effect_details(&Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::None,
@@ -17349,13 +17356,13 @@ mod tests {
             })
         };
 
-        let per_object = details(MassLibraryShuffleMode::PerObject);
+        let per_object = details(LibraryShuffleMode::PerObject);
         assert!(
             !per_object.iter().any(|(key, _)| key == "library_shuffle"),
             "the default mode must not churn legacy coverage signatures"
         );
 
-        let terminal = details(MassLibraryShuffleMode::TerminalShuffle);
+        let terminal = details(LibraryShuffleMode::TerminalShuffle);
         assert!(
             terminal
                 .iter()
@@ -23657,6 +23664,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin,
                 destination,
                 target,

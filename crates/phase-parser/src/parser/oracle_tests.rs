@@ -35038,7 +35038,7 @@ fn choice_of_fortunes_shuffles_the_sought_set_into_the_library() {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: crate::types::ability::MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
             random_order: false,
         }
     );
