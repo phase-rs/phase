@@ -7246,17 +7246,37 @@ fn attach_object_binding(
     ))
 }
 
+/// CR 115.1: True when `filter` itself names the player(s) an effect affects,
+/// as opposed to an object population that only reads a player through a
+/// controller/owner constraint. `TargetFilter::is_player_scope` covers the
+/// targeted/mass player shapes; the extra `Typed` arm admits the unscoped
+/// empty-type player filter (Teferi's Reproach's chosen opponent), which the
+/// player axis resolves but `is_player_scope` leaves to object enumeration.
+fn filter_selects_players(filter: &TargetFilter) -> bool {
+    filter.is_player_scope()
+        || matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                properties,
+                ..
+            }) if type_filters.is_empty() && properties.is_empty()
+        )
+}
+
 /// Resolve a player-scoped `TargetFilter` to the concrete set of player ids it
 /// affects, for an effect whose targets live on `ability`.
 ///
-/// Explicit `TargetRef::Player` targets win. Otherwise a player-typed mass
-/// filter (`Controller`, `Player`, or a `Typed` filter with no `type_filters`
-/// and an optional `controller` ref) expands to the matching player ids.
-/// Returns an empty vec if the filter doesn't refer to players (the caller's
-/// object branch handles those). Every `ControllerRef` variant is matched
-/// exhaustively so this is the single authority for the
-/// "player-typed filter → `Vec<PlayerId>`" shape (shared by phasing's
-/// player path and the transient-effect player-scope binding).
+/// When the filter itself names players, explicit `TargetRef::Player` targets
+/// win; otherwise a player-typed mass filter (`Controller`, `Player`, or a
+/// `Typed` filter with no `type_filters` and an optional `controller` ref)
+/// expands to the matching player ids. Returns an empty vec if the filter
+/// doesn't refer to players (the caller's object branch handles those), even
+/// when the ability carries a player target as an object filter's controller
+/// anchor ("each creature target player controls"). Every `ControllerRef`
+/// variant is matched exhaustively so this is the single authority for the
+/// "player-typed filter → `Vec<PlayerId>`" shape (shared by phasing's player
+/// path and the transient-effect player-scope binding).
 pub(crate) fn collect_player_targets(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -7287,16 +7307,26 @@ pub(crate) fn collect_player_targets(
             .into_iter()
             .collect();
     }
-    let from_targets: Vec<PlayerId> = ability
-        .targets
-        .iter()
-        .filter_map(|t| match t {
-            TargetRef::Player(pid) => Some(*pid),
-            TargetRef::Object(_) => None,
-        })
-        .collect();
-    if !from_targets.is_empty() {
-        return from_targets;
+    // CR 608.2c: only a filter that itself names players may consume the
+    // ability's player targets. An object-population filter that merely *reads*
+    // a player ("each creature target player controls") still carries a
+    // companion `TargetRef::Player` for its controller anchor; returning that
+    // player here would turn an object effect into a player effect (issue
+    // #10266: kicked Galadriel's Dismissal phased out the targeted player as
+    // well as their creatures). The player-anaphor filters above are exempt
+    // because their arms already resolved the exact slot before this point.
+    if filter_selects_players(target) {
+        let from_targets: Vec<PlayerId> = ability
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                TargetRef::Object(_) => None,
+            })
+            .collect();
+        if !from_targets.is_empty() {
+            return from_targets;
+        }
     }
 
     match target {
@@ -16551,6 +16581,49 @@ mod tests {
         let defending =
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::DefendingPlayer));
         assert!(collect_player_targets(&state, &ability, &defending).is_empty());
+    }
+
+    /// Issue #10266 regression: an object-population filter that names a player
+    /// only as its controller anchor ("each creature target player controls")
+    /// must NOT resolve that player through the player-target path. The
+    /// companion `TargetRef::Player` is the anchor for the object filter, not a
+    /// player the effect affects. A genuinely player-scoped filter retains the
+    /// explicit-target fast path as a positive control.
+    #[test]
+    fn collect_player_targets_ignores_controller_anchor_for_object_filter() {
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        let creature_anchor =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetPlayer));
+        assert!(
+            collect_player_targets(&state, &ability, &creature_anchor).is_empty(),
+            "an object filter's controller anchor must not phase/animate the player"
+        );
+
+        // Positive controls: the same explicit player target is consumed when
+        // the filter itself names players ("target player phases out"), including
+        // the unscoped empty-type player shape used by Teferi's Reproach.
+        assert_eq!(
+            collect_player_targets(&state, &ability, &TargetFilter::Player),
+            vec![PlayerId(1)]
+        );
+        assert_eq!(
+            collect_player_targets(
+                &state,
+                &ability,
+                &TargetFilter::Typed(TypedFilter::default())
+            ),
+            vec![PlayerId(1)]
+        );
     }
 
     /// Issue #478 regression: a delayed-trigger return effect

@@ -5,11 +5,14 @@
 //! `EffectResolved` bookkeeping event.
 //!
 //! Both resolvers handle player and object targets in a single pass:
-//! explicit `TargetRef::Player` targets and player-typed mass filters
-//! (`Controller`, `Player`, `Typed { type_filters: [], … }`) route through
-//! `phase_out_player`/`phase_in_player`; everything else routes through the
-//! permanent path (CR 702.26 proper). Player phasing has no formal CR rule
-//! and follows the small set of card Oracle text that says "you phase out".
+//! player-typed filters (`Controller`, `Player`, `Typed { type_filters: [], … }`)
+//! route through `phase_out_player`/`phase_in_player`, and an explicit
+//! `TargetRef::Player` is read only when the effect filter itself names players.
+//! An object population's companion player target ("each creature target
+//! player controls") is only its controller anchor and never phases the
+//! player; those filters route through the permanent path (CR 702.26 proper).
+//! Player phasing has no formal CR rule and follows the small set of card
+//! Oracle text that says "you phase out".
 
 use std::collections::HashSet;
 
@@ -41,12 +44,14 @@ pub fn resolve(
         _ => return Ok(()),
     };
 
-    // Player-phasing branch. Mirrors `collect_object_targets` for the
-    // permanent path: explicit `TargetRef::Player` targets win, then a
-    // player-typed mass filter (`Controller`, `Typed { type_filters: [], … }`,
-    // `Player`) expands to the matching set of player ids. This dispatches
-    // before the object branch so a player target never silently becomes a
-    // no-op via `collect_object_targets`.
+    // Player-phasing branch. Only a filter that itself names players
+    // contributes player ids: a player-typed mass filter (`Controller`,
+    // `Typed { type_filters: [], … }`, `Player`) expands to the matching set,
+    // and an explicit `TargetRef::Player` is consumed for those filters. An
+    // object population's companion player target is only its controller
+    // anchor, so it never phases the player. This dispatches before the object
+    // branch so a genuine player target never silently becomes a no-op via
+    // `collect_object_targets`.
     let player_targets =
         crate::game::ability_utils::collect_player_targets(state, ability, &target);
     for pid in &player_targets {
@@ -84,10 +89,11 @@ pub fn resolve_phase_in(
         _ => return Ok(()),
     };
 
-    // Player-phasing branch — same idiom as `resolve` for symmetry. Phased-out
+    // Player-phasing branch — same filter-scoped idiom as `resolve`. Phased-out
     // players don't appear in the targeting choke point, so callers wanting
-    // to phase them back in must use an explicit `TargetRef::Player` target
-    // (or a player-typed mass filter such as `Controller`).
+    // to phase them back in must use a player-typed filter (`Controller`,
+    // `Player`, …), with an explicit `TargetRef::Player` read only for such a
+    // filter.
     let player_targets =
         crate::game::ability_utils::collect_player_targets(state, ability, &target);
     for pid in &player_targets {
@@ -265,6 +271,47 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         id
+    }
+
+    /// Issue #10266 regression: an object-population filter whose controller is
+    /// a declared player ("each creature target player controls phases out")
+    /// carries that player as `TargetRef::Player` for the filter anchor, but the
+    /// effect affects creatures only. The player must remain phased in.
+    #[test]
+    fn phase_out_object_filter_with_player_anchor_does_not_phase_out_player() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "Galadriel's Dismissal");
+        let theirs = add_creature(&mut state, PlayerId(1), "Target Bear");
+        let yours = add_creature(&mut state, PlayerId(0), "Caster Bear");
+
+        let ability = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 702.26b: only permanents phase out; the player target is the
+        // controller anchor for the creature filter, not an affected player.
+        assert!(
+            !state.players[1].is_phased_out(),
+            "the targeted player must remain phased in"
+        );
+        assert!(
+            state.objects[&theirs].is_phased_out(),
+            "the targeted player's creature must phase out"
+        );
+        assert!(
+            state.objects[&yours].is_phased_in(),
+            "an untargeted player's creature must remain phased in"
+        );
     }
 
     /// CR 702.26b: A mass phase-in effect specifically mentioning phased-out

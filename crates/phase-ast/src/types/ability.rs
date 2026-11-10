@@ -26308,9 +26308,17 @@ fn phase_out_or_in_filter_is_mass(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Controller | TargetFilter::Player | TargetFilter::ScopedPlayer => true,
         TargetFilter::Typed(tf) => {
-            tf.type_filters == [TypeFilter::Permanent]
+            (tf.type_filters == [TypeFilter::Permanent]
                 && tf.controller.is_some()
-                && tf.properties.is_empty()
+                && tf.properties.is_empty())
+                // CR 115.1 + CR 702.26b: "each creature target player controls
+                // phases out" (Galadriel's Dismissal, Teferi, Timeless
+                // Voyager) declares the PLAYER as the target; the creature
+                // population is expanded from that anchor at resolution. The
+                // companion player slot (`ability_needs_companion_target_player_slot`)
+                // supplies the declaration, so the object filter itself must not
+                // add a second, spurious creature target slot.
+                || filter_references_target_player(filter)
         }
         _ => false,
     }
