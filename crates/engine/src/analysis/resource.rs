@@ -10202,6 +10202,51 @@ mod tests {
         );
     }
 
+    /// CR 608.2k: `bind_transient_effect` SPLITS a top-level union and recurses with each
+    /// member as the application filter, so a member `EventTarget` reaches the journal
+    /// reader even though the whole filter is not exactly `EventTarget`. The gate must keep
+    /// the witness for that shape.
+    #[test]
+    fn loop_relational_union_member_recipient_keeps_witness() {
+        use crate::types::ability::{Effect, ResolvedAbility, TargetFilter};
+
+        let mut frame = relational_recipient_frame(Some(3), false, false);
+        for entry in frame.stack.iter_mut() {
+            let StackEntryKind::TriggeredAbility { ability, .. } = &mut entry.kind else {
+                unreachable!("fixture keeps only trigger carriers");
+            };
+            **ability = ResolvedAbility::new(
+                Effect::GenericEffect {
+                    static_abilities: vec![],
+                    duration: None,
+                    target: Some(TargetFilter::Or {
+                        filters: vec![TargetFilter::Controller, TargetFilter::EventTarget],
+                    }),
+                    end_cost: None,
+                },
+                vec![],
+                entry.source_id,
+                PlayerId(0),
+            );
+        }
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let projected = project_out_resources(&frame);
+        assert!(
+            DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get) > 0,
+            "a union member EventTarget can reach the runtime reader"
+        );
+        assert_eq!(
+            projected.damage_dealt_this_turn.len(),
+            1,
+            "the stale recipient relation stays observable"
+        );
+        assert_eq!(
+            projected.damage_dealt_this_turn[0].target_incarnation,
+            Some(0),
+            "all-stale is still the stale class"
+        );
+    }
+
     #[test]
     fn loop_relational_priority_sampling_does_not_rank_unread_damage_history() {
         use crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS;

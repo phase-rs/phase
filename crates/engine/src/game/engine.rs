@@ -7257,12 +7257,10 @@ fn materialize_fixed_shortcut(
     // `RespondToShortcut`/`LoopShortcut` at entry (never `Priority`), so seed a settled
     // priority beat before capturing the boundary. `reset_priority` zeroes
     // `priority_pass_count` and sets `priority_player`; `waiting_for` is set explicitly
-    // here (reset_priority does not touch it). `loop_states_equal_modulo_resources` /
-    // `loop_states_cover_modulo_growth` both project internally (`project_out_resources`,
-    // which opens with the sample form), so the extra strict `.normalize_for_loop()` here
-    // is redundant with that internal call but harmless (idempotent) — kept for a
-    // self-contained boundary value whose `waiting_for`/ring fields are already canonical
-    // at the call sites below.
+    // here (reset_priority does not touch it). `take_boundary` is the SAMPLE normal form:
+    // both consumers (`loop_states_equal_modulo_resources`,
+    // `loop_states_cover_modulo_growth`) project before they rank, so the boundary never
+    // ranks the row-unbounded journal itself.
     let boundary = take_boundary(&committed);
 
     let cycle_beat_cap = auto_pass_loop_max_iterations(&committed);
@@ -31648,11 +31646,54 @@ mod damage_history_priority_cost_tests {
             Zone::Battlefield,
         );
         let incarnation = state.objects[&source].incarnation;
+        let recipient = crate::game::zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Boundary recipient".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient_incarnation = state.objects[&recipient].incarnation;
+        // A REAL recipient reader, so the journal reduction actually runs on both projected
+        // sides; without it the fixture would measure the empty-request early return.
+        state.stack.push_back(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::SetTapState {
+                        target: TargetFilter::EventTarget,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                    vec![],
+                    source,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: Some(GameEvent::DamageDealt {
+                    source_id: source,
+                    source_incarnation: Some(incarnation),
+                    target: TargetRef::Object(recipient),
+                    amount: 1,
+                    is_combat: false,
+                    excess: 0,
+                }),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
         for _ in 0..ROWS {
             state.damage_dealt_this_turn.push_back(DamageRecord {
                 source_id: source,
                 source_incarnation: Some(incarnation),
-                target: TargetRef::Player(PlayerId(1)),
+                target: TargetRef::Object(recipient),
+                target_incarnation: Some(recipient_incarnation),
                 amount: 1,
                 ..Default::default()
             });
@@ -31666,14 +31707,15 @@ mod damage_history_priority_cost_tests {
             "take_boundary must not rank the row-unbounded journal"
         );
         // Boundary construction through the first settle comparison: one reduction pass per
-        // projected side, plus any bounded witness rank — never an identity rank of H.
+        // projected side plus a bounded witness rank. A strict boundary would add its own
+        // two journal passes, so the bound discriminates that revert.
         LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
         let _ = settle_recurs(&boundary, &state);
         let whole_path = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
         assert!(
-            whole_path <= 2 * ROWS + 8,
+            whole_path <= 2 * ROWS + 16,
             "{whole_path} visits from boundary construction through the first settle \
-             comparison for {ROWS} unread rows"
+             comparison for {ROWS} rows; a strict boundary would add two more passes"
         );
     }
 

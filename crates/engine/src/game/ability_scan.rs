@@ -5726,10 +5726,21 @@ pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
                 static_abilities,
                 ..
             } => {
-                target.as_ref() == Some(&TargetFilter::EventTarget)
+                // `bind_transient_effect` SPLITS a top-level `Or`/`And` union and recurses
+                // with each member as the application filter, so a member `EventTarget`
+                // reaches the same exact-match arm as a whole-filter one. Use the
+                // recursive event-subject test here (a superset) so such a member cannot
+                // slip past the gate.
+                let names_recipient = |filter: &TargetFilter| {
+                    crate::types::ability::filter_refs_event_subject(
+                        filter,
+                        &TargetFilter::EventTarget,
+                    )
+                };
+                target.as_ref().is_some_and(names_recipient)
                     || static_abilities
                         .iter()
-                        .any(|d| d.affected.as_ref() == Some(&TargetFilter::EventTarget))
+                        .any(|d| d.affected.as_ref().is_some_and(names_recipient))
             }
             _ => false,
         }
