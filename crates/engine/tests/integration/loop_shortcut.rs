@@ -16894,6 +16894,42 @@ fn r5_probe_delta() -> i32 {
     delta
 }
 
+/// CR 119.3: on the printed Sanguine Bond board ("Whenever you gain life, target opponent loses
+/// that much life."), a declaration re-aiming the Bond at P2 drains P2, which only ever LOSES
+/// life. P2's per-turn gained tally full to the stored limit refuses nothing: the headroom proof
+/// steps each tally by its own gross edit, and P2 gains none. P2's LOST tally full to the limit
+/// is the control — the drain advances it, so it bounds the declaration and the declaration is
+/// handed back before any response window (#10543). Two repetitions, because the first resolves
+/// the trigger already on the stack, aimed at P1 (CR 603.3d + CR 601.2c); the second drains P2.
+#[test]
+fn a_seat_that_only_loses_life_is_not_bounded_by_its_gained_tally() {
+    let declare = |gained: u32, lost: u32| {
+        let (mut runner, slot, _bond, _hexproof_src, _lives) = r5_reach_offer();
+        let p2 = &mut runner.state_mut().players[P2.0 as usize];
+        p2.life_gained_this_turn = gained;
+        p2.life_lost_this_turn = lost;
+        runner
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(2),
+                template: Some(r5_pin_template(slot, P2, 2)),
+            })
+            .expect("a declaration is answered, not an error");
+        runner.state().waiting_for.clone()
+    };
+    assert!(
+        matches!(declare(0, 0), WaitingFor::RespondToShortcut { .. }),
+        "reach guard: the declaration aimed at P2 opens the response window"
+    );
+    assert!(
+        matches!(declare(u32::MAX, 0), WaitingFor::RespondToShortcut { .. }),
+        "a full gained tally on the drained seat, which gains no life, refuses nothing"
+    );
+    assert!(
+        matches!(declare(0, u32::MAX), WaitingFor::Priority { player } if player == P0),
+        "control: the lost tally the drain advances does bound the declaration"
+    );
+}
+
 /// ITEM 2 / R5 ⭐ — **a declared target made illegal mid-drive stops the drive short and is
 /// NEVER re-chosen.** Governing ruling, ledgered verbatim: *stop-short/abort, never silently
 /// re-choose or skip.*

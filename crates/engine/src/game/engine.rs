@@ -2983,9 +2983,10 @@ fn interactive_loop_bridge_paths(
             // winner it names: the declare seam admits `UntilLethal` only where it lies inside the
             // capacity, a responder may name only a place before it, and restore and settlement
             // re-check it. The winner and the capacity alone do not state where the sequence
-            // ends. A fixed fallback states its own ending point and promises no crossing.
+            // ends. A fixed fallback states its own ending point and promises no crossing, but the
+            // crossing is still recorded for shortening bounds and restore validation.
             let mut certificate = certificate;
-            if iteration_count == crate::analysis::decision_template::IterationCount::UntilLethal {
+            if cycles_to_lethal != u64::MAX {
                 certificate.win_kind_at = u32::try_from(cycles_to_lethal).ok();
             }
             let schema = build_shortcut_schema(Vec::new(), iteration_count, None, representable);

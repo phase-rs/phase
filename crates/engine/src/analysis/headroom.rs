@@ -375,7 +375,7 @@ impl PeriodExcursions {
                         observed.lost.max(charged_loss),
                     )
                 }
-                None => (charged_loss.max(net_gain), charged_loss),
+                None => (net_gain, charged_loss),
             };
             let net = net_gain - charge.net;
             if net != 0 || gained != 0 || lost != 0 {

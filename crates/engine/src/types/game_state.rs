@@ -16279,6 +16279,19 @@ fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
                     .to_string(),
             );
         }
+        // A legacy Ring offer from a save written before the headroom measurement existed
+        // decodes with the default schema (iteration_count = Fixed(0), deliverable_capacity = budget).
+        // Such an offer states no measured take and must be refused — the player must play it out.
+        if *road == crate::analysis::loop_check::OfferRoad::Ring
+            && schema.iteration_count
+                == crate::analysis::decision_template::IterationCount::Fixed(0)
+        {
+            return Err(
+                "persisted Ring offer carries the default schema (iteration_count = 0), which states \
+                 no measured shortcut; the save predates the headroom measurement"
+                    .to_string(),
+            );
+        }
         // After the zero-capacity check, so a corrupt zero bound carrying a period is refused as
         // the zero it is.
         reject_period_on_the_ring_road(*road, period, "LoopShortcut offer")?;
