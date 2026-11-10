@@ -3799,42 +3799,41 @@ fn payer_producer_facts_match(
 /// whose exit record was lost falls into. The units are the caller's — one payer's pool, in
 /// pool order — because the fact belongs to the payer whose payment can spend it, not to the
 /// state as a whole.
+///
+/// The resolver is `game::casting::mana_spent_source_snapshots` — the single authority a
+/// payment uses — asked ONCE for the whole pool through that authority's position-preserving
+/// form. The batch answer on its own drops every unit it cannot resolve, so it says how many
+/// units are unprovable but never WHICH, and a fact compared without its unit is exactly the
+/// defect this pairing exists to close; resolving unit by unit kept the pairing but rebuilt
+/// the ledger's retained-row index for EVERY unit of EVERY compared position. One batch keeps
+/// the per-unit answer and one index.
 fn spendable_unit_producer_facts(
     state: &GameState,
     pool: &crate::types::mana::ManaPool,
 ) -> Vec<(crate::types::mana::ManaShape, Option<LKISnapshot>)> {
-    let mut facts: Vec<(crate::types::mana::ManaShape, Option<LKISnapshot>)> = Vec::new();
-    for unit in pool.units() {
-        let fact = unit_producer_fact(state, &unit);
+    // CR 118.3a: ONE batch read for the WHOLE pool, so the index over the retained producer
+    // rows is built once per compared position instead of once per unit
+    // (`casting::mana_spent_source_snapshots_by_unit`; the probe is
+    // `game::perf_counters::TakeCostCounters::pooled_producer_index_builds`, and a per-unit
+    // read charges units × rows where the batch charges units + rows).
+    let units: Vec<crate::types::mana::ManaUnit> = pool.units().collect();
+    let facts = crate::game::casting::mana_spent_source_snapshots_by_unit(state, &units);
+    let mut retained: Vec<(crate::types::mana::ManaShape, Option<LKISnapshot>)> = Vec::new();
+    for (unit, fact) in units.into_iter().zip(facts) {
+        let fact = fact.map(|snapshot| canonical_producer_fact(snapshot.lki));
         let (shape, _pip) = unit.into_shape_and_pip();
-        let listed = facts
+        // A repeated fact on ONE shape is the same evidence, not more of it — see this
+        // function's doc. The scan is over the retained rows, at most one per
+        // (shape, fact) pair and one per shape until two units of one shape resolve apart,
+        // so it is bounded by this payer's pool and not by the retained ledger.
+        let listed = retained
             .iter()
             .any(|(listed_shape, listed_fact)| *listed_shape == shape && *listed_fact == fact);
         if !listed {
-            facts.push((shape, fact));
+            retained.push((shape, fact));
         }
     }
-    facts
-}
-
-/// CR 106.3 + CR 113.7 + CR 400.7: the ONE fact `unit`'s payment can prove, or `None` when
-/// the payment cannot name its producer at all.
-///
-/// The resolver is `game::casting::mana_spent_source_snapshots` — the single authority a
-/// payment uses — asked about THIS unit alone, because that is the question a payment asks:
-/// it resolves the unit it is about to spend, one unit at a time
-/// (`game::casting::mana_spent_source_snapshot`). The batch answer drops every unit it cannot
-/// resolve, so it says how many units are unprovable but never WHICH, and a fact compared
-/// without its unit is exactly the defect this pairing exists to close. A payer's pool holds
-/// only the mana a payment can drain, so the per-unit call is bounded by that payment.
-fn unit_producer_fact(
-    state: &GameState,
-    unit: &crate::types::mana::ManaUnit,
-) -> Option<LKISnapshot> {
-    crate::game::casting::mana_spent_source_snapshots(state, std::slice::from_ref(unit))
-        .into_iter()
-        .next()
-        .map(|snapshot| canonical_producer_fact(snapshot.lki))
+    retained
 }
 
 /// CR 106.3 + CR 613.1g: the payment-visible part of one producer fact — the snapshot
@@ -3882,8 +3881,14 @@ fn loyalty_activation_counts_match(a: &GameState, b: &GameState) -> bool {
     })
 }
 
-/// CR 601.2f + CR 732.2a: does a LIVE cost modifier's projected-journal multiplier observe a
+/// CR 601.2f + CR 604.1 + CR 732.2a: does a LIVE per-turn first-use cast gate observe a
 /// DIFFERENT value on the two compared frames?
+///
+/// A first-use cast gate is either a cost modifier (Head of the Class) or a
+/// `CastWithKeyword` grant (Rain of Riches), and it reads the turn's cast journal either as
+/// a `dynamic_count` multiplier ("{1} less for each …") or as a printed `static condition`
+/// (the "first spell … each turn" gate, which prices the next cast in one shape and grants
+/// it an ability in the other).
 ///
 /// [`project_out_resources`] zeroes the per-turn journals on BOTH compared frames, so a pair
 /// whose journal moved compares equal and would certify a recurrence whose price is not
@@ -3976,11 +3981,12 @@ fn actual_cast_variants(
 ///
 /// * [`Count`](Self::Count) is a `dynamic_count` the modifier MULTIPLIES by ("{1}
 ///   less for each …"), so the frame's resolved NUMBER is the price input.
-/// * [`Gate`](Self::Gate) is a printed CONDITION the price is subject to ("the first
-///   spell you cast each turn …", costed only while the gate holds), so the frame's
-///   TRUTH is the price input. Comparing its population instead would refuse a
-///   recurrence whose gate answers the same on both frames — a count of 2 growing to
-///   3 behind `count == 0` prices exactly the same nothing.
+/// * [`Gate`](Self::Gate) is a printed CONDITION the next cast is subject to ("the first
+///   spell you cast each turn …"), read only while the gate holds — a price it discounts,
+///   or, for a `CastWithKeyword` grant, an ability it confers — so the frame's TRUTH is the
+///   input. Comparing its population instead would refuse a recurrence whose gate answers
+///   the same on both frames — a count of 2 growing to 3 behind `count == 0` prices exactly
+///   the same nothing.
 ///
 /// Reading only the first shape is what let a conditional reducer price a short-cut
 /// the comparator could not see: the modifier's `dynamic_count` was `None`, so the
@@ -4046,9 +4052,14 @@ fn projected_cost_observables<'a>(
     observables
 }
 
-/// CR 601.2f: the observables ONE cost-modifier static definition reads — its
-/// `dynamic_count` when that reads a projected journal, and its printed CONDITION
+/// CR 601.2f + CR 604.1: the observables ONE first-use-cast-gate static definition reads —
+/// its `dynamic_count` when that reads a projected journal, and its printed CONDITION
 /// whenever that condition reads one too.
+///
+/// A first-use gate has two shapes and both are read here, because they differ only in what
+/// the first use BUYS: a cost modifier PRICES the cast and a `CastWithKeyword` grant gives
+/// it an ability. Reading one and not the other left the other's spent-and-unspent pair
+/// indistinguishable.
 ///
 /// The condition arm is the exhaustive half: [`static_condition_reads_projected`]
 /// classifies every `StaticCondition` variant through `ability_scan`, so a gate
@@ -4061,22 +4072,33 @@ fn static_mode_observables(
     if let Some(count) = static_mode_projected_count(&def.mode) {
         observables.push(CostObservable::Count(count));
     }
-    // Only a cost modifier's condition GATES a price; the same condition on any other
-    // static changes no cost, and including it would refuse recurrences for a reason
-    // CR 601.2f does not have.
+    // Only a first-use cast gate's condition GATES a per-turn first use; the same
+    // condition on any other static changes nothing the next cast reads, and including it
+    // would refuse recurrences for a reason CR 601.2f does not have. Two modes carry such
+    // a gate and they differ only in what the first use BUYS: a cost modifier PRICES the
+    // cast (`ModifyCost` / `ReduceAbilityCost`, Head of the Class) and a keyword grant
+    // gives it an ABILITY (`CastWithKeyword`, Rain of Riches' "The first spell you cast
+    // each turn that mana from a Treasure was spent to cast has cascade."). CR 732.2a
+    // asks about "the current game state and the predictable results of the sequence of
+    // choices", so a first use that GRANTS is as much a predictably different result as
+    // one that discounts. This arm is the exhaustive half; the row projection
+    // (`casting::is_first_use_cast_gate_mode`) carries the same two shapes, and reading
+    // only one of them leaves the other's difference invisible.
     if matches!(
         def.mode,
         crate::types::statics::StaticMode::ModifyCost { .. }
             | crate::types::statics::StaticMode::ReduceAbilityCost { .. }
+            | crate::types::statics::StaticMode::CastWithKeyword { .. }
     ) {
         if let Some(condition) = def
             .condition
             .as_ref()
             .filter(|condition| static_condition_reads_projected(condition))
         {
-            // CR 601.2f: the definition's own `affected` says WHOSE spells the price
-            // applies to; `board_wide_cost_modifier` reads the same axis and rejects
-            // `SelfRef`, so the scope is read here off `affected` directly.
+            // CR 601.2f + CR 604.1: the definition's own `affected` says WHOSE spells this
+            // applies to; `board_wide_cost_modifier` reads the same axis for a price and
+            // rejects `SelfRef`, and a `CastWithKeyword` grant is scoped by the same filter,
+            // so the scope is read here off `affected` directly.
             observables.push(CostObservable::Gate {
                 condition,
                 caster_scope: crate::types::ability::cost_modifier_caster_scope(
@@ -11270,6 +11292,284 @@ mod tests {
         assert!(
             loop_states_equal_modulo_resources(&a, &b),
             "CR 732.2a: an unchanged red/blue pool plus a monotone life change must stay covered"
+        );
+    }
+
+    /// CR 106.3 + CR 601.2f: **Rain of Riches** (`{3}{R}{R}` Enchantment; Oracle verified
+    /// against Scryfall: "When this enchantment enters, create two Treasure tokens. / The
+    /// first spell you cast each turn that mana from a Treasure was spent to cast has
+    /// cascade.").
+    ///
+    /// The grant is `StaticMode::CastWithKeyword { Cascade }` gated on
+    /// `SpellsCastThisTurn(you, mana-from-a-Treasure) == 0` — NOT a cost modifier. Returns
+    /// the state, the enchantment, and one Treasure under P0.
+    fn first_use_cascade_board() -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(7);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(309),
+            PlayerId(0),
+            "Rain of Riches".to_string(),
+            Zone::Battlefield,
+        );
+        // CR 601.2f + CR 604.1: the parser's own lowering of the printed line, so the
+        // grant's condition (`SpellsCastThisTurn(filter) == 0`) and its Treasure-qualified
+        // filter are the card's, not a hand-built approximation of them.
+        let definition = crate::parser::oracle_static::parse_static_line(
+            "The first spell you cast each turn that mana from a Treasure was spent to cast has cascade.",
+        )
+        .expect("Rain of Riches' cascade grant must parse");
+        state
+            .objects
+            .get_mut(&source)
+            .expect("the source was just created")
+            .static_definitions
+            .push(definition);
+        let treasure = treasure_on_battlefield(&mut state, 3091, PlayerId(0));
+        (state, source, treasure)
+    }
+
+    /// CR 604.1: does the board's `CastWithKeyword` grant FUNCTION right now — the live
+    /// authority (`functioning_abilities::active_static_definitions` applies the
+    /// definition's own `condition`) for "the next cast is granted cascade".
+    fn cascade_grant_functions(state: &GameState, source: ObjectId) -> bool {
+        crate::game::functioning_abilities::active_static_definitions(
+            state,
+            &state.objects[&source],
+        )
+        .any(|def| {
+            matches!(
+                def.mode,
+                crate::types::statics::StaticMode::CastWithKeyword { .. }
+            )
+        })
+    }
+
+    /// CR 106.3 + CR 601.2h: one cast-journal row for a spell whose payment the record can
+    /// PROVE came from `treasure` — the shape `finalize_cast` latches.
+    fn treasure_funded_cast_record(
+        state: &GameState,
+        treasure: ObjectId,
+        name: &str,
+    ) -> crate::types::game_state::SpellCastRecord {
+        let mut record = cast_record(
+            name,
+            vec![crate::types::card_type::CoreType::Sorcery],
+            crate::types::game_state::CastingVariant::Normal,
+        );
+        record.mana_spent_source_snapshots =
+            Some(vec![crate::types::game_state::ManaSpentSourceSnapshot {
+                source_id: treasure,
+                lki: state.objects[&treasure].snapshot_for_mana_spent(),
+            }]);
+        record
+    }
+
+    /// CR 732.2a + CR 106.3 + CR 601.2f: **the first-use state must be compared.**
+    ///
+    /// Rain of Riches' grant is consumed per turn: two positions whose ONLY difference is
+    /// whether the turn's first Treasure-funded spell has already been cast are NOT the
+    /// same position, because the NEXT cast is granted cascade in one and not in the other
+    /// (CR 732.2a asks about "the current game state and the predictable results of the
+    /// sequence of choices"). Both halves of the cast-history comparison had to learn
+    /// `CastWithKeyword` — the exhaustive veto's gate arm (`static_mode_observables`) AND
+    /// the journal row projection (`casting::cost_observable_cast_journal`, whose mode
+    /// filter excluded grants). With either missing, `b` projects to the same journal as
+    /// `a` and the pair was certified as constant.
+    #[test]
+    fn first_use_cascade_grant_spent_is_not_the_same_position() {
+        let (unspent, source, treasure) = first_use_cascade_board();
+        let record = treasure_funded_cast_record(&unspent, treasure, "Night's Whisper");
+
+        let mut spent = unspent.clone();
+        spent
+            .spells_cast_this_turn_by_player
+            .insert(PlayerId(0), im::Vector::from(vec![record]));
+        // The monotone resource the projection already erases, so the pair differs ONLY in
+        // the first-use state.
+        spent.players[1].life -= 1;
+
+        // REASON the two positions differ: the next Treasure-funded cast is granted cascade
+        // in one and not in the other. Asked of the LIVE authority, not of the comparator.
+        assert!(
+            cascade_grant_functions(&unspent, source),
+            "reason: `unspent` has cast no Treasure-funded spell this turn, so Rain of Riches \
+             grants cascade to the next one"
+        );
+        assert!(
+            !cascade_grant_functions(&spent, source),
+            "reason: `spent` has already cast this turn's Treasure-funded first spell, so the \
+             next one gets no cascade — the two positions price the next cast apart"
+        );
+
+        // HALF 1 — the journal row projection (`casting::cost_observable_cast_journal`).
+        assert_ne!(
+            crate::game::casting::cost_observable_cast_journal(&unspent),
+            crate::game::casting::cost_observable_cast_journal(&spent),
+            "CR 601.2f: the projection must keep the spent first Treasure-funded row and no \
+             row for the unspent position, so the first-use state survives the projection"
+        );
+
+        // HALF 2 — the exhaustive veto's gate arm (`static_mode_observables`).
+        assert!(
+            super::cost_modifier_reads_changed_projected_resource(&unspent, &spent),
+            "CR 601.2f + CR 604.1: the grant's gate answers differently on the two frames, so \
+             the first-use grant IS an observable a recurrence must price"
+        );
+
+        // The comparator the loop firewall calls.
+        assert!(
+            !loop_states_equal_modulo_resources(&unspent, &spent),
+            "CR 732.2a: a period that SPENDS the turn's first-use cascade must not compare \
+             modulo-equal to one that has not — a certificate over that period would replay a \
+             grant the turn can make only once"
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&spent, &unspent),
+            "CR 732.2a: the comparison is symmetric — the reverse order must refuse too"
+        );
+    }
+
+    /// CR 732.2a: the over-tightening guard for the witness above. The first-use state is
+    /// the SAME on both sides in both shapes a real recurrence takes, and the pair must
+    /// still compare EQUAL — so the control cannot be satisfied by refusing every position
+    /// that carries a first-use grant.
+    ///
+    /// * BEFORE the grant is used: neither side has cast a Treasure-funded spell, so the
+    ///   next cast is granted cascade in both. Only a monotone resource moved.
+    /// * AFTER it is used: both sides keep the SAME first row and later periods append
+    ///   further rows, so the kept prefix is identical and the gate answers "no" on both —
+    ///   an ordinary cast loop past the one-time grant is not refused.
+    #[test]
+    fn first_use_cascade_grant_that_answers_the_same_stays_covered() {
+        let (before, source, treasure) = first_use_cascade_board();
+        let record = treasure_funded_cast_record(&before, treasure, "Night's Whisper");
+
+        assert!(
+            cascade_grant_functions(&before, source),
+            "reach-guard: the unspent position really does carry a live first-use grant"
+        );
+        let mut before_plus_life = before.clone();
+        before_plus_life.players[1].life -= 1;
+        assert_eq!(
+            crate::game::casting::cost_observable_cast_journal(&before),
+            crate::game::casting::cost_observable_cast_journal(&before_plus_life),
+            "reach-guard: neither side has spent the grant, so the row projection agrees"
+        );
+        assert!(
+            !super::cost_modifier_reads_changed_projected_resource(&before, &before_plus_life),
+            "reach-guard: an unmoved first-use gate is not a dependency"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&before, &before_plus_life),
+            "CR 732.2a: two positions that have BOTH not spent the grant are the same position"
+        );
+
+        let mut spent = before.clone();
+        spent
+            .spells_cast_this_turn_by_player
+            .insert(PlayerId(0), im::Vector::from(vec![record.clone()]));
+        let mut spent_later = spent.clone();
+        spent_later
+            .spells_cast_this_turn_by_player
+            .get_mut(&PlayerId(0))
+            .expect("the first row is journalled")
+            .push_back(record);
+        assert!(
+            !cascade_grant_functions(&spent, source)
+                && !cascade_grant_functions(&spent_later, source),
+            "reach-guard: the turn's first use is spent on BOTH sides"
+        );
+        assert_eq!(
+            crate::game::casting::cost_observable_cast_journal(&spent),
+            crate::game::casting::cost_observable_cast_journal(&spent_later),
+            "CR 601.2f: later periods keep the SAME kept prefix, so the projection agrees"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&spent, &spent_later),
+            "CR 732.2a: after the first use is spent, further casts are pure history (EQUAL)"
+        );
+    }
+
+    /// CR 118.3a + CR 400.7: the producer-fact comparison indexes the retained producer
+    /// rows ONCE PER COMPARED POSITION, not once per floating unit.
+    ///
+    /// [`spendable_unit_producer_facts`] resolves every unit of a payer's pool through
+    /// `game::casting::mana_spent_source_snapshots`, whose first read that falls back to the
+    /// carried ledger builds that ledger's index
+    /// (`mana_payment::LazyPooledProducerLedgerIndex`). Asking the resolver once per UNIT
+    /// built one index per unit, so comparing two positions charged
+    /// `pooled_producer_index_builds == units × 2` — the units × rows shape the probes on the
+    /// payment and boundary paths already refuse. The position-preserving batch read charges
+    /// exactly 2: one index per compared position, however many units either pool holds.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn producer_fact_comparison_indexes_the_retained_rows_once_per_position() {
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::{ManaPipId, ManaUnit};
+
+        const UNITS: u64 = 4;
+        let mut state = GameState::new_two_player(7);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Mox Jet".to_string(),
+            Zone::Battlefield,
+        );
+        let incarnation = state.objects[&source].incarnation;
+        let lki = state.objects[&source].snapshot_for_mana_spent();
+        // CR 400.7: the producer is GONE — the storage id now holds a later object, so no
+        // unit can be answered by its live source and every one of them reaches the ledger.
+        state
+            .objects
+            .get_mut(&source)
+            .expect("the producer exists")
+            .incarnation += 1;
+        let mut rows = Vec::new();
+        for index in 1..=UNITS {
+            let mut unit = ManaUnit::new(ManaType::Red, source, false, Vec::new());
+            unit.pip_id = ManaPipId(index);
+            unit.source_incarnation = Some(incarnation);
+            state.players[0].mana_pool.add(unit);
+            rows.push(crate::types::game_state::PooledManaProducerSnapshot {
+                pip_id: ManaPipId(index),
+                source_id: source,
+                source_incarnation: incarnation,
+                lki: lki.clone(),
+            });
+        }
+        state.pooled_mana_producer_snapshots = rows;
+        let other = state.clone();
+
+        crate::game::perf_counters::reset();
+        let earlier = crate::game::perf_counters::take_cost_snapshot();
+        let equal = super::floating_producer_facts_match(&state, &other);
+        let charged = crate::game::perf_counters::take_cost_snapshot().since(earlier);
+
+        assert!(
+            equal,
+            "reach-guard: two identical positions prove identical producer facts"
+        );
+        assert_eq!(
+            charged.pooled_producer_index_builds,
+            2,
+            "CR 118.3a: ONE index over the retained producer rows serves each compared \
+             position, so comparing two positions builds two. It built {} for {UNITS} units \
+             per pool — the signature of a rebuild per unit ({} before the fix).",
+            charged.pooled_producer_index_builds,
+            UNITS * 2
+        );
+        assert!(
+            charged.pooled_producer_rows_probed <= 2 * (UNITS + UNITS),
+            "CR 118.3a: one indexed batch charges its rows once for the build plus each unit's \
+             own lookup, so two positions cost 2 × ({UNITS} + {UNITS}) rows at worst. It \
+             examined {} — a per-unit index build charges 2 × ({UNITS} × {UNITS}).",
+            charged.pooled_producer_rows_probed
         );
     }
 

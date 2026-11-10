@@ -24868,12 +24868,41 @@ pub(crate) fn mana_spent_source_snapshots(
     // lasts. Indexing that up front charged every payment for facts a live or
     // exit-cache answer already settled; the lazy index keeps the batch linear when the
     // fallback IS reached and free when it is not.
+    //
+    // The read itself is the position-preserving sibling's, so the batch a payment asks
+    // and the comparator that pairs each fact with the unit carrying it share ONE body
+    // and therefore one index policy.
+    mana_spent_source_snapshots_by_unit(state, units)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// CR 118.3a + CR 400.7: the SAME single-authority read as
+/// [`mana_spent_source_snapshots`], but POSITION-PRESERVING — one entry per input unit,
+/// `None` for a unit whose producer the payment cannot name.
+///
+/// The batch above answers a PAYMENT, which asks about the units it is about to spend and
+/// never needs to know which of them it could not name. A comparator that pairs a fact with
+/// the UNIT carrying it does, and both questions must still share ONE index over the
+/// retained producer rows: those rows are read per unit
+/// ([`mana_spent_source_snapshot`]'s last resort), so resolving a pool of N units through N
+/// separate single-unit calls builds that index N times — the units × rows shape the
+/// boundary's and the payment's own probes refuse — while one batch charges units + rows.
+///
+/// Nothing else moves: the driver, the origin-zone chain, the exit cache and the retained
+/// ledger are all still answered by [`mana_spent_source_snapshot`], and the batch above is
+/// this function with the `None`s dropped.
+pub(crate) fn mana_spent_source_snapshots_by_unit(
+    state: &GameState,
+    units: &[crate::types::mana::ManaUnit],
+) -> Vec<Option<crate::types::game_state::ManaSpentSourceSnapshot>> {
     let pooled_index = super::mana_payment::LazyPooledProducerLedgerIndex::new(
         &state.pooled_mana_producer_snapshots,
     );
     units
         .iter()
-        .filter_map(|unit| mana_spent_source_snapshot(state, &pooled_index, unit))
+        .map(|unit| mana_spent_source_snapshot(state, &pooled_index, unit))
         .collect()
 }
 
@@ -35489,7 +35518,10 @@ pub(crate) fn cost_observable_activation_journal(
 /// CR 601.2f prices a spell against the turn's cast history ("The first spell you
 /// cast during each of your turns that targets a creature costs {W}{B} less to
 /// cast" — Head of the Class), and CR 732.2a's "predictable results" forbid the
-/// comparator to equate two positions the next price reads differently. The rest of
+/// comparator to equate two positions the next price reads differently. The same
+/// journal answers a per-turn first-use GRANT ("The first spell you cast each turn
+/// that mana from a Treasure was spent to cast has cascade." — Rain of Riches), where
+/// the difference the next cast reads is an ability rather than a price. The rest of
 /// the journal is pumped history — it grows on every cycle of an ordinary cast loop
 /// and clearing it is what lets such a loop compare equal — so the projection cannot
 /// keep the whole journal either.
@@ -35497,8 +35529,10 @@ pub(crate) fn cost_observable_activation_journal(
 /// The line is the same one the activation journal's projection draws: a
 /// "the Nth … each turn" gate reads exactly one fact — WHICH row it would count
 /// against, or that it counts none. So the projection keeps, for every such gate a
-/// cost modifier carries, the gate's first `N` qualifying rows for every living
-/// player as its hypothetical controller (CR 109.5: control can later pass to
+/// first-use definition carries — a cost modifier that PRICES the cast, or a
+/// `CastWithKeyword` grant that gives it an ability
+/// ([`is_first_use_cast_gate_mode`]) — the gate's first `N` qualifying rows for every
+/// living player as its hypothetical controller (CR 109.5: control can later pass to
 /// anyone), and drops every other row.
 ///
 /// Keeping the first `N` is what makes an exact-ordinal gate (`count == N - 1`)
@@ -35538,7 +35572,7 @@ pub(crate) fn cost_observable_cast_journal(
                     .iter()
                     .flat_map(|face| face.static_definitions.iter_all()),
             )
-            .filter(|def| is_cost_modifier_mode(&def.mode));
+            .filter(|def| is_first_use_cast_gate_mode(&def.mode));
         for def in definitions {
             collect(def.condition.as_ref(), *id);
         }
@@ -35581,12 +35615,29 @@ pub(crate) fn cost_observable_cast_journal(
     journal
 }
 
-/// CR 601.2f: whether `mode` is a mode that can price a spell — the family whose
-/// printed condition may gate a price on the turn's cast journal.
-fn is_cost_modifier_mode(mode: &StaticMode) -> bool {
+/// CR 601.2f + CR 604.1: whether `mode` is a mode whose printed CONDITION gates a
+/// per-turn FIRST USE of the turn's cast journal — the family whose condition may be
+/// asked against `GameState::spells_cast_this_turn_by_player`.
+///
+/// Two shapes read the journal this way, and they differ only in what the first use
+/// BUYS: a cost modifier PRICES the cast (`ModifyCost` / `ReduceAbilityCost` — Head of the
+/// Class), and a keyword grant gives it an ABILITY (`CastWithKeyword` — Rain of Riches,
+/// "The first spell you cast each turn that mana from a Treasure was spent to cast has
+/// cascade."). CR 732.2a asks about "the current game state and the predictable results of
+/// the sequence of choices", and a first use that GRANTS is as much a predictably
+/// different result as one that discounts. Leaving the grant out projected a
+/// spent-and-unspent pair to the same journal, so the recurrence was certified as though
+/// the next cast's cascade could not differ.
+///
+/// A mode whose definition carries no `condition` contributes no gate (`collect` returns
+/// early), and over-keeping a row can only make two positions compare UNEQUAL — never
+/// equal — so widening this set is the fail-closed direction.
+fn is_first_use_cast_gate_mode(mode: &StaticMode) -> bool {
     matches!(
         mode,
-        StaticMode::ModifyCost { .. } | StaticMode::ReduceAbilityCost { .. }
+        StaticMode::ModifyCost { .. }
+            | StaticMode::ReduceAbilityCost { .. }
+            | StaticMode::CastWithKeyword { .. }
     )
 }
 
