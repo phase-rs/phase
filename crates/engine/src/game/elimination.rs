@@ -233,13 +233,10 @@ pub fn concede(
             false
         };
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-        // CR 104.3a: the concession ended the game; no family may deliver
-        // another member afterwards.
         return Ok(Some(scan_from));
     }
-    // CR 704.3 + 704.5f: the concession's staged batch drain can leave the
-    // board needing state-based actions (a counterless 0/0 from a departed
-    // anthem) before the next priority.
+    // CR 704.3 + 704.5f: the staged batch drain can leave zero-toughness
+    // permanents needing SBAs before the next priority.
     super::sba::check_state_based_actions(state, events);
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
         return Ok(Some(scan_from));

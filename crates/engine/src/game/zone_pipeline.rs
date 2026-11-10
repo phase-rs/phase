@@ -4943,6 +4943,33 @@ pub(crate) fn resume_paused_entry_attack_choice(
                 pending.library_placement.clone(),
             )
         };
+    // CR 508.4: the offered defender can leave while the answer is pending.
+    // Reoffer the surviving legal defenders before delivering the entry.
+    let live_targets = crate::game::combat::valid_entry_attack_targets(
+        state,
+        controller,
+        &crate::types::ability::EntryAttackDestination::AnyDefender,
+    );
+    if !live_targets.contains(&target) && !live_targets.is_empty() {
+        state.pending_entry_attack_event = Some(Box::new(
+            crate::types::game_state::PendingEntryAttackEvent {
+                event: expected_event,
+                member,
+                source_id: Some(source_id),
+                duration,
+                exile_controller: Some(controller),
+                track_exiled_by_source: track,
+                library_placement,
+            },
+        ));
+        state.waiting_for = WaitingFor::EntryAttackTargetChoice {
+            player: controller,
+            object_id: member.object_id,
+            valid_targets: live_targets,
+        };
+        return Ok(state.waiting_for.clone());
+    }
+    // If no defender remains the entry still happens without an attacker.
     let delivery_start = events.len();
     // The move never happened (the pause precedes it), so deliver the approved
     // event here with the chosen defender; every earlier modifier rides on it.

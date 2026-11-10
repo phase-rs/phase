@@ -1609,6 +1609,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // authority for who receives priority after the batch finishes announcing.
     // No viewer projection carries it.
     filtered.pending_trigger_construction_priority_recipient = None;
+    // Parked entry carriers hold approved private events and delivery context.
+    // The projected WaitingFor is the complete interaction surface.
+    filtered.pending_entry_attack_event = None;
+    filtered.pending_aura_entry = None;
     // CR 400.2 + CR 608.2c: Resolution frames and their instruction-local
     // return results are server-authoritative continuations. They can carry
     // private object identities, trigger source contexts, and resolved ability

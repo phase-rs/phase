@@ -667,6 +667,7 @@ fn zones_mask<'a>(zones: impl IntoIterator<Item = &'a Zone>) -> u8 {
 struct OwnerReach {
     named: u8,
     all: u8,
+    excluded: u8,
 }
 
 /// A typed leg's own zone constraints, intersected: `InAnyZone { Library,
@@ -710,32 +711,41 @@ fn owner_reach(filter: &TargetFilter, player: &ControllerRef) -> OwnerReach {
                     0
                 },
                 all: bits,
+                excluded: 0,
             }
         }
         TargetFilter::And { filters } => {
             let mut all = ALL_ZONES_MASK;
             let mut naming = 0;
+            let mut excluded = 0;
             for child in filters {
                 let child = owner_reach(child, player);
                 all &= child.all;
                 naming |= child.named;
+                excluded |= child.excluded;
             }
+            let all = all & !excluded;
             OwnerReach {
                 named: all & naming,
                 all,
+                excluded,
             }
         }
-        TargetFilter::Or { filters } => {
-            filters
-                .iter()
-                .fold(OwnerReach { named: 0, all: 0 }, |acc, child| {
-                    let child = owner_reach(child, player);
-                    OwnerReach {
-                        named: acc.named | child.named,
-                        all: acc.all | child.all,
-                    }
-                })
-        }
+        TargetFilter::Or { filters } => filters.iter().fold(
+            OwnerReach {
+                named: 0,
+                all: 0,
+                excluded: ALL_ZONES_MASK,
+            },
+            |acc, child| {
+                let child = owner_reach(child, player);
+                OwnerReach {
+                    named: (acc.named | child.named) & !child.excluded,
+                    all: (acc.all | child.all) & !child.excluded,
+                    excluded: acc.excluded & child.excluded,
+                }
+            },
+        ),
         TargetFilter::Not { filter } => {
             // CR 608.2c: a negation excludes a set rather than naming whose
             // objects they are, so it carries no positive reach and no naming
@@ -743,10 +753,19 @@ fn owner_reach(filter: &TargetFilter, player: &ControllerRef) -> OwnerReach {
             // that leaf's exact attribution instead of widening it.
             match filter.as_ref() {
                 TargetFilter::Not { filter: inner } => owner_reach(inner, player),
-                _ => OwnerReach {
-                    named: 0,
-                    all: ALL_ZONES_MASK,
-                },
+                _ => {
+                    let excluded = match filter.as_ref() {
+                        TargetFilter::Typed(leg) => leg_zone_constraints(leg)
+                            .as_ref()
+                            .map_or(0, |zones| zones_mask(zones.iter())),
+                        _ => 0,
+                    };
+                    OwnerReach {
+                        named: 0,
+                        all: ALL_ZONES_MASK,
+                        excluded,
+                    }
+                }
             }
         }
         TargetFilter::TrackedSetFiltered { filter, .. } => owner_reach(filter, player),
@@ -812,6 +831,7 @@ fn owner_reach(filter: &TargetFilter, player: &ControllerRef) -> OwnerReach {
         | TargetFilter::AllPlayers => OwnerReach {
             named: 0,
             all: ALL_ZONES_MASK,
+            excluded: 0,
         },
     }
 }
@@ -3859,6 +3879,37 @@ mod tests {
     // enchant that creature, put it onto the battlefield attached to that creature, then shuffle.")
     // -- Bitterheart Witch: trigger with announced attach host, but its single target fizzles
     // whole. Sovereigns: event-referent host, the unassigned fallback case.
+    /// CR 608.2c: a typed Library-only attribution matches the same population
+    /// as Library-or-Graveyard with a negated Graveyard leg.
+    #[test]
+    fn negation_composition_preserves_effective_zone_attribution() {
+        let scoped = |properties: Vec<FilterProp>| {
+            TargetFilter::Typed(crate::types::TypedFilter {
+                type_filters: vec![crate::types::ability::TypeFilter::Creature],
+                controller: Some(ControllerRef::ScopedPlayer),
+                properties,
+            })
+        };
+        let leaf = scoped(vec![FilterProp::InZone { zone: Zone::Library }]);
+        let composed = TargetFilter::And {
+            filters: vec![
+                scoped(vec![FilterProp::InAnyZone {
+                    zones: vec![Zone::Library, Zone::Graveyard],
+                }]),
+                TargetFilter::Not {
+                    filter: Box::new(scoped(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }])),
+                },
+            ],
+        };
+        let leaf_reach = owner_reach(&leaf, &ControllerRef::ScopedPlayer);
+        let composed_reach = owner_reach(&composed, &ControllerRef::ScopedPlayer);
+        assert_eq!(leaf_reach.named, zone_mask(Zone::Library));
+        assert_eq!(composed_reach.named, leaf_reach.named);
+        assert_eq!(composed_reach.all, leaf_reach.all);
+    }
+
     /// CR 608.2c: `Not` excludes a set, it does not confine the subject, so
     /// the naming reach it carries must be the inner leaf's bit-for-bit.
     /// `Not(Not(Graveyard leaf))` then credits the same player and zones as the
