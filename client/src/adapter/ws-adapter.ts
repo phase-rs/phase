@@ -2334,6 +2334,12 @@ export class WebSocketAdapter implements EngineAdapter {
     if (this.disposed) return;
     this.attachGeneration += 1;
     this.socketOpening = true;
+    // A successor owns the episode now: an older timer must not linger and
+    // refuse this attempt's own retry if it fails quickly.
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this.stateCodecPreparation?.abort();
     const preparation = new AbortController();
     this.stateCodecPreparation = preparation;

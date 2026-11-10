@@ -11,6 +11,8 @@ type BridgeEvent =
 
 // Declares that this client reassembles `fragment` events; a shell splits texts only when told.
 type BridgeTextDelivery = "fragments";
+/** Bound on waiting for sink settlement before the close command is issued. */
+const NATIVE_CLOSE_DRAIN_WAIT_MS = 1000;
 const TEXT_DELIVERY: BridgeTextDelivery = "fragments";
 
 type CloseListener = (event: CloseEvent) => void;
@@ -52,6 +54,12 @@ export class NativeEngineSocket {
    * the Rust bridge FIFO in program order rather than task-scheduling order.
    */
   private writeQueue: Promise<void> = Promise.resolve();
+  /** What the installed shell supports; probed before the socket opens. */
+  private capabilities: { sinkReceipt: boolean; abandon: boolean } = {
+    sinkReceipt: false,
+    abandon: false,
+  };
+  private receiptWriter: ((data: string, signal?: AbortSignal) => Promise<void>) | null = null;
 
   constructor(private readonly destination?: { type: "lan"; url: string; origin: string }) {
     // Match the browser WebSocket lifecycle: construction returns while the
@@ -105,7 +113,19 @@ export class NativeEngineSocket {
    * IPC write, rejects when it failed (after routing the failure through the
    * usual bridge error/close path).
    */
-  sendReceipt(text: string, signal?: AbortSignal): Promise<void> {
+  /**
+   * Present only when the installed shell reports sink-write receipts. An
+   * older shell acknowledges queue admission instead, so adapters must fall
+   * back to the synchronous send path rather than retire an incumbent on a
+   * promise that does not mean the frame was written.
+   */
+  get sendReceipt(): ((data: string, signal?: AbortSignal) => Promise<void>) | undefined {
+    if (!this.capabilities.sinkReceipt) return undefined;
+    this.receiptWriter ??= (data: string, signal?: AbortSignal) => this.writeWithReceipt(data, signal);
+    return this.receiptWriter;
+  }
+
+  private writeWithReceipt(text: string, signal?: AbortSignal): Promise<void> {
     if (this.readyState !== NativeEngineSocket.OPEN || this.bridgeId === null || signal?.aborted === true) {
       return Promise.reject(new DOMException("WebSocket is not open.", "InvalidStateError"));
     }
@@ -131,7 +151,7 @@ export class NativeEngineSocket {
    */
   private abandonQueuedWrites(): void {
     const bridgeId = this.bridgeId;
-    if (bridgeId === null) return;
+    if (bridgeId === null || !this.capabilities.abandon) return;
     void this.invokeDesktop(
       this.destination ? "lan_bridge_abandon" : "native_engine_bridge_abandon",
       { id: bridgeId },
@@ -145,7 +165,9 @@ export class NativeEngineSocket {
    */
   private enqueueAdmission(text: string, signal?: AbortSignal): Promise<void> {
     const write = this.writeQueue.then(async () => {
-      if (this.readyState !== NativeEngineSocket.OPEN || this.bridgeId === null) {
+      // A write accepted before close must still be admitted: only a fully
+      // closed socket or a vanished bridge rejects at this point.
+      if (this.bridgeId === null || this.readyState === NativeEngineSocket.CLOSED) {
         throw new DOMException("WebSocket is not open.", "InvalidStateError");
       }
       if (signal?.aborted === true) {
@@ -170,12 +192,17 @@ export class NativeEngineSocket {
     this._readyState = NativeEngineSocket.CLOSING;
     const bridgeId = this.bridgeId;
     if (bridgeId !== null) {
-      // The close is admitted after every already-queued write, never before.
+      // The close starts after every already-admitted write, but a stalled
+      // sink must not postpone the bridge watchdog indefinitely.
       const afterWrites = this.writeQueue.then(
         () => undefined,
         () => undefined,
       );
-      void afterWrites.then(() => this.closeBridge(bridgeId));
+      const bounded = Promise.race([
+        afterWrites,
+        new Promise<void>((resolve) => setTimeout(resolve, NATIVE_CLOSE_DRAIN_WAIT_MS)),
+      ]);
+      void bounded.then(() => this.closeBridge(bridgeId));
     }
   }
 
@@ -197,6 +224,7 @@ export class NativeEngineSocket {
           : { onEvent: channel, textDelivery: TEXT_DELIVERY },
       );
       this.bridgeId = bridgeId;
+      await this.probeCapabilities();
       if (this.readyState === NativeEngineSocket.CLOSING) {
         this.closeBridge(bridgeId);
         return;
@@ -211,6 +239,22 @@ export class NativeEngineSocket {
       }
     } catch (error) {
       this.handleBridgeFailure(error);
+    }
+  }
+
+  private async probeCapabilities(): Promise<void> {
+    try {
+      const caps = await this.invokeDesktop<{ sinkReceipt?: unknown; abandon?: unknown }>(
+        "bridge_capabilities",
+        {},
+      );
+      this.capabilities = {
+        sinkReceipt: caps.sinkReceipt === true,
+        abandon: caps.abandon === true,
+      };
+    } catch {
+      // An older shell has no capability command: keep the legacy contract.
+      this.capabilities = { sinkReceipt: false, abandon: false };
     }
   }
 

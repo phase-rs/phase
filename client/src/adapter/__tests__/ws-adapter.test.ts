@@ -6024,6 +6024,35 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
     }
   });
 
+  it("keeps a successor's retry alive when it fails before the obsolete timer fires", async () => {
+    const codec = scriptedCodec();
+    const provider = vi.fn(() => Promise.resolve(codec.session));
+    const { adapter, raw, events } = await establishCodecAdapter(provider);
+    let successorInitialization: Promise<unknown> = Promise.resolve(undefined);
+    try {
+      expect(adapter.tryReconnect(session() as never)).toBe(true);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+      const failed = latestSocket();
+      failed.readyState = 3;
+      failed.dispatchSynthetic("close");
+      await vi.waitFor(() => expect(events).toContainEqual(
+        expect.objectContaining({ type: "reconnecting" }),
+      ));
+
+      successorInitialization = adapter.initialize().catch(() => undefined);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(failed));
+      const successor = latestSocket();
+      // The successor fails before the obsolete retry timer fires.
+      successor.readyState = 3;
+      successor.dispatchSynthetic("close");
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(successor));
+    } finally {
+      void successorInitialization;
+      adapter.dispose();
+    }
+  });
+
   it("clears every request and initialization owner before a synchronous close's pending listener throws", async () => {
     MockWebSocket.last = null;
     const adapter = new WebSocketAdapter(

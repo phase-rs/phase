@@ -115,6 +115,24 @@ impl BridgeHandle {
     }
 }
 
+/// Capabilities this shell's bridge contract provides. A web build deployed
+/// independently can therefore gate the sink-receipt and abandonment paths on
+/// what the installed shell actually supports.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeCapabilities {
+    pub sink_receipt: bool,
+    pub abandon: bool,
+}
+
+#[tauri::command]
+pub fn bridge_capabilities() -> BridgeCapabilities {
+    BridgeCapabilities {
+        sink_receipt: true,
+        abandon: true,
+    }
+}
+
 /// Opens the shell-pinned loopback connection for the currently running engine.
 #[tauri::command]
 pub async fn connect_native_engine(
@@ -224,13 +242,15 @@ async fn await_written(
 /// without transmitting, which retires a candidate's setup before admission.
 #[tauri::command]
 pub fn native_engine_bridge_abandon(id: u64) -> Result<(), NativeEngineBridgeError> {
-    if native_engine::abandon_native_engine_bridge(id) {
-        Ok(())
-    } else {
-        Err(NativeEngineBridgeError::UnknownBridge {
+    if !native_engine::abandon_native_engine_bridge(id) {
+        return Err(NativeEngineBridgeError::UnknownBridge {
             detail: format!("native engine bridge {id} is not open"),
-        })
+        });
     }
+    // Retire this exact candidate: its queued frames are cancelled and its
+    // server connection closes, so it cannot outlive the client's decision.
+    native_engine::close_native_engine_bridge(id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -791,11 +811,15 @@ impl LanBridges {
         Ok(written)
     }
 
-    fn abandon(&self, id: u64, client: &LanClient) -> Result<(), NativeEngineBridgeError> {
+    fn abandon(&mut self, id: u64, client: &LanClient) -> Result<(), NativeEngineBridgeError> {
         self.owned_bridge(id, client)?
             .handle
             .abandoned()
             .store(true, Ordering::Relaxed);
+        // Retire this exact candidate after its queued frames are cancelled.
+        if let Some(bridge) = self.bridges.remove(&id) {
+            bridge.handle.close();
+        }
         Ok(())
     }
 
@@ -1493,6 +1517,29 @@ mod tests {
             "https://phase-rs.dev"
         );
         assert!(lan_request("ws://192.168.1.2:1234/ws", "https://untrusted.example").is_err());
+    }
+
+    #[test]
+    fn abandoning_a_lan_bridge_retires_it_and_its_queue_immediately() {
+        let (outbound, mut receiver) = mpsc::unbounded_channel();
+        let (abort, _) = AbortHandle::new_pair();
+        let handle = BridgeHandle::new(abort, outbound);
+        let abandoned = handle.abandoned();
+        let mut state = LanBridges::default();
+        state.bridges.insert(
+            1,
+            LanBridge {
+                client: test_client(),
+                handle,
+            },
+        );
+        state.abandon(1, &test_client()).unwrap();
+        assert!(abandoned.load(Ordering::Relaxed));
+        assert!(state.bridges.is_empty());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 
     #[test]

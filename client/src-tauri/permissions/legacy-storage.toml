@@ -52,3 +52,13 @@ commands.allow = ["native_engine_bridge_send"]
 identifier = "allow-native-engine-bridge-close"
 description = "Allows first-party remote content to close its native-engine bridge."
 commands.allow = ["native_engine_bridge_close"]
+
+[[permission]]
+identifier = "allow-bridge-capabilities"
+description = "Allows first-party remote content to read the shell bridge capability contract."
+commands.allow = ["bridge_capabilities"]
+
+[[permission]]
+identifier = "allow-native-engine-bridge-abandon"
+description = "Allows first-party remote content to cancel and retire its unadopted native-engine bridge candidate."
+commands.allow = ["native_engine_bridge_abandon"]
