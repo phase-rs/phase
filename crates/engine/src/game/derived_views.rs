@@ -1913,9 +1913,10 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // `unbounded_resources` keeps the mark until the boundary applies the growth; a Mark take
     // marks no `Life` axis, since its life lands at the take.
     //
-    // Except a crown's marks, which stand on the board its win ends, and a Horde or debug seat's
-    // standing infinite-mana mark (`horde::has_horde_infinite_mana`, `debug_infinite_mana`), what
-    // ends an `∞` is the boundary, never this projection:
+    // Except a crown's marks, which stand on the board its win ends, a Horde or debug seat's
+    // standing infinite-mana mark (`horde::has_horde_infinite_mana`, `debug_infinite_mana`), and
+    // any mark a debug toggle-off drops (`clear_unbounded_loop` clears every axis of its seat),
+    // what ends an `∞` is the boundary, never this projection:
     // `clear_collapsed_materializations` drops the collapsed axes once the growth is applied, and
     // `turns::drain_pending_phase_transition_progress` clears a `Mana(_)` axis when the step or
     // phase ends (CR 500.5).
