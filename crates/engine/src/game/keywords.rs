@@ -691,22 +691,55 @@ pub fn protection_prevents_from_with_source_name(
     false
 }
 
-pub fn source_matches_protection_target(
+/// CR 702.16: The bearer a protection quality is evaluated for. Object
+/// protection reads the protected permanent's own chosen attributes; player
+/// protection has no `GameObject`, so the chosen-attribute arms are inert for
+/// it (a player-scoped chosen quality is resolved by the granting static's
+/// scan arm before it reaches this matcher).
+enum ProtectionBearer<'a> {
+    Object(&'a GameObject),
+    Player(PlayerId),
+}
+
+impl ProtectionBearer<'_> {
+    /// CR 702.16k: the protected side of a "protection from [a player]" quality.
+    fn controller(&self) -> PlayerId {
+        match self {
+            Self::Object(object) => object.controller,
+            Self::Player(player) => *player,
+        }
+    }
+
+    fn object(&self) -> Option<&GameObject> {
+        match self {
+            Self::Object(object) => Some(object),
+            Self::Player(_) => None,
+        }
+    }
+}
+
+/// CR 702.16: Single quality-vs-source matcher for both protection bearers
+/// (permanent and player). `source` is the spell/ability/permanent the
+/// protection is checked against.
+fn protection_quality_matches(
     protection: &ProtectionTarget,
-    protected: &GameObject,
+    bearer: ProtectionBearer<'_>,
     source: &GameObject,
 ) -> bool {
     // CR 709.4b: A split source off the stack has the combined colors of both
     // halves; on the stack (the usual protection-source case) it is the chosen
     // half. `effective_colors` no-ops for single-face and on-stack sources.
     let source_colors = source.effective_colors();
+    let protected = bearer.object();
     match protection {
         ProtectionTarget::Color(color) => source_colors.contains(color),
         ProtectionTarget::CardType(type_name) => source_matches_card_type(source, type_name),
         ProtectionTarget::Quality(quality) => source_matches_quality(source, quality),
         ProtectionTarget::Multicolored => source_colors.len() > 1,
+        // CR 702.16 + CR 105.4: the chosen color is a property of the protected
+        // permanent; a player bearer has no chosen attributes.
         ProtectionTarget::ChosenColor => protected
-            .chosen_color()
+            .and_then(|object| object.chosen_color())
             .is_some_and(|color| source_colors.contains(&color)),
         // CR 702.16 + CR 205.2: "Protection from the chosen card
         // type" — resolved from the protected permanent's own chosen card type.
@@ -714,20 +747,22 @@ pub fn source_matches_protection_target(
         // (e.g. Serra's Emissary); creatures it grants protection to receive a
         // concrete `Protection(CardType(..))` baked in by the layer applier.
         ProtectionTarget::ChosenCardType => protected
-            .chosen_card_type()
+            .and_then(|object| object.chosen_card_type())
             .and_then(|ct| ct.protection_quality_str())
             .is_some_and(|quality| source_matches_card_type(source, quality)),
         // CR 702.16a + CR 201.2: "Protection from the chosen card
         // name" — resolved from the protected permanent's own chosen card name.
-        ProtectionTarget::ChosenCardName => protected.chosen_card_name().is_some_and(|name| {
-            crate::game::filter::source_has_chosen_name(Some(source), None, name)
-        }),
+        ProtectionTarget::ChosenCardName => protected
+            .and_then(|object| object.chosen_card_name())
+            .is_some_and(|name| {
+                crate::game::filter::source_has_chosen_name(Some(source), None, name)
+            }),
         // CR 702.16k: Resolve "the chosen player" from the protected
         // permanent's persisted choice. Protection covers objects that player
         // controls and objects they own that no other player controls; CR
         // 109.4 + CR 108.4a make controller-or-owner the shared authority.
         ProtectionTarget::ChosenPlayer => protected
-            .chosen_player()
+            .and_then(|object| object.chosen_player())
             .is_some_and(|player| source.controller_or_owner() == player),
         // CR 702.16j: "Protection from everything" — protection from each object
         // regardless of the source's characteristic values.
@@ -738,23 +773,81 @@ pub fn source_matches_protection_target(
         // be evaluated from the source alone without game state.
         ProtectionTarget::Filter(filter) => source_matches_protection_filter(source, filter),
         // CR 702.16k: "Protection from [a player]" — the source matches if it is
-        // controlled by the scoped player(s) relative to the protected object's
-        // controller, regardless of the source's characteristics. "Each of your
-        // opponents" (CR 702.16i) is captured by `Opponent`: any controller
-        // other than the protected object's controller is an opponent in 1v1 and
-        // free-for-all multiplayer. Player references with no static context
-        // (target/chosen/etc.) fail closed.
+        // controlled by the scoped player(s) relative to the protected side,
+        // regardless of the source's characteristics. "Each of your opponents"
+        // (CR 702.16i) is captured by `Opponent`: any controller other than the
+        // protected side is an opponent in 1v1 and free-for-all multiplayer.
+        // `SpecificPlayer` is the resolution-time binding of a declared-target
+        // anaphor ("protection from that player", CR 608.2c/608.2h). Player
+        // references with no static context fail closed.
         ProtectionTarget::FromPlayer(scope) => match scope {
             crate::types::ability::ControllerRef::Opponent => {
-                source.controller != protected.controller
+                source.controller_or_owner() != bearer.controller()
             }
-            crate::types::ability::ControllerRef::You => source.controller == protected.controller,
+            crate::types::ability::ControllerRef::You => {
+                source.controller_or_owner() == bearer.controller()
+            }
+            crate::types::ability::ControllerRef::SpecificPlayer { id } => {
+                source.controller_or_owner() == *id
+            }
             _ => false,
         },
         // CR 702.16i: a set quality is expanded into concrete Color qualities by
         // resolve_granted_protection before any match; an unexpanded set (a printed
         // keyword, never produced by a card today) matches nothing.
         ProtectionTarget::EachColor(_) => false,
+    }
+}
+
+pub fn source_matches_protection_target(
+    protection: &ProtectionTarget,
+    protected: &GameObject,
+    source: &GameObject,
+) -> bool {
+    protection_quality_matches(protection, ProtectionBearer::Object(protected), source)
+}
+
+/// CR 702.16: Player-scoped protection quality match. The player-level sibling
+/// of [`source_matches_protection_target`]: "you gain protection from [quality]"
+/// (Seht's Tiger, Faith's Shield) and "protection from that player" (Eon
+/// Frolicker) are read against a source without a protected `GameObject`.
+pub fn source_matches_protection_target_for_player(
+    protection: &ProtectionTarget,
+    player_id: PlayerId,
+    source: &GameObject,
+) -> bool {
+    protection_quality_matches(protection, ProtectionBearer::Player(player_id), source)
+}
+
+/// CR 702.11d: Check if a source matches a `HexproofFilter` ("hexproof from
+/// [quality]"). Bearer-independent — it reads only the source — so the object
+/// path (`targeting::hexproof_filter_matches`) and the player path
+/// (`static_abilities::player_has_hexproof_from`) share it.
+pub fn source_matches_hexproof_filter(
+    filter: &crate::types::keywords::HexproofFilter,
+    source: &GameObject,
+) -> bool {
+    // CR 709.4b: A split source has its chosen-half colors on the stack (the
+    // usual hexproof-source case) and its combined colors off the stack; no-op
+    // for single-face and on-stack sources.
+    let source_colors = source.effective_colors();
+    match filter {
+        crate::types::keywords::HexproofFilter::Color(color) => source_colors.contains(color),
+        crate::types::keywords::HexproofFilter::CardType(type_name) => {
+            source_matches_card_type(source, type_name)
+        }
+        crate::types::keywords::HexproofFilter::Quality(quality) => {
+            source_matches_quality(source, quality)
+        }
+        // CR 702.11d + CR 702.16 + CR 609.6: `ChosenColor` is normally
+        // resolved to a concrete `Color(_)` at layer application time (see
+        // `layers::apply_continuous_effect`). The intrinsic variant arm
+        // remains for cards whose printed text resolves "the chosen color" on
+        // the same object that chose it — mirrors
+        // `source_matches_protection_target` for `ProtectionTarget::ChosenColor`.
+        crate::types::keywords::HexproofFilter::ChosenColor => source
+            .chosen_color()
+            .is_some_and(|color| source_colors.contains(&color)),
     }
 }
 
@@ -1433,12 +1526,14 @@ mod tests {
     use crate::ai_support::legal_actions;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction, TargetFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution, ManaProduction,
+        TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::counter::CounterType;
     use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::HexproofFilter;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -1451,6 +1546,71 @@ mod tests {
             "Test".to_string(),
             Zone::Battlefield,
         )
+    }
+
+    /// CR 702.16k: "protection from that player" is the player bearer's
+    /// `FromPlayer(SpecificPlayer)` arm; the source matches when that player
+    /// controls (or, off the battlefield, owns) it.
+    #[test]
+    fn player_bearer_from_player_specific_player_matches_controller_or_owner() {
+        let mut owned_source = make_obj();
+        owned_source.zone = Zone::Graveyard;
+        owned_source.controller = PlayerId(0);
+        owned_source.owner = PlayerId(1);
+
+        let protection =
+            ProtectionTarget::FromPlayer(ControllerRef::SpecificPlayer { id: PlayerId(1) });
+        assert!(
+            source_matches_protection_target_for_player(&protection, PlayerId(0), &owned_source),
+            "CR 702.16k: a source owned by the named player matches"
+        );
+        let mut other = owned_source.clone();
+        other.owner = PlayerId(0);
+        assert!(
+            !source_matches_protection_target_for_player(&protection, PlayerId(0), &other),
+            "a source neither controlled nor owned by the named player does not match"
+        );
+    }
+
+    /// CR 702.16: the player bearer has no chosen attributes, so the chosen
+    /// quality arms are inert for it; a concrete color still matches.
+    #[test]
+    fn player_bearer_reads_concrete_colors_and_ignores_chosen_attributes() {
+        let mut red_source = make_obj();
+        red_source.color = vec![ManaColor::Red];
+
+        assert!(source_matches_protection_target_for_player(
+            &ProtectionTarget::Color(ManaColor::Red),
+            PlayerId(0),
+            &red_source,
+        ));
+        assert!(!source_matches_protection_target_for_player(
+            &ProtectionTarget::Color(ManaColor::Blue),
+            PlayerId(0),
+            &red_source,
+        ));
+        assert!(!source_matches_protection_target_for_player(
+            &ProtectionTarget::ChosenColor,
+            PlayerId(0),
+            &red_source,
+        ));
+    }
+
+    /// CR 702.11d: the hexproof-from filter matcher is bearer-independent, so
+    /// the player path reuses it.
+    #[test]
+    fn hexproof_filter_matches_concrete_quality_for_any_bearer() {
+        let mut blue_source = make_obj();
+        blue_source.color = vec![ManaColor::Blue];
+
+        assert!(source_matches_hexproof_filter(
+            &HexproofFilter::Color(ManaColor::Blue),
+            &blue_source,
+        ));
+        assert!(!source_matches_hexproof_filter(
+            &HexproofFilter::Color(ManaColor::Black),
+            &blue_source,
+        ));
     }
 
     #[test]
@@ -2913,6 +3073,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: Some(Zone::Battlefield),
                             destination: Zone::Exile,
                             target: TargetFilter::SelfRef,

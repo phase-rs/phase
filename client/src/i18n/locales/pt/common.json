@@ -13,7 +13,8 @@
   "quantityRef": {
     "highestNumber": "o número mais alto",
     "lowestNumber": "o número mais baixo",
-    "chosenNumber": "o número escolhido"
+    "chosenNumber": "o número escolhido",
+    "energyPaidOrLostThisTurn": "energia paga ou perdida neste turno"
   },
   "scryOutcome": {
     "title": "Vidência concluída",
