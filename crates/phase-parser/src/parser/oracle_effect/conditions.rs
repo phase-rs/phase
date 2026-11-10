@@ -38,13 +38,13 @@ use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
 };
 use crate::types::ability::{
-    extract_target_filter_from_effect, AbilityCondition, AbilityDefinition, AbilityKind,
-    AbilityUseTally, AdditionalCostOrigin, AttachCardinality, AttachSelection, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CostCategory,
-    CountScope, DamageChannel, DigSource, Duration, Effect, EffectOutcomeSignal, FilterProp,
-    GuessOutcome, LibraryPosition, MultiTargetSpec, ObjectScope, ParsedCondition, PlayerScope,
-    PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SpentColor, StaticCondition,
-    TargetFilter, TypeFilter, TypedFilter,
+    extract_target_filter_from_effect, fight_declared_slot_filters, AbilityCondition,
+    AbilityDefinition, AbilityKind, AbilityUseTally, AdditionalCostOrigin, AttachCardinality,
+    AttachSelection, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult,
+    Comparator, ControllerRef, CostCategory, CountScope, DamageChannel, DigSource, Duration,
+    Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, LibraryPosition, MultiTargetSpec,
+    ObjectScope, ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    SharedQuality, SpentColor, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -4960,9 +4960,11 @@ fn is_declared_target_filter(filter: &TargetFilter) -> bool {
 
 /// The typed target filter of the effect an instruction lowers to, with the
 /// clause's multi-target spec.
+#[derive(Debug)]
 struct EffectTargetProbe {
     filter: TargetFilter,
     multi_target: Option<MultiTargetSpec>,
+    declared_slots: Vec<TargetFilter>,
 }
 
 /// Lowers `effect_text` on a throwaway context (the caller's is untouched)
@@ -4973,7 +4975,24 @@ fn probe_effect_target(effect_text: &str, ctx: &ParseContext) -> Option<EffectTa
     Some(EffectTargetProbe {
         filter,
         multi_target: clause.multi_target,
+        declared_slots: Vec::new(),
     })
+}
+
+/// CR 115.1a + CR 601.2c: the effect's announced object roles. `Fight` is the
+/// multi-role shape `extract_target_filter_from_effect` cannot express (its
+/// subject and target are separate announced targets); every other effect has
+/// the one filtered role that authority returns.
+fn effect_declared_slot_filters(effect: &Effect) -> Vec<TargetFilter> {
+    if let Effect::Fight { subject, target } = effect {
+        return fight_declared_slot_filters(subject, target)
+            .cloned()
+            .collect();
+    }
+    extract_target_filter_from_effect(effect)
+        .cloned()
+        .into_iter()
+        .collect()
 }
 
 /// CR 115.1d: the effect probe narrowed to a declared target slot. A target
@@ -4981,13 +5000,19 @@ fn probe_effect_target(effect_text: &str, ctx: &ParseContext) -> Option<EffectTa
 /// operand that carries a filter: Whitemane Lion's "return a creature you
 /// control to its owner's hand" is a `Bounce` chosen at resolution, so
 /// `Effect::target_filter` surfaces its operand while the slot authority
-/// excludes it.
+/// excludes it. The throwaway context also carries the announced-role registry
+/// (`try_parse_two_targets`), so a two-role instruction is distinguishable.
 fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<EffectTargetProbe> {
     let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
-    let filter = extract_target_filter_from_effect(&clause.effect)?.clone();
+    let declared_slots = effect_declared_slot_filters(&clause.effect);
+    if declared_slots.is_empty() {
+        return None;
+    }
+    let filter = declared_slots.first().cloned()?;
     Some(EffectTargetProbe {
         filter,
         multi_target: clause.multi_target,
+        declared_slots,
     })
 }
 
@@ -5207,37 +5232,42 @@ fn parse_target_controller_poison_threshold(input: &str) -> OracleResult<'_, i32
 /// The single declared object target of an instruction, with the controller
 /// its own type phrase introduced ("… an opponent controls").
 struct DeclaredObjectTarget {
+    filter: TargetFilter,
     introduced_controller: Option<ControllerRef>,
 }
 
 /// CR 115.1: the instruction `effect_text` lowers to declares exactly one
 /// object target (not a context reference, the untyped `Any` fallback, a
-/// player, or a multi-target slot). Parsed on a throwaway context so the
-/// caller's is untouched.
+/// player, or a multi-role/multi-target slot). Parsed on a throwaway context so
+/// the caller's is untouched.
 fn declared_single_object_target(
     effect_text: &str,
     ctx: &ParseContext,
 ) -> Option<DeclaredObjectTarget> {
     let probe = probe_declared_target_slot(effect_text, ctx)?;
-    if probe.multi_target.is_some()
-        || !is_declared_target_filter(&probe.filter)
-        || super::is_player_scoped_filter(&probe.filter)
-    {
+    // Two announced roles (Fight's two creatures), or one role with a
+    // cardinality range, cannot name a single "that <noun>" antecedent.
+    if probe.multi_target.is_some() || probe.declared_slots.len() > 1 {
         return None;
     }
-    let introduced_controller = match probe.filter {
-        TargetFilter::Typed(tf) => tf.controller,
+    let filter = probe.declared_slots.first()?;
+    if !is_declared_target_filter(filter) || super::is_player_scoped_filter(filter) {
+        return None;
+    }
+    let introduced_controller = match filter {
+        TargetFilter::Typed(tf) => tf.controller.clone(),
         _ => None,
     };
     Some(DeclaredObjectTarget {
+        filter: filter.clone(),
         introduced_controller,
     })
 }
 
-/// CR 608.2c: whether the condition's subject has an antecedent in the gated
-/// instruction. "that opponent" refers back only to an opponent the target's
-/// type phrase introduced; "its controller" always names the target's
-/// controller.
+/// CR 608.2c + CR 115.1: whether the condition's subject has a matching
+/// antecedent in the gated instruction. "that opponent" requires the target's
+/// own type phrase to introduce the opponent; "that spell/creature/permanent"
+/// requires the declared slot's kind to match; "its" inherits the slot.
 fn referent_is_bound(
     referent: nom_condition::TargetControllerReferent,
     target: &DeclaredObjectTarget,
@@ -5246,7 +5276,9 @@ fn referent_is_bound(
         nom_condition::TargetControllerReferent::IntroducedOpponent => {
             target.introduced_controller == Some(ControllerRef::Opponent)
         }
-        nom_condition::TargetControllerReferent::ObjectController => true,
+        nom_condition::TargetControllerReferent::ObjectController { noun } => {
+            nom_condition::referent_noun_matches_slot(noun, &target.filter)
+        }
     }
 }
 
@@ -11151,6 +11183,44 @@ mod tests {
             None,
             "{effect} if {condition}"
         );
+
+        // CR 115.1: the referent's object kind must match the declared slot.
+        // Unified Will's printed "that spell's controller" cannot bind an
+        // artifact, and a creature noun cannot either; a permanent noun can.
+        let effect = "Destroy target artifact";
+        for condition in [
+            "you control more creatures than that spell's controller",
+            "you control more creatures than that creature's controller",
+        ] {
+            assert!(
+                nom_condition::parse_target_controller_count_condition(condition).is_ok(),
+                "reach guard: {condition}"
+            );
+            assert_eq!(
+                parse_target_controller_control_condition_text(condition, effect, &ctx),
+                None,
+                "{effect} if {condition}"
+            );
+        }
+        let condition = "you control more creatures than that permanent's controller";
+        assert!(
+            parse_target_controller_control_condition_text(condition, effect, &ctx).is_some(),
+            "an artifact slot is a permanent"
+        );
+
+        // Fight announces two objects, so "that creature" has no single role.
+        let effect = "Target creature you control fights target creature an opponent controls";
+        let probe = probe_declared_target_slot(effect, &ctx).expect("fight effect probe");
+        assert!(
+            probe.multi_target.is_some() || probe.declared_slots.len() == 2,
+            "Fight must surface both announced roles: {probe:?}"
+        );
+        let condition = "you control more creatures than that creature's controller";
+        assert_eq!(
+            parse_target_controller_control_condition_text(condition, effect, &ctx),
+            None,
+            "{effect} if {condition}"
+        );
     }
 
     /// CR 109.4 + CR 608.2c: a counted population that already carries a
@@ -11216,12 +11286,35 @@ mod tests {
                 "Return a creature you control to its owner's hand",
                 "you control more creatures than its controller",
             ),
+            // Unified Will's printed noun on an artifact slot is an
+            // incompatible object kind.
+            (
+                "Destroy target artifact",
+                "you control more creatures than that spell's controller",
+            ),
+            // Fight announces two roles; a single "that creature" cannot name
+            // one of them.
+            (
+                "Target creature you control fights target creature an opponent controls",
+                "you control more creatures than that creature's controller",
+            ),
         ] {
             let text = format!("{effect} if {condition}");
             let (cond, body) = strip_suffix_conditional(&text, &mut ctx);
             assert_eq!(cond, None, "the full strip must decline: {text}");
             assert_eq!(body, text, "the declined text must be unchanged");
         }
+
+        // One legal declared slot keeps parsing at the same seam.
+        let (cond, body) = strip_suffix_conditional(
+            "Counter target spell if you control more creatures than that spell's controller",
+            &mut ctx,
+        );
+        assert!(
+            cond.is_some(),
+            "the printed Unified Will condition must parse"
+        );
+        assert_eq!(body, "Counter target spell");
     }
 
     /// CR 608.2d + CR 107.4 + CR 202.1: Omnath, Locus of All — "you may reveal

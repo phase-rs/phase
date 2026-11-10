@@ -4716,6 +4716,16 @@ fn parse_parent_target_referent(input: &str) -> OracleResult<'_, ParentTargetRef
     .parse(input)
 }
 
+/// CR 115.1: the object kind a "that spell/creature/permanent" referent names.
+/// "its" has no printed noun and inherits the declared target's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjectReferentNoun {
+    Pronoun,
+    Spell,
+    Creature,
+    Permanent,
+}
+
 /// The player a trailing condition names as the controller of the instruction's
 /// declared object target (CR 608.2c).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4724,7 +4734,7 @@ pub(crate) enum TargetControllerReferent {
     /// introduced the opponent ("target creature an opponent controls").
     IntroducedOpponent,
     /// "its controller" / "that spell's | creature's | permanent's controller".
-    ObjectController,
+    ObjectController { noun: ObjectReferentNoun },
 }
 
 /// CR 608.2c: the subject of a trailing condition that names the controller of
@@ -4738,21 +4748,99 @@ pub(crate) fn parse_target_controller_referent(
             tag("that opponent"),
         ),
         value(
-            TargetControllerReferent::ObjectController,
+            TargetControllerReferent::ObjectController {
+                noun: ObjectReferentNoun::Pronoun,
+            },
+            terminated(tag("its"), tag(" controller")),
+        ),
+        value(
+            TargetControllerReferent::ObjectController {
+                noun: ObjectReferentNoun::Spell,
+            },
             terminated(
-                alt((
-                    tag("its"),
-                    recognize((
-                        tag("that "),
-                        alt((tag("spell"), tag("creature"), tag("permanent"))),
-                        parse_apostrophe_s,
-                    )),
-                )),
+                (tag("that "), tag("spell"), parse_apostrophe_s),
+                tag(" controller"),
+            ),
+        ),
+        value(
+            TargetControllerReferent::ObjectController {
+                noun: ObjectReferentNoun::Creature,
+            },
+            terminated(
+                (tag("that "), tag("creature"), parse_apostrophe_s),
+                tag(" controller"),
+            ),
+        ),
+        value(
+            TargetControllerReferent::ObjectController {
+                noun: ObjectReferentNoun::Permanent,
+            },
+            terminated(
+                (tag("that "), tag("permanent"), parse_apostrophe_s),
                 tag(" controller"),
             ),
         ),
     ))
     .parse(input)
+}
+
+/// CR 115.1: whether the declared target slot can be the object the referent
+/// names. "That spell" requires a spell slot; "that creature" and "that
+/// permanent" require a typed slot on the corresponding type axis. Fail closed
+/// for a shape this projection cannot classify (a disjunction or a bare
+/// subtype-only filter) rather than binding by name alone.
+pub(crate) fn referent_noun_matches_slot(noun: ObjectReferentNoun, filter: &TargetFilter) -> bool {
+    match noun {
+        ObjectReferentNoun::Pronoun => true,
+        ObjectReferentNoun::Spell => matches!(filter, TargetFilter::StackSpell),
+        ObjectReferentNoun::Creature => {
+            typed_slot_type_axis_matches(filter, |t| matches!(t, TypeFilter::Creature))
+        }
+        ObjectReferentNoun::Permanent => {
+            typed_slot_type_axis_matches(filter, type_filter_is_permanent)
+        }
+    }
+}
+
+fn typed_slot_type_axis_matches(
+    filter: &TargetFilter,
+    predicate: impl Fn(&TypeFilter) -> bool + Copy,
+) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .type_filters
+            .iter()
+            .any(|type_filter| type_filter_or_any_of(type_filter, predicate)),
+        _ => false,
+    }
+}
+
+fn type_filter_or_any_of(
+    type_filter: &TypeFilter,
+    predicate: impl Fn(&TypeFilter) -> bool + Copy,
+) -> bool {
+    match type_filter {
+        // A disjunctive type axis matches the referent's noun only when every
+        // branch does: "target creature or enchantment" cannot guarantee the
+        // "that creature" antecedent.
+        TypeFilter::AnyOf(inner) => inner
+            .iter()
+            .all(|inner| type_filter_or_any_of(inner, predicate)),
+        other => predicate(other),
+    }
+}
+
+fn type_filter_is_permanent(type_filter: &TypeFilter) -> bool {
+    matches!(
+        type_filter,
+        TypeFilter::Creature
+            | TypeFilter::Land
+            | TypeFilter::Artifact
+            | TypeFilter::Enchantment
+            | TypeFilter::Planeswalker
+            | TypeFilter::Battle
+            | TypeFilter::Permanent
+    )
 }
 
 /// CR 109.4: the permanents the declared target's controller controls.
@@ -27836,10 +27924,13 @@ mod counters_among_condition_tests {
 /// conditions an intervening-if commonly uses, at the building-block level.
 #[cfg(test)]
 mod intervening_if_state_condition_tests {
-    use super::{parse_inner_condition, parse_target_controller_count_condition};
+    use super::{
+        parse_inner_condition, parse_target_controller_count_condition, referent_noun_matches_slot,
+        ObjectReferentNoun,
+    };
     use crate::types::ability::{
         AggregateFunction, Comparator, FilterProp, PlayerScope, QuantityExpr, QuantityRef,
-        StaticCondition, TargetFilter,
+        StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
 
@@ -27981,5 +28072,31 @@ mod intervening_if_state_condition_tests {
                 "a static condition cannot bind {condition}"
             );
         }
+    }
+
+    /// CR 115.1 + CR 205.2a: a disjunctive type axis can name the referent's
+    /// noun only when every branch matches; "creature or enchantment" cannot
+    /// guarantee "that creature", while both branches are permanents.
+    #[test]
+    fn referent_noun_requires_every_disjunct_to_match() {
+        let creature_or_enchantment = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::AnyOf(vec![
+                TypeFilter::Creature,
+                TypeFilter::Enchantment,
+            ])],
+            ..Default::default()
+        });
+        assert!(!referent_noun_matches_slot(
+            ObjectReferentNoun::Creature,
+            &creature_or_enchantment
+        ));
+        assert!(referent_noun_matches_slot(
+            ObjectReferentNoun::Permanent,
+            &creature_or_enchantment
+        ));
+        assert!(referent_noun_matches_slot(
+            ObjectReferentNoun::Creature,
+            &TargetFilter::Typed(TypedFilter::creature())
+        ));
     }
 }
