@@ -102,6 +102,8 @@ class MockWebSocket extends EventTarget {
   onerror: (() => void) | null = null;
   onclose: (() => void) | null = null;
   send = vi.fn();
+  /** Opt-in ordered write receipt; absent keeps the synchronous path. */
+  sendReceipt?: (data: string) => Promise<void>;
   close = vi.fn();
   constructor(public url: string) {
     super();
@@ -2594,6 +2596,44 @@ describe("draft attachment settlement", () => {
     });
   });
 
+  it("rejects an already-owned pick before sending and never treats a later broadcast as its receipt", async () => {
+    const card = cutoverCard("already-owned-guard");
+    await receiveDraftView(adapter, established, createMockDraftView({ pool: [card] }));
+    const before = established.send.mock.calls.length;
+    await expect(adapter.submitPick(card.instance_id)).rejects.toMatchObject({
+      code: "PHASE_ERROR",
+      message: "That card is already in your draft pool",
+    });
+    expect(established.send.mock.calls).toHaveLength(before);
+    // A same-socket broadcast containing that instance cannot settle a request
+    // that was never sent.
+    receive(established, "DraftStateUpdate", { view: createMockDraftView({ pool: [card] }) });
+    expect(established.send.mock.calls).toHaveLength(before);
+  });
+
+  it("still clears the pending indicator when a matchStarting subscriber throws", async () => {
+    enterAcceptedFullMatch(adapter, established);
+    const seen: boolean[] = [];
+    const off = adapter.onEvent((event) => {
+      if (event.type === "actionPendingChanged") seen.push(event.pending);
+      if (event.type === "matchStarting") throw new Error("matchStarting listener failed");
+    });
+    const pending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+    try {
+      expect(() => receive(established, "DraftMatchStart", {
+        match_id: "r6-t0", round: 6, game_code: "GAME06",
+        full_key: { game_code: "GAME06", generation: 12 },
+        player_token: "match-draft-token", your_player: 0, opponent_name: "Next opponent",
+      })).toThrow("matchStarting listener failed");
+    } finally {
+      off();
+    }
+    expect(await pending()).toMatchObject({ code: "REQUEST_FAILED" });
+    // The clear belongs to the transition's completion path, not to a later
+    // announcement that already sees the same match.
+    expect(seen).toEqual([true, false]);
+  });
+
   it.each(["serverHello", "draftViewUpdated"] as const)(
     "drains older reconnect views before the synchronous selected-inventory reply from a %s pick consumer",
     async (trigger) => {
@@ -3815,6 +3855,41 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       type: "gameStateUpdated", state: expect.objectContaining({ label: "recovered-11" }),
     })));
     expect(gateOpen()).toBe(true);
+    adapter.dispose();
+  });
+
+  it("keeps the incumbent usable when the candidate's setup write fails asynchronously", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    const candidateSession = draftCodecSession(decodeEnvelope);
+    provider.mockResolvedValueOnce(candidateSession.session);
+    const initialized = trackRejection(adapter.createDraft({
+      displayName: "Contender", setCodes: ["TST"], kind: "Premier", public: false,
+      tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+    }));
+    await drainArt();
+    const candidate = MockWebSocket.last!;
+    expect(candidate).not.toBe(ws);
+    candidate.sendReceipt = vi.fn(async () => {
+      throw new Error("async write failed");
+    });
+    candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+    await drainArt();
+    await expect(initialized()).resolves.toMatchObject({
+      code: "WS_CLOSED", message: "Failed to send setup frame",
+    });
+    // Only the receipt failed; the incumbent and its authority are intact.
+    expect(ws.close).not.toHaveBeenCalled();
+    expect(adapter.currentMatchId).toBe("r1-t0");
+    const command = adapter.submitAction({ type: "PassPriority" } as GameAction, 0);
+    ws.dispatchSynthetic("message", draftFrame("Delta", {
+      type: "StateUpdate", command_id: lastSubmissionCommandId(ws),
+      data: { state: matchState("after-async-write-failure"), events: [{ marker: "async-ok" }], full_key: FULL_KEY },
+    }));
+    await expect(command).resolves.toMatchObject({ events: [{ marker: "async-ok" }] });
     adapter.dispose();
   });
 
@@ -5640,7 +5715,7 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
     }
   });
 
-  it.each(["already owned", "incomplete commander step", "different selected instance"] as const)(
+  it.each(["incomplete commander step", "different selected instance"] as const)(
     "does not infer cutover pick success from a later pool update: %s",
     async (request) => {
       const { adapter, ws, provider, codec } = await startRuntimeDraft();
@@ -5650,8 +5725,8 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
         const before = createMockDraftView({
           required_pick_count: 1,
           ...(request === "incomplete commander step" ? { kind: "CommanderDraft", required_pick_count: 2 } : {}),
-          current_pack: request === "already owned" ? [other] : [card, other],
-          pool: request === "already owned" ? [card] : [],
+          current_pack: [card, other],
+          pool: [],
         });
         await receiveDraftView(adapter, ws, before);
         const pick = adapter.submitPick(card.instance_id);

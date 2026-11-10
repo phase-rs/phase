@@ -2615,7 +2615,7 @@ export class WebSocketAdapter implements EngineAdapter {
       // enqueues setup before any subsequently notified consumer can enqueue
       // a command. Raw transports can reply synchronously, so handlers above
       // retain those replies until the send has returned successfully.
-      if (!this.send(setupFrame, socket.ws)) {
+      if (!(await this.writeSetupFrame(socket.ws, setupFrame))) {
         if (this.disposed || this.stateCodecPreparation !== preparation) return;
         if (this.initialFallbackActive()) {
           this.failInitialFallback(initialFallbackFailure());
@@ -2689,6 +2689,23 @@ export class WebSocketAdapter implements EngineAdapter {
       }
     } finally {
       if (!retained) retireSocket();
+    }
+  }
+
+  /**
+   * A setup frame must be actually *written* before its candidate displaces
+   * anything. Transports with an ordered write receipt (gzip encode+send,
+   * native IPC) report the real outcome; a raw transport writes synchronously
+   * inside `send` and reports through it.
+   */
+  private async writeSetupFrame(socket: PhaseSocketTransport, frame: unknown): Promise<boolean> {
+    if (socket.sendReceipt === undefined) return this.send(frame, socket);
+    if (socket.readyState !== WebSocket.OPEN) return false;
+    try {
+      await socket.sendReceipt(JSON.stringify(frame));
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -3084,6 +3101,11 @@ export class WebSocketAdapter implements EngineAdapter {
       if (Date.now() - this.reconnectStartedAt! >= policy.budgetMs) {
         this.failReconnect();
       } else {
+        // The attempt that scheduled this retry is over. An incumbent may
+        // still be open (its transport was preserved through the failed
+        // candidate), so clearing the flag is what lets the retry own a new
+        // attempt instead of being refused by tryReconnect's in-flight guard.
+        this.reconnectInFlight = false;
         this.tryReconnect(session);
       }
     }, delay);

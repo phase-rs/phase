@@ -96,6 +96,27 @@ export class NativeEngineSocket {
     );
   }
 
+  /**
+   * Ordered write receipt: resolves once the shell acknowledged this frame's
+   * IPC write, rejects when it failed (after routing the failure through the
+   * usual bridge error/close path).
+   */
+  sendReceipt(text: string): Promise<void> {
+    if (this.readyState !== NativeEngineSocket.OPEN || this.bridgeId === null) {
+      return Promise.reject(new DOMException("WebSocket is not open.", "InvalidStateError"));
+    }
+    return this.invokeDesktop(
+      this.destination ? "lan_bridge_send" : "native_engine_bridge_send",
+      { id: this.bridgeId, text },
+    ).then(
+      () => undefined,
+      (error: unknown) => {
+        this.handleBridgeFailure(error);
+        throw error;
+      },
+    );
+  }
+
   close(): void {
     if (
       this.readyState === NativeEngineSocket.CLOSING ||

@@ -67,6 +67,8 @@ class MockWebSocket extends EventTarget {
   onerror: (() => void) | null = null;
   onclose: ((event?: CloseEvent) => void) | null = null;
   send = vi.fn();
+  /** Opt-in ordered write receipt; absent keeps the synchronous path. */
+  sendReceipt?: (data: string) => Promise<void>;
   close = vi.fn();
   constructor(public url: string) {
     super();
@@ -5892,6 +5894,35 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       armed = false;
       adapter.dispose();
       codec.runtime.dispose();
+    }
+  });
+
+  it("keeps the incumbent open through an asynchronous candidate write failure and retries the episode", async () => {
+    const codec = scriptedCodec();
+    const provider = vi.fn(() => Promise.resolve(codec.session));
+    const { adapter, raw } = await establishCodecAdapter(provider);
+    const pending = observe(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+    try {
+      expect(adapter.tryReconnect(session() as never)).toBe(true);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+      const candidate = latestSocket();
+      candidate.sendReceipt = vi.fn(async () => {
+        throw new Error("async write failed");
+      });
+      candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+      await vi.waitFor(() => expect(candidate.close).toHaveBeenCalledOnce());
+      // The queued write, not a synchronous refusal, failed: the incumbent is
+      // still open and its owned request still completes.
+      expect(raw.close).not.toHaveBeenCalled();
+      deliverCodec(raw, "Delta", codecStateUpdate(6, 6, { command_id: lastSubmissionCommandId(raw) }));
+      await vi.waitFor(() => expect(pending.value()).toMatchObject({ resolvedWith: { events: [] } }));
+      // The failed attempt owns its retry; it is not left merely connecting.
+      await vi.advanceTimersByTimeAsync(2000);
+      const retry = await codecHandshake("Reconnect", candidate);
+      expect(retry).not.toBe(candidate);
+      retry.dispatchSynthetic("message", CODEC_CONFIRMATION);
+    } finally {
+      adapter.dispose();
     }
   });
 

@@ -53,14 +53,36 @@ export class GzipEnvelopeSocket implements PhaseSocketTransport {
 
   send(data: string): void {
     if (this.retired || this.rawCloseEvent !== null) return;
-    this.sendQueue = this.sendQueue
-      .then(async () => {
-        if (this.retired || this.rawCloseEvent !== null) return;
-        const encoded = await encodeJsonEnvelope(data);
-        if (this.retired || this.rawCloseEvent !== null) return;
-        (this.socket as unknown as { send(data: Uint8Array): void }).send(encoded);
-        this.onFrameSent?.();
-      })
+    this.enqueueWrite(data).catch(() => undefined);
+  }
+
+  /**
+   * Ordered write receipt for setup: resolves after this frame's encode and
+   * raw write settle, or rejects when either fails. Failure still travels the
+   * transport's own error/close path exactly as `send` does, so callers see
+   * both the receipt and the transport closing.
+   */
+  sendReceipt(data: string): Promise<void> {
+    if (this.retired || this.rawCloseEvent !== null) {
+      return Promise.reject(new Error("gzip envelope transport is retired"));
+    }
+    return this.enqueueWrite(data);
+  }
+
+  /** Appends one write to the shared FIFO and reports its settled outcome. */
+  private enqueueWrite(data: string): Promise<void> {
+    const write = this.sendQueue.then(async () => {
+      if (this.retired || this.rawCloseEvent !== null) {
+        throw new Error("gzip envelope transport is retired");
+      }
+      const encoded = await encodeJsonEnvelope(data);
+      if (this.retired || this.rawCloseEvent !== null) {
+        throw new Error("gzip envelope transport is retired");
+      }
+      (this.socket as unknown as { send(data: Uint8Array): void }).send(encoded);
+      this.onFrameSent?.();
+    });
+    this.sendQueue = write
       .catch(() => {
         if (this.retired || this.rawCloseEvent !== null) return;
         // The close is what `withReconnect` recovers from, so it must survive a
@@ -72,6 +94,7 @@ export class GzipEnvelopeSocket implements PhaseSocketTransport {
         }
       })
       .catch(() => undefined);
+    return write;
   }
 
   close(): void {

@@ -461,6 +461,17 @@ export class StateCodecSocket implements PhaseSocketTransport {
 
   constructor(private readonly options: StateCodecSocketOptions) {
     const { inner, raw } = options;
+    const innerReceipt = inner.sendReceipt;
+    if (innerReceipt !== undefined) {
+      this.sendReceipt = (data: string): Promise<void> => {
+        if (this.closed || this.naturalClose !== null) {
+          return Promise.reject(new Error("state codec socket is closed"));
+        }
+        return innerReceipt.call(inner, data).then(() => {
+          this.options.onFrameSent?.();
+        });
+      };
+    }
     // Capture first: an existing raw observer can synchronously dispose us.
     raw.addEventListener("close", this.rawCloseListener, { capture: true, once: true });
     inner.onopen = (event) => {
@@ -517,6 +528,13 @@ export class StateCodecSocket implements PhaseSocketTransport {
     this.options.inner.send(data);
     this.options.onFrameSent?.();
   }
+
+  /**
+   * Present only when the inner transport has an ordered write receipt: the
+   * codec wrapper adds no asynchrony of its own. Its absence keeps a raw
+   * snapshot transport synchronous for setup.
+   */
+  readonly sendReceipt?: (data: string) => Promise<void>;
 
   close(): void {
     // A local-first close invalidates and releases even during an outstanding

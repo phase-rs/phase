@@ -349,6 +349,23 @@ export class ServerDraftAdapter implements EngineAdapter {
     return { events: [] };
   }
 
+  /**
+   * A setup frame must be actually *written* before its candidate displaces
+   * anything. Transports with an ordered write receipt (gzip encode+send,
+   * native IPC) report the real outcome; a raw transport writes synchronously
+   * inside `send` and reports through it.
+   */
+  private async writeSetupFrame(socket: PhaseSocketTransport, frame: unknown): Promise<boolean> {
+    if (socket.sendReceipt === undefined) return this.send(frame, socket);
+    if (socket.readyState !== WebSocket.OPEN) return false;
+    try {
+      await socket.sendReceipt(JSON.stringify(frame));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async submitAction(action: GameAction, _actor: PlayerId): Promise<SubmitResult> {
     this.assertNoPendingSubmission();
     if (this.phase !== "match") {
@@ -683,11 +700,17 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
+    const view = this.draftView;
+    if (view?.pool.some((card) => card.instance_id === cardInstanceId)) {
+      // An already-owned instance can never be the outcome of this request,
+      // and a later broadcast (any source) would otherwise look like one.
+      // Refuse before claiming the slot so nothing is sent.
+      throw new AdapterError("PHASE_ERROR", "That card is already in your draft pool", false);
+    }
     const draftCode = this.draftCode;
     const playerToken = this.draftToken;
     return new Promise<DraftPlayerView>((resolve, reject) => {
       if (!this.claimDraftAction("Pick", resolve, reject)) return;
-      const view = this.draftView;
       this.draftPick = {
         draftCode,
         playerToken,
@@ -1236,7 +1259,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.stateCodec.consumeFailure(bootstrap);
       }
       // Address the local candidate, not the still-current previous socket.
-      if (!this.send(setupFrame, sourceSocket)) {
+      if (!(await this.writeSetupFrame(sourceSocket, setupFrame))) {
         throw new AdapterError("WS_CLOSED", "Failed to send setup frame", true);
       }
       if (!this.ownsAttachment(attachment) || !this.sockets.has(sourceSocket)) {
@@ -1456,16 +1479,22 @@ export class ServerDraftAdapter implements EngineAdapter {
               message: "Cannot attach draft match without draft credentials.",
             });
           }
-          this.emit({
-            type: "matchStarting",
-            matchId: data.match_id,
-            round: data.round,
-            opponentName: data.opponent_name,
-            gameCode: data.game_code,
-          });
-        }
-        if (releasedPending) {
-          this.emit({ type: "actionPendingChanged", pending: false });
+          try {
+            this.emit({
+              type: "matchStarting",
+              matchId: data.match_id,
+              round: data.round,
+              opponentName: data.opponent_name,
+              gameCode: data.game_code,
+            });
+          } finally {
+            // The pending clear is the transition's guaranteed completion: a
+            // throwing matchStarting subscriber must not suppress it, and a
+            // repeated announcement cannot replay it later.
+            if (releasedPending) {
+              this.emit({ type: "actionPendingChanged", pending: false });
+            }
+          }
         }
         break;
       }

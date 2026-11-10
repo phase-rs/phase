@@ -53,6 +53,15 @@ export interface PhaseSocketTransport {
   ): void;
   removeEventListener(type: "message", listener: (event: MessageEvent<string>) => void): void;
   send(data: string): void;
+  /**
+   * Optional ordered write receipt: resolves once `data` has entered the
+   * transport's serialized write path and its final write step settled;
+   * rejects when that write fails. Adapters use it to keep an incumbent
+   * transport until a candidate's setup frame is actually written, rather
+   * than only queued. A transport without this method writes synchronously
+   * within `send` (throwing on failure).
+   */
+  sendReceipt?(data: string): Promise<void>;
   close(): void;
 }
 
