@@ -1838,11 +1838,13 @@ fn parked_activation_pointing_at_an_earlier_activation_s_node_is_refused() {
         ),
     }
 
-    // Leg 2 — the occurrence ABSENT. No released build omits it: the field was
-    // introduced with this record, so a save that states none is a contradiction
-    // rather than an older shape. Nothing beside the reference can then separate the
-    // two activations, so the save is refused before the settlement question is even
-    // reached — the absent record is named as the defect.
+    // Leg 2 — the SAME contradiction with the occurrence absent, which is the shape
+    // an older save carries: `PendingManaAbility` has been persisted by every
+    // released build and this field only since 0.123. Nothing beside the reference
+    // then separates the two activations, and the node it points at has already
+    // produced its mana: CR 605.3b resolved that node immediately after activation
+    // 1 was activated, so a still-parked activation cannot be it. The node's own
+    // settlement record is the witness, and it is the same rule that refuses it.
     let (runner, source, first_node) = prismite_second_activation_parked();
     let mut json = persisted_json(runner.state());
     let pending = saved_pending_mut(&mut json);
@@ -1857,14 +1859,14 @@ fn parked_activation_pointing_at_an_earlier_activation_s_node_is_refused() {
     match &admission_refusal(json) {
         PersistedRestoreError::ContradictoryParkedActivation {
             source_id,
-            reason: ParkedActivationConflict::AbsentOccurrence { node },
+            reason: ParkedActivationConflict::SettledWithoutOccurrence { node },
         } => {
             assert_eq!(*source_id, source.object_id);
-            assert_eq!(*node, first_node, "the node the save points at");
+            assert_eq!(*node, first_node, "activation 1's already-settled node");
         }
         other => panic!(
-            "CR 605.3b: a save that states no activation occurrence must be refused as a \
-             contradiction, got {other:?}"
+            "CR 605.3b: an occurrence-less save pointing at a SETTLED node of the same source and \
+             epoch must be refused, got {other:?}"
         ),
     }
 
@@ -2340,17 +2342,16 @@ const HERONBLADE_ELITE: &str =
 /// and a second activation parks at its colour prompt — the pair a save cannot
 /// separate by object, epoch or kind, exactly like Prismite's two activations.
 ///
-/// The save is then pointed at the first node with NO occurrence field. Settlement
-/// must answer that a finished activation owns that node; reading settlement off the
-/// pip list answered "unfinished" here, and the later colour answer wrote the SECOND
-/// activation's production into the FIRST activation's node.
+/// The save is then pointed at the first node with NO occurrence field (the shape an
+/// older save carries). Settlement must answer that a finished activation owns that
+/// node; reading settlement off the pip list answered "unfinished" here, and the later
+/// colour answer wrote the SECOND activation's production into the FIRST one's node.
 ///
 /// Settlement is a property of the NODE, so it is checked whether or not the save
 /// states an occurrence beside the reference. Three legs, because they are three
 /// different answers to the same absent-or-stale record:
-///   * **the occurrence is absent** ⇒ refused as a contradiction before the
-///     settlement question is asked ([`ParkedActivationConflict::AbsentOccurrence`]) —
-///     no released build omits the record, so its absence is not an older shape;
+///   * **the occurrence is absent and the node is settled** ⇒ refused
+///     ([`ParkedActivationConflict::SettledWithoutOccurrence`]);
 ///   * **the occurrence is present and AGREES with the reference**, both naming the
 ///     finished activation ⇒ refused too
 ///     ([`ParkedActivationConflict::SettledOccurrence`]) — agreeing on the node is not
@@ -2388,10 +2389,13 @@ fn zero_output_activation_settles_so_a_later_parked_activation_cannot_claim_its_
     match &admission_refusal(json) {
         PersistedRestoreError::ContradictoryParkedActivation {
             source_id,
-            reason: ParkedActivationConflict::AbsentOccurrence { node },
+            reason: ParkedActivationConflict::SettledWithoutOccurrence { node },
         } => {
             assert_eq!(*source_id, source.object_id);
-            assert_eq!(*node, first_node, "the node the save points at");
+            assert_eq!(
+                *node, first_node,
+                "the zero-output activation's own settled node"
+            );
         }
         other => panic!(
             "CR 605.2 + CR 605.3b: a save pointing at a SETTLED node that produced no mana must be \
@@ -2542,17 +2546,18 @@ fn zero_output_activation_settles_so_a_later_parked_activation_cannot_claim_its_
     );
 }
 
-/// A journal node that states NO settlement record.
+/// A journal node that states NO settlement record — the shape every RELEASED build
+/// wrote, because `SettlementNode` has been persisted since 0.85 and this field only
+/// since 0.123.
 ///
-/// `settled` is written explicitly at both ends of a node's life — `Some(false)` at
-/// allocation, `Some(true)` in `settle_node` — so a payload without it was not written
-/// by any released build. It is refused as a contradiction rather than read as "open"
-/// (which made a completed zero-output activation look live, the defect that let a
-/// later activation write its mana into a finished node) or as "settled" (the
-/// withdrawn pip inference, which restated the settlement question as a production
-/// question — CR 605.2).
+/// It is read from the pip list it does carry (`LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4`),
+/// which is what lets a committed pre-field capture (`dina_conqueror_4p.json.gz`) keep
+/// restoring. What must NOT happen is a CURRENT payload landing in that arm: this
+/// build writes the record at allocation (`Some(false)`) and at settlement
+/// (`Some(true)`), so the ambiguity that made a completed zero-output activation
+/// indistinguishable from a live one exists only for saves that predate the field.
 #[test]
-fn a_node_that_states_no_settlement_is_refused_rather_than_read_as_open_or_settled() {
+fn a_node_that_states_no_settlement_is_read_from_its_pips_as_the_older_shape() {
     let (runner, _source, first_node) = prismite_second_activation_parked();
     let mut json = persisted_json(runner.state());
     let first_identity = serde_json::to_value(first_node).expect("the node identity serializes");
@@ -2580,30 +2585,12 @@ fn a_node_that_states_no_settlement_is_refused_rather_than_read_as_open_or_settl
             node["produced_pips"]
                 .as_array()
                 .is_some_and(|pips| pips.len() == 1),
-            "reach-guard: and it still carries the pip its resolution produced, so a reader \
-             that answered from the pips would answer 'settled'"
+            "reach-guard: and it carries the pip its resolution produced"
         );
     }
 
-    let persisted = serde_json::from_value::<PersistedGameState>(json)
-        .expect("the payload decodes — the refusal is the journal's authority check");
-    match persisted.into_game_state() {
-        Ok(_) => panic!(
-            "a node stating no settlement must be refused: no released build writes that shape, \
-             and answering it from the pip list reads the resolution record as a production \
-             record — the reading CR 605.2 says is a different question"
-        ),
-        Err(error) => assert!(
-            error.to_string().contains("states no settlement record"),
-            "the refusal must come from the journal's settlement authority, got {error}"
-        ),
-    }
-
-    // Control — the untouched save is admitted and settles normally, so the refusal
-    // above is about the absent record and not about every parked prompt.
-    let (runner, _source, first_node) = prismite_second_activation_parked();
     let mut runner = GameRunner::from_state(
-        admitted(persisted_json(runner.state())).expect("the untouched save restores"),
+        admitted(json).expect("an older save that states no settlement still restores"),
     );
     runner = choose_blue(runner);
     assert!(
@@ -2611,7 +2598,13 @@ fn a_node_that_states_no_settlement_is_refused_rather_than_read_as_open_or_settl
             .state()
             .resolved_rules_journal
             .node_settled(first_node),
-        "the untouched save settles activation 1's node"
+        "the pre-field shape answers from the pip the node recorded, so the finished node \
+         still reads as settled and cannot be claimed by the later activation"
+    );
+    assert_eq!(
+        node_produced_pips(runner.state(), first_node).len(),
+        1,
+        "and the later activation's pip did not land in it"
     );
 }
 

@@ -29,63 +29,56 @@ Each entry MUST include:
 
 ## Active shims
 
-None. The three paths this release introduced were withdrawn before shipping — see
-[Withdrawn before shipping](#withdrawn-before-shipping).
+### `LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4` — ACTIVE
+
+- **Covers:** a `SettlementNode` payload stating no `settled` record, from which
+  `ResolvedRulesJournal::node_settled` infers settlement off `produced_pips`.
+- **Why it is genuine:** `SettlementNode` has been persisted since 0.85
+  (`d247cee56`, 2026-07-22) and every released build wrote it WITHOUT this field —
+  `git tag --contains d247cee56` lists shipped tags, and `upstream/main`'s copy of
+  the struct has no such field. The committed capture
+  `crates/engine/tests/fixtures/dina_conqueror_4p.json.gz` is one such payload (zero
+  `"settled"` occurrences) and must keep restoring. What is new is the field, not
+  the record.
+- **Added in:** 0.123.0.
+- **Removal trigger:** the tripwire `assert!` fires once a release above 0.137.0
+  ships (`+14` releases from the shipping version). Removing the shim means
+  answering `None` as "this payload states no settlement" rather than inferring one.
+- **Source:** `crates/engine/src/types/resolved_commands.rs:4223` (tripwire const);
+  the shimmed arm is `ResolvedRulesJournal::node_settled`.
+
+### `LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4` — ACTIVE
+
+- **Covers:** a parked `PendingManaAbility` payload stating no
+  `activated_mana_occurrence`. `PendingManaAbility::activation_producer_evidence`
+  then asks the retained node's own settlement record instead of comparing the
+  occurrence against the node's ordinal, and refuses a node that already settled
+  (`ParkedActivationConflict::SettledWithoutOccurrence`). Such a save's announcement
+  epoch is still exact evidence, so it is admitted rather than refused.
+- **Why it is genuine:** `PendingManaAbility` is persisted by every released build
+  and this field only by 0.123, so an occurrence-less save is an older save, not a
+  contradiction.
+- **Added in:** 0.123.0.
+- **Removal trigger:** the tripwire `assert!` fires once a release above 0.137.0
+  ships (`+14` releases from the shipping version). Removing the shim means
+  requiring the occurrence on every parked activation.
+- **Source:** `crates/engine/src/types/game_state.rs:11930` (tripwire const); the
+  shimmed `None` arm is `PendingManaAbility::activation_producer_evidence`.
+
+### Not a shim: `PendingCast::assist_contributed_units` absence
+
+A parked Assist cast written before the field existed decodes its unit list as the
+serde default (empty). That shape is NOT admitted silently: the restore boundary
+binds a restored contribution to the payment it claims
+(`bind_or_reject_assist_contribution_provenance`) — recovering the units the journal
+records for that helper on that spell, and refusing a paid-but-unprovable root and a
+unit list with no paid helper alike. Removing the field's `#[serde(default)]` instead
+would fail the whole payload at decode time and foreclose the journal recovery, which
+is the behaviour the maintainer asked for.
 
 ## Withdrawn before shipping
 
-A shim whose guarded shape never reached the wire is not a compatibility path at
-all: no released build can write the older shape, so admitting it buys nothing and
-the tripwire's deadline only breaks the build. These three were added and withdrawn
-inside the same unreleased release (`0.122.0`). Each field was traced to its
-introducing commit and no release tag contains one, which is what `git log -S
-<field>` plus `git tag --contains <sha>` shows.
-
-Note for the next shim: `docs/LEGACY-COMPAT.md` deadlines are counted in RELEASES,
-and this workspace releases by bumping the minor version only, so a "+14" window is
-`minor + 14`. Counting patch positions collapses the window to the next release and
-fails the build for `main` and every open PR.
-
-### `LEGACY_JOURNAL_SETTLED_PIP_INFERENCE_2026Q4` — WITHDRAWN
-
-- **Covered:** a `SettlementNode` payload stating no `settled` record, from which
-  `ResolvedRulesJournal::node_settled` inferred settlement off `produced_pips`.
-- **Why withdrawn:** `SettlementNode::settled` was introduced on this branch and no
-  released build omits it. The reading was also wrong on its own terms: a zero-output
-  activation (Heronblade Elite at power 0, CR 605.2) settles with no pips, so the pip
-  list answers a different question. `settled` is now written explicitly at both ends
-  of a node's life — `Some(false)` at allocation, `Some(true)` in `settle_node` — and
-  `validate_serialized_authority` refuses a node that states none.
-- **Was:** `crates/engine/src/types/resolved_commands.rs:4183` (tripwire const);
-  shimmed arm in `ResolvedRulesJournal::node_settled`.
-
-### `LEGACY_PARKED_ACTIVATION_OCCURRENCE_ABSENT_2026Q4` — WITHDRAWN
-
-- **Covered:** a parked `PendingManaAbility` payload stating no
-  `activated_mana_occurrence`, which `PendingManaAbility::activation_producer_evidence`
-  admitted by asking the retained node's own settlement record instead of comparing
-  the occurrence against the node's ordinal.
-- **Why withdrawn:** `activated_mana_occurrence` was introduced on this branch and no
-  released build omits it. An occurrence-less save cannot say WHICH activation its
-  retained node belongs to, so it is refused as a contradiction
-  (`ParkedActivationConflict::AbsentOccurrence`) rather than read as an older shape.
-- **Was:** `crates/engine/src/types/game_state.rs:11956` (tripwire const); shimmed
-  `None` arm in `PendingManaAbility::activation_producer_evidence`.
-
-### `LEGACY_ASSIST_CONTRIBUTION_ABSENT_2026Q4` — WITHDRAWN
-
-- **Covered:** a parked `PendingCast` payload stating no `assist_contributed_units`,
-  whose empty serde default recorded the helper's spend as "the helper spent nothing"
-  in the cast's payment snapshot.
-- **Why withdrawn:** the field was introduced on this branch and no released build
-  omits it, so absence is a contradiction. The compat reading is replaced by binding
-  a restored Assist to the spend it claims — recovering the journal-bound units where
-  the record proves them and refusing an unprovable paid root — rather than
-  under-recording the payment.
-- **Was:** `crates/engine/src/types/game_state.rs:528` (tripwire const); the reading
-  was `PendingCast::assist_contributed_units`' empty serde default, consumed by
-  `crates/engine/src/game/casting_costs.rs` (the capture at the spend boundary) and
-  `crates/engine/src/game/casting.rs` (both payment finalizers).
+None.
 
 ## Removed shims
 
