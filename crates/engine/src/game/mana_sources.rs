@@ -462,10 +462,17 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
 /// life" at 3 life, CR 119.4), and one that asks a choice before it's paid
 /// can't be read this way and keeps the pass. A use that leaves a player-loss
 /// SBA pending also stops it, as the public action's terminal checkpoint would
-/// end the game there (CR 704.5a); no printed source in the class reaches that
-/// stop except through a life cost, which the payment check already refuses.
-/// Only `object`'s own rows are read, one copy each.
-pub(crate) fn untap_repeats_mana(state: &GameState, player: PlayerId, object: ObjectId) -> bool {
+/// end the game there (CR 704.5a): a life cost paid down to 0 (the Staff's "Pay
+/// 2 life" at 2 life), or an effect run after the color is chosen (Cryptolith
+/// Fragment's "Each player loses 1 life." at 1 life). `untap_is_reached` reads
+/// the copy after the use, for an untap behind a condition. Only `object`'s own
+/// rows are read, one copy each.
+pub(crate) fn untap_repeats_mana(
+    state: &GameState,
+    player: PlayerId,
+    object: ObjectId,
+    untap_is_reached: impl Fn(&GameState) -> bool,
+) -> bool {
     let Some(source) = state.objects.get(&object) else {
         return false;
     };
@@ -532,6 +539,7 @@ pub(crate) fn untap_repeats_mana(state: &GameState, player: PlayerId, object: Ob
                 .objects
                 .get(&object)
                 .is_none_or(|after| after.zone != Zone::Battlefield)
+                || !untap_is_reached(&copy)
             {
                 return false;
             }

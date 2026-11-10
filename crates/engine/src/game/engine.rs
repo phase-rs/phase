@@ -11121,7 +11121,10 @@ pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Op
     // window is judged against the board before anything resolves, so it cannot
     // see a mana source an earlier member untaps. That is sound for the `Held`
     // rung's removal reason, because a batch consumes only windows this
-    // look-ahead authorized, and its members are triggered abilities. Its untap
+    // look-ahead authorized, and its members are triggered abilities. A
+    // Committed session doesn't read it for a non-representative's skipped
+    // window: no batch kind (inert, self-counter, fixed life gain, fixed
+    // opponent effect, token) moves a mana source off the battlefield. Its untap
     // reason is for an activated ability only, whose window is never looked
     // ahead to. A member that untaps a mana source which a later
     // identical member then removes, without pausing, is an accepted

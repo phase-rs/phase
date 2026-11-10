@@ -492,21 +492,38 @@ fn resolution_untaps_ready_mana_source(
         | StackEntryKind::KeywordAction { .. }
         | StackEntryKind::CombatDamage { .. } => return false,
     };
-    untapped_source(state, ability)
-        .is_some_and(|source| mana_sources::untap_repeats_mana(state, player, source))
+    let mut gated = Vec::new();
+    let Some(source) = untapped_source(state, ability, &mut gated) else {
+        return false;
+    };
+    // CR 608.2c: a condition on the way to the untap is read as the ability
+    // resolves, so it is read on the copy once the source has been tapped for
+    // mana there: Eater of the Dead's "If this creature is tapped" then holds,
+    // and Civilized Scholar's "If a creature card is discarded this way" doesn't,
+    // since the copy discards nothing.
+    let untap_is_reached = |copy: &GameState| {
+        gated.iter().all(|node| {
+            node.condition
+                .as_ref()
+                .is_none_or(|condition| super::effects::evaluate_condition(condition, copy, node))
+        })
+    };
+    mana_sources::untap_repeats_mana(state, player, source, untap_is_reached)
 }
 
 /// The object a "Untap this artifact." / "Untap this creature." instruction in
 /// `ability`'s chain untaps, bound as its resolver binds it
 /// (`ResolvedAbility::self_ref_binding`): none once the source has left the
-/// battlefield, even if it came back (CR 400.7). Only an instruction resolution
-/// is sure to reach counts: the root and its unconditioned sub-instructions. A
-/// condition is read as the ability resolves (CR 608.2c), so Civilized
-/// Scholar's "If a creature card is discarded this way, untap this creature"
-/// and an `else` branch are left out.
-fn untapped_source(state: &GameState, ability: &ResolvedAbility) -> Option<ObjectId> {
+/// battlefield, even if it came back (CR 400.7). The walk follows the root and
+/// its sub-instructions, not an `else` branch, and collects in `gated` each node
+/// on the way whose condition decides whether the untap is reached.
+fn untapped_source<'a>(
+    state: &GameState,
+    ability: &'a ResolvedAbility,
+    gated: &mut Vec<&'a ResolvedAbility>,
+) -> Option<ObjectId> {
     if ability.condition.is_some() {
-        return None;
+        gated.push(ability);
     }
     let untaps_its_source = matches!(
         ability.effect,
@@ -523,7 +540,7 @@ fn untapped_source(state: &GameState, ability: &ResolvedAbility) -> Option<Objec
             ability
                 .sub_ability
                 .as_deref()
-                .and_then(|sub| untapped_source(state, sub))
+                .and_then(|sub| untapped_source(state, sub, gated))
         })
 }
 
@@ -1535,42 +1552,6 @@ mod tests {
 
             state.objects.get_mut(&forest).unwrap().tapped = true;
             assert_eq!(verdict(&state, &untap), StandingPriorityPass::Granted);
-        }
-
-        /// Civilized Scholar: "{T}: Draw a card, then discard a card. If a creature card is
-        /// discarded this way, untap this creature, then transform it." The untap's condition
-        /// is read as the ability resolves (CR 608.2c), so it isn't sure to be reached and the
-        /// pass stays; the same chain without the condition holds.
-        #[test]
-        fn a_conditional_self_untap_keeps_the_pass() {
-            let (state, forest, _) = board();
-            let draw_then_untap = |condition: Option<crate::types::ability::AbilityCondition>| {
-                let mut untap = untap_itself(forest, PlayerId(0));
-                untap.condition = condition;
-                let mut root = ResolvedAbility::new(
-                    Effect::Draw {
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
-                        target: TargetFilter::Controller,
-                    },
-                    vec![],
-                    forest,
-                    PlayerId(0),
-                );
-                root.sub_ability = Some(Box::new(untap));
-                activated_top(PlayerId(0), forest, root)
-            };
-            let creature_discarded = crate::types::ability::AbilityCondition::ZoneChangedThisWay {
-                filter: TargetFilter::Typed(TypedFilter::creature()),
-                destination: None,
-            };
-            assert_eq!(
-                verdict(&state, &draw_then_untap(Some(creature_discarded))),
-                StandingPriorityPass::Granted
-            );
-            assert_eq!(
-                verdict(&state, &draw_then_untap(None)),
-                StandingPriorityPass::Held
-            );
         }
 
         #[test]

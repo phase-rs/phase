@@ -52,8 +52,8 @@ use engine::types::ability::{Effect, TapStateChange, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::parse_counter_type;
 use engine::types::game_state::{
-    AutoPassRequest, CastPaymentMode, ExileLink, ExileLinkKind, LoopDetectionMode,
-    PriorityPassingMode, StackEntry, StackEntryKind, WaitingFor,
+    AutoPassMode, AutoPassRequest, CastPaymentMode, ExileLink, ExileLinkKind, LoopDetectionMode,
+    PriorityPassingMode, StackEntry, StackEntryKind, StackResolutionPolicy, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType};
@@ -817,45 +817,142 @@ const GRIM_MONOLITH: &str = "This artifact doesn't untap during your untap step.
 /// Monolith's untap and its Rings copy are on the stack, and the opponent asks
 /// to resolve the stack. The copy untaps Monolith, and P0, who has no other
 /// action ({4} is more than Monolith's {C}{C}{C}), still gets the window over
-/// the original to tap it.
+/// the original to tap it. Both routes: the request through the public action,
+/// which installs a session P0 isn't part of, and a stored request with no
+/// session, as a restored game carries it.
 #[test]
 fn another_players_resolve_all_leaves_the_untap_window_held() {
     let Some(db) = shared_card_db() else { return };
+    for stored in [false, true] {
+        let mut scenario = main_phase_scenario();
+        let monolith = scenario
+            .add_artifact_from_oracle(P0, "Grim Monolith", GRIM_MONOLITH)
+            .id();
+        scenario.add_real_card(P0, "Rings of Brighthearth", Zone::Battlefield, db);
+        let mountains: Vec<_> = (0..3)
+            .map(|_| scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db))
+            .collect();
+        let mut runner = scenario.build();
+        tap_for_mana(&mut runner, monolith);
+        tap_for_mana(&mut runner, mountains[0]);
+        let untap = untap_ability_index(&runner, monolith);
+        activate(&mut runner, monolith, untap, &[]);
+        client_drive(&mut runner, Rings::Pay, original_and_copy);
+        assert!(is_tapped(&runner, monolith));
+        assert!(recommends_pass(&runner));
+
+        if stored {
+            runner.state_mut().auto_pass.insert(
+                P1,
+                AutoPassMode::UntilStackEmpty {
+                    initial_stack_len: 2,
+                    policy: StackResolutionPolicy::Committed,
+                },
+            );
+            runner.act(GameAction::PassPriority).expect("P0 passes");
+            assert!(runner.state().stack_resolution_session.is_none());
+        } else {
+            runner.act(GameAction::PassPriority).expect("P0 passes");
+            assert_eq!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player: P1 }
+            );
+            runner
+                .act(GameAction::SetAutoPass {
+                    mode: AutoPassRequest::UntilStackEmpty,
+                })
+                .expect("the opponent asks to resolve the stack");
+        }
+
+        assert!(
+            p0_has_priority(&runner),
+            "stored: {stored}: P0 gets the window over the original"
+        );
+        assert_eq!(runner.state().stack.len(), 1, "stored: {stored}");
+        assert!(!is_tapped(&runner, monolith), "the copy untapped Monolith");
+        assert!(!recommends_pass(&runner));
+    }
+}
+
+/// Eater of the Dead, verbatim.
+const EATER_OF_THE_DEAD: &str = "{0}: If this creature is tapped, exile target creature card from a graveyard and untap this creature.";
+/// Civilized Scholar's front face, verbatim.
+const CIVILIZED_SCHOLAR: &str = "{T}: Draw a card, then discard a card. If a creature card is discarded this way, untap this creature, then transform it.";
+/// Cryptolith Rite, verbatim.
+const CRYPTOLITH_RITE: &str =
+    "Convoke\nCreatures you control have \"{T}: Add one mana of any color.\"";
+/// Vitalize, verbatim.
+const VITALIZE: &str = "Untap all creatures you control.";
+
+/// `source`'s one activated ability that isn't a mana ability: its printed
+/// one, beside the mana ability Cryptolith Rite grants.
+fn printed_ability_index(runner: &GameRunner, source: ObjectId) -> usize {
+    runner.state().objects[&source]
+        .abilities
+        .iter()
+        .position(|ability| !is_mana_ability(ability))
+        .expect("the source has its printed ability")
+}
+
+/// CR 608.2c: an untap behind a condition is read as the ability resolves, on
+/// the copy after the creature's mana use (each has Cryptolith Rite's "{T}: Add
+/// one mana of any color."). Eater of the Dead's "If this creature is tapped" is
+/// then true, so the window holds. Civilized Scholar, untapped by Vitalize in
+/// response, untaps only "If a creature card is discarded this way", which
+/// the copy never does, so the pass stays.
+#[test]
+fn a_conditional_untap_holds_only_when_its_condition_is_met() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = main_phase_scenario();
-    let monolith = scenario
-        .add_artifact_from_oracle(P0, "Grim Monolith", GRIM_MONOLITH)
+    scenario.add_enchantment_from_oracle(P0, "Cryptolith Rite", CRYPTOLITH_RITE);
+    let eater = scenario
+        .add_creature_from_oracle(P0, "Eater of the Dead", 3, 4, EATER_OF_THE_DEAD)
         .id();
-    scenario.add_real_card(P0, "Rings of Brighthearth", Zone::Battlefield, db);
-    let mountains: Vec<_> = (0..3)
-        .map(|_| scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db))
-        .collect();
+    let corpse = scenario.add_real_card(P1, "Llanowar Elves", Zone::Graveyard, db);
     let mut runner = scenario.build();
-    tap_for_mana(&mut runner, monolith);
-    tap_for_mana(&mut runner, mountains[0]);
-    let untap = untap_ability_index(&runner, monolith);
-    activate(&mut runner, monolith, untap, &[]);
-    client_drive(&mut runner, Rings::Pay, original_and_copy);
-    assert!(is_tapped(&runner, monolith));
-    assert!(recommends_pass(&runner));
-
-    runner.act(GameAction::PassPriority).expect("P0 passes");
+    clear_summoning_sickness(&mut runner, eater);
+    let exile = printed_ability_index(&runner, eater);
+    activate(&mut runner, eater, exile, &[corpse]);
     assert_eq!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { player: P1 }
+        top_source_name(&runner).as_deref(),
+        Some("Eater of the Dead")
     );
-    runner
-        .act(GameAction::SetAutoPass {
-            mode: AutoPassRequest::UntilStackEmpty,
-        })
-        .expect("the opponent asks to resolve the stack");
-
+    assert!(mana_action(&runner, eater).is_some() && !is_tapped(&runner, eater));
     assert!(
-        p0_has_priority(&runner),
-        "P0 gets the window over the original"
+        !recommends_pass(&runner),
+        "Eater: tapping it meets the condition"
     );
-    assert_eq!(runner.state().stack.len(), 1);
-    assert!(!is_tapped(&runner, monolith), "the copy untapped Monolith");
-    assert!(!recommends_pass(&runner));
+
+    let mut scenario = main_phase_scenario();
+    scenario.add_enchantment_from_oracle(P0, "Cryptolith Rite", CRYPTOLITH_RITE);
+    let scholar = scenario
+        .add_creature_from_oracle(P0, "Civilized Scholar", 0, 1, CIVILIZED_SCHOLAR)
+        .id();
+    let vitalize = scenario
+        .add_spell_to_hand_from_oracle(P0, "Vitalize", true, VITALIZE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    clear_summoning_sickness(&mut runner, scholar);
+    let loot = printed_ability_index(&runner, scholar);
+    activate(&mut runner, scholar, loot, &[]);
+    assert!(is_tapped(&runner, scholar));
+    runner.cast(vitalize).commit();
+    for _ in 0..4 {
+        if runner.state().stack.len() == 1 {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+    assert_eq!(
+        top_source_name(&runner).as_deref(),
+        Some("Civilized Scholar")
+    );
+    assert!(mana_action(&runner, scholar).is_some() && !is_tapped(&runner, scholar));
+    assert!(
+        recommends_pass(&runner),
+        "Scholar: the copy discards no creature"
+    );
 }
 
 /// CR 603.2 + CR 603.3: a trigger goes on the stack with no player act, so
