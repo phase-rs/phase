@@ -1195,3 +1195,80 @@ fn a_revoked_debug_capability_survives_payment_settlement() {
     );
     assert!(state.debug_permitted.contains(&P0));
 }
+
+/// CR 402.3 + CR 118.12: a hand reorder admitted while a recovered payment is
+/// parked names only the live canonical hand; the checkpoint's drawn card must
+/// stay in the hand and the player's canonical order must survive settlement.
+#[test]
+fn a_hand_reorder_between_recovery_and_completion_keeps_the_drawn_card() {
+    let (mut runner, source) = concession_board_with_hand();
+    let mut root = ResolvedAbility::new(
+        pay_cost(AbilityCost::Composite {
+            costs: vec![draw_cost(1), discard_cost()],
+        }),
+        vec![],
+        source,
+        P0,
+    );
+    root.sub_ability = None;
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    assert!(is_dredge_prompt_for_p0(state));
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining leg 1's Dredge accepts the draw");
+    let WaitingFor::DiscardChoice { cards, .. } = &state.waiting_for else {
+        panic!("the discard leg owns the cursor: {:?}", state.waiting_for);
+    };
+    let cards = cards.clone();
+    apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("a player can concede at any time");
+    let canonical_hand: Vec<_> = state.players[P0.0 as usize].hand.iter().copied().collect();
+    assert_eq!(canonical_hand.len(), 2);
+    let reordered = vec![canonical_hand[1], canonical_hand[0]];
+    apply(
+        state,
+        P0,
+        GameAction::ReorderHand {
+            order: reordered.clone(),
+        },
+    )
+    .expect("the canonical hand can be reordered while the payment is parked");
+
+    let drawn = state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .expect("the checkpoint is live")
+        .events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::CardDrawn {
+                player_id,
+                object_id,
+                ..
+            } if *player_id == P0 => Some(*object_id),
+            _ => None,
+        })
+        .expect("the accepted prefix published its draw");
+    assert!(cards.contains(&drawn));
+    apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SelectCards { cards: vec![drawn] },
+    )
+    .expect("discard the prefix-drawn card");
+
+    let state = runner.state();
+    assert!(state.payment_transaction.is_none());
+    let final_hand: Vec<_> = state.players[P0.0 as usize].hand.iter().copied().collect();
+    assert_eq!(
+        final_hand, reordered,
+        "the accepted canonical order survives and the drawn card was discarded"
+    );
+}

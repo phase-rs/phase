@@ -1171,17 +1171,17 @@ pub(super) fn handle_unless_payment(
     // Only the pay branch is refused; `PayUnlessCost { pay: false }` stays legal.
     // The authority's fresh entry re-asks the same question on the same cost;
     // for every arm below it is an idempotent backstop.
-    // CR 702.24a: a compact repeated draw cost becomes the concrete cost the
-    // player pays before any admission or payment logic sees it.
-    let cost = match repeat {
-        Some(count) if count > 0 => crate::game::effects::expand_per_counter(&cost, count),
-        _ => cost,
+    // CR 121.2b + CR 702.24a: judge the whole repeated payment compactly; the
+    // concrete legs are allocated only if the payer actually pays.
+    let check_cost = match repeat {
+        Some(count) if count > 0 => crate::game::effects::repeated_draw_check_cost(&cost, count),
+        _ => cost.clone(),
     };
     if pay
         && costs::resolution_cost_includes_impossible_event(
             state,
             player,
-            &cost,
+            &check_cost,
             pending_effect.as_ref(),
         )
     {
@@ -1194,6 +1194,11 @@ pub(super) fn handle_unless_payment(
     let mut payment_failed = !pay;
     let post_action_event_start = None;
     if pay {
+        // CR 702.24a: the concrete repeated legs exist only while paying.
+        let cost = match repeat {
+            Some(count) if count > 0 => crate::game::effects::expand_per_counter(&cost, count),
+            _ => cost,
+        };
         match cost {
             // CR 118.12: Pay the static mana component of the unless cost
             // through the single payment authority (cost-payment unification,

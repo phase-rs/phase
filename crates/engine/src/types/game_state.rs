@@ -16634,6 +16634,17 @@ impl GameState {
                     "recovery checkpoint prompt does not match the canonical prompt".to_string(),
                 );
             }
+            // The outer structural checks cannot see this nested state; apply
+            // the same non-resolvable stack refusal to it.
+            if checkpoint
+                .state
+                .stack
+                .iter()
+                .chain(checkpoint.state.resolving_stack_entry.iter())
+                .any(|entry| matches!(entry.kind, StackEntryKind::CombatDamage { .. }))
+            {
+                return Err("recovery checkpoint carries combat damage on the stack".to_string());
+            }
         }
         for (index, entry) in transaction.transcript.iter().enumerate() {
             if crate::game::payment_transaction::is_outside_transaction(&entry.action) {

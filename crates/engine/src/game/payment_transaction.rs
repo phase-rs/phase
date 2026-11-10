@@ -473,7 +473,10 @@ fn settle_replay_outcome(
             // CR 104.3a + CR 118.12: the accepted payment (and any departure
             // already mirrored into it) commits BEFORE the fallible rider and
             // canonical tail run, so an error in either cannot erase the paid
-            // work or restore a player who left the game.
+            // work or restore a player who left the game. The restored runtime
+            // authorities (card DB, names, RNG) are carried from the live state,
+            // which the nested checkpoint could not serialize.
+            carry_runtime_authorities(&mut shadow, state);
             *state = shadow;
             // The payment is committed. Continue the printed rider through the
             // ordinary chain walker, now outside the transaction, so a later
@@ -683,7 +686,34 @@ pub(crate) fn mirror_outside_action(state: &mut GameState, actor: PlayerId, acti
     shadow.payment_transaction = None;
     shadow.payment_transaction_replay = true;
     shadow.payment_transaction_just_handled = false;
-    if engine::apply_admitted_recorded_action(&mut shadow, actor, actor, action.clone()).is_err() {
+    // CR 402.3 + CR 118.12: a hand reorder names only the live canonical hand;
+    // the checkpoint also holds the accepted prefix's drawn cards. Preserve the
+    // player's canonical order and keep the extra cards in the hand.
+    if let GameAction::ReorderHand { order } = action {
+        let Some(player) = shadow.players.get(actor.0 as usize) else {
+            return;
+        };
+        let hand: Vec<crate::types::identifiers::ObjectId> = player.hand.iter().copied().collect();
+        if order.len() != hand.len() {
+            let extras: Vec<crate::types::identifiers::ObjectId> = hand
+                .iter()
+                .copied()
+                .filter(|id| !order.contains(id))
+                .collect();
+            let mut merged = order.clone();
+            merged.extend(extras);
+            if merged.len() != hand.len() || merged.iter().any(|id| !hand.contains(id)) {
+                return;
+            }
+            shadow.players[actor.0 as usize].hand = merged.into_iter().collect();
+        } else if engine::apply_admitted_recorded_action(&mut shadow, actor, actor, action.clone())
+            .is_err()
+        {
+            return;
+        }
+    } else if engine::apply_admitted_recorded_action(&mut shadow, actor, actor, action.clone())
+        .is_err()
+    {
         return;
     }
     shadow.payment_transaction_replay = false;
@@ -698,6 +728,18 @@ pub(crate) fn mirror_outside_action(state: &mut GameState, actor: PlayerId, acti
         .payment_transaction
         .as_mut()
         .expect("the descriptor is live") = updated;
+}
+
+/// Runtime-only fields are `#[serde(skip)]` on the live state and cannot be
+/// carried inside the nested checkpoint; reattach them when a checkpoint
+/// settlement replaces the outer state.
+fn carry_runtime_authorities(shadow: &mut GameState, live: &GameState) {
+    shadow.card_db = live.card_db.clone();
+    shadow.all_card_names = live.all_card_names.clone();
+    shadow.log_player_names = live.log_player_names.clone();
+    shadow.rng = live.rng.clone();
+    shadow.rng_seed = live.rng_seed;
+    shadow.rng_word_pos = live.rng_word_pos;
 }
 
 /// CR 614.17c: a parked replacement for a draw that can no longer happen
@@ -754,6 +796,15 @@ pub(crate) fn abandon_failed_recovery(state: &mut GameState) {
 /// legal-action enumeration. A replay failure fails closed to the untouched
 /// base rather than exposing a partially mutated shadow.
 pub(crate) fn project(state: &GameState) -> GameState {
+    // CR 104.1 + CR 104.3a: a terminal game has no live payment prompt; never
+    // project a stale one into sideboarding or the results view.
+    if state.game_end.is_some() {
+        let mut base = state.clone();
+        base.payment_transaction = None;
+        base.payment_transaction_replay = false;
+        base.payment_transaction_just_handled = false;
+        return base;
+    }
     let Some(transaction) = state.payment_transaction.as_ref() else {
         return state.clone();
     };
@@ -1052,6 +1103,36 @@ mod tests {
             .expect("the recovery checkpoint survives");
         assert_eq!(checkpoint.consumed, 1);
         assert_eq!(checkpoint.state.players[0].life, 11);
+    }
+
+    #[test]
+    fn a_terminal_game_never_projects_a_parked_payment_prompt() {
+        let mut state = GameState::new_two_player(7);
+        state.game_end = Some(crate::types::game_state::GameEnd {
+            winner: Some(PlayerId(0)),
+        });
+        state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
+            wire_version: 1,
+            owner: PlayerId(0),
+            root: Box::new(crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::NoOp,
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )),
+            transcript: Vec::new(),
+            base_waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            resolving_trigger_context: None,
+            recovered: None,
+        }));
+        let projected = project(&state);
+        assert!(
+            projected.payment_transaction.is_none(),
+            "a terminal game must not project a parked payment"
+        );
+        assert_eq!(projected.waiting_for, state.waiting_for);
     }
 
     #[test]

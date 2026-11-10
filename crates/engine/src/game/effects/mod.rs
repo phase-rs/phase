@@ -23540,9 +23540,10 @@ fn resolve_chain_body(
             // payment site only handles static AbilityCost variants.
             let (resolved_cost, repeat) = resolved_unless_cost(state, ability, &unless_pay.cost);
             // CR 121.2b + CR 614.17b: judge the whole repeated payment, not
-            // just the compact first instruction, before offering it.
+            // just the compact first instruction, before offering it — without
+            // allocating one leg per age counter.
             let checked_cost = match repeat {
-                Some(count) if count > 0 => expand_per_counter(&resolved_cost, count),
+                Some(count) if count > 0 => repeated_draw_check_cost(&resolved_cost, count),
                 _ => resolved_cost.clone(),
             };
             // CR 118.6 + CR 202.1b: A cost based on the mana cost of an object
@@ -28917,6 +28918,30 @@ fn resolve_unless_payers(
 /// (CR 118.3a), which is still asked (CR 118.5). `OneOf`
 /// unfolds into a `Composite` of N independent disjunctive choices
 /// (CR 702.24a: each choice is made separately).
+/// CR 121.2b + CR 702.24a: a compact repeated draw admission check. The whole
+/// repeated payment is impossible exactly when a single draw of the total size
+/// is, so no per-leg allocation is needed; non-fixed quantities fall back to the
+/// concrete expansion.
+pub(crate) fn repeated_draw_check_cost(base: &AbilityCost, count: u32) -> AbilityCost {
+    if let AbilityCost::EffectCost { effect } = base {
+        if let Effect::Draw {
+            count: QuantityExpr::Fixed { value },
+            target,
+        } = effect.as_ref()
+        {
+            return AbilityCost::EffectCost {
+                effect: Box::new(Effect::Draw {
+                    count: QuantityExpr::Fixed {
+                        value: value.saturating_mul(count as i32),
+                    },
+                    target: target.clone(),
+                }),
+            };
+        }
+    }
+    expand_per_counter(base, count)
+}
+
 pub(crate) fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
     if n == 0 {
         return AbilityCost::Mana {
