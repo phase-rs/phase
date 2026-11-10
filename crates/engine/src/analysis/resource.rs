@@ -4992,9 +4992,7 @@ pub(crate) fn loop_states_cover_modulo_object_growth(
     // growth, so they must not split the remainder. A witness naming any other object
     // keeps its live/stale relation: the FODDER cover quotients those, and this predicate
     // must not become a blanket erasure of the sharing it protects.
-    let nominates_grown = |record: &DamageRecord| {
-        matches!(&record.target, TargetRef::Object(id) if grown_ids.contains(id))
-    };
+    let nominates_grown = |record: &DamageRecord| matches!(&record.target, TargetRef::Object(id) if grown_ids.contains(id));
     pa.0.damage_dealt_this_turn
         .retain(|record| !nominates_grown(record));
     pb.0.damage_dealt_this_turn
@@ -8996,7 +8994,10 @@ fn canonicalize_projected_recipient_relations(
     canonicalize: impl FnOnce(&mut GameState),
 ) {
     for &index in stale {
-        debug_assert_eq!(frame.0.damage_dealt_this_turn[index].target_incarnation, Some(0));
+        debug_assert_eq!(
+            frame.0.damage_dealt_this_turn[index].target_incarnation,
+            Some(0)
+        );
         frame.0.damage_dealt_this_turn[index].target_incarnation = None;
     }
     canonicalize(&mut frame.0);
@@ -10928,7 +10929,10 @@ mod tests {
             let mut events = Vec::new();
             assert_eq!(future.stack.len(), 2, "two actual pending consumers");
             assert!(
-                future.battlefield.iter().all(|id| !future.objects[id].tapped),
+                future
+                    .battlefield
+                    .iter()
+                    .all(|id| !future.objects[id].tapped),
                 "the pending consumers must cause the observed taps"
             );
             for remaining in [1, 0] {
@@ -10994,7 +10998,10 @@ mod tests {
                 (&legacy_shared, BTreeSet::from([ObjectId(21)])),
                 (&legacy_renamed, BTreeSet::from([ObjectId(22)])),
                 (&legacy_split, BTreeSet::from([ObjectId(21), ObjectId(22)])),
-                (&legacy_permuted, BTreeSet::from([ObjectId(23), ObjectId(25)])),
+                (
+                    &legacy_permuted,
+                    BTreeSet::from([ObjectId(23), ObjectId(25)]),
+                ),
             ] {
                 assert_eq!(
                     recipients(raw),
@@ -11080,8 +11087,7 @@ mod tests {
                 ("renamed", &legacy_shared, &legacy_renamed, true),
                 ("two-group renamed", &legacy_split, &legacy_permuted, true),
             ] {
-                let refusals =
-                    fodder_growth_cover_refusals(prior, current, &class, PlayerId(0)).0;
+                let refusals = fodder_growth_cover_refusals(prior, current, &class, PlayerId(0)).0;
                 assert!(
                     refusals
                         .iter()
