@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "PeriodicDelta gains seat_life_gross (per-seat gross gained/lost life edits) for loop-shortcut headroom; a LoopShortcut schema without deliverable_capacity now decodes unproved (0) and is refused at restore instead of defaulting to the engine budget; an UntilLethal ShortcutProposal must carry its proven crossing in win_kind_at (#10543)"
+  "reason": "PeriodicDelta gains seat_life_gross (per-seat gross gained/lost life edits) for loop-shortcut headroom; an UntilLethal ShortcutProposal must carry its proven crossing in win_kind_at, and checked restore refuses one without it (#10543)"
 }
