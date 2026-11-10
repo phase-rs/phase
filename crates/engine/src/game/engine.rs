@@ -9887,6 +9887,18 @@ pub(super) fn resume_pending_continuation_if_priority(
                 state.waiting_for =
                     super::casting_costs::resume_interrupted_cost_payment(state, events, None)?;
             }
+            // CR 702.24a + CR 118.12: a compact repeated draw cost resumes its
+            // next bounded chunk once the previous chunk's suffix has settled.
+            if matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && state.active_ability_continuation().is_none()
+                && state.pending_unless_draw_repeat.is_some()
+                && state.pending_cost_move_resume.is_none()
+                && !state.cost_payment_failed_flag
+                && super::engine_replacement::resume_active_draw_sequences(state, events).is_none()
+            {
+                state.waiting_for =
+                    super::engine_payment_choices::drive_pending_unless_draw_repeat(state, events)?;
+            }
             return Ok(());
         }
     }

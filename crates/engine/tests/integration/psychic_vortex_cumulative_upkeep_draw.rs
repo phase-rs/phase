@@ -1512,3 +1512,32 @@ fn a_large_age_count_declines_without_expanding_every_leg() {
     assert_eq!(zone_of(&runner, vortex), Zone::Graveyard);
     assert_eq!(ZoneSizes::of(&runner, P0).hand, before.hand);
 }
+
+/// CR 702.24a: accepting a large repeated draw cost pays through the counted
+/// cursor in bounded chunks; the whole leg vector is never materialized.
+#[test]
+fn a_large_age_count_accepts_through_the_counted_cursor() {
+    const AGE: u32 = 100;
+    let names: Vec<String> = (0..(AGE as usize + 50))
+        .map(|index| format!("Library {index}"))
+        .collect();
+    let library: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &library, |_| ());
+    advance_through_upkeep(&mut runner);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::UnlessPayment { .. }
+    ));
+    let before = ZoneSizes::of(&runner, P0);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("paying a large cumulative upkeep is legal");
+    let after = ZoneSizes::of(&runner, P0);
+    assert_eq!(after.hand, before.hand + AGE as usize);
+    assert_eq!(after.library, before.library - AGE as usize);
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+    assert!(
+        runner.state().pending_unless_draw_repeat.is_none(),
+        "the counted cursor retires after the last chunk"
+    );
+}

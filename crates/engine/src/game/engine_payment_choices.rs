@@ -1194,7 +1194,23 @@ pub(super) fn handle_unless_payment(
     let mut payment_failed = !pay;
     let post_action_event_start = None;
     if pay {
-        // CR 702.24a: the concrete repeated legs exist only while paying.
+        // CR 702.24a: a large compact repeated draw is paid in bounded chunks
+        // through one counted cursor; a small cost keeps the ordinary concrete
+        // legs so its prompt/pause lifecycle is unchanged.
+        if let Some(count) = repeat.filter(|count| *count > REPEATED_DRAW_CHUNK) {
+            state.pending_unless_draw_repeat = Some(Box::new(
+                crate::types::game_state::PendingUnlessDrawRepeat {
+                    player,
+                    base: Box::new(cost),
+                    remaining: count,
+                    pending_effect,
+                    trigger_event,
+                    effect_description,
+                },
+            ));
+            let waiting_for = drive_pending_unless_draw_repeat(state, events)?;
+            return Ok(action_result(events, waiting_for));
+        }
         let cost = match repeat {
             Some(count) if count > 0 => crate::game::effects::expand_per_counter(&cost, count),
             _ => cost,
@@ -2084,6 +2100,74 @@ fn finish_unless_payment(
 /// the cost authority again. Deferred life-payment substitutions use this
 /// after their replacement post-effects finish, because the mana and life
 /// components were committed before the replacement choice opened.
+const REPEATED_DRAW_CHUNK: u32 = 64;
+
+/// CR 702.24a + CR 118.12: pay a compact repeated draw unless-cost through a
+/// counted cursor. Each chunk materializes at most `REPEATED_DRAW_CHUNK`
+/// printed instructions; the remaining count survives a pause.
+pub(crate) fn drive_pending_unless_draw_repeat(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    loop {
+        let Some(mut pending) = state.pending_unless_draw_repeat.take() else {
+            return Ok(state.waiting_for.clone());
+        };
+        if pending.remaining == 0 {
+            return finish_successful_unless_payment(
+                state,
+                pending.pending_effect.as_ref(),
+                &pending.trigger_event,
+                events,
+            );
+        }
+        let chunk = pending.remaining.min(REPEATED_DRAW_CHUNK);
+        let cost = crate::game::effects::expand_per_counter(&pending.base, chunk);
+        match costs::pay_ability_cost_for_resolution(
+            state,
+            pending.player,
+            &cost,
+            pending.pending_effect.as_ref(),
+            events,
+        )? {
+            PaymentOutcome::Paid => {
+                pending.remaining -= chunk;
+                if pending.remaining == 0 {
+                    return finish_successful_unless_payment(
+                        state,
+                        pending.pending_effect.as_ref(),
+                        &pending.trigger_event,
+                        events,
+                    );
+                }
+                state.pending_unless_draw_repeat = Some(pending);
+            }
+            PaymentOutcome::Paused { .. } => {
+                // The chunk's suffix owns the paused legs; the remaining count
+                // resumes once that suffix settles.
+                pending.remaining -= chunk;
+                state.pending_unless_draw_repeat = Some(pending);
+                return Ok(state.waiting_for.clone());
+            }
+            PaymentOutcome::Failed { .. } => {
+                return finish_unless_payment(
+                    state,
+                    true,
+                    true,
+                    *pending.base,
+                    pending.pending_effect,
+                    pending.trigger_event,
+                    pending.effect_description,
+                    Vec::new(),
+                    None,
+                    events,
+                )
+                .map(|result| result.waiting_for);
+            }
+        }
+    }
+}
+
 pub(crate) fn finish_successful_unless_payment(
     state: &mut GameState,
     pending_effect: &ResolvedAbility,

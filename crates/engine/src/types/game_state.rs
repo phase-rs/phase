@@ -5703,6 +5703,21 @@ pub struct PendingPlayerScopeSacrificeChoice {
 /// creation after every payer has answered. Kept independently of the current
 /// `UnlessPayment`/`WardSacrificeChoice`, which represent only one seat's
 /// decision and may be replaced mid-payment.
+/// CR 702.24a + CR 118.12: a compact repeated draw unless-cost being paid.
+/// `base` is the printed instruction; `remaining` is the number of legs still
+/// owed. The payment authority pays bounded chunks, never one box per leg.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingUnlessDrawRepeat {
+    pub player: PlayerId,
+    pub base: Box<AbilityCost>,
+    pub remaining: u32,
+    pub pending_effect: Box<ResolvedAbility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_event: Option<GameEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_description: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PendingPlayerScopeUnlessPayment {
     /// The unscoped token instruction to resolve exactly once at the terminal
@@ -25805,6 +25820,11 @@ declare_game_state! {
     /// across one-seat sacrifice choices and replacement pauses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_player_scope_unless_payment: Option<Box<PendingPlayerScopeUnlessPayment>>,
+    /// CR 702.24a: a compact repeated draw unless-payment being paid in bounded
+    /// chunks. The count and the printed instruction are carried; no leg vector
+    /// is allocated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_unless_draw_repeat: Option<Box<PendingUnlessDrawRepeat>>,
     /// CR 608.2c + CR 701.9a: a discard instruction parked by a
     /// replacement-application choice. See [`PendingDiscardBatch`], whose doc
     /// records why CR 616.1 does not govern this path.
@@ -34303,6 +34323,7 @@ impl GameState {
             repeat_process_requested: None,
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_unless_payment: None,
+            pending_unless_draw_repeat: None,
             pending_discard_batch: None,
             pending_hero_event: None,
             pending_horde_reveal: None,
@@ -38435,6 +38456,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     COMPARING it can never suppress a legitimate loop's detection.
         pending_player_scope_sacrifice_choice: _,
         pending_player_scope_unless_payment: _,
+        pending_unless_draw_repeat: _,
         pending_discard_batch: _,
         pending_hero_event: _,
         pending_horde_reveal: _,
