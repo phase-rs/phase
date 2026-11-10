@@ -654,11 +654,17 @@ const ASHAYA: &str = "Ashaya's power and toughness are each equal to the number 
 const MANABARBS: &str =
     "Whenever a player taps a land for mana, this enchantment deals 1 damage to that player.";
 
+/// Wild Growth, verbatim.
+const WILD_GROWTH: &str =
+    "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional {G}.";
+
 /// Devoted Druid under Ashaya, its own untap on top, a Manabarbs on each side
-/// when `manabarbs`, and `treasures` Treasures beside it. Returns whether the window
+/// when `manabarbs`, Wild Growth on the Druid when `wild_growth`, and
+/// `treasures` Treasures beside it. Returns whether the window
 /// holds and the work the recommendation does.
 fn ashaya_druid_untap(
     manabarbs: bool,
+    wild_growth: bool,
     treasures: usize,
 ) -> (bool, u64, perf_counters::PerfCounterSnapshot) {
     let mut scenario = main_phase_scenario();
@@ -673,8 +679,17 @@ fn ashaya_druid_untap(
     for _ in 0..treasures {
         scenario.add_artifact_from_oracle(P0, "Treasure", TREASURE);
     }
+    let growth = wild_growth.then(|| {
+        scenario
+            .add_enchantment_from_oracle(P0, "Wild Growth", WILD_GROWTH)
+            .id()
+    });
     let mut runner = scenario.build();
     flush_layers(runner.state_mut());
+    if let Some(growth) = growth {
+        attach_to(runner.state_mut(), growth, druid);
+        flush_layers(runner.state_mut());
+    }
     clear_summoning_sickness(&mut runner, druid);
     assert!(
         runner.state().objects[&druid]
@@ -699,20 +714,28 @@ fn ashaya_druid_untap(
 }
 
 /// Devoted Druid under Ashaya is a Forest, so its mana comes through the land
-/// rows, which read the battlefield's `TapsForMana` triggers. With none, the
-/// trigger index answers that without a scan, and sixty Treasures beside the
-/// Druid add no work.
+/// rows, which read the battlefield's `TapsForMana` triggers. The trigger index
+/// answers them without a scan, with Wild Growth on the Druid or without it,
+/// and sixty Treasures beside the Druid add no work.
 #[test]
 fn a_land_source_reads_no_more_of_a_wide_board() {
-    let (bare_holds, bare_copies, bare) = ashaya_druid_untap(false, 0);
-    let (wide_holds, wide_copies, wide) = ashaya_druid_untap(false, 60);
-    assert!(bare_holds && wide_holds, "the window holds");
-    assert_eq!((bare_copies, wide_copies), (1, 1));
-    assert_eq!(
-        wide.mana_aura_trigger_scans, 0,
-        "no battlefield trigger scan"
-    );
-    assert_eq!(wide, bare, "the board's width adds no work");
+    for wild_growth in [false, true] {
+        let (bare_holds, bare_copies, bare) = ashaya_druid_untap(false, wild_growth, 0);
+        let (wide_holds, wide_copies, wide) = ashaya_druid_untap(false, wild_growth, 60);
+        assert!(
+            bare_holds && wide_holds,
+            "Wild Growth: {wild_growth}: the window holds"
+        );
+        assert_eq!((bare_copies, wide_copies), (1, 1));
+        assert_eq!(
+            wide.mana_aura_trigger_scans, 0,
+            "Wild Growth: {wild_growth}: no battlefield trigger scan"
+        );
+        assert_eq!(
+            wide, bare,
+            "Wild Growth: {wild_growth}: the board's width adds no work"
+        );
+    }
 }
 
 /// CR 117.4 + CR 603.3: tapping the Druid triggers both players' Manabarbs, and
@@ -720,7 +743,7 @@ fn a_land_source_reads_no_more_of_a_wide_board() {
 /// them, and the window holds.
 #[test]
 fn triggers_above_the_untap_resolve_first() {
-    let (holds, copies, _) = ashaya_druid_untap(true, 0);
+    let (holds, copies, _) = ashaya_druid_untap(true, false, 0);
     assert_eq!(copies, 1);
     assert!(holds, "two Manabarbs triggers don't hide the second tap");
 }
@@ -1054,12 +1077,8 @@ fn another_players_resolve_all_leaves_the_untap_window_held() {
 
 /// Eater of the Dead, verbatim.
 const EATER_OF_THE_DEAD: &str = "{0}: If this creature is tapped, exile target creature card from a graveyard and untap this creature.";
-/// Civilized Scholar's front face, verbatim.
-const CIVILIZED_SCHOLAR: &str = "{T}: Draw a card, then discard a card. If a creature card is discarded this way, untap this creature, then transform it.";
 /// Cryptolith Rite, verbatim.
 const CRYPTOLITH_RITE: &str = "Creatures you control have \"{T}: Add one mana of any color.\"";
-/// Vitalize, verbatim.
-const VITALIZE: &str = "Untap all creatures you control.";
 
 /// `source`'s one activated ability that isn't a mana ability: its printed
 /// one, beside the mana ability Cryptolith Rite grants.
@@ -1071,15 +1090,19 @@ fn printed_ability_index(runner: &GameRunner, source: ObjectId) -> usize {
         .expect("the source has its printed ability")
 }
 
-/// CR 608.2c: an untap behind a condition is read as the ability resolves, on
-/// the copy after the creature's mana use (each has Cryptolith Rite's "{T}: Add
-/// one mana of any color."). Eater of the Dead's "If this creature is tapped" is
-/// then true, so the window holds, until its only target is gone. Civilized
-/// Scholar, untapped by Vitalize in response, untaps only "If a creature card
-/// is discarded this way", and the copy can't choose the player's discard, so
-/// the pass stays.
+/// Harsh Deceiver, verbatim.
+const HARSH_DECEIVER: &str = "{1}: Look at the top card of your library.\n{2}: Reveal the top card of your library. If it's a land card, untap this creature and it gets +1/+1 until end of turn. Activate only once each turn.";
+
+/// Only an ability that does nothing but untap its own source holds. Each
+/// creature here has Cryptolith Rite's "{T}: Add one mana of any color." and is
+/// untapped with its ability on the stack. Eater of the Dead's "If this
+/// creature is tapped, exile target creature card from a graveyard and untap
+/// this creature." keeps the pass, though tapping it would meet the condition.
+/// Harsh Deceiver's untap turns on the hidden top card of its library
+/// (CR 401.2), and the recommendation is the same with a land or a nonland on
+/// top. The repeat check isn't even run for either.
 #[test]
-fn a_conditional_untap_holds_only_when_its_condition_is_met() {
+fn an_ability_that_does_more_than_untap_keeps_the_pass() {
     let Some(db) = shared_card_db() else { return };
     let mut scenario = main_phase_scenario();
     scenario.add_enchantment_from_oracle(P0, "Cryptolith Rite", CRYPTOLITH_RITE);
@@ -1096,53 +1119,44 @@ fn a_conditional_untap_holds_only_when_its_condition_is_met() {
         Some("Eater of the Dead")
     );
     assert!(mana_action(&runner, eater).is_some() && !is_tapped(&runner, eater));
-    assert!(
-        !recommends_pass(&runner),
-        "Eater: tapping it meets the condition"
-    );
-
-    // CR 608.2b: with its only target gone from the graveyard the ability
-    // doesn't resolve, so there is no untap to wait for.
-    move_to_zone(runner.state_mut(), corpse, Zone::Exile, &mut Vec::new());
-    assert!(recommends_pass(&runner), "Eater: its target is gone");
-
-    let mut scenario = main_phase_scenario();
-    scenario.add_enchantment_from_oracle(P0, "Cryptolith Rite", CRYPTOLITH_RITE);
-    let scholar = scenario
-        .add_creature_from_oracle(P0, "Civilized Scholar", 0, 1, CIVILIZED_SCHOLAR)
-        .id();
-    let vitalize = scenario
-        .add_spell_to_hand_from_oracle(P0, "Vitalize", true, VITALIZE)
-        .with_mana_cost(ManaCost::zero())
-        .id();
-    scenario.add_real_card(P0, "Island", Zone::Library, db);
-    let mut runner = scenario.build();
-    clear_summoning_sickness(&mut runner, scholar);
-    let loot = printed_ability_index(&runner, scholar);
-    activate(&mut runner, scholar, loot, &[]);
-    assert!(is_tapped(&runner, scholar));
-    runner.cast(vitalize).commit();
-    for _ in 0..4 {
-        if runner.state().stack.len() == 1 {
-            break;
-        }
-        runner.act(GameAction::PassPriority).expect("pass");
-    }
-    assert_eq!(
-        top_source_name(&runner).as_deref(),
-        Some("Civilized Scholar")
-    );
-    assert!(mana_action(&runner, scholar).is_some() && !is_tapped(&runner, scholar));
     perf_counters::reset();
-    assert!(
-        recommends_pass(&runner),
-        "Scholar: the copy discards no creature"
-    );
-    assert_eq!(
-        perf_counters::untap_repeat_probe_snapshot().state_clones,
-        1,
-        "the copy played the Scholar's ability out"
-    );
+    assert!(recommends_pass(&runner), "Eater: its ability exiles too");
+    assert_eq!(perf_counters::untap_repeat_probe_snapshot().state_clones, 0);
+
+    for top_card in ["Forest", "Llanowar Elves"] {
+        let mut scenario = main_phase_scenario();
+        scenario.add_enchantment_from_oracle(P0, "Cryptolith Rite", CRYPTOLITH_RITE);
+        let deceiver = scenario
+            .add_creature_from_oracle(P0, "Harsh Deceiver", 1, 4, HARSH_DECEIVER)
+            .id();
+        scenario.add_real_card(P0, top_card, Zone::Library, db);
+        let islands: Vec<_> = (0..2)
+            .map(|_| scenario.add_real_card(P0, "Island", Zone::Battlefield, db))
+            .collect();
+        let mut runner = scenario.build();
+        clear_summoning_sickness(&mut runner, deceiver);
+        for island in islands {
+            tap_for_mana(&mut runner, island);
+        }
+        // Its second printed ability, after "{1}: Look at the top card".
+        let reveal = runner.state().objects[&deceiver]
+            .abilities
+            .iter()
+            .enumerate()
+            .filter(|(_, ability)| !is_mana_ability(ability))
+            .nth(1)
+            .map(|(index, _)| index)
+            .expect("the reveal ability");
+        activate(&mut runner, deceiver, reveal, &[]);
+        assert_eq!(top_source_name(&runner).as_deref(), Some("Harsh Deceiver"));
+        assert!(mana_action(&runner, deceiver).is_some() && !is_tapped(&runner, deceiver));
+        perf_counters::reset();
+        assert!(
+            recommends_pass(&runner),
+            "Deceiver over a {top_card}: the hidden card doesn't decide"
+        );
+        assert_eq!(perf_counters::untap_repeat_probe_snapshot().state_clones, 0);
+    }
 }
 
 /// CR 603.2 + CR 603.3: a trigger goes on the stack with no player act, so

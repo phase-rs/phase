@@ -576,26 +576,42 @@ fn use_mana_on_copy(copy: &mut GameState, player: PlayerId, action: &GameAction)
         && in_game(copy, player)
 }
 
-/// Step 2 of [`untap_repeats_mana`]: every player passes until `entry` has left
-/// the stack, each pass the engine's own (CR 117.4), triggers put above it on
-/// the way (Manabarbs on each side) resolving first. A window that isn't a
-/// priority window means a choice, which the copy can't make for the player.
+/// Step 2 of [`untap_repeats_mana`]: every player passes until the pass that
+/// resolves `entry` reports it (`GameEvent::StackResolved`), each pass the
+/// engine's own (CR 117.4), triggers put above it on the way (Manabarbs on each
+/// side) resolving first; the stack itself isn't searched. A window that isn't
+/// a priority window means a choice, which the copy can't make for the player.
 /// [`UNTAP_PROBE_PASS_CAP`] passes without the entry resolving read as no
 /// repeat.
 fn pass_until_resolved(copy: &mut GameState, entry: ObjectId) -> bool {
     for _ in 0..UNTAP_PROBE_PASS_CAP {
-        if !copy.stack.iter().any(|on_stack| on_stack.id == entry) {
-            return true;
-        }
         let WaitingFor::Priority { player } = copy.waiting_for else {
             return false;
         };
         let actor = turn_control::authorized_submitter_for_player(copy, player);
-        if super::engine::apply_for_simulation(copy, actor, GameAction::PassPriority).is_err() {
+        let Ok(result) = super::engine::apply_for_simulation(copy, actor, GameAction::PassPriority)
+        else {
             return false;
+        };
+        let resolved = result.events.iter().any(
+            |event| matches!(event, GameEvent::StackResolved { object_id } if *object_id == entry),
+        );
+        if resolved {
+            return resolution_settled(copy);
         }
     }
     false
+}
+
+/// CR 117.2e: no player has priority while a spell or ability is resolving, so
+/// the untap's resolution has settled once a player has priority again with
+/// nothing left mid-resolution (a replacement's ordering prompt, a parked
+/// final part).
+fn resolution_settled(copy: &GameState) -> bool {
+    matches!(copy.waiting_for, WaitingFor::Priority { .. })
+        && copy.resolving_stack_entry.is_none()
+        && copy.resolving_trigger_firing.is_none()
+        && copy.resolving_spell_final_part.is_none()
 }
 
 /// The most passes [`pass_until_resolved`] makes: a guard against a trigger
@@ -4173,21 +4189,35 @@ pub(crate) fn opponent_land_color_options(
 /// turning a per-land full-battlefield scan into a per-land walk over only the
 /// (usually tiny) set of trigger-bearing permanents.
 ///
-/// Once the trigger index is built, an empty `TapsForMana` bucket (and empty
-/// unclassified bucket) answers without the scan: the index holds every
-/// battlefield object whose trigger could match, which is also how those
-/// triggers are found when they fire. Otherwise the scan runs, in battlefield
-/// order.
+/// Once the trigger index is built it answers without a battlefield scan: its
+/// unclassified bucket, then its `TapsForMana` bucket, in the order
+/// `trigger_index::candidates_for_event` hands the same triggers to the
+/// trigger pipeline when they fire (CR 605.4a), each kept only while it is on
+/// the battlefield with a `TapsForMana` trigger. Before the index is built the
+/// scan runs, in battlefield order.
 pub(crate) fn taps_for_mana_trigger_sources(state: &GameState) -> Vec<ObjectId> {
     let index = &state.trigger_index;
-    if index.readiness == crate::types::game_state::DerivedIndexReadiness::Built
-        && index.unclassified.is_empty()
-        && index
-            .by_key
-            .get(&crate::types::triggers::TriggerEventKey::TapsForMana)
-            .is_none_or(|bucket| bucket.is_empty())
-    {
-        return Vec::new();
+    if index.readiness == crate::types::game_state::DerivedIndexReadiness::Built {
+        let mut sources: Vec<ObjectId> = Vec::new();
+        for &object_id in index.unclassified.iter().chain(
+            index
+                .by_key
+                .get(&crate::types::triggers::TriggerEventKey::TapsForMana)
+                .into_iter()
+                .flatten(),
+        ) {
+            let has_trigger = state.objects.get(&object_id).is_some_and(|object| {
+                object.zone == Zone::Battlefield
+                    && object
+                        .trigger_definitions
+                        .iter_all()
+                        .any(|entry| entry.definition.mode == TriggerMode::TapsForMana)
+            });
+            if has_trigger && !sources.contains(&object_id) {
+                sources.push(object_id);
+            }
+        }
+        return sources;
     }
     crate::game::perf_counters::record_mana_aura_trigger_scan();
     state

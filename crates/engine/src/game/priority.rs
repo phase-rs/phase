@@ -502,30 +502,32 @@ fn resolution_untaps_ready_mana_source(
         .is_some_and(|source| mana_sources::untap_repeats_mana(state, player, top.id, source))
 }
 
-/// The object a "Untap this artifact." / "Untap this creature." instruction in
-/// `ability`'s chain would untap, bound as its resolver binds it
+/// The object `ability` untaps when it is a plain "Untap this artifact." /
+/// "Untap this creature." and nothing else: one unconditional, untargeted,
+/// non-optional instruction with no branch after it (Basalt Monolith, Grim
+/// Monolith, Devoted Druid, Soliton). It is bound as the resolver binds it
 /// (`ResolvedAbility::self_ref_binding`): none once the source has left the
-/// battlefield, even if it came back (CR 400.7). Whether resolution reaches the
-/// instruction (a condition, a target gone illegal) is the resolver's answer,
-/// read by `untap_repeats_mana` on its copy.
+/// battlefield, even if it came back (CR 400.7). An ability that does more
+/// (Eater of the Dead's exile, Harsh Deceiver's reveal) keeps the pass, so the
+/// hold never turns on a condition, a target or a hidden card.
 fn untapped_source(state: &GameState, ability: &ResolvedAbility) -> Option<ObjectId> {
-    let untaps_its_source = matches!(
+    let plain_self_untap = matches!(
         ability.effect,
         Effect::SetTapState {
             state: TapStateChange::Untap,
             scope: EffectScope::Single,
             target: TargetFilter::SelfRef,
         }
-    );
-    untaps_its_source
+    ) && ability.sub_ability.is_none()
+        && ability.else_ability.is_none()
+        && ability.coin_branches.is_none()
+        && ability.condition.is_none()
+        && ability.targets.is_empty()
+        && !ability.optional
+        && ability.repeat_for.is_none();
+    plain_self_untap
         .then(|| ability.self_ref_binding(state))
         .flatten()
-        .or_else(|| {
-            [&ability.sub_ability, &ability.else_ability]
-                .into_iter()
-                .flatten()
-                .find_map(|branch| untapped_source(state, branch))
-        })
 }
 
 /// Whether any instruction in `ability`'s chain can move battlefield objects to
