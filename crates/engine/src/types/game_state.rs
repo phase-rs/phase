@@ -6978,6 +6978,16 @@ pub struct PendingBatchDeliveries {
     /// CR 616.1: staged common-approval lifecycle, if this batch was
     /// admitted to it. `None` is every non-staged batch and every legacy save;
     /// the `requests` loop above remains its authority.
+    ///
+    /// Restore contract: a payload written WITHOUT this field (any save from
+    /// the release that predates the staged lifecycle) cannot carry a private
+    /// owner arrangement, because the arrangement needs each member's approved
+    /// event, and those events exist only here. Such a payload resumes at the
+    /// current member and delivers the remaining cards in announcement order;
+    /// `requests` is the per-member suffix, so a member that already answered
+    /// before the save has no legacy representation and is not re-consulted.
+    /// Saves written by this engine keep `staged` and therefore keep the
+    /// owner's submitted order across a reopen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged: Option<StagedBatchDelivery>,
 }

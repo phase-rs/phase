@@ -911,6 +911,97 @@ fn unexpectedly_absent_fixed_depth_component_arrangement_survives_reopen() {
     ));
 }
 
+/// CR 400.7 + CR 730.3c: a predecessor payload (every staged-only field
+/// removed) cannot carry a private arrangement, so the resumed delivery lands
+/// the merged pile in announcement order. What it must NOT do is ask the same
+/// CR 903.9b question twice or lose a card: the answered replacement stays
+/// answered and both cards reach the correct slot.
+#[test]
+fn legacy_payload_resume_keeps_every_card_and_does_not_reask_the_answer() {
+    let mut scenario =
+        GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, burial_mana());
+    scenario.with_library_top(P0, &["Sentinel"]);
+    let host = scenario
+        .add_creature_from_oracle(P0, "Otrimi, the Ever-Playful", 6, 6, OTRIMI_ORACLE)
+        .with_subtypes(vec!["Nightmare", "Beast"])
+        .commander()
+        .id();
+    let rider = scenario
+        .add_creature_to_hand_from_oracle(P0, "Gemrazer", 4, 4, GEMRAZER_ORACLE)
+        .with_subtypes(vec!["Beast"])
+        .id();
+    let burial = add_hallowed_burial(&mut scenario);
+    let mut runner = scenario.build();
+    merge_pair(&mut runner, host, rider);
+    let sentinel = library(&runner, P0)[0];
+    runner.cast(burial).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+
+    // Emulate the previous writer: the staged payload did not exist.
+    fn strip(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(map) => {
+                for key in [
+                    "staged",
+                    "consult_order",
+                    "consult_pos",
+                    "pending_chooser",
+                    "expected_origin",
+                ] {
+                    map.remove(key);
+                }
+                for child in map.values_mut() {
+                    strip(child);
+                }
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    let mut saved = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the pause serializes");
+    strip(&mut saved);
+    let restored = serde_json::from_value::<PersistedGameState>(saved)
+        .expect("the predecessor payload restores")
+        .into_game_state()
+        .expect("the predecessor payload finalizes");
+    *runner.state_mut() = restored;
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+
+    let declined = runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("P0 keeps its commander out of the command zone");
+    // The predecessor payload has no arrangement to publish, so the resumed
+    // delivery completes without the private prompt (documented restore
+    // contract). What this row pins is card safety: no card is lost and the
+    // answered replacement is not asked again.
+    let _ = &declined;
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the answered CR 903.9b replacement is not asked again: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        library(&runner, P0),
+        vec![sentinel, host, rider],
+        "both cards land beneath the sentinel in announcement order"
+    );
+    assert_eq!(zone(&runner, host), Zone::Library);
+    assert_eq!(zone(&runner, rider), Zone::Library);
+    assert_arrangement_finished(&runner);
+}
+
 /// CR 903.9b + CR 401.4: an earlier consultation can pause while the seeded
 /// permanent has not yet been consulted. Its original submitted order survives.
 #[test]
