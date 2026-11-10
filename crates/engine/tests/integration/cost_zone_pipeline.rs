@@ -8784,7 +8784,11 @@ struct BringDownBoard {
 /// (P1), and a white source owned by the caster whose own cost move pauses for a
 /// replacement — so the save point sits BETWEEN the helper's spend and the recording,
 /// which is the window the contribution has to survive.
-fn bring_down_board() -> BringDownBoard {
+///
+/// `weave` adds board pieces before the scenario is built (the Expend witness needs a
+/// permanent whose expend threshold the CASTER must not cross); every other witness
+/// passes a no-op.
+fn bring_down_board_with(weave: impl FnOnce(&mut GameScenario)) -> BringDownBoard {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     // Cascade exiles from the top until a nonland card with lesser mana value, so the
@@ -8844,6 +8848,7 @@ fn bring_down_board() -> BringDownBoard {
         )
         .with_mana_cost(ManaCost::generic(1))
         .id();
+    weave(&mut scenario);
     let mut runner = scenario.build();
     let helper_treasures = (0..BRING_DOWN_ASSIST_GENERIC)
         .map(|offset| treasure_for(runner.state_mut(), P1, 9410 + u64::from(offset)))
@@ -8856,6 +8861,10 @@ fn bring_down_board() -> BringDownBoard {
         caster_source,
         second_spell,
     }
+}
+
+fn bring_down_board() -> BringDownBoard {
+    bring_down_board_with(|_| {})
 }
 
 /// Drive printed Bring Down to its committed-Helper payment step: declare the power-4
@@ -8978,6 +8987,194 @@ fn finish_bring_down(runner: &mut GameRunner, bring_down: ObjectId) {
         }
     }
     panic!("the assisted cast never reached the stack");
+}
+
+/// Printed Wandertale Mentor (`blb` 240), verbatim from Scryfall. Its expend trigger is the
+/// witness: CR 700.14 counts the mana THAT player spent, so the CASTER of an assisted spell
+/// must not cross "expend 4" on the helper's three Treasures.
+const WANDERTALE_MENTOR: &str = "Whenever you expend 4, put a +1/+1 counter on this creature. \
+(You expend 4 as you spend your fourth total mana to cast spells during a turn.)\n\
+{T}: Add {R} or {G}.";
+
+/// CR 700.14 + CR 702.132a: an assisted cast credits each payer with only the mana THEY
+/// spent, while the spell-wide payment facts keep the COMBINED amount.
+///
+/// The board is the Bring Down board — the helper pays the whole `{3}` generic with three
+/// Treasures, the caster pays the `{W}` with one white unit — plus printed Wandertale
+/// Mentor under the CASTER's control. Four mana leaves pools in total, so a ledger that
+/// credits the caster with the spell-wide amount makes them "expend 4" and put a +1/+1
+/// counter on a creature for mana the helper spent. CR 700.14 reads "the amount of mana
+/// that player spent this turn to cast spells", so the helper's three are the helper's and
+/// the caster's one is the caster's — and Rain of Riches, which asks what was spent to cast
+/// the spell rather than who spent it, must still see all four.
+#[test]
+fn assisted_cast_credits_each_payers_expenditure_separately() {
+    let BringDownBoard {
+        mut runner,
+        bring_down,
+        victim,
+        helper_treasures,
+        ..
+    } = bring_down_board_with(|scenario| {
+        scenario.add_creature_from_oracle(P0, "Wandertale Mentor", 2, 2, WANDERTALE_MENTOR);
+    });
+    let mentor = runner
+        .state()
+        .objects
+        .values()
+        .find(|object| object.name == "Wandertale Mentor")
+        .map(|object| object.id)
+        .expect("reach-guard: the expend witness is on the battlefield");
+
+    let advertised =
+        announce_bring_down_with_helper(&mut runner, bring_down, victim, BRING_DOWN_ASSIST_GENERIC);
+    assert_eq!(
+        advertised, BRING_DOWN_ASSIST_GENERIC,
+        "reach-guard: printed Bring Down's Assist offers its whole {{3}} generic component"
+    );
+    drive_to_caster_source_pause(&mut runner);
+    finish_bring_down(&mut runner, bring_down);
+    assert_eq!(
+        runner.state().objects[&bring_down].zone,
+        Zone::Stack,
+        "reach-guard: the assisted cast reached the stack"
+    );
+
+    // The spell-wide fact is unchanged: four units, three of them the helper's Treasures.
+    let spell = &runner.state().objects[&bring_down];
+    assert_eq!(
+        spell.mana_spent_to_cast_amount,
+        BRING_DOWN_ASSIST_GENERIC + 1,
+        "CR 702.132a + CR 118.3a: the cast's OWN payment facts keep the combined amount — \
+         the helper's three units beside the caster's one — because Rain of Riches asks what \
+         was spent to cast the spell, not who spent it"
+    );
+    assert_eq!(
+        spell
+            .mana_spent_source_snapshots
+            .iter()
+            .filter(|snapshot| helper_treasures.contains(&snapshot.source_id))
+            .count(),
+        BRING_DOWN_ASSIST_GENERIC as usize,
+        "reach-guard: and it still names every Treasure the helper sacrificed, got {:?}",
+        spell
+            .mana_spent_source_snapshots
+            .iter()
+            .map(|snapshot| snapshot.source_id)
+            .collect::<Vec<_>>()
+    );
+
+    // CR 700.14: the per-player ledger splits that same four.
+    assert_eq!(
+        runner.state().mana_spent_on_spells_this_turn.get(&P0),
+        Some(&1),
+        "CR 700.14: the CASTER spent one mana — the {{W}} their own source produced — and is \
+         credited with that alone, not with the helper's three Treasures; got {:?}",
+        runner.state().mana_spent_on_spells_this_turn
+    );
+    assert_eq!(
+        runner.state().mana_spent_on_spells_this_turn.get(&P1),
+        Some(&BRING_DOWN_ASSIST_GENERIC),
+        "CR 700.14 + CR 702.132a: the HELPER spent three, so the helper's own expenditure is \
+         three — the mana that left their pool to cast this spell; got {:?}",
+        runner.state().mana_spent_on_spells_this_turn
+    );
+
+    // CR 700.14: so the caster's Wandertale Mentor does not expend 4 for someone else's mana.
+    assert!(
+        !runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == mentor),
+        "CR 700.14: a caster who spent one mana has not expended four, so no expend trigger \
+         is collected for their Mentor"
+    );
+
+    // CR 702.85a + CR 611.3b: Rain of Riches still grants cascade off the helper's Treasures.
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .any(|object| object.name == "Rain of Riches" && object.zone == Zone::Battlefield),
+        "reach-guard: Rain of Riches is on the battlefield"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| {
+                entry.source_id == bring_down
+                    && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                    && entry
+                        .ability()
+                        .is_some_and(|ability| matches!(ability.effect, Effect::Cascade))
+            })
+            .count(),
+        1,
+        "CR 702.85a: the granted cascade reads the helper's Treasure pip from the combined \
+         spell-wide facts, which the per-payer split must leave untouched"
+    );
+
+    // Empty the stack, then confirm the counter never appears either.
+    for _ in 0..64 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority on the resolving stack");
+            }
+            WaitingFor::CastOffer { .. } => {
+                runner
+                    .act(GameAction::CascadeChoice {
+                        choice: engine::types::actions::CastChoice::Decline,
+                    })
+                    .expect("decline the cascade's free cast");
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: Vec::new(),
+                        bands: Vec::new(),
+                    })
+                    .expect("declare no attackers");
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: Vec::new(),
+                    })
+                    .expect("declare no blockers");
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("settle the cascade's replacement ordering");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order the collected triggers");
+            }
+            other => panic!("unexpected prompt while emptying the stack: {other:?}"),
+        }
+    }
+    assert_eq!(
+        runner.state().objects[&mentor]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        None,
+        "CR 700.14: the caster never expended four, so no +1/+1 counter reaches their Mentor"
+    );
 }
 
 /// CR 702.132a + CR 118.3a: the helper pip, the GRANTED cascade, and the consumed
@@ -10669,6 +10866,307 @@ fn restore_keeps_an_untouched_prepaid_spell_copy_and_grants_rains_cascade() {
         }),
         "CR 702.85a: the granted cascade reaches the stack off the restored cast"
     );
+}
+
+// ---------------------------------------------------------------------------
+// CR 702.190a + CR 702.188a + CR 601.2h: the Sneak / Web-slinging returned-creature cost
+// move is a carrier of a cast whose mana is ALREADY PAID, and it is a carrier the
+// `PendingCast` walk cannot reach through its own amount field: the park rebuilds the cast
+// (`PendingCast::new`), so the settled amount rides on
+// `PendingCostMoveCompletion::FinalizeCast` beside the announced-target latch. The facts
+// the resumed cast CONSUMES are validated there — the stated amount, the latch, and the
+// payment copy the finalizers stamped on the spell.
+// ---------------------------------------------------------------------------
+
+/// CR 702.188a: Web-slinging pays its alternative cost and returns a TAPPED creature to
+/// hand. Two redirects on that return move make it park on a CR 616.1 ordering choice, so
+/// the paid cast stays on the cost-move carrier in the save.
+fn web_slinging_carrier_board() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let returned = scenario
+        .add_creature(P0, "Web-Slinging Carrier Return Witness", 2, 2)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Web-Slinging Carrier Witness", true)
+        .with_mana_cost(ManaCost::generic(7))
+        .with_keyword(Keyword::WebSlinging(ManaCost::generic(1)))
+        .id();
+    for name in ["Return Redirect One", "Return Redirect Two"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Exile));
+    }
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&returned)
+        .unwrap()
+        .tapped = true;
+    (runner, spell, returned)
+}
+
+/// Drive the Web-slinging cast until the returned creature's move parks: the mana is paid,
+/// the copy is stamped, and the cast sits on the cost-move carrier.
+fn announce_web_slinging_onto_the_carrier(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    returned: ObjectId,
+) {
+    let action = engine::ai_support::legal_actions(runner.state())
+        .into_iter()
+        .find(|action| match action {
+            GameAction::CastSpellAsWebSlinging {
+                hand_object,
+                creature_to_return,
+                ..
+            } => *hand_object == spell && *creature_to_return == returned,
+            _ => false,
+        })
+        .expect("CR 702.188a: the Web-slinging alternative cost is offered");
+    runner
+        .act(action)
+        .expect("the Web-slinging cast is announced");
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => return,
+            WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("confirm the Web-slinging payment");
+            }
+            other => panic!("unexpected prompt while announcing Web-slinging: {other:?}"),
+        }
+    }
+    panic!("the Web-slinging return move never parked on its replacement choice");
+}
+
+/// Reach guards shared by the three Web-slinging-carrier witnesses: this IS the carrier,
+/// the payment HAS run, and the amount rides on the completion rather than on the rebuilt
+/// cast.
+fn assert_web_slinging_carrier_reach_guards(runner: &GameRunner, spell: ObjectId) {
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach-guard: the returned creature's move parked on a replacement choice, got {:?}",
+        runner.state().waiting_for
+    );
+    let Some(PendingCostMoveResume::Cast {
+        pending: Some(pending),
+        completion:
+            PendingCostMoveCompletion::FinalizeCast {
+                prepaid_actual_mana_spent,
+                committed_target_facts,
+                ..
+            },
+        ..
+    }) = runner.state().pending_cost_move_resume.as_ref()
+    else {
+        panic!(
+            "reach-guard: the paid cast is parked on the cost-move carrier, got {:?}",
+            runner.state().pending_cost_move_resume
+        );
+    };
+    assert_eq!(
+        pending.object_id, spell,
+        "reach-guard: the carrier holds the cast being finalized"
+    );
+    assert!(
+        pending.prepaid_actual_mana_spent.is_none(),
+        "reach-guard: the rebuilt PendingCast states no amount — that is why the amount has \
+         to be validated on the completion"
+    );
+    assert!(
+        committed_target_facts.is_some(),
+        "reach-guard: the completion carries the announced-target latch (the spell declares \
+         nothing, which the latch states as an empty list)"
+    );
+    assert_eq!(
+        *prepaid_actual_mana_spent, None,
+        "reach-guard: this park states no amount, so the resume reads the copy"
+    );
+    assert_eq!(
+        runner.state().objects[&spell].mana_spent_to_cast_amount,
+        1,
+        "reach-guard: the payment ran before the return move, so the finalizers stamped the \
+         copy — one unit, the {{1}} Web-slinging cost"
+    );
+}
+
+/// CR 702.190a + CR 702.188a + CR 601.2h: the UNTOUCHED Sneak / Web-slinging carrier is
+/// admitted, and the resumed cast finishes and reaches the stack — the control for the two
+/// refusal witnesses below.
+#[test]
+fn restore_keeps_an_untouched_web_slinging_carrier_and_resumes_the_cast() {
+    let (mut runner, spell, returned) = web_slinging_carrier_board();
+    announce_web_slinging_onto_the_carrier(&mut runner, spell, returned);
+    assert_web_slinging_carrier_reach_guards(&runner, spell);
+    assert_eq!(
+        runner.state().objects[&returned].zone,
+        Zone::Battlefield,
+        "reach-guard: the returned creature has not moved yet — its move is what parked"
+    );
+
+    let saved = serde_json::to_string(runner.state()).expect("the parked cast serializes");
+    let restored: PersistedGameState =
+        serde_json::from_str(&saved).expect("the parked cast deserializes");
+    let restored = restored
+        .into_game_state()
+        .expect("a Web-slinging carrier whose facts agree with the journal is admitted");
+    let mut resumed = GameRunner::from_state(restored);
+    let mut finished = false;
+    for _ in 0..16 {
+        if resumed.state().objects[&spell].zone == Zone::Stack {
+            finished = true;
+            break;
+        }
+        match resumed.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                resumed
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("apply the redirect the return move parked on");
+            }
+            WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+                resumed
+                    .act(GameAction::PassPriority)
+                    .expect("confirm the resumed cast");
+            }
+            other => panic!("unexpected prompt while resuming Web-slinging: {other:?}"),
+        }
+    }
+    assert!(
+        finished,
+        "the untouched carrier resumes into a cast that reaches the stack"
+    );
+}
+
+/// CR 118.3a + CR 601.2h: an AMOUNT the carrier states is validated, not merely observed.
+/// This tamper leaves the copy on the spell alone, so the only thing that can refuse the
+/// save is the number the completion states for the payment.
+#[test]
+fn restore_refuses_a_stated_amount_the_settled_spend_does_not_prove() {
+    let (mut runner, spell, returned) = web_slinging_carrier_board();
+    announce_web_slinging_onto_the_carrier(&mut runner, spell, returned);
+    assert_web_slinging_carrier_reach_guards(&runner, spell);
+
+    let mut state = runner.state().clone();
+    let Some(PendingCostMoveResume::Cast {
+        completion:
+            PendingCostMoveCompletion::FinalizeCast {
+                prepaid_actual_mana_spent,
+                ..
+            },
+        ..
+    }) = state.pending_cost_move_resume.as_mut()
+    else {
+        panic!("reach-guard: the carrier is still parked");
+    };
+    *prepaid_actual_mana_spent = Some(2);
+    let error = PersistedGameState::capture(state)
+        .into_game_state()
+        .expect_err("a stated amount the settled spend does not prove cannot be admitted");
+    let engine::types::game_state::PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+        source_id,
+        reason,
+    } = error
+    else {
+        panic!("expected a prepaid-copy refusal, got {error:?}");
+    };
+    assert_eq!(source_id, spell, "the refusal names the cast it is about");
+    // The copy on the spell is untouched and agrees with the journal, so the copy-shaped
+    // conflicts cannot explain the refusal: the remaining answer — the amount the CARRIER
+    // states for the payment — is the one that fired.
+    assert!(
+        !matches!(
+            reason,
+            engine::types::game_state::PrepaidSpellCopyConflict::AmountDisagreesWithSettledSpend { .. }
+                | engine::types::game_state::PrepaidSpellCopyConflict::ColorsDisagreeWithSettledSpend { .. }
+                | engine::types::game_state::PrepaidSpellCopyConflict::ProducersDisagreeWithSettledSpend { .. }
+        ),
+        "the refusal is about the stated amount, not the spell copy: {reason:?}"
+    );
+}
+
+/// CR 115.1 + CR 601.2c + CR 106.3: the LATCH and the PAYMENT COPY the carrier holds are
+/// both decided at restore. Without the announced-target facts the resumed CR 601.2i write
+/// would describe a later incarnation of what the caster announced; with a copy that
+/// disagrees with the settled spend the resumed cast would carry a payment nobody made.
+#[test]
+fn restore_refuses_a_lost_latch_or_a_tampered_copy_on_the_web_slinging_carrier() {
+    let (mut runner, spell, returned) = web_slinging_carrier_board();
+    announce_web_slinging_onto_the_carrier(&mut runner, spell, returned);
+    assert_web_slinging_carrier_reach_guards(&runner, spell);
+
+    // (1) The announced-target latch removed.
+    {
+        let mut state = runner.state().clone();
+        let Some(PendingCostMoveResume::Cast {
+            completion:
+                PendingCostMoveCompletion::FinalizeCast {
+                    committed_target_facts,
+                    ..
+                },
+            ..
+        }) = state.pending_cost_move_resume.as_mut()
+        else {
+            panic!("reach-guard: the carrier is still parked");
+        };
+        *committed_target_facts = None;
+        let error = PersistedGameState::capture(state)
+            .into_game_state()
+            .expect_err("a paid cast that lost its announced-target latch cannot be admitted");
+        assert!(
+            matches!(
+                error,
+                engine::types::game_state::PersistedRestoreError::UnknownPendingTargetFacts {
+                    spell_object_id: Some(refused),
+                } if refused == spell
+            ),
+            "expected an UnknownPendingTargetFacts refusal naming the cast, got {error:?}"
+        );
+    }
+
+    // (2) The payment copy on the spell states a payment of another size.
+    {
+        let mut state = runner.state().clone();
+        state
+            .objects
+            .get_mut(&spell)
+            .expect("the spell object is in the save")
+            .mana_spent_to_cast_amount = 2;
+        let error = PersistedGameState::capture(state)
+            .into_game_state()
+            .expect_err("a copy that disagrees with the settled spend cannot be admitted");
+        match error {
+            engine::types::game_state::PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+                source_id,
+                reason:
+                    engine::types::game_state::PrepaidSpellCopyConflict::AmountDisagreesWithSettledSpend {
+                        copy_amount,
+                        settled,
+                        ..
+                    },
+            } => {
+                assert_eq!(source_id, spell, "the refusal names the cast it is about");
+                assert_eq!(copy_amount, 2, "and the amount the copy states");
+                assert_eq!(settled, 1, "and the one unit the journal records for the cast");
+            }
+            other => panic!("expected a typed copy-amount refusal, got {other:?}"),
+        }
+    }
 }
 
 /// CR 702.132a: the ORDINARY cast path is untouched — a non-Assist spell records exactly

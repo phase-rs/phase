@@ -317,6 +317,82 @@ fn recorded_mana_spent_to_cast(state: &GameState, object_id: ObjectId) -> u32 {
         .mana_spent_to_cast_amount
 }
 
+/// CR 700.14 + CR 702.132a + CR 118.3a: the per-payer credits one finalized spell
+/// cast owes the Expend ledger.
+///
+/// The payment finalizers record the COMBINED payment on the spell: an Assist
+/// helper's units are mana spent to cast this spell (CR 702.132a has the helper pay
+/// "before you begin to pay the total cost", and CR 118.3a makes paying mana removing
+/// those units from a pool), so `mana_spent_to_cast_amount`, the color tally and the
+/// producer snapshots all count them — which is what a source-qualified predicate
+/// asks for (Rain of Riches' "mana from a Treasure was spent to cast").
+///
+/// Expend reads the same payment per PLAYER. CR 700.14 counts "the amount of mana
+/// that player spent this turn to cast spells": the helper's units are the helper's
+/// expenditure and the caster's are the caster's. Crediting the whole
+/// `combined_spent` to the caster would let three helper Treasures fire the CASTER's
+/// "Whenever you expend 4" (Wandertale Mentor) on mana the caster never spent, and
+/// would leave the helper's own tally short.
+///
+/// The split is the parked cast's own Assist CLAIM
+/// ([`crate::types::game_state::PendingCast::assist_contribution`]) — the typed
+/// statement of who paid how much that the payment finalizers splice into the spell's
+/// paid units, carried with the cast across every pause (a pre-payment pause, a
+/// replaced life payment, a delve or deferred-sacrifice cost move, the prepaid
+/// resume) and validated against the journal at the restore boundary. Reading the
+/// resolved-rules journal directly instead does NOT work at this point: the journal
+/// keys each spend by the spell's object incarnation
+/// (`ManaPaymentRecipient::Object`), and a resumed announcement re-creates the stack
+/// object, so by finalization the live spell and the journal's recipient name
+/// different incarnations of the same id and a payer-keyed query by recipient answers
+/// nothing. The caster is credited with the remainder of the combined payment, which
+/// is the whole of it for an unassisted cast.
+///
+/// Returns one credit per payer that spent something, the caster's first.
+fn expend_credits_for_cast(
+    caster: PlayerId,
+    object_id: ObjectId,
+    combined_spent: u32,
+    parked: Option<&PendingCast>,
+) -> Vec<(PlayerId, u32)> {
+    // CR 702.132a + CR 118.3a: the contribution names the cast it paid toward, so a
+    // claim captured for another cast is not this cast's split.
+    let contribution = parked
+        .and_then(PendingCast::assist_contribution)
+        .filter(|contribution| contribution.source_id == object_id);
+    let Some(contribution) = contribution else {
+        return (combined_spent > 0)
+            .then_some((caster, combined_spent))
+            .into_iter()
+            .collect();
+    };
+    // CR 118.3a: the units the helper's spend REMOVED are the helper's expenditure —
+    // the same units the finalizer spliced into this spell's paid units, so the split
+    // and the combined amount describe one payment. The amount the claim states and
+    // the units it carries are the same payment twice; the restore boundary refuses a
+    // save where they disagree, and the payment's own splice refuses them on the live
+    // path, so this is an invariant rather than a check.
+    debug_assert!(
+        contribution.is_backed_by_its_units(),
+        "an Assist contribution's units must number the generic mana it paid: {contribution:?}"
+    );
+    let helper_spent = contribution.units.len() as u32;
+    let mut credits = Vec::with_capacity(2);
+    // CR 118.3a + CR 601.2h: the combined amount IS this cast's whole payment, so the
+    // caster's own share is what is left after the helper's.
+    let caster_spent = combined_spent.checked_sub(helper_spent).expect(
+        "the helper's units are part of the spell's combined payment, so they cannot \
+         exceed it",
+    );
+    if caster_spent > 0 {
+        credits.push((caster, caster_spent));
+    }
+    if helper_spent > 0 {
+        credits.push((contribution.helper, helper_spent));
+    }
+    credits
+}
+
 fn stamp_controller_controlled_as_cast(
     state: &GameState,
     ability: &mut ResolvedAbility,
@@ -15045,17 +15121,25 @@ fn finalize_cast_with_phyrexian_choices_inner(
     super::casting::consume_pending_next_spell_modifiers(state, player, object_id);
 
     // CR 700.14: Track cumulative mana spent on spells this turn for Expend triggers.
-    // Uses actual mana deducted from pool (accounts for cost reduction, convoke, etc.).
-    if actual_mana_spent > 0 {
+    // Uses actual mana deducted from pool (accounts for cost reduction, convoke, etc.),
+    // attributed to the player who spent it: the spell keeps the COMBINED payment for
+    // its own spell-wide facts (Rain of Riches' source-qualified predicate), while an
+    // Assist helper's units are credited to the helper rather than to the caster.
+    for (payer, amount_spent) in expend_credits_for_cast(
+        player,
+        object_id,
+        actual_mana_spent,
+        deferred_life_resume_pending,
+    ) {
         let cumulative = state
             .mana_spent_on_spells_this_turn
-            .entry(player)
+            .entry(payer)
             .or_insert(0);
-        *cumulative += actual_mana_spent;
+        *cumulative += amount_spent;
         let new_cumulative = *cumulative;
         events.push(GameEvent::ManaExpended {
-            player_id: player,
-            amount_spent: actual_mana_spent,
+            player_id: payer,
+            amount_spent,
             new_cumulative,
         });
     }

@@ -12336,6 +12336,19 @@ impl std::fmt::Display for AssistContributionConflict {
 /// consumed as written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrepaidSpellCopyConflict {
+    /// CR 118.3a + CR 601.2h: the carrier STATES an amount for this payment and it is not
+    /// the size of the payment the save settled. The resumed cast consumes that number as
+    /// its spent mana — the CR 601.2h paid-facts snapshot, the stack entry's recorded
+    /// spend, and the CR 700.14 Expend ledger — without re-deriving it, so an amount the
+    /// settle does not prove would rewrite the cast's expenditure. `settled` is the count
+    /// the resolved-rules journal records for this cast.
+    StatedAmountDisagreesWithSettledSpend {
+        /// The amount the parked carrier states (`PendingCast::prepaid_actual_mana_spent`,
+        /// or the `PendingCostMoveCompletion::FinalizeCast` amount the Sneak /
+        /// Web-slinging resume carries).
+        stated_amount: u32,
+        settled: usize,
+    },
     /// CR 118.3a + CR 601.2h: the copy states a different number of units than the
     /// save settled. Paying mana removes exactly that many units from a pool, so the
     /// two are one payment stated twice and disagreeing about its size. `settled` is
@@ -12371,6 +12384,15 @@ pub enum PrepaidSpellCopyConflict {
 impl std::fmt::Display for PrepaidSpellCopyConflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::StatedAmountDisagreesWithSettledSpend {
+                stated_amount,
+                settled,
+            } => write!(
+                f,
+                "its parked cast states {stated_amount} units of mana spent while the \
+                 resolved-rules journal records {settled} units spent on this cast (CR 118.3a: \
+                 paying mana is removing exactly those units)"
+            ),
             Self::AmountDisagreesWithSettledSpend {
                 copy_amount,
                 copy_marks_spent,
@@ -17472,6 +17494,26 @@ impl TrustedGameStateEnvelope {
     }
 }
 
+/// CR 601.2h + CR 601.2i: one parked carrier that holds a cast whose mana has ALREADY
+/// been paid, and the settled amount that carrier states for it.
+///
+/// A prepaid cast's payment facts travel in two shapes. The ordinary root repeats the
+/// amount it settled on its own [`PendingCast`]
+/// (`PendingCast::prepaid_actual_mana_spent`), and the finalizers gate the whole payment
+/// — and the copy it stamps — out while that field is set. The Sneak / Web-slinging
+/// returned-creature move (CR 702.190a / CR 702.188a) instead parks a cast whose
+/// `PendingCast` was rebuilt at the park (`PendingCast::new`) and so states no amount at
+/// all: its amount rides beside the announced-target latch on
+/// [`PendingCostMoveCompletion::FinalizeCast`]. `stated_amount` keeps that difference
+/// visible rather than collapsing both shapes into "some amount was paid".
+struct PrepaidSpellCopyCarrier<'a> {
+    /// The cast this carrier holds — the temp that carries the payment copy.
+    pending: &'a PendingCast,
+    /// The amount THIS carrier states the payment settled at, or `None` when it states
+    /// none and the resumed cast will read the copy the finalizers stamped.
+    stated_amount: Option<u32>,
+}
+
 impl GameState {
     /// CR 616.1 load migration: re-derive `ReplacementChoice::kind` from the
     /// live pending replacement.
@@ -18729,32 +18771,98 @@ impl GameState {
     /// an activation's `prepaid_actual_mana_spent` is a different fact (an activated
     /// ability's cost is not mana spent to CAST, and its source is a permanent that may
     /// carry the stamps of its own earlier cast).
+    ///
+    /// The AMOUNT a carrier states is validated, not merely observed
+    /// ([`PrepaidSpellCopyConflict::StatedAmountDisagreesWithSettledSpend`]). The resume
+    /// consumes that number as the cast's `actual_mana_spent` — the CR 601.2h paid-facts
+    /// snapshot, the stack entry's recorded spend, and CR 700.14's per-player Expend
+    /// ledger — without re-deriving it, so a save that states a different amount rewrites
+    /// the cast's expenditure on a payment of another size. Where a carrier states
+    /// nothing, the resume reads the copy below, which is validated on its own.
+    ///
+    /// [`PendingCostMoveCompletion::FinalizeCast`] is a carrier of this payment too, and
+    /// it is not reachable through the `PendingCast` walk's own amount field: the Sneak /
+    /// Web-slinging returned-creature cost move (CR 702.190a / CR 702.188a) parks a
+    /// `PendingCast` rebuilt at the park, so its amount travels on the completion. The
+    /// same three facts are validated there — the stated amount, the copy, and (through
+    /// [`Self::reject_unknown_pending_target_facts`], the sibling rule that refuses it
+    /// before this one runs) the announced-target latch the resumed history write reads.
     pub(crate) fn bind_or_reject_prepaid_spell_copy_provenance(
         &self,
     ) -> Result<(), PersistedRestoreError> {
-        for owner in self.pending_cast_owners() {
-            let Some(pending) = self.pending_cast_at(owner) else {
-                continue;
-            };
-            self.proven_prepaid_spell_copy(pending)?;
+        for carrier in self.prepaid_spell_copy_carriers() {
+            self.proven_prepaid_spell_copy(&carrier)?;
         }
         Ok(())
     }
 
+    /// CR 601.2h + CR 702.190a + CR 702.188a: every parked carrier in this save that holds
+    /// a cast whose payment has already run, with the amount each one states for it.
+    ///
+    /// The `PendingCast` walk reuses [`Self::pending_cast_owners`], the single authority on
+    /// inline cast custody. The Sneak / Web-slinging cost-move carrier is added separately
+    /// because its amount is not on the cast it holds
+    /// ([`PendingCostMoveCompletion::FinalizeCast`]): reaching that park means the
+    /// finalizer already paid (it pays before handing the returned creature to the move),
+    /// so the copy on the spell is this cast's payment and is validated even when the
+    /// completion states no amount.
+    fn prepaid_spell_copy_carriers(&self) -> Vec<PrepaidSpellCopyCarrier<'_>> {
+        let mut carriers = Vec::new();
+        for owner in self.pending_cast_owners() {
+            let Some(pending) = self.pending_cast_at(owner) else {
+                continue;
+            };
+            // CR 601.2h: an activation's `prepaid_actual_mana_spent` is a different fact,
+            // and a cast whose payment has not run states no amount.
+            if pending.activation_ability_index.is_some() {
+                continue;
+            }
+            let Some(stated_amount) = pending.prepaid_actual_mana_spent else {
+                continue;
+            };
+            carriers.push(PrepaidSpellCopyCarrier {
+                pending,
+                stated_amount: Some(stated_amount),
+            });
+        }
+        if let Some(PendingCostMoveResume::Cast {
+            pending: Some(pending),
+            completion:
+                PendingCostMoveCompletion::FinalizeCast {
+                    prepaid_actual_mana_spent,
+                    ..
+                },
+            ..
+        }) = self.pending_cost_move_resume.as_ref()
+        {
+            if pending.activation_ability_index.is_none() {
+                carriers.push(PrepaidSpellCopyCarrier {
+                    pending,
+                    stated_amount: *prepaid_actual_mana_spent,
+                });
+            }
+        }
+        carriers
+    }
+
     /// CR 106.3 + CR 118.3a + CR 601.2h: the copy this save's settled spend proves for
-    /// one parked cast, or the refusal that says how the two disagree. See
+    /// one parked carrier, or the refusal that says how the two disagree. See
     /// [`Self::bind_or_reject_prepaid_spell_copy_provenance`] for the rule.
     fn proven_prepaid_spell_copy(
         &self,
-        pending: &PendingCast,
+        carrier: &PrepaidSpellCopyCarrier<'_>,
     ) -> Result<(), PersistedRestoreError> {
+        let pending = carrier.pending;
         let source_id = pending.object_id;
         // CR 601.2h: only a cast whose payment has already run can carry a copy of THIS
         // cast. Before that the field still holds whatever the object carried in — stale
         // stamps from an earlier cast of the same card — and the finalizers overwrite it
         // when the payment happens, so there is nothing here to validate.
-        if pending.activation_ability_index.is_some() || pending.prepaid_actual_mana_spent.is_none()
-        {
+        //
+        // `prepaid_spell_copy_carriers` already drops every carrier this excludes; the
+        // discriminator is restated HERE, beside the read it protects, so a carrier added
+        // to that enumeration later cannot start validating a payment that never ran.
+        if pending.activation_ability_index.is_some() {
             return Ok(());
         }
         // A cast object this save does not carry is a different guard's question (the
@@ -18775,6 +18883,22 @@ impl GameState {
             .map(|spent| spent.unit.clone())
             .filter(|unit| !unit.is_convoke_payment())
             .collect();
+        // CR 118.3a: paying mana removes exactly as many units as it pays, so the amount a
+        // carrier STATES for this payment must be the size of the payment the journal
+        // recorded. Presence is not the fact: the resume consumes this number as the
+        // cast's spent mana (CR 601.2h paid facts, CR 700.14 Expend) instead of
+        // re-deriving it, so a save stating another amount has not recorded this payment.
+        if let Some(stated_amount) = carrier.stated_amount {
+            if stated_amount as usize != settled.len() {
+                return Err(PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+                    source_id,
+                    reason: PrepaidSpellCopyConflict::StatedAmountDisagreesWithSettledSpend {
+                        stated_amount,
+                        settled: settled.len(),
+                    },
+                });
+            }
+        }
         // CR 207.2c: the color tally the settled units produce, through the same fold the
         // finalizers use. Colorless mana contributes nothing, exactly as there.
         let mut settled_colors = crate::types::mana::ColoredManaCount::default();
