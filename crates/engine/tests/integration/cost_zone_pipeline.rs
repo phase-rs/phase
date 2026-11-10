@@ -9877,8 +9877,23 @@ fn life_loss_ordering_tether() -> ReplacementDefinition {
 /// (CR 118.11 life-for-{B}), and TWO printed Bloodletter of Aclazotz under P1 — an
 /// opponent of P0, so P0's life payment on P1's turn is doubled twice.
 fn gang_up_board() -> GangUpBoard {
+    gang_up_board_impl(false)
+}
+
+/// The same board, plus printed Rain of Riches on the battlefield: the assisted cast
+/// really spends the helper's Treasure, so Rain of Riches' first-qualifying-spell gate
+/// GRANTS it cascade — the consequence the prepaid spell copy is the record of, and the
+/// reason a save whose copy disagrees with the settled spend must be refused.
+fn gang_up_board_with_rains_grant() -> GangUpBoard {
+    gang_up_board_impl(true)
+}
+
+fn gang_up_board_impl(rain_of_riches: bool) -> GangUpBoard {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+    if rain_of_riches {
+        scenario.add_enchantment_from_oracle(P0, "Rain of Riches", RAIN_OF_RICHES);
+    }
     let victim = scenario.add_creature(P1, "Power One Witness", 1, 1).id();
     let mut bloodletters = Vec::new();
     for name in [
@@ -10249,6 +10264,410 @@ fn restore_recovers_a_legacy_contribution_parked_at_a_life_payment_ordering_prom
             .iter()
             .map(|snapshot| snapshot.source_id)
             .collect::<Vec<_>>()
+    );
+}
+
+/// CR 106.3 + CR 118.3a + CR 601.2h: the PREPAID SPELL COPY is validated against the spend
+/// the save settled. The saved helper's UNITS are untouched here and still agree with the
+/// journal; the tampered record is the copy the payment finalizers stamped on the SPELL
+/// OBJECT — the amount, the color tally and one producer snapshot per unit — which the
+/// prepaid resume consumes without re-deriving it and which Rain of Riches'
+/// `FilterProp::ManaSpentFromSource` gate answers from.
+///
+/// The board is the replaced-life-payment assisted cast: Gang Up `{X}{B}` at X=1, the
+/// HELPER (P1) pays the one generic with a Treasure, the caster pays the `{B}` with 2 life
+/// through K'rrik (CR 118.11, so no mana leaves P0's pool), and two Bloodletters park that
+/// life payment on a CR 616.1 ordering choice AFTER the finalizers stamped the copy. The
+/// edit rewrites exactly one field of that serialized copy: the producer of the one unit
+/// it states. Everything else in the payload — above all `assist_contributed_units`, the
+/// record the sibling Assist guard binds — is byte-identical, which is the whole finding:
+/// a save can satisfy the units guard while its spell copy disagrees with the same spend.
+#[test]
+fn restore_refuses_a_tampered_prepaid_spell_copy() {
+    let GangUpBoard {
+        mut runner,
+        gang_up,
+        victim,
+        helper_treasures,
+        ..
+    } = gang_up_board();
+    announce_gang_up(&mut runner, gang_up, victim, GANG_UP_X);
+
+    // Reach guards: the pause is the PREPAID shape, and the copy is the whole payment.
+    {
+        let parked = parked_gang_up(&runner);
+        assert!(
+            parked.prepaid_actual_mana_spent.is_some(),
+            "reach-guard: the parked cast's payment already ran, so the finalizers stamped the \
+             copy and the resume will not re-derive it"
+        );
+        assert_eq!(
+            parked.assist_state,
+            engine::types::game_state::AssistState::Paid {
+                helper: P1,
+                generic: GANG_UP_X,
+            },
+            "reach-guard: the helper's contribution reached its paid checkpoint"
+        );
+    }
+    let recipient = assist_payment_recipient(runner.state(), gang_up, P1);
+    let journal_units = runner
+        .state()
+        .resolved_rules_journal
+        .spent_units_for_payer_and_recipient(P1, &recipient)
+        .expect("the journal recorded the helper's spend at the spend boundary");
+    assert_eq!(
+        parked_gang_up(&runner).assist_contributed_units,
+        journal_units,
+        "reach-guard: the save's units AGREE with the journal — this witness tampers with the \
+         other record"
+    );
+    {
+        let spell = &runner.state().objects[&gang_up];
+        assert_eq!(
+            spell.mana_spent_to_cast_amount, GANG_UP_X,
+            "reach-guard: the prepaid copy states the helper's one unit"
+        );
+        assert_eq!(
+            spell.mana_spent_source_snapshots.len(),
+            GANG_UP_X as usize,
+            "reach-guard: one producer snapshot per settled unit"
+        );
+        assert!(
+            helper_treasures.contains(&spell.mana_spent_source_snapshots[0].source_id),
+            "reach-guard: and it names the Treasure the helper sacrificed, got {:?}",
+            spell.mana_spent_source_snapshots[0].source_id
+        );
+    }
+
+    // --- The one edit: the serialized SPELL COPY names a source that never paid.
+    let mut json = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the paused prepaid cast serializes");
+    let units_before_edit = json["state"]["pending_deferred_life_cost_resume"].clone();
+    let impostor = victim;
+    {
+        let object = json["state"]["objects"][gang_up.0.to_string()]
+            .as_object_mut()
+            .expect("the spell object is serialized in the save");
+        let copy = object["mana_spent_source_snapshots"]
+            .as_array_mut()
+            .expect("the prepaid copy is serialized on the parked spell object");
+        assert_eq!(
+            copy.len(),
+            GANG_UP_X as usize,
+            "reach-guard: the copy states one entry per settled unit"
+        );
+        assert!(
+            helper_treasures
+                .iter()
+                .any(|treasure| copy[0]["source_id"] == serde_json::json!(treasure.0)),
+            "reach-guard: the copy starts out naming the helper's Treasure, got {}",
+            copy[0]
+        );
+        copy[0]["source_id"] = serde_json::json!(impostor.0);
+    }
+    assert_eq!(
+        json["state"]["pending_deferred_life_cost_resume"], units_before_edit,
+        "reach-guard: the edit touches the spell copy ONLY — the saved units still name the \
+         pips the journal proves"
+    );
+
+    let persisted: PersistedGameState =
+        serde_json::from_value(json).expect("a save with a rewritten spell copy still decodes");
+    match persisted.into_game_state() {
+        Err(engine::types::game_state::PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+            source_id,
+            reason:
+                engine::types::game_state::PrepaidSpellCopyConflict::ProducersDisagreeWithSettledSpend {
+                    copy,
+                    settled,
+                },
+        }) => {
+            assert_eq!(source_id, gang_up, "the refusal names the cast it is about");
+            assert_eq!(
+                copy,
+                vec![impostor],
+                "and the producer the tampered copy substituted"
+            );
+            assert_eq!(
+                settled,
+                vec![helper_treasures[0]],
+                "against the Treasure the settled spend names (CR 106.3)"
+            );
+        }
+        other => panic!(
+            "CR 106.3 + CR 601.2h: a prepaid copy naming a producer that never paid must be \
+             refused as a contradiction, got {other:?}"
+        ),
+    }
+}
+
+/// CR 118.3a + CR 702.132a: the INVERSE zero-contribution case, decided deliberately rather
+/// than by omission.
+///
+/// A helper recorded as having paid 0 generic mana removed nothing ("Players can always pay
+/// 0 mana", CR 118.3a), so the empty unit list IS the payment and the sibling guard owes no
+/// recovery for it. That is not permission to skip the copy: with the helper contributing
+/// nothing, the settled spend is the CASTER's units alone — so the CORRECT ANSWER is that
+/// such a save restores exactly when its prepaid copy states the caster's spend and nothing
+/// more, and is refused the moment the copy states a unit nobody paid. A zero contribution
+/// must neither launder a claim about mana nor be grounds for refusing an honest copy, and
+/// it cannot be left to the omission of "paid nothing, so there is nothing to check".
+///
+/// The board is the assisted cast with the HELPER committing 0 generic: no mana leaves P1's
+/// pool, the caster pays the `{1}` from its own (colorless, source-less) pool, and the `{B}`
+/// goes to K'rrik's life permission — so P0 spends exactly one unit and the journal records
+/// exactly one, the caster's own. The save under test is that world with the parked cast
+/// written as the shape the zero branch exists for — `Paid { helper, generic: 0 }` with no
+/// units, which the interactive commit path never produces and a save can.
+#[test]
+fn restore_decides_a_zero_assist_contribution_by_the_prepaid_spell_copy() {
+    let GangUpBoard {
+        mut runner,
+        gang_up,
+        victim,
+        ..
+    } = gang_up_board();
+    announce_gang_up(&mut runner, gang_up, victim, 0);
+
+    // Reach guards: the helper spent NOTHING, and the copy is the caster's own unit.
+    let recipient = assist_payment_recipient(runner.state(), gang_up, P1);
+    {
+        let parked = parked_gang_up(&runner);
+        assert!(
+            parked.assist_contributed_units.is_empty(),
+            "reach-guard: the helper removed no unit from their pool"
+        );
+        assert!(
+            parked.prepaid_actual_mana_spent.is_some(),
+            "reach-guard: the caster's own payment already ran, so the copy is stamped"
+        );
+    }
+    assert_eq!(
+        runner
+            .state()
+            .resolved_rules_journal
+            .spent_units_for_payer_and_recipient(P1, &recipient),
+        None,
+        "reach-guard: the journal records no spend by the helper on this cast at all"
+    );
+    assert_eq!(
+        runner.state().objects[&gang_up].mana_spent_to_cast_amount,
+        1,
+        "reach-guard: the copy the finalizers stamped is the CASTER's one unit — X=1 generic \
+         minus the helper's zero is still one generic, paid from P0's own pool"
+    );
+
+    // The save under test: the same world, with the parked cast recording the helper as
+    // PAID for a zero contribution — the shape `proven_assist_contribution_units` admits
+    // through its `generic == 0` branch without consulting anything.
+    let mut state = runner.state().clone();
+    match state.pending_deferred_life_cost_resume.as_mut() {
+        Some(DeferredLifeCostResume::Cast {
+            pending: Some(pending),
+            ..
+        }) => {
+            pending.assist_state = engine::types::game_state::AssistState::Paid {
+                helper: P1,
+                generic: 0,
+            };
+            pending.assist_contributed_units.clear();
+        }
+        other => panic!("the replaced life payment is not parking a cast: {other:?}"),
+    }
+    let saved = serde_json::to_value(PersistedGameState::capture(state))
+        .expect("the paused zero-contribution cast serializes");
+
+    // (a) The honest zero-contribution save is ADMITTED: the empty contribution is a real
+    // payment of nothing, and the copy states exactly the caster's spend.
+    let admitted = serde_json::from_value::<PersistedGameState>(saved.clone())
+        .expect("the save decodes")
+        .into_game_state()
+        .expect(
+            "CR 118.3a: a helper who paid 0 generic mana removed nothing, so a copy that \
+             states the caster's own spend is admitted",
+        );
+    assert_eq!(
+        admitted.objects[&gang_up].mana_spent_to_cast_amount, 1,
+        "and the admitted copy still states the caster's one unit"
+    );
+    let mut admitted = GameRunner::from_state(admitted);
+    assert_eq!(
+        parked_gang_up(&admitted).assist_state,
+        engine::types::game_state::AssistState::Paid {
+            helper: P1,
+            generic: 0,
+        },
+        "the admitted save keeps the zero contribution it states"
+    );
+    finish_gang_up(&mut admitted, gang_up);
+    assert_eq!(
+        admitted.state().objects[&gang_up].mana_spent_to_cast_amount,
+        1,
+        "CR 601.2h: the resumed cast records exactly the caster's one unit, and nothing for a \
+         helper who paid nothing"
+    );
+
+    // (b) The same save with one more unit in its copy is REFUSED: nothing settled it, and a
+    // zero contribution cannot vouch for it.
+    let mut json = saved;
+    json["state"]["objects"][gang_up.0.to_string()]["mana_spent_to_cast_amount"] =
+        serde_json::json!(2);
+    let tampered: PersistedGameState =
+        serde_json::from_value(json).expect("the tampered save decodes");
+    match tampered.into_game_state() {
+        Err(engine::types::game_state::PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+            source_id,
+            reason:
+                engine::types::game_state::PrepaidSpellCopyConflict::AmountDisagreesWithSettledSpend {
+                    copy_amount,
+                    settled,
+                    ..
+                },
+        }) => {
+            assert_eq!(source_id, gang_up, "the refusal names the cast it is about");
+            assert_eq!(copy_amount, 2, "and the extra unit the copy claims");
+            assert_eq!(
+                settled, 1,
+                "against the one unit the caster actually paid (CR 118.3a)"
+            );
+        }
+        other => panic!(
+            "CR 118.3a: a prepaid copy stating a unit no one paid must be refused even though \
+             the helper's recorded contribution is zero, got {other:?}"
+        ),
+    }
+}
+
+/// CR 106.3 + CR 702.132a + CR 611.3b: the CONTROL for the two refusals above — an
+/// UNTOUCHED prepaid assisted save still restores, still carries the helper's units, and
+/// still records the helper's Treasure pip, which is what Rain of Riches' cascade gate
+/// reads on the resumed cast.
+#[test]
+fn restore_keeps_an_untouched_prepaid_spell_copy_and_grants_rains_cascade() {
+    let GangUpBoard {
+        mut runner,
+        gang_up,
+        victim,
+        helper_treasures,
+        ..
+    } = gang_up_board_with_rains_grant();
+
+    // Reach guards: Rain of Riches is on the battlefield and Gang Up does NOT print cascade,
+    // so anything granted below comes from the Treasure pip.
+    assert!(
+        runner
+            .state()
+            .objects
+            .values()
+            .any(|object| object.name == "Rain of Riches" && object.zone == Zone::Battlefield),
+        "reach-guard: Rain of Riches is on the battlefield"
+    );
+    assert!(
+        !runner.state().objects[&gang_up]
+            .keywords
+            .contains(&Keyword::Cascade),
+        "reach-guard: printed Gang Up has no cascade of its own"
+    );
+    announce_gang_up(&mut runner, gang_up, victim, GANG_UP_X);
+    let recipient = assist_payment_recipient(runner.state(), gang_up, P1);
+    let journal_units = runner
+        .state()
+        .resolved_rules_journal
+        .spent_units_for_payer_and_recipient(P1, &recipient)
+        .expect("the journal recorded the helper's spend");
+    assert_eq!(
+        parked_gang_up(&runner).assist_contributed_units,
+        journal_units,
+        "reach-guard: an ordinary prepaid save agrees with the journal in every field"
+    );
+
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the paused prepaid cast serializes");
+    let restored: PersistedGameState =
+        serde_json::from_str(&saved).expect("the paused prepaid cast deserializes");
+    let restored = restored
+        .into_game_state()
+        .expect("a prepaid spell copy that agrees with the settled spend is admitted");
+    let mut runner = GameRunner::from_state(restored);
+    assert_eq!(
+        parked_gang_up(&runner).assist_contributed_units,
+        journal_units,
+        "the admitted save still carries exactly the units that paid"
+    );
+
+    finish_gang_up(&mut runner, gang_up);
+    let spell = &runner.state().objects[&gang_up];
+    assert_eq!(
+        spell.zone,
+        Zone::Stack,
+        "reach-guard: the resumed cast reached the stack"
+    );
+    assert_eq!(
+        spell.mana_spent_to_cast_amount, GANG_UP_X,
+        "CR 702.132a + CR 118.3a: the resumed cast still records the helper's unit beside the \
+         caster's zero mana"
+    );
+    assert_eq!(
+        spell
+            .mana_spent_source_snapshots
+            .iter()
+            .filter(|snapshot| helper_treasures.contains(&snapshot.source_id))
+            .count(),
+        GANG_UP_X as usize,
+        "CR 106.3: the helper's Treasure pip survives the round trip, got {:?}",
+        spell
+            .mana_spent_source_snapshots
+            .iter()
+            .map(|snapshot| snapshot.source_id)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        spell
+            .cast_spell_keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Cascade)),
+        "CR 611.3b: Rain of Riches grants cascade off that Treasure pip; got {:?}",
+        spell.cast_spell_keywords
+    );
+    // CR 603.3b: the granted cascade is collected with the cast and waits on its
+    // controller's ordering choice, beside K'rrik's own "whenever you cast a black spell"
+    // trigger.
+    let WaitingFor::OrderTriggers { player, triggers } = runner.state().waiting_for.clone() else {
+        panic!(
+            "CR 603.3b: the resumed cast's collected triggers wait on an ordering choice, got \
+             {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        player, P0,
+        "reach-guard: the caster orders their own triggers"
+    );
+    assert!(
+        triggers
+            .iter()
+            .any(|trigger| trigger.source_id == gang_up && trigger.description == "Cascade"),
+        "CR 702.85a: Rain of Riches' grant collected a Cascade trigger for this cast; got {:?}",
+        triggers
+            .iter()
+            .map(|trigger| (trigger.source_id, trigger.description.as_str()))
+            .collect::<Vec<_>>()
+    );
+    runner
+        .act(GameAction::OrderTriggers {
+            order: (0..triggers.len()).collect(),
+        })
+        .expect("the caster's trigger ordering is accepted");
+    assert!(
+        runner.state().stack.iter().any(|entry| {
+            entry.source_id == gang_up
+                && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                && entry
+                    .ability()
+                    .is_some_and(|ability| matches!(ability.effect, Effect::Cascade))
+        }),
+        "CR 702.85a: the granted cascade reaches the stack off the restored cast"
     );
 }
 

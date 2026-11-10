@@ -12318,6 +12318,85 @@ impl std::fmt::Display for AssistContributionConflict {
     }
 }
 
+/// CR 106.3 + CR 118.3a + CR 601.2h: why a parked cast's PREPAID SPELL COPY cannot be
+/// bound to the spend the save settled. Produced by
+/// [`GameState::bind_or_reject_prepaid_spell_copy_provenance`], the one rule that
+/// decides whether the facts a prepaid resume will CONSUME were the facts the spend
+/// established.
+///
+/// The copy is the triple the payment finalizers stamp on the spell object in the same
+/// step they spend — `GameObject::mana_spent_to_cast_amount`,
+/// `GameObject::colors_spent_to_cast`, and `GameObject::mana_spent_source_snapshots`
+/// (`crate::game::casting`'s two `pay_…` finalizers) — and it is the ONE record a
+/// source-qualified cast predicate reads: `FilterProp::ManaSpentFromSource` answers
+/// Rain of Riches' "The first spell you cast each turn that mana from a Treasure was
+/// spent to cast has cascade." from these snapshots. There is no second stamp and no
+/// re-derivation on the prepaid path (`casting_costs` gates the whole payment out on
+/// `prepaid_actual_mana_spent`), so a copy that disagrees with the settled spend is
+/// consumed as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrepaidSpellCopyConflict {
+    /// CR 118.3a + CR 601.2h: the copy states a different number of units than the
+    /// save settled. Paying mana removes exactly that many units from a pool, so the
+    /// two are one payment stated twice and disagreeing about its size. `settled` is
+    /// the count the resolved-rules journal records for this cast.
+    AmountDisagreesWithSettledSpend {
+        copy_amount: u32,
+        /// CR 601.2h: the copy's own "mana was spent" flag. Reported, never compared:
+        /// it is a trigger-collection transient the engine clears after collection
+        /// (`triggers::clear_post_collection_transients`), while the amount, the tally
+        /// and the snapshots are the latched evidence of the payment.
+        copy_marks_spent: bool,
+        settled: usize,
+    },
+    /// CR 207.2c + CR 601.2h: the copy's per-color tally is not the tally of the units
+    /// the save settled — the fact an Adamant-style or "{W}{W} was spent" rider reads.
+    ColorsDisagreeWithSettledSpend {
+        copy: crate::types::mana::ColoredManaCount,
+        settled: crate::types::mana::ColoredManaCount,
+    },
+    /// CR 106.3 + CR 400.7: the copy's producer snapshots are not the ones the settled
+    /// units project. Each entry names the source that PRODUCED one unit (CR 106.3),
+    /// as the epoch that produced it (CR 400.7) — so a difference is either a payment
+    /// of different units or one payment whose copy describes a source that never paid.
+    /// Both lists are the snapshots' `source_id`s: the ids are what a save can be read
+    /// for, and a reader comparing them does not need the two last-known-information
+    /// projections to say which unit is which.
+    ProducersDisagreeWithSettledSpend {
+        copy: Vec<ObjectId>,
+        settled: Vec<ObjectId>,
+    },
+}
+
+impl std::fmt::Display for PrepaidSpellCopyConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AmountDisagreesWithSettledSpend {
+                copy_amount,
+                copy_marks_spent,
+                settled,
+            } => write!(
+                f,
+                "its prepaid spell copy states {copy_amount} units of mana spent \
+                 (mana_spent_to_cast={copy_marks_spent}) while the resolved-rules journal \
+                 records {settled} units spent on this cast (CR 118.3a: paying mana is \
+                 removing exactly those units)"
+            ),
+            Self::ColorsDisagreeWithSettledSpend { copy, settled } => write!(
+                f,
+                "its prepaid spell copy tallies {copy:?} colored mana spent while the settled \
+                 units tally {settled:?}"
+            ),
+            Self::ProducersDisagreeWithSettledSpend { copy, settled } => write!(
+                f,
+                "its prepaid spell copy names the producers {copy:?} while the settled spend \
+                 names {settled:?} (CR 106.3: a unit's source is the source of the ability that \
+                 produced it)"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetSelectionSlot {
     pub legal_targets: Vec<TargetRef>,
@@ -18589,6 +18668,164 @@ impl GameState {
         })
     }
 
+    /// CR 106.3 + CR 118.3a + CR 601.2h: VALIDATE the prepaid spell copy a parked cast
+    /// carries against the spend the save settled — or refuse the save.
+    ///
+    /// The Assist guard above binds the helper's UNITS to the payment they claim. Those
+    /// units are not the only copy of the payment, and they are not the one the rules
+    /// read: the payment finalizers stamp a second record on the SPELL OBJECT itself —
+    /// the amount spent, the per-color tally, and one producer snapshot per unit
+    /// (`crate::game::casting::mana_spent_source_snapshots`, called from
+    /// `pay_mana_cost_with_choices_and_resume` and its pool-only sibling). That copy is
+    /// what a source-qualified cast predicate answers from: Rain of Riches' "The first
+    /// spell you cast each turn that mana from a Treasure was spent to cast has
+    /// cascade." is `FilterProp::ManaSpentFromSource` over
+    /// `GameObject::mana_spent_source_snapshots`.
+    ///
+    /// A save can therefore carry units that agree with the journal while its spell copy
+    /// disagrees with the same spend — and on the PREPAID path nothing re-derives it:
+    /// `finalize_cast_with_phyrexian_choices_inner` gates the entire payment (and the
+    /// stamping that rides it) out on `pending.prepaid_actual_mana_spent`, so the resumed
+    /// cast consumes whatever the save kept. That gate is why this guard exists, and why
+    /// it is asked here rather than at the finalizer.
+    ///
+    /// **The settled spend** is the resolved-rules journal's own record of every unit
+    /// spent toward THIS cast: one `ManaSpend` command per payment, written where the
+    /// mana left a pool (CR 118.3a: "Paying mana is done by removing the indicated mana
+    /// from a player's mana pool"). Both payers of an assisted cast are in it — the
+    /// helper's command, recorded at its own spend boundary, and the caster's — so the
+    /// same record proves the caster's units and the helper's without this boundary
+    /// having to name which is which. Two adjustments mirror the finalizers exactly:
+    /// convoke/improvise/waterbend markers are recorded but are NOT mana spent to cast
+    /// (CR 702.51a + CR 702.126a + CR 701.67a), so they are dropped, and the copy is
+    /// re-projected through the same capture authority the finalizers used, so the
+    /// comparison is against the facts a payment produces rather than a re-implementation
+    /// of them.
+    ///
+    /// Both directions are refusals, and neither is a rewrite: the copy is a fact about a
+    /// cast the rules already settled, so a save whose copy says something else has not
+    /// recorded that payment.
+    ///
+    /// * **The copy states more than the settle proves.** The units are a payment nobody
+    ///   made — the shape that GRANTS cascade for mana no Treasure produced.
+    /// * **The copy states less.** The saved units are a payment whose record was
+    ///   deleted — the shape that WITHHOLDS cascade for a Treasure the helper really
+    ///   sacrificed, which is the loss the Assist guard above was written to stop.
+    ///
+    /// The inverse zero-contribution case is decided deliberately rather than by
+    /// omission. A helper recorded as having paid 0 generic mana removed nothing
+    /// (CR 118.3a), so `proven_assist_contribution_units` admits the empty unit list as
+    /// the payment and owes no recovery — and the settled spend is then the caster's
+    /// units ALONE. This guard does not read that as "skip the copy": the copy must
+    /// state exactly the caster's spend and nothing more, so a zero contribution can
+    /// never launder a unit that no one paid. Conversely a copy that omits the caster's
+    /// own units is refused even though the helper's contribution is empty, because
+    /// "the helper paid nothing" says nothing about the caster's mana.
+    ///
+    /// Every carrier is checked through the assertion-free enumeration
+    /// ([`Self::pending_cast_owners`]), because this runs on untrusted input. Casts whose
+    /// payment has not run yet are out of scope and are not read: their park predates the
+    /// stamping, the finalizers clear and rewrite the copy when the payment does run, and
+    /// an activation's `prepaid_actual_mana_spent` is a different fact (an activated
+    /// ability's cost is not mana spent to CAST, and its source is a permanent that may
+    /// carry the stamps of its own earlier cast).
+    pub(crate) fn bind_or_reject_prepaid_spell_copy_provenance(
+        &self,
+    ) -> Result<(), PersistedRestoreError> {
+        for owner in self.pending_cast_owners() {
+            let Some(pending) = self.pending_cast_at(owner) else {
+                continue;
+            };
+            self.proven_prepaid_spell_copy(pending)?;
+        }
+        Ok(())
+    }
+
+    /// CR 106.3 + CR 118.3a + CR 601.2h: the copy this save's settled spend proves for
+    /// one parked cast, or the refusal that says how the two disagree. See
+    /// [`Self::bind_or_reject_prepaid_spell_copy_provenance`] for the rule.
+    fn proven_prepaid_spell_copy(
+        &self,
+        pending: &PendingCast,
+    ) -> Result<(), PersistedRestoreError> {
+        let source_id = pending.object_id;
+        // CR 601.2h: only a cast whose payment has already run can carry a copy of THIS
+        // cast. Before that the field still holds whatever the object carried in — stale
+        // stamps from an earlier cast of the same card — and the finalizers overwrite it
+        // when the payment happens, so there is nothing here to validate.
+        if pending.activation_ability_index.is_some() || pending.prepaid_actual_mana_spent.is_none()
+        {
+            return Ok(());
+        }
+        // A cast object this save does not carry is a different guard's question (the
+        // finalizers refuse to publish a spell whose object is gone); there is no copy to
+        // compare, and this rule does not invent one.
+        let Some(spell) = self.objects.get(&source_id) else {
+            return Ok(());
+        };
+        // CR 118.3a: the recipient the spend was recorded against is the spell's own
+        // incarnation — the value `GameState::mana_payment_recipient` builds from the live
+        // object at every payment, and the value the helper's guard already asks for.
+        let recipient = ManaPaymentRecipient::Object(ObjectIncarnationRef::from_object(spell));
+        let settled: Vec<ManaUnit> = self
+            .resolved_rules_journal
+            .spent_mana()
+            .iter()
+            .filter(|spent| spent.recipient == recipient)
+            .map(|spent| spent.unit.clone())
+            .filter(|unit| !unit.is_convoke_payment())
+            .collect();
+        // CR 207.2c: the color tally the settled units produce, through the same fold the
+        // finalizers use. Colorless mana contributes nothing, exactly as there.
+        let mut settled_colors = crate::types::mana::ColoredManaCount::default();
+        for unit in &settled {
+            settled_colors.add_unit(unit);
+        }
+        if spell.mana_spent_to_cast_amount as usize != settled.len() {
+            return Err(PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+                source_id,
+                reason: PrepaidSpellCopyConflict::AmountDisagreesWithSettledSpend {
+                    copy_amount: spell.mana_spent_to_cast_amount,
+                    // CR 601.2h: reported, never compared — this flag is a
+                    // trigger-collection transient the engine clears after collection,
+                    // while the amount and the snapshots are the latched payment facts.
+                    copy_marks_spent: spell.mana_spent_to_cast,
+                    settled: settled.len(),
+                },
+            });
+        }
+        if spell.colors_spent_to_cast != settled_colors {
+            return Err(PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+                source_id,
+                reason: PrepaidSpellCopyConflict::ColorsDisagreeWithSettledSpend {
+                    copy: spell.colors_spent_to_cast.clone(),
+                    settled: settled_colors,
+                },
+            });
+        }
+        // CR 106.3 + CR 400.7: the producers are the payment's own provenance, re-projected
+        // through the single capture authority rather than compared field by field here, so
+        // this guard cannot drift from what the finalizers write.
+        let settled_producers = crate::game::casting::mana_spent_source_snapshots(self, &settled);
+        if spell.mana_spent_source_snapshots != settled_producers {
+            return Err(PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+                source_id,
+                reason: PrepaidSpellCopyConflict::ProducersDisagreeWithSettledSpend {
+                    copy: spell
+                        .mana_spent_source_snapshots
+                        .iter()
+                        .map(|snapshot| snapshot.source_id)
+                        .collect(),
+                    settled: settled_producers
+                        .iter()
+                        .map(|snapshot| snapshot.source_id)
+                        .collect(),
+                },
+            });
+        }
+        Ok(())
+    }
+
     /// CR 601.2 / CR 602.2: at most one announcement is in flight, so every live
     /// `PendingCast` owner names the same cast.
     ///
@@ -19177,6 +19414,25 @@ pub enum PersistedRestoreError {
         source_id: ObjectId,
         reason: AssistContributionConflict,
     },
+
+    /// CR 106.3 + CR 118.3a + CR 601.2h: a parked cast's PREPAID SPELL COPY — the amount,
+    /// the per-color tally and the producer snapshots the finalizers stamped on the spell
+    /// object before the cast parked — is not the projection of the spend this save
+    /// settled. The prepaid resume consumes that copy instead of re-deriving it
+    /// (`casting_costs` gates the payment out on `prepaid_actual_mana_spent`), and it is
+    /// the record `FilterProp::ManaSpentFromSource` answers from, so admitting a copy the
+    /// settle does not prove would price the cast off facts the game never established:
+    /// Rain of Riches would grant — or withhold — cascade for a Treasure that never paid,
+    /// or for one that did and whose pip the save deleted.
+    ///
+    /// The bytes are refusable in both directions because the two records are one payment
+    /// stated twice: the journal's `ManaSpend` commands are the removals themselves
+    /// (CR 118.3a), and the copy is the projection those removals produce.
+    #[error("persisted prepaid spell copy on {source_id:?} cannot be restored: {reason}")]
+    ContradictoryPrepaidSpellCopy {
+        source_id: ObjectId,
+        reason: PrepaidSpellCopyConflict,
+    },
 }
 
 impl PreparedPersistedGameState {
@@ -19405,6 +19661,13 @@ impl PersistedGameState {
         // every production restore funnels through — means resume and admission can
         // never disagree about whether the helper's units exist.
         state.bind_or_reject_assist_contribution_provenance()?;
+        // CR 106.3 + CR 118.3a + CR 601.2h: the SEPARATE copy the payment finalizers
+        // stamped on the spell object — amount, color tally and producer snapshots — is
+        // validated against the same settled spend, AFTER the Assist units above are
+        // bound, so the copy is read against the units this save settled rather than the
+        // ones it claimed. A prepaid cast never re-derives it, so this boundary is the
+        // only place the two records can be reconciled.
+        state.bind_or_reject_prepaid_spell_copy_provenance()?;
         crate::game::effects::choose_from_zone::migrate_legacy_per_player_frame_on_restore(
             &mut state,
         )
