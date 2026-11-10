@@ -5926,6 +5926,66 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
     }
   });
 
+  it("never writes a candidate's setup after disposal cancels the held write", async () => {
+    const codec = scriptedCodec();
+    const provider = vi.fn(() => Promise.resolve(codec.session));
+    const { adapter, raw } = await establishCodecAdapter(provider);
+    expect(adapter.tryReconnect(session() as never)).toBe(true);
+    await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+    const candidate = latestSocket();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    candidate.sendReceipt = vi.fn(async (data: string, signal?: AbortSignal) => {
+      await gate;
+      if (signal?.aborted === true) throw new Error("write was cancelled");
+      candidate.send(data);
+    });
+    candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+    await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+    adapter.dispose();
+    release();
+    await vi.waitFor(() => expect(candidate.close).toHaveBeenCalled());
+    const setups = candidate.send.mock.calls
+      .map(([frame]) => (JSON.parse(String(frame)) as { type?: string }).type);
+    expect(setups).not.toContain("Reconnect");
+  });
+
+  it("does not let an incumbent close schedule a retry over a candidate still writing", async () => {
+    const codec = scriptedCodec();
+    const provider = vi.fn(() => Promise.resolve(codec.session));
+    const { adapter, raw, events } = await establishCodecAdapter(provider);
+    try {
+      expect(adapter.tryReconnect(session() as never)).toBe(true);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+      const candidate = latestSocket();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      candidate.sendReceipt = vi.fn(async (data: string) => {
+        await gate;
+        candidate.send(data);
+      });
+      candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+      await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+      events.length = 0;
+      // The incumbent dies while the candidate is still writing. Its close
+      // must not schedule a retry over the candidate's pending setup.
+      raw.readyState = 3;
+      raw.dispatchSynthetic("close");
+      release();
+      await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+        expect.stringContaining('"type":"Reconnect"'),
+      ));
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(MockWebSocket.last).toBe(candidate);
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "reconnecting" }));
+      candidate.dispatchSynthetic("message", CODEC_CONFIRMATION);
+      deliverCodec(candidate, "Full", codecGameStarted(5, 5));
+      await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+    } finally {
+      adapter.dispose();
+    }
+  });
+
   it("clears every request and initialization owner before a synchronous close's pending listener throws", async () => {
     MockWebSocket.last = null;
     const adapter = new WebSocketAdapter(

@@ -355,12 +355,18 @@ export class ServerDraftAdapter implements EngineAdapter {
    * native IPC) report the real outcome; a raw transport writes synchronously
    * inside `send` and reports through it.
    */
-  private async writeSetupFrame(socket: PhaseSocketTransport, frame: unknown): Promise<boolean> {
+  private async writeSetupFrame(
+    socket: PhaseSocketTransport,
+    frame: unknown,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const isAborted = () => signal?.aborted === true;
+    if (isAborted()) return false;
     if (socket.sendReceipt === undefined) return this.send(frame, socket);
     if (socket.readyState !== WebSocket.OPEN) return false;
     try {
-      await socket.sendReceipt(JSON.stringify(frame));
-      return true;
+      await socket.sendReceipt(JSON.stringify(frame), signal);
+      return !isAborted();
     } catch {
       return false;
     }
@@ -1259,7 +1265,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.stateCodec.consumeFailure(bootstrap);
       }
       // Address the local candidate, not the still-current previous socket.
-      if (!(await this.writeSetupFrame(sourceSocket, setupFrame))) {
+      if (!(await this.writeSetupFrame(sourceSocket, setupFrame, attachment.controller.signal))) {
         throw new AdapterError("WS_CLOSED", "Failed to send setup frame", true);
       }
       if (!this.ownsAttachment(attachment) || !this.sockets.has(sourceSocket)) {
@@ -1465,21 +1471,21 @@ export class ServerDraftAdapter implements EngineAdapter {
           }
         }
         if (!sameMatch) {
-          if (this.draftCode && this.draftToken) {
-            this.send({
-              type: "ReconnectDraft",
-              data: {
-                draft_code: this.draftCode,
-                player_token: this.draftToken,
-              },
-            });
-          } else {
-            this.emit({
-              type: "error",
-              message: "Cannot attach draft match without draft credentials.",
-            });
-          }
           try {
+            if (this.draftCode && this.draftToken) {
+              this.send({
+                type: "ReconnectDraft",
+                data: {
+                  draft_code: this.draftCode,
+                  player_token: this.draftToken,
+                },
+              });
+            } else {
+              this.emit({
+                type: "error",
+                message: "Cannot attach draft match without draft credentials.",
+              });
+            }
             this.emit({
               type: "matchStarting",
               matchId: data.match_id,

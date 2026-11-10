@@ -50,6 +50,19 @@ it("reports an ordered write receipt for setup and rejects when the queued write
   expect(raw.close).toHaveBeenCalled();
 });
 
+it("rejects a queued write when the raw socket starts closing before the close event", async () => {
+  const raw = Object.assign(new EventTarget(), {
+    readyState: 1, onopen: null, onmessage: null, onerror: null, onclose: null,
+    send: vi.fn(), close: vi.fn(),
+  });
+  const socket = new GzipEnvelopeSocket(raw as never);
+  const queued = socket.sendReceipt(JSON.stringify({ type: "Closing" }));
+  // The browser has begun closing but has not delivered the close event yet.
+  raw.readyState = 2;
+  await expect(queued).rejects.toThrow("not open");
+  expect(raw.send).not.toHaveBeenCalled();
+});
+
 it("records a loss outside a secure context, where crypto.randomUUID is unavailable", () => {
   const original = globalThis.crypto.randomUUID;
   Object.defineProperty(globalThis.crypto, "randomUUID", { value: undefined, configurable: true });

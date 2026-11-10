@@ -61,7 +61,7 @@ export interface PhaseSocketTransport {
    * than only queued. A transport without this method writes synchronously
    * within `send` (throwing on failure).
    */
-  sendReceipt?(data: string): Promise<void>;
+  sendReceipt?(data: string, signal?: AbortSignal): Promise<void>;
   close(): void;
 }
 

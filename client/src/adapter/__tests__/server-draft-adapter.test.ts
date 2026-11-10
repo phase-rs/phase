@@ -2634,6 +2634,29 @@ describe("draft attachment settlement", () => {
     expect(seen).toEqual([true, false]);
   });
 
+  it("still clears the pending indicator when the setup send throws through an error listener", async () => {
+    enterAcceptedFullMatch(adapter, established);
+    const seen: boolean[] = [];
+    const off = adapter.onEvent((event) => {
+      if (event.type === "actionPendingChanged") seen.push(event.pending);
+      if (event.type === "error") throw new Error("error listener failed");
+    });
+    const pending = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
+    established.readyState = 3; // CLOSED: the setup send now emits an error.
+    try {
+      expect(() => receive(established, "DraftMatchStart", {
+        match_id: "r7-t0", round: 7, game_code: "GAME07",
+        full_key: { game_code: "GAME07", generation: 13 },
+        player_token: "match-draft-token", your_player: 0, opponent_name: "Next opponent",
+      })).toThrow("error listener failed");
+    } finally {
+      off();
+    }
+    expect(await pending()).toMatchObject({ code: "REQUEST_FAILED" });
+    // Setup and its failure sit inside the transition's completion boundary.
+    expect(seen).toEqual([true, false]);
+  });
+
   it.each(["serverHello", "draftViewUpdated"] as const)(
     "drains older reconnect views before the synchronous selected-inventory reply from a %s pick consumer",
     async (trigger) => {
@@ -3890,6 +3913,48 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       data: { state: matchState("after-async-write-failure"), events: [{ marker: "async-ok" }], full_key: FULL_KEY },
     }));
     await expect(command).resolves.toMatchObject({ events: [{ marker: "async-ok" }] });
+    adapter.dispose();
+  });
+
+  it("does not write a superseded candidate's setup after cancellation", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const first = draftCodecSession(decodeEnvelope);
+    const second = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    provider.mockResolvedValueOnce(first.session);
+    const superseded = trackRejection(adapter.createDraft({
+      displayName: "First", setCodes: ["TST"], kind: "Premier", public: false,
+      tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+    }));
+    await drainArt();
+    const candidate = MockWebSocket.last!;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    candidate.sendReceipt = vi.fn(async (data: string, signal?: AbortSignal) => {
+      await gate;
+      if (signal?.aborted === true) throw new Error("write was cancelled");
+      candidate.send(data);
+    });
+    candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+    await drainArt();
+    // A newer attachment supersedes the candidate while its setup write is held.
+    provider.mockResolvedValueOnce(second.session);
+    void trackRejection(adapter.createDraft({
+      displayName: "Second", setCodes: ["TST"], kind: "Premier", public: false,
+      tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+    }));
+    await drainArt();
+    release();
+    await drainArt();
+    await expect(superseded()).resolves.toMatchObject({ code: "WS_CLOSED" });
+    const setups = candidate.send.mock.calls
+      .map(([raw]) => (JSON.parse(String(raw)) as { type?: string }).type)
+      .filter((type) => type === "CreateDraftWithSettings");
+    expect(setups).toEqual([]);
+    expect(ws.close).not.toHaveBeenCalled();
     adapter.dispose();
   });
 

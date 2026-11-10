@@ -11,7 +11,10 @@ use futures_util::{
 };
 use tauri::{ipc::Channel, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::{
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
+    oneshot,
+};
 use tokio_tungstenite::{
     connect_async_with_config,
     tungstenite::{
@@ -51,13 +54,25 @@ impl NativeEngineBridgeError {
     }
 }
 
+/// One outbound frame plus the receipt for its actual sink write. Queue
+/// admission is not success: the forwarder acknowledges only after the sink
+/// write settles.
+#[derive(Debug)]
+pub(crate) struct OutboundFrame {
+    pub(crate) message: Message,
+    pub(crate) ack: Option<oneshot::Sender<Result<(), String>>>,
+}
+
+pub(crate) type OutboundSender = UnboundedSender<OutboundFrame>;
+pub(crate) type OutboundReceiver = UnboundedReceiver<OutboundFrame>;
+
 pub(crate) struct BridgeHandle {
     abort: AbortHandle,
-    outbound: UnboundedSender<Message>,
+    outbound: OutboundSender,
 }
 
 impl BridgeHandle {
-    pub(crate) fn new(abort: AbortHandle, outbound: UnboundedSender<Message>) -> Self {
+    pub(crate) fn new(abort: AbortHandle, outbound: OutboundSender) -> Self {
         Self { abort, outbound }
     }
 
@@ -76,7 +91,7 @@ impl BridgeHandle {
         });
     }
 
-    pub(crate) fn outbound(&self) -> UnboundedSender<Message> {
+    pub(crate) fn outbound(&self) -> OutboundSender {
         self.outbound.clone()
     }
 }
@@ -140,19 +155,48 @@ pub async fn connect_native_engine(
     Ok(bridge_id)
 }
 
-/// Sends a JSON text frame over a shell-pinned bridge.
+/// Sends a JSON text frame over a shell-pinned bridge and waits for the sink
+/// write. Queue admission is not success.
 #[tauri::command]
-pub fn native_engine_bridge_send(id: u64, text: String) -> Result<(), NativeEngineBridgeError> {
+pub async fn native_engine_bridge_send(
+    id: u64,
+    text: String,
+) -> Result<(), NativeEngineBridgeError> {
     let outbound = native_engine::native_engine_bridge_sender(id).ok_or_else(|| {
         NativeEngineBridgeError::UnknownBridge {
             detail: format!("native engine bridge {id} is not open"),
         }
     })?;
+    enqueue_frame(outbound, Message::Text(text.into())).await
+}
+
+/// Enqueues one frame and resolves with the forwarder\u0027s sink result.
+async fn enqueue_frame(
+    outbound: OutboundSender,
+    message: Message,
+) -> Result<(), NativeEngineBridgeError> {
+    let (ack, written) = oneshot::channel();
     outbound
-        .send(Message::Text(text.into()))
+        .send(OutboundFrame {
+            message,
+            ack: Some(ack),
+        })
         .map_err(|error| NativeEngineBridgeError::Send {
             detail: error.to_string(),
-        })
+        })?;
+    await_written(written).await
+}
+
+async fn await_written(
+    written: oneshot::Receiver<Result<(), String>>,
+) -> Result<(), NativeEngineBridgeError> {
+    match written.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(detail)) => Err(NativeEngineBridgeError::Send { detail }),
+        Err(_) => Err(NativeEngineBridgeError::Send {
+            detail: "bridge closed before the frame was written".to_owned(),
+        }),
+    }
 }
 
 /// Closes a shell-pinned bridge and forwards a close event to JS.
@@ -228,7 +272,7 @@ fn bridge_request(port: u16, origin: &str) -> Result<Request<()>, NativeEngineBr
 async fn forward_bridge(
     bridge_id: u64,
     socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
-    outbound: UnboundedReceiver<Message>,
+    outbound: OutboundReceiver,
     registration: AbortRegistration,
     on_event: Channel<BridgeEvent>,
     text_delivery: Option<BridgeTextDelivery>,
@@ -254,7 +298,7 @@ async fn forward_bridge(
 
 async fn run_bridge(
     socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
-    mut outbound: UnboundedReceiver<Message>,
+    mut outbound: OutboundReceiver,
     on_event: Channel<BridgeEvent>,
     text_delivery: Option<BridgeTextDelivery>,
 ) -> (Option<String>, Option<(u16, String)>) {
@@ -266,8 +310,13 @@ async fn run_bridge(
     loop {
         tokio::select! {
             outgoing = outbound.recv(), if !closing => match outgoing {
-                Some(message) => {
-                    if let Err(send_error) = write.send(message).await {
+                Some(frame) => {
+                    let written = write.send(frame.message).await;
+                    if let Some(ack) = frame.ack {
+                        // Report the sink result, not queue admission.
+                        let _ = ack.send(written.as_ref().map(|_| ()).map_err(|send_error| send_error.to_string()));
+                    }
+                    if let Err(send_error) = written {
                         error = Some(send_error.to_string());
                         break;
                     }
@@ -661,19 +710,36 @@ impl LanBridges {
             })
     }
 
+    #[cfg(test)]
     fn send(
         &self,
         id: u64,
         client: &LanClient,
         text: String,
     ) -> Result<(), NativeEngineBridgeError> {
+        let _ = self.enqueue(id, client, Message::Text(text.into()))?;
+        Ok(())
+    }
+
+    /// Enqueues one frame and returns the receipt for its sink write.
+    fn enqueue(
+        &self,
+        id: u64,
+        client: &LanClient,
+        message: Message,
+    ) -> Result<oneshot::Receiver<Result<(), String>>, NativeEngineBridgeError> {
+        let (ack, written) = oneshot::channel();
         self.owned_bridge(id, client)?
             .handle
             .outbound()
-            .send(Message::Text(text.into()))
+            .send(OutboundFrame {
+                message,
+                ack: Some(ack),
+            })
             .map_err(|error| NativeEngineBridgeError::Send {
                 detail: error.to_string(),
-            })
+            })?;
+        Ok(written)
     }
 
     fn close(&mut self, id: u64, client: &LanClient) -> Result<(), NativeEngineBridgeError> {
@@ -686,16 +752,17 @@ impl LanBridges {
 }
 
 #[tauri::command]
-pub fn lan_bridge_send(
+pub async fn lan_bridge_send(
     window: WebviewWindow,
     id: u64,
     text: String,
 ) -> Result<(), NativeEngineBridgeError> {
     let client = invoking_lan_client(&window)?;
-    lan_bridges()
+    let written = lan_bridges()
         .lock()
         .map_err(|error| NativeEngineBridgeError::internal(error.to_string()))?
-        .send(id, &client, text)
+        .enqueue(id, &client, Message::Text(text.into()))?;
+    await_written(written).await
 }
 
 #[tauri::command]
@@ -860,17 +927,49 @@ mod tests {
             assert!(receiver.try_recv().is_err());
         }
         state.send(1, &test_client(), "allowed".into()).unwrap();
-        assert_eq!(
-            receiver.try_recv().unwrap(),
-            Message::Text("allowed".into())
-        );
+        let allowed = receiver.try_recv().unwrap();
+        assert_eq!(allowed.message, Message::Text("allowed".into()));
         state.close(1, &test_client()).unwrap();
         assert!(state.bridges.is_empty());
         assert!(!abort.is_aborted());
-        assert_eq!(
+        assert!(matches!(
             receiver.try_recv(),
             Err(mpsc::error::TryRecvError::Disconnected)
-        );
+        ));
+    }
+
+    #[test]
+    fn send_receipt_reports_a_sink_failure_after_queue_admission() {
+        tauri::async_runtime::block_on(async {
+            let (outbound, mut receiver) = mpsc::unbounded_channel::<OutboundFrame>();
+            let writer = tauri::async_runtime::spawn(async move {
+                let frame = receiver.recv().await.unwrap();
+                // Admission accepted the frame; the sink rejects it.
+                let _ = frame.ack.unwrap().send(Err("sink write failed".to_owned()));
+            });
+            let sent = enqueue_frame(outbound, Message::Text("setup".into())).await;
+            writer.await.unwrap();
+            assert!(matches!(
+                sent,
+                Err(NativeEngineBridgeError::Send { detail }) if detail == "sink write failed"
+            ));
+        });
+    }
+
+    #[test]
+    fn send_receipt_resolves_only_after_the_sink_acknowledges() {
+        tauri::async_runtime::block_on(async {
+            let (outbound, mut receiver) = mpsc::unbounded_channel::<OutboundFrame>();
+            let writer = tauri::async_runtime::spawn(async move {
+                let frame = receiver.recv().await.unwrap();
+                // Nothing is acknowledged until the writer completes.
+                tokio::task::yield_now().await;
+                let _ = frame.ack.unwrap().send(Ok(()));
+            });
+            let sent = enqueue_frame(outbound, Message::Text("setup".into())).await;
+            writer.await.unwrap();
+            assert!(sent.is_ok());
+        });
     }
 
     #[test]
@@ -1303,10 +1402,8 @@ mod tests {
             .unwrap()
             .send(id, &test_client(), "still open".into())
             .unwrap();
-        assert_eq!(
-            receiver.try_recv().unwrap(),
-            Message::Text("still open".into())
-        );
+        let still_open = receiver.try_recv().unwrap();
+        assert_eq!(still_open.message, Message::Text("still open".into()));
         abort_lan_bridges();
         assert!(abort.is_aborted());
         assert!(lan_bridges()
@@ -1379,7 +1476,10 @@ mod tests {
         let unknown_bridge_id = u64::MAX;
 
         assert!(matches!(
-            native_engine_bridge_send(unknown_bridge_id, "frame".to_owned()),
+            tauri::async_runtime::block_on(native_engine_bridge_send(
+                unknown_bridge_id,
+                "frame".to_owned()
+            )),
             Err(NativeEngineBridgeError::UnknownBridge { .. })
         ));
         assert!(matches!(

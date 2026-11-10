@@ -101,15 +101,17 @@ export class NativeEngineSocket {
    * IPC write, rejects when it failed (after routing the failure through the
    * usual bridge error/close path).
    */
-  sendReceipt(text: string): Promise<void> {
-    if (this.readyState !== NativeEngineSocket.OPEN || this.bridgeId === null) {
+  sendReceipt(text: string, signal?: AbortSignal): Promise<void> {
+    if (this.readyState !== NativeEngineSocket.OPEN || this.bridgeId === null || signal?.aborted === true) {
       return Promise.reject(new DOMException("WebSocket is not open.", "InvalidStateError"));
     }
     return this.invokeDesktop(
       this.destination ? "lan_bridge_send" : "native_engine_bridge_send",
       { id: this.bridgeId, text },
     ).then(
-      () => undefined,
+      () => {
+        if (signal?.aborted === true) throw new Error("native bridge write was abandoned");
+      },
       (error: unknown) => {
         this.handleBridgeFailure(error);
         throw error;

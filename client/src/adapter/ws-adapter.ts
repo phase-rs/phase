@@ -1967,6 +1967,8 @@ export class WebSocketAdapter implements EngineAdapter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectStartedAt: number | null = null;
   private socketOpening = false;
+  /** A candidate's setup frame is awaiting its ordered write receipt. */
+  private setupWriteInFlight = false;
   private socketDiagnostics: SocketDiagnosticObserver | null = null;
   private readonly pendingDiagnosticLosses = new Set<string>();
   private sessionLifecycleListening = false;
@@ -2615,7 +2617,22 @@ export class WebSocketAdapter implements EngineAdapter {
       // enqueues setup before any subsequently notified consumer can enqueue
       // a command. Raw transports can reply synchronously, so handlers above
       // retain those replies until the send has returned successfully.
-      if (!(await this.writeSetupFrame(socket.ws, setupFrame))) {
+      //
+      // A retry timer from an earlier attempt is obsolete while this attempt
+      // owns the write, and the write marker keeps an incumbent close from
+      // scheduling a new one over the candidate.
+      if (this.reconnectTimer !== null) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+      this.setupWriteInFlight = true;
+      let written: boolean;
+      try {
+        written = await this.writeSetupFrame(socket.ws, setupFrame, preparation.signal);
+      } finally {
+        this.setupWriteInFlight = false;
+      }
+      if (!written) {
         if (this.disposed || this.stateCodecPreparation !== preparation) return;
         if (this.initialFallbackActive()) {
           this.failInitialFallback(initialFallbackFailure());
@@ -2625,7 +2642,8 @@ export class WebSocketAdapter implements EngineAdapter {
         if (this.reconnectInFlight) this.attemptReconnect();
         return;
       }
-      if (this.disposed || this.stateCodecPreparation !== preparation) return;
+      if (this.disposed || this.stateCodecPreparation !== preparation
+        || preparation.signal.aborted) return;
       if (closed) {
         this.rejectInitialization(new AdapterError("WS_CLOSED", "Connection closed during setup", true));
         if (this.reconnectInFlight) this.attemptReconnect();
@@ -2698,12 +2716,18 @@ export class WebSocketAdapter implements EngineAdapter {
    * native IPC) report the real outcome; a raw transport writes synchronously
    * inside `send` and reports through it.
    */
-  private async writeSetupFrame(socket: PhaseSocketTransport, frame: unknown): Promise<boolean> {
+  private async writeSetupFrame(
+    socket: PhaseSocketTransport,
+    frame: unknown,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const isAborted = () => signal?.aborted === true;
+    if (isAborted()) return false;
     if (socket.sendReceipt === undefined) return this.send(frame, socket);
     if (socket.readyState !== WebSocket.OPEN) return false;
     try {
-      await socket.sendReceipt(JSON.stringify(frame));
-      return true;
+      await socket.sendReceipt(JSON.stringify(frame), signal);
+      return !isAborted();
     } catch {
       return false;
     }
@@ -3018,6 +3042,7 @@ export class WebSocketAdapter implements EngineAdapter {
     );
     this.rejectAbandon(new AdapterError("WS_CLOSED", "Adapter disposed while abandoning game", true));
     this.reconnectInFlight = false;
+    this.setupWriteInFlight = false;
     this._serverInfo = null;
     this.receivedGameStarted = false;
     this.stateCodec.release();
@@ -3063,7 +3088,7 @@ export class WebSocketAdapter implements EngineAdapter {
 
   private attemptReconnect(immediate = false): void {
     if (this.disposed || this.gameEnded || this.sessionIdentityRejected) return;
-    if (this.reconnectTimer !== null || this.socketOpening) return;
+    if (this.reconnectTimer !== null || this.socketOpening || this.setupWriteInFlight) return;
     const session = this.currentSession();
     const policy = this.reconnectPolicy;
     this.reconnectStartedAt ??= Date.now();

@@ -586,7 +586,7 @@ pub(crate) fn register_native_engine_bridge(
 
 pub(crate) fn native_engine_bridge_sender(
     bridge_id: u64,
-) -> Option<tokio::sync::mpsc::UnboundedSender<tokio_tungstenite::tungstenite::Message>> {
+) -> Option<crate::native_bridge::OutboundSender> {
     let state = engine_state().lock().ok()?;
     state.bridges.get(&bridge_id).map(BridgeHandle::outbound)
 }
@@ -3577,14 +3577,23 @@ mod tests {
         let mut bridges = BTreeMap::from([(1, BridgeHandle::new(abort.clone(), outbound))]);
         bridges[&1]
             .outbound()
-            .send(Message::Text("queued".into()))
+            .send(crate::native_bridge::OutboundFrame {
+                message: Message::Text("queued".into()),
+                ack: None,
+            })
             .unwrap();
 
         assert!(close_registered_bridge(&mut bridges, 1));
 
         assert!(!close_registered_bridge(&mut bridges, 1));
         assert!(!abort.is_aborted());
-        assert_eq!(receiver.try_recv().unwrap(), Message::Text("queued".into()));
-        assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
+        assert_eq!(
+            receiver.try_recv().unwrap().message,
+            Message::Text("queued".into())
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(TryRecvError::Disconnected)
+        ));
     }
 }

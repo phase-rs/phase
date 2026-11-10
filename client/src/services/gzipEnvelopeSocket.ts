@@ -62,22 +62,28 @@ export class GzipEnvelopeSocket implements PhaseSocketTransport {
    * transport's own error/close path exactly as `send` does, so callers see
    * both the receipt and the transport closing.
    */
-  sendReceipt(data: string): Promise<void> {
+  sendReceipt(data: string, signal?: AbortSignal): Promise<void> {
     if (this.retired || this.rawCloseEvent !== null) {
       return Promise.reject(new Error("gzip envelope transport is retired"));
     }
-    return this.enqueueWrite(data);
+    return this.enqueueWrite(data, signal);
   }
 
   /** Appends one write to the shared FIFO and reports its settled outcome. */
-  private enqueueWrite(data: string): Promise<void> {
+  private enqueueWrite(data: string, signal?: AbortSignal): Promise<void> {
+    const isAborted = () => signal?.aborted === true;
     const write = this.sendQueue.then(async () => {
-      if (this.retired || this.rawCloseEvent !== null) {
+      if (this.retired || this.rawCloseEvent !== null || isAborted()) {
         throw new Error("gzip envelope transport is retired");
       }
       const encoded = await encodeJsonEnvelope(data);
-      if (this.retired || this.rawCloseEvent !== null) {
+      if (this.retired || this.rawCloseEvent !== null || isAborted()) {
         throw new Error("gzip envelope transport is retired");
+      }
+      if (this.socket.readyState !== WebSocket.OPEN) {
+        // A socket that is closing may silently drop a frame; a receipt must
+        // never report a write that the browser declined to transmit.
+        throw new Error("gzip envelope transport is not open");
       }
       (this.socket as unknown as { send(data: Uint8Array): void }).send(encoded);
       this.onFrameSent?.();
