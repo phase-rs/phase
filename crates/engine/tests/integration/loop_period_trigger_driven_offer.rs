@@ -1190,9 +1190,12 @@ fn public_recorded_period_replay_saturates_a_later_life_counter() {
 }
 
 /// CR 732.2a/c: the recorded-period Replay with the energy attendant. The control commits every
-/// recorded attendant energy gain once in each cycle; with the energy total one cycle's gains
-/// short of its limit, the first replayed cycle fits exactly and the next one rejects the final
-/// Accept action and restores that action's entire entry state.
+/// recorded attendant energy gain once in each cycle. With the energy total three cycles' gains
+/// short of its limit (the exact row), every Accept action is accepted and the total lands exactly
+/// on `u32::MAX`. With it one cycle's gains short (the hostile row), the first replayed cycle fits
+/// exactly and the next one rejects the final Accept action and restores that action's entire entry
+/// state. The exact row's last cycle starts where the hostile row's first starts, so the hostile
+/// row's rejection is not its first cycle's.
 #[test]
 fn public_recorded_period_replay_rejects_later_energy_overflow_atomically() {
     use engine::game::perf_counters::take_cost_snapshot;
@@ -1232,6 +1235,51 @@ fn public_recorded_period_replay_rejects_later_energy_overflow_atomically() {
         control.state().players[0].energy - control_energy,
         takes * COUNT,
         "the representable Replay committed each recorded attendant energy gain once in each cycle"
+    );
+
+    let (mut exact, _) = offered(Board::BEnergyAttendant)
+        .expect("the real Board B fixture must produce its recorded-period offer");
+    exact.runner.state_mut().players[0].energy = u32::MAX - takes * COUNT;
+    let exact_recorded = recorded_declaration(exact.state(), |_| false);
+    let before_exact = take_cost_snapshot();
+    exact
+        .runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(COUNT),
+            template: Some(exact_recorded),
+        })
+        .expect("a valid recorded declaration opens the response window");
+    for _ in 0..4 {
+        if !matches!(
+            exact.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ) {
+            break;
+        }
+        exact
+            .runner
+            .act(GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            })
+            .expect("every public Accept of the Replay that lands on the limit is accepted");
+    }
+    let exact_drive = take_cost_snapshot().since(before_exact);
+    assert!(
+        exact_drive.drive_snapshots > 0,
+        "reach guard: the public response entered the real Replay drive"
+    );
+    assert!(
+        !matches!(
+            exact.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ),
+        "the exact landing leaves no response window, got {}",
+        exact.state().waiting_for.variant_name()
+    );
+    assert_eq!(
+        exact.state().players[0].energy,
+        u32::MAX,
+        "a Replay whose last cycle lands exactly on the limit commits every gain"
     );
 
     let (mut hostile, _) = offered(Board::BEnergyAttendant)
