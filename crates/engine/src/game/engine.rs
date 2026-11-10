@@ -16244,6 +16244,16 @@ fn apply_non_priority_pass_action(
                     grants,
                 } => (enchant_filter.clone(), grants.clone()),
                 _ => {
+                    // CR 303.4f: an entering Aura's host was chosen before its
+                    // delivery; deliver the parked approved event with it.
+                    if state.pending_aura_entry.is_some() {
+                        let waiting = super::zone_pipeline::resume_paused_aura_entry_choice(
+                            state,
+                            chosen.clone(),
+                            &mut events,
+                        )?;
+                        return Ok(ActionResult::applied(events, waiting));
+                    }
                     // CR 303.4f + CR 701.3b: attach through the entering-Aura
                     // authority, so the CR 701.3a gate judges the same entrant
                     // the host list was offered for. Seams that park none get

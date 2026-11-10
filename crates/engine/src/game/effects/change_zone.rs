@@ -2034,6 +2034,10 @@ pub fn resolve(
                     &events[logical_group_event_start..],
                 )
                 .expect("paused ChangeZone retains its explicit delivery prefix");
+                let anticipated_pause = crate::game::zone_pipeline::preferred_entry_pause_boundary(
+                    state,
+                    anticipated_pause,
+                );
                 let replacement_boundary = state.pending_zone_change_delivery_from_replacement();
                 let paused_current = Some(
                     replacement_boundary
@@ -3632,6 +3636,10 @@ pub fn resolve_all(
                     &events[logical_group_event_start..],
                 )
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
+                let anticipated_pause = crate::game::zone_pipeline::preferred_entry_pause_boundary(
+                    state,
+                    anticipated_pause,
+                );
                 let replacement_boundary = state.pending_zone_change_delivery_from_replacement();
                 let paused_current = Some(
                     replacement_boundary
@@ -4996,7 +5004,9 @@ mod tests {
             }
             other => panic!("expected Aura host choice, got {other:?}"),
         }
-        assert_eq!(state.objects[&aura_id].zone, Zone::Battlefield);
+        // CR 303.4f: the host is chosen as the Aura enters, so the entry is
+        // still held in its origin zone at the prompt.
+        assert_eq!(state.objects[&aura_id].zone, Zone::Graveyard);
         assert!(state.objects[&aura_id].attached_to.is_none());
 
         apply_as_current(
@@ -5157,6 +5167,92 @@ mod tests {
     /// `NeedsAuraAttachmentChoice` (mirroring the targeted loop) so the drain
     /// resumes them after the host is chosen — pre-fix it returned early, so
     /// every member after the Aura was silently dropped ("returned only one").
+    /// CR 508.4: answering one entering attacker's defender choice must not
+    /// swallow the NEXT member's own prompt. Both prompts surface through the
+    /// public reducer and each member keeps its own chosen defender.
+    #[test]
+    fn mass_enter_attacking_surfaces_each_members_defender_choice() {
+        use crate::game::engine::apply_as_current;
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        state.combat = Some(crate::game::combat::CombatState::default());
+        let mut ids = Vec::new();
+        for i in 0..2u64 {
+            let id = create_object(
+                &mut state,
+                CardId(700 + i),
+                PlayerId(0),
+                format!("Mass Attacker {i}"),
+                Zone::Graveyard,
+            );
+            let object = state.objects.get_mut(&id).unwrap();
+            object.card_types.core_types = vec![CoreType::Creature];
+            object.base_card_types = object.card_types.clone();
+            ids.push(id);
+        }
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: true,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                library_shuffle: Default::default(),
+                random_order: false,
+            },
+            ids.iter()
+                .map(|&id| crate::types::ability::TargetRef::Object(id))
+                .collect(),
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        super::resolve_all(&mut state, &ability, &mut events)
+            .expect("mass entering attackers resolve to the first prompt");
+        let first = match state.waiting_for {
+            WaitingFor::EntryAttackTargetChoice { object_id, .. } => object_id,
+            ref other => panic!("first defender prompt missing: {other:?}"),
+        };
+        assert_eq!(first, ids[0]);
+        apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseEntryAttackTarget {
+                target: crate::types::attack_target::AttackTarget::Player(PlayerId(1)),
+            },
+        )
+        .expect("answer the first defender");
+        let second = match state.waiting_for {
+            WaitingFor::EntryAttackTargetChoice { object_id, .. } => object_id,
+            ref other => panic!("successor defender prompt was lost: {other:?}"),
+        };
+        assert_eq!(second, ids[1]);
+        apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseEntryAttackTarget {
+                target: crate::types::attack_target::AttackTarget::Player(PlayerId(2)),
+            },
+        )
+        .expect("answer the second defender");
+        assert!(state.pending_replacement.is_none());
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::EntryAttackTargetChoice { .. }
+        ));
+        for &id in &ids {
+            assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        }
+        let combat = state.combat.as_ref().expect("combat exists");
+        assert!(combat.attackers.iter().any(
+            |attacker| attacker.object_id == ids[0] && attacker.defending_player == PlayerId(1)
+        ));
+    }
+
     #[test]
     fn change_zone_all_resumes_remaining_members_after_aura_host_choice() {
         let mut state = GameState::new_two_player(42);

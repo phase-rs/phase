@@ -2747,6 +2747,11 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
                     let replacement_boundary =
                         state.pending_zone_change_delivery_from_replacement();
+                    let anticipated_pause =
+                        crate::game::zone_pipeline::preferred_entry_pause_boundary(
+                            state,
+                            anticipated_pause,
+                        );
                     let paused_current = Some(
                         replacement_boundary
                             .clone()

@@ -1533,10 +1533,12 @@ fn deliver_batch(
                 let mut paused_current = state
                     .pending_zone_change_delivery_from_replacement()
                     .or_else(|| {
-                        anticipated_pause.map(|mut boundary| {
-                            boundary.append_delivery_events(&events[delivery_start..]);
-                            boundary
-                        })
+                        preferred_entry_pause_boundary(state, anticipated_pause).map(
+                            |mut boundary| {
+                                boundary.append_delivery_events(&events[delivery_start..]);
+                                boundary
+                            },
+                        )
                     })
                     .expect("parked batch zone change must retain an exact boundary");
                 paused_current.face_down_in_exile = face_down_in_exile;
@@ -1701,6 +1703,35 @@ fn anticipated_zone_change_delivery(
     Some(PendingZoneChangeDelivery::new(
         crate::types::identifiers::ObjectIncarnationRef::from_object(object),
         expected_event,
+    ))
+}
+
+/// CR 508.4: use the fully approved entering event the delivery parked at its
+/// defender choice. The pre-consult anticipated boundary omits replacement-
+/// applied counters, tap state, attacking and controller facts.
+pub(crate) fn preferred_entry_pause_boundary(
+    state: &mut GameState,
+    anticipated: Option<PendingZoneChangeDelivery>,
+) -> Option<PendingZoneChangeDelivery> {
+    if !matches!(
+        state.waiting_for,
+        WaitingFor::EntryAttackTargetChoice { .. }
+    ) {
+        return anticipated;
+    }
+    let Some(event) = state.pending_entry_attack_event.take() else {
+        return anticipated;
+    };
+    let object_id = match &event {
+        ProposedEvent::ZoneChange { object_id, .. } => *object_id,
+        _ => return anticipated,
+    };
+    let Some(object) = state.objects.get(&object_id) else {
+        return anticipated;
+    };
+    Some(PendingZoneChangeDelivery::new(
+        crate::types::identifiers::ObjectIncarnationRef::from_object(object),
+        event,
     ))
 }
 
@@ -3914,6 +3945,7 @@ fn deliver_replaced_zone_change_inner(
     entry_attack_target: Option<crate::types::attack_target::AttackTarget>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
+    let approved_entry_event = event.clone();
     if let ProposedEvent::ZoneChange {
         object_id,
         from,
@@ -4150,6 +4182,7 @@ fn deliver_replaced_zone_change_inner(
                     &crate::types::ability::EntryAttackDestination::AnyDefender,
                 );
                 if valid_targets.len() > 1 {
+                    state.pending_entry_attack_event = Some(approved_entry_event);
                     state.waiting_for = WaitingFor::EntryAttackTargetChoice {
                         player: controller,
                         object_id,
@@ -4643,12 +4676,102 @@ fn deliver_replaced_zone_change_inner(
 /// with the chosen defender; the parked delivery then records its terminal
 /// outcome exactly once for the family (Remained if the pre-delivery departure
 /// guard refuses the entry, CR 800.4b).
+/// CR 303.4f: answer an Aura host choice that paused before its battlefield
+/// entry. Deliver the approved event with the chosen host, terminalize the
+/// paused member, then drain the owning batch/family.
+pub(crate) fn resume_paused_aura_entry_choice(
+    state: &mut GameState,
+    chosen: TargetRef,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, crate::game::engine::EngineError> {
+    let Some(pending) = state.pending_aura_entry.take().map(|pending| *pending) else {
+        return Err(crate::game::engine::EngineError::InvalidAction(
+            "aura host choice has no parked entry".to_string(),
+        ));
+    };
+    let mut event = pending.event;
+    let object_id = match &mut event {
+        ProposedEvent::ZoneChange {
+            object_id,
+            attach_to,
+            ..
+        } => {
+            *attach_to = Some(match chosen {
+                TargetRef::Object(id) => AttachTarget::Object(id),
+                TargetRef::Player(id) => AttachTarget::Player(id),
+            });
+            *object_id
+        }
+        _ => {
+            return Err(crate::game::engine::EngineError::InvalidAction(
+                "aura host choice parked without a zone change".to_string(),
+            ));
+        }
+    };
+    let player = match &state.waiting_for {
+        WaitingFor::ReturnAsAuraTarget { player, .. } => *player,
+        _ => state.active_player,
+    };
+    // Clearing the answered prompt before delivery keeps a completed delivery
+    // from appearing to still await the same host choice.
+    state.waiting_for = WaitingFor::Priority { player };
+    let delivery_start = events.len();
+    let result = deliver_replaced_zone_change(
+        state,
+        event.clone(),
+        Some(pending.source_id),
+        pending.duration.as_ref(),
+        pending.exile_controller,
+        pending.track_exiled_by_source,
+        PostReplacementDrainOwner::DeliveryTail,
+        pending.library_placement,
+        events,
+    );
+    if !matches!(result, ZoneDeliveryResult::NeedsChoice(_)) {
+        let member = state
+            .active_batch_delivery()
+            .and_then(|batch| batch.paused_current.as_ref())
+            .or_else(|| {
+                state
+                    .active_change_zone_frame()
+                    .and_then(|frame| frame.pending.as_ref())
+                    .and_then(|owner| owner.paused_current.as_ref())
+            })
+            .filter(|paused| {
+                paused.member.object_id == object_id && paused.terminal_completion.is_none()
+            })
+            .map(|paused| paused.member);
+        if let Some(member) = member {
+            let completion = PendingZoneChangeDelivery::completion_from_delivery_events(
+                member,
+                &events[delivery_start..],
+            );
+            let _ = state.capture_resumed_paused_zone_change_delivery(
+                member,
+                &event,
+                &events[delivery_start..],
+                completion,
+            );
+        }
+        if state.active_batch_delivery().is_some() {
+            drain_pending_batch_deliveries(state, events);
+        } else if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            // Resume the owning ChangeZone iteration too: the delivered Aura
+            // is its paused member, and the remaining members follow here.
+            crate::game::effects::drain_pending_continuation(state, events);
+            super::engine::resume_pending_continuation_if_priority(state, events)?;
+        }
+    }
+    Ok(state.waiting_for.clone())
+}
+
 pub(crate) fn resume_paused_entry_attack_choice(
     state: &mut GameState,
     object_id: ObjectId,
     target: crate::types::attack_target::AttackTarget,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, crate::game::engine::EngineError> {
+    state.pending_entry_attack_event = None;
     let player = match &state.waiting_for {
         WaitingFor::EntryAttackTargetChoice { player, .. } => *player,
         _ => {
@@ -5357,29 +5480,17 @@ fn execute_zone_move_with_applied_terminal(
                 );
             }
             if let Some((controller, aura_id, legal_targets)) = pending_aura_choice {
-                let delivery_start = events.len();
-                match deliver_replaced_zone_change(
-                    state,
-                    event,
-                    Some(source_id),
-                    duration,
-                    exile_controller,
-                    track_exiled_by_source,
-                    PostReplacementDrainOwner::DeliveryTail,
-                    library_placement,
-                    events,
-                ) {
-                    ZoneDeliveryResult::Done => {
-                        debug_assert_eq!(
-                            zone_move_completion_from_delivery(member, &events[delivery_start..]),
-                            ZoneMoveCompletion::Moved,
-                            "an Aura host choice follows a completed battlefield entry"
-                        );
-                    }
-                    ZoneDeliveryResult::NeedsChoice(player) => {
-                        return ZoneMoveTerminalResult::NeedsChoice(player);
-                    }
-                }
+                // CR 303.4f: choose the host as the Aura enters, so hold the
+                // approved entry (and its origin) until the answer arrives.
+                state.pending_aura_entry =
+                    Some(Box::new(crate::types::game_state::PendingAuraEntry {
+                        event: event.clone(),
+                        source_id,
+                        duration: duration.cloned(),
+                        exile_controller,
+                        track_exiled_by_source,
+                        library_placement: library_placement.clone(),
+                    }));
                 state.waiting_for = WaitingFor::ReturnAsAuraTarget {
                     player: controller,
                     source_id,

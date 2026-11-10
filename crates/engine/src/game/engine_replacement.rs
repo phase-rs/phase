@@ -186,6 +186,12 @@ impl DepartingEntryPayment {
         state: &mut GameState,
         events: &mut Vec<GameEvent>,
     ) -> Result<bool, EngineError> {
+        // CR 104.3a: a terminal concession must stay terminal. The unpaid
+        // entry is already prevented; never replace GameOver with priority or
+        // resume the family after the game ended.
+        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            return Ok(false);
+        }
         let player = if super::players::is_alive(state, state.active_player) {
             state.active_player
         } else {
@@ -193,6 +199,9 @@ impl DepartingEntryPayment {
         };
         state.waiting_for = WaitingFor::Priority { player };
         super::engine::resume_pending_continuation_if_priority(state, events)?;
+        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            return Ok(true);
+        }
         if let WaitingFor::Priority { player } = state.waiting_for {
             if !super::players::is_alive(state, player) {
                 state.waiting_for = WaitingFor::Priority {

@@ -171,6 +171,36 @@ pub fn eliminate_players_simultaneously(
 /// cancels a member of a begun resolution, resume that exact family and return
 /// the start of its event segment for the caller's ordinary SBA/trigger pass.
 /// The caller owns rollback if resumption or that convergence pass fails.
+/// CR 303.4f + CR 800.4b: settle a parked Aura-host entry before its chooser
+/// leaves, so the approved entry is not delivered and the family tail resumes.
+fn prevent_aura_host_entry(state: &mut GameState, departing: PlayerId) -> bool {
+    let awaiting = matches!(
+        state.waiting_for,
+        WaitingFor::ReturnAsAuraTarget { player, .. } if player == departing
+    );
+    if !awaiting {
+        return false;
+    }
+    let parked = state
+        .pending_aura_entry
+        .as_ref()
+        .and_then(|pending| match &pending.event {
+            crate::types::ProposedEvent::ZoneChange { object_id, .. } => state
+                .objects
+                .get(object_id)
+                .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+                .map(|member| (member, pending.event.clone())),
+            _ => None,
+        });
+    let Some((member, event)) = parked else {
+        return false;
+    };
+    let _ = state.prevent_paused_batch_zone_change_delivery(member, &event);
+    let _ = state.prevent_paused_zone_change_delivery(member, &event);
+    state.pending_aura_entry = None;
+    true
+}
+
 pub fn concede(
     state: &mut GameState,
     player: PlayerId,
@@ -178,6 +208,9 @@ pub fn concede(
 ) -> Result<Option<usize>, super::engine::EngineError> {
     let departing_entry_payment =
         super::engine_replacement::DepartingEntryPayment::capture(state, player);
+    // CR 303.4f: an Aura's host is chosen as it enters, so a departing
+    // chooser settles the held entry before the sweep can deliver it.
+    let prevented_aura_host = prevent_aura_host_entry(state, player);
     // CR 800.4f: prevent an interrupted unpaid entry before the leave sweep
     // can cancel its paused member and route the object through replacements.
     let prevented_payment = departing_entry_payment
@@ -190,14 +223,20 @@ pub fn concede(
         events,
     );
     let scan_from = events.len();
-    let settled_payment = if prevented_payment {
-        match departing_entry_payment.as_ref() {
-            Some(payment) => payment.finish(state, events)?,
-            None => false,
-        }
-    } else {
-        false
-    };
+    let settled_payment = prevented_aura_host
+        || if prevented_payment {
+            match departing_entry_payment.as_ref() {
+                Some(payment) => payment.finish(state, events)?,
+                None => false,
+            }
+        } else {
+            false
+        };
+    if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+        // CR 104.3a: the concession ended the game; no family may deliver
+        // another member afterwards.
+        return Ok(Some(scan_from));
+    }
     if !resume_canceled_change_zone && !settled_payment {
         return Ok(None);
     }
@@ -828,6 +867,28 @@ pub(crate) fn eliminate_players(
                 state.waiting_for = WaitingFor::Priority { player: next };
             }
         }
+        // A parked entry choice whose chooser is gone no longer has an answer;
+        // its family is settled by the leave sweep, so drop the transient
+        // approved events rather than let a stale prompt event leak.
+        if !matches!(
+            state.waiting_for,
+            WaitingFor::EntryAttackTargetChoice { .. }
+        ) {
+            state.pending_entry_attack_event = None;
+        }
+        if !matches!(state.waiting_for, WaitingFor::ReturnAsAuraTarget { .. }) {
+            let had_parked_aura = state.pending_aura_entry.is_some();
+            let _ = prevent_aura_host_entry(
+                state,
+                state
+                    .waiting_for
+                    .acting_player()
+                    .unwrap_or(state.active_player),
+            );
+            if had_parked_aura && state.active_batch_delivery().is_some() {
+                super::zone_pipeline::drain_pending_batch_deliveries(state, events);
+            }
+        }
 
         // CR 800.4f + CR 608.2m: settle the captured entry payment through its
         // ordinary unpaid replacement branch after every departure. A
@@ -847,6 +908,7 @@ pub(crate) fn eliminate_players(
         // caller-owned pass resumes here; a concession defers fallible resume
         // and convergence until all its other departure work is finished.
         if departure_triggers != DepartureTriggers::CollectedByDeparture
+            && !matches!(state.waiting_for, WaitingFor::GameOver { .. })
             && canceled_change_zone_is_resumable(state)
         {
             super::engine::resume_pending_continuation_if_priority(state, events)

@@ -2316,14 +2316,23 @@ pub(super) fn handle_resolution_choice(
             let waiting = crate::game::zone_pipeline::resume_paused_entry_attack_choice(
                 state, object_id, target, events,
             )?;
-            if matches!(waiting, WaitingFor::EntryAttackTargetChoice { .. }) {
-                // The resumed delivery completed without surfacing a new
-                // prompt: return to the ordinary boundary.
-                state.waiting_for = WaitingFor::Priority { player };
-                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
-            } else {
-                // The resumed delivery parked again (nested replacement/host).
-                ResolutionChoiceOutcome::WaitingFor(waiting)
+            match waiting {
+                WaitingFor::EntryAttackTargetChoice {
+                    object_id: parked_object,
+                    ..
+                } if parked_object == object_id => {
+                    // The resumed delivery completed without surfacing a new
+                    // prompt: return to the ordinary boundary.
+                    state.waiting_for = WaitingFor::Priority { player };
+                    ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
+                        state, player, events,
+                    ))
+                }
+                other => {
+                    // The resumed delivery parked again (nested replacement,
+                    // host, or the NEXT batch member's own defender choice).
+                    ResolutionChoiceOutcome::WaitingFor(other)
+                }
             }
         }
         (

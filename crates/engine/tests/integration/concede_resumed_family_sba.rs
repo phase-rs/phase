@@ -10,6 +10,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
     GameState, LiminalEntryKind, ReplacementChoiceKind, WaitingFor, ZoneDeparture,
@@ -371,6 +372,69 @@ fn beacon_mox_scenario() -> (GameScenario, [ObjectId; 4]) {
     (scenario, [beacon, mox, forest, island])
 }
 
+/// CR 104.3a + CR 800.4f + CR 608.2m: a concession that ends a duel must stay
+/// terminal even while an accepted entry cost is paused. The unpaid entry is
+/// prevented and later members of the same batch never move.
+#[test]
+fn duel_concession_at_unpaid_mox_cost_stays_terminal() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let vaults = scenario
+        .add_spell_to_hand_from_oracle(P0, "Open the Vaults", false, OPEN_THE_VAULTS)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 4,
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+        })
+        .id();
+    let mox = scenario
+        .add_artifact_to_graveyard(P1, "Mox Diamond")
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text(MOX_DIAMOND)
+        .id();
+    let forest = scenario.add_land_to_hand(P1, "Forest").id();
+    let island = scenario.add_land_to_hand(P1, "Island").id();
+    let _ = island;
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::White,
+            ManaType::White,
+        ]
+        .into_iter()
+        .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+    assert_eq!(runner.state().objects[&mox].zone, Zone::Graveyard);
+    runner.cast(vaults).resolve();
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P1 accepts the Mox cost");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![forest],
+        })
+        .expect("P1 selects the discard");
+    let result = runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes from the unpaid cost");
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    assert_eq!(result.waiting_for, state.waiting_for);
+    assert!(
+        !state.battlefield.contains(&mox),
+        "the unpaid entry stays off the battlefield"
+    );
+    assert_eq!(
+        move_count(&result.events, mox, Zone::Graveyard, Zone::Battlefield),
+        0
+    );
+}
+
 /// CR 800.4f: the accepted Mox cost pauses on a nested graveyard-redirect
 /// ordering prompt. A departure there must settle the unpaid entry, keep the
 /// selected land in hand, and leave Mox in its owner's graveyard.
@@ -532,6 +596,13 @@ fn departed_nested_mox_redirect_ordering_settles_unpaid_before_priority() {
     assert!(
         land_graveyard_moves.is_empty(),
         "the unpaid discard must not move the land to a graveyard: {land_graveyard_moves:?}"
+    );
+    assert!(
+        !result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::Discarded { object_id, .. } if *object_id == forest
+        )),
+        "the unpaid cost must not report the land as discarded"
     );
     assert!(state.pending_replacement.is_none());
     assert!(
@@ -996,7 +1067,9 @@ fn open_the_vaults_aura_host_chooser_concession_resumes_surviving_member() {
         "the returning Aura parks on P1's host pick; got {:?}",
         outcome.final_waiting_for()
     );
-    assert_eq!(runner.state().objects[&pacifism].zone, Zone::Battlefield);
+    // CR 303.4f: the host is chosen as the Aura enters, so the entry is still
+    // held in its origin zone at the prompt.
+    assert_eq!(runner.state().objects[&pacifism].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&ingot].zone, Zone::Graveyard);
     let pending = runner
         .state()
@@ -1011,8 +1084,8 @@ fn open_the_vaults_aura_host_chooser_concession_resumes_surviving_member() {
             Zone::Graveyard,
             Zone::Battlefield
         ),
-        1,
-        "the Aura's counted entry is delivered exactly once"
+        0,
+        "the Aura is not delivered before its host pick"
     );
     assert_eq!(
         move_count(outcome.events(), ingot, Zone::Graveyard, Zone::Battlefield),
@@ -1071,6 +1144,191 @@ fn open_the_vaults_aura_host_chooser_concession_resumes_surviving_member() {
 }
 
 const OLIVIA_CRIMSON_BRIDE: &str = "Flying, haste\nWhenever Olivia, Crimson Bride attacks, return target creature card from your graveyard to the battlefield tapped and attacking. It's a Vampire in addition to its other types.";
+
+/// CR 104.3a + CR 303.4f: a host-choice concession that ends a duel must not
+/// deliver the Aura or any later batch member.
+#[test]
+fn duel_concession_at_aura_host_choice_stays_terminal() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let vaults = scenario
+        .add_spell_to_hand_from_oracle(P0, "Open the Vaults", false, OPEN_THE_VAULTS)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 4,
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+        })
+        .id();
+    let later = scenario
+        .add_artifact_to_graveyard(P1, "Darksteel Ingot")
+        .from_oracle_text(DARKSTEEL_INGOT)
+        .id();
+    let pacifism = scenario
+        .add_enchantment_to_graveyard(P0, "Pacifism")
+        .from_oracle_text(PACIFISM)
+        .with_subtypes(vec!["Aura"])
+        .id();
+    scenario.add_creature(P0, "Runeclaw Bear", 2, 2);
+    scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::White,
+            ManaType::White,
+        ]
+        .into_iter()
+        .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+    assert_eq!(
+        runner.state().objects[&later].zone,
+        Zone::Graveyard,
+        "the later batch member starts in the graveyard"
+    );
+    {
+        let needs_enchant = runner.state().objects.get(&pacifism).is_some_and(|obj| {
+            !obj.keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Enchant(_)))
+        });
+        if needs_enchant {
+            let enchant = Keyword::Enchant(TargetFilter::Typed(TypedFilter::creature()));
+            let obj = runner.state_mut().objects.get_mut(&pacifism).unwrap();
+            obj.keywords.push(enchant.clone());
+            obj.base_keywords.push(enchant);
+        }
+    }
+    runner.cast(vaults).resolve();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReturnAsAuraTarget { player: P0, .. }
+        ),
+        "host pick parked; got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().objects[&later].zone,
+        Zone::Graveyard,
+        "later batch member is parked before the host choice; wait={:?}",
+        runner.state().waiting_for
+    );
+    let result = runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("P1 concedes at the host choice");
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    assert_eq!(result.waiting_for, state.waiting_for);
+    assert!(!state.battlefield.contains(&pacifism));
+    let later_events: Vec<_> = result
+        .events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            GameEvent::ZoneChanged { record, .. } => record
+                .trigger_source_context()
+                .filter(|context| context.identity.reference.object_id == later)
+                .map(|_| (index, record.from_zone, record.to_zone)),
+            _ => None,
+        })
+        .collect();
+    let eliminated_at = result.events.iter().position(
+        |event| matches!(event, GameEvent::PlayerEliminated { player_id } if *player_id == P0),
+    );
+    assert_eq!(
+        state.objects[&later].zone,
+        Zone::Graveyard,
+        "later moves={later_events:?} eliminated_at={eliminated_at:?} wait={:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        move_count(&result.events, later, Zone::Graveyard, Zone::Battlefield),
+        0
+    );
+}
+
+const SPIKE_FEEDER: &str = "Flash\nThis creature enters with two +1/+1 counters on it.\n{T}: Remove a +1/+1 counter from this creature: You gain 2 life.";
+
+/// CR 614.1c + CR 508.4: the approved event parked at the defender choice
+/// carries the replacement-granted counters, tap state, attacking status and
+/// controller into the resumed delivery.
+#[test]
+fn olivia_approved_entry_keeps_counters_and_attacking_after_defender_answer() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let olivia = scenario
+        .add_creature_from_oracle(P0, "Olivia, Crimson Bride", 3, 4, OLIVIA_CRIMSON_BRIDE)
+        .id();
+    let feeder = scenario
+        .add_creature_to_graveyard(P0, "Spike Feeder", 0, 0)
+        .from_oracle_text(SPIKE_FEEDER)
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(olivia, AttackTarget::Player(P1))])
+        .expect("Olivia attacks P1");
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::EntryAttackTargetChoice {
+                player, object_id, ..
+            } => {
+                assert_eq!(player, P0);
+                assert_eq!(object_id, feeder);
+                break;
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order Olivia's trigger");
+            }
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(feeder)),
+                    })
+                    .expect("choose Spike Feeder");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass toward the trigger");
+            }
+            other => panic!("unexpected state before the choice: {other:?}"),
+        }
+    }
+    runner
+        .act(GameAction::ChooseEntryAttackTarget {
+            target: AttackTarget::Player(P2),
+        })
+        .expect("choose a legal defender");
+    let state = runner.state();
+    let object = state.objects.get(&feeder).expect("Spike Feeder entered");
+    assert_eq!(object.zone, Zone::Battlefield);
+    assert_eq!(object.controller, P0);
+    assert!(object.tapped, "Olivia's return enters tapped");
+    assert_eq!(
+        object
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or_default(),
+        2,
+        "the replacement-granted +1/+1 counters survive the defender pause"
+    );
+    assert!(state.combat.as_ref().is_some_and(|combat| combat
+        .attackers
+        .iter()
+        .any(|attacker| attacker.object_id == feeder && attacker.defending_player == P2)));
+    assert!(state.pending_replacement.is_none());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
 
 /// CR 508.4 + CR 608.2m + CR 800.4a: an entering attacker's defender pick is a
 /// prompt owned by the family's own paused delivery, not a replacement. When

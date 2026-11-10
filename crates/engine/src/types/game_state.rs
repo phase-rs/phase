@@ -5815,6 +5815,19 @@ pub struct PendingSingleDiscard {
 /// The companion `GameState::clause_minimum_snapshot` persists with this batch:
 /// a save taken mid-pause must resume the same CR 608.2h application with its
 /// original frozen value, rather than determine it again after restore.
+/// CR 303.4f: the approved entering-Aura event parked at the host choice,
+/// before the object moves. A departure at the chooser's prompt leaves the
+/// Aura in its origin zone (CR 800.4b).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PendingAuraEntry {
+    pub event: ProposedEvent,
+    pub source_id: ObjectId,
+    pub duration: Option<crate::types::ability::Duration>,
+    pub exile_controller: Option<PlayerId>,
+    pub track_exiled_by_source: bool,
+    pub library_placement: Option<crate::types::ability::LibraryPosition>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingDiscardBatch {
     /// The discarding seat whose batch paused.
@@ -25666,6 +25679,16 @@ declare_game_state! {
     /// box.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_discard_batch: Option<Box<PendingDiscardBatch>>,
+    /// CR 508.4: the fully approved entering event parked at the defender
+    /// choice, before the object moves. Transient: the pausing caller takes it
+    /// into its paused delivery so counters/tapped/attacking/controller facts
+    /// survive the answer instead of being reconstructed from the pre-consult
+    /// request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_entry_attack_event: Option<ProposedEvent>,
+    /// CR 303.4f: approved Aura entry parked before the host choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_aura_entry: Option<Box<PendingAuraEntry>>,
     /// Turtle Team-Up: a hero-choice batch parked mid-application by a nested
     /// replacement prompt (regeneration, Library of Leng). Boxed like its
     /// `pending_discard_batch` sibling — `GameState` moves by value under a
@@ -32560,6 +32583,25 @@ impl GameState {
     /// CR 800.4f: the accepted cost was not paid, so the paused entry is
     /// prevented without delivering its event. Terminalizes the exact paused
     /// member as `Remained` so the owning family can drain.
+    /// CR 800.4b: terminalize a paused batch member whose Aura-host chooser
+    /// is gone. The member remains in its origin zone and the batch tail
+    /// resumes afterward.
+    pub(crate) fn prevent_paused_batch_zone_change_delivery(
+        &mut self,
+        member: ObjectIncarnationRef,
+        approved_event: &ProposedEvent,
+    ) -> bool {
+        let Some(paused) = self
+            .active_batch_delivery_mut()
+            .and_then(|owner| owner.paused_current.as_mut())
+            .filter(|paused| paused.captures(member, approved_event))
+        else {
+            return false;
+        };
+        let _ = paused.settle_delivery(&[], ZoneMoveCompletion::Remained);
+        true
+    }
+
     pub(crate) fn prevent_paused_zone_change_delivery(
         &mut self,
         member: ObjectIncarnationRef,
@@ -34178,6 +34220,8 @@ impl GameState {
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
+            pending_entry_attack_event: None,
+            pending_aura_entry: None,
             pending_hero_event: None,
             pending_horde_reveal: None,
             pending_damage_post_loss: None,
@@ -38336,6 +38380,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     object-growth lives in `objects` (stripped+compared by `eq_except_growable`), so
         //     excluding this single-object identity field cannot hide growth.
         resolution_source_relatch: _,
+        pending_entry_attack_event: _,
+        pending_aura_entry: _,
     } = s;
 }
 
