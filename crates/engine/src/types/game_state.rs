@@ -37704,10 +37704,10 @@ pub(crate) fn objects_content_eq(a: &ObjectMap, b: &ObjectMap) -> bool {
 /// between two loop frames, MINUS the layer-derived axes the OMITTED paragraph below delegates
 /// to the static firewall: `controller` and `zone`; the tap / face-down / flip /
 /// transform / modal-back-face / phasing status axes; marked damage, the deathtouch flag and
-/// the damage-kind latch (`dealt_damage_kinds`); the attachment and pairing links; the counter map; the stored power / toughness / loyalty /
-/// defense family; `name`; the numeric and per-iteration accumulators the static firewall is
-/// blind to; and the designation, door and cast-occurrence toggles. Each conjunct below
-/// carries its own rule anchor where it has one.
+/// the damage-kind latch (`dealt_damage_kinds`); the attachment and pairing links; the counter
+/// map; the stored power / toughness / loyalty / defense family; `name`; the numeric and
+/// per-iteration accumulators the static firewall is blind to; and the designation, door and
+/// cast-occurrence toggles. Each conjunct below carries its own rule anchor where it has one.
 ///
 /// OMITTED, each justified by its write site rather than by this doc: volatile layer identity
 /// (`timestamp` / `incarnation` / `transformation_count`); card-intrinsic `base_*`, abilities
@@ -37728,7 +37728,11 @@ pub(crate) fn objects_content_eq(a: &ObjectMap, b: &ObjectMap) -> bool {
 /// an axis a stale un-flushed clone can differ on. The damage-kind latch
 /// (`dealt_damage_kinds`) is NOT in the monotone-saturating bucket: it changes what is
 /// targetable (`conditions::eval_source_has_dealt_damage` gates hexproof on it), so it is
-/// compared, and its first-iteration settle is absorbed by the loop warm-up.
+/// compared, and its first-iteration settle is absorbed because the ring walk compares the
+/// current frame against every prior frame, so the second iteration recurs against the first.
+/// The comparison is deliberately ungated (it does not ask whether anything reads the latch), so
+/// a loop that creates a token in one iteration and has it deal damage in the next may lose a
+/// shortcut it would otherwise take; that is conservative, never a false certification.
 ///
 /// `loyalty_activations_this_turn` fits none of those buckets. It is named here not as the only
 /// omission that doesn't, but because its compensation lives in a predicate this comparator
