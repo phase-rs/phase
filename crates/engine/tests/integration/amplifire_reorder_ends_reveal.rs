@@ -134,6 +134,45 @@ fn amplifire_reorder_ends_reveal_and_hides_cards_for_all_viewers() {
     assert!(!revealed.contains(&island));
     assert!(!revealed.contains(&forest));
 
+    // CR 701.20d + CR 400.2: Filtered response boundary — reveal names are public
+    // across both seated viewers (P0, P1) and spectators, while library positions
+    // stay hidden (card_ids filtered out of the event for hidden library cards).
+    for viewer in [P0, P1] {
+        let filtered_events = engine::game::visibility::filter_events_for_viewer(
+            &result.events,
+            runner.state(),
+            viewer,
+        );
+        let (card_names, card_ids) = filtered_events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::CardsRevealed {
+                    card_names,
+                    card_ids,
+                    ..
+                } => Some((card_names, card_ids)),
+                _ => None,
+            })
+            .expect("CardsRevealed must be present in filtered events");
+        // Public reveal names:
+        assert!(card_names.contains(&"Lightning Bolt".to_string()));
+        assert!(card_names.contains(&"Mountain".to_string()));
+        assert!(card_names.contains(&"Hill Giant".to_string()));
+        // Library positions stay hidden:
+        assert!(
+            !card_ids.contains(&bolt),
+            "reordered bolt ID must be redacted from filtered event for {viewer:?}"
+        );
+        assert!(
+            !card_ids.contains(&mountain),
+            "reordered mountain ID must be redacted from filtered event for {viewer:?}"
+        );
+        assert!(
+            !card_ids.contains(&giant),
+            "reordered giant ID must be redacted from filtered event for {viewer:?}"
+        );
+    }
+
     // 3. CR 701.20d: All 3 revealed cards were reordered to bottom in random order.
     // They stop being revealed and become new objects (bump incarnation).
     for (id, label, inc_before) in [

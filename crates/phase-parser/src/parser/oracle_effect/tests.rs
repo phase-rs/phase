@@ -46617,12 +46617,27 @@ fn reveal_until_passive_compound_stopping_rejected_counted_variants() {
     }
 }
 
-/// CR 608.2c / CR 701.20a: An intervening instruction (such as Draw) between RevealUntil
-/// and whole-pile placement must preserve the placement as a separate SequentialSibling
-/// instruction rather than folding it into RevealUntil.
+/// CR 608.2c / CR 701.20a: An intervening instruction (such as Draw, Pump, or DealDamage)
+/// between RevealUntil and whole-pile placement must preserve the placement as a separate
+/// SequentialSibling instruction rather than folding it into RevealUntil.
+///
+/// Nearest printed analogues:
+/// - Erratic Mutation ("Choose target creature. Reveal cards from the top of your library until
+///   you reveal a nonland card. That creature gets +X/-X until end of turn, where X is that card's
+///   mana value. Put all cards revealed this way on the bottom of your library in any order.")
+/// - Goblin Machinist ("{2}{R}: Reveal cards from the top of your library until you reveal a
+///   nonland card. This creature gets +X/+0 until end of turn, where X is that card's mana value.
+///   Put the revealed cards on the bottom of your library in any order.")
+/// - Goblin Charbelcher ("Reveal cards from the top of your library until you reveal a land card.
+///   Goblin Charbelcher deals damage equal to the number of nonland cards revealed this way... Put
+///   the revealed cards on the bottom of your library in any order.")
+/// - Trepanation Blade ("Whenever equipped creature attacks, defending player reveals cards...
+///   The creature gets +1/+0... That player puts the revealed cards into their graveyard.")
+/// - Nascent Metamorph ("Whenever this creature attacks or blocks, target opponent reveals cards...
+///   This creature becomes a copy... Then that player puts all cards revealed this way on the bottom...")
 #[test]
 fn reveal_until_all_to_zone_does_not_fold_across_intervening_draw() {
-    let text = "Reveal cards from the top of your library until you reveal a land card. That player draws a card. Put the revealed cards into your graveyard.";
+    let text = "Reveal cards from the top of your library until you reveal a land card. That player draws a card. Put the revealed cards on the bottom of your library in any order.";
     let def = parse_effect_chain(text, AbilityKind::Spell);
     let Effect::RevealUntil {
         matched_disposition,
@@ -46657,7 +46672,7 @@ fn reveal_until_all_to_zone_does_not_fold_across_intervening_draw() {
             &*placement.effect,
             Effect::ChangeZoneAll {
                 origin: Some(Zone::Library),
-                destination: Zone::Graveyard,
+                destination: Zone::Library,
                 target: TargetFilter::LastRevealed,
                 ..
             }
@@ -46667,10 +46682,73 @@ fn reveal_until_all_to_zone_does_not_fold_across_intervening_draw() {
     );
 }
 
+/// CR 404.3: Displaced graveyard placement across an intervening instruction requires
+/// owner graveyard arrangement, which is not yet supported; verify it fails closed with
+/// an explicit `revealed_remainder_graveyard_order` gap.
+#[test]
+fn reveal_until_displaced_graveyard_fails_closed_without_owner_order() {
+    let text = "Reveal cards from the top of your library until you reveal a land card. That player draws a card. Put the revealed cards into your graveyard.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let draw = def.sub_ability.as_ref().expect("chained draw");
+    let placement = draw.sub_ability.as_ref().expect("gap placement");
+    assert!(
+        matches!(
+            &*placement.effect,
+            Effect::Unimplemented { ref name, .. } if name == "revealed_remainder_graveyard_order"
+        ),
+        "displaced graveyard placement must fail closed, got {:?}",
+        placement.effect
+    );
+}
+
+/// CR 701.20a + CR 608.2c: An intervening instruction that does not preserve the reveal
+/// population (e.g. Clash, which rewrites `last_revealed_ids`) must fail closed with
+/// `displaced_pile_placement_unsafe_span`.
+#[test]
+fn reveal_until_unsafe_intervening_span_fails_closed() {
+    let reveal_def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a land card.",
+        AbilityKind::Spell,
+    );
+    let clash = AbilityDefinition::new(AbilityKind::Spell, Effect::Clash);
+    let mut defs = vec![reveal_def, clash];
+    let mut env = super::assembly::AssemblyEnv::default();
+    env.observe(&defs, None, super::assembly::NodeRole::Primary);
+    super::sequence::apply_clause_continuation(
+        &mut defs,
+        crate::parser::oracle_ir::ast::ContinuationAst::RevealUntilAllToZone {
+            destination: Zone::Library,
+            rest_order: DigRestOrder::Random,
+        },
+        AbilityKind::Spell,
+        &env,
+    );
+    assert_eq!(defs.len(), 3);
+    assert!(
+        matches!(
+            &*defs[2].effect,
+            Effect::Unimplemented { ref name, .. } if name == "displaced_pile_placement_unsafe_span"
+        ),
+        "unsafe span must fail closed with displaced_pile_placement_unsafe_span, got {:?}",
+        defs[2].effect
+    );
+}
+
 /// CR 608.2c / CR 701.20a: Demonstrates that when `defs[target_idx]` already carries
 /// a pre-linked child (e.g. `sub_ability: Some(...)`), the intervening instruction
 /// check still splits the whole-pile placement into a separate SequentialSibling rather
 /// than skipping the check or folding across instructions.
+///
+/// Nearest printed analogues:
+/// - Erratic Mutation ("Choose target creature. Reveal cards from the top of your library until
+///   you reveal a nonland card. That creature gets +X/-X until end of turn, where X is that card's
+///   mana value. Put all cards revealed this way on the bottom of your library in any order.")
+/// - Goblin Machinist ("{2}{R}: Reveal cards from the top of your library until you reveal a
+///   nonland card. This creature gets +X/+0 until end of turn, where X is that card's mana value.
+///   Put the revealed cards on the bottom of your library in any order.")
+/// - Goblin Charbelcher ("Reveal cards from the top of your library until you reveal a land card.
+///   Goblin Charbelcher deals damage equal to the number of nonland cards revealed this way... Put
+///   the revealed cards on the bottom of your library in any order.")
 #[test]
 fn reveal_until_all_to_zone_splits_even_when_reveal_has_prelinked_child() {
     let mut reveal_def = parse_effect_chain(
@@ -97749,6 +97827,7 @@ fn revealed_remainder_destinations_are_explicit_or_refused() {
             Some(ContinuationAst::RevealedRemainder {
                 destination,
                 rest_order,
+                ..
             }) => {
                 assert_eq!(destination, zone, "{text}");
                 if zone == Zone::Library {

@@ -190,6 +190,25 @@ fn erratic_mutation_custom_bottom_order_permutation() {
 
     // Submit a custom non-encounter permutation: [nonland, land2, land1]
     let custom_order = vec![nonland, land2, land1];
+
+    // CR 401.4: AI candidate generation enumerates alternate permutations for owner arrangement.
+    let candidates = engine::ai_support::candidate_actions_broad(committed.state());
+    let candidate_orders: Vec<Vec<ObjectId>> = candidates
+        .into_iter()
+        .filter_map(|cand| match cand.action {
+            GameAction::SelectCards { cards } => Some(cards),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        candidate_orders.len() > 1,
+        "expected alternate ordering permutations for AI, got {candidate_orders:?}"
+    );
+    assert!(
+        candidate_orders.contains(&custom_order),
+        "AI candidates should contain custom permutation"
+    );
+
     committed
         .act(GameAction::SelectCards {
             cards: custom_order.clone(),
@@ -797,4 +816,138 @@ fn transmogrify_shuffles_the_revealing_players_library() {
         0,
         "the caster's library is not shuffled, got {events:?}"
     );
+}
+
+const GOBLIN_MACHINIST_ORACLE: &str = "{2}{R}: Reveal cards from the top of your library until you reveal a nonland card. This creature gets +X/+0 until end of turn, where X is that card's mana value. Put the revealed cards on the bottom of your library in any order.";
+
+/// CR 608.2c + CR 401.4 + CR 701.20a: Goblin Machinist — "{2}{R}: Reveal cards
+/// from the top of your library until you reveal a nonland card. This creature
+/// gets +X/+0 until end of turn, where X is that card's mana value. Put the
+/// revealed cards on the bottom of your library in any order."
+///
+/// Activating the ability reveals cards until a nonland card is found, pumps
+/// Goblin Machinist's power by that card's mana value, and pauses with
+/// `WaitingFor::EffectZoneChoice` for the owner to arrange the revealed pile on
+/// the bottom of the library. Verifies AI candidates include alternate
+/// permutations and custom order is respected.
+#[test]
+fn goblin_machinist_activation_pump_and_owner_arranged_bottom() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let machinist = scenario
+        .add_creature_from_oracle(P0, "Goblin Machinist", 0, 5, GOBLIN_MACHINIST_ORACLE)
+        .id();
+
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+
+    let other = scenario.add_card_to_library_top(P0, "Deep Card");
+    let nonland = scenario
+        .add_spell_to_library_top(P0, "Divination", false)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let land2 = scenario
+        .add_spell_to_library_top(P0, "Mountain", false)
+        .as_land()
+        .id();
+    let land1 = scenario
+        .add_spell_to_library_top(P0, "Forest", false)
+        .as_land()
+        .id();
+
+    let mut runner = scenario.build();
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: machinist,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("activate Goblin Machinist ability");
+
+    // Pass priority from both players down to the bottom-order choice
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+
+    // Verify pump applied: base 0/5 + Divination MV 3 -> 3/5
+    evaluate_layers(runner.state_mut());
+    let machinist_obj = &runner.state().objects[&machinist];
+    assert_eq!(machinist_obj.power, Some(3));
+    assert_eq!(machinist_obj.toughness, Some(5));
+
+    // Verify engine paused on EffectZoneChoice with mass library ordering
+    match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice {
+            player,
+            cards,
+            mass_library_order,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert!(
+                mass_library_order.is_some(),
+                "expected mass_library_order for bottom arrangement"
+            );
+            assert_eq!(
+                cards
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                [land1, land2, nonland].into_iter().collect(),
+            );
+        }
+        other_wait => panic!("expected EffectZoneChoice, got {other_wait:?}"),
+    }
+
+    // CR 401.4: AI candidate generation enumerates alternate permutations for owner arrangement.
+    let custom_order = vec![nonland, land1, land2];
+    let candidates = engine::ai_support::candidate_actions_broad(runner.state());
+    let candidate_orders: Vec<Vec<ObjectId>> = candidates
+        .into_iter()
+        .filter_map(|cand| match cand.action {
+            GameAction::SelectCards { cards } => Some(cards),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        candidate_orders.len() > 1,
+        "expected alternate ordering permutations for AI, got {candidate_orders:?}"
+    );
+    assert!(
+        candidate_orders.contains(&custom_order),
+        "AI candidates should contain custom permutation"
+    );
+
+    // Submit custom permutation and verify final library bottom
+    runner
+        .act(GameAction::SelectCards {
+            cards: custom_order.clone(),
+        })
+        .unwrap();
+
+    let p0_lib = &runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .unwrap()
+        .library;
+    assert_eq!(
+        p0_lib.iter().copied().collect::<Vec<_>>(),
+        vec![other, nonland, land1, land2],
+        "library bottom must match custom submitted permutation"
+    );
+
+    // Final P/T check
+    evaluate_layers(runner.state_mut());
+    let machinist_obj = &runner.state().objects[&machinist];
+    assert_eq!(machinist_obj.power, Some(3));
+    assert_eq!(machinist_obj.toughness, Some(5));
 }

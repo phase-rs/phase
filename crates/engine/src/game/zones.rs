@@ -2732,6 +2732,31 @@ pub(crate) fn capture_combat_status(
     }
 }
 
+/// CR 701.20d: If cards in a player's library are shuffled or otherwise
+/// reordered, any revealed cards that are reordered stop being revealed and
+/// become new objects.
+///
+/// Stack-bound reveal leases (CR 701.20a) belong to abilities on the stack
+/// and keep their unindexed reveal presentation separate from exposure of
+/// library positions.
+pub(crate) fn retire_reordered_library_reveals(state: &mut GameState, cards: &[ObjectId]) {
+    for &object_id in cards {
+        let is_revealed = state.revealed_cards.contains(&object_id)
+            || state.public_revealed_cards.contains(&object_id);
+        if is_revealed {
+            if let Some(obj) = state.objects.get(&object_id) {
+                let occurrence = ObjectIncarnationRef::from_object(obj);
+                state.clear_reordered_library_reveal(occurrence);
+            }
+            state.revealed_cards.remove(&object_id);
+            state.public_revealed_cards.remove(&object_id);
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                obj.bump_incarnation();
+            }
+        }
+    }
+}
+
 /// Reorder objects that remain in one player's library without performing a
 /// zone change. `ordered` is placed at `index` in the supplied order, or
 /// appended when `index` is `None`.
@@ -2741,31 +2766,36 @@ pub(crate) fn reorder_within_library(
     ordered: &[ObjectId],
     index: Option<usize>,
 ) {
+    let old_order: Vec<ObjectId> = state.library_of(player).iter().copied().collect();
     let library = state.library_of_mut(player);
     library.retain(|id| !ordered.contains(id));
     let insert_index = index.unwrap_or(library.len()).min(library.len());
     for (offset, &object_id) in ordered.iter().enumerate() {
         library.insert(insert_index + offset, object_id);
     }
+    let new_order: Vec<ObjectId> = state.library_of(player).iter().copied().collect();
     state.advance_library_knowledge_epoch(player);
 
     // CR 701.20d: An effect that reveals multiple cards may state that the cards
     // are to be reordered; any revealed cards that are reordered stop being
     // revealed and become new objects.
-    for &object_id in ordered {
-        let is_revealed = state.revealed_cards.contains(&object_id)
-            || state.public_revealed_cards.contains(&object_id)
-            || state.holds_stack_bound_reveal(object_id);
-        if is_revealed {
-            if let Some(obj) = state.objects.get(&object_id) {
-                let occurrence = ObjectIncarnationRef::from_object(obj);
-                state.clear_revealed_information_on_zone_exit(occurrence, Zone::Library);
+    // A singleton card that remains in the same position (e.g. Calibrated Blast
+    // bottoming the only card in a 1-card library) is not reordered.
+    if !ordered.is_empty() && old_order != new_order {
+        let reordered_cards: Vec<ObjectId> = if ordered.len() == 1 {
+            let card = ordered[0];
+            let old_pos = old_order.iter().position(|&id| id == card);
+            let new_pos = new_order.iter().position(|&id| id == card);
+            if old_pos != new_pos {
+                vec![card]
+            } else {
+                vec![]
             }
-            state.revealed_cards.remove(&object_id);
-            state.public_revealed_cards.remove(&object_id);
-            if let Some(obj) = state.objects.get_mut(&object_id) {
-                obj.bump_incarnation();
-            }
+        } else {
+            ordered.to_vec()
+        };
+        if !reordered_cards.is_empty() {
+            retire_reordered_library_reveals(state, &reordered_cards);
         }
     }
 

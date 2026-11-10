@@ -1702,14 +1702,21 @@ pub fn candidate_actions_broad_with_probe(
             count,
             min_count,
             up_to,
+            mass_library_order,
             ..
         } => {
-            let sizes = if *up_to {
-                (*min_count..=*count).collect()
+            // CR 401.4: an owner-ordering EffectZoneChoice prompt (mass library order)
+            // must enumerate alternate permutations, not only a single combination.
+            if mass_library_order.is_some() {
+                bounded_select_card_permutations(*player, cards)
             } else {
-                vec![*count]
-            };
-            bounded_select_card_candidates(*player, cards, sizes)
+                let sizes = if *up_to {
+                    (*min_count..=*count).collect()
+                } else {
+                    vec![*count]
+                };
+                bounded_select_card_candidates(*player, cards, sizes)
+            }
         }
         WaitingFor::DrawnThisTurnTopdeckChoice {
             player,
@@ -10955,6 +10962,78 @@ mod tests {
             clear_markers: Vec::new(),
             emit_reveal_until_resolved: None,
             reveal_until_hit_snapshot: None,
+        };
+
+        let actions = candidate_actions_broad(&state);
+        let permutations: Vec<Vec<ObjectId>> = actions
+            .into_iter()
+            .filter_map(|cand| match cand.action {
+                GameAction::SelectCards { cards } => Some(cards),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(permutations.len(), 2);
+        assert_eq!(permutations[0], vec![a, b]);
+        assert_eq!(permutations[1], vec![b, a]);
+    }
+
+    /// CR 401.4: an owner-ordering EffectZoneChoice prompt (mass library order)
+    /// must enumerate alternate permutations, not only a single combination.
+    #[test]
+    fn mass_library_order_effect_zone_choice_ai_candidates_include_alternate_permutations() {
+        use crate::types::game_state::{MassLibraryOrderBatch, MassLibraryOrderMember};
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        let mut state = GameState::new_two_player(42);
+        let a = ObjectId(10);
+        let b = ObjectId(20);
+        let batch = MassLibraryOrderBatch {
+            owner: PlayerId(0),
+            arranger: None,
+            members: vec![
+                MassLibraryOrderMember {
+                    identity: ObjectIncarnationRef {
+                        object_id: a,
+                        incarnation: 0,
+                    },
+                    origin: Zone::Library,
+                },
+                MassLibraryOrderMember {
+                    identity: ObjectIncarnationRef {
+                        object_id: b,
+                        incarnation: 0,
+                    },
+                    origin: Zone::Library,
+                },
+            ],
+        };
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![a, b],
+            count: 2,
+            min_count: 2,
+            up_to: false,
+            source_id: ObjectId(1),
+            effect_kind: crate::types::ability::EffectKind::PutAtLibraryPosition,
+            zone: Zone::Library,
+            destination: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+            face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            count_param: 0,
+            library_position: Some(crate::types::ability::LibraryPosition::Bottom),
+            mass_library_order: Some(batch),
+            is_cost_payment: false,
+            enters_modified_if: None,
+            duration: None,
         };
 
         let actions = candidate_actions_broad(&state);

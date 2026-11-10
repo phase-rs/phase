@@ -703,6 +703,7 @@ fn parse_reveal_until_all_to_zone_that_player(input: &str) -> OracleResult<'_, C
         ContinuationAst::RevealedRemainder {
             destination,
             rest_order: DigRestOrder::Preserve,
+            whole_pile: true,
         },
     ))
 }
@@ -835,6 +836,7 @@ pub(super) fn parse_revealed_remainder_clause(input: &str) -> Option<Continuatio
         .then_some(ContinuationAst::RevealedRemainder {
             destination,
             rest_order,
+            whole_pile: false,
         })
 }
 
@@ -858,12 +860,21 @@ pub(super) fn parse_revealed_remainder_clause(input: &str) -> Option<Continuatio
 /// crossed even when they happen to nest an observer: their own resolution is
 /// not proved to be reveal-free, so the honest answer is "unproved".
 pub(super) fn clause_preserves_reveal_population(effect: &Effect) -> bool {
-    // Pure life arithmetic. It reads the settled card's mana value and moves no
-    // card, so it cannot publish or replace a reveal (Reviving Vapors' "You gain
-    // life equal to that card's mana value"). Extending this allow-list means
-    // proving the new clause reveal-free; there is deliberately no deny-list to
-    // add to, because a missed producer is the defect this predicate guards.
-    matches!(effect, Effect::GainLife { .. })
+    // Pure life/pump/damage/draw/continuous-modification arithmetic. Reads settled
+    // card properties and moves no revealed library cards, so it cannot publish or
+    // replace a reveal (Reviving Vapors' "You gain life...", Erratic Mutation's
+    // "gets +X/-X...", Amplifire's continuous PT setting, Goblin Charbelcher's damage,
+    // Draw). Extending this allow-list means proving the new clause reveal-free;
+    // there is deliberately no deny-list to add to, because a missed producer is
+    // the defect this predicate guards.
+    matches!(
+        effect,
+        Effect::GainLife { .. }
+            | Effect::Pump { .. }
+            | Effect::DealDamage { .. }
+            | Effect::Draw { .. }
+            | Effect::GenericEffect { .. }
+    )
 }
 
 /// CR 608.2c: The destination a "the other cards revealed this way" clause
@@ -5978,6 +5989,7 @@ pub(super) fn apply_clause_continuation(
         ContinuationAst::RevealedRemainder {
             destination,
             rest_order,
+            whole_pile,
         } => {
             // CR 701.20a + CR 608.2c: the clause says "revealed this way", so
             // it names the population of a PUBLIC reveal instruction. The
@@ -6042,7 +6054,11 @@ pub(super) fn apply_clause_continuation(
                     kind,
                     Effect::unimplemented(
                         "revealed_remainder_graveyard_order",
-                        "all other cards revealed this way into graveyard",
+                        if whole_pile {
+                            "all cards revealed this way into graveyard"
+                        } else {
+                            "all other cards revealed this way into graveyard"
+                        },
                     ),
                 ));
                 return;
@@ -7075,6 +7091,60 @@ pub(super) fn apply_clause_continuation(
                 // emit the placement as a later chain instruction over the revealed set.
                 let has_intervening_instruction = target_idx + 1 < defs.len();
                 if has_intervening_instruction {
+                    // CR 404.3: an owner-ordered graveyard remainder needs an ordering
+                    // prompt this instruction does not own; rather than delivering in
+                    // arbitrary engine order, keep this shape honest as an unsupported gap.
+                    if destination == Zone::Graveyard {
+                        if let Effect::RevealUntil {
+                            matched_disposition,
+                            kept_destination,
+                            rest_destination,
+                            ..
+                        } = &mut *defs[target_idx].effect
+                        {
+                            *matched_disposition = RevealUntilDisposition::RevealOnly;
+                            *kept_destination = Zone::Library;
+                            *rest_destination = Zone::Library;
+                        }
+                        defs.push(AbilityDefinition::new(
+                            kind,
+                            Effect::unimplemented(
+                                "revealed_remainder_graveyard_order",
+                                "all cards revealed this way into graveyard",
+                            ),
+                        ));
+                        return;
+                    }
+
+                    // CR 701.20a + CR 608.2c: intervening instructions must preserve the
+                    // reveal population (Pump, DealDamage, GainLife, Draw).
+                    // An intervening Clash or other reveal producer overwrites last_revealed_ids,
+                    // so fail closed on unsafe spans.
+                    let span_safe = defs[target_idx + 1..]
+                        .iter()
+                        .all(|d| clause_preserves_reveal_population(&d.effect));
+                    if !span_safe {
+                        if let Effect::RevealUntil {
+                            matched_disposition,
+                            kept_destination,
+                            rest_destination,
+                            ..
+                        } = &mut *defs[target_idx].effect
+                        {
+                            *matched_disposition = RevealUntilDisposition::RevealOnly;
+                            *kept_destination = Zone::Library;
+                            *rest_destination = Zone::Library;
+                        }
+                        defs.push(AbilityDefinition::new(
+                            kind,
+                            Effect::unimplemented(
+                                "displaced_pile_placement_unsafe_span",
+                                "all cards revealed this way",
+                            ),
+                        ));
+                        return;
+                    }
+
                     if let Effect::RevealUntil {
                         matched_disposition,
                         kept_destination,

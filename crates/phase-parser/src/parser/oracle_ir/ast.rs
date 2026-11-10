@@ -556,6 +556,10 @@ pub(crate) enum ContinuationAst {
         /// parse time rather than silently kept in place.
         #[serde(default, skip_serializing_if = "DigRestOrder::is_preserve")]
         rest_order: DigRestOrder,
+        /// CR 701.20a: True when the remainder references the whole revealed pile ("all cards revealed
+        /// this way") rather than the complement ("all other cards revealed this way").
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        whole_pile: bool,
     },
     /// "Put the rest on the bottom/into your graveyard" after Dig/RevealTop —
     /// sets `rest_destination` on the preceding Dig effect. The destination is
