@@ -1726,3 +1726,51 @@ fn a_small_payment_queues_its_draw_triggers() {
         "each drawn card queued its trigger once"
     );
 }
+
+/// CR 603.2: a Dredge-paused counted payment queues each draw trigger once
+/// across consecutive replacement choices.
+#[test]
+fn a_resumed_counted_payment_queues_its_draw_triggers_once() {
+    const AGE: u32 = 65;
+    const PSYCHOSIS_CRAWLER_ORACLE: &str = "Whenever you draw a card, each opponent loses 1 life.";
+    let names: Vec<String> = (0..(AGE as usize + 20))
+        .map(|index| format!("Library {index}"))
+        .collect();
+    let library: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &library, |scenario| {
+        scenario
+            .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text(STINKWEED_IMP_ORACLE);
+        scenario
+            .add_creature(P0, "Psychosis Crawler", 1, 1)
+            .from_oracle_text(PSYCHOSIS_CRAWLER_ORACLE);
+    });
+    advance_through_upkeep(&mut runner);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the counted payment is legal");
+    let mut prompts = 0u32;
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ) {
+        prompts += 1;
+        runner
+            .act(GameAction::ChooseReplacement {
+                index: DECLINE_REPLACEMENT,
+            })
+            .expect("declining Dredge is legal");
+    }
+    assert_eq!(prompts, AGE, "each draw paused on its own Dredge choice");
+    assert_eq!(
+        runner.state().stack.len(),
+        AGE as usize,
+        "each drawn card queued exactly one Psychosis Crawler trigger"
+    );
+    assert_eq!(
+        runner.state().deferred_triggers.len(),
+        0,
+        "no trigger is left behind in the deferred queue"
+    );
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+}

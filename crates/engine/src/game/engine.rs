@@ -18324,21 +18324,19 @@ fn apply_non_priority_pass_action(
     // buffer's claims and typed retention owners are live, through the same
     // collect-only authority as the shared pipeline's non-Priority exit; then end
     // this buffer's claim coordinates before the next recorded action's buffer.
-    if (state.payment_transaction.is_some() || state.payment_transaction_replay)
-        && state.game_end.is_none()
-    {
-        let delayed_input = engine_priority::unclaimed_delayed_trigger_input(
-            state,
-            &events,
-            0,
-            &mut Vec::new(),
-            None,
+    let payment_owned = state.payment_transaction.is_some()
+        || state.payment_transaction_replay
+        || state.pending_unless_draw_repeat.is_some()
+        || matches!(
+            state.waiting_for,
+            WaitingFor::UnlessPayment { .. } | WaitingFor::UnlessPaymentChooseCost { .. }
         );
-        triggers::collect_unclaimed_delayed_triggers_into_deferred(state, &events, &delayed_input);
-        // CR 603.2: an ordinary draw trigger emitted by the answered
-        // replacement is also processed replay history now; defer it so the
-        // next priority queues it exactly once.
-        triggers::collect_triggers_into_deferred(state, &events);
+    if payment_owned && state.game_end.is_none() {
+        // CR 603.2c: route the answered replacement's ordinary and delayed
+        // triggers through the shared claim-aware collector so each occurrence
+        // is queued once and a mill already claimed by the zone pipeline is not
+        // repeated.
+        triggers::collect_unclaimed_triggers_into_deferred(state, &events, 0, None);
         state.consumed_before_priority_trigger_events.clear();
     }
 
