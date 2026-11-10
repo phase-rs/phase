@@ -1251,6 +1251,270 @@ fn duel_concession_at_aura_host_choice_stays_terminal() {
     );
 }
 
+/// CR 508.4 + CR 614.1c: accepting Clone's copy replacement exposes the
+/// entering-attacker defender choice. The approved move stays live across that
+/// replacement-to-defender handoff and delivers after the answer.
+#[test]
+fn olivia_clone_replacement_then_defender_answer_delivers() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let olivia = scenario
+        .add_creature_from_oracle(P0, "Olivia, Crimson Bride", 3, 4, OLIVIA_CRIMSON_BRIDE)
+        .id();
+    let clone = scenario
+        .add_creature_to_graveyard(P0, "Clone", 0, 0)
+        .from_oracle_text(CLONE)
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(olivia, AttackTarget::Player(P1))])
+        .expect("Olivia attacks P1");
+    let mut answered_replacement = false;
+    let mut answered_copy = false;
+    for _ in 0..60 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::EntryAttackTargetChoice {
+                player, object_id, ..
+            } => {
+                assert_eq!(player, P0);
+                assert_eq!(object_id, clone);
+                assert_eq!(
+                    runner.state().objects[&clone].zone,
+                    Zone::Graveyard,
+                    "the approved entry is still parked"
+                );
+                break;
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order Olivia's trigger");
+            }
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(clone)),
+                    })
+                    .expect("choose Clone");
+            }
+            WaitingFor::ReplacementChoice { .. } if !answered_replacement => {
+                answered_replacement = true;
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("accept Clone's copy replacement");
+            }
+            WaitingFor::CopyTargetChoice { valid_targets, .. } if !answered_copy => {
+                answered_copy = true;
+                let target = valid_targets
+                    .first()
+                    .copied()
+                    .expect("Clone offers a copy target");
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    })
+                    .expect("choose the copy target");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass toward the trigger");
+            }
+            other => panic!("unexpected state before the defender choice: {other:?}"),
+        }
+    }
+    runner
+        .act(GameAction::ChooseEntryAttackTarget {
+            target: AttackTarget::Player(P2),
+        })
+        .expect("choose a legal defender");
+    if let WaitingFor::CopyTargetChoice { valid_targets, .. } = runner.state().waiting_for.clone() {
+        let target = valid_targets
+            .first()
+            .copied()
+            .expect("Clone offers a copy target after entry");
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .expect("choose the copy target");
+    }
+    let state = runner.state();
+    let object = state.objects.get(&clone).expect("Clone entered");
+    assert_eq!(object.zone, Zone::Battlefield);
+    assert!(object.tapped, "Olivia's return enters tapped");
+    assert!(
+        state.combat.as_ref().is_some_and(|combat| combat
+            .attackers
+            .iter()
+            .any(|attacker| attacker.object_id == clone && attacker.defending_player == P2)),
+        "wait={:?} zone={:?} pending_event={:?}",
+        state.waiting_for,
+        state.objects[&clone].zone,
+        state.pending_entry_attack_event
+    );
+}
+
+/// CR 117.2e: concession from a real Winota defender prompt settles the batch
+/// owner and lets the surviving continuation finish.
+#[test]
+fn winota_concession_settles_batch_before_priority() {
+    const WINOTA: &str = "Whenever a non-Human creature you control attacks, look at the top six cards of your library. You may put a Human creature card from among them onto the battlefield tapped and attacking. It gains indestructible until end of turn. Put the rest of the cards on the bottom of your library in a random order.";
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let human = scenario.add_card_to_library_top(P0, "Winota Human");
+    for name in ["Filler 1", "Filler 2", "Filler 3", "Filler 4", "Filler 5"] {
+        scenario.add_card_to_library_top(P0, name);
+    }
+    scenario
+        .add_creature_from_oracle(P0, "Winota, Joiner of Forces", 4, 4, WINOTA)
+        .with_subtypes(vec!["Human", "Warrior"]);
+    let attacker = scenario
+        .add_creature(P0, "Non-Human Attacker", 2, 2)
+        .with_subtypes(vec!["Goblin"])
+        .id();
+    let mut runner = scenario.build();
+    {
+        let card = runner.state_mut().objects.get_mut(&human).unwrap();
+        card.card_types.core_types = vec![CoreType::Creature];
+        card.card_types.subtypes = vec!["Human".to_string()];
+        card.base_card_types = card.card_types.clone();
+    }
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("declare the non-Human attacker");
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DigChoice { .. } => break,
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order Winota's trigger");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass toward the Dig");
+            }
+            other => panic!("unexpected state before Dig: {other:?}"),
+        }
+    }
+    runner
+        .act(GameAction::SelectCards { cards: vec![human] })
+        .expect("put the Human onto the battlefield");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::EntryAttackTargetChoice { .. }
+    ));
+    let result = runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("the Winota chooser concedes");
+    let state = runner.state();
+    assert!(state.players[P0.0 as usize].is_eliminated);
+    assert!(
+        state
+            .active_batch_delivery()
+            .and_then(|batch| batch.paused_current.as_ref())
+            .is_none(),
+        "the departing member must not stay parked; wait={:?}",
+        state.waiting_for
+    );
+    assert!(state.pending_entry_attack_event.is_none());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty(), "stack={:?}", state.stack);
+    assert_eq!(result.waiting_for, state.waiting_for);
+    assert!(!state.battlefield.contains(&human));
+}
+
+/// CR 303.4f + 303.4g: the offered host can leave before the chooser answers.
+/// The stale id is rejected at entry time and the Aura stays in its origin.
+#[test]
+fn stale_aura_host_is_rejected_and_aura_remains_in_origin() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let vaults = scenario
+        .add_spell_to_hand_from_oracle(P0, "Open the Vaults", false, OPEN_THE_VAULTS)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 4,
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+        })
+        .id();
+    let pacifism = scenario
+        .add_enchantment_to_graveyard(P1, "Pacifism")
+        .from_oracle_text(PACIFISM)
+        .with_subtypes(vec!["Aura"])
+        .id();
+    // Both hosts belong to the third player, who leaves while P1 chooses.
+    let first_host = scenario.add_creature(P2, "First Host", 2, 2).id();
+    scenario.add_creature(P2, "Second Host", 2, 2);
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::White,
+            ManaType::White,
+        ]
+        .into_iter()
+        .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+    {
+        let needs_enchant = runner.state().objects.get(&pacifism).is_some_and(|obj| {
+            !obj.keywords
+                .iter()
+                .any(|k| matches!(k, Keyword::Enchant(_)))
+        });
+        if needs_enchant {
+            let enchant = Keyword::Enchant(TargetFilter::Typed(TypedFilter::creature()));
+            let obj = runner.state_mut().objects.get_mut(&pacifism).unwrap();
+            obj.keywords.push(enchant.clone());
+            obj.base_keywords.push(enchant);
+        }
+    }
+    runner.cast(vaults).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReturnAsAuraTarget { player: P1, .. }
+    ));
+    let result = runner
+        .act(GameAction::Concede { player_id: P2 })
+        .expect("the third player concedes, removing both hosts");
+    let state = runner.state();
+    assert!(state.players[P2.0 as usize].is_eliminated);
+    assert_eq!(state.objects[&pacifism].zone, Zone::Graveyard);
+    assert!(
+        result.events.iter().all(|event| !matches!(
+            event,
+            GameEvent::ZoneChanged { record, .. }
+                if record
+                    .trigger_source_context()
+                    .is_some_and(|context| context.identity.reference.object_id == pacifism
+                        && record.to_zone == Zone::Battlefield)
+        )),
+        "no battlefield-entry event for the Aura"
+    );
+    let result = runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(first_host)),
+        })
+        .expect("the stale host is still a legal-shaped answer");
+    let state = runner.state();
+    assert_eq!(state.objects[&pacifism].zone, Zone::Graveyard);
+    assert!(state.pending_aura_entry.is_none());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(result.waiting_for, state.waiting_for);
+}
+
 const SPIKE_FEEDER: &str = "Flash\nThis creature enters with two +1/+1 counters on it.\n{T}: Remove a +1/+1 counter from this creature: You gain 2 life.";
 
 /// CR 614.1c + CR 508.4: the approved event parked at the defender choice

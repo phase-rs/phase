@@ -861,6 +861,36 @@ pub(crate) fn eliminate_players(
             debug_assert!(false, "team tap payment elimination resume failed: {error}");
         }
 
+        // CR 117.2e + CR 508.4: a batch member parked on its entering-attacker
+        // choice keeps the batch and its continuation live. A departing
+        // chooser's member is Remained and the batch tail resumes here.
+        if let WaitingFor::EntryAttackTargetChoice { player, .. } = state.waiting_for.clone() {
+            if (players_to_eliminate.contains(&player) || !players::is_alive(state, player))
+                && state.active_batch_delivery().is_some()
+            {
+                if let Some(event) = state.pending_entry_attack_event.take() {
+                    if let crate::types::ProposedEvent::ZoneChange { object_id, .. } = &event {
+                        if let Some(member) = state
+                            .objects
+                            .get(object_id)
+                            .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+                        {
+                            let _ = state.prevent_paused_batch_zone_change_delivery(member, &event);
+                        }
+                    }
+                }
+                let next = players::next_player(state, player);
+                state.waiting_for = WaitingFor::Priority { player: next };
+                for _ in 0..4 {
+                    if state.active_batch_delivery().is_none()
+                        || !matches!(state.waiting_for, WaitingFor::Priority { .. })
+                    {
+                        break;
+                    }
+                    super::zone_pipeline::drain_pending_batch_deliveries(state, events);
+                }
+            }
+        }
         if let Some(waiting_pid) = state.waiting_for.acting_player() {
             if !players::is_alive(state, waiting_pid) {
                 let next = players::next_player(state, waiting_pid);

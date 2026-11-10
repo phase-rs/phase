@@ -2296,7 +2296,8 @@ pub(super) fn handle_resolution_choice(
                     .and_then(|pending| pending.paused_current.as_ref())
                     .is_some_and(|paused| {
                         paused.member.object_id == object_id && paused.terminal_completion.is_none()
-                    });
+                    })
+                || state.pending_entry_attack_event.is_some();
             if !has_parked_family {
                 state.waiting_for = WaitingFor::Priority { player };
                 if let Some(defending_player) =

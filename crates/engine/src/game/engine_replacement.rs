@@ -714,44 +714,51 @@ fn handle_replacement_choice_inner(
                     // moved, so its classification is `Remained`, the exact path
                     // sees only the child, and the occurrence-level walk (gated on
                     // `Moved`) records nothing for the parent.
-                    if let Some(paused) = parked_zone_change_delivery.as_ref() {
-                        let completion =
-                            crate::game::zone_pipeline::zone_move_completion_from_delivery(
+                    let pre_delivery_prompt = matches!(
+                        state.waiting_for,
+                        WaitingFor::EntryAttackTargetChoice { .. }
+                            | WaitingFor::ReturnAsAuraTarget { .. }
+                    );
+                    if !pre_delivery_prompt {
+                        if let Some(paused) = parked_zone_change_delivery.as_ref() {
+                            let completion =
+                                crate::game::zone_pipeline::zone_move_completion_from_delivery(
+                                    paused.member,
+                                    &events[delivery_start..],
+                                );
+                            // Exact boundary match first (the historical path every
+                            // shipped park uses), then the occurrence-level match for a
+                            // resume whose approved event carries the chosen
+                            // replacement's modifications (controller/counter override
+                            // or a CR 614.6 zone redirect).
+                            let matched = state.capture_paused_zone_change_delivery(
                                 paused.member,
-                                &events[delivery_start..],
-                            );
-                        // Exact boundary match first (the historical path every
-                        // shipped park uses), then the occurrence-level match for a
-                        // resume whose approved event carries the chosen
-                        // replacement's modifications (controller/counter override
-                        // or a CR 614.6 zone redirect).
-                        let matched = state.capture_paused_zone_change_delivery(
-                            paused.member,
-                            &paused.expected_event,
-                            &events[delivery_start..],
-                            completion,
-                        ) || (completion
-                            == crate::types::game_state::ZoneMoveCompletion::Moved
-                            && state.capture_resumed_paused_zone_change_delivery(
-                                paused.member,
-                                &event_for_capture,
+                                &paused.expected_event,
                                 &events[delivery_start..],
                                 completion,
-                            ));
-                        if matched
-                            && matches!(
-                                &delivery,
-                                crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_)
-                            )
-                        {
-                            // CR 614.6: the replaced move's terminal `ZoneChanged` is
-                            // already in this slice, so the forwarded-result marker
-                            // settles against the same record the Done path uses.
-                            effects::settle_replaced_forwarded_zone_delivery(
-                                state,
-                                paused.member,
-                                &events[delivery_start..],
-                            );
+                            ) || (completion
+                                == crate::types::game_state::ZoneMoveCompletion::Moved
+                                && state.capture_resumed_paused_zone_change_delivery(
+                                    paused.member,
+                                    &event_for_capture,
+                                    &events[delivery_start..],
+                                    completion,
+                                ));
+                            if matched
+                                && matches!(
+                                    &delivery,
+                                    crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_)
+                                )
+                            {
+                                // CR 614.6: the replaced move's terminal `ZoneChanged` is
+                                // already in this slice, so the forwarded-result marker
+                                // settles against the same record the Done path uses.
+                                effects::settle_replaced_forwarded_zone_delivery(
+                                    state,
+                                    paused.member,
+                                    &events[delivery_start..],
+                                );
+                            }
                         }
                     }
                     match delivery {

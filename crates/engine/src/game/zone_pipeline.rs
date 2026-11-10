@@ -4690,9 +4690,11 @@ pub(crate) fn resume_paused_aura_entry_choice(
         ));
     };
     let mut event = pending.event;
-    let object_id = match &mut event {
+    let (object_id, from_zone, controller_override) = match &mut event {
         ProposedEvent::ZoneChange {
             object_id,
+            from,
+            controller_override,
             attach_to,
             ..
         } => {
@@ -4700,7 +4702,7 @@ pub(crate) fn resume_paused_aura_entry_choice(
                 TargetRef::Object(id) => AttachTarget::Object(id),
                 TargetRef::Player(id) => AttachTarget::Player(id),
             });
-            *object_id
+            (*object_id, *from, *controller_override)
         }
         _ => {
             return Err(crate::game::engine::EngineError::InvalidAction(
@@ -4708,10 +4710,63 @@ pub(crate) fn resume_paused_aura_entry_choice(
             ));
         }
     };
+    // CR 303.4f: the offered host list can go stale while the chooser holds
+    // the prompt (another player concedes and takes the hosts away). Recheck
+    // eligibility here; with no legal host the Aura remains in its current
+    // zone (CR 303.4g), or goes to its owner's graveyard when it came off the
+    // stack.
+    let host_still_legal = aura_enchant_filter(state, object_id).is_some_and(|filter| {
+        let controller = controller_override.or_else(|| {
+            entering_object_projection(state, object_id).map(|object| object.controller)
+        });
+        let controller = controller.unwrap_or(PlayerId(0));
+        legal_aura_attachment_targets(
+            state,
+            object_id,
+            entering_object_projection(state, object_id),
+            controller,
+            &filter,
+        )
+        .contains(&chosen)
+    });
     let player = match &state.waiting_for {
         WaitingFor::ReturnAsAuraTarget { player, .. } => *player,
         _ => state.active_player,
     };
+    if !host_still_legal {
+        let member = state
+            .active_batch_delivery()
+            .and_then(|batch| batch.paused_current.as_ref())
+            .or_else(|| {
+                state
+                    .active_change_zone_frame()
+                    .and_then(|frame| frame.pending.as_ref())
+                    .and_then(|owner| owner.paused_current.as_ref())
+            })
+            .filter(|paused| {
+                paused.member.object_id == object_id && paused.terminal_completion.is_none()
+            })
+            .map(|paused| paused.member);
+        if let Some(member) = member {
+            let _ = state.prevent_paused_batch_zone_change_delivery(member, &event);
+            let _ = state.prevent_paused_zone_change_delivery(member, &event);
+        }
+        state.waiting_for = WaitingFor::Priority { player };
+        if from_zone == Zone::Stack {
+            let _ = move_object_with_terminal(
+                state,
+                ZoneMoveRequest::effect(object_id, Zone::Graveyard, pending.source_id),
+                events,
+            );
+        }
+        if state.active_batch_delivery().is_some() {
+            drain_pending_batch_deliveries(state, events);
+        } else {
+            crate::game::effects::drain_pending_continuation(state, events);
+            super::engine::resume_pending_continuation_if_priority(state, events)?;
+        }
+        return Ok(state.waiting_for.clone());
+    }
     // Clearing the answered prompt before delivery keeps a completed delivery
     // from appearing to still await the same host choice.
     state.waiting_for = WaitingFor::Priority { player };
@@ -4771,7 +4826,6 @@ pub(crate) fn resume_paused_entry_attack_choice(
     target: crate::types::attack_target::AttackTarget,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, crate::game::engine::EngineError> {
-    state.pending_entry_attack_event = None;
     let player = match &state.waiting_for {
         WaitingFor::EntryAttackTargetChoice { player, .. } => *player,
         _ => {
@@ -4806,6 +4860,31 @@ pub(crate) fn resume_paused_entry_attack_choice(
     let (member, expected_event, source_id, controller, duration, track, library_placement) =
         if let Some(pause) = change_zone_pause {
             pause
+        } else if let Some(event) = state.pending_entry_attack_event.take() {
+            // CR 508.4: a replacement-to-defender handoff (Clone) can surface
+            // the same choice without a ChangeZone paused member; the approved
+            // event itself is the delivery carrier.
+            let object_id = match &event {
+                ProposedEvent::ZoneChange { object_id, .. } => *object_id,
+                _ => object_id,
+            };
+            let controller = state
+                .objects
+                .get(&object_id)
+                .map(|object| object.controller)
+                .unwrap_or(player);
+            (
+                crate::types::identifiers::ObjectIncarnationRef::of(
+                    object_id,
+                    state.objects[&object_id].incarnation,
+                ),
+                event,
+                object_id,
+                controller,
+                None,
+                false,
+                None,
+            )
         } else {
             // CR 603.10a: a Dig/Draw batch can park the same pre-delivery
             // entering-attacker choice (Winota). Its paused member is settled
@@ -4856,6 +4935,35 @@ pub(crate) fn resume_paused_entry_attack_choice(
         target,
         events,
     );
+    // CR 508.4: this prompt exists only for an entering attacker, so seat the
+    // answered defender even when the entry's own post-entry copy prompt parks.
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.zone == Zone::Battlefield)
+        && !state.combat.as_ref().is_some_and(|combat| {
+            combat
+                .attackers
+                .iter()
+                .any(|attacker| attacker.object_id == object_id)
+        })
+    {
+        let attacker_controller = state
+            .objects
+            .get(&object_id)
+            .map(|object| object.controller)
+            .unwrap_or(player);
+        if let Some(defending_player) =
+            crate::game::combat::entry_attack_target_defender(state, attacker_controller, target)
+        {
+            crate::game::combat::enter_attacking_at_target(
+                state,
+                object_id,
+                defending_player,
+                target,
+            );
+        }
+    }
     if !matches!(result, ZoneDeliveryResult::NeedsChoice(_)) {
         let completion = PendingZoneChangeDelivery::completion_from_delivery_events(
             member,
