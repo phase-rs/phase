@@ -2662,7 +2662,8 @@ impl ResourceVector {
     /// is `self`.
     ///
     /// It is the stored change a cycle carrying this amount makes for a seat whose changes in the
-    /// period all have one sign and land on its own field. A seat whose gains and losses interleave
+    /// period all have one sign and land on its own field, when no other member of its total
+    /// moves. A seat whose gains and losses interleave
     /// across a limit, a change the spread (`game::players::spread_life_change`) stores in a
     /// teammate's field, or two members of one shared total that both move, may store a different
     /// amount, and such a cycle then reads as a different period.
@@ -2724,7 +2725,8 @@ impl ResourceVector {
     ///
     /// Where no entry of `self` is negative, no entry of the result is, and a total that grows
     /// keeps a positive entry, except a total that fails closed, which keeps none: where its
-    /// counters are read they sum to at least `t`, so a member that gained carries one. So the
+    /// counters attribute its change they sum to at least `t`, so a member that gained carries
+    /// one, and where they do not, `self`'s entries, which sum to `t`, stand. So the
     /// win-kind reader answers for the result as it answers for `self`, and the unbounded-axis
     /// reader names a life axis for each total that grows and can be attributed, and no drain
     /// axis. Where no entry of `self` is negative and a total's counters are read, a member gets a
@@ -6802,7 +6804,7 @@ fn life_counter_change(before: &Player, after: &Player) -> Option<i64> {
     Some(i64::from(gained) - i64::from(lost))
 }
 
-/// CR 810.9a: the change `current` stored in `seat`'s own life field since `prior`, in `i64`;
+/// CR 810.9: the change `current` stored in `seat`'s own life field since `prior`, in `i64`;
 /// 0 for a seat either state does not hold.
 fn own_field_change(prior: &GameState, current: &GameState, seat: PlayerId) -> i64 {
     let field = |state: &GameState| {
@@ -6871,8 +6873,8 @@ fn life_total_changes(prior: &GameState, current: &GameState) -> Vec<LifeTotalCh
 
 /// CR 119.3 + CR 810.9 + CR 810.9a: the players whose life change in one driven cycle is not a
 /// gain stored whole on their own field, as far as the cycle's events and its players' counters
-/// can say (a one-member total whose counter ends at `u32::MAX` names nobody here;
-/// `PeriodGrowth::life_passes_a_limit` reads its gain held at a limit). It is the take route's
+/// can say (a gain held at a limit on a one-member total whose counter ends at `u32::MAX`
+/// names nobody here; `PeriodGrowth::life_passes_a_limit` reads it). It is the take route's
 /// reading of the cycle: `game::engine`'s `PeriodGrowth::collapse_is_replay` performs a take whose
 /// driven cycle names anybody here. The offer reads [`ResourceVector::with_life_attributed`]
 /// instead, and whether a gain passes an `i32` limit is `game::engine`'s

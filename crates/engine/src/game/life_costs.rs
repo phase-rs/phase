@@ -196,8 +196,9 @@ pub fn pay_life_as_cost(
     // Engine representability limit, not a rule: a nested player-counter or
     // energy settlement the engine cannot represent (the life loss itself
     // saturates) is reported through the existing unpayable variant; the life
-    // loss that settled before it is not undone here (the public action
-    // boundary restores the action's entry state).
+    // loss that settled before it is not undone here, and only a caller that
+    // turns this result into a rejected action has the public action boundary
+    // restore the action's entry state.
     match try_apply_life_loss(state, player, amount, events) {
         Ok(_) => PayLifeCostResult::Paid { amount },
         Err(PlayerResourceChangeError::Unrepresentable(_)) => PayLifeCostResult::InsufficientLife,

@@ -829,9 +829,10 @@ fn apply_debug_life_change(
         )));
     }
     let event_start = events.len();
-    // The settle step is the single authority: a life total and its per-turn
-    // counters saturate at their limits, as does a life replacement quantity,
-    // and a nested player-counter or energy settlement that is unrepresentable
+    // The settle step is the single authority for the final change: a life
+    // total and its per-turn counters saturate at their limits (a life
+    // replacement quantity already lands on `u32::MAX` in its applier), and a
+    // nested player-counter or energy settlement that is unrepresentable
     // rejects the action and the action boundary restores its snapshot —
     // nothing wraps.
     let outcome = match change {

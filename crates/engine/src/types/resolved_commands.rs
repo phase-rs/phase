@@ -4297,10 +4297,9 @@ mod tests {
         .is_err());
     }
 
-    /// CR 119.3 + CR 119.5: a life edit records any gain, loss or set/exchange
-    /// difference exactly in an `i64` delta. A delta in the `i32` range
-    /// serializes exactly as before, a delta past it round-trips, and a zero
-    /// delta is still the one empty life edit.
+    /// CR 119.3 + CR 119.5: a life edit records its settled delta in an `i64`.
+    /// A delta in the `i32` range serializes exactly as before, a delta past it
+    /// round-trips, and a zero delta is still the one empty life edit.
     #[test]
     fn life_edit_carries_an_i64_delta_and_in_range_json_is_unchanged() {
         assert_eq!(

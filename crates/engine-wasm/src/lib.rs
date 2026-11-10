@@ -4406,7 +4406,7 @@ mod restored_card_db_requirements_tests {
     }
 
     /// Seeds a cached AI session, a replay recording and an outstanding AI
-    /// proposal, with reach guards that each is live.
+    /// proposal, with reach guards that the recording and the proposal are live.
     fn seed_host_resume_authorities() -> SeededHostAuthorities {
         let cached_state = legacy_ready_state();
         let cached_before = cached_ai_session(&cached_state);

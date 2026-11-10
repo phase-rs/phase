@@ -499,10 +499,12 @@ fn drain_substitution_continuation(
 /// Order before anything observable: the shared replacement-quantity overflow
 /// consumer (no life applier records one; a life replacement quantity saturates
 /// at `u32::MAX`), then the edit authority applies the whole amount as an exact `i64` delta,
-/// saturating the total it adjusts (the player's own life, or in Two-Headed
-/// Giant the team's shared total, CR 810.9) at `i32::MAX` and the
-/// gained-this-turn counter at `u32::MAX`; the `LifeChanged` amount
-/// (`arithmetic::life_changed_amount`) and the returned amount are the rules amount,
+/// saturating the total it adjusts (the player's own life, or in a shared-life
+/// format the shared total, CR 810.9: a Two-Headed Giant team's, CR 810.4; the
+/// Archenemy Commander heroes', CR 904.13b; a Horde game's survivors',
+/// `topology::has_shared_life`) at `i32::MAX` and the gained-this-turn counter
+/// at `u32::MAX`; the returned amount is the rules amount, and the `LifeChanged`
+/// amount is that amount clamped to `i32` (`arithmetic::life_changed_amount`),
 /// even when the total moved less. No life applier records an overflow and the
 /// edit cannot fail, so a life event does not reach the shared failure branch
 /// (`settle_unrepresentable`, per `policy`) in play; the unit tests reach it by
@@ -1806,9 +1808,11 @@ mod tests {
     /// difference. The resume lands P0 exactly on P1's previous total
     /// (`i32::MIN`) from that difference. P1's gain, which the two doublers
     /// make four times the difference (CR 701.12c: "Replacement effects may
-    /// modify these gains and losses"; CR 616.1f), stops at `i32::MAX`, P0's
-    /// previous total, only because a total stops there (an engine limit, not
-    /// a rule), with the gained counter at `u32::MAX`.
+    /// modify these gains and losses"; CR 616.1f), lands on `u32::MAX`, where
+    /// a life replacement quantity past `u32` saturates (an engine limit, not
+    /// a rule); from `i32::MIN` that amount reaches exactly `i32::MAX`, P0's
+    /// previous total, without the total's own limit engaging, and the gained
+    /// counter reads `u32::MAX`.
     #[test]
     fn life_total_assignment_parks_and_resumes_a_difference_past_i32_exactly() {
         use crate::game::engine::apply_as_current;
