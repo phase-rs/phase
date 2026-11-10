@@ -71,9 +71,10 @@ pub(in crate::game) fn priority_unlock_room_door_announcements(
 
 /// CR 709.5 + CR 709.5a: does this type line have the two shared halves? The
 /// engine marker is the `Room` subtype, which CR 709.5a puts on both halves.
-/// Single authority, so the current-form and printed-form readers below cannot
-/// drift apart — they differ only in WHICH type line they hand it.
-fn has_shared_type_line(types: &crate::types::card_type::CardType) -> bool {
+/// Single authority, so the current-form and printed-form readers below, and the
+/// printed-form reader `transform::stored_double_face`, cannot drift apart — they
+/// differ only in WHICH type line they hand it.
+pub(crate) fn has_shared_type_line(types: &crate::types::card_type::CardType) -> bool {
     types.subtypes.iter().any(|s| s == "Room")
 }
 

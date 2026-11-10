@@ -8159,6 +8159,17 @@ fn remade_tokens(before: &GameState, after: &GameState) -> Vec<(ObjectId, Object
 /// `intrinsic_copiable_values`, so a multiset homogeneous only under `fodder_content_eq` could mint
 /// k*N copies of ONE representative while the period produced k DIFFERENT permanents.
 ///
+/// A DOUBLE-FACED MEMBER REFUSES THE CLASS (CR 732.2a + CR 111.10i). The mint gives each token
+/// only the stored faces its own sources write: `install_copiable_values_as_base` writes a Room's
+/// other half (CR 709.5b) and a prepare spell (CR 722.2b), and
+/// `token::inject_predefined_token_abilities` fills an Incubator's back face. A member that
+/// [`crate::game::transform::stored_double_face`] classifies as double-faced may hold a face none
+/// of them writes, such as a transformed Incubator's stored Incubator face, which the mint would
+/// lose. `object_content_eq` does not compare `back_face`, so every member is asked, not only the
+/// representative. A front-face-up Incubator class is refused too, although the payload supplies
+/// its back face: the gate does not ask which source supplies a face. Refusing only leaves the
+/// loop to be played out, since a shortcut is only ever suggested (CR 732.2a).
+///
 /// THE SET IS THE MINTED MEMBERS, and the criterion is what the collapse can DELIVER rather than
 /// what the frames contain. `PersistentAxisMaterialization::Tokens`' boundary mint reproduces `k`
 /// members of the class per cycle by MINTING them (CR 111.1, with CR 111.3 / CR 707.2 fixing the
@@ -8173,10 +8184,14 @@ fn derived_fodder_class(
     let new_ids = minted_battlefield_ids(before, after);
     let mut members = new_ids.iter().filter_map(|id| after.objects.get(id));
     let class = members.next()?.clone();
+    if crate::game::transform::stored_double_face(&class).is_some() {
+        return None;
+    }
     let class_values = crate::game::printed_cards::intrinsic_copiable_values(&class);
     let mut k: u32 = 1;
     for other in members {
-        if !crate::analysis::resource::fodder_content_eq(&class, other)
+        if crate::game::transform::stored_double_face(other).is_some()
+            || !crate::analysis::resource::fodder_content_eq(&class, other)
             || crate::game::printed_cards::intrinsic_copiable_values(other) != class_values
         {
             return None;

@@ -73,14 +73,29 @@ fn transform_instruction_is_noop(state: &GameState, object_id: ObjectId) -> bool
 /// known single-faced layouts are excluded. Independently of layout, a face that
 /// is an instant or sorcery is never a transform destination.
 fn other_face_is_transform_destination(object: &crate::game::game_object::GameObject) -> bool {
-    use crate::types::card::LayoutKind;
     use crate::types::card_type::CoreType;
     let Some(face) = object.back_face.as_ref() else {
         return true;
     };
     // CR 701.27c: a permanent that isn't represented by a double-faced token or
     // a double-faced card can't transform.
-    let single_faced_layout = match face.layout_kind {
+    let single_faced_layout = layout_is_single_faced_alternative(face.layout_kind);
+    // CR 701.27d: transforming into an instant or sorcery face does nothing.
+    let instant_or_sorcery_face = face
+        .card_types
+        .core_types
+        .iter()
+        .any(|core| matches!(core, CoreType::Instant | CoreType::Sorcery));
+    !single_faced_layout && !instant_or_sorcery_face
+}
+
+/// CR 709 / CR 710 / CR 715 / CR 720 / CR 722: whether a stored face's layout marks a
+/// single-faced card's alternative characteristics (split half, flip half, Adventure, Omen,
+/// prepare spell) kept in the `back_face` slot. Such a card is not double-faced, and a token
+/// copy of it carries those characteristics as copiable values (CR 709.5b, CR 722.2b).
+fn layout_is_single_faced_alternative(layout: Option<crate::types::card::LayoutKind>) -> bool {
+    use crate::types::card::LayoutKind;
+    match layout {
         Some(
             LayoutKind::Split
             | LayoutKind::Flip
@@ -90,14 +105,53 @@ fn other_face_is_transform_destination(object: &crate::game::game_object::GameOb
         ) => true,
         Some(LayoutKind::Single | LayoutKind::Transform | LayoutKind::Modal | LayoutKind::Meld)
         | None => false,
-    };
-    // CR 701.27d: transforming into an instant or sorcery face does nothing.
-    let instant_or_sorcery_face = face
-        .card_types
-        .core_types
-        .iter()
-        .any(|core| matches!(core, CoreType::Instant | CoreType::Sorcery));
-    !single_faced_layout && !instant_or_sorcery_face
+    }
+}
+
+/// CR 712.1 + CR 111.10i: the other face of a double-faced card or double-faced token, as the
+/// engine stores it in `back_face` — `None` when the object is not double-faced, or when its
+/// `back_face` holds something other than an other face.
+///
+/// Reads only the object's own state (its stored face, its own status, its printed type
+/// line), never copy-modified values, so a Layer-1 copy effect does not change the answer.
+///
+/// Not [`is_double_faced_permanent`]: that answers CR 712.16's face-down question and keys on
+/// printed layouts and `transformed`, so it is false for a front-face-up Incubator token,
+/// whose stored Phyrexian face has no layout. This one keys on what `back_face` holds.
+pub(crate) fn stored_double_face(obj: &GameObject) -> Option<&BackFaceData> {
+    use crate::game::game_object::MergeKind;
+    use crate::types::card::LayoutKind;
+    let face = obj.back_face.as_ref()?;
+    // CR 708.2 + CR 712.15: a face-down object's `back_face` is its face-down stash.
+    if obj.face_down {
+        return None;
+    }
+    // Specialize (digital-only, no CR rule): the stash is the face before specializing.
+    if obj.specialized_color.is_some() {
+        return None;
+    }
+    match obj.merge_kind {
+        // CR 730.2i: a merged permanent is not a double-faced permanent even if it contains
+        // double-faced components.
+        Some(MergeKind::Mutate | MergeKind::Augment) => return None,
+        // CR 712.1 + CR 712.16: meld cards are double-faced cards, and a melded permanent is
+        // a double-faced permanent.
+        Some(MergeKind::Meld) | None => {}
+    }
+    // CR 709.5b: a Room's other half is a copiable value of a single-faced card. A token copy
+    // stores it with no layout, so the printed type line is the discriminator.
+    if crate::game::room::has_shared_type_line(&obj.base_card_types) {
+        return None;
+    }
+    // A `Single` layout names a single-faced card. No production writer stores it: the card
+    // database stores `None` for it (`back_face_for_card_face_with_printed_ref`).
+    if face.layout_kind == Some(LayoutKind::Single) {
+        return None;
+    }
+    if layout_is_single_faced_alternative(face.layout_kind) {
+        return None;
+    }
+    Some(face)
 }
 
 /// Enumerates controlled transformable battlefield permanents as Priority
@@ -699,6 +753,221 @@ mod tests {
         assert!(
             priority_transform_announcements(&state, &principal).is_empty(),
             "Priority must not announce a transform that the reducer silently ignores"
+        );
+    }
+
+    /// CR 712.1 + CR 111.10i: `stored_double_face` answers "does `back_face` hold the other face
+    /// of a double-faced card or token?", one row per gate. Each gated row starts from a plain
+    /// object with a stored face and moves exactly one field, so only its gate can explain its
+    /// verdict. Every row is checked and the mismatches are reported together.
+    ///
+    /// Nearest printed cards: (a)/(b) Kessig Prowler // Sinuous Predator; (c) Valentin, Dean of
+    /// the Vein // Lisette, Dean of the Root; (d) Bruna, the Fading Light; (e) the Incubator token
+    /// from Blighted Burgeoning's "incubate 2"; (f) Fire // Ice, Akki Lavarunner // Tok-Tok,
+    /// Volcano Born, Bonecrusher Giant // Stomp, Dirgur Island Dragon // Skimming Strike and
+    /// Adventurous Eater // Have a Bite; (h) a card manifested by Soul Summons; (i) Lae'zel,
+    /// Githyanki Warrior after it specializes; (j) a token copy of Bottomless Pool // Locker Room
+    /// under a Layer-1 copy of a creature; (k) Gemrazer mutated onto Kessig Prowler. (g) is
+    /// synthetic: no production writer stores a `Single` layout.
+    ///
+    /// Revert-failing, one row per gate: drop the face-down gate ⇒ (h) is `Some`; the specialize
+    /// gate ⇒ (i); the Room gate ⇒ (j); the merged gate ⇒ (k)'s Mutate and Augment rows; the
+    /// `Single` gate ⇒ (g); replace `layout_is_single_faced_alternative` with `false` ⇒ every
+    /// (f) row. (b) and (e) are the positive reach for the no-layout arm.
+    #[test]
+    fn stored_double_face_classifies_each_stored_face() {
+        use crate::game::game_object::MergeKind;
+        use crate::types::card::LayoutKind;
+
+        let mut state = GameState::new_two_player(42);
+        let with_face = |state: &mut GameState, name: &str, layout: Option<LayoutKind>| {
+            let id = create_object(
+                state,
+                CardId(3),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            };
+            obj.base_card_types = obj.card_types.clone();
+            obj.back_face = Some(BackFaceData {
+                name: format!("{name} other face"),
+                layout_kind: layout,
+                ..Default::default()
+            });
+            id
+        };
+        let mut rows: Vec<(String, ObjectId, bool)> = Vec::new();
+
+        // (a) a transforming double-faced card, front face up.
+        let prowler = setup_dfc(&mut state);
+        state
+            .objects
+            .get_mut(&prowler)
+            .unwrap()
+            .back_face
+            .as_mut()
+            .unwrap()
+            .layout_kind = Some(LayoutKind::Transform);
+        rows.push(("(a) Transform, front face up".into(), prowler, true));
+
+        // (b) the same card after it transforms: its front face is stashed with no layout.
+        let transformed = setup_dfc(&mut state);
+        state
+            .objects
+            .get_mut(&transformed)
+            .unwrap()
+            .back_face
+            .as_mut()
+            .unwrap()
+            .layout_kind = Some(LayoutKind::Transform);
+        transform_permanent(&mut state, transformed, &mut Vec::new()).unwrap();
+        assert_eq!(
+            state.objects[&transformed]
+                .back_face
+                .as_ref()
+                .map(|face| face.layout_kind),
+            Some(None),
+            "(b) reach-guard: the transform stash has no layout"
+        );
+        rows.push((
+            "(b) transformed, stash with no layout".into(),
+            transformed,
+            true,
+        ));
+
+        // (c) a modal double-faced card; (d) a meld card that has not melded.
+        let modal = with_face(&mut state, "Valentin", Some(LayoutKind::Modal));
+        rows.push(("(c) Modal".into(), modal, true));
+        let meld_card = with_face(&mut state, "Bruna", Some(LayoutKind::Meld));
+        rows.push(("(d) Meld face, not merged".into(), meld_card, true));
+
+        // (e) an Incubator token from the production incubate resolver.
+        let earlier: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+        crate::game::effects::incubate::resolve(
+            &mut state,
+            &crate::types::ability::ResolvedAbility::new(
+                crate::types::ability::Effect::Incubate {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                },
+                vec![],
+                ObjectId(99),
+                PlayerId(0),
+            ),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        crate::game::layers::mark_layers_full(&mut state);
+        crate::game::layers::flush_layers(&mut state);
+        let incubator = *state
+            .battlefield
+            .iter()
+            .find(|id| !earlier.contains(id))
+            .expect("incubate created an Incubator token");
+        assert_eq!(
+            state.objects[&incubator]
+                .back_face
+                .as_ref()
+                .map(|face| (face.name.as_str(), face.layout_kind)),
+            Some(("Phyrexian Token", None)),
+            "(e) reach-guard: the payload stores the Phyrexian face with no layout"
+        );
+        rows.push(("(e) Incubator token".into(), incubator, true));
+
+        // (f) single-faced cards that keep alternative characteristics in `back_face`.
+        for layout in [
+            LayoutKind::Split,
+            LayoutKind::Flip,
+            LayoutKind::Adventure,
+            LayoutKind::Omen,
+            LayoutKind::Prepare,
+        ] {
+            let id = with_face(&mut state, "Alternative", Some(layout));
+            rows.push((format!("(f) {layout:?}"), id, false));
+        }
+
+        // (g) a stored `Single` layout.
+        let single = with_face(&mut state, "Single", Some(LayoutKind::Single));
+        rows.push(("(g) Single".into(), single, false));
+
+        // (h) face down: `back_face` is the face-down stash.
+        let face_down = with_face(&mut state, "Manifested", None);
+        state.objects.get_mut(&face_down).unwrap().face_down = true;
+        rows.push(("(h) face down".into(), face_down, false));
+
+        // (i) specialized: `back_face` is the face before specializing.
+        let specialized = with_face(&mut state, "Lae'zel", None);
+        state
+            .objects
+            .get_mut(&specialized)
+            .unwrap()
+            .specialized_color = Some(ManaColor::Red);
+        rows.push(("(i) specialized".into(), specialized, false));
+
+        // (j) a Room-copy token: printed Room, stored half with no layout, and a live type
+        // line without Room, as under a Layer-1 copy of a creature.
+        let room_copy = with_face(&mut state, "Bottomless Pool", None);
+        {
+            let obj = state.objects.get_mut(&room_copy).unwrap();
+            obj.is_token = true;
+            obj.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Room".to_string()],
+            };
+            assert!(
+                !obj.card_types.subtypes.iter().any(|s| s == "Room"),
+                "(j) reach-guard: the live type line has no Room"
+            );
+        }
+        rows.push((
+            "(j) Room copy, live type line not a Room".into(),
+            room_copy,
+            false,
+        ));
+
+        // (k) merged permanents over a transforming face.
+        for (kind, expected) in [
+            (MergeKind::Mutate, false),
+            (MergeKind::Augment, false),
+            (MergeKind::Meld, true),
+        ] {
+            let id = with_face(&mut state, "Merged", Some(LayoutKind::Transform));
+            state.objects.get_mut(&id).unwrap().merge_kind = Some(kind);
+            rows.push((format!("(k) merged by {kind:?}"), id, expected));
+        }
+
+        // (l) no stored face.
+        let plain = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Plain".to_string(),
+            Zone::Battlefield,
+        );
+        rows.push(("(l) no back_face".into(), plain, false));
+
+        let mismatches: Vec<String> = rows
+            .iter()
+            .filter_map(|(row, id, expected)| {
+                let found = stored_double_face(&state.objects[id]);
+                (found.is_some() != *expected).then(|| {
+                    format!(
+                        "{row}: expected {}, got {:?}",
+                        if *expected { "Some" } else { "None" },
+                        found.map(|face| &face.name)
+                    )
+                })
+            })
+            .collect();
+        assert!(
+            mismatches.is_empty(),
+            "stored_double_face misclassified: {mismatches:#?}"
         );
     }
 
