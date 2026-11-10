@@ -4810,13 +4810,17 @@ fn filter_is_spell_slot(filter: &TargetFilter) -> bool {
 /// subtype-only filter) rather than binding by name alone.
 pub(crate) fn referent_noun_matches_slot(noun: ObjectReferentNoun, filter: &TargetFilter) -> bool {
     match noun {
-        ObjectReferentNoun::Pronoun => true,
-        ObjectReferentNoun::Spell => filter_is_spell_slot(filter),
+        ObjectReferentNoun::Pronoun => filter_guarantees_object_controller(filter),
+        ObjectReferentNoun::Spell => {
+            filter_is_spell_slot(filter) && filter_guarantees_object_controller(filter)
+        }
         ObjectReferentNoun::Creature => {
             typed_slot_type_axis_matches(filter, |t| matches!(t, TypeFilter::Creature))
+                && filter_guarantees_object_controller(filter)
         }
         ObjectReferentNoun::Permanent => {
             typed_slot_type_axis_matches(filter, type_filter_is_permanent)
+                && filter_guarantees_object_controller(filter)
         }
     }
 }
@@ -4915,10 +4919,10 @@ fn type_filter_every_branch_matches(
 /// the permanent card types; `TypeFilter::Permanent` is the direct spelling.
 fn type_filter_is_permanent(type_filter: &TypeFilter) -> bool {
     matches!(type_filter, TypeFilter::Permanent)
-        || type_filter_core_type(type_filter).is_some_and(CoreType::is_permanent_type)
+        || type_filter_to_core_type(type_filter).is_some_and(CoreType::is_permanent_type)
 }
 
-fn type_filter_core_type(type_filter: &TypeFilter) -> Option<CoreType> {
+pub(crate) fn type_filter_to_core_type(type_filter: &TypeFilter) -> Option<CoreType> {
     match type_filter {
         TypeFilter::Creature => Some(CoreType::Creature),
         TypeFilter::Land => Some(CoreType::Land),
@@ -4935,6 +4939,19 @@ fn type_filter_core_type(type_filter: &TypeFilter) -> Option<CoreType> {
         | TypeFilter::Non(_)
         | TypeFilter::Subtype(_)
         | TypeFilter::AnyOf(_) => None,
+    }
+}
+
+/// CR 109.4: whether the declared slot names an object that can have a
+/// controller. Player and off-zone object slots cannot; battlefield objects
+/// and stack objects can. Composite filters fail closed unless every
+/// disjunct (or an object conjunct) guarantees one.
+pub(crate) fn filter_guarantees_object_controller(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::StackSpell | TargetFilter::StackAbility { .. } => true,
+        TargetFilter::Or { filters } => filters.iter().all(filter_guarantees_object_controller),
+        TargetFilter::And { filters } => filters.iter().any(filter_guarantees_object_controller),
+        other => other.denotes_battlefield_objects(),
     }
 }
 

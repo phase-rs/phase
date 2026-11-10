@@ -26764,6 +26764,13 @@ pub fn effect_stack_target_declaration_matching(
 /// role listed here still binds at resolution when that authority says so.
 pub fn effect_announced_target_roles(effect: &Effect) -> Vec<TargetFilter> {
     let mut roles: Vec<TargetFilter> = Vec::new();
+    // CR 109.4 + CR 115.1: when a filter references a target player, the
+    // engine announces that player's companion slot BEFORE the primary filter
+    // (ability_utils::collect_target_slots_inner). Model that order so the
+    // antecedent guard cannot treat the object as the first target.
+    if effect_references_target_player(effect) {
+        roles.push(TargetFilter::Player);
+    }
     if let Some(damage_roles) = damage_replacement_target_roles(effect) {
         roles.extend(damage_roles.into_iter().map(|role| role.filter().clone()));
         return roles;

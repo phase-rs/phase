@@ -1602,25 +1602,9 @@ pub(super) fn strip_cast_from_zone_conditional(text: &str) -> (Option<AbilityCon
     (None, text.to_string())
 }
 
-fn type_filter_to_core_type(tf: &TypeFilter) -> Option<CoreType> {
-    match tf {
-        TypeFilter::Creature => Some(CoreType::Creature),
-        TypeFilter::Land => Some(CoreType::Land),
-        TypeFilter::Artifact => Some(CoreType::Artifact),
-        TypeFilter::Enchantment => Some(CoreType::Enchantment),
-        TypeFilter::Instant => Some(CoreType::Instant),
-        TypeFilter::Sorcery => Some(CoreType::Sorcery),
-        TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
-        TypeFilter::Battle => Some(CoreType::Battle),
-        // CR 308.1: Kindred maps to its core type.
-        TypeFilter::Kindred => Some(CoreType::Kindred),
-        _ => None,
-    }
-}
-
-/// Inverse of [`type_filter_to_core_type`]: map a `CoreType` to the `TypeFilter`
+/// Inverse of `nom_condition::type_filter_to_core_type`: map a `CoreType` to the `TypeFilter`
 /// the engine uses to gate a present-target filter. Total over the card-type
-/// `CoreType` set; mirrors the explicit arms of `type_filter_to_core_type`.
+/// `CoreType` set; mirrors the explicit arms of the shared conversion.
 pub(super) fn core_type_to_type_filter(core: CoreType) -> TypeFilter {
     match core {
         CoreType::Creature => TypeFilter::Creature,
@@ -1797,7 +1781,7 @@ fn parse_if_revealed_card_type_conditional(text: &str) -> Option<(AbilityConditi
     })?;
     let core_types: Vec<CoreType> = type_filters
         .iter()
-        .filter_map(type_filter_to_core_type)
+        .filter_map(nom_condition::type_filter_to_core_type)
         .collect();
     if core_types.is_empty() {
         return None;
@@ -1867,7 +1851,7 @@ fn parse_if_exiled_card_type_conditional(text: &str) -> Option<(AbilityCondition
     })?;
     let core_types: Vec<CoreType> = type_filters
         .iter()
-        .filter_map(type_filter_to_core_type)
+        .filter_map(nom_condition::type_filter_to_core_type)
         .collect();
     if core_types.is_empty() {
         return None;
@@ -5236,7 +5220,7 @@ struct DeclaredObjectTarget {
 /// CR 115.1a: an announced role is an object for the antecedent grammar when
 /// it is neither a context reference nor a player.
 fn is_object_role(filter: &TargetFilter) -> bool {
-    !filter.is_context_ref() && !super::is_player_scoped_filter(filter)
+    !filter.is_context_ref() && nom_condition::filter_guarantees_object_controller(filter)
 }
 
 /// CR 115.1 + CR 608.2c: the single object antecedent in declaration order.
@@ -11261,6 +11245,47 @@ mod tests {
         let effect = "Put a sticker on a nonland permanent you own";
         assert!(probe_declared_target_slot(effect, &ctx).is_none());
         let condition = "you control more creatures than that permanent's controller";
+        assert_eq!(
+            parse_target_controller_control_condition_text(condition, effect, &ctx),
+            None,
+            "{effect} if {condition}"
+        );
+
+        // Printed Noble Vestige: "Prevent the next 1 damage that would be dealt
+        // to target player or planeswalker this turn." The operand is
+        // Or(Player, Planeswalker), which cannot guarantee an object controller.
+        let effect =
+            "Prevent the next 1 damage that would be dealt to target player or planeswalker this turn";
+        let probe = probe_declared_target_slot(effect, &ctx).expect("noble vestige probe");
+        assert!(!is_object_role(&probe.declared_slots[0]));
+        assert!(declared_single_object_target(effect, &ctx).is_none());
+        let condition = "its controller controls no creatures";
+        assert_eq!(
+            parse_target_controller_control_condition_text(condition, effect, &ctx),
+            None,
+            "{effect} if {condition}"
+        );
+
+        // Printed Deathrite Shaman: "Exile target creature card from a
+        // graveyard." A graveyard card has no controller (CR 109.4).
+        let effect = "Exile target creature card from a graveyard";
+        let probe = probe_declared_target_slot(effect, &ctx).expect("deathrite probe");
+        assert!(!is_object_role(&probe.declared_slots[0]));
+        assert!(declared_single_object_target(effect, &ctx).is_none());
+        let condition = "its controller controls no creatures";
+        assert_eq!(
+            parse_target_controller_control_condition_text(condition, effect, &ctx),
+            None,
+            "{effect} if {condition}"
+        );
+
+        // A companion target player is announced before the primary filter
+        // (ability_utils::collect_target_slots_inner), so the object is not the
+        // first target.
+        let effect = "Destroy all creatures target player controls";
+        let probe = probe_declared_target_slot(effect, &ctx).expect("companion player probe");
+        assert_eq!(probe.declared_slots[0], TargetFilter::Player);
+        let condition = "you control more creatures than that creature's controller";
         assert_eq!(
             parse_target_controller_control_condition_text(condition, effect, &ctx),
             None,
