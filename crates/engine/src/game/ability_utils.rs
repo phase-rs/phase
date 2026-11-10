@@ -6,7 +6,7 @@ use crate::types::ability::{
     effect_needs_parent_target_combat_relation_slot, effect_needs_target_creature_quantity_slot,
     effect_references_target_player, effect_stack_target_declaration_matching,
     effect_target_filter_references_chosen_player, effect_target_slot_filter,
-    extract_target_filter_from_effect, fight_declared_slot_filters, fight_declared_slots,
+    extract_target_filter_from_effect, fight_declared_slots, fight_slots,
     fight_subject_needs_target_slot, filter_references_target_opponent, is_any_target_filter,
     mass_all_target_filter, move_counter_stack_target_filters,
     one_sided_fight_source_supplies_quantity_creature, paired_subject_filters,
@@ -14,8 +14,8 @@ use crate::types::ability::{
     payer_is_declared_target, quantity_slot_filter_selects_players, relative_controller_kind,
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCost, AttachSelection,
     AttachmentReferent, ChosenTargetSlots, ControllerRef, DamageReplacementTargetRole,
-    EachDamageRecipient, Effect, EffectError, EffectKind, EffectScope, FilterProp, ModalChoice,
-    ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectScope,
+    EachDamageRecipient, Effect, EffectError, EffectKind, EffectScope, FightSlots, FilterProp,
+    ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, MultiTargetSpec, ObjectScope,
     ParentTargetMissingReason, PlayerFilter, PreventionAmount, PtValue, QuantityExpr, QuantityRef,
     ResolvedAbility, SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter,
     TargetReadOrigin, TargetRef, TypeFilter, TypedFilter,
@@ -3777,9 +3777,16 @@ fn occurrence_binds_prior(
         NodeSlotFilters::UniformRun(filter) => target_filter_binds_prior_target(filter),
         NodeSlotFilters::None => false,
         NodeSlotFilters::NotDerivable => match &node.effect {
-            Effect::Fight { subject, target } => fight_declared_slot_filters(subject, target)
+            // CR 601.2c + CR 608.2b: a stored occurrence binds the role it was
+            // announced for; an omitted optional fighter shifts no role.
+            Effect::Fight {
+                subject,
+                target,
+                up_to_one,
+            } => FightSlots::new(subject, target, *up_to_one)
+                .occupied(node.targets.len())
                 .nth(position)
-                .is_some_and(target_filter_binds_prior_target),
+                .is_some_and(|(_, filter)| target_filter_binds_prior_target(filter)),
             Effect::Attach {
                 attachment, target, ..
             } => {
@@ -4228,24 +4235,28 @@ fn validate_targets_in_chain_inner(
             verdicts[..claimed].fill(OccurrenceVerdict::Dropped);
         }
         NodeValidation::Verdicts(verdicts)
-    } else if let Effect::Fight { subject, target } = &validated.effect {
+    } else if let Effect::Fight {
+        subject,
+        target,
+        up_to_one,
+    } = &validated.effect
+    {
         // CR 608.2b + CR 701.14a: Dual-fighter fights validate each chosen
         // fighter against its own slot filter so one illegal fighter does not
         // collapse into the single-target "~ fights" fallback shape.
         if fight_subject_needs_target_slot(subject) {
-            let filters = vec![subject, target];
+            // CR 608.2b + CR 601.2c: each stored occurrence is checked against
+            // the role it was announced for (`FightSlots::occupied`), so an
+            // omitted optional fighter does not move the opponent into the
+            // fighter's filter. Occurrences beyond the declaration stay
+            // `Dropped`.
             let mut verdicts = vec![OccurrenceVerdict::Dropped; occurrence_count];
-            let mut next = 0usize;
-            for filter in filters {
-                if matches!(filter, TargetFilter::SelfRef | TargetFilter::ParentTarget) {
-                    continue;
-                }
-                if next >= occurrence_count {
-                    continue;
-                }
+            for (next, (_, filter)) in FightSlots::new(subject, target, *up_to_one)
+                .occupied(occurrence_count)
+                .enumerate()
+            {
                 verdicts[next] =
                     legal_or_dropped(occurrence_is_legal(view, state, next, filter, &validated));
-                next += 1;
             }
             NodeValidation::Verdicts(verdicts)
         } else {
@@ -5365,7 +5376,10 @@ fn collect_target_slots_inner(
     // creature" names two chosen fighters. "~ fights …" and "enchanted creature
     // fights …" only surface the opponent as a target slot — the fighter is the
     // ability source or the host permanent.
-    if let Effect::Fight { subject, target } = &ability.effect {
+    if let Effect::Fight {
+        subject, target, ..
+    } = &ability.effect
+    {
         for (role, filter) in fight_declared_slots(subject, target) {
             // CR 608.2c + CR 701.14a: A context-ref fighter (SelfRef, ParentTarget,
             // ParentTargetSlot, TrackedSet — the reciprocal "those creatures fight
@@ -5377,8 +5391,8 @@ fn collect_target_slots_inner(
             // cast (Malamet Battle Glyph).
             let legal_targets =
                 legal_targets_for_ability_filter(state, ability, filter, acc.built());
-            // CR 115.6 + CR 601.2c: optionality is per slot — "up to one" frees
-            // only the creature being fought, never the fighter.
+            // CR 115.6 + CR 601.2c: optionality is the printed operand's own
+            // (`FightSlots`).
             let optional = ability.fight_slot_is_optional(role);
             if legal_targets.is_empty() && !optional {
                 return Err(no_legal_target_slots());
@@ -7555,13 +7569,18 @@ fn collect_target_slot_specs(
 
     // CR 701.14a + CR 115.1: Mirror the dual-fighter `Fight` branch in
     // `collect_target_slots` so per-slot specs line up one-for-one.
-    if let Effect::Fight { subject, target } = &ability.effect {
+    if let Effect::Fight {
+        subject, target, ..
+    } = &ability.effect
+    {
         for (role, filter) in fight_declared_slots(subject, target) {
             // Keep per-slot metadata aligned with the surfaced cast-time slots.
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
             specs.push(TargetSlotSpec {
                 filter: filter.clone(),
+                // CR 115.6 + CR 601.2c: optionality is the printed operand's
+                // own (`FightSlots`).
                 optional: ability.fight_slot_is_optional(role),
                 instance: id,
                 group: ability.declares_chosen_group,
@@ -10276,7 +10295,7 @@ fn validate_target_prefix_with_specs(
         ));
     }
 
-    let selected_slots: Vec<Option<TargetRef>> = targets.iter().cloned().map(Some).collect();
+    let selected_slots = compact_declaration_slots(state, ability, specs, targets);
     validate_selected_slots_with_specs(
         state,
         ability,
@@ -10285,6 +10304,58 @@ fn validate_target_prefix_with_specs(
         &selected_slots,
         constraints,
     )
+}
+
+/// CR 601.2c + CR 115.6: the announced slot each entry of a compact bulk
+/// declaration fills — the reading `assign_targets_recursive` applies to the
+/// same list. Positional (`targets[i]` is spec `i`), except that a fight's
+/// optional role takes a target only when one is spare beyond
+/// `fight_optional_role_reserve`, and otherwise keeps its slot as `None`.
+/// A coin chain with a multi-target node is read purely positionally
+/// (`chain_needs_announced_group_ends`), as its assigner reads it.
+///
+/// Never rejects a list: targets left after the spec walk stay positional, and
+/// the count window belongs to the callers. `specs` can be shorter than the
+/// prompt's slots — an Aura spell's enchant slot (CR 303.4a) has no spec.
+fn compact_declaration_slots(
+    state: &GameState,
+    root: &ResolvedAbility,
+    specs: &[TargetSlotSpec],
+    targets: &[TargetRef],
+) -> Vec<Option<TargetRef>> {
+    if chain_needs_announced_group_ends(root) {
+        return targets.iter().cloned().map(Some).collect();
+    }
+    let mut selected_slots = Vec::with_capacity(specs.len().max(targets.len()));
+    let mut cursor = 0usize;
+    let mut spec_index = 0usize;
+    while spec_index < specs.len() && cursor < targets.len() {
+        let fight = node_at(root, &specs[spec_index].path)
+            .and_then(|node| fight_slots(&node.effect).map(|slots| (node, slots)));
+        let Some((node, slots)) = fight else {
+            selected_slots.push(Some(targets[cursor].clone()));
+            cursor += 1;
+            spec_index += 1;
+            continue;
+        };
+        // `collect_target_slot_specs`' Fight arm pushes the declared roles
+        // consecutively, in declared order, starting at this spec.
+        let reserve = fight_optional_role_reserve(state, node, slots);
+        for (role, _) in slots.declared() {
+            if spec_index >= specs.len() || cursor >= targets.len() {
+                break;
+            }
+            if slots.is_optional(role) && targets.len() - cursor <= reserve {
+                selected_slots.push(None);
+            } else {
+                selected_slots.push(Some(targets[cursor].clone()));
+                cursor += 1;
+            }
+            spec_index += 1;
+        }
+    }
+    selected_slots.extend(targets[cursor..].iter().cloned().map(Some));
+    selected_slots
 }
 
 fn validate_selected_slots_for_ability(
@@ -10525,20 +10596,31 @@ fn assign_targets_recursive(
         return Ok(());
     }
 
-    if let Effect::Fight { subject, target } = &ability.effect {
+    if let Some(slots) = fight_slots(&ability.effect) {
         // Mirror `collect_target_slots`: a context-ref fighter (SelfRef,
         // ParentTarget, ParentTargetSlot, reciprocal-fight TrackedSet)
         // surfaces no slot, so it consumes no selected target here either —
         // otherwise the assign/slot-gen counts diverge and a valid two-target
         // selection reports a spurious "Missing required target".
-        let roles: Vec<_> = fight_declared_slots(subject, target)
-            .map(|(role, _)| role)
+        //
+        // CR 601.2c + CR 115.6: a compact list never names a declined slot, so
+        // the optional role takes a target only when one is spare beyond the
+        // fight's later required roles and the chain below — the same
+        // arithmetic as the generic multi-target arm's `remaining_minimum`.
+        // A required role always takes the next target.
+        let reserve = fight_optional_role_reserve(state, ability, slots);
+        let optional_flags: Vec<bool> = slots
+            .declared()
+            .map(|(role, _)| slots.is_optional(role))
             .collect();
-        for role in roles {
+        for optional in optional_flags {
+            if optional && targets.len().saturating_sub(*next_target) <= reserve {
+                continue;
+            }
             if let Some(chosen) = targets.get(*next_target) {
                 ability.push_chosen_target(chosen.clone());
                 *next_target += 1;
-            } else if !ability.fight_slot_is_optional(role) {
+            } else if !optional {
                 return Err(EngineError::InvalidAction(
                     "Missing required target".to_string(),
                 ));
@@ -10933,10 +11015,14 @@ fn assign_selected_slots_recursive(
         return Ok(());
     }
 
-    if let Effect::Fight { subject, target } = &ability.effect {
+    if let Effect::Fight {
+        subject, target, ..
+    } = &ability.effect
+    {
         // Mirror `collect_target_slots` and `assign_targets_recursive`:
         // context-reference fighters resolve from the ability chain, so they
-        // consume no interactive target-selection slot.
+        // consume no interactive target-selection slot. A declined slot stays a
+        // hole, so each chosen target keeps the role it was announced for.
         let roles: Vec<_> = fight_declared_slots(subject, target)
             .map(|(role, _)| role)
             .collect();
@@ -10949,7 +11035,7 @@ fn assign_selected_slots_recursive(
             match selected_slot {
                 Some(chosen) => ability.push_chosen_target(chosen.clone()),
                 // CR 115.6 + CR 601.2c: a declined slot is legal only when that
-                // fighter's own slot is optional.
+                // fighter's own slot is optional (`FightSlots`).
                 None if ability.fight_slot_is_optional(role) => {}
                 None => {
                     return Err(EngineError::InvalidAction(
@@ -11454,7 +11540,10 @@ fn node_has_target_sink(ability: &ResolvedAbility) -> bool {
         return true;
     }
 
-    if let Effect::Fight { subject, target } = &ability.effect {
+    if let Effect::Fight {
+        subject, target, ..
+    } = &ability.effect
+    {
         if fight_subject_needs_target_slot(subject) {
             return true;
         }
@@ -12877,6 +12966,13 @@ fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usi
     if defers_conditional_target_selection(ability) {
         return 0;
     }
+    // CR 601.2c + CR 115.6: a fight reserves exactly its required declared
+    // fighters, from the same authority its collect / assign arms read. Like
+    // `collect_target_slots_inner`'s Fight arm it surfaces nothing else, so no
+    // generic, companion or mana term applies.
+    if let Some(slots) = fight_slots(&ability.effect) {
+        return slots.required_count() + minimum_targets_below(state, ability);
+    }
 
     let attach_targets = if let Effect::Attach {
         attachment,
@@ -13073,6 +13169,29 @@ fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usi
     let rest = minimum_targets_below(state, ability);
 
     current + rest
+}
+
+/// CR 601.2c + CR 115.6: how many of the remaining compact targets a fight's
+/// optional role must leave for the same fight's later required roles and for
+/// the chain below; the optional role takes a target only beyond it. Mirrors
+/// the generic multi-target arm's `remaining_minimum`. Shared by the bulk
+/// assigner (`assign_targets_recursive`) and the bulk announcement reading
+/// (`compact_declaration_slots`) so the two cannot drift.
+fn fight_optional_role_reserve(
+    state: &GameState,
+    node: &ResolvedAbility,
+    slots: FightSlots<'_>,
+) -> usize {
+    // A fight frees at most one role, so every role declared after it is
+    // required.
+    let later_required_roles = slots.optional_role().map_or(0, |optional| {
+        slots
+            .declared()
+            .skip_while(|(role, _)| *role != optional)
+            .skip(1)
+            .count()
+    });
+    later_required_roles + minimum_targets_below(state, node)
 }
 
 /// CR 601.2c: the minimum number of announced targets the chain BELOW `ability`
@@ -13664,6 +13783,7 @@ mod tests {
             Effect::Fight {
                 subject: artifact.clone(),
                 target: creature.clone(),
+                up_to_one: None,
             },
         ] {
             assert_declaration_witnesses(
@@ -13696,6 +13816,7 @@ mod tests {
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
                 },
+                up_to_one: None,
             },
         ] {
             assert_declaration_witnesses(&node(effect), false, &[]);
@@ -13710,6 +13831,7 @@ mod tests {
                 &node(Effect::Fight {
                     subject,
                     target: creature.clone(),
+                    up_to_one: None,
                 }),
                 true,
                 std::slice::from_ref(&creature),
@@ -14264,6 +14386,7 @@ mod tests {
                 Effect::Fight {
                     subject: a.clone(),
                     target: b.clone(),
+                    up_to_one: None,
                 },
                 count,
                 count,
@@ -14566,6 +14689,7 @@ mod tests {
             Effect::Fight {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 subject: TargetFilter::SelfRef,
+                up_to_one: None,
             },
             vec![TargetRef::Object(creature)],
             source,
@@ -17628,6 +17752,7 @@ mod tests {
                 Effect::Fight {
                     subject: TargetFilter::SelfRef,
                     target: TargetFilter::Typed(TypedFilter::creature()),
+                    up_to_one: None,
                 },
                 vec![],
                 ObjectId(99),
@@ -27351,6 +27476,328 @@ mod tests {
             "Ent's Fury must surface ally + opponent target slots, got {}",
             slots.len()
         );
+    }
+
+    /// The first fight node of a card parsed from its verbatim Oracle text,
+    /// walking abilities and trigger bodies (including nested reflexive
+    /// payloads).
+    fn parsed_fight_def(
+        oracle: &str,
+        name: &str,
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> AbilityDefinition {
+        use crate::database::synthesis::parse_oracle_with_cleave_brackets;
+        let to_strings =
+            |words: &[&str]| words.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+        let (parsed, _) = parse_oracle_with_cleave_brackets(
+            oracle,
+            name,
+            &[],
+            &to_strings(types),
+            &to_strings(subtypes),
+        );
+        let found = RefCell::new(None);
+        let find = |def: &AbilityDefinition| {
+            let is_fight = matches!(def.effect.as_ref(), Effect::Fight { .. });
+            if is_fight {
+                found.borrow_mut().get_or_insert_with(|| def.clone());
+            }
+            is_fight
+        };
+        parsed
+            .abilities
+            .iter()
+            .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+            .any(|def| crate::types::ability_visit::ability_tree_any(def, &find));
+        found
+            .into_inner()
+            .unwrap_or_else(|| panic!("{name} parses to a fight"))
+    }
+
+    fn favored_enemy_fight() -> AbilityDefinition {
+        parsed_fight_def(
+            "When this enchantment enters, target creature you control fights up to one target creature you don't control.",
+            "Favored Enemy",
+            &["Enchantment"],
+            &[],
+        )
+    }
+
+    fn gut_fight() -> AbilityDefinition {
+        parsed_fight_def(
+            "When Gut, Fanatical Priestess enters, up to one target creature you control fights target creature you don't control. If the creature you don't control would die this turn, exile it instead.",
+            "Gut, Fanatical Priestess",
+            &["Creature"],
+            &["Goblin", "Shaman"],
+        )
+    }
+
+    fn prey_upon_fight() -> AbilityDefinition {
+        parsed_fight_def(
+            "Target creature you control fights target creature you don't control.",
+            "Prey Upon",
+            &["Sorcery"],
+            &[],
+        )
+    }
+
+    /// The single spell ability of a sorcery parsed from `oracle`.
+    fn parsed_spell(oracle: &str, name: &str) -> AbilityDefinition {
+        use crate::database::synthesis::parse_oracle_with_cleave_brackets;
+        let (parsed, _) =
+            parse_oracle_with_cleave_brackets(oracle, name, &[], &["Sorcery".to_string()], &[]);
+        assert_eq!(parsed.abilities.len(), 1, "{name}: {parsed:#?}");
+        parsed.abilities[0].clone()
+    }
+
+    /// `head` with `sub` appended as its announced sub-ability, resolved.
+    fn chain_of(head: &AbilityDefinition, sub: AbilityDefinition) -> ResolvedAbility {
+        let mut chain = head.clone();
+        chain.sub_ability = Some(Box::new(sub));
+        build_resolved_from_def(&chain, ObjectId(1), PlayerId(0))
+    }
+
+    /// P0's 3/3 "Champion" and P1's "Bear" (creatures), a card in P1's
+    /// graveyard, and P1's artifact.
+    struct FightChainBoard {
+        state: GameState,
+        champion: TargetRef,
+        bear: TargetRef,
+        graveyard_card: TargetRef,
+        artifact: TargetRef,
+    }
+
+    fn fight_chain_board() -> FightChainBoard {
+        use crate::types::card_type::CoreType;
+        use crate::types::zones::Zone;
+        let mut state = GameState::new_two_player(42);
+        let mut add = |card: u64, owner: u8, name: &str, zone: Zone, core: Option<CoreType>| {
+            let id = create_object(
+                &mut state,
+                CardId(card),
+                PlayerId(owner),
+                name.to_string(),
+                zone,
+            );
+            if let Some(core) = core {
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(core);
+            }
+            TargetRef::Object(id)
+        };
+        let champion = add(
+            10,
+            0,
+            "Champion",
+            Zone::Battlefield,
+            Some(CoreType::Creature),
+        );
+        let bear = add(11, 1, "Bear", Zone::Battlefield, Some(CoreType::Creature));
+        let graveyard_card = add(12, 1, "Graveyard Card", Zone::Graveyard, None);
+        let artifact = add(
+            13,
+            1,
+            "Artifact",
+            Zone::Battlefield,
+            Some(CoreType::Artifact),
+        );
+        FightChainBoard {
+            state,
+            champion,
+            bear,
+            graveyard_card,
+            artifact,
+        }
+    }
+
+    /// Bulk-assign `targets` to `chain`, returning the head's and the sub's
+    /// targets.
+    fn assign_head_and_sub(
+        state: &GameState,
+        chain: &ResolvedAbility,
+        targets: &[TargetRef],
+    ) -> (Vec<TargetRef>, Vec<TargetRef>) {
+        let mut assigned = chain.clone();
+        assign_targets_in_chain(state, &mut assigned, targets)
+            .unwrap_or_else(|error| panic!("{targets:?} assigns: {error:?}"));
+        let sub = assigned.sub_ability.as_deref().expect("sub-ability");
+        (assigned.targets.clone(), sub.targets.clone())
+    }
+
+    /// CR 601.2c + CR 115.6: a fight reserves its required declared fighters
+    /// from the chain above, so an earlier "up to N" node cannot consume them.
+    /// Building block over a synthetic composition: no printed chain puts a
+    /// variable-count node above a declared-fighter fight (nearest printed
+    /// cards Invasion of Muraganda and Diregraf Horde). The head is the bare
+    /// clause "Exile up to two target cards from graveyards." parsed as a
+    /// sorcery line, so it carries no "When you do," marker. The assigner does
+    /// not judge legality, so these rows assert placement only.
+    #[test]
+    fn fight_reservation_protects_required_fighters_from_an_earlier_variable_node() {
+        let board = fight_chain_board();
+        let head = parsed_spell(
+            "Exile up to two target cards from graveyards.",
+            "Diregraf Horde",
+        );
+        let [champion, bear, card] =
+            [&board.champion, &board.bear, &board.graveyard_card].map(Clone::clone);
+
+        // Favored Enemy: the required fighter is reserved.
+        let favored = chain_of(&head, favored_enemy_fight());
+        assert_eq!(minimum_targets_in_chain(&board.state, &favored), 1);
+        assert_eq!(
+            minimum_targets_in_chain(&board.state, favored.sub_ability.as_deref().unwrap()),
+            1
+        );
+        assert_eq!(
+            assign_head_and_sub(&board.state, &favored, &[card.clone(), champion.clone()]),
+            (vec![card.clone()], vec![champion.clone()])
+        );
+
+        // Prey Upon: both fighters are reserved, so the head yields both.
+        let prey_upon = chain_of(&head, prey_upon_fight());
+        assert_eq!(minimum_targets_in_chain(&board.state, &prey_upon), 2);
+        assert_eq!(
+            assign_head_and_sub(&board.state, &prey_upon, &[card.clone(), champion.clone()]),
+            (vec![], vec![card.clone(), champion.clone()])
+        );
+
+        // Gut: the spare-less target goes to the required fought creature.
+        let gut = chain_of(&head, gut_fight());
+        assert_eq!(
+            assign_head_and_sub(&board.state, &gut, &[card.clone(), bear.clone()]),
+            (vec![card], vec![bear])
+        );
+    }
+
+    /// CR 601.2c + CR 115.6: a fight node reserves exactly the authority's
+    /// required count, whatever the ability-level fields say.
+    #[test]
+    fn fight_reservation_equals_the_required_declared_fighters() {
+        let state = GameState::new_two_player(42);
+        let reserve = |def: AbilityDefinition| {
+            minimum_targets_in_chain(
+                &state,
+                &build_resolved_from_def(&def, ObjectId(1), PlayerId(0)),
+            )
+        };
+        assert_eq!(reserve(favored_enemy_fight()), 1);
+        assert_eq!(reserve(gut_fight()), 1);
+        assert_eq!(
+            reserve(parsed_fight_def(
+                "Proliferate.\nTarget creature you control fights up to one target creature you don't control.",
+                "Smell Fear",
+                &["Sorcery"],
+                &[],
+            )),
+            1
+        );
+        assert_eq!(reserve(prey_upon_fight()), 2);
+        assert_eq!(
+            reserve(parsed_fight_def(
+                "When this creature enters, it fights up to one target creature you don't control.",
+                "Apex Altisaur",
+                &["Creature"],
+                &["Dinosaur"],
+            )),
+            0
+        );
+        assert_eq!(
+            reserve(parsed_fight_def(
+                "Whenever a Wolf you control enters, you gain 3 life and that creature fights up to one target creature you don't control.",
+                "Tolsimir, Friend to Wolves",
+                &["Creature"],
+                &["Elf", "Scout"],
+            )),
+            0
+        );
+        // Hostile: an ability-level flag does not free a fight's fighters.
+        let mut flagged = prey_upon_fight();
+        flagged.optional_targeting = true;
+        assert_eq!(reserve(flagged), 2);
+    }
+
+    /// CR 601.2c + CR 115.6: the bulk Fight arm gives its optional role a
+    /// target only when one is spare beyond the chain below, and bulk
+    /// validation reads the compact list through the same slots. Building block
+    /// over a synthetic composition: no printed fight has a targeted node after
+    /// it. The sub is "Destroy target artifact." (Shatter, verbatim).
+    #[test]
+    fn fight_optional_role_takes_only_a_spare_target_in_bulk() {
+        let board = fight_chain_board();
+        let [champion, bear, artifact] =
+            [&board.champion, &board.bear, &board.artifact].map(Clone::clone);
+        let chain = chain_of(
+            &favored_enemy_fight(),
+            parsed_spell("Destroy target artifact.", "Shatter"),
+        );
+        let slots = build_target_slots(&board.state, &chain).expect("slots build");
+        assert_eq!(
+            slots.len(),
+            3,
+            "fighter, fought creature, artifact: {slots:?}"
+        );
+        let validate = |targets: &[TargetRef]| {
+            validate_selected_targets_for_ability(&board.state, &chain, &slots, targets, &[])
+        };
+
+        let declined = [champion.clone(), artifact.clone()];
+        validate(&declined).expect("the fought creature is declined");
+        assert_eq!(
+            assign_head_and_sub(&board.state, &chain, &declined),
+            (vec![champion.clone()], vec![artifact.clone()])
+        );
+
+        let full = [champion.clone(), bear.clone(), artifact.clone()];
+        validate(&full).expect("every slot filled");
+        assert_eq!(
+            assign_head_and_sub(&board.state, &chain, &full),
+            (vec![champion.clone(), bear.clone()], vec![artifact])
+        );
+
+        // No target is spare for the fought creature, so the bear falls to the
+        // artifact slot, where it is illegal.
+        assert!(validate(&[champion, bear]).is_err());
+    }
+
+    /// CR 115.6: `targeting_is_optional()` answers from the fight-slot
+    /// authority for every fight node — zero targets is legal only when every
+    /// declared fighter is optional.
+    #[test]
+    fn fight_targeting_is_optional_reads_the_role_map() {
+        let optional = |def: AbilityDefinition| {
+            build_resolved_from_def(&def, ObjectId(1), PlayerId(0)).targeting_is_optional()
+        };
+        for (name, types, subtypes, oracle) in [
+            ("Apex Altisaur", &["Creature"][..], &["Dinosaur"][..], "When this creature enters, it fights up to one target creature you don't control."),
+            ("Tolsimir, Friend to Wolves", &["Creature"], &["Elf", "Scout"], "Whenever a Wolf you control enters, you gain 3 life and that creature fights up to one target creature you don't control."),
+            ("Boxing Ring", &["Artifact"], &[], "Whenever a creature you control enters, it fights up to one target creature you don't control with the same mana value."),
+            ("Novel Nunchaku", &["Artifact"], &["Equipment"], "When this Equipment enters, attach it to target creature you control. When you do, equipped creature fights up to one target creature an opponent controls."),
+            ("Bridgeworks Battle", &["Sorcery"], &[], "Target creature you control gets +2/+2 until end of turn. It fights up to one target creature you don't control."),
+        ] {
+            assert!(optional(parsed_fight_def(oracle, name, types, subtypes)), "{name}");
+        }
+        for (name, types, subtypes, oracle) in [
+            ("Smell Fear", &["Sorcery"][..], &[][..], "Proliferate.\nTarget creature you control fights up to one target creature you don't control."),
+            ("Earth Rumble", &["Sorcery"], &[], "Earthbend 2. When you do, up to one target creature you control fights target creature an opponent controls."),
+        ] {
+            assert!(!optional(parsed_fight_def(oracle, name, types, subtypes)), "{name}");
+        }
+        assert!(!optional(favored_enemy_fight()));
+        assert!(!optional(gut_fight()));
+        assert!(!optional(prey_upon_fight()));
+
+        // Hostile: the ability-level fields never make a fight optional.
+        let mut flagged = prey_upon_fight();
+        flagged.optional_targeting = true;
+        flagged.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }));
+        assert!(!optional(flagged));
     }
 
     #[test]

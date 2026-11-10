@@ -6167,6 +6167,7 @@ fn same_node_coin_scope(won: bool) {
                     relation: SharedQualityRelation::Shares,
                 },
             ])),
+            up_to_one: None,
         },
     );
     let mut scenario = GameScenario::new();
@@ -6741,6 +6742,7 @@ fn coin_mixed_slot_static_pool_covers_player_and_object_elections() {
             Effect::Fight {
                 subject: TargetFilter::Any,
                 target: TargetFilter::Typed(TypedFilter::creature()),
+                up_to_one: None,
             },
         )
         .sub_ability(shared_type_destroy());
@@ -6826,9 +6828,9 @@ fn coin_mixed_slot_static_pool_covers_player_and_object_elections() {
 }
 
 // Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this shape:
-// A creature target precedes a coin whose lost branch holds an optional two-target fight (an
-// artifact, then a permanent sharing its type); skipping the artifact leaves the outer creature as
-// antecedent. Nearest printed card: Invert Polarity ("Choose target spell, then flip a coin. If you
+// A creature target precedes a coin whose lost branch holds a fight whose fighter is up to one
+// target (an artifact, then a permanent sharing its type); skipping the artifact leaves the outer
+// creature as antecedent. Nearest printed card: Invert Polarity ("Choose target spell, then flip a coin. If you
 // win the flip, gain control of that spell and you may choose new targets for it. If you lose the
 // flip, counter that spell."); Mogg Assassin ("{T}: You choose target creature an opponent
 // controls, and that opponent chooses target creature. Flip a coin. If you win the flip, destroy
@@ -6837,7 +6839,7 @@ fn coin_mixed_slot_static_pool_covers_player_and_object_elections() {
 // targets; neither has optional targeting or a dependency.
 #[test]
 fn coin_optional_same_node_election_keeps_the_ancestor_in_static_scope() {
-    let mut branch = AbilityDefinition::new(
+    let branch = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Fight {
             subject: TargetFilter::Typed(TypedFilter::new(
@@ -6848,9 +6850,9 @@ fn coin_optional_same_node_election_keeps_the_ancestor_in_static_scope() {
                 .target_filter()
                 .unwrap()
                 .clone(),
+            up_to_one: Some(engine::types::ability::FightSlotRole::Subject),
         },
     );
-    branch.optional_targeting = true;
     let definition = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::TargetOnly {
@@ -6925,8 +6927,12 @@ fn coin_optional_same_node_election_keeps_the_ancestor_in_static_scope() {
         .current_legal_targets
         .iter()
         .all(|target| static_pool.contains(target)));
+    // CR 601.2c: the fought creature is required, so it is chosen from the
+    // ancestor-scoped pool.
     runner
-        .act(GameAction::ChooseTarget { target: None })
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(victim)),
+        })
         .unwrap();
     let mut events = Vec::new();
     finish(&mut runner, &mut events);
@@ -6935,6 +6941,8 @@ fn coin_optional_same_node_election_keeps_the_ancestor_in_static_scope() {
         vec![false],
         "reach: optional branch resolves after elections"
     );
+    // CR 701.14a + CR 701.14b: a two-slot fight holding one target does not
+    // fight, so the chosen victim is untouched.
     assert_eq!(runner.state().objects[&ancestor].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&artifact].zone, Zone::Battlefield);

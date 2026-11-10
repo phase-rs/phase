@@ -393,8 +393,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, Comparator, Effect, ManaContribution, ManaProduction, MultiTargetSpec,
-        QuantityExpr, QuantityRef, TargetFilter,
+        AbilityCondition, Comparator, Effect, FightSlotRole, ManaContribution, ManaProduction,
+        MultiTargetSpec, QuantityExpr, QuantityRef, TargetFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::ZoneChangeRecord;
@@ -431,6 +431,7 @@ mod tests {
             Effect::Fight {
                 target: TargetFilter::Any,
                 subject: TargetFilter::SelfRef,
+                up_to_one: None,
             },
             vec![TargetRef::Object(target)],
             source,
@@ -468,6 +469,7 @@ mod tests {
             Effect::Fight {
                 target: TargetFilter::Any,
                 subject: TargetFilter::SelfRef,
+                up_to_one: None,
             },
             vec![TargetRef::Object(bear), TargetRef::Object(wolf)],
             tracker,
@@ -598,6 +600,7 @@ mod tests {
             Effect::Fight {
                 target: TargetFilter::Any,
                 subject: TargetFilter::Any,
+                up_to_one: None,
             },
             vec![TargetRef::Object(attacker), TargetRef::Object(victim)],
             attacker,
@@ -709,6 +712,7 @@ mod tests {
                     crate::types::ability::TypedFilter::creature()
                         .properties(vec![crate::types::ability::FilterProp::EnchantedBy]),
                 ),
+                up_to_one: None,
             },
             vec![TargetRef::Object(wolf)],
             aura_id,
@@ -1027,6 +1031,7 @@ mod tests {
             Effect::Fight {
                 target: TargetFilter::ParentTarget,
                 subject: TargetFilter::SelfRef,
+                up_to_one: None,
             },
             vec![TargetRef::Object(a)],
             a, // source
@@ -1045,6 +1050,7 @@ mod tests {
             Effect::Fight {
                 target: TargetFilter::ParentTarget,
                 subject: TargetFilter::ParentTarget,
+                up_to_one: None,
             },
             vec![TargetRef::Object(a)],
             a,
@@ -1102,6 +1108,7 @@ mod tests {
             Effect::Fight {
                 subject: TargetFilter::TriggeringSource,
                 target: TargetFilter::Any,
+                up_to_one: None,
             },
             vec![TargetRef::Object(opponent)],
             tolsimir,
@@ -1141,6 +1148,7 @@ mod tests {
             Effect::Fight {
                 subject: TargetFilter::ParentTarget,
                 target: TargetFilter::Any,
+                up_to_one: None,
             },
             vec![TargetRef::Object(opponent)],
             parent_fighter,
@@ -1156,49 +1164,60 @@ mod tests {
     }
 
     /// CR 115.6 + CR 701.14a: empty object targets + `targeting_is_optional()`
-    /// is `Ok(None)`, not `Err(MissingParam("Fight target"))`.
+    /// is `Ok(None)`, not `Err(MissingParam("Fight target"))`. Optionality is the
+    /// printed operand's own (`Effect::Fight::up_to_one`); the ability-level
+    /// `optional_targeting` / `multi_target` never make a fight optional.
     #[test]
     fn optional_empty_fight_targets_are_ok_none() {
         let mut state = GameState::new_two_player(42);
         let source = make_creature(&mut state, PlayerId(0), "Fighter", 1, 1);
 
-        let mut via_multi = ResolvedAbility::new(
+        let optional_opponent = ResolvedAbility::new(
             Effect::Fight {
                 subject: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
+                up_to_one: Some(FightSlotRole::Opponent),
             },
             vec![],
             source,
             PlayerId(0),
         );
-        via_multi.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }));
-        assert!(via_multi.targeting_is_optional());
+        assert!(optional_opponent.targeting_is_optional());
         assert_eq!(
-            resolve_fight_fighters(&state, &via_multi).unwrap(),
+            resolve_fight_fighters(&state, &optional_opponent).unwrap(),
             None,
-            "multi_target up_to(1) with zero chosen objects must no-op"
+            "an optional fought creature with zero chosen objects must no-op"
         );
 
-        let mut via_flag = ResolvedAbility::new(
+        // Hostile: the ability-level fields do not express fight cardinality.
+        let mut ability_level_only = ResolvedAbility::new(
             Effect::Fight {
                 subject: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
+                up_to_one: None,
             },
             vec![],
             source,
             PlayerId(0),
         );
-        via_flag.optional_targeting = true;
-        assert_eq!(
-            resolve_fight_fighters(&state, &via_flag).unwrap(),
-            None,
-            "optional_targeting with zero chosen objects must no-op"
-        );
+        ability_level_only.optional_targeting = true;
+        ability_level_only.multi_target =
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }));
+        assert!(!ability_level_only.targeting_is_optional());
+        match resolve_fight_fighters(&state, &ability_level_only) {
+            Err(EffectError::MissingParam(msg)) => {
+                assert_eq!(msg, "Fight target");
+            }
+            other => {
+                panic!("ability-level optionality must not free a fight's target, got {other:?}")
+            }
+        }
 
         let required = ResolvedAbility::new(
             Effect::Fight {
                 subject: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
+                up_to_one: None,
             },
             vec![],
             source,

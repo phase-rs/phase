@@ -2377,12 +2377,15 @@ fn lower_trigger_effect_chain(
     // host_target`), not through a trigger-body scan. The old stamp let any
     // later "up to one target" in the same trigger body mark a mandatory Attach
     // host optional (Hunter's Bow, Novel Nunchaku), so the resolver's declined-
-    // host no-op made an illegal decline look legal.
+    // host no-op made an illegal decline look legal. A `Fight` owns its
+    // operands' quantifiers through `Effect::Fight::up_to_one`, so the stamp
+    // would free a required fighter (Favored Enemy; Gut, Fanatical Priestess).
     if modifiers.has_up_to
         && ability.multi_target.is_none()
         && !matches!(
             *ability.effect,
             crate::types::ability::Effect::Attach { .. }
+                | crate::types::ability::Effect::Fight { .. }
         )
         && ability
             .effect

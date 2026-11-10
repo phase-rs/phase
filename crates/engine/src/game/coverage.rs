@@ -19,15 +19,15 @@ use crate::parser::oracle_effect::imperative::try_parse_em_dash_die_result_line;
 use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind, OracleDiagnostic};
 use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
-    ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
-    AttackedYouScope, AttackerBlockStatus, CardTypeSetSource, ChoiceType, CoinFlipResult,
-    CoinFlipRun, CombatHistoryScope, CommanderOwnership, Comparator, ContinuousEffectOnset,
-    ContinuousModification, ControllerRef, CountScope, CounterKindChooser, CounterKindDomain,
-    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
-    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
-    ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition, LibraryShuffleMode,
-    ManaProduction, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
+    fight_slots, fight_subject_needs_target_slot, AbilityCondition, AbilityCost, AbilityDefinition,
+    AbilityKind, AbilityUseTally, ActivationRestriction, AdditionalCost, AggregateFunction,
+    AttachmentReferent, AttackSubject, AttackedYouScope, AttackerBlockStatus, CardTypeSetSource,
+    ChoiceType, CoinFlipResult, CoinFlipRun, CombatHistoryScope, CommanderOwnership, Comparator,
+    ContinuousEffectOnset, ContinuousModification, ControllerRef, CountScope, CounterKindChooser,
+    CounterKindDomain, CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode,
+    Duration, EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FightSlotRole,
+    FightSlots, FilterProp, ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition,
+    LibraryShuffleMode, ManaProduction, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
     ObjectSelectionCardinality, ObjectSelectionEligibility, Parity, ParsedCondition,
     PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValue,
     PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
@@ -3056,12 +3056,39 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ChoosePermanent { filter } => {
             d.push(("choose".into(), fmt_target(filter)));
         }
+        // CR 601.2c + CR 115.6 + CR 701.14a: a fight reports the creature fought,
+        // the fighter when it is announced as a target, and which declared operand
+        // its printed "up to one" frees. That operand is read from the `FightSlots`
+        // authority: the ability-level `multi_target` no longer carries a fight's
+        // cardinality, and a role the fight does not declare frees nothing. Gut,
+        // Fanatical Priestess ("up to one target creature you control fights target
+        // creature you don't control") reports the fighter; Favored Enemy ("target
+        // creature you control fights up to one target creature you don't control")
+        // reports the fought creature. Keys are emitted only when set (the
+        // `Effect::Mana` per-role rule), so a required fight whose fighter is not a
+        // target (Ent's Fury) keeps a byte-identical signature.
+        Effect::Fight {
+            target,
+            subject,
+            up_to_one: _,
+        } => {
+            d.push(("target".into(), fmt_target(target)));
+            if fight_subject_needs_target_slot(subject) {
+                d.push(("fighter".into(), fmt_target(subject)));
+            }
+            if let Some(role) = fight_slots(effect).and_then(FightSlots::optional_role) {
+                let operand = match role {
+                    FightSlotRole::Subject => "fighter",
+                    FightSlotRole::Opponent => "fought creature",
+                };
+                d.push(("up to one".into(), operand.into()));
+            }
+        }
         Effect::Destroy { target, .. }
         | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
         | Effect::Attach { target, .. }
         | Effect::UnattachAll { target, .. }
-        | Effect::Fight { target, .. }
         | Effect::CopySpell { target, .. }
         | Effect::CastCopyOfCard { target, .. }
         | Effect::BecomeCopy { target, .. }
@@ -16905,6 +16932,133 @@ mod tests {
                 .iter()
                 .any(|(key, value)| key == "condition" && value == "lost life this turn"));
         }
+    }
+
+    /// Parse `oracle` as one card face of the given core type.
+    fn oracle_face(name: &str, card_type: &str, oracle: &str) -> CardFace {
+        let parsed =
+            crate::parser::parse_oracle_text(oracle, name, &[], &[card_type.to_string()], &[]);
+        CardFace {
+            name: name.into(),
+            oracle_text: Some(oracle.into()),
+            abilities: parsed.abilities,
+            triggers: parsed.triggers,
+            static_abilities: parsed.statics,
+            replacements: parsed.replacements,
+            keywords: parsed.extracted_keywords,
+            parse_warnings: parsed.parse_warnings,
+            ..Default::default()
+        }
+    }
+
+    /// The details of the only parse item labelled `Fight` (positive reach
+    /// guard: exactly one such item).
+    fn fight_item_details(face: &CardFace) -> Vec<(String, String)> {
+        fn collect<'a>(items: &'a [ParsedItem], found: &mut Vec<&'a ParsedItem>) {
+            for item in items {
+                if item.label == "Fight" {
+                    found.push(item);
+                }
+                collect(&item.children, found);
+            }
+        }
+        let items = build_parse_details_for_face(face);
+        let mut found = Vec::new();
+        collect(&items, &mut found);
+        assert_eq!(found.len(), 1, "{}: one Fight item: {items:#?}", face.name);
+        let details = found[0].details.clone();
+        assert!(
+            details.iter().any(|(key, _)| key == "target"),
+            "{}: the fought creature is reported: {details:?}",
+            face.name
+        );
+        details
+    }
+
+    fn detail<'a>(details: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        details
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// CR 601.2c + CR 115.6 + CR 701.14a: a fight's parse details name the
+    /// operand its printed "up to one" frees — read through the `FightSlots`
+    /// authority, not the ability-level `multi_target` — and the fighter when
+    /// it is announced as a target.
+    #[test]
+    fn fight_parse_details_name_the_up_to_one_operand() {
+        let favored_enemy = fight_item_details(&oracle_face(
+            "Favored Enemy",
+            "Enchantment",
+            "When this enchantment enters, target creature you control fights up to one target creature you don't control.",
+        ));
+        assert_eq!(detail(&favored_enemy, "up to one"), Some("fought creature"));
+        assert!(detail(&favored_enemy, "fighter").is_some());
+        assert_eq!(detail(&favored_enemy, "targets"), None);
+
+        let gut = fight_item_details(&oracle_face(
+            "Gut, Fanatical Priestess",
+            "Creature",
+            "When Gut, Fanatical Priestess enters, up to one target creature you control fights target creature you don't control. If the creature you don't control would die this turn, exile it instead.",
+        ));
+        assert_eq!(detail(&gut, "up to one"), Some("fighter"));
+        assert!(detail(&gut, "fighter").is_some());
+        assert_eq!(detail(&gut, "targets"), None);
+
+        let earth_rumble = fight_item_details(&oracle_face(
+            "Earth Rumble",
+            "Sorcery",
+            "Earthbend 2. When you do, up to one target creature you control fights target creature an opponent controls.",
+        ));
+        assert_eq!(detail(&earth_rumble, "up to one"), Some("fighter"));
+        assert_eq!(detail(&earth_rumble, "targets"), None);
+
+        // CR 115.10a: the source fights; it is not a target.
+        let apex_face = oracle_face(
+            "Apex Altisaur",
+            "Creature",
+            "When this creature enters, it fights up to one target creature you don't control.",
+        );
+        let apex = fight_item_details(&apex_face);
+        assert_eq!(detail(&apex, "up to one"), Some("fought creature"));
+        assert_eq!(detail(&apex, "fighter"), None);
+
+        let prey_upon = fight_item_details(&oracle_face(
+            "Prey Upon",
+            "Sorcery",
+            "Target creature you control fights target creature you don't control.",
+        ));
+        assert!(detail(&prey_upon, "fighter").is_some());
+        assert_eq!(detail(&prey_upon, "up to one"), None);
+
+        let ents_fury = fight_item_details(&oracle_face(
+            "Ent's Fury",
+            "Sorcery",
+            "Put a +1/+1 counter on target creature you control if its power is 4 or greater. Then that creature gets +1/+1 until end of turn and fights target creature you don't control.",
+        ));
+        assert_eq!(detail(&ents_fury, "fighter"), None);
+        assert_eq!(detail(&ents_fury, "up to one"), None);
+
+        // Authority, not raw field. Synthetic: no printed card prints "up to
+        // one" on a fighter that declares no slot (nearest printed card: Apex
+        // Altisaur). A display that read `up_to_one` directly would print
+        // `fighter`; the authority frees no undeclared role (CR 601.2c).
+        let apex_target = apex_face
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .find_map(|execute| match &*execute.effect {
+                Effect::Fight { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .expect("Apex Altisaur's enters trigger fights");
+        let undeclared = effect_details(&Effect::Fight {
+            subject: TargetFilter::SelfRef,
+            target: apex_target,
+            up_to_one: Some(FightSlotRole::Subject),
+        });
+        assert_eq!(detail(&undeclared, "up to one"), None, "{undeclared:?}");
     }
 
     /// Exact cardinality and counter-removal eligibility are semantic parser

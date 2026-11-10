@@ -11915,6 +11915,7 @@ mod tests {
                 Effect::Fight {
                     subject: parent.clone(),
                     target: tracked.clone(),
+                    up_to_one: None,
                 },
                 false,
                 None,
@@ -11923,6 +11924,7 @@ mod tests {
                 Effect::Fight {
                     subject: creature.clone(),
                     target: tracked.clone(),
+                    up_to_one: None,
                 },
                 true,
                 None,

@@ -6209,6 +6209,12 @@ impl MultiTargetSpec {
         matches!(self.min, QuantityExpr::Fixed { value: 0 })
     }
 
+    /// CR 115.6: "up to one" — zero or one target. `up_to(Fixed 1)` and
+    /// `fixed(0, 1)` are the same value.
+    pub fn is_up_to_one(&self) -> bool {
+        self.min_is_fixed_zero() && self.max == Some(QuantityExpr::Fixed { value: 1 })
+    }
+
     pub fn fixed_min_usize(&self) -> Option<usize> {
         match self.min {
             QuantityExpr::Fixed { value } if value >= 0 => Some(value as usize),
@@ -22770,6 +22776,15 @@ pub enum Effect {
         /// Set to AttachedTo for "enchanted/equipped creature fights" patterns.
         #[serde(default = "default_target_filter_self_ref")]
         subject: TargetFilter,
+        /// CR 115.6 + CR 601.2c: the declared fighter whose printed "up to one"
+        /// lets its controller choose no target for it — `Subject` for "up to one
+        /// target creature you control fights target creature …" (Earth Rumble;
+        /// Gut, Fanatical Priestess), `Opponent` for "… fights up to one target
+        /// creature …" (Favored Enemy, Apex Altisaur). `None`: every declared
+        /// fighter is required (Prey Upon). Both-optional is unrepresentable: no
+        /// printed fight quantifies both operands.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        up_to_one: Option<FightSlotRole>,
     },
     Bounce {
         #[serde(default = "default_target_filter_any")]
@@ -26667,7 +26682,7 @@ pub fn fight_subject_needs_target_slot(subject: &TargetFilter) -> bool {
 }
 
 /// CR 701.14a: Which of a fight's two creatures a declared target slot names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FightSlotRole {
     /// The fighter (`Effect::Fight::subject`): "target creature you control
     /// fights …".
@@ -26687,6 +26702,100 @@ pub fn fight_declared_slots<'a>(
         .into_iter()
         .chain(std::iter::once((FightSlotRole::Opponent, target)))
         .filter(|(_, filter)| !filter.is_context_ref())
+}
+
+/// CR 601.2c + CR 115.6 + CR 701.14a: the announcement shape of one fight —
+/// its declared slots and which of them its printed "up to one" frees.
+///
+/// This is the SINGLE AUTHORITY for fight-slot cardinality. Its consumers are
+/// target-slot collection, slot specs, both target assigners (step-by-step and
+/// bulk), bulk announcement validation, `minimum_targets_in_chain`, the
+/// CR 608.2b validation arm, `occurrence_binds_prior`,
+/// `ResolvedAbility::{targeting_is_optional, fight_slot_is_optional}` (and
+/// through them `resolve_fight_fighters`), and the coverage parse details
+/// (`effect_details`). For a fight, the ability-level `optional_targeting` and
+/// `multi_target` never express cardinality.
+#[derive(Debug, Clone, Copy)]
+pub struct FightSlots<'a> {
+    subject: &'a TargetFilter,
+    target: &'a TargetFilter,
+    up_to_one: Option<FightSlotRole>,
+}
+
+/// The fight-slot authority for `effect`; `Some` only for `Effect::Fight`.
+pub fn fight_slots(effect: &Effect) -> Option<FightSlots<'_>> {
+    match effect {
+        Effect::Fight {
+            subject,
+            target,
+            up_to_one,
+        } => Some(FightSlots::new(subject, target, *up_to_one)),
+        _ => None,
+    }
+}
+
+impl<'a> FightSlots<'a> {
+    pub fn new(
+        subject: &'a TargetFilter,
+        target: &'a TargetFilter,
+        up_to_one: Option<FightSlotRole>,
+    ) -> Self {
+        Self {
+            subject,
+            target,
+            up_to_one,
+        }
+    }
+
+    /// CR 601.2c: declared slots in announcement order (`fight_declared_slots`).
+    pub fn declared(self) -> impl Iterator<Item = (FightSlotRole, &'a TargetFilter)> + 'a {
+        fight_declared_slots(self.subject, self.target)
+    }
+
+    /// CR 115.6: the declared role the printed "up to one" frees, if any. A role
+    /// the fight does not declare frees nothing (CR 601.2c: only declared
+    /// targets are announced).
+    pub fn optional_role(self) -> Option<FightSlotRole> {
+        let role = self.up_to_one?;
+        self.declared()
+            .any(|(declared, _)| declared == role)
+            .then_some(role)
+    }
+
+    /// CR 115.6: whether `role` may receive no target.
+    pub fn is_optional(self, role: FightSlotRole) -> bool {
+        self.optional_role() == Some(role)
+    }
+
+    /// CR 601.2c: declared roles that must receive a target.
+    pub fn required_count(self) -> usize {
+        self.declared()
+            .filter(|(role, _)| !self.is_optional(*role))
+            .count()
+    }
+
+    /// CR 115.6: zero targets is a legal announcement — at least one declared
+    /// slot, and every declared slot optional.
+    pub fn permits_zero_targets(self) -> bool {
+        self.declared().next().is_some() && self.required_count() == 0
+    }
+
+    /// CR 601.2c + CR 115.6 + CR 608.2b: the declared slots a node's own
+    /// `chosen` targets occupy, in order. A required role is never omitted, so
+    /// a list shorter than the declaration omitted exactly the optional role.
+    pub fn occupied(
+        self,
+        chosen: usize,
+    ) -> impl Iterator<Item = (FightSlotRole, &'a TargetFilter)> + 'a {
+        let omitted = if chosen < self.declared().count() {
+            self.optional_role()
+        } else {
+            None
+        };
+        self.declared()
+            .filter(move |(role, _)| Some(*role) != omitted)
+            .take(chosen)
+    }
 }
 
 /// CR 601.2c + CR 701.14a: Only declared fighters occupy announcement slots.
@@ -26724,7 +26833,10 @@ pub fn effect_stack_target_declaration_matching(
     if paired_subject_filters(effect).is_some() {
         return paired_subject_slot_filters(effect).any(predicate);
     }
-    if let Effect::Fight { subject, target } = effect {
+    if let Effect::Fight {
+        subject, target, ..
+    } = effect
+    {
         return fight_declared_slot_filters(subject, target).any(predicate);
     }
     if let Effect::MoveCounters {
@@ -49230,6 +49342,138 @@ mod tests {
             }),
         }
         .contains_unimplemented());
+    }
+
+    fn creature_you_control() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+    }
+
+    fn creature_you_dont_control() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent))
+    }
+
+    fn roles<'a>(
+        slots: impl Iterator<Item = (FightSlotRole, &'a TargetFilter)>,
+    ) -> Vec<FightSlotRole> {
+        slots.map(|(role, _)| role).collect()
+    }
+
+    /// CR 601.2c + CR 115.6: Gut, Fanatical Priestess ("up to one target
+    /// creature you control fights target creature you don't control") frees
+    /// the fighter; a one-target list omitted exactly that optional fighter.
+    #[test]
+    fn fight_slots_optional_fighter_occupancy() {
+        let (subject, target) = (creature_you_control(), creature_you_dont_control());
+        let slots = FightSlots::new(&subject, &target, Some(FightSlotRole::Subject));
+        assert_eq!(slots.declared().count(), 2);
+        assert_eq!(slots.optional_role(), Some(FightSlotRole::Subject));
+        assert_eq!(slots.required_count(), 1);
+        assert!(!slots.permits_zero_targets());
+        assert_eq!(roles(slots.occupied(1)), vec![FightSlotRole::Opponent]);
+        assert_eq!(
+            roles(slots.occupied(2)),
+            vec![FightSlotRole::Subject, FightSlotRole::Opponent]
+        );
+        assert!(roles(slots.occupied(0)).is_empty());
+    }
+
+    /// CR 601.2c + CR 115.6: Favored Enemy ("target creature you control fights
+    /// up to one target creature you don't control") frees the fought creature.
+    #[test]
+    fn fight_slots_optional_fought_creature_occupancy() {
+        let (subject, target) = (creature_you_control(), creature_you_dont_control());
+        let slots = FightSlots::new(&subject, &target, Some(FightSlotRole::Opponent));
+        assert_eq!(slots.required_count(), 1);
+        assert!(slots.is_optional(FightSlotRole::Opponent));
+        assert!(!slots.is_optional(FightSlotRole::Subject));
+        assert_eq!(roles(slots.occupied(1)), vec![FightSlotRole::Subject]);
+    }
+
+    /// CR 601.2c: Prey Upon ("Target creature you control fights target
+    /// creature you don't control") requires both fighters.
+    #[test]
+    fn fight_slots_both_required() {
+        let (subject, target) = (creature_you_control(), creature_you_dont_control());
+        let slots = FightSlots::new(&subject, &target, None);
+        assert_eq!(slots.optional_role(), None);
+        assert_eq!(slots.required_count(), 2);
+        assert!(!slots.permits_zero_targets());
+        assert_eq!(roles(slots.occupied(1)), vec![FightSlotRole::Subject]);
+    }
+
+    /// CR 115.6 + CR 115.10a: Apex Altisaur ("When this creature enters, it
+    /// fights up to one target creature you don't control") declares only the
+    /// fought creature, and it is optional.
+    #[test]
+    fn fight_slots_one_declared_optional_slot_permits_zero() {
+        let (subject, target) = (TargetFilter::SelfRef, creature_you_dont_control());
+        let slots = FightSlots::new(&subject, &target, Some(FightSlotRole::Opponent));
+        assert_eq!(roles(slots.declared()), vec![FightSlotRole::Opponent]);
+        assert_eq!(slots.required_count(), 0);
+        assert!(slots.permits_zero_targets());
+        assert!(roles(slots.occupied(0)).is_empty());
+    }
+
+    /// CR 601.2c: Rivals' Duel's fight ("Choose two target creatures that share
+    /// no creature types. Those creatures fight each other.") reads both
+    /// fighters from the parent announcement, so it declares no slot and zero
+    /// targets is not a choice it offers.
+    #[test]
+    fn fight_slots_without_declared_slots() {
+        let slots = FightSlots::new(
+            &TargetFilter::ParentTarget,
+            &TargetFilter::ParentTarget,
+            None,
+        );
+        assert_eq!(slots.declared().count(), 0);
+        assert_eq!(slots.required_count(), 0);
+        assert!(!slots.permits_zero_targets());
+    }
+
+    /// CR 601.2c: an undeclared role frees nothing. Synthetic: no printed card
+    /// prints "up to one" on a fighter that declares no slot, and the parser
+    /// lowers that shape to `fight_operand_cardinality`. Nearest printed card:
+    /// Apex Altisaur ("When this creature enters, it fights up to one target
+    /// creature you don't control."), whose fighter is the source and not a
+    /// target (CR 115.10a). Kept because `fight_slots` also reads deserialized
+    /// stack state.
+    #[test]
+    fn fight_slots_undeclared_optional_role_frees_nothing() {
+        let (subject, target) = (TargetFilter::SelfRef, creature_you_dont_control());
+        let slots = FightSlots::new(&subject, &target, Some(FightSlotRole::Subject));
+        assert_eq!(slots.optional_role(), None);
+        assert!(!slots.is_optional(FightSlotRole::Subject));
+        assert_eq!(slots.required_count(), 1);
+        assert!(!slots.permits_zero_targets());
+    }
+
+    /// `fight_slots` is the authority only over `Effect::Fight`.
+    #[test]
+    fn fight_slots_reads_only_fight_effects() {
+        let fight = Effect::Fight {
+            target: creature_you_dont_control(),
+            subject: creature_you_control(),
+            up_to_one: Some(FightSlotRole::Subject),
+        };
+        assert_eq!(
+            fight_slots(&fight).and_then(FightSlots::optional_role),
+            Some(FightSlotRole::Subject)
+        );
+        assert!(fight_slots(&Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+        })
+        .is_none());
+    }
+
+    /// CR 115.6: "up to one" is zero-or-one, however it is spelled.
+    #[test]
+    fn multi_target_is_up_to_one() {
+        assert!(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }).is_up_to_one());
+        assert!(MultiTargetSpec::fixed(0, 1).is_up_to_one());
+        assert!(!MultiTargetSpec::fixed(0, 2).is_up_to_one());
+        assert!(!MultiTargetSpec::unlimited(0).is_up_to_one());
+        assert!(!MultiTargetSpec::exact(QuantityExpr::Fixed { value: 1 }).is_up_to_one());
     }
 }
 

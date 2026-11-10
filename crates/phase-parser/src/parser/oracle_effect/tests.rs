@@ -23273,12 +23273,141 @@ fn earth_rumble_head_stays_unstamped_and_the_fight_takes_up_to_one() {
     );
     assert_eq!(def.multi_target, None, "head must stay unstamped: {def:#?}");
 
+    // CR 115.6 + CR 601.2c: the subject's "up to one" frees the fighter it
+    // names, on the effect; the ability carries no spec.
     let fight = parse_effect_clause(
         "up to one target creature you control fights target creature an opponent controls",
         &mut ParseContext::default(),
     );
-    assert!(matches!(fight.effect, Effect::Fight { .. }), "{fight:#?}");
-    assert_eq!(fight.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+    match &fight.effect {
+        Effect::Fight {
+            subject: TargetFilter::Typed(subject),
+            up_to_one,
+            ..
+        } => {
+            assert_eq!(*up_to_one, Some(FightSlotRole::Subject), "{fight:#?}");
+            assert_eq!(subject.controller, Some(ControllerRef::You), "{fight:#?}");
+            assert!(
+                subject.type_filters.contains(&TypeFilter::Creature),
+                "{fight:#?}"
+            );
+        }
+        other => panic!("expected a fight with a declared fighter, got {other:#?}"),
+    }
+    assert_eq!(fight.multi_target, None, "{fight:#?}");
+    assert!(!fight.optional_targeting, "{fight:#?}");
+}
+
+/// Every fight node in a parsed card, in walk order: its `up_to_one` and
+/// whether the node carries any ability-level target cardinality.
+fn parsed_fight_nodes(
+    parsed: &crate::parser::oracle::ParsedAbilities,
+) -> Vec<(Option<FightSlotRole>, bool)> {
+    let nodes = std::cell::RefCell::new(Vec::new());
+    let record = |def: &AbilityDefinition| {
+        if let Effect::Fight { up_to_one, .. } = def.effect.as_ref() {
+            nodes.borrow_mut().push((
+                *up_to_one,
+                def.multi_target.is_some() || def.optional_targeting,
+            ));
+        }
+        false
+    };
+    for def in parsed
+        .abilities
+        .iter()
+        .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+    {
+        crate::types::ability_visit::ability_tree_any(def, &record);
+    }
+    nodes.into_inner()
+}
+
+/// CR 115.6 + CR 601.2c: the parser binds a printed "up to one" to the operand
+/// it modifies, for every printed fight shape — fighter optional (Earth Rumble,
+/// Gut), fought creature optional with a declared fighter or with a source,
+/// host, event-object or anaphoric fighter, and both required (Prey Upon,
+/// Ent's Fury). No fight node carries an ability-level spec or flag. Each card
+/// is its verbatim Oracle text (reminder text omitted).
+#[test]
+fn fight_up_to_one_binds_the_printed_operand() {
+    use FightSlotRole::{Opponent, Subject};
+    type Case<'a> = (
+        &'a str,
+        &'a [&'a str],
+        &'a [&'a str],
+        &'a str,
+        &'a [Option<FightSlotRole>],
+    );
+    let cases: &[Case] = &[
+        ("Earth Rumble", &["Sorcery"], &[], "Earthbend 2. When you do, up to one target creature you control fights target creature an opponent controls.", &[Some(Subject)]),
+        ("Gut, Fanatical Priestess", &["Creature"], &["Goblin", "Shaman"], "When Gut, Fanatical Priestess enters, up to one target creature you control fights target creature you don't control. If the creature you don't control would die this turn, exile it instead.", &[Some(Subject)]),
+        ("Favored Enemy", &["Enchantment"], &[], "When this enchantment enters, target creature you control fights up to one target creature you don't control.", &[Some(Opponent)]),
+        ("Smell Fear", &["Sorcery"], &[], "Proliferate.\nTarget creature you control fights up to one target creature you don't control.", &[Some(Opponent)]),
+        ("Amok Time", &["Enchantment"], &["Saga"], "I — Target creature you control fights up to one target creature an opponent controls.\nII — You gain 3 life.\nIII — Return target creature card from your graveyard to your hand.", &[Some(Opponent)]),
+        ("Arni Slays the Troll", &["Enchantment"], &["Saga"], "I — Target creature you control fights up to one target creature you don't control.\nII — Add {R}. Put two +1/+1 counters on up to one target creature you control.\nIII — You gain life equal to the greatest power among creatures you control.", &[Some(Opponent)]),
+        ("Yoshimaru, Scrappy Stray", &["Creature"], &["Dog"], "When Yoshimaru enters, another target creature you control fights up to one target creature an opponent controls.\n{6}: Put a +1/+1 counter on target nonlegendary creature.", &[Some(Opponent)]),
+        ("The Super Hero Civil War", &["Enchantment"], &["Saga"], "I — Gain control of up to two target creatures with total mana value 6 or less for as long as this Saga remains on the battlefield.\nII — Creatures you control get +1/+1 and gain vigilance until end of turn.\nIII — Target creature you control fights up to one other target creature.", &[Some(Opponent)]),
+        ("Gimli's Reckless Might", &["Enchantment"], &[], "Creatures you control have haste.\nFormidable — Whenever you attack, if creatures you control have total power 8 or greater, target attacking creature you control fights up to one target creature you don't control.", &[Some(Opponent)]),
+        ("Apex Altisaur", &["Creature"], &["Dinosaur"], "When this creature enters, it fights up to one target creature you don't control.\nEnrage — Whenever this creature is dealt damage, it fights up to one target creature you don't control.", &[Some(Opponent), Some(Opponent)]),
+        ("Tolsimir, Friend to Wolves", &["Creature"], &["Elf", "Scout"], "When Tolsimir enters, create Voja, Friend to Elves, a legendary 3/3 green and white Wolf creature token.\nWhenever a Wolf you control enters, you gain 3 life and that creature fights up to one target creature you don't control.", &[Some(Opponent)]),
+        ("Boxing Ring", &["Artifact"], &[], "Whenever a creature you control enters, it fights up to one target creature you don't control with the same mana value.\n{T}: Create a Treasure token. Activate only if you control a creature that fought this turn.", &[Some(Opponent)]),
+        ("Novel Nunchaku", &["Artifact"], &["Equipment"], "When this Equipment enters, attach it to target creature you control. When you do, equipped creature fights up to one target creature an opponent controls.\nEquipped creature gets +1/+1 and has trample.\nEquip {3}", &[Some(Opponent)]),
+        ("Bridgeworks Battle", &["Sorcery"], &[], "Target creature you control gets +2/+2 until end of turn. It fights up to one target creature you don't control.", &[Some(Opponent)]),
+        ("Invasion of Muraganda", &["Battle"], &["Siege"], "When this Siege enters, put a +1/+1 counter on target creature you control. Then that creature fights up to one target creature you don't control.", &[Some(Opponent)]),
+        ("Back for More", &["Instant"], &[], "Return target creature card from your graveyard to the battlefield. When you do, it fights up to one target creature you don't control.", &[Some(Opponent)]),
+        ("Prey Upon", &["Sorcery"], &[], "Target creature you control fights target creature you don't control.", &[None]),
+        ("Ent's Fury", &["Sorcery"], &[], "Put a +1/+1 counter on target creature you control if its power is 4 or greater. Then that creature gets +1/+1 until end of turn and fights target creature you don't control.", &[None]),
+    ];
+    let to_strings = |words: &[&str]| words.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+    for (name, types, subtypes, oracle, expected) in cases {
+        let parsed =
+            parse_oracle_text(oracle, name, &[], &to_strings(types), &to_strings(subtypes));
+        let nodes = parsed_fight_nodes(&parsed);
+        assert_eq!(
+            nodes.iter().map(|(role, _)| *role).collect::<Vec<_>>(),
+            expected.to_vec(),
+            "{name}: one bound operand per fight node: {parsed:#?}"
+        );
+        assert!(
+            nodes.iter().all(|(_, ability_level)| !ability_level),
+            "{name}: no fight node carries an ability-level spec or flag: {parsed:#?}"
+        );
+    }
+
+    // CR 115.6: a trigger whose root is the fight keeps the root unstamped —
+    // the trigger-body "up to one" stamp excludes Fight.
+    for (name, card_type, oracle) in [
+        ("Apex Altisaur", "Creature", "When this creature enters, it fights up to one target creature you don't control."),
+        ("Favored Enemy", "Enchantment", "When this enchantment enters, target creature you control fights up to one target creature you don't control."),
+        ("Gut, Fanatical Priestess", "Creature", "When Gut, Fanatical Priestess enters, up to one target creature you control fights target creature you don't control. If the creature you don't control would die this turn, exile it instead."),
+    ] {
+        let parsed = parse_oracle_text(oracle, name, &[], &[card_type.to_string()], &[]);
+        let root = parsed.triggers[0].execute.as_deref().expect("trigger executes");
+        assert!(matches!(root.effect.as_ref(), Effect::Fight { .. }), "{name}: {root:#?}");
+        assert!(!root.optional_targeting, "{name}: {root:#?}");
+    }
+}
+
+/// CR 701.14a: both operands quantified is a shape no printed fight has, so it
+/// fails strictly instead of guessing an operand. Synthetic grammar; nearest
+/// printed cards Earth Rumble ("up to one target creature you control fights
+/// target creature an opponent controls") and Favored Enemy ("target creature
+/// you control fights up to one target creature you don't control").
+#[test]
+fn fight_with_both_operands_quantified_fails_strictly() {
+    let parsed = parse_oracle_text(
+        "Up to one target creature you control fights up to one target creature you don't control.",
+        "Synthetic Brawl",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert!(
+        parsed_has_unimplemented_named(&parsed, "fight_operand_cardinality"),
+        "{parsed:#?}"
+    );
+    assert!(parsed_fight_nodes(&parsed).is_empty(), "{parsed:#?}");
 }
 
 #[test]
@@ -45876,7 +46005,9 @@ fn suffix_legendary_condition_gates_counter_and_anaphoric_fight_subject() {
         .as_ref()
         .expect("expected fight sub-ability");
     match sub.effect.as_ref() {
-        Effect::Fight { target, subject } => {
+        Effect::Fight {
+            target, subject, ..
+        } => {
             assert_eq!(subject, &TargetFilter::ParentTarget);
             assert!(
                 matches!(target, TargetFilter::Typed(_)),

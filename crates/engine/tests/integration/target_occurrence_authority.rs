@@ -319,6 +319,7 @@ fn fight_copy(blink: bool, change_root: bool, alteration: Alteration) -> FightCo
         Effect::Fight {
             subject: TargetFilter::ParentTarget,
             target: TargetFilter::Typed(TypedFilter::creature().subtype("Elf".into())),
+            up_to_one: None,
         },
     )));
     let spell = s
@@ -701,6 +702,7 @@ fn implicit_ally_board(shroud: bool, printed: bool) -> ([u32; 2], [u32; 2], bool
             Effect::Fight {
                 subject: TargetFilter::ParentTarget,
                 target: TargetFilter::Typed(TypedFilter::creature().subtype("Elf".into())),
+                up_to_one: None,
             },
         )));
         root

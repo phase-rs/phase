@@ -8515,11 +8515,12 @@ pub(crate) fn extract_bounded_target_multi_target(text: &str) -> Option<MultiTar
 /// passes the remainder through unchanged — a malformed quoted "up to one
 /// target" is accepted as visible text; no corpus card has one.
 ///
-/// Capacity exclusions: `Counter`, `Attach`, `CopySpell`, `BecomeCopy`,
-/// `DealDamage`, `MoveCounters`, `Token` and `Transform` decline. These effects
-/// have no safe representation for a declined optional target yet (the resolver
-/// errors, acts on the wrong object, or a later stage drops the spec), so keep
-/// base behavior until the effect grows the capability.
+/// Exclusions: `Counter`, `Attach`, `Fight`, `CopySpell`, `BecomeCopy`,
+/// `DealDamage`, `MoveCounters`, `Token` and `Transform` decline. Apart from
+/// `Fight`, these effects have no safe representation for a declined optional
+/// target yet (the resolver errors, acts on the wrong object, or a later stage
+/// drops the spec), so keep base behavior until the effect grows the
+/// capability.
 /// - `Counter` has no field for the announced count, so "counter up to N
 ///   target …" cannot carry the spec (Double Negative, Katara's Reversal, Repel
 ///   Intruders, Repulsive Mutation, Tishana's Tidebinder).
@@ -8528,6 +8529,10 @@ pub(crate) fn extract_bounded_target_multi_target(text: &str) -> Option<MultiTar
 ///   `imperative.rs`, and writing the host's "up to one" into
 ///   `clause.multi_target` would bind the wrong operand (Luxior, Ignited; The
 ///   Aetherspark; Sting, Bilbo's Sword).
+/// - `Fight` owns each operand's count on `Effect::Fight::up_to_one`; an
+///   ability-level spec would merge both operands into one (Earth Rumble's
+///   optional fighter vs Favored Enemy's optional fought creature). This
+///   exclusion is permanent, not a capacity gap.
 /// - `CopySpell` copies one object and a zero-target decline would copy the top
 ///   of the stack instead (Display of Power).
 /// - `BecomeCopy` errors `MissingParam` on a declined copy source (Fleeting
@@ -8559,7 +8564,7 @@ pub(crate) fn extract_bounded_target_multi_target(text: &str) -> Option<MultiTar
 ///   declared optional target instead of falling through to `source_id`, then
 ///   lift the exclusion.
 ///
-/// Follow-ups (the reason each exclusion is temporary): the engine's
+/// Follow-ups (the reason each capacity exclusion is temporary): the engine's
 /// `MoveCounters` arms must move to `targeting_is_optional()`; `become_copy.rs`
 /// already honours `multi_target` in its slot path, but its resolver needs an
 /// explicit empty-source no-op instead of `MissingParam` (`become_copy.rs:64-74`);
@@ -8580,6 +8585,7 @@ pub(crate) fn extract_optional_target_multi_target(
         effect,
         Effect::Counter { .. }
             | Effect::Attach { .. }
+            | Effect::Fight { .. }
             | Effect::CopySpell { .. }
             | Effect::BecomeCopy { .. }
             | Effect::DealDamage { .. }
@@ -8640,10 +8646,12 @@ pub(crate) fn extract_optional_target_multi_target(
 ///   count on it would be inert (Razorgrass Invoker's subject `Pump`).
 ///   `EachSourceDealsDamage` is the one live carve-out: its untyped recipient
 ///   is the printed one ("any target", CR 115.4), so it keeps the spec.
-/// - `extract_optional_target_multi_target` declines the eight effects that
-///   cannot yet represent a declined optional target (`Counter`, `Attach`,
-///   `CopySpell`, `BecomeCopy`, `DealDamage`, `MoveCounters`, `Token`,
-///   `Transform`), keeping their base behavior.
+/// - `extract_optional_target_multi_target` declines nine effects (`Counter`,
+///   `Attach`, `Fight`, `CopySpell`, `BecomeCopy`, `DealDamage`,
+///   `MoveCounters`, `Token`, `Transform`): `Fight` because it owns each
+///   operand's count on `Effect::Fight::up_to_one`, the others because they
+///   cannot yet represent a declined optional target, keeping their base
+///   behavior.
 ///
 /// This function never writes `optional_targeting`; that flag belongs to the
 /// Attach HOST frame captured in `imperative.rs`, and non-Attach clauses are

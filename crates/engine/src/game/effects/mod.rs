@@ -9161,7 +9161,9 @@ fn effect_fields_read_filter_population(
         } => has_filter(attachment) || has_filter(target),
         Effect::UnattachAll { attachment, target } => has_filter(attachment) || has_filter(target),
         Effect::Surveil { target, .. } => has_filter(target),
-        Effect::Fight { target, subject } => has_filter(target) || has_filter(subject),
+        Effect::Fight {
+            target, subject, ..
+        } => has_filter(target) || has_filter(subject),
         Effect::Bounce { target, .. } => has_filter(target),
         Effect::BounceAll { target, .. } => has_filter(target),
         Effect::BecomeMonarch { target } => has_filter(target),
@@ -29195,6 +29197,7 @@ mod tests {
                                             Effect::Fight {
                                                 target: TargetFilter::Typed(TypedFilter::creature()),
                                                 subject: TargetFilter::ParentTarget,
+                                                up_to_one: None,
                                             },
                                             vec![],
                                             source,
@@ -52235,6 +52238,7 @@ mod tests {
                 effect_row(|subject| Effect::Fight {
                     target: TargetFilter::Any,
                     subject,
+                    up_to_one: None,
                 }),
             ),
             (
@@ -66639,6 +66643,7 @@ mod untargeted_target_only_choice_tests {
             Effect::Fight {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 subject: TargetFilter::ParentTarget,
+                up_to_one: None,
             },
             vec![],
             ObjectId(100),

@@ -1,19 +1,27 @@
-//! CR 115.6 + CR 601.2c + CR 701.14a: "up to one" on a fight makes only the
-//! creature being fought optional. The fighter is never optional.
+//! CR 115.6 + CR 601.2c + CR 701.14a: "up to one" on a fight frees exactly the
+//! operand it is printed on. The printed operand decides which fighter is
+//! optional; the other declared fighter stays required.
 //!
-//! - Two declared slots, "target creature you control fights up to one target
-//!   creature you don't control" (Favored Enemy, Arni Slays the Troll I, Amok
-//!   Time I): the fighter slot stays required.
+//! - Two declared slots, fought creature optional: "target creature you control
+//!   fights up to one target creature you don't control" (Favored Enemy, Smell
+//!   Fear, Arni Slays the Troll I, Amok Time I).
+//! - Two declared slots, fighter optional: "up to one target creature you
+//!   control fights target creature …" (Gut, Fanatical Priestess; Earth Rumble).
+//!   The fought creature can never be skipped, and an omitted fighter keeps its
+//!   identity through announcement, validation and resolution (CR 608.2b).
 //! - One declared slot, "it fights up to one target creature" after a targeted
 //!   pump (Bridgeworks Battle, Primal Might): the fight may be declined.
 //!
-//! Review finding on https://github.com/phase-rs/phase/pull/8820.
+//! Review findings on https://github.com/phase-rs/phase/pull/8820 and
+//! https://github.com/phase-rs/phase/pull/10714.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{EffectKind, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{TargetSelectionSlot, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, TargetSelectionSlot, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
@@ -59,24 +67,37 @@ fn favored_enemy(with_fighter: bool) -> Board {
     board(with_fighter, "Favored Enemy", FAVORED_ENEMY_ENTERS, true)
 }
 
-/// Cast Favored Enemy and stop at its enters trigger's target prompt, returning
+/// Cast the card under test and stop at its trigger's target prompt, returning
 /// the slots. `None` when the stack empties without one surfacing.
 fn cast_to_trigger_targets(board: &mut Board) -> Option<Vec<TargetSelectionSlot>> {
     let _commit = board.runner.cast(board.card).commit();
+    pass_to_trigger_targets(&mut board.runner).0
+}
+
+/// Pass priority until a trigger's target prompt surfaces (returning its
+/// slots) or the stack empties (`None`), collecting every event.
+fn pass_to_trigger_targets(
+    runner: &mut GameRunner,
+) -> (Option<Vec<TargetSelectionSlot>>, Vec<GameEvent>) {
+    let mut events = Vec::new();
     for _ in 0..80 {
-        match board.runner.state().waiting_for.clone() {
-            WaitingFor::TriggerTargetSelection { target_slots, .. } => return Some(target_slots),
-            WaitingFor::Priority { .. } if board.runner.state().stack.is_empty() => return None,
-            WaitingFor::Priority { .. } => {
-                board
-                    .runner
-                    .act(GameAction::PassPriority)
-                    .expect("pass toward the enters trigger");
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection { target_slots, .. } => {
+                return (Some(target_slots), events)
             }
-            other => panic!("unexpected wait while casting Favored Enemy: {other:?}"),
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
+                return (None, events)
+            }
+            WaitingFor::Priority { .. } => {
+                let result = runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass toward the trigger");
+                events.extend(result.events);
+            }
+            other => panic!("unexpected wait while driving toward the trigger: {other:?}"),
         }
     }
-    panic!("never reached the enters trigger's target prompt");
+    panic!("never reached a trigger target prompt or an empty stack");
 }
 
 fn choose(board: &mut Board, target: Option<ObjectId>) {
@@ -88,17 +109,50 @@ fn choose(board: &mut Board, target: Option<ObjectId>) {
         .expect("target choice accepted");
 }
 
-fn resolve_stack(board: &mut Board) {
+/// Pass priority until the stack is empty, returning every event.
+fn resolve_stack(board: &mut Board) -> Vec<GameEvent> {
+    drain_stack(&mut board.runner)
+}
+
+fn drain_stack(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let mut events = Vec::new();
     for _ in 0..80 {
-        if board.runner.state().stack.is_empty() {
-            return;
+        if runner.state().stack.is_empty() {
+            return events;
         }
-        board
-            .runner
+        let result = runner
             .act(GameAction::PassPriority)
             .expect("pass to resolve the stack");
+        events.extend(result.events);
     }
     panic!("stack did not resolve");
+}
+
+/// How many fights resolved (CR 701.14a), whether or not anyone fought.
+fn fights_resolved(events: &[GameEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Fight,
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// The completion boundary: an empty stack and a priority window.
+fn assert_completed(runner: &GameRunner) {
+    let state = runner.state();
+    assert!(state.stack.is_empty(), "stack: {:?}", state.stack);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "waiting for: {:?}",
+        state.waiting_for
+    );
 }
 
 /// CR 601.2c: one slot per "target", announced in order. The fighter slot is
@@ -375,4 +429,494 @@ fn boxing_ring_without_a_same_mana_value_creature_fights_nothing() {
         assert_eq!(state.objects[&untouched].zone, Zone::Battlefield);
         assert_eq!(state.objects[&untouched].damage_marked, 0);
     }
+}
+
+/// Gut, Fanatical Priestess's enters trigger (its second Oracle line,
+/// verbatim). Its first line, "Specialize {5}", is a separate ability not under
+/// test.
+const GUT_ENTERS: &str = "When Gut, Fanatical Priestess enters, up to one target creature you control fights target creature you don't control. If the creature you don't control would die this turn, exile it instead.";
+
+/// Earth Rumble (verbatim, reminder text dropped).
+const EARTH_RUMBLE: &str =
+    "Earthbend 2. When you do, up to one target creature you control fights target creature an opponent controls.";
+
+/// Ray of Command (verbatim).
+const RAY_OF_COMMAND: &str = "Untap target creature an opponent controls and gain control of it until end of turn. That creature gains haste until end of turn. When you lose control of the creature, tap it.";
+
+/// Smell Fear (verbatim, both lines, reminder text dropped).
+const SMELL_FEAR: &str =
+    "Proliferate.\nTarget creature you control fights up to one target creature you don't control.";
+
+/// A 3/3 "Champion" for you, a 2/2 for the opponent, and Gut (4/3) in your
+/// hand. Returns the unbuilt scenario so a row can add more cards, plus the
+/// Champion, the opponent's creature and Gut.
+fn gut_scenario() -> (GameScenario, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let champion = scenario.add_creature(P0, "Champion", 3, 3).id();
+    let opponent = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
+    let gut = scenario
+        .add_creature_to_hand_from_oracle(P0, "Gut, Fanatical Priestess", 4, 3, GUT_ENTERS)
+        .id();
+    (scenario, champion, opponent, gut)
+}
+
+fn gut_board() -> Board {
+    let (scenario, champion, opponent, gut) = gut_scenario();
+    Board {
+        runner: scenario.build(),
+        card: gut,
+        fighter: Some(champion),
+        opponent,
+    }
+}
+
+/// CR 115.6 + CR 601.2c: Gut's printed "up to one" is on the fighter, so the
+/// fighter slot is optional and the fought creature's slot is required.
+#[test]
+fn gut_fighter_optional_fought_required() {
+    let mut board = gut_board();
+    let slots = cast_to_trigger_targets(&mut board).expect("trigger asks for targets");
+    assert_eq!(slots.len(), 2, "fighter + fought creature: {slots:?}");
+    assert!(slots[0].optional, "the 'up to one' fighter is optional");
+    assert!(
+        !slots[1].optional,
+        "CR 601.2c: the fought creature is required"
+    );
+    for fighter in [board.fighter.unwrap(), board.card] {
+        assert!(slots[0].legal_targets.contains(&TargetRef::Object(fighter)));
+    }
+    assert_eq!(
+        slots[1].legal_targets,
+        vec![TargetRef::Object(board.opponent)]
+    );
+}
+
+/// CR 601.2c: after choosing a fighter, the required fought creature cannot
+/// be skipped.
+#[test]
+fn gut_declining_the_fought_creature_is_rejected() {
+    let mut board = gut_board();
+    let fighter = board.fighter;
+    cast_to_trigger_targets(&mut board).expect("trigger asks for targets");
+    choose(&mut board, fighter);
+    let before = board.runner.state().waiting_for.clone();
+    let declined = board.runner.act(GameAction::ChooseTarget { target: None });
+    assert!(
+        declined.is_err(),
+        "the fought creature is required, declining it must fail: {declined:?}"
+    );
+    assert_eq!(board.runner.state().waiting_for, before, "prompt unchanged");
+}
+
+/// CR 115.6 + CR 608.2b: a declined fighter keeps its identity, so the chosen
+/// fought creature is validated against its own role ("creature you don't
+/// control") and the ability resolves. CR 701.14b: a two-slot fight with only
+/// one creature does not fight.
+#[test]
+fn gut_declined_fighter_resolves_without_a_fight() {
+    let mut board = gut_board();
+    let opponent = board.opponent;
+    cast_to_trigger_targets(&mut board).expect("trigger asks for targets");
+    choose(&mut board, None);
+    choose(&mut board, Some(opponent));
+    let events = resolve_stack(&mut board);
+
+    assert_eq!(
+        fights_resolved(&events),
+        1,
+        "the trigger resolved rather than fizzled: {events:?}"
+    );
+    let state = board.runner.state();
+    for creature in [opponent, board.fighter.unwrap(), board.card] {
+        assert_eq!(state.objects[&creature].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&creature].damage_marked, 0);
+    }
+    assert_completed(&board.runner);
+}
+
+/// CR 701.14a: Gut's chosen pair fights.
+#[test]
+fn gut_selected_pair_fights() {
+    let mut board = gut_board();
+    let fighter = board.fighter.unwrap();
+    let opponent = board.opponent;
+    cast_to_trigger_targets(&mut board).expect("trigger asks for targets");
+    choose(&mut board, Some(fighter));
+    choose(&mut board, Some(opponent));
+    resolve_stack(&mut board);
+
+    let state = board.runner.state();
+    assert_eq!(state.objects[&opponent].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&fighter].damage_marked, 2, "2/2 deals 2 back");
+    assert_completed(&board.runner);
+}
+
+/// CR 608.2b: the fought creature changes controller before resolution. Its
+/// only stored occurrence is checked against the role it was announced for,
+/// "creature you don't control", which it now fails, so the ability does not
+/// resolve. A positional reading would accept it as "creature you control".
+#[test]
+fn gut_fought_creature_stolen_before_resolution_stops_the_ability() {
+    let (mut scenario, champion, opponent, gut) = gut_scenario();
+    let ray = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ray of Command", true, RAY_OF_COMMAND)
+        .id();
+    let mut board = Board {
+        runner: scenario.build(),
+        card: gut,
+        fighter: Some(champion),
+        opponent,
+    };
+    cast_to_trigger_targets(&mut board).expect("trigger asks for targets");
+    choose(&mut board, None);
+    choose(&mut board, Some(opponent));
+
+    let mut events = board
+        .runner
+        .cast(ray)
+        .target_object(opponent)
+        .commit()
+        .events()
+        .to_vec();
+    // Resolve Ray of Command (top of the stack); Gut's trigger stays below.
+    while board.runner.state().stack.len() > 1 {
+        let result = board
+            .runner
+            .act(GameAction::PassPriority)
+            .expect("pass to resolve Ray of Command");
+        events.extend(result.events);
+    }
+    assert_eq!(
+        board.runner.state().objects[&opponent].controller,
+        P0,
+        "precondition: Ray of Command took the fought creature"
+    );
+    events.extend(resolve_stack(&mut board));
+
+    assert_eq!(
+        fights_resolved(&events),
+        0,
+        "the only target fails its own role's filter: {events:?}"
+    );
+    let state = board.runner.state();
+    assert_eq!(state.objects[&opponent].damage_marked, 0);
+    assert_eq!(state.objects[&champion].damage_marked, 0);
+    assert_completed(&board.runner);
+}
+
+/// Earth Rumble in your hand, a Forest to earthbend and a 3/3 "Champion"; the
+/// opponent's 2/2 is present only when `with_opponent`.
+struct EarthRumbleBoard {
+    runner: GameRunner,
+    card: ObjectId,
+    champion: ObjectId,
+    forest: ObjectId,
+    opponent: Option<ObjectId>,
+}
+
+fn earth_rumble_board(with_opponent: bool) -> EarthRumbleBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let champion = scenario.add_creature(P0, "Champion", 3, 3).id();
+    let opponent = with_opponent.then(|| scenario.add_creature(P1, "Opponent Bear", 2, 2).id());
+    let forest = scenario.add_basic_land(P0, ManaColor::Green);
+    let card = scenario
+        .add_spell_to_hand_from_oracle(P0, "Earth Rumble", false, EARTH_RUMBLE)
+        .id();
+    EarthRumbleBoard {
+        runner: scenario.build(),
+        card,
+        champion,
+        forest,
+        opponent,
+    }
+}
+
+impl EarthRumbleBoard {
+    /// Cast Earth Rumble earthbending the Forest, then drive to the reflexive
+    /// "when you do" prompt (its slots) or an empty stack (`None`), collecting
+    /// every event.
+    fn cast(&mut self) -> (Option<Vec<TargetSelectionSlot>>, Vec<GameEvent>) {
+        let mut events = self
+            .runner
+            .cast(self.card)
+            .target_object(self.forest)
+            .commit()
+            .events()
+            .to_vec();
+        let (slots, more) = pass_to_trigger_targets(&mut self.runner);
+        events.extend(more);
+        (slots, events)
+    }
+
+    fn choose(&mut self, target: Option<ObjectId>) -> Result<(), String> {
+        self.runner
+            .act(GameAction::ChooseTarget {
+                target: target.map(TargetRef::Object),
+            })
+            .map(drop)
+            .map_err(|error| format!("{error:?}"))
+    }
+
+    /// Reach guard: the earthbent Forest is a creature with two +1/+1 counters.
+    fn assert_forest_earthbent(&self) {
+        let forest = &self.runner.state().objects[&self.forest];
+        assert!(
+            forest.card_types.core_types.contains(&CoreType::Creature),
+            "earthbend animated the Forest"
+        );
+        assert_eq!(forest.counters.get(&CounterType::Plus1Plus1), Some(&2));
+    }
+}
+
+/// CR 115.6 + CR 601.2c: Earth Rumble's reflexive fight frees the fighter and
+/// requires the fought creature.
+#[test]
+fn earth_rumble_fighter_optional_fought_required() {
+    let mut rumble = earth_rumble_board(true);
+    let (slots, _) = rumble.cast();
+    let slots = slots.expect("the reflexive trigger asks for targets");
+    rumble.assert_forest_earthbent();
+    assert_eq!(slots.len(), 2, "fighter + fought creature: {slots:?}");
+    assert!(slots[0].optional, "the 'up to one' fighter is optional");
+    assert!(!slots[1].optional, "the fought creature is required");
+
+    rumble
+        .choose(Some(rumble.champion))
+        .expect("the fighter is chosen");
+    let declined = rumble.choose(None);
+    assert!(
+        declined.is_err(),
+        "the fought creature is required, declining it must fail: {declined:?}"
+    );
+}
+
+/// CR 115.6 + CR 701.14b: declining Earth Rumble's fighter resolves the
+/// reflexive trigger without a fight.
+#[test]
+fn earth_rumble_declined_fighter_resolves_without_a_fight() {
+    let mut rumble = earth_rumble_board(true);
+    let opponent = rumble.opponent.unwrap();
+    let (slots, _) = rumble.cast();
+    slots.expect("the reflexive trigger asks for targets");
+    rumble.choose(None).expect("the fighter is declined");
+    rumble
+        .choose(Some(opponent))
+        .expect("the fought creature is chosen");
+    let events = drain_stack(&mut rumble.runner);
+
+    assert_eq!(fights_resolved(&events), 1, "{events:?}");
+    let state = rumble.runner.state();
+    assert_eq!(state.objects[&opponent].damage_marked, 0);
+    assert_eq!(state.objects[&rumble.champion].damage_marked, 0);
+    assert_completed(&rumble.runner);
+}
+
+/// CR 603.3d: with no creature an opponent controls, the required fought
+/// creature has no legal choice, so the reflexive trigger is removed — through
+/// the failed-slot route, although the optional fighter has legal choices.
+#[test]
+fn earth_rumble_without_an_opponent_creature_removes_the_reflexive_trigger() {
+    let mut rumble = earth_rumble_board(false);
+    let (slots, events) = rumble.cast();
+    assert!(
+        slots.is_none(),
+        "the fought creature has no legal choice: the trigger must not prompt, got {slots:?}"
+    );
+    rumble.assert_forest_earthbent();
+    assert_eq!(fights_resolved(&events), 0, "{events:?}");
+    assert_eq!(
+        rumble.runner.state().objects[&rumble.champion].damage_marked,
+        0
+    );
+    assert_completed(&rumble.runner);
+}
+
+/// CR 603.3d: Gut with no creature you don't control. The required fought
+/// creature has no legal choice, so the enters trigger is removed although the
+/// optional fighter has legal choices (Gut, Champion).
+#[test]
+fn gut_without_a_creature_you_dont_control_removes_the_trigger() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let champion = scenario.add_creature(P0, "Champion", 3, 3).id();
+    let gut = scenario
+        .add_creature_to_hand_from_oracle(P0, "Gut, Fanatical Priestess", 4, 3, GUT_ENTERS)
+        .id();
+    let mut runner = scenario.build();
+    let mut events = runner.cast(gut).commit().events().to_vec();
+    let (slots, more) = pass_to_trigger_targets(&mut runner);
+    events.extend(more);
+
+    assert!(
+        slots.is_none(),
+        "no creature you don't control: the trigger must not prompt, got {slots:?}"
+    );
+    assert_eq!(fights_resolved(&events), 0, "{events:?}");
+    let state = runner.state();
+    assert_eq!(state.objects[&gut].zone, Zone::Battlefield, "Gut resolved");
+    assert_eq!(state.objects[&gut].damage_marked, 0);
+    assert_eq!(state.objects[&champion].damage_marked, 0);
+    assert_completed(&runner);
+}
+
+/// Submit a bulk `SelectTargets` answer.
+fn select_targets(board: &mut Board, targets: &[ObjectId]) -> Result<(), String> {
+    board
+        .runner
+        .act(GameAction::SelectTargets {
+            targets: targets.iter().copied().map(TargetRef::Object).collect(),
+        })
+        .map(drop)
+        .map_err(|error| format!("{error:?}"))
+}
+
+/// CR 601.2c + CR 115.6: a compact bulk list never names a declined slot, and
+/// a required role is never omitted. Gut's one-entry list therefore names the
+/// required fought creature: `[bear]` is legal (fighter declined), `[Champion]`
+/// is not (Champion is no creature you don't control).
+#[test]
+fn gut_bulk_selection_reads_a_one_entry_list_as_the_fought_creature() {
+    let mut board = gut_board();
+    let fighter = board.fighter.unwrap();
+    let opponent = board.opponent;
+    cast_to_trigger_targets(&mut board).expect("trigger asks for targets");
+
+    let before = board.runner.state().waiting_for.clone();
+    let refused = select_targets(&mut board, &[fighter]);
+    assert!(
+        refused.is_err(),
+        "Champion cannot be the fought creature: {refused:?}"
+    );
+    assert_eq!(board.runner.state().waiting_for, before, "prompt unchanged");
+
+    select_targets(&mut board, &[opponent]).expect("fighter declined, bear fought");
+    let stacked = board
+        .runner
+        .state()
+        .stack
+        .last()
+        .and_then(|entry| entry.ability())
+        .expect("Gut's trigger is on the stack")
+        .targets
+        .clone();
+    assert_eq!(stacked, vec![TargetRef::Object(opponent)]);
+    let events = resolve_stack(&mut board);
+    assert_eq!(fights_resolved(&events), 1, "{events:?}");
+    let state = board.runner.state();
+    assert_eq!(state.objects[&opponent].damage_marked, 0);
+    assert_eq!(state.objects[&fighter].damage_marked, 0);
+    assert_completed(&board.runner);
+}
+
+/// CR 701.14a: Gut's full bulk pair fights.
+#[test]
+fn gut_bulk_selection_of_both_fights() {
+    let mut board = gut_board();
+    let fighter = board.fighter.unwrap();
+    let opponent = board.opponent;
+    cast_to_trigger_targets(&mut board).expect("trigger asks for targets");
+    select_targets(&mut board, &[fighter, opponent]).expect("both fighters chosen");
+    resolve_stack(&mut board);
+
+    let state = board.runner.state();
+    assert_eq!(state.objects[&opponent].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&fighter].damage_marked, 2);
+    assert_completed(&board.runner);
+}
+
+/// CR 601.2c + CR 115.6: Favored Enemy's one-entry bulk list names the
+/// required fighter: `[Champion]` declines the fought creature, `[bear]` is
+/// refused (the bear is no creature you control).
+#[test]
+fn favored_enemy_bulk_selection_reads_a_one_entry_list_as_the_fighter() {
+    let mut board = favored_enemy(true);
+    let fighter = board.fighter.unwrap();
+    let opponent = board.opponent;
+    cast_to_trigger_targets(&mut board).expect("trigger asks for targets");
+
+    let before = board.runner.state().waiting_for.clone();
+    let refused = select_targets(&mut board, &[opponent]);
+    assert!(
+        refused.is_err(),
+        "the bear cannot be the fighter: {refused:?}"
+    );
+    assert_eq!(board.runner.state().waiting_for, before, "prompt unchanged");
+
+    select_targets(&mut board, &[fighter]).expect("fighter chosen, fought declined");
+    resolve_stack(&mut board);
+    let state = board.runner.state();
+    assert_eq!(state.objects[&opponent].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&opponent].damage_marked, 0);
+    assert_eq!(state.objects[&fighter].damage_marked, 0);
+    assert_completed(&board.runner);
+}
+
+/// A 3/3 for you, a 2/2 for the opponent, and Smell Fear cast with no targets
+/// announced up front, stopped at its target prompt.
+fn smell_fear_at_target_prompt() -> Board {
+    let mut board = board(true, "Smell Fear", SMELL_FEAR, false);
+    let card_id = board.runner.state().objects[&board.card].card_id;
+    board
+        .runner
+        .act(GameAction::CastSpell {
+            object_id: board.card,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Smell Fear is cast");
+    let WaitingFor::TargetSelection { target_slots, .. } = &board.runner.state().waiting_for else {
+        panic!(
+            "Smell Fear asks for targets: {:?}",
+            board.runner.state().waiting_for
+        );
+    };
+    assert_eq!(target_slots.len(), 2, "fighter + fought creature");
+    assert!(!target_slots[0].optional, "the fighter is required");
+    assert!(target_slots[1].optional, "the fought creature is up to one");
+    board
+}
+
+/// CR 601.2c + CR 115.6: the spell-side bulk handler reads Smell Fear's compact
+/// list through the same slots: `[Champion]` names the required fighter and
+/// declines the fought creature, so nobody fights (CR 701.14a); `[bear]` is
+/// refused.
+#[test]
+fn smell_fear_bulk_selection_reads_a_one_entry_list_as_the_fighter() {
+    let mut board = smell_fear_at_target_prompt();
+    let fighter = board.fighter.unwrap();
+    let opponent = board.opponent;
+
+    let before = board.runner.state().waiting_for.clone();
+    let refused = select_targets(&mut board, &[opponent]);
+    assert!(
+        refused.is_err(),
+        "the bear cannot be the fighter: {refused:?}"
+    );
+    assert_eq!(board.runner.state().waiting_for, before, "prompt unchanged");
+
+    select_targets(&mut board, &[fighter]).expect("fighter chosen, fought declined");
+    resolve_stack(&mut board);
+    let state = board.runner.state();
+    assert_eq!(state.objects[&opponent].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&opponent].damage_marked, 0);
+    assert_eq!(state.objects[&fighter].damage_marked, 0);
+    assert_completed(&board.runner);
+}
+
+/// CR 701.14a: Smell Fear's full bulk pair fights.
+#[test]
+fn smell_fear_bulk_selection_of_both_fights() {
+    let mut board = smell_fear_at_target_prompt();
+    let fighter = board.fighter.unwrap();
+    let opponent = board.opponent;
+    select_targets(&mut board, &[fighter, opponent]).expect("both fighters chosen");
+    resolve_stack(&mut board);
+
+    let state = board.runner.state();
+    assert_eq!(state.objects[&opponent].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&fighter].damage_marked, 2);
+    assert_completed(&board.runner);
 }

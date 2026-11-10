@@ -6053,7 +6053,14 @@ impl ResolvedAbility {
     /// `multi_target` spec ("up to N") has a minimum of zero. Both fields encode
     /// the same "zero targets is legal" fact, so target-slot collection must
     /// honor either.
+    ///
+    /// CR 115.6: For a fight, zero targets is legal only when every declared
+    /// fighter is optional; the answer comes from the `FightSlots` authority,
+    /// never from the ability-level fields.
     pub fn targeting_is_optional(&self) -> bool {
+        if let Some(slots) = fight_slots(&self.effect) {
+            return slots.permits_zero_targets();
+        }
         self.optional_targeting
             || self
                 .multi_target
@@ -6062,16 +6069,15 @@ impl ResolvedAbility {
     }
 
     /// CR 115.6 + CR 601.2c: Whether one declared `Fight` target slot may be
-    /// left unchosen. Each instance of "target" is announced separately, and
-    /// the "up to one" (`multi_target` minimum zero) a fight prints belongs to
-    /// the creature being fought ("target creature you control fights up to one
-    /// target creature you don't control"), so it never makes the fighter
-    /// optional. The fighter follows only the ability-wide `optional_targeting`.
+    /// left unchosen. Each instance of "target" is announced separately, and a
+    /// printed "up to one" frees only the operand it modifies — the fighter in
+    /// "up to one target creature you control fights target creature …", the
+    /// fought creature in "target creature you control fights up to one target
+    /// creature …". That operand is `Effect::Fight::up_to_one`, read through
+    /// the `FightSlots` authority; the ability-level `optional_targeting` and
+    /// `multi_target` never express fight cardinality.
     pub fn fight_slot_is_optional(&self, role: FightSlotRole) -> bool {
-        match role {
-            FightSlotRole::Subject => self.optional_targeting,
-            FightSlotRole::Opponent => self.targeting_is_optional(),
-        }
+        fight_slots(&self.effect).is_some_and(|slots| slots.is_optional(role))
     }
 }
 

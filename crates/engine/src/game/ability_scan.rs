@@ -1038,7 +1038,11 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::Fight { target, subject } => {
+        Effect::Fight {
+            target,
+            subject,
+            up_to_one: _, // CR 115.6 announced cardinality, no dynamic read
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc = acc.or(scan_target_filter(subject, target_ctx, mode));

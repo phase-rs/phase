@@ -8512,6 +8512,7 @@ mod tests {
             Effect::Fight {
                 subject: TypedFilter::creature().controller(first_controller).into(),
                 target: TypedFilter::creature().controller(second_controller).into(),
+                up_to_one: None,
             },
         );
         if destroy_second_fighter_after_fight {
@@ -8759,6 +8760,7 @@ mod tests {
                 target: TypedFilter::creature()
                     .controller(ControllerRef::Opponent)
                     .into(),
+                up_to_one: None,
             },
         );
         let ability = AbilityDefinition::new(

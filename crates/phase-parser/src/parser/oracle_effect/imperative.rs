@@ -57,11 +57,11 @@ use crate::types::ability::{
     ContinuousEffectOnset, ContinuousModification, ControlWindow, ControllerRef,
     CopyRetargetPermission, CountBinding, CountScope, CounterAdjustment, CounterKindChooser,
     CounterKindDomain, DigSource, DoorLockOp, Duration, Effect, EffectScope, ExtraPhaseAnchor,
-    ExtraPhaseRecipient, FaceDownProfile, FilterProp, ForceBlockAttackerRef, GrantedAbilityScope,
-    LibraryPosition, LibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
-    ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
-    PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
-    PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, ReturnResultReadSpec,
+    ExtraPhaseRecipient, FaceDownProfile, FightSlotRole, FilterProp, ForceBlockAttackerRef,
+    GrantedAbilityScope, LibraryPosition, LibraryShuffleMode, MultiTargetSpec,
+    ObjectSelectionCardinality, ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope,
+    PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope,
+    PtStat, PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, ReturnResultReadSpec,
     SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment, TapCreaturesRequirement,
     TapStateChange, TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause,
     TokenAttackDestination, TypeFilter, TypedFilter, ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
@@ -2723,8 +2723,8 @@ pub(super) fn parse_targeted_action_ast(
         nom_on_lower(text, lower, |input| value((), tag("fight ")).parse(input))
     {
         // CR 115.6: "fights up to one target creature …" allows zero targets.
-        // Preserve the optional-target spec through the AST; it is stamped onto
-        // the clause in `lower_imperative_family_ast`.
+        // Preserve the optional-target spec through the AST; it is lowered onto
+        // `Effect::Fight::up_to_one` by `lower_targeted_action_ast`.
         let (target_text, multi_target) = super::strip_optional_target_prefix(rest);
         let (target, _rem) = parse_fight_target(target_text, ctx);
         #[cfg(debug_assertions)]
@@ -3077,16 +3077,29 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 random_order: false,
             }
         }
-        // CR 115.6: the "up to N" target cardinality is an ability-level field
-        // (`ParsedEffectClause.multi_target`), not an `Effect::Fight` field. It is
-        // recovered at the clause layer in `lower_imperative_family_ast`; this
-        // bare-Effect lowering deliberately ignores `multi_target`.
+        // CR 115.6 + CR 601.2c: the fought creature's printed count belongs to
+        // that operand, not to the ability, so it lowers onto
+        // `Effect::Fight::up_to_one` rather than an ability-level spec.
         TargetedImperativeAst::Fight {
             target,
-            multi_target: _,
-        } => Effect::Fight {
-            target,
-            subject: TargetFilter::SelfRef,
+            multi_target,
+        } => match multi_target {
+            None => Effect::Fight {
+                target,
+                subject: TargetFilter::SelfRef,
+                up_to_one: None,
+            },
+            // CR 115.6: "fights up to one target …" frees the creature fought.
+            Some(spec) if spec.is_up_to_one() => Effect::Fight {
+                target,
+                subject: TargetFilter::SelfRef,
+                up_to_one: Some(FightSlotRole::Opponent),
+            },
+            // CR 701.14a: a fight has exactly one fought creature.
+            Some(spec) => Effect::unimplemented(
+                "fight_operand_cardinality",
+                format!("fights {spec:?} target creatures"),
+            ),
         },
         TargetedImperativeAst::GainControl { target, all, .. } => {
             if all {
@@ -17673,37 +17686,13 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.optional = true;
             clause
         }
-        // CR 115.6: "it fights up to one target creature …" allows zero targets.
-        // The "up to N" cardinality is an ability-level field
-        // (`ParsedEffectClause.multi_target` → `AbilityDefinition.multi_target`
-        // with min=0 via `lower.rs`), not an `Effect::Fight` field. The
-        // bare-Effect lowering chain (`lower_targeted_action_ast`) cannot carry
-        // it, so intercept here where a `ParsedEffectClause` is in scope and
-        // stamp the spec onto the clause — mirroring the `YouMay` /
-        // `PutCounterList` clause-field interception arms above and the
-        // subject-form "up to" path in `subject.rs`. `None` (mandatory "fights
-        // target …") leaves the clause unchanged.
-        ImperativeFamilyAst::Structured(ImperativeAst::Targeted(
-            TargetedImperativeAst::Fight {
-                target,
-                multi_target,
-            },
-        )) => {
-            let mut clause =
-                parsed_clause(lower_targeted_action_ast(TargetedImperativeAst::Fight {
-                    target,
-                    multi_target: None,
-                }));
-            clause.multi_target = multi_target;
-            clause
-        }
         // CR 115.1d + CR 708.2a: "turn any number of target … face down" /
         // "turn N target … face down" (Illithid Harvester). The target-count
         // quantifier is an ability-level field (`ParsedEffectClause.multi_target`
         // → `AbilityDefinition.multi_target`), not an `Effect::TurnFaceDown`
         // field, so intercept here where a `ParsedEffectClause` is in scope and
-        // stamp the spec — mirroring the `Fight` / `PutCounterList` clause-field
-        // arms above. `None` (single subject — Cyber Conversion) leaves the
+        // stamp the spec — mirroring the `PutCounterList` clause-field arm
+        // above. `None` (single subject — Cyber Conversion) leaves the
         // clause's default unchanged.
         ImperativeFamilyAst::TurnFaceDown {
             target,
@@ -25659,11 +25648,11 @@ mod tests {
     }
 
     /// CR 115.6: "it fights up to one target creature …" allows zero targets.
-    /// The optional-target cardinality must survive the full effect → clause →
-    /// `AbilityDefinition` lowering as `AbilityDefinition.multi_target` with
-    /// min=0 (`up_to(1)`), since the bare-`Effect::Fight` lowering cannot carry
-    /// it. Building-block test across the optionality axis: "up to one" →
-    /// `up_to(1)`, mandatory → `None`.
+    /// The optional-target cardinality belongs to the fought creature, so it
+    /// survives the full effect → clause → `AbilityDefinition` lowering as
+    /// `Effect::Fight::up_to_one == Some(Opponent)`, never as an ability-level
+    /// spec. Building-block test across the optionality axis: "up to one" →
+    /// `Opponent`, mandatory → `None`, any other count → strict failure.
     #[test]
     fn lower_fight_up_to_one_target_carries_multi_target() {
         let def = super::super::parse_effect_chain(
@@ -25671,15 +25660,30 @@ mod tests {
             AbilityKind::Spell,
         );
         assert!(
-            matches!(*def.effect, Effect::Fight { .. }),
-            "Expected Effect::Fight, got {:?}",
+            matches!(
+                *def.effect,
+                Effect::Fight {
+                    up_to_one: Some(FightSlotRole::Opponent),
+                    ..
+                }
+            ),
+            "fight 'up to one target' must free the fought creature, got {:?}",
             def.effect
         );
-        assert_eq!(
-            def.multi_target,
-            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
-            "fight 'up to one target' must carry up_to(1) (min=0)"
-        );
+        assert_eq!(def.multi_target, None, "no ability-level spec on a fight");
+        assert!(!def.optional_targeting);
+
+        // CR 701.14a: a fight has exactly one fought creature. Synthetic: no
+        // printed card prints "fights up to two"; nearest printed card Favored
+        // Enemy ("… fights up to one target creature you don't control").
+        let effect = lower_targeted_action_ast(TargetedImperativeAst::Fight {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            multi_target: Some(MultiTargetSpec::fixed(0, 2)),
+        });
+        match &effect {
+            Effect::Unimplemented { name, .. } => assert_eq!(name, "fight_operand_cardinality"),
+            other => panic!("an unsupported fought-creature count fails strictly, got {other:?}"),
+        }
     }
 
     /// CR 701.14a: the mandatory "fights target creature" form (no "up to")
@@ -25689,14 +25693,21 @@ mod tests {
     fn lower_fight_mandatory_target_no_multi_target() {
         let def = super::super::parse_effect_chain("it fights target creature", AbilityKind::Spell);
         assert!(
-            matches!(*def.effect, Effect::Fight { .. }),
-            "Expected Effect::Fight, got {:?}",
+            matches!(
+                *def.effect,
+                Effect::Fight {
+                    up_to_one: None,
+                    ..
+                }
+            ),
+            "Expected a required Effect::Fight, got {:?}",
             def.effect
         );
         assert_eq!(
             def.multi_target, None,
             "mandatory fight target must not be optional"
         );
+        assert!(!def.optional_targeting);
     }
 
     #[test]

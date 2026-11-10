@@ -3447,9 +3447,11 @@ fn legacy_effect(x: &Effect) -> bool {
         }
 
         // ---- Pairs of filters / mixed shapes ----
-        Effect::Fight { target, subject } => {
-            legacy_target_filter(target) || legacy_target_filter(subject)
-        }
+        Effect::Fight {
+            target,
+            subject,
+            up_to_one: _, // CR 115.6 announced cardinality, no read/write effect
+        } => legacy_target_filter(target) || legacy_target_filter(subject),
         Effect::EachDealsDamageEqualToPower {
             sources,
             recipient,
@@ -5020,7 +5022,11 @@ fn rw_effect(
             p.merge(rw_quantity_expr(amount));
             (p, None)
         }
-        Effect::Fight { target, subject } => {
+        Effect::Fight {
+            target,
+            subject,
+            up_to_one: _, // CR 115.6 announced cardinality, no read/write effect
+        } => {
             let mut p = damage_writes(target);
             p.merge(damage_writes(subject));
             (p, None)

@@ -1791,6 +1791,7 @@ mod tests {
         let effect = Effect::Fight {
             target: TargetFilter::Any,
             subject: TargetFilter::SelfRef,
+            up_to_one: None,
         };
 
         assert_eq!(

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Effect::Fight gains up_to_one: Option<FightSlotRole>, binding a printed 'up to one' to the fighter or the fought creature; fight abilities no longer carry an ability-level multi_target. An older peer ignores the field and treats every declared fighter as required, so it refuses a declined optional fighter or fought creature."
+}

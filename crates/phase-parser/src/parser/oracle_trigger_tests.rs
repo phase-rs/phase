@@ -33591,12 +33591,18 @@ fn attack_trigger_fight_defending_player_controls() {
 /// "…then it fights up to one target creature defending player controls."
 /// The Fight is the tail of a `then`-sequence sub-ability chain, so it lands
 /// on a nested `sub_ability`. Both axes must survive: the "up to one" target
-/// cardinality (`multi_target == up_to(1)`, min=0) AND the defending-player
-/// scope (`ControllerRef::DefendingPlayer`). Regression guard for the
-/// dropped optionality (cluster #17) and the landed controller-scope fix.
+/// cardinality (`Effect::Fight::up_to_one == Some(Opponent)`) AND the
+/// defending-player scope (`ControllerRef::DefendingPlayer`). Regression guard
+/// for the dropped optionality (cluster #17) and the landed controller-scope
+/// fix.
+///
+/// Real cards: Ace, Fearless Rebel prints "Nitro-9 — Whenever Ace attacks, you
+/// may sacrifice an artifact. When you do, put a +1/+1 counter on Ace, then it
+/// fights up to one target creature defending player controls." This test
+/// parses an abridged trigger line that keeps the fight clause verbatim.
 #[test]
 fn attack_trigger_fight_up_to_one_defending_player_controls() {
-    use crate::types::ability::{Effect, MultiTargetSpec};
+    use crate::types::ability::{Effect, FightSlotRole};
 
     let def = parse_trigger_line(
             "Whenever Ace attacks, put a +1/+1 counter on Ace, then it fights up to one target creature defending player controls.",
@@ -33606,10 +33612,17 @@ fn attack_trigger_fight_up_to_one_defending_player_controls() {
     let execute = def.execute.as_deref().expect("execute ability");
     // Walk the `then`-sequence chain to the Fight sub-ability.
     let fight = walk_to_fight_sub_ability(execute);
-    assert_eq!(
-        fight.multi_target,
-        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
-        "fight leg must carry up-to-one multi_target (min=0)",
+    assert_eq!(fight.multi_target, None, "no ability-level spec on a fight");
+    assert!(!fight.optional_targeting);
+    assert!(
+        matches!(
+            fight.effect.as_ref(),
+            Effect::Fight {
+                up_to_one: Some(FightSlotRole::Opponent),
+                ..
+            }
+        ),
+        "fight leg must free the fought creature: {fight:?}",
     );
     match fight.effect.as_ref() {
         Effect::Fight { target, .. } => match target {
@@ -33626,10 +33639,16 @@ fn attack_trigger_fight_up_to_one_defending_player_controls() {
 
 /// CR 115.6 + CR 508.5 / CR 508.5a: the "up to one" optionality and the
 /// `DefendingPlayer` scope are orthogonal axes — an Or-target Fight must fan
-/// the scope onto each `Or` disjunct AND retain `up_to(1)`.
+/// the scope onto each `Or` disjunct AND retain `up_to_one == Some(Opponent)`.
+///
+/// Real cards: "up to one target artifact or enchantment defending player
+/// controls" is synthetic — no printed card fights "up to one target artifact"
+/// or "… enchantment" (an MTGJSON search of `AtomicCards.json` finds none). The
+/// nearest printed card is Ace, Fearless Rebel ("… then it fights up to one
+/// target creature defending player controls.").
 #[test]
 fn attack_trigger_fight_up_to_one_or_target_defending_player_controls() {
-    use crate::types::ability::{Effect, MultiTargetSpec};
+    use crate::types::ability::{Effect, FightSlotRole};
 
     let def = parse_trigger_line(
             "Whenever Ace attacks, put a +1/+1 counter on Ace, then it fights up to one target artifact or enchantment defending player controls.",
@@ -33638,10 +33657,17 @@ fn attack_trigger_fight_up_to_one_or_target_defending_player_controls() {
     assert_eq!(def.mode, TriggerMode::Attacks);
     let execute = def.execute.as_deref().expect("execute ability");
     let fight = walk_to_fight_sub_ability(execute);
-    assert_eq!(
-        fight.multi_target,
-        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
-        "or-target fight leg must carry up-to-one multi_target (min=0)",
+    assert_eq!(fight.multi_target, None, "no ability-level spec on a fight");
+    assert!(!fight.optional_targeting);
+    assert!(
+        matches!(
+            fight.effect.as_ref(),
+            Effect::Fight {
+                up_to_one: Some(FightSlotRole::Opponent),
+                ..
+            }
+        ),
+        "or-target fight leg must free the fought creature: {fight:?}",
     );
     match fight.effect.as_ref() {
         Effect::Fight { target, .. } => match target {
@@ -33669,7 +33695,7 @@ fn attack_trigger_fight_up_to_one_or_target_defending_player_controls() {
 /// `sub_ability: None` and GainLife-only execute.
 #[test]
 fn wolf_enter_gain_life_and_that_creature_fights_up_to_one_shape() {
-    use crate::types::ability::{Effect, MultiTargetSpec};
+    use crate::types::ability::{Effect, FightSlotRole};
 
     let def = parse_trigger_line(
         "Whenever a Wolf you control enters, you gain 3 life and that creature fights up to one target creature you don't control.",
@@ -33685,13 +33711,18 @@ fn wolf_enter_gain_life_and_that_creature_fights_up_to_one_shape() {
         other => panic!("expected GainLife{{3}} head, got {other:?}"),
     }
     let fight = walk_to_fight_sub_ability(execute);
-    assert_eq!(
-        fight.multi_target,
-        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
-        "fight leg must carry up-to-one multi_target (min=0)",
-    );
+    assert_eq!(fight.multi_target, None, "no ability-level spec on a fight");
     match fight.effect.as_ref() {
-        Effect::Fight { subject, target } => {
+        Effect::Fight {
+            subject,
+            target,
+            up_to_one,
+        } => {
+            assert_eq!(
+                *up_to_one,
+                Some(FightSlotRole::Opponent),
+                "the fought creature is up to one target"
+            );
             assert_eq!(
                 *subject,
                 TargetFilter::TriggeringSource,

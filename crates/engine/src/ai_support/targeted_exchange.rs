@@ -1083,6 +1083,7 @@ mod tests {
         Effect::Fight {
             target: TargetFilter::Any,
             subject: TargetFilter::SelfRef,
+            up_to_one: None,
         }
     }
 

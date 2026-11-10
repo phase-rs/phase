@@ -123,31 +123,32 @@ use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
 use crate::types::ability::{
     effect_has_stack_target_declaration, effect_owns_resolution_zone_choice,
     effect_parent_ref_slot_count, effect_refs_parent_target, effect_requires_parent_target_object,
-    extract_target_filter_from_effect, instruction_object_reach, payer_is_declared_target,
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
-    AttachCardinality, AttachSelection, AttackSubject, BounceSelection, CardPlayMode,
-    CardTypeSetSource, CastFromZoneDriver, CastMechanism, CastPermissionConstraint,
-    CastingPermission, ChoiceType, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
-    ChosenGroupId, CoinFlipRun, CombatDamageScope, CombatHistoryScope, Comparator, ConjureCard,
-    ConjureSource, ContinuousEffectOnset, ContinuousModification, ControlWindow, ControllerRef,
-    CopyChooseScope, CopyRetargetPermission, CopyScale, DamageModification, DamageSource,
-    DelayedTriggerCondition, DelayedTriggerLifetime, DieResultBranch, DigRestOrder, Duration,
-    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, ExtraPhaseRecipient, FilterProp,
-    GameRestriction, GuardReading, GuessSubject, IntensityScope, IterationKindBinding,
-    KeeperConstraint, KeeperCounterMark, LibraryPosition, LibraryShuffleMode, ManaProduction,
-    ManaSpendPermission, ManaTargetRole, MultiTargetSpec, NameStickerSet, NumberDistinctness,
-    ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
-    PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
-    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue,
-    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ReplacementCondition,
-    ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
-    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
-    SkipScope, SpellStackToGraveyardReplacement, SpellbookSelection, StaticCondition,
-    StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
-    TargetReadOrigin, TargetSelectionMode, ThisWayCause, TokenAttackDestination,
-    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
-    UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry,
-    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole, ZoneOwner,
+    extract_target_filter_from_effect, fight_subject_needs_target_slot, instruction_object_reach,
+    payer_is_declared_target, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
+    AbilityTag, AggregateFunction, AttachCardinality, AttachSelection, AttackSubject,
+    BounceSelection, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, CastMechanism,
+    CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint,
+    ChooseOneOfKind, Chooser, ChosenGroupId, CoinFlipRun, CombatDamageScope, CombatHistoryScope,
+    Comparator, ConjureCard, ConjureSource, ContinuousEffectOnset, ContinuousModification,
+    ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
+    DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
+    DieResultBranch, DigRestOrder, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
+    EffectScope, ExtraPhaseRecipient, FightSlotRole, FilterProp, GameRestriction, GuardReading,
+    GuessSubject, IntensityScope, IterationKindBinding, KeeperConstraint, KeeperCounterMark,
+    LibraryPosition, LibraryShuffleMode, ManaProduction, ManaSpendPermission, ManaTargetRole,
+    MultiTargetSpec, NameStickerSet, NumberDistinctness, ObjectProperty, ObjectScope,
+    OriginConstraint, PerPlayerScope, PerpetualModification, PlayPermissionInvalidation,
+    PlayerChoiceDistinctness, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount,
+    PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
+    ReciprocalZoneChoiceRole, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
+    RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
+    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
+    SpellbookSelection, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
+    TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode, ThisWayCause,
+    TokenAttackDestination, TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate,
+    TypeFilter, TypedFilter, UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject,
+    WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole,
+    ZoneOwner,
 };
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
@@ -22360,8 +22361,8 @@ fn try_parse_verb_and_target<'a>(
         ));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("fight ")).parse(i)) {
-        // CR 115.6: preserve "up to N target …" optionality through the AST so
-        // the compound-splitter path lowers it onto the clause's multi_target.
+        // CR 115.6: preserve "up to N target …" optionality through the AST; the
+        // count rides it to `lower_targeted_action_ast` → `Effect::Fight::up_to_one`.
         let (target_text, multi_target) = strip_optional_target_prefix(rest);
         let (target, rem) = parse_fight_target(target_text, ctx);
         return Some((
@@ -30992,6 +30993,8 @@ fn lower_subject_predicate_ast_body(
                 }
             }
             inject_subject_target(&mut clause.effect, &subject, original_clause);
+            let fight_owns_subject_count =
+                bind_fight_subject_cardinality(&mut clause, &subject, original_clause);
             inject_subject_into_shared_token_sequence(&mut clause, &subject, original_clause);
             if let Some(subject_filter) = subject.target.as_ref().or(subject.affected.as_ref()) {
                 sync_player_into_nested_shuffle_sub(&mut clause, subject_filter);
@@ -31043,7 +31046,9 @@ fn lower_subject_predicate_ast_body(
             // spell object) to the subject filter so the keyword is granted to
             // the player. This is the Teferi's-Protection-clause-2 hook.
             retarget_player_scoped_keyword_grant(&mut clause.effect, &affected);
-            if clause.multi_target.is_none() {
+            // A fight's subject count is the fighter's own (bound above), never
+            // an ability-level spec.
+            if clause.multi_target.is_none() && !fight_owns_subject_count {
                 clause.multi_target = subject.multi_target;
             }
             // CR 608.2c + CR 608.2d: Propagate the subject phrase's "may" modal
@@ -32800,6 +32805,43 @@ fn bind_player_recipient_to_possessive_actor(effect: &mut Effect, actor: &Target
         }
         _ => {}
     }
+}
+
+/// CR 115.6 + CR 601.2c + CR 701.14a: a subject phrase's own "up to one"
+/// ("up to one target creature you control fights target creature …" —
+/// Earth Rumble; Gut, Fanatical Priestess) frees the fighter it names, not
+/// the ability. Returns true when the subject's count belongs to a fight
+/// (bound, or failed strictly), so the generic clause merge must skip it.
+///
+/// Unsupported counts — a count other than one, both operands quantified, or a
+/// quantified fighter that declares no target slot — lower to
+/// `fight_operand_cardinality`. No printed card reaches them.
+fn bind_fight_subject_cardinality(
+    clause: &mut ParsedEffectClause,
+    subject: &SubjectPhraseAst,
+    original_clause: &str,
+) -> bool {
+    let Some(spec) = subject.multi_target.as_ref() else {
+        return false;
+    };
+    let Effect::Fight {
+        subject: fighter,
+        up_to_one,
+        ..
+    } = &clause.effect
+    else {
+        return false;
+    };
+    let binds_fighter =
+        spec.is_up_to_one() && up_to_one.is_none() && fight_subject_needs_target_slot(fighter);
+    if !binds_fighter {
+        clause.effect = Effect::unimplemented("fight_operand_cardinality", original_clause);
+        return true;
+    }
+    if let Effect::Fight { up_to_one, .. } = &mut clause.effect {
+        *up_to_one = Some(FightSlotRole::Subject);
+    }
+    true
 }
 
 fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, original_clause: &str) {
