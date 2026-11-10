@@ -18112,6 +18112,78 @@ mod tests {
         }
     }
 
+    /// #10543 (review): the schedule fallback
+    /// ([`crate::analysis::headroom::PeriodExcursions::representable_under_schedule`]) reads each
+    /// seat's declared charges ONCE and reuses them by index across its segments. A round robin of
+    /// two seats has no finite change-point list, so every index up to the budget starts a
+    /// segment; restarting the charge stream per segment would re-derive every preceding
+    /// repetition and cost ~budget²/2 charges per seat.
+    ///
+    /// P1 is at 2,000,000 life, so a drain of 2 a repetition fits the whole budget and the walk
+    /// visits every segment — a board that crossed early would return before the later, heavier
+    /// segments ran and measure nothing.
+    ///
+    /// REVERT-PROBE: read each segment's charges through `declared_seat_life_charges(..).nth(index)`
+    /// again (`headroom::PeriodExcursions::declared_charges_at`) ⇒ the reads become ~500,500 per
+    /// seat at `MAX_SHORTCUT_CYCLES` ⇒ FAILS.
+    #[test]
+    fn a_schedule_that_changes_every_repetition_reads_each_seat_charge_once() {
+        use crate::game::perf_counters;
+
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let mut board = bound_board(&[18, 2_000_000]);
+        let slot = announced_target_slot(&mut board, 502);
+        let charges = vec![SlotCharge {
+            slot: slot.clone(),
+            magnitude: 2,
+            reaches: vec![p0, p1],
+            aimed_at: Some(p1),
+        }];
+        let delta = life_loss_delta(&[(1, 2)]);
+        let published = delta.seat_life_charges(&charges);
+        let period = PeriodicDelta {
+            frames_per_period: 1,
+            delta,
+            victim_slot: vec![(slot.clone(), 2)],
+            declarable_victims: SlotCharge::declarable_victims(&charges),
+            seat_life_charge: published,
+            cleanup: None,
+        };
+        let points = [seat_point(&slot, &[0, 1])];
+        // A two-seat round robin changes at every repetition: no finite change-point list.
+        let declaration = seat_schedule_declaration(&[(&slot, &[0, 1])]);
+        assert_eq!(
+            declaration.resolution_change_points(),
+            None,
+            "reach-guard: a two-seat round robin has no finite change-point list"
+        );
+        let budget = crate::game::engine::MAX_SHORTCUT_CYCLES;
+        perf_counters::reset_declared_life_charge_counters();
+        let bound = crate::analysis::headroom::PeriodExcursions::representable_under_schedule(
+            &period,
+            Some(&declaration),
+            Some(&declaration),
+            &points,
+            &board,
+            AnnouncedLead::None,
+            budget,
+        );
+        let reads = perf_counters::declared_life_charge_snapshot().reads;
+        assert!(
+            bound.is_none(),
+            "reach-guard: this board outlasts the budget, so every segment is walked; got \
+             {bound:?}"
+        );
+        assert!(
+            reads >= u64::from(budget),
+            "reach-guard: the walk reads the budget's charges, got {reads}"
+        );
+        assert!(
+            reads <= 4 * u64::from(budget),
+            "the walk reads each seat's charge stream once for {budget} segments, got {reads}"
+        );
+    }
+
     /// The charge [`PeriodicDelta::declared_seat_life_charges`] states for repetition
     /// `iteration`.
     #[allow(clippy::too_many_arguments)]
