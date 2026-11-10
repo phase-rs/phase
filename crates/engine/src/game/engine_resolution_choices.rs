@@ -7457,7 +7457,10 @@ pub(super) fn handle_resolution_choice(
                     let mut logical_zone_change_group =
                         crate::game::triggers::allocate_logical_zone_change_group(
                             state,
-                            &chosen_ids,
+                            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                                &chosen_ids,
+                                dest_zone,
+                            ),
                         );
                     if let Some(marker) =
                         state
@@ -7501,6 +7504,9 @@ pub(super) fn handle_resolution_choice(
                         binding.as_ref(),
                         &entry_spec,
                         &chosen_ids,
+                    );
+                    let mut entrants = crate::game::zone_pipeline::SimultaneousEntrants::of(
+                        &logical_zone_change_group,
                     );
                     let logical_group_event_start = events.len();
                     for (i, member) in members.iter().enumerate() {
@@ -7547,7 +7553,7 @@ pub(super) fn handle_resolution_choice(
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
                             state,
-                            &logical_zone_change_group,
+                            &mut entrants,
                             &ctx,
                             member,
                             events,
@@ -8057,8 +8063,14 @@ pub(super) fn handle_resolution_choice(
                     let mut logical_zone_change_group =
                         crate::game::triggers::allocate_logical_zone_change_group(
                             state,
-                            &chosen_ids,
+                            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                                &chosen_ids,
+                                dest_zone,
+                            ),
                         );
+                    let mut entrants = crate::game::zone_pipeline::SimultaneousEntrants::of(
+                        &logical_zone_change_group,
+                    );
                     let logical_group_event_start = events.len();
                     for (i, member) in members.iter().enumerate() {
                         let card_id = &member.object_id;
@@ -8073,7 +8085,7 @@ pub(super) fn handle_resolution_choice(
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
                             state,
-                            &logical_zone_change_group,
+                            &mut entrants,
                             &ctx,
                             member,
                             events,

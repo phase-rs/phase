@@ -9656,3 +9656,50 @@ fn a_zero_dice_member_of_a_paused_batch_enters_with_no_counters() {
         }
     }
 }
+
+/// L-scale. Wall time of "Mill N cards." end to end, for the linear-batch
+/// claims of the simultaneous-entry plumbing (CR 603.6a: a mill puts nothing
+/// onto the battlefield, so its batch announces no entrants). A measurement,
+/// not a gate: run with `--ignored --nocapture` and read the printed lines.
+///
+/// Measured on one debug build, one test thread, two runs each (ms). The wall
+/// times are indicative only:
+///
+/// ```text
+///   N      before (entrants per mill member,   after (no mill entrants,
+///          prefix-rescan validation)            one list, set validation)
+///   250    108 / 109                            94 / 92
+///   500    293 / 297                            235 / 247
+///   1000   1253 / 1319                          1062 / 1069
+///   2000   8739 / 8612                          6913 / 7187
+///   4000   30093 / 29032                        21989 / 21973
+/// ```
+///
+/// The curve stays superlinear after the change, and upstream main measured
+/// no faster on the same scenario (140 / 476 / 2107 / 15004 / 22327 ms): the
+/// remaining cost is in the per-member delivery itself, not the
+/// simultaneous-entrant plumbing.
+#[test]
+#[ignore = "perf measurement; run manually"]
+fn mill_batch_wall_time_profile() {
+    for n in [250usize, 500, 1000, 2000, 4000] {
+        let mut scenario = GameScenario::new_n_player(2, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let library: Vec<String> = (0..n + 5).map(|i| format!("Library Card {i}")).collect();
+        let names: Vec<&str> = library.iter().map(String::as_str).collect();
+        scenario.with_library_top(P0, &names);
+        let oracle = format!("Mill {n} cards.");
+        let spell = free_spell(&mut scenario, "Mill Profile", false, &oracle);
+        let mut runner = scenario.build();
+        let graveyard_before = runner.state().players[0].graveyard.len();
+        let started = std::time::Instant::now();
+        let mut events = Vec::new();
+        cast_and_pass(&mut runner, spell, None, None, &mut events);
+        settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+        let elapsed = started.elapsed();
+        // The spell itself is in the graveyard too.
+        let milled = runner.state().players[0].graveyard.len() - graveyard_before - 1;
+        assert_eq!(milled, n, "reach: every card was milled");
+        eprintln!("L-scale mill n={n} elapsed_ms={}", elapsed.as_millis());
+    }
+}

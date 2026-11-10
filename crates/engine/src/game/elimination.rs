@@ -2600,7 +2600,12 @@ mod tests {
             "Surviving batch member".to_string(),
             Zone::Battlefield,
         );
-        let mut group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        let mut group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[leaving, surviving],
+                Zone::Graveyard,
+            ),
+        );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parked batch has its pre-delivery authority");
@@ -2755,7 +2760,12 @@ mod tests {
             "Surviving batch tail".to_string(),
             Zone::Battlefield,
         );
-        let mut group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        let mut group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[leaving, surviving],
+                Zone::Graveyard,
+            ),
+        );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parked batch has its pre-delivery authority");
@@ -2823,7 +2833,12 @@ mod tests {
             "Surviving change-zone tail".to_string(),
             Zone::Battlefield,
         );
-        let mut group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        let mut group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[leaving, surviving],
+                Zone::Graveyard,
+            ),
+        );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parked iteration has its pre-delivery authority");

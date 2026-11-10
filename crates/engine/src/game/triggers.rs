@@ -25,7 +25,7 @@ use crate::types::game_state::{
     LogicalZoneChangeTerminalOutcome, MayTriggerAutoChoiceKey, MayTriggerOrigin,
     ProductionOverride, StackEntry, StackEntryKind, SyntheticTriggerProvenance,
     TargetSelectionConstraint, TargetSelectionSlot, TriggerObservationTime, TriggerSourceContext,
-    TriggerSourceRead, WaitingFor,
+    TriggerSourceRead, WaitingFor, ZoneChangeAnnouncement,
 };
 use crate::types::identifiers::{
     DelayedInstallIdentity, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
@@ -2791,10 +2791,10 @@ pub(crate) fn latch_logical_zone_change_group_immediately_after(
 /// changing move-time state merely to construct a serialized observation owner.
 pub(crate) fn allocate_logical_zone_change_group(
     state: &mut GameState,
-    announced_members: &[ObjectId],
+    announced: &[ZoneChangeAnnouncement],
 ) -> LogicalZoneChangeGroup {
     let immediately_before_state = immediately_before_projection(state);
-    let mut group = state.allocate_logical_zone_change_group(announced_members);
+    let mut group = state.allocate_logical_zone_change_group(announced);
     latch_logical_zone_change_group_immediately_before(&immediately_before_state, &mut group);
     group
 }
@@ -51376,7 +51376,10 @@ pub mod tests {
         let subject = make_creature(&mut state, PlayerId(0), "Segment subject", 2, 2);
         let batched_outsider =
             add_battlefield_or_graveyard_dies_observer(&mut state, PlayerId(0), true);
-        let group = allocate_logical_zone_change_group(&mut state, &[observer, subject]);
+        let group = allocate_logical_zone_change_group(
+            &mut state,
+            &ZoneChangeAnnouncement::all(&[observer, subject], Zone::Graveyard),
+        );
 
         let mut subject_events = Vec::new();
         crate::game::zones::move_to_zone(&mut state, subject, Zone::Graveyard, &mut subject_events);
@@ -51425,7 +51428,10 @@ pub mod tests {
         let mut state = setup();
         let observer = add_battlefield_or_graveyard_dies_observer(&mut state, PlayerId(0), false);
         let subject = make_creature(&mut state, PlayerId(0), "Settlement subject", 2, 2);
-        let mut group = allocate_logical_zone_change_group(&mut state, &[observer, subject]);
+        let mut group = allocate_logical_zone_change_group(
+            &mut state,
+            &ZoneChangeAnnouncement::all(&[observer, subject], Zone::Graveyard),
+        );
 
         let mut subject_events = Vec::new();
         crate::game::zones::move_to_zone(&mut state, subject, Zone::Graveyard, &mut subject_events);
@@ -51504,7 +51510,10 @@ pub mod tests {
         );
 
         let subject = make_creature(&mut state, PlayerId(0), "Settlement subject", 2, 2);
-        let mut group = allocate_logical_zone_change_group(&mut state, &[observer, subject]);
+        let mut group = allocate_logical_zone_change_group(
+            &mut state,
+            &ZoneChangeAnnouncement::all(&[observer, subject], Zone::Graveyard),
+        );
         let mut subject_events = Vec::new();
         crate::game::zones::move_to_zone(&mut state, subject, Zone::Graveyard, &mut subject_events);
         group
@@ -51699,7 +51708,10 @@ pub mod tests {
         let member = make_creature(&mut state, PlayerId(0), "Prevented member", 2, 2);
         let member_identity =
             ObjectIncarnationRef::from_object(state.objects.get(&member).expect("member exists"));
-        let mut group = allocate_logical_zone_change_group(&mut state, &[member]);
+        let mut group = allocate_logical_zone_change_group(
+            &mut state,
+            &ZoneChangeAnnouncement::all(&[member], Zone::Graveyard),
+        );
         group
             .record_prevented(member_identity)
             .expect("record prevented member");
@@ -51736,8 +51748,10 @@ pub mod tests {
         let moved = make_creature(&mut state, PlayerId(0), "Moved member", 2, 2);
         let prevented = make_creature(&mut state, PlayerId(0), "Prevented member", 2, 2);
         let remained = make_creature(&mut state, PlayerId(0), "Remained member", 2, 2);
-        let mut group =
-            allocate_logical_zone_change_group(&mut state, &[moved, prevented, remained]);
+        let mut group = allocate_logical_zone_change_group(
+            &mut state,
+            &ZoneChangeAnnouncement::all(&[moved, prevented, remained], Zone::Graveyard),
+        );
 
         let mut final_events = Vec::new();
         crate::game::zones::move_to_zone(&mut state, moved, Zone::Graveyard, &mut final_events);

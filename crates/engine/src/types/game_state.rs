@@ -3540,6 +3540,25 @@ pub struct LogicalZoneChangeProspectiveMember {
     pub identity: ObjectIncarnationRef,
 }
 
+/// One object a logical zone-change action announces, with the zone the action
+/// moves it to. The announcement is what
+/// [`GameState::allocate_logical_zone_change_group`] classifies; it is never
+/// serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZoneChangeAnnouncement {
+    pub object_id: ObjectId,
+    pub to: Zone,
+}
+
+impl ZoneChangeAnnouncement {
+    /// Each of `ids`, announced to the same zone `to`.
+    pub fn all(ids: &[ObjectId], to: Zone) -> Vec<Self> {
+        ids.iter()
+            .map(|&object_id| Self { object_id, to })
+            .collect()
+    }
+}
+
 /// Terminal disposition of one prospective battlefield member.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -3687,9 +3706,10 @@ pub struct LogicalZoneChangeGroup {
     pub logical_group_id: LogicalZoneChangeGroupId,
     pub prospective_battlefield_members: Vec<LogicalZoneChangeProspectiveMember>,
     /// CR 603.6a: the announced members that were not on the battlefield when
-    /// this zone change was announced. The permanents this one event puts onto
-    /// the battlefield are among them (CR 603.6d + CR 614.12a: each one's
-    /// as-enters effects are part of that event).
+    /// this zone change was announced and that it announced to the battlefield.
+    /// The permanents this one event puts onto the battlefield are among them
+    /// (CR 603.6d + CR 614.12a: each one's as-enters effects are part of that
+    /// event).
     pub prospective_entrants: Vec<LogicalZoneChangeProspectiveMember>,
     pub terminal_outcomes: Vec<LogicalZoneChangeTerminalOutcome>,
     /// Exact post-delivery authority for prospective members that remained on
@@ -3775,33 +3795,29 @@ impl LogicalZoneChangeGroup {
         if self.prospective_battlefield_members.len() != self.post_event_member_contexts.len() {
             return Err("logical zone-change member/post-event-context lengths differ".to_string());
         }
-        for (index, member) in self.prospective_battlefield_members.iter().enumerate() {
-            if self.prospective_battlefield_members[..index]
-                .iter()
-                .any(|prior| prior.identity == member.identity)
-            {
+        // One pass over each list: a set of the identities seen so far finds a
+        // repeat without rescanning the prefix.
+        let mut members = HashSet::with_capacity(self.prospective_battlefield_members.len());
+        let mut member_ids = HashSet::with_capacity(self.prospective_battlefield_members.len());
+        for member in &self.prospective_battlefield_members {
+            if !members.insert(member.identity) {
                 return Err(format!(
                     "logical zone-change member {}:{} was announced more than once",
                     member.identity.object_id.0, member.identity.incarnation
                 ));
             }
+            member_ids.insert(member.identity.object_id);
         }
-        for (index, entrant) in self.prospective_entrants.iter().enumerate() {
-            if self.prospective_entrants[..index]
-                .iter()
-                .any(|prior| prior.identity == entrant.identity)
-            {
+        let mut entrants = HashSet::with_capacity(self.prospective_entrants.len());
+        for entrant in &self.prospective_entrants {
+            if !entrants.insert(entrant.identity) {
                 return Err(format!(
                     "logical zone-change entrant {}:{} was announced more than once",
                     entrant.identity.object_id.0, entrant.identity.incarnation
                 ));
             }
             // One announced object was either on the battlefield or not.
-            if self
-                .prospective_battlefield_members
-                .iter()
-                .any(|member| member.identity.object_id == entrant.identity.object_id)
-            {
+            if member_ids.contains(&entrant.identity.object_id) {
                 return Err(format!(
                     "logical zone-change object {} is both a battlefield member and an entrant",
                     entrant.identity.object_id.0
@@ -4453,17 +4469,7 @@ impl LogicalZoneChangeGroup {
         if self.prospective_battlefield_members.len() != self.post_event_member_contexts.len() {
             return Err("logical zone-change member/post-event-context lengths differ".to_string());
         }
-        for (index, member) in self.prospective_battlefield_members.iter().enumerate() {
-            if self.prospective_battlefield_members[..index]
-                .iter()
-                .any(|prior| prior.identity == member.identity)
-            {
-                return Err(format!(
-                    "logical zone-change member {}:{} was announced more than once",
-                    member.identity.object_id.0, member.identity.incarnation
-                ));
-            }
-        }
+        // A repeated member was refused by `validate_serialized_authority`.
 
         for (expected_ordinal, occurrence) in self.all_origin_occurrences.iter().enumerate() {
             if occurrence.ordinal != expected_ordinal {
@@ -23959,7 +23965,7 @@ declare_game_state! {
     pub(crate) active_rules_execution_node: Option<RulesExecutionNodeRef>,
     /// CR 603.6a: the prospective entrants of the simultaneous zone change whose
     /// member a logical owner is delivering inline
-    /// (`zone_pipeline::deliver_simultaneous_member`). Empty outside that
+    /// (`zone_pipeline::SimultaneousEntrants::deliver_member`). Empty outside that
     /// synchronous window. A parked owner's change is read from its frame
     /// instead. Never serialized and never compared.
     #[serde(skip)]
@@ -32969,11 +32975,12 @@ impl GameState {
     /// any member is delivered. Only objects on the battlefield at this exact
     /// point become prospective battlefield members; nonbattlefield actions
     /// still receive an owner with an empty member list so their all-origin
-    /// occurrence authority is retained. CR 603.6a: every announced object off
-    /// the battlefield at this point is a prospective entrant of the one event.
+    /// occurrence authority is retained. An announced object off the
+    /// battlefield at this point that is announced to the battlefield is a
+    /// prospective entrant of the one event.
     pub fn allocate_logical_zone_change_group(
         &mut self,
-        announced_members: &[ObjectId],
+        announced: &[ZoneChangeAnnouncement],
     ) -> LogicalZoneChangeGroup {
         let logical_group_id = LogicalZoneChangeGroupId(self.next_logical_zone_change_group_id);
         self.next_logical_zone_change_group_id = self
@@ -32982,15 +32989,21 @@ impl GameState {
             .expect("logical zone-change group allocator exhausted");
         let mut prospective_battlefield_members = Vec::new();
         let mut prospective_entrants = Vec::new();
-        for object in announced_members
-            .iter()
-            .filter_map(|object_id| self.objects.get(object_id))
-        {
+        for (announcement, object) in announced.iter().filter_map(|announcement| {
+            self.objects
+                .get(&announcement.object_id)
+                .map(|object| (announcement, object))
+        }) {
             let member = LogicalZoneChangeProspectiveMember {
                 identity: ObjectIncarnationRef::from_object(object),
             };
             if object.zone != Zone::Battlefield {
-                prospective_entrants.push(member);
+                // CR 603.6a: only the permanents this one event puts onto the
+                // battlefield are its entrants; a mill, discard or bounce batch
+                // announces none.
+                if announcement.to == Zone::Battlefield {
+                    prospective_entrants.push(member);
+                }
             } else if self.battlefield.contains(&object.id) {
                 // CR 730.2: an absorbed component represents the merged
                 // permanent, not an independent battlefield member.
@@ -43064,7 +43077,9 @@ mod tests {
             ProposedEvent::zone_change(object, Zone::Battlefield, Zone::Exile, Some(object));
         let mut paused = PendingZoneChangeDelivery::new(member, expected_event.clone());
         paused.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
-        let logical_zone_change_group = state.allocate_logical_zone_change_group(&[object]);
+        let logical_zone_change_group = state.allocate_logical_zone_change_group(
+            &ZoneChangeAnnouncement::all(&[object], Zone::Exile),
+        );
         state.push_change_zone_iteration(PendingChangeZoneIteration {
             pending_return_result_producer: None,
             logical_zone_change_group,
@@ -55379,7 +55394,10 @@ mod tests {
         state.objects.insert(hand_id, hand);
         state.battlefield.push_back(battlefield_id);
 
-        let group = state.allocate_logical_zone_change_group(&[battlefield_id, hand_id]);
+        let group = state.allocate_logical_zone_change_group(&ZoneChangeAnnouncement::all(
+            &[battlefield_id, hand_id],
+            Zone::Graveyard,
+        ));
 
         assert_eq!(group.logical_group_id, LogicalZoneChangeGroupId(1));
         assert_eq!(
@@ -55395,8 +55413,9 @@ mod tests {
         assert!(group.all_origin_occurrences.is_empty());
     }
 
-    /// U-C1. CR 603.6a: every announced object off the battlefield is a
-    /// prospective entrant of the one event, with its incarnation; a battlefield
+    /// U-C1. CR 603.6a: every announced object off the battlefield that is
+    /// announced to the battlefield is a prospective entrant of the one event,
+    /// with its incarnation; a battlefield
     /// object is a battlefield member; an absorbed component (CR 730.2) and an
     /// absent id are neither. The entrant list is required wire authority, and a
     /// duplicate or an object in both lists is refused.
@@ -55435,12 +55454,10 @@ mod tests {
         state.objects.insert(absorbed_id, absorbed);
         state.battlefield.push_back(battlefield_id);
 
-        let mut group = state.allocate_logical_zone_change_group(&[
-            battlefield_id,
-            library_id,
-            absorbed_id,
-            absent_id,
-        ]);
+        let mut group = state.allocate_logical_zone_change_group(&ZoneChangeAnnouncement::all(
+            &[battlefield_id, library_id, absorbed_id, absent_id],
+            Zone::Battlefield,
+        ));
 
         assert_eq!(
             group.prospective_battlefield_members,
@@ -55496,6 +55513,165 @@ mod tests {
             overlapping,
             "an object both a battlefield member and an entrant",
         );
+    }
+
+    /// L1. CR 603.6a: an announced object off the battlefield is a prospective
+    /// entrant only when the action announces it to the battlefield. A mill
+    /// (library to graveyard) has none; a hand-to-battlefield put lists each
+    /// object; a mixed batch lists only its battlefield-bound objects.
+    #[test]
+    fn logical_zone_change_group_lists_only_battlefield_bound_entrants() {
+        let mut state = GameState::new_two_player(19);
+        let library = |state: &mut GameState, n: u64| {
+            let id = ObjectId(90 + n);
+            let mut object = GameObject::new(
+                id,
+                CardId(90 + n),
+                PlayerId(0),
+                format!("card {n}"),
+                Zone::Library,
+            );
+            object.incarnation = n;
+            state.objects.insert(id, object);
+            id
+        };
+        let entrant = |id: ObjectId, incarnation: u64| LogicalZoneChangeProspectiveMember {
+            identity: ObjectIncarnationRef::of(id, incarnation),
+        };
+        let milled = [1, 2, 3].map(|n| library(&mut state, n));
+        let mill = state.allocate_logical_zone_change_group(&ZoneChangeAnnouncement::all(
+            &milled,
+            Zone::Graveyard,
+        ));
+        assert!(
+            mill.prospective_entrants.is_empty(),
+            "a mill puts nothing onto the battlefield: {:?}",
+            mill.prospective_entrants
+        );
+
+        let put = [4, 5, 6].map(|n| library(&mut state, n));
+        for id in put {
+            state.objects.get_mut(&id).expect("put object exists").zone = Zone::Hand;
+        }
+        let battlefield_bound = state.allocate_logical_zone_change_group(
+            &ZoneChangeAnnouncement::all(&put, Zone::Battlefield),
+        );
+        assert_eq!(
+            battlefield_bound.prospective_entrants,
+            vec![entrant(put[0], 4), entrant(put[1], 5), entrant(put[2], 6)],
+            "reach: a put onto the battlefield lists every object it moves"
+        );
+
+        let mixed = state.allocate_logical_zone_change_group(&[
+            ZoneChangeAnnouncement {
+                object_id: milled[0],
+                to: Zone::Graveyard,
+            },
+            ZoneChangeAnnouncement {
+                object_id: put[0],
+                to: Zone::Battlefield,
+            },
+            ZoneChangeAnnouncement {
+                object_id: milled[1],
+                to: Zone::Exile,
+            },
+            ZoneChangeAnnouncement {
+                object_id: put[2],
+                to: Zone::Battlefield,
+            },
+        ]);
+        assert_eq!(
+            mixed.prospective_entrants,
+            vec![entrant(put[0], 4), entrant(put[2], 6)],
+            "a mixed batch lists only its battlefield-bound objects, in order"
+        );
+        assert!(mixed.prospective_battlefield_members.is_empty());
+    }
+
+    /// L3. The serialized-authority check refuses a member or an entrant
+    /// announced more than once, and an object that is both a battlefield
+    /// member and an entrant (one announced object was either on the
+    /// battlefield or not, CR 603.6a), with the same messages, and accepts a
+    /// large group of distinct entrants. Final settlement refuses a repeated
+    /// member through the same check.
+    #[test]
+    fn logical_zone_change_group_validation_refuses_repeats_with_its_messages() {
+        let announced = |id: u64, incarnation: u64| LogicalZoneChangeProspectiveMember {
+            identity: ObjectIncarnationRef::of(ObjectId(id), incarnation),
+        };
+        let latched = |members: Vec<LogicalZoneChangeProspectiveMember>,
+                       entrants: Vec<LogicalZoneChangeProspectiveMember>| {
+            let mut group =
+                LogicalZoneChangeGroup::new(LogicalZoneChangeGroupId(1), members, entrants);
+            group
+                .latch_immediately_before(Vec::new(), Vec::new())
+                .expect("the test group owns an explicit pre-delivery latch");
+            group
+        };
+        let distinct = latched(
+            vec![announced(1, 0), announced(2, 0), announced(3, 0)],
+            vec![announced(10, 0), announced(11, 0), announced(12, 0)],
+        );
+        assert_eq!(
+            distinct.validate_serialized_authority(),
+            Ok(()),
+            "reach: three distinct members and three distinct entrants validate"
+        );
+
+        let repeated_members = latched(
+            vec![
+                announced(1, 0),
+                announced(2, 0),
+                announced(3, 0),
+                announced(3, 0),
+                announced(2, 0),
+                announced(1, 0),
+            ],
+            Vec::new(),
+        );
+        let member_error =
+            Err("logical zone-change member 3:0 was announced more than once".into());
+        assert_eq!(
+            repeated_members.validate_serialized_authority(),
+            member_error
+        );
+        assert_eq!(
+            repeated_members.validate_complete(),
+            member_error,
+            "final settlement refuses the repeated member through the same check"
+        );
+
+        let repeated_entrants = latched(
+            Vec::new(),
+            vec![
+                announced(10, 0),
+                announced(11, 0),
+                announced(12, 0),
+                announced(12, 0),
+                announced(11, 0),
+                announced(10, 0),
+            ],
+        );
+        assert_eq!(
+            repeated_entrants.validate_serialized_authority(),
+            Err("logical zone-change entrant 12:0 was announced more than once".into())
+        );
+
+        // The same object id under another incarnation is still one object.
+        let member_and_entrant = latched(
+            vec![announced(1, 0), announced(2, 0)],
+            vec![announced(10, 0), announced(2, 5)],
+        );
+        assert_eq!(
+            member_and_entrant.validate_serialized_authority(),
+            Err("logical zone-change object 2 is both a battlefield member and an entrant".into())
+        );
+
+        let large = latched(
+            vec![announced(0, 0)],
+            (1..=50_000).map(|id| announced(id, 1)).collect(),
+        );
+        assert_eq!(large.validate_serialized_authority(), Ok(()));
     }
 
     #[test]

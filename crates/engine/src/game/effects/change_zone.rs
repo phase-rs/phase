@@ -15,10 +15,9 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ChangeZoneMemberEntry, GameState, LogicalZoneChangeGroup, MassLibraryOrderBatch,
-    MassLibraryOrderMember, PendingCounterPostAction, PendingMassLibraryOrderBatches,
-    PendingMassLibraryOrderChoice, PendingZoneChangeDelivery, WaitingFor,
-    ZoneOpponentChooserPurpose,
+    ChangeZoneMemberEntry, GameState, MassLibraryOrderBatch, MassLibraryOrderMember,
+    PendingCounterPostAction, PendingMassLibraryOrderBatches, PendingMassLibraryOrderChoice,
+    PendingZoneChangeDelivery, WaitingFor, ZoneChangeAnnouncement, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -1524,8 +1523,12 @@ pub fn resolve(
     // Tracked the same way the mass `resolve_all` path counts, so the chained
     // sub-ability's `QuantityRef::EventContextAmount` resolves correctly.
     let mut moved_count: i32 = 0;
-    let mut logical_zone_change_group =
-        crate::game::triggers::allocate_logical_zone_change_group(state, &targeted_objects);
+    let mut logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+        state,
+        &ZoneChangeAnnouncement::all(&targeted_objects, dest_zone),
+    );
+    let mut entrants =
+        crate::game::zone_pipeline::SimultaneousEntrants::of(&logical_zone_change_group);
     let logical_group_event_start = events.len();
     for (i, member) in members.iter().enumerate() {
         let obj_id = &member.object_id;
@@ -1573,13 +1576,7 @@ pub fn resolve(
         );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
-        match process_one_zone_move_with_terminal(
-            state,
-            &logical_zone_change_group,
-            &ctx,
-            member,
-            events,
-        ) {
+        match process_one_zone_move_with_terminal(state, &mut entrants, &ctx, member, events) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
                     .record_delivery_completion(*obj_id, completion)
@@ -2058,16 +2055,17 @@ pub(crate) fn process_one_zone_move(
 /// `PendingChangeZoneIteration` on `NeedsChoice`, whose resume takes an owed
 /// attacking seat (CR 508.4); the `EffectZoneChoice` loops park it above the
 /// paused child, and that route is not verified. CR 603.6a: each caller is the
-/// logical owner of `group`, and the member is delivered with that change's
-/// prospective entrants published (`zone_pipeline::deliver_simultaneous_member`).
+/// logical owner of a change, and the member is delivered with that change's
+/// prospective `entrants` published, which the caller collected once before its
+/// loop (`zone_pipeline::SimultaneousEntrants`).
 pub(crate) fn process_one_zone_move_with_terminal(
     state: &mut GameState,
-    group: &LogicalZoneChangeGroup,
+    entrants: &mut crate::game::zone_pipeline::SimultaneousEntrants,
     ctx: &ChangeZoneIterationCtx,
     member: &ChangeZoneMemberEntry,
     events: &mut Vec<GameEvent>,
 ) -> crate::game::zone_pipeline::ZoneMoveTerminalResult {
-    crate::game::zone_pipeline::deliver_simultaneous_member(state, group, |state| {
+    entrants.deliver_member(state, |state| {
         process_one_zone_move_with_attack_seat(
             state,
             ctx,
@@ -3147,8 +3145,12 @@ pub fn resolve_all(
     }
 
     let mut moved_count: i32 = 0;
-    let mut logical_zone_change_group =
-        crate::game::triggers::allocate_logical_zone_change_group(state, &matching);
+    let mut logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+        state,
+        &ZoneChangeAnnouncement::all(&matching, dest_zone),
+    );
+    let mut entrants =
+        crate::game::zone_pipeline::SimultaneousEntrants::of(&logical_zone_change_group);
     let logical_group_event_start = events.len();
     for (i, obj_id) in matching.iter().enumerate() {
         let obj_id = *obj_id;
@@ -3176,38 +3178,34 @@ pub fn resolve_all(
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
         // CR 603.6a: the member is delivered as part of the mass move's one event.
-        match crate::game::zone_pipeline::deliver_simultaneous_member(
-            state,
-            &logical_zone_change_group,
-            |state| {
-                crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
-                    state,
-                    obj_id,
-                    per_object_origin,
-                    dest_zone,
-                    ability.source_id,
-                    ability.duration.as_ref(),
-                    false,
-                    enter_tapped,
-                    enters_attacking,
-                    // CR 508.4: the mass loop pushes its owner on `NeedsChoice`, and
-                    // that owner resumes the paused member and seats it.
-                    crate::game::zone_pipeline::PausedEntryAttackSeat::ResumingOwner,
-                    enters_under_player,
-                    &enter_with_counters,
-                    face_down_profile.as_ref(),
-                    ability.context.face_down_in_exile,
-                    track_exiled_by_source,
-                    member_library_placement.clone(),
-                    None,
-                    Some(ability.controller),
-                    // CR 608.2c: the controller follows the instruction, so it performs
-                    // the move.
-                    Some(ability.controller),
-                    events,
-                )
-            },
-        ) {
+        match entrants.deliver_member(state, |state| {
+            crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
+                state,
+                obj_id,
+                per_object_origin,
+                dest_zone,
+                ability.source_id,
+                ability.duration.as_ref(),
+                false,
+                enter_tapped,
+                enters_attacking,
+                // CR 508.4: the mass loop pushes its owner on `NeedsChoice`, and
+                // that owner resumes the paused member and seats it.
+                crate::game::zone_pipeline::PausedEntryAttackSeat::ResumingOwner,
+                enters_under_player,
+                &enter_with_counters,
+                face_down_profile.as_ref(),
+                ability.context.face_down_in_exile,
+                track_exiled_by_source,
+                member_library_placement.clone(),
+                None,
+                Some(ability.controller),
+                // CR 608.2c: the controller follows the instruction, so it performs
+                // the move.
+                Some(ability.controller),
+                events,
+            )
+        }) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
                     .record_delivery_completion(obj_id, completion)
@@ -3980,9 +3978,17 @@ mod tests {
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
         };
-        let group = state.allocate_logical_zone_change_group(&[card]);
-        let result =
-            process_one_zone_move_with_terminal(&mut state, &group, &ctx, &member, &mut Vec::new());
+        let group = state.allocate_logical_zone_change_group(&ZoneChangeAnnouncement::all(
+            &[card],
+            Zone::Battlefield,
+        ));
+        let result = process_one_zone_move_with_terminal(
+            &mut state,
+            &mut crate::game::zone_pipeline::SimultaneousEntrants::of(&group),
+            &ctx,
+            &member,
+            &mut Vec::new(),
+        );
         assert!(matches!(
             result,
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(
@@ -10344,8 +10350,10 @@ mod tests {
         let hero = creature_in_graveyard(&mut state, 1, PlayerId(0));
         let soldier = creature_in_graveyard(&mut state, 2, PlayerId(0));
 
-        let logical_zone_change_group =
-            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[hero, soldier]);
+        let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            &mut state,
+            &ZoneChangeAnnouncement::all(&[hero, soldier], Zone::Battlefield),
+        );
         state.push_change_zone_iteration(crate::types::game_state::PendingChangeZoneIteration {
             pending_return_result_producer: None,
             logical_zone_change_group,

@@ -22,7 +22,7 @@ use crate::types::game_state::{
     LogicalZoneChangeGroup, MergedCardComponentRoute, PendingBatchDeliveries,
     PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest, PendingCounterPostAction,
     PendingLiminalEntryResume, PendingZoneChangeDelivery, PostReplacementDrainOwner, WaitingFor,
-    ZoneDeliveryExileTracking, ZoneMoveCompletion,
+    ZoneChangeAnnouncement, ZoneDeliveryExileTracking, ZoneMoveCompletion,
 };
 use std::collections::HashSet;
 
@@ -1430,8 +1430,16 @@ fn deliver_simultaneous_batch(
     let event_start = events.len();
     let zone_change_record_start = state.zone_changes_this_turn.len();
     let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
+    // A batch may be heterogeneous: each request announces its own destination.
+    let announced: Vec<ZoneChangeAnnouncement> = reqs
+        .iter()
+        .map(|r| ZoneChangeAnnouncement {
+            object_id: r.object_id,
+            to: r.to,
+        })
+        .collect();
     let logical_zone_change_group =
-        crate::game::triggers::allocate_logical_zone_change_group(state, &ids);
+        crate::game::triggers::allocate_logical_zone_change_group(state, &announced);
     let destination = reqs.first().map(|r| r.to);
     match deliver_batch(state, reqs, logical_zone_change_group, events) {
         BatchDeliveryResult::Done(mut logical_zone_change_group) => {
@@ -1555,12 +1563,19 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
 fn standalone_batch_record(state: &mut GameState, destination: Zone) -> PendingBatchDeliveries {
     let zone_change_record_start = state.zone_changes_this_turn.len();
     let paused_current = state.pending_zone_change_delivery_from_replacement();
-    let announced_members = paused_current
+    // The paused delivery is announced to the zone its proposed event moves it to.
+    let announced = paused_current
         .iter()
-        .map(|delivery| delivery.member.object_id)
+        .filter_map(|delivery| match delivery.expected_event {
+            ProposedEvent::ZoneChange { to, .. } => Some(ZoneChangeAnnouncement {
+                object_id: delivery.member.object_id,
+                to,
+            }),
+            _ => None,
+        })
         .collect::<Vec<_>>();
     let logical_zone_change_group =
-        crate::game::triggers::allocate_logical_zone_change_group(state, &announced_members);
+        crate::game::triggers::allocate_logical_zone_change_group(state, &announced);
     PendingBatchDeliveries {
         logical_zone_change_group,
         paused_current,
@@ -1579,27 +1594,40 @@ fn standalone_batch_record(state: &mut GameState, destination: Zone) -> PendingB
     }
 }
 
-/// CR 603.6a + CR 603.6d + CR 614.12a: deliver one member of a simultaneous
-/// zone change with that change's prospective entrants published, so an
-/// as-enters roll made during this delivery is not observed by a co-entrant
-/// (`simultaneous_entrants_of`). Restores the outer publication: a member's
-/// own continuation can run a nested simultaneous change.
-pub(crate) fn deliver_simultaneous_member<R>(
-    state: &mut GameState,
-    group: &LogicalZoneChangeGroup,
-    deliver: impl FnOnce(&mut GameState) -> R,
-) -> R {
-    let outer = std::mem::replace(
-        &mut state.active_simultaneous_entrants,
-        group
-            .prospective_entrants
-            .iter()
-            .map(|member| member.identity.object_id)
-            .collect(),
-    );
-    let result = deliver(state);
-    state.active_simultaneous_entrants = outer;
-    result
+/// CR 603.6a + CR 603.6d + CR 614.12a: the prospective entrants of one
+/// simultaneous zone change, published while each of its members is delivered
+/// so an as-enters roll made during that delivery is not observed by a
+/// co-entrant (`simultaneous_entrants_of`). A delivery loop collects them once,
+/// before its first member, and every member's delivery reuses that one list.
+pub(crate) struct SimultaneousEntrants(Vec<ObjectId>);
+
+impl SimultaneousEntrants {
+    /// The entrants `group` announced.
+    pub(crate) fn of(group: &LogicalZoneChangeGroup) -> Self {
+        Self(
+            group
+                .prospective_entrants
+                .iter()
+                .map(|member| member.identity.object_id)
+                .collect(),
+        )
+    }
+
+    /// Deliver one member of the change with its entrants published. The list
+    /// is swapped in and back, so publishing it takes constant time per member,
+    /// and
+    /// the outer publication is restored: a member's own continuation can run
+    /// a nested simultaneous change, which publishes and restores its own.
+    pub(crate) fn deliver_member<R>(
+        &mut self,
+        state: &mut GameState,
+        deliver: impl FnOnce(&mut GameState) -> R,
+    ) -> R {
+        std::mem::swap(&mut state.active_simultaneous_entrants, &mut self.0);
+        let result = deliver(state);
+        std::mem::swap(&mut state.active_simultaneous_entrants, &mut self.0);
+        result
+    }
 }
 
 /// CR 603.6a + CR 603.6d + CR 614.12a: the permanents that the one event
@@ -1678,6 +1706,7 @@ fn deliver_batch(
     events: &mut Vec<GameEvent>,
 ) -> BatchDeliveryResult {
     let segment_start = events.len();
+    let mut entrants = SimultaneousEntrants::of(&logical_zone_change_group);
     let mut queue = reqs.into_iter();
     while let Some(req) = queue.next() {
         let destination = req.to;
@@ -1690,7 +1719,7 @@ fn deliver_batch(
         let object_id = req.object_id;
         // CR 508.4: the batch owner resumes a paused member and takes its stamp.
         // CR 603.6a: the member is delivered as part of the batch's one event.
-        match deliver_simultaneous_member(state, &logical_zone_change_group, |state| {
+        match entrants.deliver_member(state, |state| {
             move_object_with_attack_seat(state, req, PausedEntryAttackSeat::ResumingOwner, events)
         }) {
             ZoneMoveTerminalResult::Completed(completion) => {
@@ -2233,8 +2262,10 @@ mod paused_search_audience_tests {
         let paused_current = state
             .pending_zone_change_delivery_from_replacement()
             .expect("a parked zone change has a delivery key");
-        let logical_zone_change_group =
-            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[entrant]);
+        let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            &mut state,
+            &ZoneChangeAnnouncement::all(&[entrant], Zone::Battlefield),
+        );
         state.push_batch_delivery(PendingBatchDeliveries {
             logical_zone_change_group,
             paused_current: Some(paused_current),
@@ -8697,16 +8728,20 @@ mod simultaneous_entry_tests {
                 Zone::Hand,
             )
         });
-        let group = state.allocate_logical_zone_change_group(&[a, b]);
+        let group = state.allocate_logical_zone_change_group(&ZoneChangeAnnouncement::all(
+            &[a, b],
+            Zone::Battlefield,
+        ));
         let empty = state.allocate_logical_zone_change_group(&[]);
 
-        let (outer, nested, restored) = deliver_simultaneous_member(&mut state, &group, |state| {
-            let outer = simultaneous_entrants_of(state, b);
-            let nested = deliver_simultaneous_member(state, &empty, |state| {
-                simultaneous_entrants_of(state, b)
+        let mut nested_entrants = SimultaneousEntrants::of(&empty);
+        let (outer, nested, restored) =
+            SimultaneousEntrants::of(&group).deliver_member(&mut state, |state| {
+                let outer = simultaneous_entrants_of(state, b);
+                let nested = nested_entrants
+                    .deliver_member(state, |state| simultaneous_entrants_of(state, b));
+                (outer, nested, simultaneous_entrants_of(state, b))
             });
-            (outer, nested, simultaneous_entrants_of(state, b))
-        });
         assert_eq!(outer, vec![a, b]);
         assert!(nested.is_empty(), "the nested change publishes its own");
         assert_eq!(restored, vec![a, b], "the outer publication is restored");
@@ -8748,6 +8783,68 @@ mod simultaneous_entry_tests {
         assert!(simultaneous_entrants_of(&state, c).is_empty());
     }
 
+    /// L2. A delivery loop's one entrant list is published for each member it
+    /// delivers: every member reads the change's entrants from that same
+    /// allocation, the loop gets it back after each member, and a nested
+    /// change publishes its own list and restores the loop's.
+    #[test]
+    fn one_entrant_list_is_published_for_every_member_without_a_rebuild() {
+        let mut state = GameState::new_two_player(42);
+        let members = [1, 2, 3].map(|n| {
+            create_object(
+                &mut state,
+                CardId(n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Hand,
+            )
+        });
+        let group = state.allocate_logical_zone_change_group(&ZoneChangeAnnouncement::all(
+            &members,
+            Zone::Battlefield,
+        ));
+        let empty = state.allocate_logical_zone_change_group(&[]);
+        let mut entrants = SimultaneousEntrants::of(&group);
+        let mut nested_entrants = SimultaneousEntrants::of(&empty);
+        let allocation = entrants.0.as_ptr();
+
+        for member in members {
+            let (published, during, nested, restored) =
+                entrants.deliver_member(&mut state, |state| {
+                    let during = state.active_simultaneous_entrants.as_ptr();
+                    let published = simultaneous_entrants_of(state, member);
+                    let nested = nested_entrants
+                        .deliver_member(state, |state| simultaneous_entrants_of(state, member));
+                    let restored = state.active_simultaneous_entrants.as_ptr();
+                    (published, during, nested, restored)
+                });
+            assert_eq!(published, members.to_vec(), "member {member:?} reads them");
+            assert_eq!(
+                during, allocation,
+                "member {member:?} reads the loop's one list, not a rebuilt one"
+            );
+            assert!(nested.is_empty(), "the nested change publishes its own");
+            assert_eq!(
+                restored, allocation,
+                "the nested change restores the loop's list"
+            );
+            assert_eq!(
+                entrants.0.as_ptr(),
+                allocation,
+                "the loop gets the same list back after member {member:?}"
+            );
+            assert!(
+                state.active_simultaneous_entrants.is_empty(),
+                "nothing is published between members"
+            );
+        }
+        assert_eq!(
+            entrants.0,
+            members.to_vec(),
+            "the list is intact after the loop"
+        );
+    }
+
     /// CR 111.1 + CR 603.6a + CR 614.12: only a token's liminal entry names its
     /// event's entrants from its creating effect. A meld or transformed-entry
     /// projection is a card's entry, so a delivering change's publication names
@@ -8764,7 +8861,10 @@ mod simultaneous_entry_tests {
                 Zone::Hand,
             )
         });
-        let group = state.allocate_logical_zone_change_group(&[a, b]);
+        let group = state.allocate_logical_zone_change_group(&ZoneChangeAnnouncement::all(
+            &[a, b],
+            Zone::Battlefield,
+        ));
         let meld = LiminalEntryKind::Meld {
             context: MeldSelection {
                 source_id: b,
@@ -8811,9 +8911,8 @@ mod simultaneous_entry_tests {
                     replacement_applied: HashSet::new(),
                 },
             );
-            let published = deliver_simultaneous_member(&mut state, &group, |state| {
-                simultaneous_entrants_of(state, b)
-            });
+            let published = SimultaneousEntrants::of(&group)
+                .deliver_member(&mut state, |state| simultaneous_entrants_of(state, b));
             let outside = simultaneous_entrants_of(&state, b);
             if is_token {
                 assert_eq!(

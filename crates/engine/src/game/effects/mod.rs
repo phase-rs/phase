@@ -2670,6 +2670,8 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // members moved in this resume join the logical co-departed group and
         // their observer triggers are collected with earlier pause segments.
         let events_before_drain = events.len();
+        let mut entrants =
+            crate::game::zone_pipeline::SimultaneousEntrants::of(&logical_zone_change_group);
         // CR 603.6a + CR 614.12: each member applies the entry modifications
         // resolved before the event's first member moved; never recompute
         // against the partly-moved board.
@@ -2719,7 +2721,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
             match crate::game::effects::change_zone::process_one_zone_move_with_terminal(
                 state,
-                &logical_zone_change_group,
+                &mut entrants,
                 &ctx,
                 member,
                 events,
