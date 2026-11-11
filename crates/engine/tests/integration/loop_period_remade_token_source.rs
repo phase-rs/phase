@@ -56,14 +56,14 @@ const POOL: [ManaType; 6] = [
 
 /// How a drive answers the prompts a board's loop asks.
 #[derive(Clone)]
-struct Answers {
-    color: ManaType,
+pub(crate) struct Answers {
+    pub(crate) color: ManaType,
     /// What every target prompt names, and every source choice and cost `cost` leaves unnamed.
-    aim: Option<TargetRef>,
+    pub(crate) aim: Option<TargetRef>,
     /// The permanent a sacrifice or tap cost names when it is not `aim`.
-    cost: Option<ObjectId>,
+    pub(crate) cost: Option<ObjectId>,
     /// The answer to a "you may".
-    accept: bool,
+    pub(crate) accept: bool,
 }
 
 impl Answers {
@@ -127,7 +127,7 @@ fn answer_prompts(state: &mut GameState, answers: &Answers) {
 }
 
 /// [`answer_prompts`], with every player passing priority until the stack is empty.
-fn settle(state: &mut GameState, answers: &Answers) {
+pub(crate) fn settle(state: &mut GameState, answers: &Answers) {
     for _ in 0..BEAT_CAP {
         answer_prompts(state, answers);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) || state.stack.is_empty() {
@@ -138,7 +138,7 @@ fn settle(state: &mut GameState, answers: &Answers) {
     panic!("the stack did not empty");
 }
 
-fn activate(state: &mut GameState, source_id: ObjectId, ability_index: usize) {
+pub(crate) fn activate(state: &mut GameState, source_id: ObjectId, ability_index: usize) {
     act(
         state,
         GameAction::ActivateAbility {

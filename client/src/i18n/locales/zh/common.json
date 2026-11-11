@@ -13,7 +13,8 @@
   "quantityRef": {
     "highestNumber": "最大的数",
     "lowestNumber": "最小的数",
-    "chosenNumber": "选定的数"
+    "chosenNumber": "选定的数",
+    "energyPaidOrLostThisTurn": "本回合支付或失去的能量"
   },
   "scryOutcome": {
     "title": "占卜完成",
