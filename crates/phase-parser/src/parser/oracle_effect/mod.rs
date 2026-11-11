@@ -991,6 +991,21 @@ fn if_you_do_object_anchor(
         })
 }
 
+/// CR 118.12: the optional look a "you may look …. If you do, …" gate names,
+/// when that look is a `Dig` the body's instructions can continue.
+fn if_you_do_look_anchor(clauses: &[ClauseIr], condition: &AbilityCondition) -> Option<Effect> {
+    if !condition.is_optional_effect_performed() {
+        return None;
+    }
+    clauses
+        .iter()
+        .rev()
+        // allow-noncombinator: typed ClauseIr adjacency lookup, not Oracle-text dispatch.
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .filter(|clause| clause.is_optional && matches!(clause.parsed.effect, Effect::Dig { .. }))
+        .map(|clause| clause.parsed.effect.clone())
+}
+
 /// CR 608.2c + CR 708.7 + CR 118.1: Reinterpret a generic "if you can't" rider
 /// for a preceding effect that performs no zone change.
 ///
@@ -47862,6 +47877,51 @@ fn parse_effect_chain_ir_body(
         if let Some(ref outer_condition) = condition {
             let body_chunks = split_clause_sequence(&text);
             if body_chunks.len() > 1 {
+                // CR 118.12 + CR 608.2c: a body that is exactly one selection from
+                // among the looked-at cards and one rest instruction continues the
+                // optional look, whose optional Dig is the "If you do" gate.
+                if let Some(look) = if_you_do_look_anchor(builder.clauses(), outer_condition) {
+                    let mut candidate_ctx = ctx.clone();
+                    let continuations = body_chunks
+                        .iter()
+                        .map(|body| {
+                            parse_followup_continuation_ast(&body.text, &look, &mut candidate_ctx)
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .filter(|continuations| {
+                            matches!(
+                                continuations.as_slice(),
+                                [
+                                    ContinuationAst::DigFromAmong { .. },
+                                    ContinuationAst::PutRest { .. }
+                                ]
+                            )
+                        });
+                    if let Some(continuations) = continuations {
+                        *ctx = candidate_ctx;
+                        let last = body_chunks.len() - 1;
+                        for (index, (body, continuation)) in
+                            body_chunks.iter().zip(continuations).enumerate()
+                        {
+                            let boundary = if index == last {
+                                body.boundary_after.or(chunk.boundary_after)
+                            } else {
+                                body.boundary_after
+                            };
+                            builder
+                                .clause(
+                                    &body.text,
+                                    placeholder_parsed_clause("if_you_do_look_continuation"),
+                                    boundary,
+                                    ClauseDisposition::Continue {
+                                        continuation: Some(continuation),
+                                    },
+                                )
+                                .push();
+                        }
+                        continue;
+                    }
+                }
                 if has_player_anaphoric_reference(&text.to_lowercase()) {
                     ctx.enclosing_declared_player = declared_player_reference(
                         builder.clauses(),

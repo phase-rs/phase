@@ -167,6 +167,7 @@ mod cait_sith_fortune_teller;
 mod calamity_of_the_titans_reveal_cost;
 mod call_damage_control_modal_return;
 mod call_forth_tempest_and_rootha;
+mod call_to_the_kindred;
 mod canker_abomination_enters_with_counters;
 mod captain_america_first_tap_msh_wave2;
 mod captain_america_throw;

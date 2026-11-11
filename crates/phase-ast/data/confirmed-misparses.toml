@@ -318,7 +318,6 @@ face = [
   { key = "caldera breaker", class = "wrong_player", clauses = ["When Caldera Breaker dies, put all cards exiled with it onto the battlefield under their owner's control."] },
   { key = "calim, djinn emperor", class = "cost_wrong", clauses = ["Calim's Breath — {1}{U}, Discard Calim: Tap up to one target nonland permanent.", "Then you may exile two other cards named Calim, Djinn Emperor from your graveyard.", "When you discard Calim, conjure a card named Calim, Djinn Emperor into your library seventh from the top."] },
   { key = "calix, destiny's hand", class = "wrong_duration", clauses = ["Put the rest on the bottom of your library in a random order.", "[−3]: Exile target creature or enchantment you don't control until target enchantment you control leaves the battlefield."] },
-  { key = "call to the kindred", class = "wrong_count", clauses = ["If you do, you may put a creature card that shares a creature type with enchanted creature from among them onto the battlefield,", "then you put the rest of those cards on the bottom of your library in any order."] },
   { key = "callous giant", class = "dropped_qualifier", clauses = ["If a source would deal 3 or less damage to this creature, prevent that damage."] },
   { key = "calming licid", class = "missing_effect", clauses = ["{W}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature."] },
   { key = "camato scout", class = "missing_effect", clauses = ["Camato Scout has landwalk of the chosen type."] },

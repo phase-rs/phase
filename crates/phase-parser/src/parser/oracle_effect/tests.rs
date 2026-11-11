@@ -98281,6 +98281,138 @@ fn put_those_cards_with_a_rest_clause_keeps_the_dig_partition() {
     }
 }
 
+fn upkeep_look_trigger_root(oracle: &str) -> AbilityDefinition {
+    let parsed = parse_oracle_text(
+        oracle,
+        "Call to the Kindred",
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .first()
+        .expect("the upkeep trigger must parse");
+    trigger.execute.as_deref().expect("trigger body").clone()
+}
+
+/// CR 118.12 + CR 608.2c: Call to the Kindred's comma-joined "If you do" body
+/// (one selection from among the looked-at cards, then the rest) folds into the
+/// optional look's Dig, so no separately gated instruction remains.
+#[test]
+fn if_you_do_body_continues_the_optional_look_dig() {
+    use crate::types::ability::{FilterProp, SharedQuality, SharedQualityRelation};
+    let root = upkeep_look_trigger_root(
+        "Enchant creature\nAt the beginning of your upkeep, you may look at the top five cards \
+         of your library. If you do, you may put a creature card that shares a creature type \
+         with enchanted creature from among them onto the battlefield, then you put the rest of \
+         those cards on the bottom of your library in any order.",
+    );
+    assert!(root.optional, "the look is the optional instruction");
+    assert!(
+        root.sub_ability.is_none(),
+        "nothing is left to gate: {root:#?}"
+    );
+    let Effect::Dig {
+        keep_count,
+        up_to,
+        destination,
+        filter,
+        rest_destination,
+        rest_order,
+        reveal,
+        ..
+    } = &*root.effect
+    else {
+        panic!("expected Effect::Dig, got {:?}", root.effect);
+    };
+    assert_eq!(*keep_count, Some(1));
+    assert!(
+        *up_to,
+        "\"you may put a creature card\" chooses zero or one"
+    );
+    assert_eq!(*destination, Some(Zone::Battlefield));
+    assert_eq!(
+        *filter,
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                reference: Some(Box::new(TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                ))),
+                relation: SharedQualityRelation::Shares,
+            },])
+        )
+    );
+    assert_eq!(*rest_destination, Some(Zone::Library));
+    assert_eq!(*rest_order, DigRestOrder::PlayerChoice);
+    // CR 701.20e: a look is not a reveal.
+    assert!(!*reveal);
+}
+
+/// The fold covers only a body of selection-plus-rest instructions; a trailing
+/// instruction of another kind keeps the gated distribution. No printed card has
+/// this shape; the nearest printed card is Call to the Kindred.
+#[test]
+fn if_you_do_look_body_with_a_draw_is_not_folded() {
+    let root = upkeep_look_trigger_root(
+        "At the beginning of your upkeep, you may look at the top five cards of your library. \
+         If you do, you may put a creature card from among them onto the battlefield, then draw \
+         a card.",
+    );
+    assert!(matches!(
+        &*root.effect,
+        Effect::Dig {
+            keep_count: Some(0),
+            ..
+        }
+    ));
+    let mut node = root.sub_ability.as_deref();
+    let mut gated_draw = false;
+    while let Some(def) = node {
+        gated_draw |= matches!(&*def.effect, Effect::Draw { .. })
+            && def
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_optional_effect_performed);
+        node = def.sub_ability.as_deref();
+    }
+    assert!(
+        gated_draw,
+        "the draw keeps its \"If you do\" gate: {root:#?}"
+    );
+}
+
+/// A single Dig holds one selection and one rest, so a body with two selections
+/// keeps the gated distribution. No printed card has this shape; the nearest
+/// printed card is Call to the Kindred.
+#[test]
+fn if_you_do_look_body_with_two_selections_is_not_folded() {
+    let root = upkeep_look_trigger_root(
+        "At the beginning of your upkeep, you may look at the top five cards of your library. \
+         If you do, put a creature card from among them into your hand, then put a land card \
+         from among them onto the battlefield, then put the rest on the bottom of your library \
+         in any order.",
+    );
+    assert!(matches!(
+        &*root.effect,
+        Effect::Dig {
+            keep_count: Some(0),
+            ..
+        }
+    ));
+    let sub = root
+        .sub_ability
+        .as_deref()
+        .expect("the body stays a gated sub");
+    assert!(
+        sub.condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed),
+        "the body keeps its \"If you do\" gate: {root:#?}"
+    );
+}
+
 /// CR 701.20e + CR 701.20b: a bare look leaves its cards in the library, so a
 /// following "put those cards into your graveyard" must lower to a whole-set
 /// move that reads the looked-at set out of the LIBRARY. The tracked-set mass
