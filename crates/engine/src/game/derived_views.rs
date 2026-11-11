@@ -26,8 +26,8 @@ use crate::game::stack::{
     stack_revealed_card_names, StackDisplayGroup,
 };
 use crate::types::ability::{
-    ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
-    RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
+    AbilityCost, ContinuousModification, Duration, Effect, GameRestriction, KeywordAction,
+    ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card::{PrintedCardRef, TokenImageRef};
@@ -624,6 +624,15 @@ pub struct SharedPilesView {
     pub graveyard: Option<PlayerId>,
 }
 
+/// CR 121.1 + CR 702.24a: the resolved draw an unless-payment prompt asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlessDrawCostView {
+    /// Cards one printed instruction draws (CR 107.1b: a negative count is 0).
+    pub cards: u32,
+    /// Printed instructions the payment performs, each drawing `cards`.
+    pub instructions: u32,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
@@ -662,6 +671,13 @@ pub struct DerivedViews {
     /// seat whose `Player` container stores each shared pile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_piles: Option<SharedPilesView>,
+    /// CR 121.1 + CR 702.24a: the draw an open unless-payment prompt asks the
+    /// payer to perform — the resolved card count of one printed draw
+    /// instruction and how many times it repeats (one per age counter for
+    /// cumulative upkeep). Present only while that prompt is a draw cost, so
+    /// the client renders these numbers instead of decoding the cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unless_draw_cost: Option<UnlessDrawCostView>,
     /// The live (post-layer) keyword badges each battlefield permanent should
     /// display. The engine classifies the complete keyword list so the client
     /// can render the compact strip without reinterpreting keyword timing.
@@ -1542,6 +1558,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         blocker_assignment_pairs: blocker_assignment_pairs(state),
         debug_library_cards: debug_library_cards(state, viewer),
         shared_piles: shared_piles(state),
+        unless_draw_cost: unless_draw_cost(state),
         current_target_kind: current_target_kind(state),
         dungeon_rooms: dungeon_rooms(state),
         storm_count: storm_count(state),
@@ -2245,6 +2262,30 @@ fn visible_exile_object_ids(state: &GameState) -> BTreeMap<PlayerId, Vec<ObjectI
             (!object_ids.is_empty()).then_some((player.id, object_ids))
         })
         .collect()
+}
+
+/// CR 121.1 + CR 702.24a: the draw the open unless-payment prompt asks for,
+/// with its count resolved against the pending ability as the payment would
+/// resolve it, and its repetition.
+fn unless_draw_cost(state: &GameState) -> Option<UnlessDrawCostView> {
+    let WaitingFor::UnlessPayment {
+        cost: AbilityCost::EffectCost { effect },
+        pending_effect,
+        repeat,
+        ..
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    let Effect::Draw { count, .. } = effect.as_ref() else {
+        return None;
+    };
+    let resolved =
+        crate::game::quantity::resolve_quantity_with_targets(state, count, pending_effect);
+    Some(UnlessDrawCostView {
+        cards: u32::try_from(resolved).unwrap_or(0),
+        instructions: repeat.unwrap_or(1),
+    })
 }
 
 fn shared_piles(state: &GameState) -> Option<SharedPilesView> {
@@ -10078,6 +10119,87 @@ mod tests {
         state.library_of_mut(PlayerId(1)).push_back(card);
         assert!(state.players[0].library.contains(&card));
         assert!(state.players[1].library.is_empty());
+    }
+
+    /// CR 121.1 + CR 702.24a: the unless-payment draw view resolves the
+    /// instruction's count against the pending ability (fixed, zero and
+    /// dynamic) and carries the repetition; any other prompt has none.
+    #[test]
+    fn unless_draw_cost_resolves_the_count_and_repetition() {
+        use crate::types::ability::{
+            AbilityCost, Effect, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility,
+        };
+        let mut state = GameState::new_two_player(42);
+        assert_eq!(derive_views(&state, None).unless_draw_cost, None);
+        let draw = |count: QuantityExpr| AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count,
+                target: TargetFilter::Controller,
+            }),
+        };
+        let prompt = |cost: AbilityCost, repeat: Option<u32>| WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost,
+            pending_effect: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+            repeat,
+        };
+        for (count, repeat, expected) in [
+            (QuantityExpr::Fixed { value: 1 }, None, (1, 1)),
+            (QuantityExpr::Fixed { value: 3 }, None, (3, 1)),
+            (QuantityExpr::Fixed { value: 0 }, None, (0, 1)),
+            (QuantityExpr::Fixed { value: -2 }, None, (0, 1)),
+            (QuantityExpr::Fixed { value: 1 }, Some(65), (1, 65)),
+        ] {
+            state.waiting_for = prompt(draw(count), repeat);
+            assert_eq!(
+                derive_views(&state, None).unless_draw_cost,
+                Some(UnlessDrawCostView {
+                    cards: expected.0,
+                    instructions: expected.1,
+                })
+            );
+        }
+        // A dynamic count is resolved by the engine, here P0's hand size.
+        for _ in 0..4 {
+            create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                "Hand Card".to_string(),
+                Zone::Hand,
+            );
+        }
+        state.waiting_for = prompt(
+            draw(QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Controller,
+                },
+            }),
+            None,
+        );
+        assert_eq!(
+            derive_views(&state, None).unless_draw_cost,
+            Some(UnlessDrawCostView {
+                cards: 4,
+                instructions: 1,
+            })
+        );
+        // A non-draw unless cost has no draw view.
+        state.waiting_for = prompt(
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            None,
+        );
+        assert_eq!(derive_views(&state, None).unless_draw_cost, None);
     }
 
     #[test]

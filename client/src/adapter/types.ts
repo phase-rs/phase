@@ -4482,6 +4482,12 @@ export interface SharedPilesView {
  * themselves (CLAUDE.md: engine owns all logic). Mirrors
  * `engine::game::derived_views::DerivedViews`.
  */
+/** Mirrors `engine::game::derived_views::UnlessDrawCostView`. */
+export interface UnlessDrawCostView {
+  cards: number;
+  instructions: number;
+}
+
 export interface DerivedViews {
   unique_authorized_submitter?: PlayerId;
   /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
@@ -4504,6 +4510,11 @@ export interface DerivedViews {
    * per-player.
    */
   shared_piles?: SharedPilesView;
+  /** CR 121.1 + CR 702.24a: the draw an open unless-payment prompt asks for —
+   *  the resolved cards per printed instruction and how many instructions the
+   *  payment performs. Present only for a draw-cost prompt. Mirrors
+   *  `engine::game::derived_views::DerivedViews::unless_draw_cost`. */
+  unless_draw_cost?: UnlessDrawCostView;
   /**
    * Engine-classified live keyword badges for battlefield permanents. The
    * strip renders this map directly rather than deciding which keyword timing

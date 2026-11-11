@@ -207,6 +207,7 @@ import {
   loyaltyBadge,
   stripCostPrefix,
   stripLoyaltyCostPrefix,
+  unlessDrawCostLabel,
 } from "../viewmodel/costLabel.ts";
 import { renderDescription } from "../utils/description.ts";
 import { LoyaltyBadge } from "../components/ui/LoyaltyBadge.tsx";
@@ -3897,36 +3898,9 @@ function formatUnlessCost(
     }
     case "PayEnergy":
       return t("gamePage.cost.energy", { amount: cost.amount ?? 0 });
-    default: {
-      // A repeated draw cost (Psychic Vortex) is an EffectCost wrapping the
-      // printed Draw instruction; show the instruction, not a generic cost.
-      const raw = cost as unknown as {
-        type?: string;
-        effect?: { type?: string; count?: unknown };
-      };
-      if (raw.type === "EffectCost" && raw.effect?.type === "Draw") {
-        const count = drawInstructionCount(raw.effect.count);
-        return count > 1
-          ? t("gamePage.cost.drawCount", { count })
-          : t("gamePage.cost.draw");
-      }
+    default:
       return t("gamePage.cost.generic");
-    }
   }
-}
-
-/** The printed size of a Draw instruction's count expression. */
-function drawInstructionCount(count: unknown): number {
-  if (typeof count === "number") return count;
-  if (
-    count &&
-    typeof count === "object" &&
-    "value" in count &&
-    typeof (count as { value?: unknown }).value === "number"
-  ) {
-    return (count as { value: number }).value;
-  }
-  return 1;
 }
 
 /** The say-it prompt for a `SayPhrase` unless-cost. Answering "pay" says the phrase. */
@@ -3984,6 +3958,7 @@ function UnlessPaymentPanel() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const drawCost = useGameStore((s) => s.gameState?.derived?.unless_draw_cost);
 
   if (waitingFor?.type !== "UnlessPayment") return null;
 
@@ -3996,10 +3971,9 @@ function UnlessPaymentPanel() {
     return <SayPhrasePanel phrase={waitingFor.data.cost.phrase} effect={effect} />;
   }
 
-  const repeat = waitingFor.data.repeat;
-  const baseCostDisplay = formatUnlessCost(waitingFor.data.cost, t);
-  const costDisplay =
-    repeat && repeat > 1 ? `${baseCostDisplay} × ${repeat}` : baseCostDisplay;
+  const costDisplay = drawCost
+    ? unlessDrawCostLabel(drawCost)
+    : formatUnlessCost(waitingFor.data.cost, t);
 
   return (
     <AnimatePresence>
