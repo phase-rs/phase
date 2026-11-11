@@ -1932,6 +1932,7 @@ const CHANNEL_HARM: &str = "Prevent all damage that would be dealt to you and pe
 const SWANS_OF_BRYN_ARGOLL: &str = "Flying\nIf a source would deal damage to this creature, prevent that damage. The source's controller draws cards equal to the damage prevented this way.";
 const ABUNDANCE: &str = "If you would draw a card, you may instead choose land or nonland and reveal cards from the top of your library until you reveal a card of the chosen kind. Put that card into your hand and put all other cards revealed this way on the bottom of your library in any order.";
 const NEW_WAY_FORWARD: &str = "The next time a source of your choice would deal damage to you this turn, prevent that damage. When damage is prevented this way, New Way Forward deals that much damage to that source's controller and you draw that many cards.";
+const AWE_STRIKE: &str = "The next time target creature would deal damage this turn, prevent that damage. You gain life equal to the damage prevented this way.";
 const NEFARIOUS_LICH: &str = "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game.";
 const SHEOLDRED: &str = "Deathtouch\nWhenever you draw a card, you gain 2 life.\nWhenever an opponent draws a card, they lose 2 life.";
 const EXQUISITE_BLOOD: &str = "Whenever an opponent loses life, you gain that much life.";
@@ -2749,6 +2750,100 @@ fn nothing_happens_in_the_batch_after_a_lifelink_gain_ends_the_game() {
         assert_eq!(life(&runner, P0), 20);
         assert_eq!(life(&runner, P1), 20, "channel harm {channel_harm}");
     }
+}
+
+/// CR 104.1 between two of the batch's aggregate prevention riders (CR 615.5). P1 has cast New
+/// Way Forward ("When damage is prevented this way, New Way Forward deals that much damage to that
+/// source's controller and you draw that many cards.") choosing P0's Grizzly Bears, then Awe
+/// Strike ("The next time target creature would deal damage this turn, prevent that damage. You
+/// gain life equal to the damage prevented this way.") at P0's Hill Giant. Both attack unblocked
+/// and both portions are prevented. New Way Forward's rider deals the Bears' 2 to P0, whose
+/// Nefarious Lich can't exile 2 cards from an empty graveyard, so P0 loses. Awe Strike's gain of
+/// 3 never happens.
+#[test]
+fn a_prevention_rider_that_ends_the_game_ends_the_batchs_riders() {
+    let mut scenario = rider_board();
+    scenario.add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH);
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let new_way_forward = scenario
+        .add_spell_to_hand_from_oracle(P1, "New Way Forward", true, NEW_WAY_FORWARD)
+        .id();
+    let awe_strike = scenario
+        .add_spell_to_hand_from_oracle(P1, "Awe Strike", true, AWE_STRIKE)
+        .id();
+    let mut runner = scenario.build();
+
+    let mut events = cast_by_p1(&mut runner, new_way_forward);
+    loop {
+        drive(&mut runner, &mut Vec::new(), &mut events);
+        if !matches!(
+            runner.state().waiting_for,
+            WaitingFor::DamageSourceChoice { .. }
+        ) {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::ChooseDamageSource { source: bears })
+                .expect("P1 chooses P0's Grizzly Bears")
+                .events,
+        );
+    }
+    let mut events = cast_by_p1(&mut runner, awe_strike);
+    drive(
+        &mut runner,
+        &mut vec![TargetRef::Object(giant)],
+        &mut events,
+    );
+    assert_settled(&runner);
+
+    let combat = fight(&mut runner, &[bears, giant], &[], None);
+
+    let state = runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::GameOver { winner: Some(winner) } if winner == P1),
+        "got {:?}",
+        state.waiting_for
+    );
+    assert!(state.players[0].is_eliminated);
+    // Reach guard: both portions were prevented, and the game ended through New Way Forward's 2
+    // to P0, which Nefarious Lich replaced (P0's loss above).
+    assert!(damage_dealt_to_player(&combat.events, P1).is_empty());
+    assert_eq!(life(&runner, P0), 20);
+    // Awe Strike's rider never ran.
+    assert_eq!(life(&runner, P1), 20);
+    let over = combat
+        .events
+        .iter()
+        .position(|e| matches!(e, GameEvent::GameOver { .. }))
+        .expect("the game ended");
+    assert!(
+        !combat.events[over + 1..]
+            .iter()
+            .any(|e| matches!(e, GameEvent::LifeChanged { .. })),
+        "{:?}",
+        &combat.events[over + 1..]
+    );
+}
+
+/// P0 passes priority, and P1 casts `spell`; the caller answers its prompts.
+fn cast_by_p1(runner: &mut GameRunner, spell: ObjectId) -> Vec<GameEvent> {
+    if matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0) {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P0 passes priority to P1");
+    }
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P1 casts the spell")
+        .events
 }
 
 /// No damage, prevention, counter, life change or zone change follows the `GameOver` event, no

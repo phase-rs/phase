@@ -2178,6 +2178,11 @@ fn fire_combat_prevention_riders(
     events: &mut Vec<GameEvent>,
 ) {
     for &(key, total_prevented) in prevention_tally {
+        // CR 104.1: a rider that ended the game (New Way Forward's damage meeting an empty
+        // Nefarious Lich graveyard) ends the batch; no later shield's rider runs.
+        if state.game_end.is_some() {
+            break;
+        }
         let rid = key.as_replacement_id();
         if total_prevented <= 0 {
             continue;
