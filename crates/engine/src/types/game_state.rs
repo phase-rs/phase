@@ -5129,6 +5129,13 @@ pub struct PendingCopyTokenResolution {
     pub remaining: VecDeque<PendingCopyTokenBatch>,
     pub effect_kind: EffectKind,
     pub source_id: ObjectId,
+    /// CR 608.2c + CR 603.7a: the tracked set the producing instruction published when it
+    /// paused with this owner parked ("those tokens"). On completion the owner extends exactly
+    /// this set with every token it created and re-establishes it as the chain's set, so the
+    /// parked tail binds it even when a nested resolution reset the chain scope. `None` for an
+    /// owner that never paused under a tracked-set consumer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referent_set: Option<TrackedSetId>,
 }
 
 /// Private, face-complete source for a debug-created card that has not yet
@@ -41344,6 +41351,7 @@ mod tests {
                 }]),
                 effect_kind: EffectKind::CopyTokenOf,
                 source_id: ObjectId(42),
+                referent_set: None,
             });
         state
     }

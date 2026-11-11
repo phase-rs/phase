@@ -1247,12 +1247,32 @@ impl ResolutionStack {
         self.frames.capture_depth()
     }
 
-    /// Whether the frame at the captured `child_stack_start` is a `CopyToken` owner.
-    pub fn copy_token_at_child_boundary(&self, child_stack_start: ChildStackDepth) -> bool {
-        self.frames
+    /// The `CopyToken` owner at the captured `child_stack_start`, if that frame is one.
+    pub fn copy_token_at_child_boundary(
+        &self,
+        child_stack_start: ChildStackDepth,
+    ) -> Option<&PendingCopyTokenResolution> {
+        match self
+            .frames
             .slot_at_captured_depth(child_stack_start)
             .and_then(|slot| self.frames.get(slot))
-            .is_some_and(|frame| matches!(frame, ResolutionFrame::CopyToken(_)))
+        {
+            Some(ResolutionFrame::CopyToken(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
+    }
+
+    /// The mutable twin of [`Self::copy_token_at_child_boundary`]: the same slot
+    /// lookup, so the two cannot disagree about which frame is the producer's.
+    pub fn copy_token_at_child_boundary_mut(
+        &mut self,
+        child_stack_start: ChildStackDepth,
+    ) -> Option<&mut PendingCopyTokenResolution> {
+        let slot = self.frames.slot_at_captured_depth(child_stack_start)?;
+        match self.frames.get_mut(slot) {
+            Some(ResolutionFrame::CopyToken(frame)) => Some(frame),
+            Some(_) | None => None,
+        }
     }
 
     pub fn last(&self) -> Option<&ResolutionFrame> {
@@ -9120,6 +9140,7 @@ mod tests {
                 remaining: VecDeque::new(),
                 effect_kind: EffectKind::CopyTokenOf,
                 source_id: ObjectId(121),
+                referent_set: None,
             },
         );
         crate::game::effects::token_copy::drain_pending_copy_token_resolution(
@@ -9154,6 +9175,7 @@ mod tests {
             remaining: VecDeque::new(),
             effect_kind: EffectKind::CopyTokenOf,
             source_id: ObjectId(122),
+            referent_set: None,
         };
         let counter_additions = PendingCounterAdditionQueue {
             remaining: Vec::new(),

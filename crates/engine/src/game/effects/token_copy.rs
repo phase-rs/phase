@@ -465,6 +465,7 @@ pub(crate) fn drive_copy_token_batches(
             remaining,
             effect_kind,
             source_id,
+            referent_set: None,
         },
         events,
     );
@@ -569,6 +570,19 @@ fn drain_copy_token_resolution(
                 return;
             }
         }
+    }
+
+    // CR 608.2c + CR 603.7a: the producing instruction's "those tokens" is every token this
+    // resolution created, across every pause. Re-enter the producer's chain set and publish
+    // the whole referent through the one tracked-set authority, so the tail parked beneath
+    // this owner binds it.
+    if let Some(set) = pending.referent_set {
+        state.chain_tracked_set_id = Some(set);
+        let cause = super::this_way_cause_for_action(pending.effect_kind, None);
+        super::publish_tracked_set_with_causes(
+            state,
+            pending.created_ids.iter().map(|id| (*id, cause)).collect(),
+        );
     }
 
     // CR 603.7 + CR 701.36a: Record created token IDs so sub-abilities can
@@ -1196,10 +1210,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         state.waiting_for = crate::types::game_state::WaitingFor::Priority {
             player: state.active_player,
         };
-        let created_ids_for_pending = state.last_created_token_ids.clone();
-        if let Some(pending) = state.active_copy_token_mut() {
-            pending.created_ids = created_ids_for_pending;
-        }
+        super::token::record_copy_batch_ledger_on_active_copy_token(state);
         if state.active_copy_token().is_some() {
             drain_pending_copy_token_resolution(state, events);
         }
@@ -6460,5 +6471,163 @@ mod tests {
             state.battlefield.contains(&squirrel),
             "the Squirrel survives the end step"
         );
+    }
+
+    /// CR 608.2c + CR 111.1: the liminal batch terminal of
+    /// `apply_copy_token_after_replacement_with_created_ids` re-syncs the batch ledger onto an
+    /// ACTIVE CopyToken owner (a resumed batch's route) by merging, so the token an earlier batch
+    /// created stays in the owner's referent and reaches `LastCreated` when the owner drains.
+    #[test]
+    fn liminal_batch_terminal_merges_its_ledger_into_the_active_copy_token_owner() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = add_copy_source(&mut state, "Grizzly Bears");
+        let earlier = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Earlier Copy".to_string(),
+            Zone::Battlefield,
+        );
+        state.push_copy_token(PendingCopyTokenResolution {
+            created_ids: vec![earlier],
+            remaining: VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id,
+            referent_set: None,
+        });
+        let copy = CopyTokenSpec {
+            values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
+                &state.objects[&source_id],
+            )),
+            display: DisplayIdentity {
+                display_source: DisplaySource::Token,
+                ..Default::default()
+            },
+            extra_keywords: Vec::new(),
+            additional_modifications: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
+            sacrifice_at: None,
+            source_id,
+            controller: PlayerId(0),
+            donor: None,
+        };
+        let mut events = Vec::new();
+        let status = apply_copy_token_after_replacement_with_created_ids(
+            &mut state,
+            PlayerId(0),
+            copy,
+            EtbTapState::from_seeded_tapped(false),
+            Vec::new(),
+            1,
+            Vec::new(),
+            &mut events,
+        );
+        assert!(matches!(
+            status.completion,
+            CopyTokenApplyCompletion::Completed
+        ));
+        let created: Vec<ObjectId> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(created.len(), 1, "REACH-GUARD: the batch created its token");
+        assert!(
+            state.active_copy_token().is_none(),
+            "REACH-GUARD: the liminal terminal drained the active owner"
+        );
+        assert_eq!(copy_token_of_resolved(&events), 1);
+        assert_eq!(
+            state.last_created_token_ids,
+            vec![earlier, created[0]],
+            "the owner's earlier-batch token survives the batch ledger's re-sync"
+        );
+    }
+
+    /// H1 state: a parked, unbound owner holding `[t1, t2]`, a referent `A`
+    /// that already lists `t1`, and an unrelated chain set `B = [x]` current.
+    fn completing_owner_under_a_foreign_chain_set() -> (GameState, [ObjectId; 3], [TrackedSetId; 2])
+    {
+        let mut state = GameState::new_two_player(42);
+        let (t1, t2, x) = (ObjectId(901), ObjectId(902), ObjectId(903));
+        let (a, b) = (TrackedSetId(7), TrackedSetId(8));
+        state.tracked_object_sets.insert(a, vec![t1]);
+        state.tracked_object_sets.insert(b, vec![x]);
+        state.next_tracked_set_id = 9;
+        state.chain_tracked_set_id = Some(b);
+        state.push_copy_token(PendingCopyTokenResolution {
+            created_ids: vec![t1, t2],
+            remaining: VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id: ObjectId(900),
+            referent_set: None,
+        });
+        (state, [t1, t2, x], [a, b])
+    }
+
+    fn copy_token_of_resolved(events: &[GameEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::CopyTokenOf,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    /// H1 — CR 608.2c + CR 603.7a: a completing CopyToken owner publishes every
+    /// token it created into the set it was bound to at its pause, and makes
+    /// that set the chain's again; the chain set current at completion (here a
+    /// foreign `B`) is left untouched.
+    #[test]
+    fn completing_copy_token_owner_publishes_into_its_bound_referent() {
+        let (mut state, [t1, t2, x], [a, b]) = completing_owner_under_a_foreign_chain_set();
+        state
+            .active_copy_token_mut()
+            .expect("REACH-GUARD: the owner is the active frame")
+            .referent_set = Some(a);
+        let mut events = Vec::new();
+        drain_pending_copy_token_resolution(&mut state, &mut events);
+
+        assert!(state.active_copy_token().is_none(), "the owner is consumed");
+        assert_eq!(copy_token_of_resolved(&events), 1);
+        assert_eq!(
+            state.tracked_object_sets[&a],
+            vec![t1, t2],
+            "the bound referent gains the post-pause token, and t1 is not duplicated"
+        );
+        assert_eq!(
+            state.tracked_object_sets[&b],
+            vec![x],
+            "the foreign chain set is untouched"
+        );
+        assert_eq!(state.chain_tracked_set_id, Some(a));
+        assert_eq!(state.last_created_token_ids, vec![t1, t2]);
+    }
+
+    /// H1 paired guard: an owner that never paused under a tracked-set consumer
+    /// (`referent_set: None`) publishes nothing and leaves the chain alone, but
+    /// still completes its instruction.
+    #[test]
+    fn completing_copy_token_owner_without_referent_publishes_nothing() {
+        let (mut state, [t1, t2, x], [a, b]) = completing_owner_under_a_foreign_chain_set();
+        let mut events = Vec::new();
+        drain_pending_copy_token_resolution(&mut state, &mut events);
+
+        assert!(state.active_copy_token().is_none(), "the owner is consumed");
+        assert_eq!(copy_token_of_resolved(&events), 1);
+        assert_eq!(state.tracked_object_sets[&a], vec![t1]);
+        assert_eq!(state.tracked_object_sets[&b], vec![x]);
+        assert_eq!(state.chain_tracked_set_id, Some(b));
+        assert_eq!(state.last_created_token_ids, vec![t1, t2]);
     }
 }

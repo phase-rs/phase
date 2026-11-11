@@ -24758,6 +24758,16 @@ fn resolve_chain_body(
                 events: &events[events_before..],
             },
         );
+        // CR 608.2c + CR 603.7a: a CopyToken owner parked at this producer's boundary completes
+        // the instruction later; bind it to the set just published so its remaining tokens join
+        // "those tokens".
+        let published = state.chain_tracked_set_id;
+        if let Some(owner) = state
+            .resolution_stack
+            .copy_token_at_child_boundary_mut(child_stack_start)
+        {
+            owner.referent_set = published;
+        }
     }
 
     // CR 608.2c + CR 608.2d: after a resolved producer has no legal candidate,
@@ -25818,7 +25828,8 @@ fn resolve_chain_body(
                 || sub_clone.reads_return_result.is_some()
                 || state
                     .resolution_stack
-                    .copy_token_at_child_boundary(child_stack_start))
+                    .copy_token_at_child_boundary(child_stack_start)
+                    .is_some())
                 && state.resolution_stack.capture_child_boundary() > child_stack_start
             {
                 // CR 608.2c: the rest of the chain follows the complete producer action,
