@@ -8418,12 +8418,15 @@ fn active_continuous_effects_from_static_definitions(
                     mode: def.mode.clone(),
                     characteristic_defining: def.characteristic_defining,
                     granter: def.granting_object,
+                    // CR 702.16n + CR 702.16p: this static is the source's own.
                     protection_rider: def.protection_does_not_remove.clone().map(
-                        |does_not_remove| crate::types::layers::ProtectionRiderSpec {
-                            does_not_remove,
+                        |does_not_remove| crate::types::layers::ProtectionRiderGrant {
                             source: source_id,
-                            def_index: def_idx,
+                            definition: crate::types::layers::ProtectionRiderDefinition::Live(
+                                def_idx,
+                            ),
                             mod_index,
+                            does_not_remove,
                         },
                     ),
                 };
@@ -8451,7 +8454,6 @@ fn active_continuous_effects_from_static_definitions(
                     timestamp,
                     inner.as_ref(),
                     effect.trigger_producer_origin.clone(),
-                    effect.def_index,
                     state
                         .battlefield
                         .iter()
@@ -8519,7 +8521,6 @@ fn expand_granted_static_effects(
     host_timestamp: u64,
     inner: &StaticDefinition,
     host_origin: Option<TriggerProducerOrigin>,
-    origin_def_index: Option<usize>,
     recipients: impl IntoIterator<Item = ObjectId>,
     admission: ModificationAdmission,
 ) -> Vec<ActiveContinuousEffect> {
@@ -8537,6 +8538,17 @@ fn expand_granted_static_effects(
         _ => std::borrow::Cow::Borrowed(inner),
     };
     let inner_affected = inner.affected.clone().unwrap_or(TargetFilter::Any);
+    // CR 702.16n + CR 613.1f: a ridered granted static is identified on each
+    // recipient by the definition layer 6 installs there (the stamped `inner`).
+    let rider = inner
+        .protection_does_not_remove
+        .clone()
+        .map(|does_not_remove| {
+            let definition = crate::types::layers::ProtectionRiderDefinition::Granted(
+                std::sync::Arc::new(inner.as_ref().clone()),
+            );
+            (definition, does_not_remove)
+        });
     let mut out = Vec::new();
     for recipient_id in recipients {
         let (recipient_controller, recipient_timestamp) = match state.objects.get(&recipient_id) {
@@ -8588,13 +8600,16 @@ fn expand_granted_static_effects(
                 mode: inner.mode.clone(),
                 characteristic_defining: inner.characteristic_defining,
                 granter: inner.granting_object,
-                protection_rider: inner.protection_does_not_remove.clone().and_then(|rider| {
-                    origin_def_index.map(|def_index| crate::types::layers::ProtectionRiderSpec {
-                        does_not_remove: rider,
-                        source: host_source_id,
-                        def_index,
+                // CR 702.16n + CR 113.7: the rider belongs to the granted
+                // static, whose source is this recipient; it does not depend on
+                // how the parent was produced (printed, transient or late).
+                protection_rider: rider.as_ref().map(|(definition, does_not_remove)| {
+                    crate::types::layers::ProtectionRiderGrant {
+                        source: recipient_id,
+                        definition: definition.clone(),
                         mod_index,
-                    })
+                        does_not_remove: does_not_remove.clone(),
+                    }
                 }),
             });
         }
@@ -9034,7 +9049,6 @@ fn append_late_granted_static_effects(
                 parent.timestamp,
                 inner,
                 parent.trigger_producer_origin.clone(),
-                parent.def_index,
                 candidates,
                 ModificationAdmission::Every,
             )
@@ -9506,7 +9520,6 @@ fn gather_transient_continuous_effects_with(
                     tce.timestamp,
                     inner.as_ref(),
                     effect.trigger_producer_origin.clone(),
-                    effect.def_index,
                     state
                         .battlefield
                         .iter()
@@ -11252,15 +11265,15 @@ fn trigger_origin(effect: &ActiveContinuousEffect) -> TriggerProducerOrigin {
 }
 
 /// CR 702.16 + CR 613.7: record a surviving protection instance's provenance,
+/// with the CR 702.16n rider of the exact definition that produced `effect`,
 /// then grant the keyword through the shared dedup policy.
 fn grant_protection_instance(
     obj: &mut crate::game::game_object::GameObject,
     quality: crate::types::keywords::ProtectionTarget,
-    rider: Option<&crate::game::game_object::ProtectionRiderGrant>,
     effect: &ActiveContinuousEffect,
     keyword_output_index: usize,
 ) {
-    obj.record_protection_provenance(quality.clone(), rider.cloned());
+    obj.record_protection_provenance(quality.clone(), effect.protection_rider.clone());
     grant_keyword_instance(
         obj,
         Keyword::Protection(quality),
@@ -12057,20 +12070,6 @@ fn apply_continuous_effect_filtered(
             Vec::new()
         };
 
-    // CR 702.16n + CR 702.16p: the rider carried from the exact definition
-    // that produced this effect. Synthesized granted-static children inherit
-    // it from the quoted inner definition, so they no longer depend on a
-    // recipient `def_index`.
-    let protection_rider: Option<crate::game::game_object::ProtectionRiderGrant> = effect
-        .protection_rider
-        .as_ref()
-        .map(|rider| crate::game::game_object::ProtectionRiderGrant {
-            source: rider.source,
-            def_index: rider.def_index,
-            mod_index: rider.mod_index,
-            does_not_remove: rider.does_not_remove.clone(),
-        });
-
     // Pre-read chosen card name from source (avoids borrow conflict in the loop).
     // CR 612.8 + CR 613.1c: `SetChosenName` sets the recipient's name to the
     // granting source's chosen card name. Read once here (the source's most recent
@@ -12387,7 +12386,6 @@ fn apply_continuous_effect_filtered(
                         grant_protection_instance(
                             obj,
                             quality.clone(),
-                            protection_rider.as_ref(),
                             effect,
                             keyword_output_index,
                         );

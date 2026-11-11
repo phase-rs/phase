@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    ContinuousModification, ProtectionDoesNotRemove, StaticCondition, TargetFilter,
-    TriggerDefinitionRef, TriggerProducerOrigin,
+    ContinuousModification, ProtectionDoesNotRemove, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerDefinitionRef, TriggerProducerOrigin,
 };
 use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::player::PlayerId;
@@ -214,7 +216,6 @@ impl ContinuousModification {
 
 /// An active continuous effect targeting a specific layer, collected during evaluation.
 #[derive(Debug, Clone)]
-/// An active continuous effect targeting a specific layer, collected during evaluation.
 pub struct ActiveContinuousEffect {
     pub source_id: ObjectId,
     pub controller: PlayerId,
@@ -256,26 +257,40 @@ pub struct ActiveContinuousEffect {
     /// CR 201.5a: the granter stamped on the static this effect comes from.
     pub granter: Option<ObjectIncarnationRef>,
     /// CR 702.16n: the rider of the definition that produced this effect.
-    pub protection_rider: Option<ProtectionRiderSpec>,
+    pub protection_rider: Option<ProtectionRiderGrant>,
 }
 
-/// CR 702.16n + CR 702.16p: the rider carried from the exact definition that
-/// produced this effect, including synthesized granted-static children that
-/// have no live `def_index` on the recipient.
+/// CR 702.16n + CR 702.16p: the "this effect doesn't remove …" rider of the
+/// exact static that produced one protection grant. `source` is the object that
+/// has that static: the object "this Aura" names (CR 702.16n), and the holder of
+/// the CR 702.16p start snapshot. For a synthesized granted-static child that is
+/// the recipient (CR 113.7: an ability's source is the object that generated
+/// it), never the granting host.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProtectionRiderSpec {
-    pub does_not_remove: ProtectionDoesNotRemove,
+pub struct ProtectionRiderGrant {
     pub source: ObjectId,
-    pub def_index: usize,
+    pub definition: ProtectionRiderDefinition,
+    /// Index of the protection modification within that static.
     pub mod_index: usize,
+    pub does_not_remove: ProtectionDoesNotRemove,
+}
+
+/// Which of `ProtectionRiderGrant::source`'s statics produced the grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtectionRiderDefinition {
+    /// The static at this live `static_definitions` index on the source.
+    Live(usize),
+    /// CR 613.1f: a static granted to the source (a synthesized
+    /// `GrantStaticAbility` child). Layer 6 installs it on the source after
+    /// gather, deduplicated by structural equality, so its live index exists
+    /// only once the pass has run and is found by that same equality.
+    Granted(Arc<StaticDefinition>),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{
-        CopiableValues, ProtectionDoesNotRemove, TextSubstitutionSpec, TextWordDomain,
-    };
+    use crate::types::ability::{CopiableValues, TextSubstitutionSpec, TextWordDomain};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
 

@@ -445,25 +445,13 @@ pub struct ProtectionStartSnapshot {
 /// `(static_definitions index, modifications index, host object id)`.
 pub type ProtectionEffectHostKey = (usize, usize, ObjectId);
 
-/// CR 702.16n + CR 702.16p: the exemption rider of the continuous static whose
-/// layer-6 application produced one surviving protection instance, with that
-/// static's identity on its source. `(def_index, mod_index)` are the same live
-/// `static_definitions` / `modifications` indices `ProtectionEffectHostKey`
-/// uses, so a `ControlledAttachmentsAlreadyAttached` rider joins the source's
-/// `protection_start_exempt_attachments` entry for this host.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProtectionRiderGrant {
-    pub source: ObjectId,
-    pub def_index: usize,
-    pub mod_index: usize,
-    pub does_not_remove: crate::types::ability::ProtectionDoesNotRemove,
-}
+pub use crate::types::layers::ProtectionRiderGrant;
 
 /// CR 702.16m + CR 613.1f: one protection instance the layer pass left on this
 /// object. `keywords` deduplicates redundant instances (CR 702.16m); this list
 /// keeps each contributor so an attachment is exempt only when every surviving
 /// instance of the matching quality exempts it (CR 702.16n).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtectionProvenance {
     pub quality: crate::types::keywords::ProtectionTarget,
     /// `None` = an instance with no rider: printed or copiable, transient,
@@ -818,8 +806,12 @@ pub struct GameObject {
     /// in `keywords` with no entry for `q` came only from writers that run
     /// before layer 6 (printed, copy layer, stickers), and none of those
     /// carries a rider.
-    /// Derived by every layer flush; deserialization starts with layers dirty,
-    /// so this is never read from the wire.
+    /// Not serialized: every layer flush rebuilds it. A decode starts with
+    /// layers dirty (`GameState::layers_dirty` defaults to `Full`), and every
+    /// production restore finalizes through
+    /// `PreparedPersistedGameState::finish_after_rehydration` →
+    /// `finalize_persisted_restore` → `finalize_rules_state` → `flush_layers`
+    /// before the state is installed, so no reader sees the decoded empty list.
     #[serde(skip)]
     pub protection_provenance: Vec<ProtectionProvenance>,
     /// CR 702.95b-d: Soulbond pair relationship. Pairing is symmetric:
