@@ -6816,6 +6816,7 @@ pub(super) fn handle_resolution_choice(
                 track_exiled_by_source,
                 face_down_in_exile,
                 face_down_profile,
+                entrant_abilities,
                 enter_with_counters,
                 conditional_enter_with_counters,
                 count_param,
@@ -7515,6 +7516,10 @@ pub(super) fn handle_resolution_choice(
                             // DOWN with the specified characteristics instead of
                             // resuming face up and exposing the real object.
                             face_down_profile: face_down_profile.clone(),
+                            // CR 611.2e + CR 614.12: the entrant-abilities carrier derived at
+                            // the instruction's resolver entry, carried across the round-trip;
+                            // never re-derived here.
+                            entrant_abilities,
                             library_placement: library_position.clone(),
                             enter_attached_to: None,
                         };
@@ -7599,6 +7604,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 708.2a + CR 708.3: preserve the
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        entrant_abilities: ctx.entrant_abilities,
                                         library_placement: ctx.library_placement.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
@@ -7676,6 +7682,7 @@ pub(super) fn handle_resolution_choice(
                                         // CR 708.2a + CR 708.3: preserve the
                                         // face-down profile across a further pause.
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        entrant_abilities: ctx.entrant_abilities,
                                         library_placement: ctx.library_placement.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
@@ -8004,6 +8011,8 @@ pub(super) fn handle_resolution_choice(
                         track_exiled_by_source,
                         face_down_in_exile,
                         face_down_profile: face_down_profile.clone(),
+                        // CR 611.2e + CR 614.12: carried across the round-trip, never re-derived.
+                        entrant_abilities,
                         library_placement: None,
                         enter_attached_to: None,
                     };
@@ -8092,6 +8101,7 @@ pub(super) fn handle_resolution_choice(
                                         face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        entrant_abilities: ctx.entrant_abilities,
                                         library_placement: ctx.library_placement.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
@@ -8142,6 +8152,7 @@ pub(super) fn handle_resolution_choice(
                                         face_down_in_exile: ctx.face_down_in_exile,
                                         moved_count: None,
                                         face_down_profile: ctx.face_down_profile.clone(),
+                                        entrant_abilities: ctx.entrant_abilities,
                                         library_placement: ctx.library_placement.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
@@ -15250,6 +15261,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -15361,6 +15373,7 @@ mod tests {
                     track_exiled_by_source: false,
                     face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                     face_down_profile: None,
+                    entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     count_param: 0,

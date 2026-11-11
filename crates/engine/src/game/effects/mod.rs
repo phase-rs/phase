@@ -2570,6 +2570,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             face_down_in_exile,
             mut moved_count,
             face_down_profile,
+            entrant_abilities,
             library_placement,
             enter_attached_to,
             effect_kind,
@@ -2668,6 +2669,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 // instead of exposing the real object face up. Mirrors the
                 // `enter_transformed`/`enters_under_player` carry-through.
                 face_down_profile: face_down_profile.clone(),
+                // CR 611.2e + CR 614.12: restore the entrant-abilities carrier
+                // derived at the instruction's resolver entry; never re-derived.
+                entrant_abilities,
                 library_placement: library_placement.clone(),
                 enter_attached_to,
             };
@@ -2756,6 +2760,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // CR 708.2a + CR 708.3: preserve the face-down profile
                             // across a further pause so resumed members stay face down.
                             face_down_profile: ctx.face_down_profile.clone(),
+                            entrant_abilities: ctx.entrant_abilities,
                             library_placement: ctx.library_placement.clone(),
                             enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
@@ -2810,6 +2815,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // CR 708.2a + CR 708.3: preserve the face-down profile
                             // across a further pause so resumed members stay face down.
                             face_down_profile: ctx.face_down_profile.clone(),
+                            entrant_abilities: ctx.entrant_abilities,
                             library_placement: ctx.library_placement.clone(),
                             enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
@@ -5854,6 +5860,352 @@ pub(crate) fn entry_occurrence_collector(
         crate::game::triggers::EntryOccurrenceCollector::AfterSimultaneousEntryEffects
     } else {
         crate::game::triggers::EntryOccurrenceCollector::Owner
+    }
+}
+
+/// CR 611.2e + CR 613.1f + CR 614.12: does an "is/has" instruction of this resolution remove all
+/// abilities of every object this ChangeZone instruction puts onto the battlefield,
+/// simultaneously with the entry? (Xu-Ifit and Bronzehide Lion rulings.) Derived once at the
+/// instruction's resolver entry; never re-derived at a resume.
+///
+/// Walks the instruction's own `sub_ability` chain (its continuation; an `else_ability` branch is
+/// never reached from it). The walk stops at a node that binds its own referent (CR 608.2c:
+/// [`can_inherit_parent_targets`], the chain resolver's propagation authority via
+/// [`should_propagate_parent_targets`]) and at a conditional or optional node, whose execution is
+/// not guaranteed when the instruction resolves. A `WhenFollowed` node ("becomes", "gains",
+/// "loses") starts after the entry and is skipped (CR 611.2e).
+pub(crate) fn entrant_abilities_with_entry(
+    state: &GameState,
+    instruction: &ResolvedAbility,
+) -> crate::types::proposed_event::EntrantAbilities {
+    use crate::types::proposed_event::EntrantAbilities;
+    // CR 608.2c: in a self-return ("return it to the battlefield"), the rider's self-reference
+    // names the returned object; otherwise it names the resolving source.
+    let self_return = matches!(
+        &instruction.effect,
+        Effect::ChangeZone {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    );
+    let mut next = instruction.sub_ability.as_deref();
+    while let Some(node) = next {
+        // CR 608.2c: the node binds its own referent, so it and every later anaphor name
+        // something other than the moved objects.
+        if !can_inherit_parent_targets(node) {
+            break;
+        }
+        next = node.sub_ability.as_deref();
+        // CR 611.2e: a `WhenFollowed` instruction applies only after the entry.
+        if !onset_applies_with_entry(node.entry_onset) {
+            continue;
+        }
+        // The node's execution is not guaranteed at the instruction's resolution.
+        if node.condition.is_some() || node.optional {
+            break;
+        }
+        if node_removes_moved_objects_abilities(state, instruction, node, self_return) {
+            return EntrantAbilities::RemovedWithEntry;
+        }
+    }
+    EntrantAbilities::Retained
+}
+
+/// CR 613.1f + CR 608.2c: does this `WithEntry` node remove all abilities of the objects
+/// `instruction` moves? A `GenericEffect` static counts when it is unconditional, carries
+/// `RemoveAllAbilities`, and its application filter (`generic_effect_application_filter`, CR
+/// 608.2c) names the moved objects; a `ReturnAsAura` counts only under a self-return.
+fn node_removes_moved_objects_abilities(
+    state: &GameState,
+    instruction: &ResolvedAbility,
+    node: &ResolvedAbility,
+    self_return: bool,
+) -> bool {
+    let removes_all = |modifications: &[ContinuousModification]| {
+        modifications
+            .iter()
+            .any(|modification| matches!(modification, ContinuousModification::RemoveAllAbilities))
+    };
+    match &node.effect {
+        Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } => static_abilities.iter().any(|static_def| {
+            static_def.condition.is_none()
+                && removes_all(&static_def.modifications)
+                && match effect::generic_effect_application_filter(
+                    target.as_ref(),
+                    static_def.affected.as_ref(),
+                ) {
+                    Some(TargetFilter::ParentTarget) => true,
+                    // CR 608.2c: a slot names the moved object only when the instruction moves
+                    // exactly that one object; a slot naming a subset keeps `Retained`.
+                    Some(TargetFilter::ParentTargetSlot { index }) => {
+                        let mut moved =
+                            instruction
+                                .targets
+                                .iter()
+                                .filter_map(|target| match target {
+                                    TargetRef::Object(id) => Some(*id),
+                                    TargetRef::Player(_) => None,
+                                });
+                        match (moved.next(), moved.next()) {
+                            (Some(id), None) => {
+                                crate::game::targeting::resolve_live_parent_slot_from_root(
+                                    state, node, *index,
+                                ) == Some(TargetRef::Object(id))
+                            }
+                            _ => false,
+                        }
+                    }
+                    Some(TargetFilter::SelfRef) => self_return,
+                    _ => false,
+                }
+        }),
+        // CR 613.1f: Bronzehide Lion / Harold and Bob — "It's an Aura enchantment ...
+        // and it loses all other abilities" returns the dying source itself.
+        Effect::ReturnAsAura { grants, .. } => self_return && removes_all(grants),
+        // `WithEntry` kinds with no ability-removal axis (`PerpetualModification` has no removal).
+        Effect::Animate { .. } | Effect::ApplyPerpetual { .. } => false,
+        // Every other instruction kind: the measured `WithEntry` stamp set (documented on
+        // `entry_observation_deferred`) is `GenericEffect`, `Animate`, `ReturnAsAura` and
+        // `ApplyPerpetual`. Exhaustive, so a new `Effect` variant must be classified here.
+        Effect::AbandonScheme
+        | Effect::Adapt { .. }
+        | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
+        | Effect::AddRestriction { .. }
+        | Effect::AddTargetReplacement { .. }
+        | Effect::AdditionalPhase { .. }
+        | Effect::Amass { .. }
+        | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ApplySticker { .. }
+        | Effect::ArrangePlanarDeckTop { .. }
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::AssembleContraptions { .. }
+        | Effect::AssembleContraptionsFromRollDifference
+        | Effect::Attach { .. }
+        | Effect::BecomeBlocked { .. }
+        | Effect::BecomeCopy { .. }
+        | Effect::BecomeMonarch { .. }
+        | Effect::BecomePrepared { .. }
+        | Effect::BecomeSaddled { .. }
+        | Effect::BecomeUnprepared { .. }
+        | Effect::Behold { .. }
+        | Effect::BlightEffect { .. }
+        | Effect::Bolster { .. }
+        | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
+        | Effect::Cascade
+        | Effect::CastCopyOfCard { .. }
+        | Effect::CastFromZone { .. }
+        | Effect::ChangeSpeed { .. }
+        | Effect::ChangeTargets { .. }
+        | Effect::ChangeZone { .. }
+        | Effect::ChangeZoneAll { .. }
+        | Effect::ChaosEnsues
+        | Effect::Choose { .. }
+        | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::ChooseAugmentAndCombineWithHost { .. }
+        | Effect::ChooseCard { .. }
+        | Effect::ChooseCounterAdjustment { .. }
+        | Effect::ChooseCounterKind { .. }
+        | Effect::ChooseDamageSource { .. }
+        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+        | Effect::ChooseFromZone { .. }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
+        | Effect::ChooseOneOf { .. }
+        | Effect::ChoosePermanent { .. }
+        | Effect::Clash
+        | Effect::Cleanup { .. }
+        | Effect::Cloak { .. }
+        | Effect::CollectEvidence { .. }
+        | Effect::CombineHost { .. }
+        | Effect::CompletePlayerAction { .. }
+        | Effect::Conjure { .. }
+        | Effect::Connive { .. }
+        | Effect::ControlNextTurn { .. }
+        | Effect::CopySpell { .. }
+        | Effect::CopyTokenBlockingAttacker { .. }
+        | Effect::CopyTokenOf { .. }
+        | Effect::Counter { .. }
+        | Effect::CounterAll { .. }
+        | Effect::CrankContraptions { .. }
+        | Effect::CreateBoon { .. }
+        | Effect::CreateDamageReplacement { .. }
+        | Effect::CreateDelayedTrigger { .. }
+        | Effect::CreateDrawReplacement { .. }
+        | Effect::CreateEmblem { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
+        | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::DamageAll { .. }
+        | Effect::DamageEachPlayer { .. }
+        | Effect::DealDamage { .. }
+        | Effect::Destroy { .. }
+        | Effect::DestroyAll { .. }
+        | Effect::Detain { .. }
+        | Effect::Dig { .. }
+        | Effect::Discard { .. }
+        | Effect::DiscardCard { .. }
+        | Effect::Discover { .. }
+        | Effect::Double { .. }
+        | Effect::DoublePT { .. }
+        | Effect::DoublePTAll { .. }
+        | Effect::DraftFromSpellbook { .. }
+        | Effect::Draw { .. }
+        | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachPlayerCopyChosen { .. }
+        | Effect::EachSourceDealsDamage { .. }
+        | Effect::EmpowerJace { .. }
+        | Effect::Encore
+        | Effect::EndCombatPhase
+        | Effect::EndTheTurn
+        | Effect::Endure { .. }
+        | Effect::EpicCopy { .. }
+        | Effect::ExchangeControl { .. }
+        | Effect::ExchangeLifeTotals { .. }
+        | Effect::ExchangeLifeWithStat { .. }
+        | Effect::ExileFaceDownPile { .. }
+        | Effect::ExileFromTopUntil { .. }
+        | Effect::ExileHaunting { .. }
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+        | Effect::ExileTop { .. }
+        | Effect::ExileTopCardContest { .. }
+        | Effect::Exploit { .. }
+        | Effect::Explore
+        | Effect::ExploreAll { .. }
+        | Effect::ExtraTurn { .. }
+        | Effect::Fight { .. }
+        | Effect::FlipCoins { .. }
+        | Effect::FlipPermanent { .. }
+        | Effect::ForEachCategory { .. }
+        | Effect::Forage
+        | Effect::ForceAttack { .. }
+        | Effect::ForceBlock { .. }
+        | Effect::FreeCastFromZones { .. }
+        | Effect::GainActivatedAbilitiesOfTarget { .. }
+        | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
+        | Effect::GainEnergy { .. }
+        | Effect::GainLife { .. }
+        | Effect::GiftDelivery { .. }
+        | Effect::GiveControl { .. }
+        | Effect::GivePlayerCounter { .. }
+        | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
+        | Effect::GrantCastingPermission { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
+        | Effect::GrantNextSpellAbility { .. }
+        | Effect::Harness
+        | Effect::Heist { .. }
+        | Effect::HeistExile
+        | Effect::HideawayConceal { .. }
+        | Effect::Incubate { .. }
+        | Effect::Intensify { .. }
+        | Effect::Investigate
+        | Effect::Learn
+        | Effect::LoseAllPlayerCounters { .. }
+        | Effect::LoseLife { .. }
+        | Effect::LoseTheGame { .. }
+        | Effect::MadnessCast { .. }
+        | Effect::Mana { .. }
+        | Effect::Manifest { .. }
+        | Effect::ManifestDread
+        | Effect::Meld { .. }
+        | Effect::Mill { .. }
+        | Effect::MiracleCast { .. }
+        | Effect::ModifyAnnouncedX { .. }
+        | Effect::Monstrosity { .. }
+        | Effect::MoveCounters { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::Myriad
+        | Effect::NoOp
+        | Effect::NoteManaSpent
+        | Effect::NoteNumber { .. }
+        | Effect::OpenAttractions { .. }
+        | Effect::OpenBoosterPack { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::PairWith { .. }
+        | Effect::PayCost { .. }
+        | Effect::PhaseIn { .. }
+        | Effect::PhaseOut { .. }
+        | Effect::PhysicalContest { .. }
+        | Effect::Planeswalk
+        | Effect::Populate
+        | Effect::PreventDamage { .. }
+        | Effect::ProcessRadCounters
+        | Effect::Proliferate
+        | Effect::ProliferateTarget { .. }
+        | Effect::Pump { .. }
+        | Effect::PumpAll { .. }
+        | Effect::PutAtLibraryPosition { .. }
+        | Effect::PutChosenCounter { .. }
+        | Effect::PutCounter { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::PutOnTopOrBottom { .. }
+        | Effect::PutSticker { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. }
+        | Effect::RedistributeLifeTotals
+        | Effect::ReduceNextSpellCost { .. }
+        | Effect::Regenerate { .. }
+        | Effect::RegisterBending { .. }
+        | Effect::RememberCard { .. }
+        | Effect::RemoveAllDamage { .. }
+        | Effect::RemoveCounter { .. }
+        | Effect::RemoveFromCombat { .. }
+        | Effect::Renown { .. }
+        | Effect::ReproduceEventCounters { .. }
+        | Effect::Reveal { .. }
+        | Effect::RevealChosenNumbers { .. }
+        | Effect::RevealFromHand { .. }
+        | Effect::RevealHand { .. }
+        | Effect::RevealTop { .. }
+        | Effect::RevealUntil { .. }
+        | Effect::ReverseTurnOrder
+        | Effect::RingTemptsYou
+        | Effect::Ripple { .. }
+        | Effect::RollDie { .. }
+        | Effect::RollToVisitAttractions
+        | Effect::RuntimeHandled { .. }
+        | Effect::Sacrifice { .. }
+        | Effect::Scry { .. }
+        | Effect::SearchLibrary { .. }
+        | Effect::SearchOutsideGame { .. }
+        | Effect::Seek { .. }
+        | Effect::SeparateIntoPiles { .. }
+        | Effect::SetClassLevel { .. }
+        | Effect::SetDayNight { .. }
+        | Effect::SetLifeTotal { .. }
+        | Effect::SetRoomDoorLock { .. }
+        | Effect::SetTapState { .. }
+        | Effect::Shuffle { .. }
+        | Effect::SkipNextStep { .. }
+        | Effect::SkipNextTurn { .. }
+        | Effect::SolveCase
+        | Effect::Specialize
+        | Effect::StartYourEngines { .. }
+        | Effect::Surveil { .. }
+        | Effect::Suspect { .. }
+        | Effect::SwapChosenLabels { .. }
+        | Effect::SwitchPT { .. }
+        | Effect::TakeTheInitiative
+        | Effect::TargetOnly { .. }
+        | Effect::TimeTravel
+        | Effect::Token { .. }
+        | Effect::Transform { .. }
+        | Effect::Tribute { .. }
+        | Effect::TurnFaceDown { .. }
+        | Effect::TurnFaceUp { .. }
+        | Effect::UnattachAll { .. }
+        | Effect::Unimplemented { .. }
+        | Effect::Unsuspect { .. }
+        | Effect::VentureInto { .. }
+        | Effect::VentureIntoDungeon
+        | Effect::Vote { .. }
+        | Effect::HordePlayCard { .. }
+        | Effect::WinTheGame { .. } => false,
     }
 }
 
@@ -19800,6 +20152,7 @@ fn set_player_scope_sacrifice_waiting_for(
         track_exiled_by_source: false,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
@@ -39137,6 +39490,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -47742,6 +48096,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -47788,6 +48143,7 @@ mod tests {
                 track_exiled_by_source: false,
                 face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                 face_down_profile: None,
+                entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 count_param: 0,
@@ -67168,5 +67524,265 @@ mod parser_oracle_effect_tests {
             !evaluate_condition(&cond, &state, &ability_for(strong)),
             "3/3 is not least power"
         );
+    }
+}
+
+#[cfg(test)]
+mod entrant_abilities_tests {
+    //! CR 611.2e + CR 613.1f + CR 614.12: the derivation of the entrant-abilities carrier from a
+    //! ChangeZone instruction's own continuation (`entrant_abilities_with_entry`).
+    use super::*;
+    use crate::types::keywords::Keyword;
+    use crate::types::proposed_event::EntrantAbilities;
+    use crate::types::zones::EtbTapState;
+
+    fn node(effect: Effect) -> ResolvedAbility {
+        ResolvedAbility::new(effect, Vec::new(), ObjectId(100), PlayerId(0))
+    }
+
+    /// A node the parser stamped as a CR 611.2e "is/has" statement.
+    fn with_entry(effect: Effect) -> ResolvedAbility {
+        let mut node = node(effect);
+        node.entry_onset = ContinuousEffectOnset::WithEntry;
+        node
+    }
+
+    fn return_to_battlefield(target: TargetFilter) -> Effect {
+        Effect::ChangeZone {
+            library_shuffle: Default::default(),
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            target,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        }
+    }
+
+    /// Xu-Ifit's instruction: "Return target creature card from your graveyard to the
+    /// battlefield", announced with the chosen card.
+    fn targeted_return() -> ResolvedAbility {
+        let mut instruction = node(return_to_battlefield(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )));
+        instruction.targets = vec![TargetRef::Object(ObjectId(7))];
+        instruction
+    }
+
+    /// Bronzehide Lion's instruction: "return it to the battlefield" (the dying source).
+    fn self_return() -> ResolvedAbility {
+        node(return_to_battlefield(TargetFilter::SelfRef))
+    }
+
+    fn generic(affected: TargetFilter, modifications: Vec<ContinuousModification>) -> Effect {
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(modifications)],
+            duration: None,
+            target: Some(affected),
+            end_cost: None,
+        }
+    }
+
+    fn skeleton_with_no_abilities() -> Vec<ContinuousModification> {
+        vec![
+            ContinuousModification::AddSubtype {
+                subtype: "Skeleton".to_string(),
+            },
+            ContinuousModification::RemoveAllAbilities,
+        ]
+    }
+
+    fn grant_ability() -> ContinuousModification {
+        ContinuousModification::GrantAbility {
+            definition: Box::new(AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp)),
+        }
+    }
+
+    fn grant_static_ability() -> ContinuousModification {
+        ContinuousModification::GrantStaticAbility {
+            definition: Box::new(StaticDefinition::continuous()),
+        }
+    }
+
+    fn return_as_aura(grants: Vec<ContinuousModification>) -> Effect {
+        Effect::ReturnAsAura {
+            enchant_filter: TargetFilter::Any,
+            grants,
+        }
+    }
+
+    fn chained(mut instruction: ResolvedAbility, sub: ResolvedAbility) -> ResolvedAbility {
+        instruction.sub_ability = Some(Box::new(sub));
+        instruction
+    }
+
+    fn derive(instruction: &ResolvedAbility) -> EntrantAbilities {
+        entrant_abilities_with_entry(&GameState::new_two_player(20), instruction)
+    }
+
+    /// Xu-Ifit, Osteoharmonist: "It's a Skeleton in addition to its other types and has no
+    /// abilities." — a `WithEntry` `ParentTarget` rider removing all abilities.
+    #[test]
+    fn xu_ifit_rider_removes_the_returned_cards_abilities() {
+        let instruction = chained(
+            targeted_return(),
+            with_entry(generic(
+                TargetFilter::ParentTarget,
+                skeleton_with_no_abilities(),
+            )),
+        );
+        assert_eq!(derive(&instruction), EntrantAbilities::RemovedWithEntry);
+    }
+
+    /// Bronzehide Lion ("It's an Aura enchantment with ... and it loses all other abilities") and
+    /// Harold and Bob, First Numens ("Harold and Bob loses all other abilities"): a `WithEntry`
+    /// `ReturnAsAura` under a self-return whose grants remove all abilities.
+    #[test]
+    fn return_as_aura_with_removal_under_self_return() {
+        for grants in [
+            vec![ContinuousModification::RemoveAllAbilities, grant_ability()],
+            vec![
+                ContinuousModification::RemoveAllAbilities,
+                grant_static_ability(),
+            ],
+        ] {
+            let instruction = chained(self_return(), with_entry(return_as_aura(grants)));
+            assert_eq!(derive(&instruction), EntrantAbilities::RemovedWithEntry);
+        }
+    }
+
+    /// The SelfRef arm's positive: a `WithEntry` self-reference rider removing all abilities
+    /// under a self-return names the returned object. No printed card exhibits this shape; the
+    /// nearest is Infernal Vessel ("... return it to the battlefield under its owner's control
+    /// with two +1/+1 counters on it. It's a Demon in addition to its other types."), the same
+    /// SelfRef rider under a self-return without removal.
+    #[test]
+    fn self_ref_removal_under_self_return() {
+        let instruction = chained(
+            self_return(),
+            with_entry(generic(
+                TargetFilter::SelfRef,
+                vec![ContinuousModification::RemoveAllAbilities],
+            )),
+        );
+        assert_eq!(derive(&instruction), EntrantAbilities::RemovedWithEntry);
+    }
+
+    /// CR 608.2c: a SelfRef rider under an instruction that moves another object names the
+    /// resolving source, not the moved card. No printed card exhibits this shape; the nearest is
+    /// Xu-Ifit, Osteoharmonist, whose rider is `ParentTarget`.
+    #[test]
+    fn self_ref_removal_under_targeted_return_is_retained() {
+        let instruction = chained(
+            targeted_return(),
+            with_entry(generic(
+                TargetFilter::SelfRef,
+                vec![ContinuousModification::RemoveAllAbilities],
+            )),
+        );
+        assert_eq!(derive(&instruction), EntrantAbilities::Retained);
+    }
+
+    /// A `ReturnAsAura` with removal under an instruction that moves another object. No printed
+    /// card exhibits this shape; the nearest is Bronzehide Lion, whose `ReturnAsAura` sits under
+    /// a self-return.
+    #[test]
+    fn return_as_aura_under_targeted_return_is_retained() {
+        let instruction = chained(
+            targeted_return(),
+            with_entry(return_as_aura(vec![
+                ContinuousModification::RemoveAllAbilities,
+                grant_ability(),
+            ])),
+        );
+        assert_eq!(derive(&instruction), EntrantAbilities::Retained);
+    }
+
+    /// Non-removing siblings stay `Retained`: Old-Growth Troll (`ReturnAsAura` that only grants),
+    /// Rise from the Grave ("That creature is a black Zombie in addition to its other colors and
+    /// types."), and Zombify (no rider).
+    #[test]
+    fn non_removing_riders_are_retained() {
+        let old_growth_troll = chained(
+            self_return(),
+            with_entry(return_as_aura(vec![grant_static_ability()])),
+        );
+        assert_eq!(derive(&old_growth_troll), EntrantAbilities::Retained);
+
+        let rise_from_the_grave = chained(
+            targeted_return(),
+            with_entry(generic(
+                TargetFilter::ParentTarget,
+                vec![
+                    ContinuousModification::AddColor {
+                        color: crate::types::mana::ManaColor::Black,
+                    },
+                    ContinuousModification::AddSubtype {
+                        subtype: "Zombie".to_string(),
+                    },
+                ],
+            )),
+        );
+        assert_eq!(derive(&rise_from_the_grave), EntrantAbilities::Retained);
+
+        assert_eq!(derive(&targeted_return()), EntrantAbilities::Retained);
+    }
+
+    /// Storm of Souls: "Return all creature cards from your graveyard to the battlefield. Each of
+    /// them is a 1/1 Spirit with flying in addition to its other types." — a `WithEntry` rider
+    /// that removes no abilities under `ChangeZoneAll`.
+    #[test]
+    fn storm_of_souls_rider_is_retained() {
+        let instruction = chained(
+            node(Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                library_shuffle: Default::default(),
+                random_order: false,
+            }),
+            with_entry(generic(
+                TargetFilter::ParentTarget,
+                vec![
+                    ContinuousModification::AddSubtype {
+                        subtype: "Spirit".to_string(),
+                    },
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    },
+                ],
+            )),
+        );
+        assert_eq!(derive(&instruction), EntrantAbilities::Retained);
+    }
+
+    /// CR 611.2e: a "loses all abilities" rider is `WhenFollowed` (Retched Wretch: "return it to
+    /// the battlefield under its owner's control and it loses all abilities"); it starts after
+    /// the entry, so the entrant's own entry abilities apply.
+    #[test]
+    fn when_followed_removal_is_retained() {
+        let instruction = chained(
+            self_return(),
+            node(generic(
+                TargetFilter::SelfRef,
+                vec![ContinuousModification::RemoveAllAbilities],
+            )),
+        );
+        assert_eq!(derive(&instruction), EntrantAbilities::Retained);
     }
 }

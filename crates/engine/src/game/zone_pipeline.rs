@@ -29,7 +29,7 @@ use crate::types::format::EntryOwnership;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
+use crate::types::proposed_event::{AppliedReplacementKey, EntrantAbilities, ProposedEvent};
 use crate::types::zones::{EtbTapState, Zone};
 
 use crate::game::effects::change_zone::shuffle_library;
@@ -1178,6 +1178,8 @@ pub(crate) fn move_object_with_terminal(
         &req.mods.enter_with_counters,
         req.mods.face_down_profile.as_ref(),
         req.face_down_in_exile,
+        // No request-route producer removes an entrant's abilities with its entry.
+        EntrantAbilities::Retained,
         req.mods.chain_referent,
         track_exiled_by_source,
         None,
@@ -3767,6 +3769,8 @@ pub(crate) fn deliver_replaced_zone_change(
     library_placement: Option<LibraryPosition>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
+    // CR 611.2e + CR 614.12: read before the event is consumed by the destructure.
+    let entrant_abilities = event.entrant_abilities();
     if let ProposedEvent::ZoneChange {
         object_id,
         from,
@@ -4317,6 +4321,24 @@ pub(crate) fn deliver_replaced_zone_change(
         // modify: the object gets none of these counters, and its
         // `pending_etb_counters` are not consumed.
         if entered_battlefield {
+            // CR 306.5c + CR 310.4c + CR 704.5i: the entrant's intrinsic loyalty/defense
+            // ability was removed with its entry (seed gate above), so it enters with no
+            // such counters and its loyalty/defense is 0; a present zero entry is the
+            // counter-tracked 0 the CR 613.1 re-derive reads (Xu-Ifit returning Grist, the
+            // Hunger Tide).
+            if !entrant_abilities.own_abilities_apply() {
+                if let Some(obj) = state.objects.get_mut(&object_id) {
+                    let withheld = crate::game::printed_cards::intrinsic_face_entry_counters(
+                        obj.printed_loyalty,
+                        obj.loyalty,
+                        None,
+                        obj.defense,
+                    );
+                    for (kind, _) in withheld {
+                        obj.counters.entry(kind).or_insert(0);
+                    }
+                }
+            }
             let mut counters_to_apply = enter_with_counters;
             // CR 614.1c + CR 122.1: Apply additional counters from continuous
             // "[scope] creatures you control enter with an additional [counter]
@@ -4516,6 +4538,7 @@ pub(crate) fn execute_zone_move_with_controller(
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
     face_down_in_exile: ExileConcealment,
+    entrant_abilities: EntrantAbilities,
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
     enter_attached_to: Option<AttachTarget>,
@@ -4537,6 +4560,7 @@ pub(crate) fn execute_zone_move_with_controller(
         effect_enter_with_counters,
         face_down_profile,
         face_down_in_exile,
+        entrant_abilities,
         track_exiled_by_source,
         library_placement,
         enter_attached_to,
@@ -4580,6 +4604,7 @@ pub(crate) fn execute_zone_move_with_terminal(
         effect_enter_with_counters,
         face_down_profile,
         ExileConcealment::Public,
+        EntrantAbilities::Retained,
         track_exiled_by_source,
         library_placement,
         enter_attached_to,
@@ -4604,6 +4629,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
     face_down_in_exile: ExileConcealment,
+    entrant_abilities: EntrantAbilities,
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
     enter_attached_to: Option<AttachTarget>,
@@ -4625,6 +4651,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
         effect_enter_with_counters,
         face_down_profile,
         face_down_in_exile,
+        entrant_abilities,
         crate::types::zones::ChainReferentIntent::Silent,
         track_exiled_by_source,
         library_placement,
@@ -4659,7 +4686,11 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
 /// entrant is a separate instruction whose counters are markers on the
 /// resulting object (CR 122.1) and must survive; callers add those after this
 /// seeding. The gate reads the proposal, so the caller must stamp
-/// `face_down_profile` (and `enter_transformed`) on it first.
+/// `face_down_profile` (and `enter_transformed`) on it first. Likewise the
+/// seeding is skipped when the proposal's `entrant_abilities` says a
+/// same-resolution "has no abilities" effect removes the entrant's abilities
+/// with its entry (CR 611.2e; Xu-Ifit, Osteoharmonist) — the caller stamps it
+/// first, and delivery records the withheld kinds at zero.
 ///
 /// CR 712.14a + CR 712.18: A permanent entering transformed (e.g. a
 /// double-faced card exiled and returned with its back face up, like a
@@ -4681,11 +4712,20 @@ pub(crate) fn seed_intrinsic_entry_counters(state: &GameState, proposed: &mut Pr
         enter_transformed,
         face_down_profile: None,
         enter_with_counters,
+        entrant_abilities,
         ..
     } = proposed
     else {
         return;
     };
+    // CR 306.5b + CR 310.4b + CR 702.156a: intrinsic entry counters (loyalty,
+    // defense, Ravenous) come from abilities; CR 611.2e + CR 613.1f: a
+    // same-resolution "has no abilities" effect removes them before they apply.
+    // A Saga's CR 714.3a lore counter is its own replacement and is withheld by
+    // the candidate gate in replacement.rs.
+    if !entrant_abilities.own_abilities_apply() {
+        return;
+    }
     let Some(obj) = state
         .liminal_entries
         .get(object_id)
@@ -4721,6 +4761,9 @@ fn execute_zone_move_with_applied_terminal(
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
     face_down_in_exile: ExileConcealment,
+    // CR 611.2e + CR 614.12: whether a same-resolution "has no abilities" effect removes the
+    // entrant's abilities with its entry; stamped on the proposal before the seed.
+    entrant_abilities: EntrantAbilities,
     // CR 608.2c: whether this entry is the producer a following demonstrative
     // anaphor binds to. Only `move_object_with_terminal` forwards a request's
     // intent; the four public `execute_zone_move*` wrappers are raw movers with
@@ -4794,6 +4837,7 @@ fn execute_zone_move_with_applied_terminal(
         face_down_in_exile: ref mut conceal_in_exile,
         chain_referent: ref mut intent,
         performed_by: ref mut performer,
+        entrant_abilities: ref mut entrant,
         ..
     } = &mut proposed
     {
@@ -4801,6 +4845,9 @@ fn execute_zone_move_with_applied_terminal(
         *conceal_in_exile = face_down_in_exile;
         *intent = chain_referent;
         *performer = performed_by;
+        // CR 611.2e + CR 614.12: stamped before `seed_intrinsic_entry_counters` and
+        // `replace_event` read it, and carried through every replacement pass and pause.
+        *entrant = entrant_abilities;
     }
 
     // CR 712.14a: Set enter_transformed on the proposed event so replacement effects

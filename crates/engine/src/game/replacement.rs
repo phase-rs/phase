@@ -2185,6 +2185,7 @@ fn discard_applier(
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
+            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             enter_as_copy: None,
@@ -7814,6 +7815,23 @@ fn object_replacement_candidate_applies(
                 ..
             }
         )
+    {
+        return false;
+    }
+    // CR 113.6h + CR 614.12 + CR 611.2e: an ability of the entrant that modifies
+    // how it enters functions as it enters, checked as it would exist on the
+    // battlefield; an "is/has" effect of the same resolution that removes all its
+    // abilities applies simultaneously with that entry (Xu-Ifit, Osteoharmonist and
+    // Bronzehide Lion rulings), so the entrant's own entry abilities (CR 614.1c /
+    // CR 603.6d: enters tapped, enters with counters, "as enters" choices, devour
+    // CR 702.82a, enter as a copy, a Saga's CR 714.3a lore counter) never apply. A
+    // definition functioning from the entrant's current zone keeps applying.
+    // CR 613.1f + CR 611.2c: a resolution-installed replacement is not one of its
+    // abilities — the layer-6 arm's own predicate.
+    if is_entering
+        && !in_scanned_zone
+        && !event.entrant_abilities().own_abilities_apply()
+        && !repl_def.is_resolution_installed()
     {
         return false;
     }
@@ -15895,6 +15913,7 @@ mod tests {
             performed_by: None,
             applied: HashSet::new(),
             face_down_profile: None,
+            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -19952,6 +19971,7 @@ mod tests {
             performed_by: None,
             applied: HashSet::new(),
             face_down_profile: None,
+            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -21428,6 +21448,7 @@ mod tests {
             performed_by: None,
             applied: HashSet::new(),
             face_down_profile: None,
+            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -24834,6 +24855,7 @@ mod tests {
             enter_as_copy: None,
             enter_with_choices: None,
             face_down_profile: None,
+            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
@@ -24886,6 +24908,7 @@ mod tests {
             enter_as_copy: None,
             enter_with_choices: None,
             face_down_profile: None,
+            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
