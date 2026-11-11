@@ -7252,7 +7252,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
                 .or_default()
                 .push(
                     &face.name,
-                    coverage.supported_before_parse_warnings,
+                    coverage.supported_before_parse_warnings(),
                     gap_count == 1,
                     &legal_formats,
                 );
@@ -7646,12 +7646,14 @@ fn modification_has_unimplemented_parts(
 }
 
 /// The per-face result of coverage analysis: parse tree items, merged coverage gaps,
-/// and whether the face is supported before considering parse warnings.
+/// and the subset of those gaps that exist before parse warnings are folded in.
 #[derive(Debug, Clone)]
 pub struct CardFaceCoverage {
     pub parse_details: Vec<ParsedItem>,
     pub gaps: Vec<CoverageGap>,
-    pub supported_before_parse_warnings: bool,
+    /// Handler, resolver-feature and parse-tree gaps only, excluding the
+    /// parse-warning gaps (`ParseWarning:*`, `Swallow:*`) that `gaps` adds.
+    pub gaps_before_parse_warnings: Vec<CoverageGap>,
 }
 
 impl CardFaceCoverage {
@@ -7659,24 +7661,45 @@ impl CardFaceCoverage {
         self.gaps.is_empty()
     }
 
+    /// Whether the face is supported ignoring parse warnings (diagnostic-only gaps).
+    pub fn supported_before_parse_warnings(&self) -> bool {
+        self.gaps_before_parse_warnings.is_empty()
+    }
+
+    pub fn gap_handlers_before_parse_warnings(&self) -> Vec<String> {
+        self.gaps_before_parse_warnings
+            .iter()
+            .map(|gap| gap.handler.clone())
+            .collect()
+    }
+
     pub fn gap_handlers(&self) -> Vec<String> {
         self.gaps.iter().map(|gap| gap.handler.clone()).collect()
     }
+}
+
+/// Whether the CR 614.12 entry-projection check participates in a coverage verdict.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EntryProjectionPolicy {
+    /// Deck validation: fail closed on entry-projection gaps.
+    Include,
+    /// Published report and CI gates: preserve the historical policy.
+    Exclude,
 }
 
 /// The single canonical per-face coverage computation shared between
 /// `analyze_coverage` (for coverage-report and CI gates) and `card_face_gaps`
 /// (for deck validation and runtime deck building).
 ///
-/// When `include_entry_projection` is true, the entry-projection check (deck-only
-/// policy) is included. The report uses `false` to preserve the existing policy;
-/// deck validation uses `true`.
+/// `entry_projection` selects the one intentional divergence between the two
+/// consumers: the report excludes the CR 614.12 entry-projection check to preserve
+/// its published policy, while deck validation includes it and fails closed.
 pub fn compute_card_face_coverage(
     face: &CardFace,
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
     static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
     valid_subtypes: &HashSet<String>,
-    include_entry_projection: bool,
+    entry_projection: EntryProjectionPolicy,
 ) -> CardFaceCoverage {
     let mut missing = Vec::new();
 
@@ -7713,26 +7736,22 @@ pub fn compute_card_face_coverage(
     );
     check_shared_source_graveyard_slot(face, &mut missing);
     check_confirmed_misparse(face, &mut missing);
-    if include_entry_projection {
-        check_entry_projection(face, &mut missing);
+    match entry_projection {
+        EntryProjectionPolicy::Include => check_entry_projection(face, &mut missing),
+        EntryProjectionPolicy::Exclude => {}
     }
     check_subtype_lexicon(face, valid_subtypes, &mut missing);
     check_resolver_features(face, &mut missing);
     check_silent_drops(&face.oracle_text, &face.name, &parse_details, &mut missing);
 
-    let gaps_before_parse_warnings =
-        merge_coverage_gaps(&missing, extract_gap_details(&parse_details), &[]);
-    let supported_before_parse_warnings = gaps_before_parse_warnings.is_empty();
-    let gaps = merge_coverage_gaps(
-        &missing,
-        extract_gap_details(&parse_details),
-        &face.parse_warnings,
-    );
+    let tree_gaps = extract_gap_details(&parse_details);
+    let gaps_before_parse_warnings = merge_coverage_gaps(&missing, tree_gaps.clone(), &[]);
+    let gaps = merge_coverage_gaps(&missing, tree_gaps, &face.parse_warnings);
 
     CardFaceCoverage {
         parse_details,
         gaps,
-        supported_before_parse_warnings,
+        gaps_before_parse_warnings,
     }
 }
 
@@ -7749,7 +7768,7 @@ fn compute_card_face_coverage_for_report(
         trigger_registry,
         static_registry,
         valid_subtypes,
-        false,
+        EntryProjectionPolicy::Exclude,
     )
 }
 
@@ -7760,8 +7779,9 @@ pub fn card_face_coverage(face: &CardFace) -> CardFaceCoverage {
 }
 
 /// Like [`card_face_coverage`], but against a caller-supplied subtype lexicon
-/// (see [`collect_valid_subtypes`]) so the verdict matches `analyze_coverage`.
-/// Includes the deck-only entry-projection check for deck validation.
+/// (see [`collect_valid_subtypes`]). With the database lexicon this matches
+/// `analyze_coverage` except for the entry-projection check, which this deck
+/// entry point includes and the report excludes ([`EntryProjectionPolicy`]).
 pub fn card_face_coverage_with_subtypes(
     face: &CardFace,
     valid_subtypes: &HashSet<String>,
@@ -7771,7 +7791,7 @@ pub fn card_face_coverage_with_subtypes(
         trigger_registry(),
         static_registry(),
         valid_subtypes,
-        true,
+        EntryProjectionPolicy::Include,
     )
 }
 
@@ -8373,7 +8393,7 @@ pub fn default_valid_subtypes() -> &'static HashSet<String> {
 }
 
 /// Build a lexicon of every subtype that appears on at least one printed
-/// card face, seeded from the default subtype vocabulary. Used by
+/// card face. Used by
 /// [`check_subtype_lexicon`] to flag parser misfires:
 /// any `AddSubtype { subtype }` whose value isn't a real printed subtype
 /// (e.g. `"Gets"`, `"Until"`, `"+1/+1"`) signals that the animation or
@@ -8383,13 +8403,10 @@ pub fn default_valid_subtypes() -> &'static HashSet<String> {
 /// printed corpus is the authoritative source for the engine — anything
 /// that has appeared on a real card's type line is valid.
 pub fn collect_valid_subtypes(card_db: &CardDatabase) -> HashSet<String> {
-    let mut set: HashSet<String> = default_valid_subtypes().clone();
-    set.extend(
-        card_db
-            .face_iter()
-            .flat_map(|(_, face)| face.card_type.subtypes.iter().cloned()),
-    );
-    set
+    card_db
+        .face_iter()
+        .flat_map(|(_, face)| face.card_type.subtypes.iter().cloned())
+        .collect()
 }
 
 /// Visit every `ContinuousModification` reachable from a card face.
@@ -26455,6 +26472,139 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let report_result = coverage_result_for_face(face);
         assert!(report_result.supported);
         assert!(report_result.gap_details.is_empty());
+    }
+
+    /// The one intentional report/deck divergence: the CR 614.12 entry check is
+    /// part of the deck verdict ([`EntryProjectionPolicy::Include`]) and not of
+    /// the published report ([`EntryProjectionPolicy::Exclude`]).
+    #[test]
+    fn entry_projection_policy_splits_report_and_deck() {
+        let mut face = make_face();
+        face.name = "Entry Consumer".to_string();
+        face.replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+                .valid_card(TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::PowerGTSource]),
+                ))
+                .destination_zone(Zone::Battlefield),
+        );
+
+        // Reach guard: the check fires on this face when called directly.
+        let mut direct = Vec::new();
+        check_entry_projection(&face, &mut direct);
+        assert_eq!(direct, vec![ENTRY_CONSUMER_GAP.to_string()]);
+
+        let deck = card_face_coverage(&face);
+        assert_eq!(
+            deck.gap_handlers(),
+            vec![ENTRY_CONSUMER_GAP.to_string()],
+            "deck coverage includes the entry-projection check"
+        );
+        let report = coverage_result_for_face(face);
+        assert!(
+            report.supported,
+            "the report excludes the entry-projection check: {:?}",
+            report.gap_details
+        );
+    }
+
+    /// Warning-only faces are unsupported but carry no pre-warning gap, and the
+    /// handler-gap view the audit consumes excludes the warning label.
+    #[test]
+    fn gaps_before_parse_warnings_exclude_warning_labels() {
+        let mut face = make_face();
+        face.parse_warnings.push(OracleDiagnostic::swallowed_clause(
+            "Replacement_Instead",
+            "exile it instead",
+            None,
+        ));
+        let warning_only = card_face_coverage(&face);
+        assert_eq!(
+            warning_only.gap_handlers(),
+            vec!["Swallow:Replacement_Instead".to_string()]
+        );
+        assert!(warning_only.supported_before_parse_warnings());
+        assert!(warning_only.gap_handlers_before_parse_warnings().is_empty());
+
+        face.static_abilities
+            .push(StaticDefinition::continuous().modifications(vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Gets".to_string(),
+                },
+            ]));
+        let mixed = card_face_coverage(&face);
+        assert!(!mixed.supported_before_parse_warnings());
+        assert_eq!(
+            mixed.gap_handlers_before_parse_warnings(),
+            vec!["ParserMisfire:InvalidSubtype(Gets)".to_string()]
+        );
+        assert_eq!(mixed.gap_handlers().len(), 2);
+    }
+
+    /// The report keeps its corpus-derived lexicon: a subtype printed on another
+    /// face is valid, one absent from the corpus is flagged even if the default
+    /// Oracle vocabulary lists it. Deck verdicts match the report when given the
+    /// same database lexicon, and a caller-supplied lexicon is honored.
+    #[test]
+    fn subtype_lexicon_is_corpus_derived_and_caller_supplied() {
+        let animate = |name: &str, subtype: &str| {
+            let mut face = make_face();
+            face.name = name.to_string();
+            face.static_abilities
+                .push(StaticDefinition::continuous().modifications(vec![
+                    ContinuousModification::AddSubtype {
+                        subtype: subtype.to_string(),
+                    },
+                ]));
+            face
+        };
+        let mut printed = make_face();
+        printed.name = "Printed Elsewhere".to_string();
+        printed.card_type.subtypes = vec!["Zzyzx".to_string()];
+        let uses_printed = animate("Uses Printed", "Zzyzx");
+        let uses_default_only = animate("Uses Default Only", "Blinkmoth");
+        assert!(default_valid_subtypes().contains("Blinkmoth"));
+
+        let mut export = serde_json::Map::new();
+        for face in [&printed, &uses_printed, &uses_default_only] {
+            export.insert(
+                face.name.to_lowercase(),
+                serde_json::to_value(face).expect("test face should serialize"),
+            );
+        }
+        let db = CardDatabase::from_json_str(&serde_json::Value::Object(export).to_string())
+            .expect("test export should deserialize");
+        let summary = analyze_coverage(&db);
+        let report_gaps = |name: &str| -> Vec<String> {
+            summary
+                .cards
+                .iter()
+                .find(|card| card.card_name == name)
+                .expect("card in report")
+                .gap_details
+                .iter()
+                .map(|gap| gap.handler.clone())
+                .collect()
+        };
+        assert!(report_gaps("Uses Printed").is_empty());
+        assert_eq!(
+            report_gaps("Uses Default Only"),
+            vec!["ParserMisfire:InvalidSubtype(Blinkmoth)".to_string()],
+            "the report's corpus lexicon is not seeded with the default vocabulary"
+        );
+
+        // Deck verdicts with the database lexicon agree with the report.
+        let lexicon = collect_valid_subtypes(&db);
+        assert!(card_face_coverage_with_subtypes(&uses_printed, &lexicon).is_supported());
+        assert_eq!(
+            card_face_coverage_with_subtypes(&uses_default_only, &lexicon).gap_handlers(),
+            report_gaps("Uses Default Only")
+        );
+        // Without the database lexicon the printed-elsewhere subtype is unknown.
+        assert_eq!(
+            card_face_coverage(&uses_printed).gap_handlers(),
+            vec!["ParserMisfire:InvalidSubtype(Zzyzx)".to_string()]
+        );
     }
 }
 

@@ -11117,86 +11117,119 @@ mod tests {
         );
     }
 
-    /// A card whose only gap is a resolver feature (CounterExileRiderTailDropped).
-    /// Transcendent Dragon's ", then you may cast it without paying its mana cost"
-    /// tail on its counter-rider is parsed but dropped at runtime. The deck
-    /// coverage must surface this through `evaluate_deck_compatibility`.
+    /// CR 608.2c + CR 614.1a: Transcendent Dragon's ", then you may cast it without
+    /// paying its mana cost" tail on its counter-rider is parsed but dropped at
+    /// runtime. Loaded from the checked-in export, so the face carries its printed
+    /// Flash, Flying and Dragon subtype, the deck coverage summary lists it as
+    /// unsupported for exactly that resolver gap (issue #9972).
     #[test]
     fn deck_coverage_marks_transcendent_dragon_resolver_gap_unsupported() {
-        use crate::parser::parse_oracle_text;
+        use crate::game::coverage::ParseCategory;
 
-        const TRANSCENDENT_DRAGON: &str =
-            "Flash\nFlying\nWhen this creature enters, if you cast it, counter target spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard, then you may cast it without paying its mana cost.";
-
-        let mut cards = Map::new();
-        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
-
-        let parsed = parse_oracle_text(
-            TRANSCENDENT_DRAGON,
-            "Transcendent Dragon",
-            &[],
-            &["Creature".to_string()],
-            &[],
-        );
-        // Merge MTGJSON keywords (empty for this test) with parser-extracted keywords.
-        let mut keywords: Vec<engine::types::keywords::Keyword> = Vec::new();
-        engine::database::synthesis::merge_extracted_keywords(
-            &mut keywords,
-            parsed.extracted_keywords,
-        );
-        let mut dragon = planechase_card_json("Transcendent Dragon", &[], &["Creature"]);
-        dragon["oracle_text"] = Value::String(TRANSCENDENT_DRAGON.to_string());
-        dragon["keywords"] = serde_json::to_value(keywords).unwrap();
-        dragon["abilities"] = serde_json::to_value(parsed.abilities).unwrap();
-        dragon["triggers"] = serde_json::to_value(parsed.triggers).unwrap();
-        dragon["static_abilities"] = serde_json::to_value(parsed.statics).unwrap();
-        dragon["replacements"] = serde_json::to_value(parsed.replacements).unwrap();
-        dragon["additional_cost"] = serde_json::to_value(parsed.additional_cost).unwrap();
-        dragon["parse_warnings"] = serde_json::to_value(parsed.parse_warnings).unwrap();
-        cards.insert("transcendent dragon".to_string(), dragon);
-
-        let db = CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap();
+        let db = crate::test_support::shared_card_db();
+        let face = db
+            .get_face_by_name("Transcendent Dragon")
+            .expect("integration fixture carries Transcendent Dragon");
+        // Reach guard: the exported face is the production shape, not a stub.
+        assert!(face.keywords.contains(&Keyword::Flash));
+        assert!(face.keywords.contains(&Keyword::Flying));
+        assert!(face.card_type.subtypes.iter().any(|s| s == "Dragon"));
 
         let request = DeckCompatibilityRequest {
             main_deck: vec!["Plains".to_string(), "Transcendent Dragon".to_string()],
             ..Default::default()
         };
-
-        let result = evaluate_deck_compatibility(&db, &request);
-        let coverage = result.coverage.expect("coverage present");
+        let coverage = evaluate_deck_compatibility(db, &request)
+            .coverage
+            .expect("coverage present");
         assert_eq!(coverage.total_unique, 2);
         assert_eq!(coverage.supported_unique, 1);
         assert_eq!(coverage.unsupported_cards.len(), 1);
         let unsupported = &coverage.unsupported_cards[0];
         assert_eq!(unsupported.name, "Transcendent Dragon");
-        // The resolver gap for the dropped counter-rider tail.
+        assert_eq!(
+            unsupported.gaps,
+            vec!["ResolverFeature:structural:counter_exile_rider_tail_dropped".to_string()],
+            "the dropped tail is the only gap"
+        );
+        // The nested Counter item sits under the enters trigger.
         assert!(
-            unsupported
-                .gaps
+            unsupported.parse_details.iter().any(|item| {
+                item.category == ParseCategory::Trigger
+                    && item.label == "ChangesZone"
+                    && item.children.iter().any(|child| {
+                        child.category == ParseCategory::Ability && child.label == "Counter"
+                    })
+            }),
+            "the enters trigger and its counter must reach the parse details"
+        );
+    }
+
+    /// A warning-only Scheme (no handler or resolver gap) is unsupported for
+    /// submitted-scheme validation and is skipped by default scheme selection,
+    /// while a clean Scheme in the same database is accepted (issue #9972).
+    #[test]
+    fn warning_only_scheme_is_unsupported_in_validation_and_default_selection() {
+        use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+
+        let mut cards = Map::new();
+        insert_planechase_card(&mut cards, "Legal Standard", &[], &[]);
+        for index in 1..=20 {
+            insert_scheme_card(&mut cards, &format!("Scheme {index}"));
+        }
+        // Sorts before every clean scheme, so default selection would take it first.
+        let mut warned = planechase_card_json("Aaa Warning Scheme", &[], &["Scheme"]);
+        warned["parse_warnings"] = serde_json::to_value(vec![OracleDiagnostic::swallowed_clause(
+            "Replacement_Instead",
+            "exile it instead",
+            None,
+        )])
+        .unwrap();
+        cards.insert("aaa warning scheme".to_string(), warned);
+        let db = CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap();
+
+        // Reach guard: the warned face is a Scheme whose only gap is the warning.
+        let face = db.get_face_by_name("Aaa Warning Scheme").unwrap();
+        let coverage = crate::game::coverage::card_face_coverage(face);
+        assert!(coverage.supported_before_parse_warnings());
+        assert!(!coverage.is_supported());
+
+        let mut scheme_deck = scheme_names(19);
+        scheme_deck.push("Aaa Warning Scheme".to_string());
+        let check = evaluate_archenemy(
+            &db,
+            &archenemy_request(scheme_deck),
+            &BTreeSet::new(),
+            &FormatConfig::archenemy(),
+        );
+        assert!(
+            check
+                .reasons
                 .iter()
-                .any(|g| g
-                    .starts_with("ResolverFeature:structural:counter_exile_rider_tail_dropped")),
-            "expected resolver feature gap, got: {:?}",
-            unsupported.gaps
+                .any(|reason| reason.contains("Unsupported scheme cards")),
+            "reasons: {:?}",
+            check.reasons
         );
-        // The Counter effect details should be present in the parse details.
+        let clean = evaluate_archenemy(
+            &db,
+            &archenemy_request(scheme_names(20)),
+            &BTreeSet::new(),
+            &FormatConfig::archenemy(),
+        );
         assert!(
-            !unsupported.parse_details.is_empty(),
-            "parse_details should not be empty"
+            !clean
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("Unsupported scheme cards")),
+            "reasons: {:?}",
+            clean.reasons
         );
-        use crate::game::coverage::ParseCategory;
-        // The free-cast tail appears in the trigger's source_text (category Trigger)
-        let has_counter_effect = unsupported.parse_details.iter().any(|item| {
-            (item.category == ParseCategory::Trigger || item.category == ParseCategory::Ability)
-                && item
-                    .source_text
-                    .as_deref()
-                    .is_some_and(|s| s.contains("cast it without paying"))
-        });
-        assert!(
-            has_counter_effect,
-            "Counter effect with free-cast tail should appear in parse details"
-        );
+
+        let selected = crate::game::deck_loading::default_scheme_deck_entries(&db);
+        assert_eq!(selected.len(), 20);
+        assert!(selected
+            .iter()
+            .all(|entry| entry.card.name != "Aaa Warning Scheme"));
     }
 
     /// A DFC commander whose two faces are each indexed under their own key,

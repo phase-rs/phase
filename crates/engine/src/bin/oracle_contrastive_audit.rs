@@ -494,11 +494,12 @@ fn classify(
 ) -> (Status, Vec<String>, Vec<String>, ProjectionPair) {
     let base_coverage = card_face_coverage(base_face);
     let mutant_coverage = card_face_coverage(mutant_face);
-    let base_gaps = base_coverage.gap_handlers();
-    let mutant_gaps = mutant_coverage.gap_handlers();
+    // Handler gaps exclude parse warnings, which the audit reports separately.
+    let base_gaps = base_coverage.gap_handlers_before_parse_warnings();
+    let mutant_gaps = mutant_coverage.gap_handlers_before_parse_warnings();
     let status = match (
-        base_coverage.supported_before_parse_warnings,
-        mutant_coverage.supported_before_parse_warnings,
+        base_coverage.supported_before_parse_warnings(),
+        mutant_coverage.supported_before_parse_warnings(),
     ) {
         (false, false) => Some(Status::BothUnsupported),
         (false, true) => Some(Status::BaseUnsupported),
@@ -1018,6 +1019,19 @@ mod tests {
             classify(&clean, &diagnostic, MutationKind::LifeYouToTargetOpponent,).0,
             Status::MutantDiagnostic
         );
+
+        // Warning-only: the diagnostic is not a handler gap.
+        let (_, base_gaps, mutant_gaps, _) =
+            classify(&diagnostic, &clean, MutationKind::LifeYouToTargetOpponent);
+        assert!(base_gaps.is_empty(), "{base_gaps:?}");
+        assert!(mutant_gaps.is_empty(), "{mutant_gaps:?}");
+        // Mixed: only the handler gap is reported, not the warning label.
+        let mut mixed = unsupported.clone();
+        mixed.parse_warnings = diagnostic.parse_warnings.clone();
+        let (status, mixed_gaps, _, _) =
+            classify(&mixed, &clean, MutationKind::LifeYouToTargetOpponent);
+        assert_eq!(status, Status::BaseUnsupported);
+        assert_eq!(mixed_gaps, vec!["Effect:fixture".to_string()]);
     }
 
     #[test]

@@ -475,8 +475,8 @@ impl CardDatabase {
     /// (Saproling, Golem, etc.) that no creature card in the loaded decks
     /// shares are still recognized by `SharesQuality::CreatureType`,
     /// `ChoiceType::CreatureType`, and the Changeling expansion.
-    /// Coverage subtype lexicon: the default vocabulary plus every subtype
-    /// printed on a loaded face. Computed once per database and cached.
+    /// Coverage subtype lexicon: every subtype printed on a loaded face, the same
+    /// set `analyze_coverage` uses. Computed once per database and cached.
     pub fn valid_subtypes(&self) -> &HashSet<String> {
         self.valid_subtypes
             .get_or_init(|| crate::game::coverage::collect_valid_subtypes(self))
