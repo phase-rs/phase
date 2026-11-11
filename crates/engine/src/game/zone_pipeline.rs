@@ -2423,11 +2423,43 @@ fn record_staged_member_approval(
     owner.paused_current = None;
 }
 
+/// CR 701.8a: whether an outer-approved Destroy member's terminal is witnessed
+/// as a destruction by this instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StagedDestroyWitness {
+    /// The instruction reached the member's object: its outer approval is the
+    /// witness, whether the inner move happened, was prevented or remained.
+    OuterApproval,
+    /// CR 400.7: the approved object left before delivery (another member's
+    /// replacement may have destroyed it, as an Umbra's armor destroys the
+    /// Aura). This instruction destroyed nothing; whatever moved it reported
+    /// its own destruction.
+    ObjectGone,
+}
+
 fn mark_staged_member_terminal(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
     index: usize,
     terminal: ZoneMoveCompletion,
+    events: &mut Vec<GameEvent>,
+) {
+    mark_staged_member_terminal_witnessed(
+        state,
+        owner,
+        index,
+        terminal,
+        StagedDestroyWitness::OuterApproval,
+        events,
+    );
+}
+
+fn mark_staged_member_terminal_witnessed(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+    index: usize,
+    terminal: ZoneMoveCompletion,
+    witness: StagedDestroyWitness,
     events: &mut Vec<GameEvent>,
 ) {
     // CR 608.2c: the mass hand-exile counter is the completion's typed
@@ -2475,7 +2507,9 @@ fn mark_staged_member_terminal(
         staged.cursor = staged.cursor.max(index + 1);
     }
     owner.paused_current = None;
-    if let Some((object_id, source_id)) = destroyed {
+    if let (Some((object_id, source_id)), StagedDestroyWitness::OuterApproval) =
+        (destroyed, witness)
+    {
         // CR 701.8a: the singleton emits `CreatureDestroyed` for both an inner
         // `Moved` and an inner `Prevented`; the outer approval is the witness.
         events.push(GameEvent::CreatureDestroyed {
@@ -2853,7 +2887,14 @@ fn deliver_staged_members(
             .get(&member.identity.object_id)
             .map(ObjectIncarnationRef::from_object);
         if live_identity != Some(member.identity) {
-            mark_staged_member_terminal(state, owner, cursor, ZoneMoveCompletion::Remained, events);
+            mark_staged_member_terminal_witnessed(
+                state,
+                owner,
+                cursor,
+                ZoneMoveCompletion::Remained,
+                StagedDestroyWitness::ObjectGone,
+                events,
+            );
             continue;
         }
         let Some(event) = member.approved_event.clone() else {

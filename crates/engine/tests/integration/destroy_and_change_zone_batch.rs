@@ -3351,6 +3351,18 @@ fn akromas_vengeance_umbra_member_gets_one_terminal_in_either_order() {
             event,
             GameEvent::CreatureDestroyed { object_id, .. } if *object_id == host
         )));
+        assert_eq!(
+            outcome
+                .events()
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::CreatureDestroyed { object_id, .. } if *object_id == umbra
+                ))
+                .count(),
+            1,
+            "aura_first={aura_first}: the Aura is reported destroyed once, by its armor"
+        );
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.resolution_stack.is_empty());
         state
