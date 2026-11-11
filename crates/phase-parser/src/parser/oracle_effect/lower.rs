@@ -1031,6 +1031,7 @@ pub(super) fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
             arranger: None,
         },
         SpellStackToGraveyardReplacement::Hand => Effect::ChangeZone {
+            library_shuffle: Default::default(),
             destination: Zone::Hand,
             origin: None,
             target: TargetFilter::ParentTarget,
@@ -3473,7 +3474,8 @@ impl ReflexiveGateParent {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
-            | Effect::Unimplemented { .. } => Self::Other,
+            | Effect::HordePlayCard { .. } => Self::Other,
+            Effect::Unimplemented { .. } => Self::Other,
         }
     }
 

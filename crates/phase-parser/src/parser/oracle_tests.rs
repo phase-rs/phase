@@ -1624,6 +1624,86 @@ fn activated_ability_opponents_upkeep_restriction_composes_scope_and_step() {
     );
 }
 
+/// CR 602.5 + CR 122.1e: Jace, Reality Sculptor's [0] ability is gated on
+/// "there are twenty-five or more loyalty counters among Jaces you control".
+/// The clause is an ordinary quantity comparison over the loyalty counters
+/// summed across Jace planeswalkers, so it must lower to `RequiresCondition`
+/// rather than leave an `unrecognized_clause_head` gap on "Activate only".
+#[test]
+fn jace_reality_sculptor_zero_ability_gates_on_loyalty_counters_among_jaces() {
+    let r = parse(
+        "[+1]: Empower Jace X, where X is the number of Islands you control.\n\
+         [−3]: Until your next turn, whenever a creature attacks you or a planeswalker you control, it gets -5/-0 until end of turn.\n\
+         [0]: Exile all but the bottom card of each opponent's library. Activate only if there are twenty-five or more loyalty counters among Jaces you control.",
+        "Jace, Reality Sculptor",
+        &[],
+        &["Planeswalker"],
+        &["Jace"],
+    );
+
+    assert_eq!(r.abilities.len(), 3, "got {r:#?}");
+    let zero = &r.abilities[2];
+    assert!(
+        matches!(
+            zero.cost,
+            Some(crate::types::ability::AbilityCost::Loyalty { amount: 0 })
+        ),
+        "the third ability is the [0] loyalty ability, got {:?}: {zero:#?}",
+        zero.cost
+    );
+    assert!(
+        !matches!(zero.effect.as_ref(), Effect::Unimplemented { .. }),
+        "the exile must parse: {zero:#?}"
+    );
+
+    let (counter_type, comparator, value) = zero
+        .activation_restrictions
+        .iter()
+        .find_map(|restriction| match restriction {
+            ActivationRestriction::RequiresCondition {
+                condition:
+                    Some(ParsedCondition::QuantityComparison {
+                        lhs:
+                            QuantityExpr::Ref {
+                                qty:
+                                    QuantityRef::CountersOnObjects {
+                                        counter_type,
+                                        filter,
+                                    },
+                            },
+                        comparator,
+                        rhs: QuantityExpr::Fixed { value },
+                    }),
+            } => {
+                assert!(
+                    matches!(
+                        filter,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters,
+                            controller: Some(ControllerRef::You),
+                            ..
+                        }) if type_filters.iter().any(|type_filter| matches!(
+                            type_filter,
+                            TypeFilter::Subtype(subtype) if subtype == "Jace"
+                        ))
+                    ),
+                    "the count is scoped to Jaces you control, got {filter:?}"
+                );
+                Some((counter_type, comparator, value))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a loyalty-counters-among-Jaces activation condition, got {:?}",
+                zero.activation_restrictions
+            )
+        });
+    assert_eq!(*counter_type, Some(CounterType::Loyalty));
+    assert_eq!(*comparator, Comparator::GE);
+    assert_eq!(*value, 25);
+}
+
 /// CR 602.5b: the `during <role> <window>` activation gate is composed from a
 /// turn-role axis and a turn-window axis, so every role×window pairing resolves
 /// without a whole-clause tag per phrase. Both opponent possessive spellings and
@@ -34955,7 +35035,7 @@ fn choice_of_fortunes_shuffles_the_sought_set_into_the_library() {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: crate::types::ability::MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
             random_order: false,
         }
     );

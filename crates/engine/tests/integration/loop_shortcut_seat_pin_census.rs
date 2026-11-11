@@ -245,6 +245,7 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
         files,
         vec![
             "engine/src/analysis/decision_template.rs",
+            "engine/src/analysis/decision_template.rs",
             "engine/src/game/engine.rs",
             "engine/src/game/engine.rs",
             "engine/src/game/interaction.rs",
@@ -260,6 +261,9 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
             (CR 115.10a existence-only). This IS the class's authority; do not narrow it, \
             `a_shrouded_player_pin_is_still_published_by_the_offer_builder` is the shipped \
             guard against exactly that.\n\
+         1b. `analysis/decision_template.rs` — `DecisionTemplate::resolution_change_points`' \
+            read arm, which lists no change point for a pinned seat (`resolve_target` hands it \
+            no iteration index) and mints no pin.\n\
          2. `game/engine.rs` — `shortcut_drive_period`'s period arm; the migrated pin lands on \
             the `Scheduled(Constant(_))` arm of the SAME match, which also returns 1.\n\
          3. `game/engine.rs` — `apply_action`'s CR 701.34a proliferate arm feeding \

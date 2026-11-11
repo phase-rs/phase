@@ -7,7 +7,7 @@ use crate::game::game_object::AttachTarget;
 use crate::game::zones;
 use crate::types::ability::{
     ControllerRef, Duration, Effect, EffectError, EffectKind, EffectResolutionResult, FilterProp,
-    LibraryPosition, MassLibraryShuffleMode, OpponentMayScope, QuantityExpr, ResolvedAbility,
+    LibraryPosition, LibraryShuffleMode, OpponentMayScope, QuantityExpr, ResolvedAbility,
     TargetChoiceTiming, TargetFilter, TargetRef, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
@@ -821,6 +821,24 @@ pub(crate) fn optional_triggering_source_move_is_infeasible(
             .all(|id| zone_move_member_cannot_move(state, id, expected_origin))
 }
 
+// CR 701.24a + CR 701.24d: An explicitly owned terminal Shuffle randomizes the
+// delivered set once. Bottom is only a transient delivery position; a printed
+// placement remains authoritative, and ordinary library moves keep auto-shuffling.
+fn member_library_placement(
+    destination: Zone,
+    printed_position: Option<LibraryPosition>,
+    library_shuffle: LibraryShuffleMode,
+) -> Option<LibraryPosition> {
+    if destination == Zone::Library
+        && printed_position.is_none()
+        && matches!(library_shuffle, LibraryShuffleMode::TerminalShuffle)
+    {
+        Some(LibraryPosition::Bottom)
+    } else {
+        printed_position
+    }
+}
+
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -840,6 +858,7 @@ pub fn resolve(
         effect_conditional_enter_with_counters,
         face_down_profile,
         effect_enters_modified_if,
+        library_shuffle,
     ) = match &ability.effect {
         Effect::ChangeZone {
             origin,
@@ -854,6 +873,7 @@ pub fn resolve(
             conditional_enter_with_counters,
             face_down_profile,
             enters_modified_if,
+            library_shuffle,
             ..
         } => {
             // CR 122.1 + CR 614.1c: Resolve `QuantityExpr` counts to concrete
@@ -893,15 +913,48 @@ pub fn resolve(
                 conditional_enter_with_counters.clone(),
                 face_down_profile.clone(),
                 enters_modified_if.clone(),
+                *library_shuffle,
             )
         }
         _ => return Err(EffectError::MissingParam("Destination".to_string())),
     };
+    let library_placement = member_library_placement(dest_zone, None, library_shuffle);
 
     let completed_result = |count| {
         super::this_way_cause_for_zone(dest_zone)
             .map(|cause| EffectResolutionResult { cause, count })
     };
+
+    // CR 608.2b: "target player shuffles target cards from their graveyard"
+    // requires the declared player to act, even when the card targets remain legal.
+    // Read the same group as the terminal Shuffle before delivering any cards.
+    // Only this compound is skipped; the ability chain still reaches independent tails.
+    if let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Library,
+        target: TargetFilter::Typed(filter),
+        owner_library: false,
+        library_shuffle: LibraryShuffleMode::TerminalShuffle,
+        ..
+    } = &ability.effect
+    {
+        let actor_unavailable = filter.properties.iter().any(|property| match property {
+            FilterProp::Owned {
+                controller: ControllerRef::DeclaredPlayer { group },
+            } => crate::game::targeting::resolve_live_declared_player(state, ability, *group)
+                .is_none(),
+            _ => false,
+        });
+        if actor_unavailable {
+            state.last_effect_count = Some(0);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(completed_result(0));
+        }
+    }
 
     // CR 610.3a / CR 610.3b: If the specified event occurred after this ability
     // was put onto the stack (activated) or triggered (triggered) but before its
@@ -1262,7 +1315,7 @@ pub fn resolve(
                 face_down_profile.as_ref(),
                 ability.context.face_down_in_exile,
                 track_exiled_by_source,
-                None,
+                library_placement.clone(),
                 None,
                 Some(ability.controller),
                 // CR 608.2c: the controller follows the instruction, so it performs the move.
@@ -1339,7 +1392,7 @@ pub fn resolve(
                 face_down_profile.as_ref(),
                 ability.context.face_down_in_exile,
                 track_exiled_by_source,
-                None,
+                library_placement.clone(),
                 None,
                 Some(ability.controller),
                 // CR 608.2c: the controller follows the instruction, so it performs the move.
@@ -1416,7 +1469,7 @@ pub fn resolve(
             enter_with_counters: effect_enter_with_counters.clone(),
             conditional_enter_with_counters: effect_conditional_enter_with_counters.clone(),
             count_param: 0,
-            library_position: None,
+            library_position: library_placement.clone(),
             mass_library_order: None,
             is_cost_payment: false,
             // CR 614.12: carry the moved-object type gate across the
@@ -1445,7 +1498,7 @@ pub fn resolve(
         track_exiled_by_source,
         face_down_in_exile: ability.context.face_down_in_exile,
         face_down_profile: face_down_profile.clone(),
-        library_placement: None,
+        library_placement,
         enter_attached_to: forward_result_search_attach_host(state, ability),
     };
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)
@@ -2797,21 +2850,8 @@ pub fn resolve_all(
     };
     let origin_zone = origin_zones[0];
 
-    // CR 701.24a + CR 701.24d: Parser-produced “shuffle [a set] into [a]
-    // library” operations mark their mass-move component explicitly. The generic
-    // zone-delivery tail normally shuffles every member that enters a library
-    // without a placement, so use a transient bottom placement only for that
-    // exact operation and reserve the one randomization for its terminal Shuffle.
-    // This mode is data, not an inferred relationship between arbitrary runtime
-    // continuation chains; explicit printed placement remains authoritative.
-    let member_library_placement = if dest_zone == Zone::Library
-        && effect_library_position.is_none()
-        && matches!(library_shuffle, MassLibraryShuffleMode::TerminalShuffle)
-    {
-        Some(LibraryPosition::Bottom)
-    } else {
-        effect_library_position.clone()
-    };
+    let member_library_placement =
+        member_library_placement(dest_zone, effect_library_position.clone(), library_shuffle);
 
     // CR 400.6 + CR 400.3: `TargetFilter::Controller` / player-anaphor filters
     // in a mass zone-change reference a *player*, not a set of objects. Such
@@ -3449,6 +3489,7 @@ mod tests {
     fn make_hand_choice_ability(up_to: bool) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -3472,6 +3513,7 @@ mod tests {
     fn exact_scoped_graveyard_exile_ability() -> ResolvedAbility {
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter::card().properties(vec![
@@ -3672,6 +3714,7 @@ mod tests {
             });
             let ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Hand,
                     target: TargetFilter::TriggeringSource,
@@ -3710,6 +3753,7 @@ mod tests {
     fn optional_referent_move(target: TargetFilter, origin: Option<Zone>) -> ResolvedAbility {
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin,
                 destination: Zone::Battlefield,
                 target,
@@ -3913,6 +3957,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -3955,6 +4000,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -3999,6 +4045,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -4082,6 +4129,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -4154,6 +4202,7 @@ mod tests {
                 .push(core);
             let ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Hand),
                     destination: Zone::Battlefield,
                     target: TargetFilter::Any,
@@ -4228,6 +4277,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -4298,6 +4348,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SpecificObject { id: aura_id },
@@ -4368,6 +4419,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SpecificObject { id: aura_id },
@@ -4441,6 +4493,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SpecificObject { id: aura_id },
@@ -4564,6 +4617,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -4783,6 +4837,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SpecificObject { id: aura_id },
@@ -4875,6 +4930,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -4960,6 +5016,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -5036,6 +5093,7 @@ mod tests {
         );
         let mut choice_ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Hand,
                 target: TargetFilter::Typed(TypedFilter::default().properties(vec![
@@ -5240,6 +5298,7 @@ mod tests {
             });
             let mut ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Hand),
                     destination: Zone::Battlefield,
                     target: TargetFilter::Typed(TypedFilter {
@@ -5344,6 +5403,7 @@ mod tests {
         )];
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination,
                 target: TargetFilter::Any,
@@ -5473,6 +5533,7 @@ mod tests {
 
         let mut move_ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -5667,6 +5728,7 @@ mod tests {
         };
         ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -5802,6 +5864,7 @@ mod tests {
 
             let mut move_ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
                     target: TargetFilter::Typed(TypedFilter {
@@ -6773,6 +6836,7 @@ mod tests {
                 }
                 let mut ability = ResolvedAbility::new(
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: Some(Zone::Hand),
                         destination: Zone::Battlefield,
                         target: TargetFilter::Typed(TypedFilter {
@@ -7113,6 +7177,7 @@ mod tests {
         });
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TriggeringSource,
@@ -7160,6 +7225,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -7209,6 +7275,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -7247,6 +7314,7 @@ mod tests {
         let source_id = ObjectId(100);
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -7294,6 +7362,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -7332,6 +7401,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -7414,6 +7484,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Library,
                 target: TargetFilter::Any,
@@ -7461,6 +7532,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Library,
                 target: TargetFilter::Any,
@@ -7508,6 +7580,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Library,
                 target: TargetFilter::SelfRef,
@@ -8296,6 +8369,7 @@ mod tests {
         let source_id = ObjectId(100);
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -8353,6 +8427,7 @@ mod tests {
         let source_id = ObjectId(100);
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -8406,6 +8481,7 @@ mod tests {
         // Try to exile from battlefield, but object is in graveyard
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -8465,6 +8541,7 @@ mod tests {
         );
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -8569,6 +8646,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Hand,
                 target: TargetFilter::Any,
@@ -8644,6 +8722,7 @@ mod tests {
         .sub_ability(
             ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Battlefield),
                     destination: Zone::Exile,
                     target: TargetFilter::Typed(
@@ -8760,6 +8839,7 @@ mod tests {
             )
             .sub_ability(ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
                     target: TargetFilter::ParentTargetSlot { index: 1 },
@@ -8813,6 +8893,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(
@@ -8888,6 +8969,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(
@@ -8955,6 +9037,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
@@ -9012,6 +9095,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
@@ -9913,6 +9997,7 @@ mod tests {
     fn make_exhume_ability(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -10095,6 +10180,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -10358,6 +10444,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -10460,6 +10547,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -10511,6 +10599,7 @@ mod tests {
         trigger.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -10605,6 +10694,7 @@ mod tests {
     ) -> Vec<GameEvent> {
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -10859,6 +10949,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -11001,6 +11092,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -11505,6 +11597,7 @@ mod tests {
             //   Exile seed from opponent's graveyard → multi_zone
             let exile_seed = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Exile,
                     target: TargetFilter::Any,
@@ -11618,6 +11711,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -12178,6 +12272,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -12243,6 +12338,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -12287,6 +12383,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -12339,6 +12436,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter::card().properties(vec![
@@ -12464,6 +12562,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -12599,6 +12698,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -12767,6 +12867,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -12942,7 +13043,7 @@ mod tests {
     /// moves must not auto-shuffle, leaving exactly the one terminal Shuffle.
     fn paused_terminal_mass_library_shuffle_events(cant_shuffle: bool) -> Vec<GameEvent> {
         use crate::types::ability::{
-            AbilityDefinition, AbilityKind, MassLibraryShuffleMode, ReplacementDefinition,
+            AbilityDefinition, AbilityKind, LibraryShuffleMode, ReplacementDefinition,
             ReplacementMode,
         };
         use crate::types::replacements::ReplacementEvent;
@@ -12982,6 +13083,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -13023,7 +13125,7 @@ mod tests {
                 enter_with_counters: vec![],
                 face_down_profile: None,
                 library_position: None,
-                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
                 random_order: false,
             },
             vec![],
@@ -13177,6 +13279,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -13202,7 +13305,7 @@ mod tests {
         assert!(matches!(
             definition.effect.as_ref(),
             Effect::ChangeZoneAll {
-                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
                 ..
             }
         ));
@@ -13358,6 +13461,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -13419,6 +13523,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -13499,6 +13604,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -13600,6 +13706,7 @@ mod tests {
         );
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -13900,6 +14007,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -14001,6 +14109,7 @@ mod tests {
 
         let put_sub = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Hand,
                 target: TargetFilter::TrackedSetFiltered {
@@ -14131,6 +14240,7 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -14214,6 +14324,7 @@ mod tests {
         // must still flip control to the sole opponent, player 1.
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -14277,6 +14388,7 @@ mod tests {
         }
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -14561,6 +14673,7 @@ mod exile_card_population_tests {
         let (mut state, card, copy) = board();
         let mut ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: owned_exiled_instants(),

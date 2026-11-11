@@ -355,6 +355,40 @@ pub struct DeclaredSlotEntry {
     pub filter: TargetFilter,
 }
 
+/// CR 608.2c: how the immediately preceding instruction produced the chain's
+/// pending tracked set, and the zone it left those cards in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingTrackedSet {
+    pub zone: Zone,
+    pub producer: TrackedSetProducer,
+}
+
+/// CR 608.2c: the instruction kind that published a pending tracked set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackedSetProducer {
+    /// "Choose card(s) in <zone>": the chosen cards are a referent that a later
+    /// bare "it" / "they" can name.
+    Chosen,
+    /// A bare reveal (CR 701.20b) chooses nothing, so its cards are named only
+    /// by "those cards" / "the cards revealed this way", never by a bare
+    /// pronoun.
+    Revealed,
+}
+
+impl ParseContext {
+    /// CR 608.2c: whether the preceding instruction chose cards that a bare
+    /// "it" / "they" can refer back to.
+    pub fn chosen_tracked_set_pending(&self) -> bool {
+        matches!(
+            self.pending_tracked_set,
+            Some(PendingTrackedSet {
+                producer: TrackedSetProducer::Chosen,
+                ..
+            })
+        )
+    }
+}
+
 /// CR 700.2: the body a [`ParseContext`] parses — a whole ability, or one mode
 /// of a modal spell or ability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -893,8 +927,9 @@ pub struct ParseContext {
     /// it lowers a `TrackedSet` put-onto-battlefield whose own clause text named
     /// no explicit origin; an impulse/cascade producer leaves this `None`, so
     /// the lowering keeps the exile default. Reset per effect chain in
-    /// `parse_effect_chain_ir`.
-    pub pending_tracked_set_origin: Option<Zone>,
+    /// `parse_effect_chain_ir`. The producer kind decides whether a bare
+    /// pronoun may name the set ([`Self::chosen_tracked_set_pending`]).
+    pub pending_tracked_set: Option<PendingTrackedSet>,
     /// CR 701.42a: The partner card name extracted from a meld instigator's
     /// own/control gate ("if you both own and control [self] and a [type] named
     /// [partner], exile them, then meld them into [result]"). The gate is parsed
