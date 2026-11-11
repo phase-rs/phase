@@ -867,26 +867,25 @@ pub(crate) fn apply_damage_after_replacement(
                 }
             }
             let toxic_poison = owed_toxic_poison(ctx, actual_amount, is_combat);
-            if toxic_poison > 0 {
-                if give_toxic_poison(state, ctx.controller, *player_id, toxic_poison, events)
+            if toxic_poison > 0
+                && give_toxic_poison(state, ctx.controller, *player_id, toxic_poison, events)
                     == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
-                {
-                    // The loss or infect result above already ran
-                    // synchronously; only the toxic poison result is parked
-                    // (owned by the pending replacement), so the fact is
-                    // recorded once here. Nothing else is owed: toxic is
-                    // combat-only and a combat leg owes no lifelink here, so
-                    // nothing is stashed behind this pause.
-                    record_player_damage_at_counter_pause(
-                        state,
-                        ctx,
-                        *player_id,
-                        actual_amount,
-                        is_combat,
-                        events,
-                    );
-                    return DamageResult::NeedsChoice;
-                }
+            {
+                // The loss or infect result above already ran
+                // synchronously; only the toxic poison result is parked
+                // (owned by the pending replacement), so the fact is
+                // recorded once here. Nothing else is owed: toxic is
+                // combat-only and a combat leg owes no lifelink here, so
+                // nothing is stashed behind this pause.
+                record_player_damage_at_counter_pause(
+                    state,
+                    ctx,
+                    *player_id,
+                    actual_amount,
+                    is_combat,
+                    events,
+                );
+                return DamageResult::NeedsChoice;
             }
         }
     }
