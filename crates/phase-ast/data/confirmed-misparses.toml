@@ -1823,6 +1823,7 @@ face = [
   { key = "osseous sticktwister", class = "condition_wrong", clauses = ["Then this creature deals damage equal to its power to each opponent who didn't sacrifice a permanent or discard a card this way."] },
   { key = "osteomancer adept", class = "cost_wrong", clauses = ["{T}: Until end of turn, you may cast creature spells from your graveyard by foraging in addition to paying their other costs.", "If you cast a spell this way, that creature enters with a finality counter on it."] },
   { key = "otherworldly outburst", class = "wrong_duration", clauses = ["When that creature dies this turn, create a 3/2 colorless Eldrazi Horror creature token."] },
+  { key = "outfitted jouster", class = "trigger_wrong", clauses = ["When damage is prevented this way, sacrifice an Equipment attached to Outfitted Jouster."] },
   { key = "outpace oblivion", class = "dropped_qualifier", clauses = ["{2}, Sacrifice this enchantment: It deals 2 damage to each player who doesn't have max speed."] },
   { key = "outrider en-kor", class = "wrong_duration", clauses = ["{0}: The next 1 damage that would be dealt to this creature this turn is dealt to target creature you control instead."] },
   { key = "overblaze", class = "dropped_qualifier", clauses = ["Each time target permanent would deal damage to a permanent or player this turn, it deals double that damage to that permanent or player instead."] },

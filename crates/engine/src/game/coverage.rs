@@ -31,7 +31,7 @@ use crate::types::ability::{
     ObjectSelectionCardinality, ObjectSelectionEligibility, Parity, ParsedCondition,
     PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValue,
     PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
+    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, ShieldKind, SpeedDelta,
     SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind,
     StaticCondition, StaticDefinition, SubAbilityLink, TapStateChange, TargetFilter,
     TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
@@ -9887,6 +9887,14 @@ enum StructuralFeature {
     /// The card parses, and outside combat the choice is asked, so nothing else in coverage can
     /// see it.
     DamageReplacementChoiceUnaskedInCombat,
+    /// CR 614.1a + CR 616.1: a damage substitution (`ShieldKind::Substitution`: Force Bubble,
+    /// Phytohydra, Nefarious Lich) whose CR 616.1 choice is not offered as the cards give it.
+    /// Protection prevents the damage before the substitution is offered (CR 702.16e), so the
+    /// affected player never chooses it; and simultaneous damage from several sources asks one
+    /// choice per source, where Force Bubble's ruling gives "one choice, not one per source".
+    /// The card parses, and with no protection or competing replacement it works, so nothing
+    /// else in coverage can see it.
+    DamageSubstitutionChoiceIncomplete,
 }
 
 impl StructuralFeature {
@@ -9913,6 +9921,9 @@ impl StructuralFeature {
             CounterExileRiderTailDropped => "structural:counter_exile_rider_tail_dropped",
             DamageReplacementChoiceUnaskedInCombat => {
                 "structural:damage_replacement_choice_unasked_in_combat"
+            }
+            DamageSubstitutionChoiceIncomplete => {
+                "structural:damage_substitution_choice_incomplete"
             }
         }
     }
@@ -9949,6 +9960,12 @@ impl StructuralFeature {
             // `damage_substitution_replacements::a_parked_may_gets_no_automatic_yes_in_combat`
             // (Battletide Alchemist: the Ogre's 3 combat damage is neither dealt nor prevented).
             DamageReplacementChoiceUnaskedInCombat => FeatureSupport::Unhandled,
+            // MEASURED UNHANDLED: `damage_substitution_replacements`
+            // (`protection_prevents_ahead_of_a_substitutions_choice`: Phytohydra with protection
+            // is never asked and gets no counters;
+            // `a_repeated_answer_puts_a_noncombat_batch_on_one_force_bubble`: two prompts for one
+            // simultaneous event).
+            DamageSubstitutionChoiceIncomplete => FeatureSupport::Unhandled,
         }
     }
 }
@@ -10857,6 +10874,21 @@ fn extract_damage_replacement_choice_feature(
             StructuralFeature::DamageReplacementChoiceUnaskedInCombat,
         );
     }
+    if is_damage_substitution(repl) {
+        emit_structural(
+            features,
+            StructuralFeature::DamageSubstitutionChoiceIncomplete,
+        );
+    }
+}
+
+/// [`StructuralFeature::DamageSubstitutionChoiceIncomplete`]: a replacement that substitutes
+/// for damage (CR 614.1a: "instead") rather than preventing it.
+fn is_damage_substitution(repl: &ReplacementDefinition) -> bool {
+    matches!(
+        repl.event,
+        ReplacementEvent::DamageDone | ReplacementEvent::DealtDamage
+    ) && matches!(repl.shield_kind, ShieldKind::Substitution)
 }
 
 fn extract_trigger_features(
