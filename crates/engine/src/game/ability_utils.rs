@@ -11745,6 +11745,8 @@ fn chain_has_target_sink_after_deferred_effect(sub_ability: Option<&ResolvedAbil
 ///   * CR 609.7: the source-scoped `PreventDamage` slot, declared FIRST
 ///   * paired-subject nodes -> `paired_subject_slot_filters` (the filters BASE's
 ///     `retarget_slot_violation` already enforces at that position)
+///   * `Fight` nodes -> the occupied declared roles' filters
+///     (`FightSlots::occupied`), the cast path's own per-slot specs
 ///   * `mana_multi_role` nodes -> `surfaced_filters()` (the same filters the
 ///     entry cascade's mana-role branch unions)
 ///   * the target-creature-quantity slot and the parent-target-combat-relation
@@ -11757,7 +11759,8 @@ fn chain_has_target_sink_after_deferred_effect(sub_ability: Option<&ResolvedAbil
 ///
 /// NOT derivable today, and therefore fail-closed (`NotDerivable`):
 ///   * the companion target-player slot — a filter/POOL PAIR, see above
-///   * `Fight`, `MoveCounters`, `Attach`, `CreateDamageReplacement`,
+///   * a `Fight` whose stored targets do not line up with its declaration,
+///     `MoveCounters`, `Attach`, `CreateDamageReplacement`,
 ///     `EachDealsDamageEqualToPower`, and per-opponent target fanout.
 ///     DELIBERATE CONSERVATISM, not an inability — widening them is
 ///     `TRACKED(pending-approval)` #2.
@@ -11797,9 +11800,23 @@ fn node_slot_filters(ability: &ResolvedAbility) -> NodeSlotFilters {
         return NodeSlotFilters::PerSlot(lead);
     }
 
-    // Arm 3 — `Fight`: fail-closed, also a `return` in the cast path.
-    if matches!(ability.effect, Effect::Fight { .. }) {
-        return NodeSlotFilters::NotDerivable;
+    // Arm 3 — `Fight`, also a `return` in the cast path. CR 115.7a + CR 601.2c
+    // + CR 115.6: each stored target is checked against the declared role it
+    // occupies (`FightSlots::occupied`), the same filter the cast path declared
+    // and enumerated for that slot. With Favored Enemy's ("target creature you
+    // control fights up to one target creature you don't control") fought
+    // creature declined, the sole stored target is the fighter, so its new
+    // target must be a creature its controller controls.
+    if let Some(slots) = fight_slots(&ability.effect) {
+        let occupied: Vec<TargetFilter> = slots
+            .occupied(ability.targets.len())
+            .map(|(_, filter)| filter.clone())
+            .collect();
+        return if lead.is_empty() && occupied.len() == ability.targets.len() {
+            NodeSlotFilters::PerSlot(occupied)
+        } else {
+            NodeSlotFilters::NotDerivable
+        };
     }
 
     // Arm 4 — `MoveCounters` fail-closed; `mana_multi_role`; the remaining

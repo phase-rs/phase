@@ -212,8 +212,13 @@ fn two_slot_declined_opponent_is_no_fight() {
     cast_to_trigger_targets(&mut board).expect("trigger asks for targets");
     choose(&mut board, Some(fighter));
     choose(&mut board, None);
-    resolve_stack(&mut board);
+    let events = resolve_stack(&mut board);
 
+    assert_eq!(
+        fights_resolved(&events),
+        1,
+        "the ability resolved rather than fizzled: {events:?}"
+    );
     let state = board.runner.state();
     assert_eq!(state.objects[&fighter].damage_marked, 0);
     assert_eq!(state.objects[&board.opponent].damage_marked, 0);
@@ -1015,7 +1020,12 @@ fn favored_enemy_bulk_selection_reads_a_one_entry_list_as_the_fighter() {
     assert_eq!(board.runner.state().waiting_for, before, "prompt unchanged");
 
     select_targets(&mut board, &[fighter]).expect("fighter chosen, fought declined");
-    resolve_stack(&mut board);
+    let events = resolve_stack(&mut board);
+    assert_eq!(
+        fights_resolved(&events),
+        1,
+        "the ability resolved rather than fizzled: {events:?}"
+    );
     let state = board.runner.state();
     assert_eq!(state.objects[&opponent].zone, Zone::Battlefield);
     assert_eq!(state.objects[&opponent].damage_marked, 0);
@@ -1068,7 +1078,12 @@ fn smell_fear_bulk_selection_reads_a_one_entry_list_as_the_fighter() {
     assert_eq!(board.runner.state().waiting_for, before, "prompt unchanged");
 
     select_targets(&mut board, &[fighter]).expect("fighter chosen, fought declined");
-    resolve_stack(&mut board);
+    let events = resolve_stack(&mut board);
+    assert_eq!(
+        fights_resolved(&events),
+        1,
+        "the ability resolved rather than fizzled: {events:?}"
+    );
     let state = board.runner.state();
     assert_eq!(state.objects[&opponent].zone, Zone::Battlefield);
     assert_eq!(state.objects[&opponent].damage_marked, 0);
@@ -1088,6 +1103,210 @@ fn smell_fear_bulk_selection_of_both_fights() {
     let state = board.runner.state();
     assert_eq!(state.objects[&opponent].zone, Zone::Graveyard);
     assert_eq!(state.objects[&fighter].damage_marked, 2);
+    assert_completed(&board.runner);
+}
+
+/// Bolt Bend (verbatim).
+const BOLT_BEND: &str = "This spell costs {3} less to cast if you control a creature with power 4 or greater.\nChange the target of target spell or ability with a single target.";
+
+/// Put a free Bolt Bend in your hand.
+fn add_bolt_bend(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(P0, "Bolt Bend", true, BOLT_BEND)
+        .with_mana_cost(ManaCost::generic(0))
+        .id()
+}
+
+/// Cast Bolt Bend at the ability on top of the stack and pass until its
+/// retarget prompt opens, returning that prompt's per-position pools.
+fn bolt_bend_the_top_ability(runner: &mut GameRunner, bolt_bend: ObjectId) -> Vec<Vec<TargetRef>> {
+    let ability = runner
+        .state()
+        .stack
+        .back()
+        .expect("the trigger is on the stack")
+        .id;
+    let _commit = runner.cast(bolt_bend).target_object(ability).commit();
+    for _ in 0..80 {
+        match &runner.state().waiting_for {
+            WaitingFor::RetargetChoice { slot_pools, .. } => return slot_pools.clone(),
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass toward Bolt Bend's resolution");
+            }
+            other => panic!("unexpected wait before the retarget prompt: {other:?}"),
+        }
+    }
+    panic!("Bolt Bend never asked for a new target");
+}
+
+fn retarget_to(runner: &mut GameRunner, target: ObjectId) -> Result<(), String> {
+    runner
+        .act(GameAction::RetargetSpell {
+            new_targets: vec![Some(TargetRef::Object(target))],
+        })
+        .map(|_| ())
+        .map_err(|error| format!("{error:?}"))
+}
+
+/// CR 115.7a + CR 601.2c + CR 115.6: with Favored Enemy's fought creature
+/// declined, its trigger's single target is the fighter, so Bolt Bend ("Change
+/// the target of target spell or ability with a single target.") may move it
+/// only to another creature you control — never to a creature you don't
+/// control, which only the declined slot could hold.
+#[test]
+fn bolt_bend_moves_favored_enemys_lone_fighter_only_to_a_creature_you_control() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let fighter = scenario.add_creature(P0, "Champion", 3, 3).id();
+    let ally = scenario.add_creature(P0, "Ally Bear", 2, 2).id();
+    let opponent = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
+    let card = {
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            P0,
+            "Favored Enemy",
+            false,
+            FAVORED_ENEMY_ENTERS,
+        );
+        builder.as_enchantment();
+        builder.id()
+    };
+    let bolt_bend = add_bolt_bend(&mut scenario);
+    let mut board = Board {
+        runner: scenario.build(),
+        card,
+        fighter: Some(fighter),
+        opponent,
+    };
+    cast_to_trigger_targets(&mut board).expect("trigger asks for targets");
+    choose(&mut board, Some(fighter));
+    choose(&mut board, None);
+
+    let pools = bolt_bend_the_top_ability(&mut board.runner, bolt_bend);
+    assert_eq!(pools.len(), 1, "one stored target, one position: {pools:?}");
+    assert!(
+        pools[0].contains(&TargetRef::Object(ally)),
+        "another creature you control is a legal new fighter: {pools:?}"
+    );
+    assert!(
+        !pools[0].contains(&TargetRef::Object(opponent)),
+        "a creature you don't control is not a legal fighter: {pools:?}"
+    );
+
+    let before = board.runner.state().waiting_for.clone();
+    assert!(
+        retarget_to(&mut board.runner, opponent).is_err(),
+        "the opponent's creature is refused as the fighter"
+    );
+    assert_eq!(board.runner.state().waiting_for, before, "prompt unchanged");
+    retarget_to(&mut board.runner, ally).expect("the ally is a legal fighter");
+
+    let events = resolve_stack(&mut board);
+    assert_eq!(
+        fights_resolved(&events),
+        1,
+        "the trigger resolved with the ally as its lone fighter: {events:?}"
+    );
+    let state = board.runner.state();
+    for creature in [fighter, ally, opponent] {
+        assert_eq!(state.objects[&creature].damage_marked, 0);
+    }
+    assert_completed(&board.runner);
+}
+
+/// CR 115.7a + CR 603.3d + CR 202.3: Boxing Ring's "with the same mana value"
+/// compares with the creature whose entry triggered it, for the retarget too.
+/// With a mana-value-3 entrant, Bolt Bend may move the fight only to the other
+/// mana-value-3 creature — never to the mana-value-0 ones, which a read
+/// without the entry's trigger event would compare with 0. CR 701.14a: the
+/// new pair then fights.
+#[test]
+fn bolt_bend_keeps_boxing_rings_fight_at_the_entrants_mana_value() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_artifact_from_oracle(P0, "Boxing Ring", BOXING_RING)
+        .with_mana_cost(ManaCost::generic(2));
+    let first_three = scenario
+        .add_creature(P1, "Opponent Three", 2, 2)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let second_three = scenario
+        .add_creature(P1, "Other Three", 2, 2)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let zeros = [
+        scenario
+            .add_creature(P1, "Opponent Zero", 2, 2)
+            .with_mana_cost(ManaCost::generic(0))
+            .id(),
+        scenario
+            .add_creature(P1, "Other Zero", 2, 2)
+            .with_mana_cost(ManaCost::generic(0))
+            .id(),
+    ];
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
+    let entering = scenario
+        .add_creature_to_hand(P0, "Entering Brawler", 3, 3)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let bolt_bend = add_bolt_bend(&mut scenario);
+    let mut board = Board {
+        runner: scenario.build(),
+        card: entering,
+        fighter: Some(entering),
+        opponent: first_three,
+    };
+    let slots = cast_boxing_ring_entrant(&mut board)
+        .0
+        .expect("trigger asks for a target");
+    assert_eq!(
+        slots[0].legal_targets.len(),
+        2,
+        "reach guard: both mana-value-3 creatures are offered at announcement: {slots:?}"
+    );
+    choose(&mut board, Some(first_three));
+
+    let pools = bolt_bend_the_top_ability(&mut board.runner, bolt_bend);
+    assert_eq!(pools.len(), 1, "one stored target, one position: {pools:?}");
+    assert!(
+        pools[0].contains(&TargetRef::Object(second_three)),
+        "the other mana-value-3 creature is a legal new target: {pools:?}"
+    );
+    for zero in zeros {
+        assert!(
+            !pools[0].contains(&TargetRef::Object(zero)),
+            "a mana-value-0 creature is not: {pools:?}"
+        );
+    }
+
+    let before = board.runner.state().waiting_for.clone();
+    assert!(
+        retarget_to(&mut board.runner, zeros[0]).is_err(),
+        "a mana-value-0 creature is refused"
+    );
+    assert_eq!(board.runner.state().waiting_for, before, "prompt unchanged");
+    retarget_to(&mut board.runner, second_three).expect("the other mana-value-3 creature");
+
+    let events = resolve_stack(&mut board);
+    assert_eq!(fights_resolved(&events), 1, "{events:?}");
+    let state = board.runner.state();
+    assert_eq!(
+        state.objects[&second_three].zone,
+        Zone::Graveyard,
+        "the 3/3 deals 3 to the new 2/2"
+    );
+    assert_eq!(
+        state.objects[&entering].damage_marked, 2,
+        "2/2 deals 2 back"
+    );
+    for untouched in [first_three, zeros[0], zeros[1]] {
+        assert_eq!(state.objects[&untouched].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&untouched].damage_marked, 0);
+    }
     assert_completed(&board.runner);
 }
 
@@ -1206,7 +1425,10 @@ fn as_pre_operand_writer(save: &mut serde_json::Value) -> usize {
                     .map(as_pre_operand_writer)
                     .sum::<usize>()
         }
-        _ => 0,
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => 0,
     }
 }
 
@@ -1235,7 +1457,10 @@ fn legacy_fight_count(value: &serde_json::Value) -> usize {
             usize::from(is_legacy_fight_node(object))
                 + object.values().map(legacy_fight_count).sum::<usize>()
         }
-        _ => 0,
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => 0,
     }
 }
 
@@ -1250,7 +1475,10 @@ fn fight_effects(value: &serde_json::Value) -> Vec<String> {
                 }
                 object.values().for_each(|value| collect(value, out));
             }
-            _ => {}
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
         }
     }
     let mut out = Vec::new();

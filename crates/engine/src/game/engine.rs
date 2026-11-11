@@ -18318,7 +18318,24 @@ fn apply_choose_objects_selection(
 /// exactly this value; the prompt-parking test and the AI's proposal
 /// enumeration (`ai_support::candidates::retarget_actions`) call it too, so no
 /// response is offered that the reducer would reject.
+///
+/// CR 115.7a + CR 603.3d: legality is judged under the targeted entry's own
+/// triggering-event context, the one its targets were announced under — Boxing
+/// Ring's "with the same mana value" reads the creature whose entry triggered
+/// it, never the ability changing the target.
 pub(crate) fn validate_retarget_submission(
+    state: &GameState,
+    proposal: &RetargetProposal<'_>,
+) -> Result<crate::types::ability::ResolvedAbility, EngineError> {
+    match state.stack.get(proposal.stack_entry_index) {
+        Some(entry) => super::triggers::with_stack_entry_trigger_context(state, entry, |state| {
+            validate_retarget_submission_in_entry_context(state, proposal)
+        }),
+        None => validate_retarget_submission_in_entry_context(state, proposal),
+    }
+}
+
+fn validate_retarget_submission_in_entry_context(
     state: &GameState,
     proposal: &RetargetProposal<'_>,
 ) -> Result<crate::types::ability::ResolvedAbility, EngineError> {

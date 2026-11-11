@@ -1312,26 +1312,16 @@ fn top_pending_trigger_has_no_legal_required_targets(
     state: &mut GameState,
     pending_id: ObjectId,
 ) -> bool {
-    let Some((ability, trigger_event, trigger_events, subject_match_count)) = state
+    let Some((ability, context)) = state
         .stack
         .back()
         .filter(|entry| entry.id == pending_id)
         .and_then(|entry| {
             let ability = entry.ability()?.clone();
-            let (trigger_event, subject_match_count) = match &entry.kind {
-                StackEntryKind::TriggeredAbility {
-                    trigger_event,
-                    subject_match_count,
-                    ..
-                } => (trigger_event.clone(), *subject_match_count),
-                _ => (None, None),
-            };
-            let trigger_events = state
-                .stack_trigger_event_batches
-                .get(&entry.id)
-                .cloned()
-                .unwrap_or_else(|| trigger_event.iter().cloned().collect());
-            Some((ability, trigger_event, trigger_events, subject_match_count))
+            Some((
+                ability,
+                super::triggers::stack_entry_trigger_context(state, entry),
+            ))
         })
     else {
         return false;
@@ -1339,9 +1329,9 @@ fn top_pending_trigger_has_no_legal_required_targets(
 
     let context_snapshot = super::triggers::push_trigger_event_context(
         state,
-        trigger_event.as_ref(),
-        &trigger_events,
-        subject_match_count,
+        context.event.as_ref(),
+        &context.events,
+        context.match_count,
     );
     let missing_required_targets = has_no_legal_required_stack_targets(state, &ability);
     super::triggers::restore_trigger_event_context(state, context_snapshot);

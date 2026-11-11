@@ -133,24 +133,31 @@ pub fn resolve(
     // because the forced path returns before the prompt would be constructed
     // (Invariant SC, `chain_retarget_slots`' doc) — this and the interactive
     // path below are its TWO call sites, both in this file.
-    let base = legal_new_targets_for_entry(state, &state.stack[stack_entry_index]);
-    let pool_controller =
-        retarget_pool_controller(state, &state.stack[stack_entry_index], &stack_ability);
-    let mut slot_pools: Vec<Vec<TargetRef>> = exposed
-        .iter()
-        .map(|b| {
-            let node =
-                ability_utils::node_at(&stack_ability, &b.address.path).unwrap_or(&stack_ability);
-            slot_pool(state, node, &b.enforcement, pool_controller, &base)
-        })
-        .collect();
-    ability_utils::widen_dependent_retarget_pools(
-        state,
-        &stack_ability,
-        exposed,
-        &mut slot_pools,
-        pool_controller,
-    );
+    // CR 115.7a + CR 603.3d: the pools are evaluated under the targeted
+    // entry's own triggering-event context, the one its targets were announced
+    // under, not the context of the ability changing them.
+    let entry = &state.stack[stack_entry_index];
+    let (base, slot_pools) =
+        crate::game::triggers::with_stack_entry_trigger_context(state, entry, |state| {
+            let base = legal_new_targets_in_entry_context(state, entry);
+            let pool_controller = retarget_pool_controller(state, entry, &stack_ability);
+            let mut slot_pools: Vec<Vec<TargetRef>> = exposed
+                .iter()
+                .map(|b| {
+                    let node = ability_utils::node_at(&stack_ability, &b.address.path)
+                        .unwrap_or(&stack_ability);
+                    slot_pool(state, node, &b.enforcement, pool_controller, &base)
+                })
+                .collect();
+            ability_utils::widen_dependent_retarget_pools(
+                state,
+                &stack_ability,
+                exposed,
+                &mut slot_pools,
+                pool_controller,
+            );
+            (base, slot_pools)
+        });
 
     if let Some(filter) = forced_to {
         // CR 115.7a/b: Forced retarget uses the exposed slot's legality, which
@@ -513,24 +520,27 @@ pub(crate) fn derive_slot_pools(
     stack_ability: &ResolvedAbility,
     bindings: &[RetargetSlotBinding],
 ) -> Vec<Vec<TargetRef>> {
-    let base = legal_new_targets_for_entry(state, entry);
-    let pool_controller = retarget_pool_controller(state, entry, stack_ability);
-    let mut pools: Vec<Vec<TargetRef>> = bindings
-        .iter()
-        .map(|b| {
-            let node =
-                ability_utils::node_at(stack_ability, &b.address.path).unwrap_or(stack_ability);
-            slot_pool(state, node, &b.enforcement, pool_controller, &base)
-        })
-        .collect();
-    ability_utils::widen_dependent_retarget_pools(
-        state,
-        stack_ability,
-        bindings,
-        &mut pools,
-        pool_controller,
-    );
-    pools
+    // CR 115.7a + CR 603.3d: under the entry's own triggering-event context.
+    crate::game::triggers::with_stack_entry_trigger_context(state, entry, |state| {
+        let base = legal_new_targets_in_entry_context(state, entry);
+        let pool_controller = retarget_pool_controller(state, entry, stack_ability);
+        let mut pools: Vec<Vec<TargetRef>> = bindings
+            .iter()
+            .map(|b| {
+                let node =
+                    ability_utils::node_at(stack_ability, &b.address.path).unwrap_or(stack_ability);
+                slot_pool(state, node, &b.enforcement, pool_controller, &base)
+            })
+            .collect();
+        ability_utils::widen_dependent_retarget_pools(
+            state,
+            stack_ability,
+            bindings,
+            &mut pools,
+            pool_controller,
+        );
+        pools
+    })
 }
 
 /// Extract the target filter from an effect variant, if it has a standard `target` field.
@@ -554,7 +564,15 @@ pub fn legal_new_targets_for_stack_entry(
         .unwrap_or_default()
 }
 
+/// CR 115.7a + CR 603.3d: the cascade is evaluated under the entry's own
+/// triggering-event context (`triggers::with_stack_entry_trigger_context`).
 fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<TargetRef> {
+    crate::game::triggers::with_stack_entry_trigger_context(state, entry, |state| {
+        legal_new_targets_in_entry_context(state, entry)
+    })
+}
+
+fn legal_new_targets_in_entry_context(state: &GameState, entry: &StackEntry) -> Vec<TargetRef> {
     let Some(stack_ability) = entry.ability() else {
         return Vec::new();
     };
@@ -654,26 +672,12 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
     // authority the cast path uses so retargeting offers a real alternative
     // instead of collapsing to the current target.
     // The entry's own triggering events, not whichever trigger is constructing.
-    // Multi-event batches are stored per entry; a single event stays on the
-    // entry, the same fallback resolution uses when binding its scope.
-    let entry_trigger_events = match (
-        state.stack_trigger_event_batches.get(&entry.id),
-        &entry.kind,
-    ) {
-        (Some(batch), _) => batch.as_slice(),
-        (
-            None,
-            StackEntryKind::TriggeredAbility {
-                trigger_event: Some(event),
-                ..
-            },
-        ) => std::slice::from_ref(event),
-        (None, _) => &[],
-    };
+    let entry_trigger_events =
+        crate::game::triggers::stack_entry_trigger_context(state, entry).events;
     if let Some(players) = crate::game::ability_utils::companion_target_player_retarget_options(
         state,
         stack_ability,
-        entry_trigger_events,
+        &entry_trigger_events,
     ) {
         return players;
     }

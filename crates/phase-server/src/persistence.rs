@@ -2067,7 +2067,10 @@ mod tests {
                     }
                     object.values().for_each(|value| collect(value, out));
                 }
-                _ => {}
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::String(_) => {}
             }
         }
         let mut out = Vec::new();
@@ -2108,7 +2111,10 @@ mod tests {
                         .map(as_pre_operand_writer)
                         .sum::<usize>()
             }
-            _ => 0,
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => 0,
         }
     }
 

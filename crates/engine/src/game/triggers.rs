@@ -264,16 +264,88 @@ pub(super) fn push_trigger_event_context(
         current_trigger_match_count: state.current_trigger_match_count,
         die_result_this_resolution: state.die_result_this_resolution,
     };
-    state.current_trigger_event = trigger_event
+    (state.current_trigger_event, state.current_trigger_events) =
+        installed_trigger_events(trigger_event, trigger_events);
+    state.current_trigger_match_count = subject_match_count;
+    snapshot
+}
+
+/// CR 603.2 + CR 603.3d: the triggering-event context a stack entry carries —
+/// its firing event, its event batch and its subject match count. A spell or
+/// an activated ability carries none.
+pub(crate) struct StackEntryTriggerContext {
+    pub(crate) event: Option<GameEvent>,
+    pub(crate) events: Vec<GameEvent>,
+    pub(crate) match_count: Option<u32>,
+}
+
+/// The triggering-event context of `entry`. Multi-event batches are stored per
+/// entry; a single event stays on the entry.
+pub(crate) fn stack_entry_trigger_context(
+    state: &GameState,
+    entry: &StackEntry,
+) -> StackEntryTriggerContext {
+    let (event, match_count) = match &entry.kind {
+        StackEntryKind::TriggeredAbility {
+            trigger_event,
+            subject_match_count,
+            ..
+        } => (trigger_event.clone(), *subject_match_count),
+        _ => (None, None),
+    };
+    let events = state
+        .stack_trigger_event_batches
+        .get(&entry.id)
+        .cloned()
+        .unwrap_or_else(|| event.iter().cloned().collect());
+    StackEntryTriggerContext {
+        event,
+        events,
+        match_count,
+    }
+}
+
+/// CR 115.7a + CR 603.3d: evaluate `f` against `entry`'s own triggering-event
+/// context, the one its targets were announced under (CR 601.2c), so a target
+/// filter that reads the trigger event (Boxing Ring's "with the same mana
+/// value" as the entering creature) answers for the entry, not for whatever
+/// ability is resolving. The state is cloned only when the live context
+/// differs; `GameState`'s collections are persistent, so the clone shares them.
+pub(crate) fn with_stack_entry_trigger_context<R>(
+    state: &GameState,
+    entry: &StackEntry,
+    f: impl FnOnce(&GameState) -> R,
+) -> R {
+    let context = stack_entry_trigger_context(state, entry);
+    let (event, events) = installed_trigger_events(context.event.as_ref(), &context.events);
+    if state.current_trigger_event == event
+        && state.current_trigger_events == events
+        && state.current_trigger_match_count == context.match_count
+    {
+        return f(state);
+    }
+    let mut scoped = state.clone();
+    scoped.current_trigger_event = event;
+    scoped.current_trigger_events = events;
+    scoped.current_trigger_match_count = context.match_count;
+    f(&scoped)
+}
+
+/// The `current_trigger_event` / `current_trigger_events` pair that installing
+/// `trigger_event` and `trigger_events` as the live context produces.
+fn installed_trigger_events(
+    trigger_event: Option<&GameEvent>,
+    trigger_events: &[GameEvent],
+) -> (Option<GameEvent>, Vec<GameEvent>) {
+    let event = trigger_event
         .cloned()
         .or_else(|| trigger_events.first().cloned());
-    state.current_trigger_events = if trigger_events.is_empty() {
+    let events = if trigger_events.is_empty() {
         trigger_event.cloned().into_iter().collect()
     } else {
         trigger_events.to_vec()
     };
-    state.current_trigger_match_count = subject_match_count;
-    snapshot
+    (event, events)
 }
 
 pub(super) fn restore_trigger_event_context(
