@@ -25935,6 +25935,23 @@ fn resolve_chain_body(
         });
         let sub = bound_sub.as_ref().unwrap_or(sub);
 
+        // CR 608.2c: only a population-shaped continuous rider needs the phase
+        // action's resolved set forwarded. A direct `ParentTarget` instruction
+        // (Oubliette's "Tap that creature as it phases in") is bound by the
+        // ordinary parent-target propagation and must keep that path.
+        let phase_rider_reads_population = matches!(
+            &sub.effect,
+            Effect::GenericEffect {
+                static_abilities,
+                ..
+            } if static_abilities.iter().any(|static_def| {
+                static_def
+                    .affected
+                    .as_ref()
+                    .is_some_and(filter_refs_parent_target)
+            })
+        );
+
         // CR 608.2c + CR 609.3: A zone-choice partition already bound this sub's
         // complement, and that binding is EMPTY — the pick exhausted the eligible
         // pool, so "the other" names no object at all
@@ -26062,12 +26079,13 @@ fn resolve_chain_body(
                 attachment_candidates,
             );
             progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
-        } else if !phase_affected_objects.is_empty() && ability_refs_parent_target(sub) {
+        } else if !phase_affected_objects.is_empty() && phase_rider_reads_population {
             // CR 608.2c: a phase instruction's resolved population is the
-            // antecedent for a following `ParentTarget` rider. Forward the
-            // actual objects through the same result-binding authority a
-            // forward-result producer uses; `effect.rs`'s inherited-target
-            // path then binds one transient effect per phased permanent.
+            // antecedent for a following `ParentTarget` continuous rider.
+            // Forward the actual objects through the same result-binding
+            // authority a forward-result producer uses; `effect.rs`'s
+            // inherited-target path then binds one transient effect per phased
+            // permanent.
             let mut sub_with_context = sub.as_ref().clone();
             apply_parent_chain_context(
                 &mut sub_with_context,
