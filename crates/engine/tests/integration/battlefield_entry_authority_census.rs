@@ -1220,7 +1220,7 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
             ambiguous_production.len(),
             ambiguous.len() - ambiguous_production.len()
         ),
-        (6, 0),
+        (5, 0),
         "the argument-ambiguous mutator surface on the two anaphora containers moved. These are \
          the calls whose SINGLE-ID-ness this census cannot read, so they are pinned instead of \
          classified. If the new call's argument is a bulk source (a `Vec`, a \
@@ -1244,7 +1244,10 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
     // `frame.created_ids.extend(ids)`. A bulk argument (a `Vec`): the event's ordered ids at
     // completion, or the ledger at a copy batch's pause, handed to the CopyToken owner the
     // delivery detached. It is the ONE hand-over site for every re-park of that owner, so the
-    // pause and completion paths cannot pick different ids.
+    // pause and completion paths cannot pick different ids. Since #10762 r3 the single-batch copy
+    // branch of `apply_create_token_batch` uses it too: it detaches the owner for the batch, so the
+    // delivery's raw `pending.created_ids.extend(status.created_ids)`, which appended a batch the
+    // liminal terminal had already merged, is gone.
     //
     // The copy batch ledger's re-sync onto the CopyToken owner added one more, in `token.rs`:
     // `token::record_copy_batch_ledger_on_active_copy_token`'s `pending.created_ids.extend(
@@ -1255,14 +1258,14 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
     assert_eq!(
         production_multiset(&ambiguous_production),
         vec![
-            ("engine/src/game/effects/token.rs".to_string(), 3),
+            ("engine/src/game/effects/token.rs".to_string(), 2),
             ("engine/src/game/effects/token_copy.rs".to_string(), 3),
         ],
-        "per-file argument-ambiguous mutator multiset moved. All six of these are bulk \
-         republishes today — `.extend(status.created_ids)`, `.extend(state.\
-         last_created_token_ids.clone())`, `repark_event_copy_frame`'s `.extend(ids)` and the \
-         ledger re-sync's `.extend(unlisted)` — and the pin exists so that a SEVENTH cannot \
-         arrive without someone reading its argument"
+        "per-file argument-ambiguous mutator multiset moved. All five of these are bulk \
+         republishes today — `resume_copy_token_batch_remainder`'s `.extend(status.created_ids)`, \
+         the batch loop's `.extend(state.last_created_token_ids.clone())` pair, \
+         `repark_event_copy_frame`'s `.extend(ids)` and the ledger re-sync's `.extend(unlisted)` \
+         — and the pin exists so that a SIXTH cannot arrive without someone reading its argument"
     );
 }
 
