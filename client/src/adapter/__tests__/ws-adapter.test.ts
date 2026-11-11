@@ -6059,6 +6059,68 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
     }
   });
 
+  describe("a synchronous reconnecting listener that starts the successor", () => {
+    /**
+     * `reconnecting` is emitted from inside `attemptReconnect`, so a listener
+     * that calls `tryReconnect` runs the successor's `attachSocket` before the
+     * attempt that scheduled the retry timer has returned.
+     */
+    async function listenerOwnedSuccessor() {
+      const codec = scriptedCodec();
+      const provider = vi.fn(() => Promise.resolve(codec.session));
+      const { adapter, raw } = await establishCodecAdapter(provider);
+      let started: boolean | null = null;
+      const off = adapter.onEvent((event) => {
+        if (event.type !== "reconnecting" || started !== null) return;
+        started = adapter.tryReconnect(session() as never);
+      });
+      raw.readyState = 3;
+      raw.dispatchSynthetic("close");
+      await vi.waitFor(() => expect(started).toBe(true));
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+      return { adapter, off, successor: latestSocket() };
+    }
+
+    it("keeps the successor's own retry when it fails before the obsolete timer fires", async () => {
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+      const { adapter, off, successor } = await listenerOwnedSuccessor();
+      try {
+        // No fake time has passed: the timer the first attempt installed is
+        // still pending when the successor fails before hello.
+        successor.readyState = 3;
+        successor.dispatchSynthetic("close");
+        // The retry delay is 1600 ms at random()=0; the maximum is 2000 ms.
+        await vi.advanceTimersByTimeAsync(2000);
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(successor));
+      } finally {
+        random.mockRestore();
+        off();
+        adapter.dispose();
+      }
+    });
+
+    it("does not let the obsolete timer replace the successor once it is attached", async () => {
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+      const { adapter, off, successor } = await listenerOwnedSuccessor();
+      try {
+        successor.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+        await vi.waitFor(() => expect(successor.send).toHaveBeenCalledWith(
+          expect.stringContaining('"type":"Reconnect"'),
+        ));
+        successor.dispatchSynthetic("message", CODEC_CONFIRMATION);
+        // Past the 800 ms delay the first attempt scheduled, short of any retry
+        // the live successor could itself need.
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(MockWebSocket.last).toBe(successor);
+        expect(successor.close).not.toHaveBeenCalled();
+      } finally {
+        random.mockRestore();
+        off();
+        adapter.dispose();
+      }
+    });
+  });
+
   it("clears every request and initialization owner before a synchronous close's pending listener throws", async () => {
     MockWebSocket.last = null;
     const adapter = new WebSocketAdapter(
