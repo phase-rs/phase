@@ -15510,9 +15510,9 @@ mod staged_batch_tests {
             });
         }
         // The sweep alone records the Pending battlefield slot before the
-        // complete collection runs.
+        // complete collection runs; the settled segment holds no occurrence.
         let mut probe = state.active_batch_delivery().unwrap().clone();
-        record_staged_terminals_for_settlement(&mut probe);
+        record_staged_terminals_for_settlement(&mut probe, &[]);
         assert_eq!(
             probe.logical_zone_change_group.terminal_outcomes[0],
             crate::types::game_state::LogicalZoneChangeTerminalOutcome::Prevented
