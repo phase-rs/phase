@@ -478,7 +478,11 @@ export function openPhaseSocket(
       // server's second, plain-text `ServerHello`.
       acceptingLease = false;
       const prepared = lease;
+      // The desktop shell's bridge carries text frames to its own wire contract
+      // and has no codec route: it never offers the codec, so its hello and
+      // framing stay exactly what they were before the codec existed.
       const negotiatesCodec = prepared !== null
+        && !(ws instanceof NativeEngineSocket)
         && surface === "full"
         && info.mode === "Full"
         && info.stateCodecs?.includes(STATE_CODEC_V1) === true;

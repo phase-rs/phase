@@ -1026,6 +1026,23 @@ describe("LAN default transport", () => {
     socket.close();
   });
 
+  it("keeps the codec off the native bridge: no offer, lease released, text hello unchanged", async () => {
+    lanSupported.mockReturnValue(true); probeLan.mockResolvedValue(true);
+    const fake = fakeSession();
+    const pending = openPhaseSocket("ws://192.168.1.2:9374/ws", { stateCodecSession: fake.session });
+    await vi.waitFor(() => expect(channelListener.current).not.toBeNull());
+    channelListener.current?.({
+      type: "message",
+      text: helloFrame({ state_codecs: ["StateCodecV1"], wire_formats: ["GzipEnvelopeV1"] }),
+    });
+    const socket = await pending;
+    const hello = invokeLan.mock.calls.find(([command]) => command === "lan_bridge_send")?.[1] as { text: string };
+    expect(JSON.parse(hello.text).data).not.toHaveProperty("state_codecs");
+    expect(JSON.parse(hello.text).data.wire_formats).toEqual([]);
+    expect(fake.close).toHaveBeenCalledOnce();
+    socket.close();
+  });
+
   it("keeps an explicit factory authoritative for a LAN address", async () => {
     lanSupported.mockReturnValue(true);
     const factory = vi.fn((url: string) => new MockWebSocket(url) as unknown as WebSocket);
