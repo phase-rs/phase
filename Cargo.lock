@@ -1939,6 +1939,7 @@ version = "0.122.0"
 dependencies = [
  "flate2",
  "mimalloc",
+ "nom",
  "phase-engine",
  "rand 0.9.4",
  "rand_chacha 0.9.0",

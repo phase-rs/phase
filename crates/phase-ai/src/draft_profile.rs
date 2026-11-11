@@ -29,14 +29,20 @@
 //! Double-counting guards: the class bonus is the *maximum* over a card's
 //! classes (an artifact-creature mana source is not rewarded twice), and a
 //! theme whose mechanic already earned the card a class bonus (Modular,
-//! Sunburst, Equipment) contributes no archetype synergy to that card.
+//! Sunburst, Equipment, Spirit, Arcane, ...) contributes only the synergy in
+//! excess of that bonus.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
+use nom::branch::alt;
+use nom::bytes::complete::tag;
+use nom::combinator::value;
+use nom::sequence::pair;
+use nom::{IResult, Parser};
 use serde::{Deserialize, Serialize};
 
-use engine::types::ability::{AbilityKind, Effect, PtValue};
+use engine::types::ability::{AbilityCost, AbilityDefinition, AbilityKind, Effect, PtValue};
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::keywords::Keyword;
@@ -121,9 +127,8 @@ pub enum CardClass {
     /// A cheap evasive creature: a reliable way to connect, so a Ninjutsu
     /// activation (CR 702.49a: return an unblocked attacker) is available.
     NinjutsuEnabler,
-    /// A non-land card with an activated ability usable from hand other than
-    /// Cycling (CR 602.1: an ability may be activated from a zone other than
-    /// the battlefield): Channel.
+    /// A card with a Channel ability (CR 207.2c ability word): activated from
+    /// hand by discarding the card itself (see [`is_channel_ability`]).
     Channel,
     /// An instant whose effect chain pumps a creature (CR 701.8-style combat
     /// trick), and that is not removal.
@@ -156,7 +161,8 @@ pub enum Theme {
 
 impl Theme {
     /// The classes whose set bonus already rewards this theme's signature
-    /// mechanics. A card paid by one of them gets no synergy from the theme.
+    /// mechanics. A card paid by one of them gets only the theme's synergy in
+    /// excess of that class bonus.
     fn linked_classes(self) -> &'static [CardClass] {
         match self {
             Theme::SunburstFiveColor => &[CardClass::Sunburst],
@@ -185,7 +191,18 @@ impl Theme {
             Theme::RedAggression => Some("R"),
             Theme::BlackAttrition => Some("B"),
             Theme::GreenMidrange => Some("G"),
-            _ => None,
+            Theme::ArtifactAffinity
+            | Theme::SunburstFiveColor
+            | Theme::ModularCounters
+            | Theme::EquipmentCombat
+            | Theme::RedGreenSpiritsArcane
+            | Theme::WhiteBlackSpiritsSoulshift
+            | Theme::BlueBlackNinjasTempo
+            | Theme::BlueWhiteEvasionTempo
+            | Theme::RedBlackAggression
+            | Theme::GreenMidrangeSpirits
+            | Theme::ArcaneSpliceControl
+            | Theme::FiveColorGoodstuff => None,
         }
     }
 
@@ -198,7 +215,16 @@ impl Theme {
             Theme::BlueWhiteEvasionTempo => Some(["U", "W"]),
             Theme::RedBlackAggression => Some(["R", "B"]),
             Theme::GreenMidrangeSpirits => Some(["G", "G"]),
-            _ => None,
+            Theme::ArtifactAffinity
+            | Theme::SunburstFiveColor
+            | Theme::ModularCounters
+            | Theme::EquipmentCombat
+            | Theme::BlueControl
+            | Theme::RedAggression
+            | Theme::BlackAttrition
+            | Theme::GreenMidrange
+            | Theme::ArcaneSpliceControl
+            | Theme::FiveColorGoodstuff => None,
         }
     }
 }
@@ -369,6 +395,7 @@ impl DraftProfile {
         })
     }
 
+    /// Parse a profile from its JSON definition.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
@@ -380,14 +407,17 @@ impl DraftProfile {
             .find(|profile| profile.covers_set(set_code))
     }
 
+    /// Whether this profile has a set entry for `set_code` (case-insensitive).
     pub fn covers_set(&self, set_code: &str) -> bool {
         self.set_profile(set_code).is_some()
     }
 
+    /// The per-set class bonuses and threat need for `set_code`.
     fn set_profile(&self, set_code: &str) -> Option<&SetProfile> {
         self.sets.get(&set_code.to_ascii_uppercase())
     }
 
+    /// The name-keyed `card_bonus` for a card, or 0 when none is configured.
     fn bonus_for_name(&self, name: &str) -> f64 {
         self.card_bonus
             .get(&name.to_lowercase())
@@ -569,6 +599,11 @@ impl DraftProfile {
     /// The strongest demonstrated theme this card belongs to, scaled to the
     /// policy cap. A theme counts once it reaches `minimum_signals`; strength
     /// saturates at twice that.
+    ///
+    /// When the set's class bonus already rewards the card for one of the
+    /// theme's linked mechanics, the theme pays only what its pool-dependent
+    /// strength adds beyond that bonus: the flat class bonus is not paid
+    /// twice, but a pool that has demonstrated the theme still raises it.
     fn archetype_synergy_bonus(
         &self,
         card: &ProfileCard<'_>,
@@ -583,14 +618,16 @@ impl DraftProfile {
             .into_iter()
             .filter(|&(_, signals)| signals >= minimum)
             .filter(|&(theme, _)| self.is_theme_member(theme, card))
-            .filter(|&(theme, _)| {
-                // Already paid for by the set's class bonus: don't pay twice.
-                !theme
+            .map(|(theme, signals)| {
+                let strength = cap * (f64::from(signals) / f64::from(2 * minimum)).min(1.0);
+                let already_paid = theme
                     .linked_classes()
                     .iter()
-                    .any(|c| classes.contains(c) && set.class_bonus.contains_key(c))
+                    .filter(|c| classes.contains(c))
+                    .filter_map(|c| set.class_bonus.get(c).copied())
+                    .fold(0.0, f64::max);
+                (strength - already_paid).max(0.0)
             })
-            .map(|(_, signals)| cap * (f64::from(signals) / f64::from(2 * minimum)).min(1.0))
             .fold(0.0, f64::max)
     }
 
@@ -605,6 +642,7 @@ impl DraftProfile {
         }
     }
 
+    /// Bonus for an artifact while the pool is below the artifact-density target.
     fn artifact_density_bonus(&self, card: &ProfileCard<'_>, pool: &[ProfileCard<'_>]) -> f64 {
         if !card.face.is_some_and(is_artifact) {
             return 0.0;
@@ -625,6 +663,7 @@ impl DraftProfile {
         density.deficit_bonus * deficit * self.artifact_weight(card)
     }
 
+    /// Bonus for a threat while the pool holds fewer threats than the set's target.
     fn threat_need_bonus(
         &self,
         need: &ThreatNeed,
@@ -639,14 +678,17 @@ impl DraftProfile {
         need.bonus * ((target - have) / target).max(0.0)
     }
 
-    /// Premium finisher or evasive threat, not merely a creature. A mana
-    /// creature is never a finisher, however highly its pick quality is rated:
-    /// the card bonus measures acceleration and fixing, not closing a game.
+    /// Premium finisher or evasive threat, not merely a creature. A creature
+    /// whose role is mana (a mana ability, multicolor mana, or a land search
+    /// such as Sakura-Tribe Elder's) is never a finisher, however highly its
+    /// pick quality is rated: the card bonus measures acceleration and fixing,
+    /// not closing a game.
     fn is_threat(&self, card: &ProfileCard<'_>) -> bool {
         let Some(face) = card.face.filter(|f| is_creature(f)) else {
             return false;
         };
-        if classify(face).contains(&CardClass::ManaCreature) {
+        let classes = classify(face);
+        if classes.contains(&CardClass::ManaCreature) || classes.contains(&CardClass::ManaFixing) {
             return false;
         }
         let power = match &face.power {
@@ -658,18 +700,22 @@ impl DraftProfile {
     }
 }
 
+/// Whether the face has the artifact card type (CR 301).
 fn is_artifact(face: &CardFace) -> bool {
     face.card_type.core_types.contains(&CoreType::Artifact)
 }
 
+/// Whether the face has the creature card type (CR 302).
 fn is_creature(face: &CardFace) -> bool {
     face.card_type.core_types.contains(&CoreType::Creature)
 }
 
+/// Whether the face has the Equipment artifact subtype (CR 301.5).
 fn is_equipment(face: &CardFace) -> bool {
     face.card_type.subtypes.iter().any(|s| s == "Equipment")
 }
 
+/// Whether the face has a keyword that restricts which creatures can block it.
 fn is_evasive(face: &CardFace) -> bool {
     face.keywords.iter().any(|k| {
         matches!(
@@ -776,18 +822,40 @@ pub fn classify(face: &CardFace) -> BTreeSet<CardClass> {
     classes
 }
 
-/// Whether the face has an ability activated from hand that is not Cycling
-/// (CR 602.1; Cycling is CR 702.29): Channel.
+/// Whether the face has a Channel ability, judged per ability.
 fn has_channel_ability(face: &CardFace) -> bool {
-    let cycles = face
-        .keywords
-        .iter()
-        .any(|k| matches!(k, Keyword::Cycling(_) | Keyword::Typecycling { .. }));
-    !cycles
-        && face
-            .abilities
-            .iter()
-            .any(|a| a.kind == AbilityKind::Activated && a.activation_zone == Some(Zone::Hand))
+    face.abilities.iter().any(is_channel_ability)
+}
+
+/// A Channel ability: "Channel — [Cost], Discard this card: [Effect]".
+///
+/// CR 207.2c: Channel is an ability word with no rules meaning, so the label
+/// is the ability's only identity; the parser keeps it in the ability's
+/// description. The ability must also activate from hand (CR 602.1) and pay
+/// "Discard this card" as part of its cost (CR 602.1a). Cycling (CR 702.29a),
+/// Transmute (CR 702.53a) and Bloodrush share that shape but not the label.
+fn is_channel_ability(ability: &AbilityDefinition) -> bool {
+    ability.kind == AbilityKind::Activated
+        && ability.activation_zone == Some(Zone::Hand)
+        && ability
+            .cost
+            .as_ref()
+            .is_some_and(AbilityCost::consumes_source)
+        && ability
+            .description
+            .as_deref()
+            .is_some_and(has_channel_label)
+}
+
+/// Whether ability text opens with the Channel ability-word label.
+fn has_channel_label(description: &str) -> bool {
+    let lower = description.to_lowercase();
+    let label: IResult<&str, ()> = value(
+        (),
+        pair(tag("channel"), alt((tag(" \u{2014} "), tag(" -- ")))),
+    )
+    .parse(lower.as_str());
+    label.is_ok()
 }
 
 /// Whether any spell or ability chain on the face pumps a creature.
@@ -799,6 +867,7 @@ fn has_pump_effect(face: &CardFace) -> bool {
     })
 }
 
+/// The deck roles a face fills, for the deck-need bonus.
 fn roles(face: &CardFace) -> Vec<DeckRole> {
     let profile = EffectProfile::from_face(face);
     let mut roles = Vec::new();
@@ -881,7 +950,6 @@ mod tests {
     use super::*;
     use engine::types::ability::{AbilityDefinition, Effect, ManaContribution, ManaProduction};
     use engine::types::card_type::CardType;
-    use engine::types::keywords::CyclingCost;
     use engine::types::mana::ManaColor;
 
     fn face(core: Vec<CoreType>, subtypes: &[&str]) -> CardFace {
@@ -1223,7 +1291,7 @@ mod tests {
     }
 
     #[test]
-    fn archetype_synergy_requires_demonstrated_theme_and_skips_class_paid_themes() {
+    fn archetype_synergy_requires_demonstrated_theme_and_nets_class_paid_themes() {
         let p = DraftProfile::mirrodin_block();
         let sword = face(vec![CoreType::Artifact], &["Equipment"]);
         let mut talisman = face(vec![CoreType::Artifact], &[]);
@@ -1250,10 +1318,11 @@ mod tests {
         let s = score15(p, &probe, &pool, 0.0, 0.0).unwrap();
         assert!(s.archetype_synergy > 0.0 && s.archetype_synergy <= 2.5);
 
-        // The equipment theme is demonstrated too, but equipment already earns its class bonus.
+        // The equipment theme is demonstrated too, but equipment already earns its class
+        // bonus, so that theme pays only its excess over it.
         let sword_probe = card("Sword", "MRD", &[], &sword);
         let sw = score15(p, &sword_probe, &pool, 0.0, 0.0).unwrap();
-        // Only the (unlinked) artifact-affinity theme may contribute for equipment.
+        // The unlinked artifact-affinity theme is the strongest one for equipment.
         assert!(sw.archetype_synergy <= s.archetype_synergy + 1e-9);
         assert_eq!(p.theme_signals(&pool)[&Theme::EquipmentCombat], 4);
     }
@@ -1388,16 +1457,201 @@ mod tests {
         let mut dual = face(vec![CoreType::Land], &[]);
         dual.abilities = vec![tap_for(vec![ManaColor::Red, ManaColor::Green])];
         assert!(classify(&dual).contains(&CardClass::ManaFixing));
+    }
 
-        let mut channel = face(vec![CoreType::Land], &[]);
-        let mut ability = tap_for(vec![ManaColor::Green]);
-        ability.activation_zone = Some(Zone::Hand);
-        channel.abilities = vec![ability.clone()];
-        assert!(classify(&channel).contains(&CardClass::Channel));
-        channel.keywords = vec![Keyword::Cycling(CyclingCost::Mana(
-            engine::types::mana::ManaCost::generic(2),
-        ))];
-        assert!(!classify(&channel).contains(&CardClass::Channel));
+    /// A face built through the production MTGJSON → parser → synthesis path.
+    /// `card` supplies the card-specific `AtomicCard` fields.
+    fn oracle_face(card: serde_json::Value) -> CardFace {
+        let mut json = serde_json::json!({
+            "colors": [],
+            "colorIdentity": [],
+            "layout": "normal",
+            "manaValue": 0.0,
+            "identifiers": {},
+        });
+        json.as_object_mut()
+            .unwrap()
+            .extend(card.as_object().unwrap().clone());
+        let atomic: engine::database::mtgjson::AtomicCard =
+            serde_json::from_value(json).expect("valid AtomicCard fixture");
+        engine::database::synthesis::build_oracle_face(&atomic, None)
+    }
+
+    #[test]
+    fn channel_is_identified_per_ability() {
+        let hand_discard_self = |f: &CardFace| {
+            f.abilities.iter().any(|a| {
+                a.activation_zone == Some(Zone::Hand)
+                    && a.cost.as_ref().is_some_and(AbilityCost::consumes_source)
+            })
+        };
+
+        let shinen = oracle_face(serde_json::json!({
+            "name": "Shinen of Life's Roar",
+            "manaCost": "{1}{G}",
+            "manaValue": 2.0,
+            "colors": ["G"],
+            "type": "Creature — Spirit",
+            "types": ["Creature"],
+            "subtypes": ["Spirit"],
+            "power": "1",
+            "toughness": "2",
+            "text": "All creatures able to block this creature do so.\nChannel — {2}{G}{G}, Discard this card: All creatures able to block target creature this turn do so.",
+        }));
+        assert!(classify(&shinen).contains(&CardClass::Channel));
+
+        // Cycling on the same card does not hide its Channel ability, and the
+        // Cycling ability alone (also "Discard this card", from hand) is not one.
+        let cycler_text = "Channel — {1}{G}, Discard this card: Target creature gets +2/+2 until end of turn.\nCycling {2} ({2}, Discard this card: Draw a card.)";
+        let cycler = oracle_face(serde_json::json!({
+            "name": "Test Channel Cycler",
+            "manaCost": "{2}{G}",
+            "manaValue": 3.0,
+            "colors": ["G"],
+            "type": "Creature — Spirit",
+            "types": ["Creature"],
+            "subtypes": ["Spirit"],
+            "power": "2",
+            "toughness": "2",
+            "keywords": ["Cycling"],
+            "text": cycler_text,
+        }));
+        let cycling: Vec<&AbilityDefinition> = cycler
+            .abilities
+            .iter()
+            .filter(|a| a.ability_tag == Some(engine::types::ability::AbilityTag::Cycling))
+            .collect();
+        assert_eq!(cycling.len(), 1, "the Cycling ability is synthesized");
+        assert!(cycling[0].cost.as_ref().unwrap().consumes_source());
+        assert!(!is_channel_ability(cycling[0]));
+        assert!(classify(&cycler).contains(&CardClass::Channel));
+
+        // Transmute and Bloodrush are hand-activated "Discard this card"
+        // abilities too, but not Channel.
+        let infiltrator = oracle_face(serde_json::json!({
+            "name": "Dimir Infiltrator",
+            "manaCost": "{U}{B}",
+            "manaValue": 2.0,
+            "colors": ["U", "B"],
+            "type": "Creature — Spirit",
+            "types": ["Creature"],
+            "subtypes": ["Spirit"],
+            "power": "1",
+            "toughness": "3",
+            "keywords": ["Transmute"],
+            "text": "This creature can't be blocked.\nTransmute {1}{U}{B} ({1}{U}{B}, Discard this card: Search your library for a card with the same mana value as this card, reveal it, put it into your hand, then shuffle. Transmute only as a sorcery.)",
+        }));
+        assert!(
+            hand_discard_self(&infiltrator),
+            "positive guard: transmute ability exists"
+        );
+        assert!(!classify(&infiltrator).contains(&CardClass::Channel));
+
+        let maaka = oracle_face(serde_json::json!({
+            "name": "Rubblebelt Maaka",
+            "manaCost": "{3}{R}",
+            "manaValue": 4.0,
+            "colors": ["R"],
+            "type": "Creature — Cat",
+            "types": ["Creature"],
+            "subtypes": ["Cat"],
+            "power": "3",
+            "toughness": "3",
+            "text": "Bloodrush — {R}, Discard this card: Target attacking creature gets +3/+3 until end of turn.",
+        }));
+        assert!(
+            hand_discard_self(&maaka),
+            "positive guard: bloodrush ability exists"
+        );
+        assert!(!classify(&maaka).contains(&CardClass::Channel));
+
+        // A hand-activated ability that does not discard the card is not Channel,
+        // even when labelled as one.
+        let mut no_discard = tap_for(vec![ManaColor::Green]);
+        no_discard.activation_zone = Some(Zone::Hand);
+        no_discard.description = Some("Channel — {T}: Add {G}.".into());
+        assert!(!is_channel_ability(&no_discard));
+    }
+
+    #[test]
+    fn land_search_creature_rated_highly_is_not_a_finisher() {
+        let p = DraftProfile::kamigawa_block();
+        let elder = oracle_face(serde_json::json!({
+            "name": "Sakura-Tribe Elder",
+            "manaCost": "{1}{G}",
+            "manaValue": 2.0,
+            "colors": ["G"],
+            "type": "Creature — Snake Shaman",
+            "types": ["Creature"],
+            "subtypes": ["Snake", "Shaman"],
+            "power": "1",
+            "toughness": "1",
+            "text": "Sacrifice this creature: Search your library for a basic land card, put that card onto the battlefield tapped, then shuffle.",
+        }));
+        let green = vec!["G".to_string()];
+        let elder_card = card("Sakura-Tribe Elder", "CHK", &green, &elder);
+        assert!(p.bonus_for_name(elder_card.name) >= PREMIUM_THREAT_THRESHOLD);
+        assert!(classify(&elder).contains(&CardClass::ManaFixing));
+        assert!(!p.is_threat(&elder_card));
+
+        let kodama = oracle_face(serde_json::json!({
+            "name": "Kodama of the North Tree",
+            "manaCost": "{2}{G}{G}{G}",
+            "manaValue": 5.0,
+            "colors": ["G"],
+            "type": "Legendary Creature — Spirit",
+            "types": ["Creature"],
+            "subtypes": ["Spirit"],
+            "supertypes": ["Legendary"],
+            "power": "6",
+            "toughness": "4",
+            "keywords": ["Shroud", "Trample"],
+            "text": "Trample\nShroud (This creature can't be the target of spells or abilities.)",
+        }));
+        let finisher = card("Kodama of the North Tree", "CHK", &green, &kodama);
+        assert!(
+            p.is_threat(&finisher),
+            "a premium finisher keeps threat status"
+        );
+
+        let elders = vec![elder_card; 4];
+        let scored = score15(p, &finisher, &elders, 0.0, 0.0).unwrap();
+        assert_eq!(scored.threat_need, 1.25);
+        let finishers = vec![finisher; 4];
+        let sated = score15(p, &finisher, &finishers, 0.0, 0.0).unwrap();
+        assert_eq!(sated.threat_need, 0.0);
+    }
+
+    #[test]
+    fn class_paid_theme_still_earns_its_excess_synergy() {
+        let p = DraftProfile::kamigawa_block();
+        let arcane_instant = face(vec![CoreType::Instant], &["Arcane"]);
+        let arcane_sorcery = face(vec![CoreType::Sorcery], &["Arcane"]);
+        let red = vec!["R".to_string()];
+        let black = vec!["B".to_string()];
+        let blue = vec!["U".to_string()];
+        let probe = card("Petals of Insight", "CHK", &blue, &arcane_sorcery);
+
+        // Distinct quality Arcane spells (card bonus >= 1.0).
+        let mut pool = vec![
+            card("Glacial Ray", "CHK", &red, &arcane_instant),
+            card("Rend Flesh", "CHK", &black, &arcane_sorcery),
+        ];
+        let below = score15(p, &probe, &pool, 0.0, 0.0).unwrap();
+        assert_eq!(below.archetype_synergy, 0.0, "theme not yet demonstrated");
+
+        pool.push(card("Horobi's Whisper", "CHK", &black, &arcane_instant));
+        pool.push(card("Blind with Anger", "CHK", &red, &arcane_instant));
+        assert_eq!(p.theme_signals(&pool)[&Theme::ArcaneSpliceControl], 4);
+        let s = score15(p, &probe, &pool, 0.0, 0.0).unwrap();
+        // Strength 2.5 * 4 / 6, less the Arcane class bonus (0.45) already paid.
+        assert_eq!(s.class_bonus, 0.45);
+        let expected = 2.5 * 4.0 / 6.0 - 0.45;
+        assert!(
+            (s.archetype_synergy - expected).abs() < 1e-9,
+            "{}",
+            s.archetype_synergy
+        );
     }
 
     #[test]
