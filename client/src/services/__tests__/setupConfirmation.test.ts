@@ -55,10 +55,18 @@ describe("SetupConfirmation", () => {
 describe("classifySetupFrame", () => {
   const frame = (type: string, data?: unknown) => JSON.stringify({ type, data });
 
-  it.each(["GameStarted", "GameCreated", "SessionAttached", "StateWithheld"])(
+  it.each(["GameStarted", "GameCreated", "SessionAttached"])(
     "treats game %s as the positive bootstrap", (type) => {
       expect(classifySetupFrame("game", frame(type, {}))).toEqual({ kind: "positive" });
     });
+
+  it("treats a StateWithheld only of the GameStarted as the positive bootstrap", () => {
+    const withheld = (inner: unknown) => frame("StateWithheld", { state_revision: 2, withheld: inner, reason: "" });
+    expect(classifySetupFrame("game", withheld({ type: "GameStarted", data: { your_player: 1 } })))
+      .toEqual({ kind: "positive" });
+    expect(classifySetupFrame("game", withheld({ type: "StateUpdate" }))).toEqual({ kind: "other" });
+    expect(classifySetupFrame("game", frame("StateWithheld", {}))).toEqual({ kind: "other" });
+  });
 
   it.each(["DraftStateUpdate", "DraftMatchStart"])("treats draft %s as the positive bootstrap", (type) => {
     expect(classifySetupFrame("draft", frame(type, {}))).toEqual({ kind: "positive" });
@@ -69,15 +77,15 @@ describe("classifySetupFrame", () => {
     expect(classifySetupFrame("draft", frame("GameStarted", {}))).toEqual({ kind: "other" });
   });
 
-  it("reads an Error as a refusal with its message and code", () => {
-    expect(classifySetupFrame("game", frame("Error", { message: "no", code: "X" }))).toEqual({
-      kind: "refusal", rejected: false, refusal: { message: "no", code: "X" },
+  it.each(["game", "draft"] as const)("reads a %s Error as a refusal with its message and code", (surface) => {
+    expect(classifySetupFrame(surface, frame("Error", { message: "no", code: "X" }))).toEqual({
+      kind: "refusal", refusal: { message: "no", code: "X" },
     });
   });
 
-  it("reads DraftActionRejected as a draft-only refusal carrying its reason", () => {
+  it("reads DraftActionRejected as a draft-only rejection that does not refuse", () => {
     expect(classifySetupFrame("draft", frame("DraftActionRejected", { reason: "why" }))).toEqual({
-      kind: "refusal", rejected: true, refusal: { message: "why" },
+      kind: "rejection", refusal: { message: "why" },
     });
     expect(classifySetupFrame("game", frame("DraftActionRejected", { reason: "why" }))).toEqual({ kind: "other" });
   });
@@ -90,5 +98,43 @@ describe("classifySetupFrame", () => {
     expect(classifySetupFrame("game", "not json")).toEqual({ kind: "other" });
     expect(classifySetupFrame("game", new Uint8Array(2))).toEqual({ kind: "other" });
     expect(classifySetupFrame("game", "{}")).toEqual({ kind: "other" });
+  });
+});
+
+describe("SetupConfirmation.observe", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  const frame = (type: string, data?: unknown) => JSON.stringify({ type, data });
+
+  it("settles refused on an Error and keeps its reason", async () => {
+    const confirmation = new SetupConfirmation();
+    confirmation.observe("game", frame("Error", { message: "gone" }));
+    await expect(confirmation.settled).resolves.toBe("refused");
+    expect(confirmation.refusal).toEqual({ message: "gone" });
+  });
+
+  it("only notes a draft rejection: the bootstrap that follows still confirms", async () => {
+    const confirmation = new SetupConfirmation();
+    confirmation.observe("draft", frame("DraftActionRejected", { reason: "Draft match is no longer active" }));
+    expect(confirmation.current).toBeNull();
+    confirmation.observe("draft", frame("DraftStateUpdate", { view: {} }));
+    await expect(confirmation.settled).resolves.toBe("confirmed");
+    expect(confirmation.rejection).toEqual({ message: "Draft match is no longer active" });
+  });
+
+  it("leaves a noted rejection for the timeout to report", async () => {
+    const confirmation = new SetupConfirmation();
+    confirmation.observe("draft", frame("DraftActionRejected", { reason: "Invalid player token" }));
+    await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS);
+    await expect(confirmation.settled).resolves.toBe("timeout");
+    expect(confirmation.rejection).toEqual({ message: "Invalid player token" });
+  });
+
+  it("ignores frames that are neither positive nor a refusal", () => {
+    const confirmation = new SetupConfirmation();
+    confirmation.observe("game", frame("Pong", { timestamp: 1 }));
+    expect(confirmation.current).toBeNull();
+    confirmation.dispose();
   });
 });

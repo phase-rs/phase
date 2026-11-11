@@ -28,7 +28,7 @@ import {
   type PhaseSocket,
   type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
-import { SetupConfirmation, classifySetupFrame, type SetupConfirmationOutcome } from "../services/setupConfirmation";
+import { SetupConfirmation, type SetupConfirmationOutcome } from "../services/setupConfirmation";
 import { isValidWebSocketUrl } from "../services/serverDetection";
 import { captureSubmissionArtPreferences, submitDeckList } from "../services/deckSubmission";
 import type {
@@ -208,7 +208,11 @@ export interface ServerDraftAdapterOptions {
  * whose setup has not been sent; setup-sent draft actions retain their replies.
  * DraftActionRejected rejects initialization without retiring the transport:
  * the seat may already be reattached and a later state update remains valid.
- * No setup-response deadline is imposed; a silent server can leave it pending.
+ * A reconnect candidate is adopted only on its positive bootstrap
+ * (`SetupConfirmation`), so a rejection that arrives first is replayed on
+ * adoption, or rejects the reattach when no bootstrap follows within
+ * `SETUP_CONFIRMATION_TIMEOUT_MS`. Create and Join impose no setup-response
+ * deadline; a silent server can leave them pending.
  */
 export class ServerDraftAdapter implements EngineAdapter {
   // ── Draft-phase state ──────────────────────────────────────────────
@@ -1186,12 +1190,10 @@ export class ServerDraftAdapter implements EngineAdapter {
       const confirmation = initOwner?.kind === "reconnect" ? new SetupConfirmation() : null;
       sourceSocket.onmessage = (event) => {
         setupMessages.push(event);
-        // Only the positive bootstrap adopts; a refusal ends the interval.
-        if (confirmation !== null) {
-          const frame = classifySetupFrame("draft", event.data);
-          if (frame.kind === "positive") confirmation.confirm();
-          else if (frame.kind === "refusal") confirmation.refuse(frame.refusal, frame.rejected);
-        }
+        // Only the positive bootstrap adopts; an `Error` ends the interval. A
+        // `DraftActionRejected` is only noted: the server also sends one ahead
+        // of the `DraftStateUpdate` of a reattach that succeeded.
+        confirmation?.observe("draft", event.data);
       };
       const handleMessage: NonNullable<PhaseSocketTransport["onmessage"]> = (event) => {
         if (!this.sockets.has(sourceSocket)) return;
@@ -1318,18 +1320,21 @@ export class ServerDraftAdapter implements EngineAdapter {
       if (unconfirmed !== null) {
         // Ownership of the seat is unknown: retire the incumbent (settling its
         // work) and the candidate. A close or an abort has already settled the
-        // initialization; a timeout settles it here. The caller owns the retry.
+        // initialization; a timeout or a refusal settles it here. Nothing
+        // retries a reattach: this adapter schedules no retry and, as on main,
+        // no product code calls `reconnectDraft`.
         this.retireSwappedIncumbent(sourceSocket, attachment.owner);
         if (unconfirmed === "timeout") {
-          this.rejectAttachment(attachment.owner, new AdapterError(
-            "WS_CLOSED", "Reconnect was not confirmed in time", true,
-          ));
+          // A rejection the bootstrap never followed is the server's answer.
+          const rejection = confirmation!.rejection;
+          this.rejectAttachment(attachment.owner, rejection === null
+            ? new AdapterError("WS_CLOSED", "Reconnect was not confirmed in time", true)
+            : new AdapterError("ACTION_REJECTED", rejection.message, true));
         } else if (unconfirmed === "refused") {
           // The server refused the reattach: surface its reason, as the
-          // refusal handlers do for an adopted socket.
-          const { refusal, rejected } = confirmation!.refusal!;
+          // `Error` handler does for an adopted socket.
           this.rejectAttachment(attachment.owner, new AdapterError(
-            rejected ? "ACTION_REJECTED" : "WS_ERROR", refusal.message, true,
+            "WS_ERROR", confirmation!.refusal!.message, true,
           ));
         }
         this.abandonSocket(socket);

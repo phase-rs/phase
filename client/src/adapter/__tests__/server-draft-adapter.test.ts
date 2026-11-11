@@ -4124,21 +4124,76 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
-    it.each([
-      ["DraftActionRejected", { reason: "seat already reattached" }, "ACTION_REJECTED", "seat already reattached"],
-      ["Error", { message: "Drafts unavailable" }, "WS_ERROR", "Drafts unavailable"],
-    ] as const)("does not adopt on a %s refusal: retires both sockets and surfaces the reason", async (type, data, code, message) => {
+    it("does not adopt on an Error refusal: retires both sockets, surfaces the reason and nothing retries", async () => {
       vi.useFakeTimers();
       const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();
       try {
-        receive(candidate, type, data);
+        // The mode gate's answer to a ReconnectDraft (phase-server main.rs:10062-10067).
+        receive(candidate, "Error", { message: "Server is in lobby-only mode — this message is not supported" });
         await vi.waitFor(() => expect(ws.close).toHaveBeenCalledOnce());
-        await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({ code, message }));
+        await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({
+          code: "WS_ERROR", message: "Server is in lobby-only mode — this message is not supported",
+        }));
         await vi.waitFor(() => expect(command.value()).toMatchObject({ code: "WS_CLOSED" }));
         expect(candidate.close).toHaveBeenCalled();
         await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects
           .toMatchObject({ message: "WebSocket not connected" });
         // Nothing retries on its own.
+        const dialed = MockWebSocket.last;
+        await vi.advanceTimersByTimeAsync(130_000);
+        expect(MockWebSocket.last).toBe(dialed);
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("adopts on the DraftStateUpdate that follows a DraftActionRejected, as the server sends on a reattach that succeeded", async () => {
+      vi.useFakeTimers();
+      const { adapter, ws, candidate, reconnecting } = await sentCandidate();
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      try {
+        // attach_current_draft_match's success path when the match ended
+        // (phase-server main.rs:2750-2754): the seat is reattached to this socket.
+        receive(candidate, "DraftActionRejected", { reason: "Draft match is no longer active" });
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(ws.close).not.toHaveBeenCalled();
+        expect(candidate.close).not.toHaveBeenCalled();
+        expect(reconnecting.value()).toBe("never settled");
+        const view = createMockDraftView({ pick_number: 3 });
+        receive(candidate, "DraftStateUpdate", { view });
+        // Replayed on the adopted socket in wire order, exactly as on an adopted
+        // socket: the rejection rejects the reattach and the view still lands.
+        await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({
+          code: "ACTION_REJECTED", message: "Draft match is no longer active",
+        }));
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "draftViewUpdated", view }));
+        expect(events).toContainEqual({ type: "draftActionRejected", reason: "Draft match is no longer active" });
+        expect(candidate.close).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(candidate.close).not.toHaveBeenCalled();
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("rejects the reattach with a DraftActionRejected that no bootstrap follows, at the bound, retiring both sockets", async () => {
+      vi.useFakeTimers();
+      const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();
+      try {
+        receive(candidate, "DraftActionRejected", { reason: "Invalid player token" });
+        await vi.advanceTimersByTimeAsync(4000);
+        expect(ws.close).not.toHaveBeenCalled();
+        expect(reconnecting.value()).toBe("never settled");
+        await vi.advanceTimersByTimeAsync(1000);
+        await vi.waitFor(() => expect(ws.close).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({
+          code: "ACTION_REJECTED", message: "Invalid player token",
+        }));
+        await vi.waitFor(() => expect(command.value()).toMatchObject({ code: "WS_CLOSED" }));
+        expect(candidate.close).toHaveBeenCalled();
         const dialed = MockWebSocket.last;
         await vi.advanceTimersByTimeAsync(130_000);
         expect(MockWebSocket.last).toBe(dialed);

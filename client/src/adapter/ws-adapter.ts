@@ -44,7 +44,7 @@ import {
   type PhaseSocketFactory,
   type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
-import { SetupConfirmation, classifySetupFrame, type SetupConfirmationOutcome } from "../services/setupConfirmation";
+import { SetupConfirmation, type SetupConfirmationOutcome } from "../services/setupConfirmation";
 import { isValidWebSocketUrl, mixedContentBlockReason } from "../services/serverDetection";
 import type { FullSessionKey, WsSessionData } from "../services/multiplayerSession";
 import {
@@ -2478,8 +2478,18 @@ export class WebSocketAdapter implements EngineAdapter {
       }
     };
     // The uncertain interval of a reconnect (setup sent, bootstrap not yet
-    // received) has one owner. The native sidecar keeps its own attach contract.
-    // An initial fallback's own deadline already bounds its replacement.
+    // received) has one owner. Two attachments keep main's attach path:
+    //  - Native sidecars (`nativeAi` / `nativePregame`): the desktop transport
+    //    keeps its existing behaviour; its bounded setup moves with the native
+    //    transport. Their peer is a private loopback server with no other
+    //    client for the seat, which answers at once or is gone (a close), and a
+    //    native pregame never retries (`maxReconnectAttempts` 0).
+    //  - An active initial-join fallback: it is admitted only by the close
+    //    consumer of the current socket after that socket has been detached
+    //    and its requests settled, with no GameStarted ever delivered, so there
+    //    is no live incumbent for the gate to keep or settle; the episode's one
+    //    non-extending deadline (`admitInitialFallback`) fails the join once
+    //    when no bootstrap arrives.
     const confirmation = !this.isNativeSocket()
       && !this.initialFallbackActive()
       && (setupFrame as { type?: unknown }).type === "Reconnect"
@@ -2546,11 +2556,7 @@ export class WebSocketAdapter implements EngineAdapter {
       socket.ws.onmessage = (event) => {
         (setupMessages ??= []).push(event);
         // Only the positive bootstrap adopts; a refusal ends the interval.
-        if (confirmation !== null) {
-          const frame = classifySetupFrame("game", event.data);
-          if (frame.kind === "positive") confirmation.confirm();
-          else if (frame.kind === "refusal") confirmation.refuse(frame.refusal, frame.rejected);
-        }
+        confirmation?.observe("game", event.data);
       };
 
       socket.ws.onerror = () => {
@@ -2744,7 +2750,7 @@ export class WebSocketAdapter implements EngineAdapter {
         if (unconfirmed === "refused") {
           // A refusal is terminal, exactly as the `Error` handler treats it:
           // surface it and end the episode instead of retrying forever.
-          const { refusal } = confirmation!.refusal!;
+          const refusal = confirmation!.refusal!;
           this.rejectInitialization(serverErrorInitializationError(refusal));
           if (this.reconnectInFlight) this.failReconnect();
           this.emit({ type: "error", message: refusal.message });
