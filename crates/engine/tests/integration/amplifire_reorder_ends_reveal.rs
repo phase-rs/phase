@@ -267,3 +267,110 @@ fn amplifire_reorder_ends_reveal_and_hides_cards_for_all_viewers() {
         "All 5 cards remain in library"
     );
 }
+
+/// CR 701.20d: the random bottom placement is one reorder of the whole revealed
+/// set, even though the pipeline delivers it one card at a time. With the whole
+/// library revealed (`[Bolt, Mountain, Giant]`), a sampled order that delivers
+/// Hill Giant first leaves it in place on its own delivery; the two later
+/// deliveries then carry it to the top. It was reordered all the same, so no
+/// viewer may still see it.
+///
+/// The sampled order comes from the game RNG, so the test walks seeds until it
+/// finds one whose final library starts with Hill Giant (the giant was delivered
+/// first) and requires that witness to exist.
+#[test]
+fn amplifire_full_library_permutation_hides_every_reordered_card() {
+    let mut shifted_witness_seen = false;
+    for seed in 0..64u64 {
+        let mut scenario = GameScenario::new_n_player(2, seed);
+        scenario.at_phase(Phase::Upkeep);
+        scenario.add_creature_from_oracle(P0, "Amplifire", 1, 1, AMPLIFIRE_ORACLE);
+        let bolt = scenario.add_spell_to_hand(P0, "Lightning Bolt", true).id();
+        let mountain = scenario.add_land_to_library_top(P0, "Mountain").id();
+        let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = P0;
+        arrange_library_top_first(&mut runner, &[bolt, mountain, giant]);
+        let library_before: Vec<ObjectId> =
+            runner.state().players[0].library.iter().copied().collect();
+        assert_eq!(
+            library_before,
+            vec![bolt, mountain, giant],
+            "the revealed set must be the whole library"
+        );
+        let incarnations_before: Vec<u64> = [bolt, mountain, giant]
+            .iter()
+            .map(|id| runner.state().objects[id].incarnation)
+            .collect();
+
+        process_triggers(
+            runner.state_mut(),
+            &[GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            }],
+        );
+        assert_eq!(runner.state().stack.len(), 1, "Amplifire trigger on stack");
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+        let result = runner.act(GameAction::PassPriority).expect("P1 passes");
+        runner.advance_until_stack_empty();
+
+        // Reach guard: the reveal really covered the whole library.
+        let revealed: Vec<ObjectId> = result
+            .events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids.clone()),
+                _ => None,
+            })
+            .expect("Amplifire publishes its reveal");
+        assert_eq!(revealed, vec![bolt, mountain, giant]);
+
+        let library_after: Vec<ObjectId> =
+            runner.state().players[0].library.iter().copied().collect();
+        let mut sorted_after = library_after.clone();
+        sorted_after.sort();
+        let mut sorted_before = library_before.clone();
+        sorted_before.sort();
+        assert_eq!(sorted_after, sorted_before, "all three stay in the library");
+        if library_after.first() == Some(&giant) && library_after != library_before {
+            shifted_witness_seen = true;
+        }
+        if library_after == library_before {
+            // The sampled order rebuilt the original library: nothing was reordered.
+            continue;
+        }
+
+        let p0_view = filter_state_for_viewer(runner.state(), P0);
+        let p1_view = filter_state_for_viewer(runner.state(), P1);
+        let spectator_view = filter_state_for_unseated_viewer(runner.state());
+        for (id, incarnation_before) in [bolt, mountain, giant].into_iter().zip(incarnations_before)
+        {
+            let state = runner.state();
+            assert!(
+                !state.revealed_cards.contains(&id)
+                    && !state.public_revealed_cards.contains(&id)
+                    && !state.holds_stack_bound_reveal(id),
+                "seed {seed}: reordered card {id:?} must stop being revealed (order {library_after:?})"
+            );
+            assert!(
+                state.objects[&id].incarnation > incarnation_before,
+                "seed {seed}: reordered card {id:?} must become a new object"
+            );
+            for (label, view) in [
+                ("P0", &p0_view),
+                ("P1", &p1_view),
+                ("spectator", &spectator_view),
+            ] {
+                assert_eq!(
+                    view.objects[&id].name, HIDDEN_CARD_NAME,
+                    "seed {seed}: {label} must not see reordered card {id:?} (order {library_after:?})"
+                );
+            }
+        }
+    }
+    assert!(
+        shifted_witness_seen,
+        "some seed must deliver Hill Giant first so its position is only shifted"
+    );
+}

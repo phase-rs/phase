@@ -3094,6 +3094,10 @@ pub fn resolve_all(
         use rand::seq::SliceRandom;
         matching.shuffle(state.rng.draw(RandomDraw::Placement));
     }
+    // CR 701.20d: the members are delivered one at a time, but the instruction
+    // reorders the library once; settle reveal retirement for the whole set.
+    let library_reorder = (dest_zone == Zone::Library)
+        .then(|| crate::game::zones::LibraryReorderOperation::begin(state, &matching));
 
     let mut moved_count: i32 = 0;
     let mut logical_zone_change_group =
@@ -3300,6 +3304,9 @@ pub fn resolve_all(
                 return Ok(());
             }
         }
+    }
+    if let Some(library_reorder) = library_reorder {
+        library_reorder.finish(state);
     }
     // CR 614.13a: the whole co-entry event completed without pausing — clear the
     // pre-entry Devour snapshot (its lifetime = this one ChangeZone-to-battlefield

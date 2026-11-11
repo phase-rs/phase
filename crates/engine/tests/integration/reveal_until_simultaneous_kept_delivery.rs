@@ -875,8 +875,8 @@ fn mind_funeral_stops_at_four_lands_revealed() {
     );
 
     // CR 701.20a: Mind Funeral reveals cards until four land cards are revealed.
-    // The reveal event must show exactly the 8 cards revealed (4 lands + 4 non-land misses)
-    // stopping before filler_land (the 5th land) and filler_spell.
+    // The reveal event shows the visited prefix in library order (the order cards
+    // are actually revealed from the top), not grouped misses-then-hits.
     let revealed_cards: Vec<ObjectId> = outcome
         .events()
         .iter()
@@ -890,8 +890,8 @@ fn mind_funeral_stops_at_four_lands_revealed() {
         .collect();
     assert_eq!(
         revealed_cards,
-        vec![miss_one, miss_two, miss_three, miss_four, land_one, land_two, land_three, land_four,],
-        "Mind Funeral reveals until exactly 4 lands are revealed (misses then hits)"
+        vec![miss_one, land_one, miss_two, land_two, miss_three, land_three, miss_four, land_four,],
+        "Mind Funeral reveals visited prefix in library order"
     );
 
     // CR 404.3: moving multiple cards into the same graveyard simultaneously
@@ -968,8 +968,8 @@ fn mind_funeral_exhausts_library_when_fewer_than_four_lands() {
         .collect();
     assert_eq!(
         revealed_cards,
-        vec![miss_one, miss_two, land_one, land_two],
-        "Mind Funeral exhausts library after revealing all available cards when fewer than 4 lands exist"
+        vec![miss_one, land_one, miss_two, land_two],
+        "Mind Funeral exhausts library after revealing all available cards in library order when fewer than 4 lands exist"
     );
 
     // CR 404.3: graveyard delivery is an honest gap, so cards remain in library.

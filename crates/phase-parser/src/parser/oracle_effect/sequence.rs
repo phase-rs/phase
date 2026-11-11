@@ -685,11 +685,16 @@ fn parse_reveal_until_all_to_zone_standard(input: &str) -> OracleResult<'_, Cont
     ))
 }
 
-/// CR 701.20a: Parse third-person "that player puts [whole pile] into their graveyard"
-/// continuation (Mind Funeral). Scoped to graveyard destination and whole-pile cards,
-/// excluding cards with intervening instructions like Trepanation Blade ("that player
-/// puts the revealed cards...") and Nascent Metamorph ("...on the bottom of their library...")
-/// so their pile placement does not fold ahead of intervening instructions (CR 608.2c).
+/// CR 701.20a + CR 404.3: Parse the third-person whole-pile placement "that
+/// player puts all cards revealed this way into their graveyard" (Mind
+/// Funeral). It is the same whole-pile instruction as the imperative arm, so it
+/// lowers to [`ContinuationAst::RevealUntilAllToZone`]. The named player owns
+/// the pile and, under CR 404.3, may arrange cards put into their graveyard at
+/// the same time, so the pile carries `DigRestOrder::PlayerChoice`.
+///
+/// Scoped to the graveyard destination and the whole-pile subject: Trepanation
+/// Blade ("that player puts the revealed cards ...") and Nascent Metamorph
+/// ("... on the bottom of their library ...") stay outside this arm.
 fn parse_reveal_until_all_to_zone_that_player(input: &str) -> OracleResult<'_, ContinuationAst> {
     type E<'a> = OracleError<'a>;
     let (input, _) = tag::<_, _, E>("that player ").parse(input)?;
@@ -700,10 +705,9 @@ fn parse_reveal_until_all_to_zone_that_player(input: &str) -> OracleResult<'_, C
     let (input, _) = eof(input)?;
     Ok((
         input,
-        ContinuationAst::RevealedRemainder {
+        ContinuationAst::RevealUntilAllToZone {
             destination,
-            rest_order: DigRestOrder::Preserve,
-            whole_pile: true,
+            rest_order: DigRestOrder::PlayerChoice,
         },
     ))
 }
@@ -836,7 +840,6 @@ pub(super) fn parse_revealed_remainder_clause(input: &str) -> Option<Continuatio
         .then_some(ContinuationAst::RevealedRemainder {
             destination,
             rest_order,
-            whole_pile: false,
         })
 }
 
@@ -860,19 +863,24 @@ pub(super) fn parse_revealed_remainder_clause(input: &str) -> Option<Continuatio
 /// crossed even when they happen to nest an observer: their own resolution is
 /// not proved to be reveal-free, so the honest answer is "unproved".
 pub(super) fn clause_preserves_reveal_population(effect: &Effect) -> bool {
-    // Pure life/pump/damage/draw/continuous-modification arithmetic. Reads settled
+    // Pure life/pump/damage/continuous-modification arithmetic. Reads settled
     // card properties and moves no revealed library cards, so it cannot publish or
     // replace a reveal (Reviving Vapors' "You gain life...", Erratic Mutation's
-    // "gets +X/-X...", Amplifire's continuous PT setting, Goblin Charbelcher's damage,
-    // Draw). Extending this allow-list means proving the new clause reveal-free;
+    // "gets +X/-X...", Amplifire's continuous PT setting, Goblin Charbelcher's
+    // damage). Extending this allow-list means proving the new clause reveal-free;
     // there is deliberately no deny-list to add to, because a missed producer is
     // the defect this predicate guards.
+    //
+    // CR 614.6: a Draw is NOT proved reveal-free. A replacement can turn it into
+    // a reveal (Abundance: "If you would draw a card, you may instead ... reveal
+    // cards from the top of your library until you reveal a card of the chosen
+    // kind"), and the replaced draw never happens, so the later remainder would
+    // read that replacement's population instead of the original reveal's.
     matches!(
         effect,
         Effect::GainLife { .. }
             | Effect::Pump { .. }
             | Effect::DealDamage { .. }
-            | Effect::Draw { .. }
             | Effect::GenericEffect { .. }
     )
 }
@@ -5989,7 +5997,6 @@ pub(super) fn apply_clause_continuation(
         ContinuationAst::RevealedRemainder {
             destination,
             rest_order,
-            whole_pile,
         } => {
             // CR 701.20a + CR 608.2c: the clause says "revealed this way", so
             // it names the population of a PUBLIC reveal instruction. The
@@ -6054,11 +6061,7 @@ pub(super) fn apply_clause_continuation(
                     kind,
                     Effect::unimplemented(
                         "revealed_remainder_graveyard_order",
-                        if whole_pile {
-                            "all cards revealed this way into graveyard"
-                        } else {
-                            "all other cards revealed this way into graveyard"
-                        },
+                        "all other cards revealed this way into graveyard",
                     ),
                 ));
                 return;
@@ -7085,15 +7088,20 @@ pub(super) fn apply_clause_continuation(
             if let Some(target_idx) = target_idx {
                 // CR 608.2c: instructions are followed in the order written. When
                 // any instruction sits between the reveal and this pile placement
-                // (Goblin Charbelcher's damage, Erratic Mutation's pump, a Draw),
+                // (Goblin Charbelcher's damage, Erratic Mutation's pump),
                 // folding the placement into the reveal would move the pile BEFORE
                 // that instruction. Leave the cards where the reveal found them and
                 // emit the placement as a later chain instruction over the revealed set.
                 let has_intervening_instruction = target_idx + 1 < defs.len();
-                if has_intervening_instruction {
-                    // CR 404.3: an owner-ordered graveyard remainder needs an ordering
-                    // prompt this instruction does not own; rather than delivering in
-                    // arbitrary engine order, keep this shape honest as an unsupported gap.
+                // CR 404.3: the owner may arrange cards put into their graveyard at
+                // the same time. A pile the owner orders (Mind Funeral's "That player
+                // puts all cards revealed this way into their graveyard"), or one
+                // displaced past an intervening instruction, needs an ordering prompt
+                // this instruction does not own; rather than delivering in arbitrary
+                // engine order, keep the shape honest as an unsupported gap.
+                let owner_orders_graveyard =
+                    destination == Zone::Graveyard && rest_order == DigRestOrder::PlayerChoice;
+                if has_intervening_instruction || owner_orders_graveyard {
                     if destination == Zone::Graveyard {
                         if let Effect::RevealUntil {
                             matched_disposition,
@@ -7117,9 +7125,10 @@ pub(super) fn apply_clause_continuation(
                     }
 
                     // CR 701.20a + CR 608.2c: intervening instructions must preserve the
-                    // reveal population (Pump, DealDamage, GainLife, Draw).
-                    // An intervening Clash or other reveal producer overwrites last_revealed_ids,
-                    // so fail closed on unsafe spans.
+                    // reveal population (Pump, DealDamage, GainLife). An intervening
+                    // Clash or other reveal producer overwrites last_revealed_ids, and a
+                    // Draw may be replaced by one (CR 614.6), so fail closed on unproved
+                    // spans.
                     let span_safe = defs[target_idx + 1..]
                         .iter()
                         .all(|d| clause_preserves_reveal_population(&d.effect));

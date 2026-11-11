@@ -2757,6 +2757,61 @@ pub(crate) fn retire_reordered_library_reveals(state: &mut GameState, cards: &[O
     }
 }
 
+/// CR 701.20d: One library placement instruction ("put the revealed cards on
+/// the bottom of your library in a random order") that the zone pipeline
+/// delivers one card at a time. Each delivery only sees its own card, so a
+/// member already in place when it is delivered (C in `[A, B, C]` bottomed as
+/// `[C, A, B]`) stays revealed while later deliveries carry it to a new
+/// position. The operation captures each affected library before the first
+/// delivery and, once every member has been placed, treats the members that
+/// stayed in that library as one reorder.
+pub(crate) struct LibraryReorderOperation {
+    members: Vec<ObjectId>,
+    libraries: Vec<(PlayerId, Vec<ObjectId>)>,
+}
+
+impl LibraryReorderOperation {
+    /// Capture the libraries holding any of `members` before delivery starts.
+    pub(crate) fn begin(state: &GameState, members: &[ObjectId]) -> Self {
+        let mut libraries: Vec<(PlayerId, Vec<ObjectId>)> = Vec::new();
+        for obj in members.iter().filter_map(|id| state.objects.get(id)) {
+            if obj.zone == Zone::Library && !libraries.iter().any(|(p, _)| *p == obj.owner) {
+                libraries.push((
+                    obj.owner,
+                    state.library_of(obj.owner).iter().copied().collect(),
+                ));
+            }
+        }
+        Self {
+            members: members.to_vec(),
+            libraries,
+        }
+    }
+
+    /// CR 701.20d: Settle the completed operation. When a library's order
+    /// changed, every member that was in it before and is still in it now was
+    /// reordered by this instruction, so any of them still revealed stops being
+    /// revealed and becomes a new object. A lone member is left to
+    /// [`reorder_within_library`], which already retires it only if it moved.
+    pub(crate) fn finish(self, state: &mut GameState) {
+        for (player, before) in self.libraries {
+            let after: Vec<ObjectId> = state.library_of(player).iter().copied().collect();
+            if before == after {
+                continue;
+            }
+            let reordered: Vec<ObjectId> = self
+                .members
+                .iter()
+                .copied()
+                .filter(|id| before.contains(id) && after.contains(id))
+                .collect();
+            if reordered.len() > 1 {
+                retire_reordered_library_reveals(state, &reordered);
+            }
+        }
+    }
+}
+
 /// Reorder objects that remain in one player's library without performing a
 /// zone change. `ordered` is placed at `index` in the supplied order, or
 /// appended when `index` is `None`.

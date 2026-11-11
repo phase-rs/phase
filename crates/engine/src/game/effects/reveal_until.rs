@@ -165,15 +165,21 @@ fn resolve_reveal(
     // CR 701.20a: Reveal cards one at a time until `target_match_count` matches
     // are found (or the library is exhausted). `target_match_count == 0` reveals
     // nothing (CR 701.20a — the until-condition is already satisfied).
+    // CR 701.20a: `revealed_in_order` is the visited prefix in library order —
+    // the order the cards are actually revealed — and is what the reveal
+    // publishes. The hit/miss lists drive destination handling only.
+    let mut revealed_in_order: Vec<ObjectId> = Vec::new();
     if target_match_count > 0 {
         for &card_id in &library {
             if matches_target_filter(state, card_id, filter, &ctx) {
                 hit_cards.push(card_id);
+                revealed_in_order.push(card_id);
                 if hit_cards.len() >= target_match_count {
                     break;
                 }
             } else {
                 revealed_misses.push(card_id);
+                revealed_in_order.push(card_id);
             }
         }
     }
@@ -188,13 +194,9 @@ fn resolve_reveal(
         None
     };
 
-    // Build the full list of revealed card IDs for the event.
-    let mut all_revealed: Vec<ObjectId> = revealed_misses.clone();
-    all_revealed.extend(&hit_cards);
-
     state
         .resolve_and_apply_information(
-            &all_revealed,
+            &revealed_in_order,
             ResolvedInformationAudience::Controller(ability.controller),
             ResolvedInformationLifetime::UntilActionBoundary,
             ResolvedInformationEdit::Reveal,
@@ -209,7 +211,7 @@ fn resolve_reveal(
     {
         state
             .resolve_and_apply_information(
-                &all_revealed,
+                &revealed_in_order,
                 ResolvedInformationAudience::Public,
                 ResolvedInformationLifetime::UntilZoneChange,
                 ResolvedInformationEdit::Reveal,
@@ -218,27 +220,27 @@ fn resolve_reveal(
     }
 
     // Emit CardsRevealed for all revealed cards.
-    let card_names: Vec<String> = all_revealed
+    let card_names: Vec<String> = revealed_in_order
         .iter()
         .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
         .collect();
     events.push(GameEvent::CardsRevealed {
         player: revealing_player,
-        card_ids: all_revealed.clone(),
+        card_ids: revealed_in_order.clone(),
         card_names,
     });
 
     // Store revealed IDs for downstream reference.
-    state.last_revealed_ids = all_revealed.clone();
+    state.last_revealed_ids = revealed_in_order.clone();
     // CR 608.2c + CR 701.20a: "[quantity] revealed this way" names the cards this
     // reveal revealed — every card looked at until the until-condition was met,
     // matching or not. Publish them as the chain's tracked set so a downstream
     // "the number of nonland cards revealed this way" reads the revealed
     // population (Goblin Charbelcher) even after the cards have been moved.
-    if all_revealed.is_empty() {
+    if revealed_in_order.is_empty() {
         super::publish_fresh_tracked_set(state, Vec::new());
     } else {
-        super::publish_tracked_set(state, all_revealed.clone());
+        super::publish_tracked_set(state, revealed_in_order.clone());
     }
 
     // CR 701.20b: reveal-only until-loop — cards stay in their zones (Sanar's
@@ -293,6 +295,9 @@ fn resolve_reveal(
         _ => None,
     };
     if let Some(pile_destination) = whole_pile_destination {
+        // Destination handling groups the misses ahead of the hits.
+        let mut all_revealed = revealed_misses.clone();
+        all_revealed.extend(&hit_cards);
         let clear_markers = all_revealed.clone();
         // CR 608.2d + CR 401.4: a library pile "in any order" (PlayerChoice) of
         // 2+ cards pauses for the library's owner to announce their bottom order.
@@ -763,7 +768,16 @@ pub(crate) fn move_rest_then(
                     library_bottom_requests_in_preserve_order(cards)
                 }
             };
-            zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events)
+            // CR 701.20d: the pile is delivered one card at a time; once it has
+            // been placed, the whole pile is one reorder of the library. A paused
+            // delivery leaves undelivered members bound to their occurrences.
+            let library_reorder = crate::game::zones::LibraryReorderOperation::begin(state, cards);
+            let result =
+                zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events);
+            if matches!(result, zone_pipeline::BatchMoveResult::Done) {
+                library_reorder.finish(state);
+            }
+            result
         }
         dest => {
             // CR 400.7: the rest cards move themselves to `dest`; each anchors

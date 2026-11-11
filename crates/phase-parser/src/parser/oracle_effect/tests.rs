@@ -46539,10 +46539,14 @@ fn reveal_until_passive_compound_stopping_rejected_thought_dissector() {
         "compound reveal-until must not be accepted by single-condition RevealUntil"
     );
 
-    // Fail closed: must return Effect::Unimplemented for the unsupported compound stopping condition
+    // Fail closed with the compound stopping-condition diagnostic, not some
+    // other unrelated parse miss.
     assert!(
-        matches!(&*ability.effect, Effect::Unimplemented { .. }),
-        "expected Effect::Unimplemented for compound reveal-until, got {:?}",
+        matches!(
+            &*ability.effect,
+            Effect::Unimplemented { name, .. } if name == "compound_reveal_until"
+        ),
+        "expected compound_reveal_until for compound reveal-until, got {:?}",
         ability.effect
     );
 }
@@ -46662,22 +46666,19 @@ fn reveal_until_all_to_zone_does_not_fold_across_intervening_draw() {
         draw.effect
     );
 
+    // CR 614.6: a replacement can turn the draw into a new reveal (Abundance),
+    // so the draw is not proved to preserve the reveal population and the
+    // displaced placement must fail closed instead of reading `LastRevealed`.
     let placement = draw
         .sub_ability
         .as_ref()
-        .unwrap_or_else(|| panic!("expected sequential sibling placement sub-ability for {text}"));
-    assert_eq!(placement.sub_link, SubAbilityLink::SequentialSibling);
+        .unwrap_or_else(|| panic!("expected placement gap after the draw for {text}"));
     assert!(
         matches!(
             &*placement.effect,
-            Effect::ChangeZoneAll {
-                origin: Some(Zone::Library),
-                destination: Zone::Library,
-                target: TargetFilter::LastRevealed,
-                ..
-            }
+            Effect::Unimplemented { name, .. } if name == "displaced_pile_placement_unsafe_span"
         ),
-        "expected ChangeZoneAll placement for {text}, got {:?}",
+        "expected displaced_pile_placement_unsafe_span for {text}, got {:?}",
         placement.effect
     );
 }
