@@ -32,8 +32,9 @@ use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     CardSelectionMode, ChosenAttribute, Comparator, ControllerRef, CounterCostSelection,
     DamageChannel, Effect, EffectKind, ManaContribution, ManaProduction, PlayerFilter,
-    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, RoundingMode, TargetFilter,
-    TargetRef, TriggerDefinition, TypedFilter, UnlessPayModifier, REMOVE_COUNTER_COST_ALL,
+    QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition, ReplacementMode,
+    RoundingMode, TargetFilter, TargetRef, TriggerDefinition, TypedFilter, UnlessPayModifier,
+    REMOVE_COUNTER_COST_ALL,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::{parse_counter_type, CounterMatch, CounterType};
@@ -1871,32 +1872,33 @@ fn a_target_trigger_from_an_activated_mode_choice_survives_its_cost_prompt() {
     );
 }
 
-/// Stage a full prevention of the parked counter removal. No RemoveCounter
-/// applier yields `Prevented` today (`remove_counter_applier` always modifies
-/// the event), so the parked choice is re-pointed at a floating skip-turn
-/// effect (the `ObjectId(0)` effect list a resolved spell's shields use),
-/// whose applier prevents its event outright. A floating effect has no source
-/// zone and is judged current while it exists; a definition on the holder for
-/// an event it never matches is not one the replacement authority would still
-/// offer (CR 616.1f), so an answer to it re-proposes the event. This mirrors
-/// the staged regeneration-shield producer of the CR 608.3e prevented-entry
-/// test in `engine_replacement.rs`. The parked event is still the
-/// RemoveCounter, and the resume runs through the real
+/// Stage a full prevention of the parked counter removal (CR 614.6).
+///
+/// Synthetic: no printed card replaces a counter removal; the nearest printed
+/// prevention is Melira's Keepers ("can't have counters put on it"), which the
+/// counter-placement applier models the same way. The holder gains a one-shot
+/// `Prevent` replacement of the parked event's own kind, and the parked choice
+/// is re-pointed at it: discovery offers that candidate for this event, so the
+/// answer applies it (CR 616.1) and the event never happens. The parked event
+/// is still the RemoveCounter, and the resume runs through the real
 /// `GameAction::ChooseReplacement` entry.
 fn stage_prevented_counter_removal(runner: &mut GameRunner) {
-    stage_prevented_pending_event(runner, |proposed| {
+    stage_prevented_pending_event(runner, ReplacementEvent::RemoveCounter, |proposed| {
         matches!(proposed, ProposedEvent::RemoveCounter { .. })
     });
 }
 
-/// `stage_prevented_counter_removal` for any parked event `expected` accepts.
-fn stage_prevented_pending_event(runner: &mut GameRunner, expected: fn(&ProposedEvent) -> bool) {
-    let floating = &mut runner.state_mut().pending_damage_replacements;
-    let prevention = ReplacementId {
-        source: ObjectId(0),
-        index: floating.len(),
-    };
-    floating.push(ReplacementDefinition::new(ReplacementEvent::BeginTurn));
+/// `stage_prevented_counter_removal` for any parked event of `kind` that
+/// `expected` accepts.
+fn stage_prevented_pending_event(
+    runner: &mut GameRunner,
+    kind: ReplacementEvent,
+    expected: fn(&ProposedEvent) -> bool,
+) {
+    let mut prevention =
+        ReplacementDefinition::new(kind).quantity_modification(QuantityModification::Prevent);
+    prevention.consume_on_apply = true;
+    let prevention = install_replacement_on_steward(runner, prevention);
     let pending = runner
         .state_mut()
         .pending_replacement
@@ -3428,7 +3430,7 @@ fn a_prevented_non_counter_child_event_finishes_its_rider_before_the_cost_root()
         "reach: the rider is parked"
     );
     assert!(runner.state().stack.is_empty());
-    stage_prevented_pending_event(&mut runner, |proposed| {
+    stage_prevented_pending_event(&mut runner, ReplacementEvent::GainLife, |proposed| {
         matches!(proposed, ProposedEvent::LifeGain { .. })
     });
 

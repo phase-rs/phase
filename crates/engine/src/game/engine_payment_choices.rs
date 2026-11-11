@@ -1207,9 +1207,6 @@ pub(super) fn handle_unless_payment(
                 effect_description,
                 remaining,
             };
-            if repeated_draw_exceeds_one_resolution(state, &payment, owed.get()) {
-                return Err(unrepresentable_repeated_payment());
-            }
             let waiting_for = pay_repeated_draw_unless_cost(
                 state,
                 payment,
@@ -2112,34 +2109,27 @@ struct RepeatedDrawUnlessPayment {
 /// priority in between (CR 117.2e).
 ///
 /// CR 118.11 + CR 614.1: each instruction is performed through the draw
-/// replacement authority, whatever replaces it. The synchronous work of one
-/// dispatch is bounded at this owner:
-/// - an instruction that emits nothing a trigger can key on
+/// replacement authority, whatever replaces it, and the whole count is paid
+/// (CR 702.24a: "for each age counter on it"); nothing is refused. The work of
+/// one dispatch ends at:
+/// - a fixed point: an instruction that emits nothing a trigger can key on
 ///   (`trigger_index::keys_from_event`) and leaves the game unchanged
 ///   (Possessed Portal's mandatory skip, an attempt from an empty library
-///   already recorded, a draw a can't-draw effect clamps) is a fixed point:
-///   the payment is deterministic, so every further instruction is the same
-///   identity and the rest of the count is paid at once. The journal keeps
-///   every instruction that changed the game, so replaying it reproduces the
-///   state;
-/// - a replacement that ends the game (Laboratory Maniac) ends the payment;
-/// - every other instruction changes the game and is performed, all within
-///   this dispatch with priority withheld, up to
-///   [`SYNCHRONOUS_INSTRUCTION_CEILING`]. A count that could keep changing the
-///   game past it (Hullbreacher creating a Treasure per draw) is beyond what
-///   the engine can represent in one resolution, so the choice to pay is
-///   refused before any instruction runs
-///   ([`repeated_draw_exceeds_one_resolution`]) and the player may still
-///   decline; so is a count the drawer's library could feed past it. The
-///   ceiling inside the loop is the backstop for a dispatch that reaches it
-///   anyway, which needs a work-performing replacement that was not
-///   applicable at the choice and became so while the payment was parked
-///   (Hullbreacher under Humility, when Humility's controller leaves the game
-///   during a Dredge prompt): that action is refused and rolled back whole,
-///   as an unrepresentable life change is. The parked payment is not
-///   re-judged at the departure, so with more than the ceiling still owed an
-///   answer that reaches it is refused; that is the engine's representation
-///   limit, not a rule.
+///   already recorded, a draw a can't-draw effect clamps). The payment is
+///   deterministic, so every further instruction is the same identity and the
+///   rest of the count is paid at once. The journal keeps every instruction
+///   performed, the identity one that shows the fixed point included, so
+///   replaying it reproduces the state;
+/// - a replacement that ends the game (Laboratory Maniac, CR 104.1);
+/// - a pause on a replacement choice, which parks the instructions still owed;
+/// - the engine's runaway ceilings ([`super::engine::runaway_growth_exceeded`]), the
+///   same per-dispatch authority the auto-pass drive halts on. Every bounded
+///   payment (a library's cards, a game end, a fixed point) settles far below
+///   them; only a replacement that creates objects for every draw of an
+///   enormous count (Hullbreacher) reaches them. That payment is halted, not
+///   refused: the instructions performed stand, the rest are not performed,
+///   the payment settles as paid (CR 118.12: a started payment is not taken
+///   back), and `GameEvent::ResolutionHalted` names its source.
 fn pay_repeated_draw_unless_cost(
     state: &mut GameState,
     payment: RepeatedDrawUnlessPayment,
@@ -2148,7 +2138,8 @@ fn pay_repeated_draw_unless_cost(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let mut owed = owed.get();
-    let mut changing_instructions = 0u32;
+    let events_baseline = events.len();
+    let objects_baseline = state.objects.len();
     // The game before the current instruction, kept while the previous one
     // emitted nothing a trigger can key on: only such an instruction can be a
     // fixed point.
@@ -2225,9 +2216,14 @@ fn pay_repeated_draw_unless_cost(
         {
             break;
         }
-        changing_instructions += 1;
-        if changing_instructions > SYNCHRONOUS_INSTRUCTION_CEILING {
-            return Err(unrepresentable_repeated_payment());
+        if super::engine::runaway_growth_exceeded(
+            events.len().saturating_sub(events_baseline),
+            state.objects.len().saturating_sub(objects_baseline),
+        ) {
+            events.push(GameEvent::ResolutionHalted {
+                involved: vec![payment.pending_effect.source_id],
+            });
+            break;
         }
         quiet_before = quiet.then(|| state.clone());
     }
@@ -2265,66 +2261,10 @@ pub(crate) fn draw_payment_is_parked(state: &GameState) -> bool {
     )
 }
 
-/// The most instructions one dispatch of a repeated draw payment performs
-/// while each still changes the game. Every printed draw replacement either
-/// moves a real card (bounded by the cards in a library, a few hundred at
-/// most), ends the game, reaches the fixed point, or creates objects without
-/// bound (Hullbreacher); this sits far above the first and stops the last
-/// long before the engine's runaway-cascade object ceiling.
-const SYNCHRONOUS_INSTRUCTION_CEILING: u32 = 1_024;
-
-/// The refusal of a repeated payment beyond what one resolution can represent.
-fn unrepresentable_repeated_payment() -> EngineError {
-    EngineError::ActionNotAllowed(format!(
-        "a repeated payment that changes the game on more than \
-         {SYNCHRONOUS_INSTRUCTION_CEILING} instructions is not representable"
-    ))
-}
-
-/// CR 118.11 + CR 614.1: whether paying `owed` instructions could exceed
-/// [`SYNCHRONOUS_INSTRUCTION_CEILING`] in one dispatch, decided at the choice
-/// to pay, where refusing leaves the player free to decline. More
-/// instructions than the ceiling must be owed, and either:
-/// - a mandatory draw replacement that performs work of its own applies to
-///   the drawer, so the instructions could keep changing the game without
-///   reaching a fixed point; or
-/// - the drawer's library holds at least the ceiling's cards. Every other
-///   instruction that changes the game moves a card out of that library
-///   (a draw, a Dredge mill), and the first attempt from an empty library is
-///   one more edit, so the instructions after any answer could pass the
-///   ceiling only then (conservative for a multi-card instruction).
-///
-/// Together these keep the loop's backstop from refusing an answer to a
-/// resumed payment, unless a work-performing replacement becomes applicable
-/// while the payment is parked.
-fn repeated_draw_exceeds_one_resolution(
-    state: &GameState,
-    payment: &RepeatedDrawUnlessPayment,
-    owed: u32,
-) -> bool {
-    if owed <= SYNCHRONOUS_INSTRUCTION_CEILING {
-        return false;
-    }
-    let AbilityCost::EffectCost { effect } = &payment.cost else {
-        return false;
-    };
-    let Effect::Draw { target, .. } = effect.as_ref() else {
-        return false;
-    };
-    effects::resolve_player_for_context_ref(state, &payment.pending_effect, target).is_some_and(
-        |drawer| {
-            replacement::draw_replacement_performs_work(state, drawer)
-                || state.players.get(drawer.0 as usize).is_some_and(|seat| {
-                    seat.library.len() >= SYNCHRONOUS_INSTRUCTION_CEILING as usize
-                })
-        },
-    )
-}
-
 /// CR 118.11: whether an instruction left the game exactly as it found it, by
-/// the semantic `GameState` equality the engine's loop detection (CR 104.4b)
-/// also uses (derived caches excluded), with the instruction's own journal
-/// entries set aside.
+/// the semantic `GameState` equality (derived caches excluded) that the
+/// engine's mandatory-loop detection also compares with, with the
+/// instruction's own journal entries set aside.
 fn instruction_changed_nothing(before: &GameState, after: &GameState) -> bool {
     let mut unjournaled = after.clone();
     unjournaled.resolved_rules_journal = before.resolved_rules_journal.clone();

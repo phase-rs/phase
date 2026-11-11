@@ -16,18 +16,22 @@ use engine::game::engine::{apply, EngineError};
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, DiscardSelfScope, Effect,
-    PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, ControllerRef,
+    DiscardSelfScope, Effect, PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition,
+    ResolvedAbility, TapCreaturesRequirement, TargetFilter, TypedFilter,
 };
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    AutoPassMode, CastPaymentMode, GameState, PersistedGameState, PersistedRestoreError,
-    StackEntry, StackEntryKind, WaitingFor,
+    AutoPassMode, CastPaymentMode, GameState, PayCostKind, PersistedGameState,
+    PersistedRestoreError, StackEntry, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::proposed_event::ReplacementId;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 /// Alms Collector, verbatim Oracle text: an instruction-level CR 121.2a
@@ -2302,7 +2306,7 @@ fn a_second_concession_whose_rider_is_unrepresentable_retires_the_payment() {
     assert_second_departure_retires_the_checkpoint(&mut runner);
 }
 
-/// CR 616.1 + CR 616.1f + CR 702.52a: a saved Dredge choice whose stored
+/// CR 616.1 + CR 702.52a: a saved Dredge choice whose stored
 /// candidate no longer applies is refused by the candidate check, like an
 /// empty candidate list; the valid save restores and its prompt is answered.
 #[test]
@@ -2336,7 +2340,7 @@ fn checked_restore_refuses_a_stale_replacement_candidate() {
 const NOTION_THIEF_ORACLE: &str = "Flash\nIf an opponent would draw a card except the first one \
 they draw in each of their draw steps, instead that player skips that draw and you draw a card.";
 
-/// CR 616.1f + CR 800.4a + CR 104.3a: P0's draw leg parks a choice between
+/// CR 616.1 + CR 800.4a + CR 104.3a: P0's draw leg parks a choice between
 /// P0's Dredge and P3's Notion Thief. P3 concedes, so Notion Thief leaves the
 /// game. The departure re-settles the parked prompt on the checkpoint: only
 /// Dredge would now apply, so the checkpoint stores that prompt, the save
@@ -2420,7 +2424,7 @@ fn a_departure_that_removes_a_parked_candidate_keeps_a_restorable_checkpoint() {
     assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
 }
 
-/// CR 616.1f + CR 800.4a: outside any payment, P0's draw parks a choice
+/// CR 616.1 + CR 800.4a: outside any payment, P0's draw parks a choice
 /// between P0's Dredge and P3's Notion Thief, and P3 concedes. Notion Thief has
 /// left the game with its owner, so it is no longer an effect that would apply:
 /// P0's answer naming it re-proposes the draw, which offers Dredge alone, and
@@ -2493,4 +2497,384 @@ fn an_answer_after_a_candidate_left_the_game_reproposes_the_draw() {
         hand_before + 1,
         "P0 draws the card"
     );
+}
+
+/// `recovered_dredge_checkpoint` with `second` as the cost's second leg: leg 1
+/// declines Dredge, leg 2 opens its own prompt, and P2's concession parks that
+/// prompt on a recovery checkpoint. P0 has a second creature and a second
+/// graveyard card, so tapping a creature or a graveyard exile asks which.
+fn recovered_second_leg_checkpoint(second: AbilityCost) -> GameRunner {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in 0..3 {
+        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
+    }
+    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+    scenario.add_creature(P0, "Second Creature", 1, 1);
+    scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE);
+    scenario.add_creature_to_graveyard(P0, "Graveyard Creature", 1, 1);
+    let mut runner = scenario.build();
+    let root = ResolvedAbility::new(
+        pay_cost(AbilityCost::Composite {
+            costs: vec![draw_cost(1), second],
+        }),
+        vec![],
+        source,
+        P0,
+    );
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining leg 1's Dredge accepts the draw");
+    apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("a player can concede at any time");
+    assert!(
+        state
+            .payment_transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.recovered.is_some()),
+        "the concession parks leg 2's prompt on a recovery checkpoint"
+    );
+    runner
+}
+
+/// The live save with every object its checkpoint's prompt lists moved to
+/// exile inside the checkpoint, as an edited save holding objects that left
+/// would have them (CR 400.7: each is a new object).
+fn save_with_listed_objects_exiled(
+    runner: &GameRunner,
+    listed: fn(&WaitingFor) -> Vec<ObjectId>,
+) -> GameState {
+    let mut state = runner.state().clone();
+    let checkpoint = state
+        .payment_transaction
+        .as_mut()
+        .and_then(|transaction| transaction.recovered.as_mut())
+        .expect("the save holds a recovery checkpoint");
+    let ids = listed(&checkpoint.state.waiting_for);
+    assert!(
+        ids.len() >= 2,
+        "reach guard: the prompt lists a choice: {ids:?}"
+    );
+    for id in ids {
+        engine::game::zones::move_to_zone(&mut checkpoint.state, id, Zone::Exile, &mut Vec::new());
+    }
+    state
+}
+
+fn refused_with(refusal: Result<GameState, PersistedRestoreError>, fragment: &str) -> bool {
+    matches!(
+        refusal,
+        Err(PersistedRestoreError::InvalidPaymentTransaction(reason)) if reason.contains(fragment)
+    )
+}
+
+/// CR 701.26a + CR 118.12: a saved prompt to tap creatures as a resolution
+/// cost (the shape of Meanders Guide's "you may tap another untapped Merfolk
+/// you control") names creatures on the battlefield. With every listed
+/// creature exiled in the save, the prompt names objects that left their zone
+/// (CR 400.7) and checked restore refuses it before probing an answer, so a
+/// decline the prompt also admits cannot carry the save; the unedited save
+/// restores.
+#[test]
+fn checked_restore_refuses_a_tap_creatures_prompt_whose_creatures_left() {
+    let runner = recovered_second_leg_checkpoint(AbilityCost::TapCreatures {
+        requirement: TapCreaturesRequirement::Count { count: 1 },
+        filter: TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .into(),
+    });
+    checked_round_trip(runner.state()).expect("reach guard: the tap prompt restores");
+    let edited = save_with_listed_objects_exiled(&runner, |waiting| match waiting {
+        WaitingFor::PayCost {
+            kind: PayCostKind::TapCreatures { .. },
+            choices,
+            ..
+        } => choices.clone(),
+        other => panic!("reach guard: leg 2 asks which creature to tap: {other:?}"),
+    });
+    let refusal = checked_round_trip(&edited);
+    assert!(
+        refused_with(refusal.clone(), "an object that left its zone"),
+        "{refusal:?}"
+    );
+}
+
+/// CR 701.13a + CR 118.12: a saved graveyard-exile prompt names cards in the
+/// graveyard. With every listed card exiled in the save, the prompt names
+/// objects that left their zone (CR 400.7) and checked restore refuses it; the
+/// unedited save restores.
+#[test]
+fn checked_restore_refuses_a_zone_choice_whose_cards_left() {
+    let runner = recovered_second_leg_checkpoint(AbilityCost::Exile {
+        count: 1,
+        zone: Some(Zone::Graveyard),
+        filter: None,
+    });
+    checked_round_trip(runner.state()).expect("reach guard: the zone choice restores");
+    let edited = save_with_listed_objects_exiled(&runner, |waiting| match waiting {
+        WaitingFor::EffectZoneChoice { cards, .. } => cards.clone(),
+        other => panic!("reach guard: leg 2 asks which card to exile: {other:?}"),
+    });
+    let refusal = checked_round_trip(&edited);
+    assert!(
+        refused_with(refusal.clone(), "an object that left its zone"),
+        "{refusal:?}"
+    );
+}
+
+/// CR 616.1 + CR 614.1: a saved replacement prompt whose candidate is a
+/// floating one-shot draw shield already used up names an effect discovery no
+/// longer offers, so checked restore refuses it like any stale candidate.
+/// Synthetic: the floating shield stands in for Words of Worship's "the next
+/// time you would draw a card this turn" shield after it applied.
+#[test]
+fn checked_restore_refuses_a_used_floating_shield_candidate() {
+    let runner = recovered_dredge_checkpoint();
+    let mut state = runner.state().clone();
+    let checkpoint = state
+        .payment_transaction
+        .as_mut()
+        .and_then(|transaction| transaction.recovered.as_mut())
+        .expect("the save holds a recovery checkpoint");
+    let floating = &mut checkpoint.state.pending_damage_replacements;
+    let mut used = ReplacementDefinition::new(ReplacementEvent::Draw);
+    used.is_consumed = true;
+    let candidate = ReplacementId {
+        source: ObjectId(0),
+        index: floating.len(),
+    };
+    floating.push(used);
+    checkpoint
+        .state
+        .pending_replacement
+        .as_mut()
+        .expect("the checkpoint holds the Dredge choice")
+        .candidates = vec![candidate];
+    let refusal = checked_round_trip(&state);
+    assert!(
+        refused_with(refusal.clone(), "replacement candidate no longer applies"),
+        "{refusal:?}"
+    );
+}
+
+/// Words of Worship, verbatim Oracle text.
+const WORDS_OF_WORSHIP_ORACLE: &str =
+    "{1}: The next time you would draw a card this turn, you gain 5 life instead.";
+
+/// P0 activates Words of Worship and, at one less than the largest life the
+/// engine represents, holds a staged `PayCost{Composite[Draw 1; Discard 1]}`
+/// whose draw leg the shield replaces with a gain of 5.
+fn words_of_worship_board() -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &STAGED_LIBRARY);
+    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+    let words = scenario
+        .add_enchantment_from_oracle(P0, "Words of Worship", WORDS_OF_WORSHIP_ORACLE)
+        .id();
+    scenario.add_card_to_hand(P0, "Hand A");
+    scenario.add_card_to_hand(P0, "Hand B");
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+    runner.state_mut().players[P0.0 as usize]
+        .mana_pool
+        .add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: words,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Words of Worship's ability is activated");
+    runner.advance_until_stack_empty();
+    runner.state_mut().players[P0.0 as usize].life = i32::MAX - 1;
+    (runner, source)
+}
+
+fn draw_then_discard() -> Effect {
+    pay_cost(AbilityCost::Composite {
+        costs: vec![draw_cost(1), discard_cost()],
+    })
+}
+
+/// CR 614.1 + CR 118.12: the staged payment begins when its ability resolves
+/// through priority passes. Its draw leg becomes a gain no engine life total
+/// can hold, and the discard leg pauses: the pause does not drop that failure,
+/// so the resolving pass is rejected and the board restored.
+#[test]
+fn an_unrepresentable_gain_before_a_payment_pauses_rejects_the_resolving_pass() {
+    let (mut runner, _) = words_of_worship_board();
+    let state = runner.state_mut();
+    state.stack = vec![ability_on_stack(301, P0, draw_then_discard())].into();
+    apply(state, P0, GameAction::PassPriority).expect("P0 passes");
+    let before = state.clone();
+    let error = apply(state, P1, GameAction::PassPriority)
+        .expect_err("the resolving pass reaches the unrepresentable gain");
+    assert!(
+        matches!(error, EngineError::LifeChangeUnrepresentable { player } if player == P0),
+        "{error:?}"
+    );
+    assert_eq!(state.players[P0.0 as usize].life, i32::MAX - 1);
+    assert_eq!(
+        state.stack, before.stack,
+        "the ability is still on the stack"
+    );
+    assert!(state.payment_transaction.is_none(), "no payment is staged");
+}
+
+/// CR 614.1 + CR 118.12: the same payment, begun outside an action boundary as
+/// a resolution test harness does, pauses on the discard leg. Answering it
+/// replays the accepted prefix, whose gain cannot be represented, and runs the
+/// answer in a boundary of its own: the failure the prefix recorded survives
+/// that boundary, so the answer is rejected and the board restored instead of
+/// completing the payment with the gain dropped.
+#[test]
+fn an_unrepresentable_gain_in_the_replayed_prefix_rejects_the_completing_answer() {
+    let (mut runner, source) = words_of_worship_board();
+    let root = ResolvedAbility::new(draw_then_discard(), vec![], source, P0);
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    let WaitingFor::DiscardChoice { cards, .. } = &state.waiting_for else {
+        panic!("reach guard: the discard leg asks: {:?}", state.waiting_for);
+    };
+    let card = cards[0];
+    let before = state.clone();
+    let error = apply(state, P0, GameAction::SelectCards { cards: vec![card] })
+        .expect_err("the replayed prefix's gain cannot be represented");
+    assert!(
+        matches!(error, EngineError::LifeChangeUnrepresentable { player } if player == P0),
+        "{error:?}"
+    );
+    assert_eq!(state.players[P0.0 as usize].life, i32::MAX - 1);
+    assert_eq!(
+        state.players[P0.0 as usize].hand,
+        before.players[P0.0 as usize].hand
+    );
+    assert_eq!(
+        state.waiting_for, before.waiting_for,
+        "the prompt is restored"
+    );
+    assert_eq!(state.payment_transaction, before.payment_transaction);
+}
+
+/// CR 800.4a + CR 400.7 + CR 104.3a: P0's staged payment parks a prompt to tap
+/// a creature, listing a creature P2 owns but P0 controls. Synthetic control:
+/// the nearest printed card is Control Magic ("You control enchanted
+/// creature."). P3 concedes first, so the prefix parks on a recovery
+/// checkpoint; then P2 concedes, and P2's creature leaves the game with its
+/// owner. A checkpoint whose prompt names it cannot execute, so the concession
+/// retires the payment: the departure is published, the save restores, and the
+/// next action starts from it.
+#[test]
+fn a_second_concession_whose_owner_lent_a_listed_creature_retires_the_payment() {
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in 0..4 {
+        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
+    }
+    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+    let lent = scenario
+        .add_creature(PlayerId(2), "Lent Creature", 1, 1)
+        .id();
+    scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&lent)
+        .expect("the lent creature exists")
+        .base_controller = Some(P0);
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&lent].controller,
+        P0,
+        "reach guard: P0 controls the lent creature"
+    );
+    let root = ResolvedAbility::new(
+        pay_cost(AbilityCost::Composite {
+            costs: vec![
+                draw_cost(1),
+                AbilityCost::TapCreatures {
+                    requirement: TapCreaturesRequirement::Count { count: 1 },
+                    filter: TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .into(),
+                },
+            ],
+        }),
+        vec![],
+        source,
+        P0,
+    );
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining leg 1's Dredge accepts the draw");
+    apply(
+        state,
+        PlayerId(3),
+        GameAction::Concede {
+            player_id: PlayerId(3),
+        },
+    )
+    .expect("a player can concede at any time");
+    let listed = match &state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .expect("reach guard: the first concession parks a recovery checkpoint")
+        .state
+        .waiting_for
+    {
+        WaitingFor::PayCost { choices, .. } => choices.clone(),
+        other => panic!("reach guard: leg 2 asks which creature to tap: {other:?}"),
+    };
+    assert!(
+        listed.contains(&lent),
+        "reach guard: the lent creature is listed"
+    );
+
+    let published = apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("CR 104.3a: the second concession stands");
+    assert!(
+        published.events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerEliminated { player_id } if *player_id == PlayerId(2)
+        )),
+        "the second departure is published"
+    );
+    let state = runner.state();
+    assert!(
+        state.payment_transaction.is_none(),
+        "a recovery whose prompt names an object that left is retired, not kept"
+    );
+    let mut restored =
+        checked_round_trip(state).expect("the published state passes checked restore");
+    let WaitingFor::Priority { player } = restored.waiting_for else {
+        panic!("a living player has priority: {:?}", restored.waiting_for);
+    };
+    apply(&mut restored, player, GameAction::PassPriority)
+        .expect("the next ordinary action starts from the departure");
 }

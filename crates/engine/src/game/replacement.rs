@@ -1134,7 +1134,7 @@ pub(crate) fn pending_replacement_option_count(
     }
 }
 
-/// CR 616.1f: whether a parked prompt still offers only replacements that
+/// CR 616.1: whether a parked prompt still offers only replacements that
 /// apply. When a stored candidate no longer would ([`stored_candidate_applies`]:
 /// its source left the battlefield or the game, its grant ended), the answer
 /// re-proposes the event, so only the effects that would now be applicable are
@@ -5038,10 +5038,20 @@ fn remove_counter_matcher(event: &ProposedEvent, _source: ObjectId, _state: &Gam
 
 fn remove_counter_applier(
     event: ProposedEvent,
-    _rid: ReplacementId,
-    _state: &mut GameState,
+    rid: ReplacementId,
+    state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
+    use crate::types::ability::QuantityModification;
+    // CR 614.6: a `Prevent` modification replaces the counter removal with
+    // nothing, as `add_counter_applier` does for a placement; the definition is
+    // read through the shared lookup, so a floating effect prevents as an
+    // object's does.
+    let prevents = stored_replacement_definition(state, rid)
+        .is_some_and(|def| def.quantity_modification == Some(QuantityModification::Prevent));
+    if prevents {
+        return ApplyResult::Prevented;
+    }
     ApplyResult::Modified(event)
 }
 
@@ -10243,14 +10253,16 @@ pub(crate) fn stored_candidate_executes(
         .unwrap_or_else(|| stored_replacement_definition(state, rid).is_some())
 }
 
-/// CR 616.1f: whether a stored candidate is still one of the replacements that
-/// would now be applicable to the parked event. A rule-derived candidate is
-/// judged by its own applier's live input, as [`stored_candidate_executes`]
-/// does. An object's definition must still be found by the discovery that
-/// offered it ([`find_applicable_replacements`]): its source still functions
-/// from its zone (CR 113.6) and the definition still matches the event. A
-/// source that changed zones, or left the game with its owner (CR 800.4a),
-/// keeps its stored definition but no longer applies.
+/// CR 616.1: whether a stored candidate is still one of the replacement effects
+/// that apply to the parked event, among which its chooser chooses. A
+/// rule-derived candidate is judged by its own applier's live input, as
+/// [`stored_candidate_executes`] does. Every other candidate, an object's
+/// definition or a floating effect, must still be found by the discovery that
+/// offered it ([`find_applicable_replacements`]): an object's source still
+/// functions from its zone (CR 113.6), a floating effect is not consumed, and
+/// the definition still matches the event. A source that changed zones, or
+/// left the game with its owner (CR 800.4a), keeps its stored definition but no
+/// longer applies; neither does a one-shot shield already used.
 ///
 /// The event is judged as it stood when the candidate was offered: a resume
 /// that already marked this candidate applied before re-entering its handler
@@ -10262,9 +10274,6 @@ fn stored_candidate_applies(
     rid: ReplacementId,
 ) -> bool {
     rule_derived_candidate_executes(state, proposed, rid).unwrap_or_else(|| {
-        if rid.source == ObjectId(0) {
-            return stored_replacement_definition(state, rid).is_some();
-        }
         let mut offered = proposed.clone();
         offered
             .applied_set_mut()
@@ -10305,38 +10314,6 @@ fn rule_derived_candidate_executes(
         || is_umbra_armor_replacement(rid)
         || is_turn_scoped_combat_skip_replacement(rid))
     .then_some(true)
-}
-
-/// CR 614.1 + CR 121.2a: whether a mandatory draw replacement that applies
-/// to `player`'s next one-card draw, at either proposal stage, performs work
-/// of its own (an execute ability: Hullbreacher's Treasure, Notion Thief's
-/// draw) rather than only modifying or skipping the draw. Each such draw can
-/// change the game without ever reaching a fixed point. An optional one is
-/// not counted: it is answered for each draw, and the work of a printed one
-/// (Dredge's mill) takes cards from the drawer's library, which the caller's
-/// library bound covers. Conservative: a bounded mandatory execute (Notion
-/// Thief, Laboratory Maniac) counts too.
-pub(crate) fn draw_replacement_performs_work(state: &GameState, player: PlayerId) -> bool {
-    [DrawEventStage::Instruction, DrawEventStage::Individual]
-        .into_iter()
-        .any(|stage| {
-            find_applicable_replacements(
-                state,
-                &ProposedEvent::Draw {
-                    player_id: player,
-                    count: 1,
-                    stage,
-                    applied: HashSet::new(),
-                },
-                replacement_registry(),
-            )
-            .into_iter()
-            .any(|rid| {
-                stored_replacement_definition(state, rid).is_some_and(|def| {
-                    !replacement_mode_is_optional(&def.mode) && def.execute.is_some()
-                })
-            })
-        })
 }
 
 /// Positions in `pending.candidates` the replacement authority can execute,
@@ -13705,8 +13682,8 @@ fn continue_replacement_impl(
     let registry = replacement_registry();
     prepare_replacement_index_for_pipeline(state);
 
-    // CR 616.1f: a stored candidate that no longer applies is not an effect
-    // that would now be applicable. Re-propose the event so the prompt, if any
+    // CR 616.1: a stored candidate that no longer applies is not among the
+    // effects its chooser chooses from. Re-propose the event so the prompt, if any
     // remains, offers only the replacements that still apply.
     if !pending_candidates_are_current(state, &pending) {
         return pipeline_loop(state, pending.proposed, pending.depth + 1, registry, events);
@@ -14318,7 +14295,7 @@ pub fn continue_replacement(
 mod tests {
     use super::*;
 
-    /// CR 614.1 + CR 616.1 + CR 616.1f: an optional replacement's accept and
+    /// CR 614.1 + CR 616.1: an optional replacement's accept and
     /// decline both name its candidate. With an executable candidate (a
     /// rule-derived one here) the prompt offers accept and decline and is
     /// current; a candidate whose source and definition are gone does not

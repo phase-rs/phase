@@ -18,7 +18,8 @@ use std::sync::Arc;
 use engine::game::ledger::resolve_and_apply_cards_drawn;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, Effect, EffectKind, ManaContribution, ManaProduction, QuantityExpr, TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, DrawReplacementScope, Effect, EffectKind,
+    ManaContribution, ManaProduction, QuantityExpr, ReplacementDefinition, TargetFilter,
 };
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::counter::CounterType;
@@ -31,6 +32,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::resolved_commands::{
     ResolvedLedgerEdit, ResolvedLedgerEditCommand, ResolvedRulesCommand,
 };
@@ -2182,130 +2184,273 @@ fn a_replacement_that_changes_the_game_is_performed_for_each_instruction() {
     );
 }
 
-/// CR 118.11 + CR 614.1: a replacement that creates an object for every draw
-/// never reaches a fixed point. One more instruction than the engine performs
-/// in a single resolution is not representable, so the choice to pay is
-/// refused and the game is left exactly as it was, with priority never
-/// handed out mid-payment; the player may still decline.
+/// Treasures under `player`'s control.
+fn treasures_of(runner: &GameRunner, player: PlayerId) -> usize {
+    let state = runner.state();
+    state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            state.objects[*id].name == "Treasure" && state.objects[*id].controller == player
+        })
+        .count()
+}
+
+/// CR 702.24a + CR 118.11: "for each age counter on it" — a replacement that
+/// creates an object for every draw (Hullbreacher) changes the game on every
+/// instruction and never reaches a fixed point, yet a count of 1,025 is paid in
+/// full: every draw becomes a Treasure for P1 and the upkeep is paid.
 #[test]
-fn a_payment_past_the_synchronous_ceiling_is_refused_whole() {
+fn a_payment_past_a_thousand_instructions_is_performed_in_full() {
     const AGE: u32 = 1_025;
     let (mut runner, vortex, ()) = vortex_board(AGE - 1, &STAGED_LIBRARY, |scenario| {
         scenario.add_creature_from_oracle(P1, "Hullbreacher", 3, 2, HULLBREACHER_ORACLE);
     });
     advance_through_upkeep(&mut runner);
-    let prompt = runner.state().waiting_for.clone();
-    let objects_before = runner.state().objects.len();
-    let error = runner
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    let before = ZoneSizes::of(&runner, P0);
+    let result = runner
         .act(GameAction::PayUnlessCost { pay: true })
-        .expect_err("more game-changing instructions than one resolution can perform");
+        .expect("a bounded payment is never refused");
+    assert_eq!(
+        treasures_of(&runner, P1),
+        AGE as usize,
+        "one Treasure per instruction"
+    );
+    assert_eq!(ZoneSizes::of(&runner, P0), before, "P0 draws nothing");
     assert!(
-        matches!(
-            &error,
-            engine::game::engine::EngineError::ActionNotAllowed(reason)
-                if reason.contains("more than 1024 instructions is not representable")
-        ),
-        "{error:?}"
+        upkeep_ability_resolved(&result.events, vortex),
+        "the upkeep is paid"
     );
-    assert_eq!(
-        runner.state().waiting_for,
-        prompt,
-        "the prompt is unchanged"
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ResolutionHalted { .. })),
+        "a bounded payment is not halted"
     );
-    assert_eq!(
-        runner.state().objects.len(),
-        objects_before,
-        "no Treasure was kept"
-    );
-    runner
-        .act(GameAction::PayUnlessCost { pay: false })
-        .expect("declining stays legal");
-    assert_eq!(zone_of(&runner, vortex), Zone::Graveyard);
 }
 
-/// CR 118.11 + CR 616.1: the same refusal is decided at the choice to pay when
-/// a work-performing replacement applies alongside an optional one. With
-/// Hullbreacher and Obstinate Familiar, the first instruction would ask for an
-/// order; the payment is refused before that, so no answer can later be
-/// refused, and the player declines instead.
+/// Laboratory Maniac, verbatim Oracle text.
+const LABORATORY_MANIAC_ORACLE: &str =
+    "If you would draw a card while your library has no cards in it, you win the game instead.";
+
+/// CR 104.1 + CR 702.24a: a mandatory replacement that performs work of its own
+/// is bounded when it ends the game. With 1,025 age counters and an empty
+/// library, paying is admitted and Laboratory Maniac wins the game on the first
+/// instruction.
 #[test]
-fn a_payment_that_could_pass_the_ceiling_is_refused_before_any_choice() {
+fn laboratory_maniac_wins_a_payment_past_a_thousand_instructions() {
     const AGE: u32 = 1_025;
-    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &STAGED_LIBRARY, |scenario| {
-        scenario.add_creature_from_oracle(P1, "Hullbreacher", 3, 2, HULLBREACHER_ORACLE);
-        scenario.add_creature_from_oracle(
-            P0,
-            "Obstinate Familiar",
-            1,
-            1,
-            OBSTINATE_FAMILIAR_ORACLE,
-        );
+    let (mut runner, _vortex, ()) = vortex_board(AGE - 1, &[], |scenario| {
+        scenario.add_creature_from_oracle(P0, "Laboratory Maniac", 2, 2, LABORATORY_MANIAC_ORACLE);
     });
     advance_through_upkeep(&mut runner);
-    let prompt = runner.state().waiting_for.clone();
-    let error = runner
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    runner
         .act(GameAction::PayUnlessCost { pay: true })
-        .expect_err("the payment could change the game past one resolution");
+        .expect("paying is admitted");
     assert!(
         matches!(
-            &error,
-            engine::game::engine::EngineError::ActionNotAllowed(reason)
-                if reason.contains("more than 1024 instructions is not representable")
+            runner.state().waiting_for,
+            WaitingFor::GameOver { winner: Some(winner) } if winner == P0
         ),
-        "{error:?}"
+        "P0 wins instead of drawing: {:?}",
+        runner.state().waiting_for
     );
-    assert_eq!(
-        runner.state().waiting_for,
-        prompt,
-        "no replacement prompt was opened"
-    );
-    runner
-        .act(GameAction::PayUnlessCost { pay: false })
-        .expect("declining stays legal");
-    assert_eq!(zone_of(&runner, vortex), Zone::Graveyard);
 }
 
-/// CR 118.11 + CR 702.52a: a library of more cards than one resolution
-/// performs could feed the instructions after any answer past the ceiling.
-/// Accepting Stinkweed Imp's Dredge on the first draw returns the Imp, and
-/// every later instruction would be a real draw from 1,100 cards; that answer
-/// could never be performed. The payment is refused at the choice instead, so
-/// no answer to it is refused later, and the player declines.
+/// A mandatory replacement of its controller's draw with a gain of 1 life
+/// ("If you would draw a card, you gain 1 life instead"). Synthetic: the nearest printed card is Words of Worship ("The
+/// next time you would draw a card this turn, you gain 5 life instead"), a
+/// one-shot shield; no printed card replaces every draw with life. Each
+/// replaced draw changes the game without growing the board, so a payment of
+/// an enormous count reaches the engine's runaway event ceiling in seconds.
+fn install_every_draw_gains_life(runner: &mut GameRunner, holder: ObjectId) {
+    let replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
+        .draw_scope(DrawReplacementScope::IndividualDraw)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        ));
+    let object = runner
+        .state_mut()
+        .objects
+        .get_mut(&holder)
+        .expect("the replacement's holder exists");
+    Arc::make_mut(&mut object.base_replacement_definitions).push(replacement.clone());
+    object.replacement_definitions.push(replacement);
+}
+
+/// CR 118.12 + CR 702.24a: a count no single dispatch can perform is halted by
+/// the engine's runaway authority, never refused: the instructions performed
+/// stand, the rest are not performed, the payment settles as paid, and
+/// `ResolutionHalted` names Psychic Vortex.
 #[test]
-fn a_payment_a_large_library_could_feed_past_the_ceiling_is_refused_before_any_choice() {
-    const AGE: u32 = 1_025;
-    let names = library_names(1_100);
-    let library: Vec<&str> = names.iter().map(String::as_str).collect();
-    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &library, |scenario| {
+fn an_enormous_payment_that_changes_the_game_on_every_draw_is_halted_not_refused() {
+    const AGE: u32 = 1 << 20;
+    let (mut runner, vortex, holder) = vortex_board(AGE - 1, &STAGED_LIBRARY, |scenario| {
         scenario
-            .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
-            .from_oracle_text(STINKWEED_IMP_ORACLE);
+            .add_creature(P0, "Synthetic Life Source", 1, 1)
+            .id()
     });
+    install_every_draw_gains_life(&mut runner, holder);
     advance_through_upkeep(&mut runner);
-    let prompt = runner.state().waiting_for.clone();
-    let error = runner
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    let life_before = runner.life(P0);
+    let before = ZoneSizes::of(&runner, P0);
+    let result = runner
         .act(GameAction::PayUnlessCost { pay: true })
-        .expect_err("the library could feed the payment past one resolution");
+        .expect("paying is never refused");
     assert!(
-        matches!(
-            &error,
-            engine::game::engine::EngineError::ActionNotAllowed(reason)
-                if reason.contains("more than 1024 instructions is not representable")
-        ),
-        "{error:?}"
+        result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::ResolutionHalted { involved } if involved.contains(&vortex)
+        )),
+        "the runaway is halted and names its source"
+    );
+    let gained = runner.life(P0) - life_before;
+    assert!(
+        gained > 1_000 && (gained as u32) < AGE,
+        "the payment ran until the runaway ceiling, then stopped: {gained}"
     );
     assert_eq!(
-        runner.state().waiting_for,
-        prompt,
-        "no Dredge prompt was opened"
+        ZoneSizes::of(&runner, P0),
+        before,
+        "every draw was replaced"
     );
-    runner
-        .act(GameAction::PayUnlessCost { pay: false })
-        .expect("declining stays legal");
-    assert_eq!(zone_of(&runner, vortex), Zone::Graveyard);
+    assert!(
+        upkeep_ability_resolved(&result.events, vortex),
+        "the upkeep is paid"
+    );
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+    assert!(
+        runner.state().pending_cost_move_resume.is_none(),
+        "nothing is owed"
+    );
 }
 
-/// CR 616.1f + CR 800.4a: a parked skip prompt whose replacement's source has
+/// Humility, verbatim Oracle text.
+const HUMILITY_ORACLE: &str =
+    "All creatures lose all abilities and have base power and toughness 1/1.";
+
+/// Three players: P0's Psychic Vortex at 1,025 age counters with Stinkweed Imp
+/// in P0's graveyard, P1's Hullbreacher muted by P2's Humility. P0 pays, and
+/// the first draw parks on Dredge (the only replacement that applies). P2
+/// concedes, so Humility leaves the game (CR 800.4a) and Hullbreacher applies
+/// again while the payment is parked.
+fn hullbreacher_unmuted_mid_payment() -> (GameRunner, ObjectId, ObjectId) {
+    const AGE: u32 = 1_025;
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::Untap);
+    scenario.with_library_top(P0, &STAGED_LIBRARY);
+    let vortex = scenario
+        .add_enchantment_from_oracle(P0, "Psychic Vortex", PSYCHIC_VORTEX_ORACLE)
+        .id();
+    scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE);
+    let hullbreacher = scenario
+        .add_creature_from_oracle(P1, "Hullbreacher", 3, 2, HULLBREACHER_ORACLE)
+        .id();
+    scenario.add_enchantment_from_oracle(PlayerId(2), "Humility", HUMILITY_ORACLE);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&vortex)
+        .expect("Psychic Vortex exists")
+        .counters
+        .insert(CounterType::Age, AGE - 1);
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("paying is admitted");
+    let pending = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("reach guard: the first draw parks on a replacement choice");
+    assert_eq!(
+        pending.candidates.len(),
+        1,
+        "reach guard: only Dredge applies while Humility mutes Hullbreacher"
+    );
+    engine::game::engine::apply(
+        runner.state_mut(),
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("a player can concede at any time");
+    (runner, vortex, hullbreacher)
+}
+
+/// CR 118.12 + CR 702.24a + CR 800.4a: after the departure, accepting Dredge
+/// replaces the parked draw, and every later instruction is replaced by
+/// Hullbreacher: the payment is performed in full and the upkeep is paid.
+#[test]
+fn accepting_dredge_after_a_departure_unmutes_hullbreacher_completes_the_payment() {
+    let (mut runner, vortex, _) = hullbreacher_unmuted_mid_payment();
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accepting Dredge is never refused");
+    assert_eq!(
+        treasures_of(&runner, P1),
+        1_024,
+        "every later draw is a Treasure"
+    );
+    assert!(
+        upkeep_ability_resolved(&result.events, vortex),
+        "the upkeep is paid"
+    );
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+    assert!(
+        runner.state().pending_cost_move_resume.is_none(),
+        "nothing is owed"
+    );
+}
+
+/// CR 616.1 + CR 702.24a + CR 800.4a: after the same departure, declining
+/// Dredge lets Hullbreacher replace the draw; every later draw again offers
+/// Dredge and Hullbreacher, and choosing Hullbreacher each time pays all 1,025
+/// instructions with no answer refused.
+#[test]
+fn declining_dredge_after_a_departure_unmutes_hullbreacher_completes_the_payment() {
+    let (mut runner, vortex, hullbreacher) = hullbreacher_unmuted_mid_payment();
+    let mut events = runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("declining Dredge is never refused")
+        .events;
+    let mut orders = 0;
+    while let Some(pending) = runner.state().pending_replacement.as_ref() {
+        let index = pending
+            .candidates
+            .iter()
+            .position(|rid| rid.source == hullbreacher)
+            .expect("each later draw offers Hullbreacher");
+        events = runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("choosing Hullbreacher is never refused")
+            .events;
+        orders += 1;
+    }
+    assert_eq!(orders, 1_024, "each later draw asks for an order");
+    assert_eq!(treasures_of(&runner, P1), 1_025, "every draw is a Treasure");
+    assert!(
+        upkeep_ability_resolved(&events, vortex),
+        "the upkeep is paid"
+    );
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+}
+
+/// CR 616.1 + CR 800.4a: a parked skip prompt whose replacement's source has
 /// left is answered by re-proposing the draw: only the effects that would now
 /// apply are considered, so the draw happens, the payment goes on, and no
 /// answer is refused. The source is removed by a sandbox action, which normal

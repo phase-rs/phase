@@ -16708,7 +16708,7 @@ impl GameState {
             return Ok(());
         };
         let probe = crate::game::payment_transaction::hydrated_checkpoint(self, checkpoint);
-        // CR 616.1 + CR 616.1f: a saved replacement prompt is the one the
+        // CR 616.1: a saved replacement prompt is the one the
         // replacement authority builds from its stored candidates, each of
         // which must still apply; a stale candidate, a forged count or a
         // missing owner changes that prompt.
@@ -16733,7 +16733,8 @@ impl GameState {
         }
         if !recovered_prompt_names_live_objects(&probe) {
             return Err(
-                "recovery checkpoint prompt names objects or a count its choice cannot meet"
+                "recovery checkpoint prompt names an object that left its zone or a count it \
+                 cannot meet"
                     .to_string(),
             );
         }
@@ -16923,15 +16924,15 @@ pub enum PersistedRestoreError {
     UnelectedCopyAnnouncer { copy_id: ObjectId },
 }
 
-/// CR 118.12 + CR 701.9a + CR 701.21a: the object-naming prompts a staged
-/// payment can park besides a replacement choice. The list is closed: these
-/// are the prompts the cost authority itself parks while paying a cost
-/// (`costs.rs`: a discard, a `PayCost` selection such as a sacrifice, an
-/// effect-cost zone choice); ward and other unless-payment prompts are never
-/// staged. Each named object must still exist (a discard card in its player's
-/// hand), and a mandatory count must be reachable from the named objects,
-/// before any answer is probed.
-fn recovered_prompt_names_live_objects(probe: &GameState) -> bool {
+/// CR 118.12 + CR 400.7: the object-naming prompts a staged payment parks
+/// besides a replacement choice. The list is closed: these are the prompts the
+/// cost authority parks while paying a cost at resolution (`costs.rs`: a
+/// discard, a `PayCost` selection such as tapping creatures, an effect-cost
+/// zone choice); ward and other unless-payment prompts are never staged. Every
+/// named object must still be in a zone its prompt draws from (an object that
+/// moved is a new object), and the count the prompt's answer handler requires
+/// must be reachable from them, before any answer is probed.
+pub(crate) fn recovered_prompt_names_live_objects(probe: &GameState) -> bool {
     match &probe.waiting_for {
         WaitingFor::DiscardChoice {
             player,
@@ -16939,19 +16940,79 @@ fn recovered_prompt_names_live_objects(probe: &GameState) -> bool {
             cards,
             up_to,
             ..
-        } => {
-            let Some(seat) = probe.players.iter().find(|seat| seat.id == *player) else {
-                return false;
-            };
-            cards.iter().all(|card| seat.hand.contains(card)) && (*up_to || cards.len() >= *count)
-        }
+        } => probe
+            .players
+            .iter()
+            .find(|seat| seat.id == *player)
+            .is_some_and(|seat| {
+                cards.iter().all(|card| seat.hand.contains(card))
+                    && (*up_to || cards.len() >= *count)
+            }),
+        // The handler accepts between `min_count` and `count` choices.
         WaitingFor::PayCost {
-            choices, min_count, ..
-        } => choices.iter().all(|id| probe.objects.contains_key(id)) && choices.len() >= *min_count,
+            kind,
+            choices,
+            min_count,
+            ..
+        } => {
+            let zones = pay_cost_choice_zones(kind);
+            choices
+                .iter()
+                .all(|id| object_is_in_zones(probe, *id, zones))
+                && choices.len() >= *min_count
+        }
+        // The handler requires exactly `count` choices unless the choice is
+        // "up to", which requires `min_count`.
         WaitingFor::EffectZoneChoice {
-            cards, min_count, ..
-        } => cards.iter().all(|id| probe.objects.contains_key(id)) && cards.len() >= *min_count,
+            cards,
+            count,
+            min_count,
+            up_to,
+            zone,
+            ..
+        } => {
+            cards
+                .iter()
+                .all(|id| object_is_in_zones(probe, *id, std::slice::from_ref(zone)))
+                && cards.len() >= if *up_to { *min_count } else { *count }
+        }
         _ => true,
+    }
+}
+
+/// CR 400.7: whether `id` is still an object in one of `zones`.
+fn object_is_in_zones(probe: &GameState, id: ObjectId, zones: &[Zone]) -> bool {
+    probe
+        .objects
+        .get(&id)
+        .is_some_and(|object| zones.contains(&object.zone))
+}
+
+/// The zones a `PayCost` prompt's choices are drawn from, per cost kind.
+fn pay_cost_choice_zones(kind: &PayCostKind) -> &[Zone] {
+    match kind {
+        // CR 701.9a + CR 701.20a: discarded and revealed cards are in hand.
+        PayCostKind::Discard | PayCostKind::Reveal { .. } => &[Zone::Hand],
+        // CR 601.2h: sacrificed, returned, exiled, unattached and tapped
+        // permanents, and permanents counters are removed from, are on the
+        // battlefield.
+        PayCostKind::Sacrifice
+        | PayCostKind::ReturnToHand
+        | PayCostKind::ExilePermanent { .. }
+        | PayCostKind::UnattachFrom { .. }
+        | PayCostKind::RemoveCounter { .. }
+        | PayCostKind::TapCreatures { .. } => &[Zone::Battlefield],
+        // CR 701.4a: a card in hand or a permanent on the battlefield.
+        PayCostKind::Behold { .. } => &[Zone::Hand, Zone::Battlefield],
+        // CR 702.167a: craft materials from the battlefield or the graveyard.
+        PayCostKind::ExileMaterials { .. } => &[Zone::Battlefield, Zone::Graveyard],
+        PayCostKind::ExileFromZone { zone } => match zone {
+            ExileCostSourceZone::Hand => &[Zone::Hand],
+            ExileCostSourceZone::Graveyard => &[Zone::Graveyard],
+        },
+        PayCostKind::ExileFromManaZone { zone } | PayCostKind::ExileAggregate { zone, .. } => {
+            std::slice::from_ref(zone)
+        }
     }
 }
 

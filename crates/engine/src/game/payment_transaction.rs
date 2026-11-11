@@ -41,7 +41,11 @@ enum ReplayOutcome {
         events: Vec<GameEvent>,
         log_entries: Vec<GameLogEntry>,
     },
-    Failed,
+    Failed {
+        /// The life-change failure the shadow recorded before the payment
+        /// failed ([`recorded_failure`]).
+        recorded_failure: Option<PlayerId>,
+    },
 }
 
 fn replay_error(error: EffectError) -> EngineError {
@@ -129,6 +133,7 @@ pub(crate) fn begin(
     // Keep the canonical state byte-for-byte at the pre-payment base.
     if shadow.cost_payment_failed_flag {
         *state = base;
+        record_failure(state, recorded_failure(&shadow));
         state.cost_payment_failed_flag = true;
         // No shadow was committed, so the ordinary chain walker must still
         // descend into the printed abort/independent continuation. A success
@@ -169,12 +174,34 @@ pub(crate) fn begin(
         recovered: None,
     };
     *state = base;
+    record_failure(state, recorded_failure(&shadow));
     state.payment_transaction = Some(Box::new(transaction));
     state.waiting_for = shadow.waiting_for;
     state.cost_payment_failed_flag = false;
     state.payment_transaction_replay = false;
     state.payment_transaction_just_handled = true;
     Ok(())
+}
+
+/// The life, player-counter or energy change a payment shadow could not
+/// represent in this action, if it recorded one.
+fn recorded_failure(shadow: &GameState) -> Option<PlayerId> {
+    shadow
+        .ingress_life_window
+        .and_then(|window| window.failed_player)
+}
+
+/// Record `failure` in `state`'s open ingress window, where the action boundary
+/// rejects it (a concession instead retires the payment). Every outcome of a
+/// payment shadow carries what it recorded: completed, paused or failed, the
+/// shadow's own state is discarded or replaces the live one, and a failure
+/// recorded in it must not be discarded with it. Outside an action boundary
+/// there is no window and the change keeps its compatibility skip.
+fn record_failure(state: &mut GameState, failure: Option<PlayerId>) {
+    let (Some(player), Some(window)) = (failure, state.ingress_life_window.as_mut()) else {
+        return;
+    };
+    window.failed_player.get_or_insert(player);
 }
 
 fn replay(
@@ -230,7 +257,9 @@ fn replay(
             shadow.payment_transaction_replay = true;
 
             if shadow.cost_payment_failed_flag {
-                return Ok(ReplayOutcome::Failed);
+                return Ok(ReplayOutcome::Failed {
+                    recorded_failure: recorded_failure(&shadow),
+                });
             }
 
             if !transaction.transcript.is_empty() {
@@ -245,6 +274,10 @@ fn replay(
             (shadow, buffered, Vec::new(), 0usize)
         };
     shadow.payment_transaction_replay = true;
+    // Each transcript answer runs in an action boundary of its own, whose
+    // transient cleanup closes the window the prefix recorded in; a failure the
+    // prefix recorded is carried past them.
+    let prefix_failure = recorded_failure(&shadow);
 
     for entry in transaction.transcript.iter().skip(consumed) {
         restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
@@ -257,13 +290,22 @@ fn replay(
         buffered_events.extend(result.events);
         buffered_log_entries.extend(result.log_entries);
         if shadow.cost_payment_failed_flag {
-            return Ok(ReplayOutcome::Failed);
+            return Ok(ReplayOutcome::Failed {
+                recorded_failure: prefix_failure,
+            });
         }
         shadow.payment_transaction_replay = true;
         restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
     }
 
     shadow.payment_transaction_replay = false;
+    if let Some(player) = prefix_failure {
+        shadow
+            .ingress_life_window
+            .get_or_insert_with(Default::default)
+            .failed_player
+            .get_or_insert(player);
+    }
 
     if returned_to_base_waiting(&shadow, &transaction.base_waiting_for) {
         Ok(ReplayOutcome::Completed {
@@ -392,7 +434,8 @@ fn settle_replay_outcome(
     outcome: ReplayOutcome,
 ) -> Result<ActionResult, EngineError> {
     match outcome {
-        ReplayOutcome::Failed => {
+        ReplayOutcome::Failed { recorded_failure } => {
+            record_failure(state, recorded_failure);
             let mut restored = state.clone();
             restored.payment_transaction = None;
             restored.payment_transaction_replay = false;
@@ -421,6 +464,7 @@ fn settle_replay_outcome(
             log_entries,
         } => {
             let waiting_for = shadow.waiting_for.clone();
+            let shadow_failure = recorded_failure(&shadow);
             let mut transaction = transaction;
             if transaction.recovered.is_some() {
                 transaction.recovered = Some(Box::new(PaymentRecoveryCheckpoint {
@@ -437,6 +481,7 @@ fn settle_replay_outcome(
             projected.payment_transaction_replay = false;
             projected.payment_transaction_just_handled = false;
             *state = projected;
+            record_failure(state, shadow_failure);
             Ok(ActionResult::applied(Vec::new(), waiting_for))
         }
         ReplayOutcome::Completed {
@@ -577,15 +622,10 @@ fn settle_accepted_prefix_after_departure(
     let mut mirrored = Vec::new();
     crate::game::elimination::concede(&mut shadow, departing, &mut mirrored);
     restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
-    if let Err(error) =
-        resettle_parked_replacement_after_departure(&mut shadow, &mut events, &mut log_entries)
-    {
-        tracing::debug!(
-            ?error,
-            "a staged payment's parked draw no longer settles after an outside action"
-        );
-        return Ok(None);
-    }
+    // A parked prompt that no longer settles on the departed prefix is a failed
+    // recovery, as on the checkpoint branch: the caller's failed-recovery
+    // boundary retires the payment instead of replaying on the changed base.
+    resettle_parked_replacement_after_departure(&mut shadow, &mut events, &mut log_entries)?;
     shadow.payment_transaction_replay = false;
     settle_recovered_outcome(state, transaction.clone(), shadow, events, log_entries).map(Some)
 }
@@ -749,6 +789,23 @@ pub(crate) fn retire_terminal_transaction(state: &mut GameState) {
     }
 }
 
+/// CR 104.3a + CR 800.4a + CR 400.7: whether the live recovery checkpoint, if
+/// any, can still execute after a departure: its seats are the canonical
+/// seats ([`checkpoint_seats_match`]) and its parked prompt names no object
+/// that left its zone (a departing owner's objects leave the game). The
+/// concession boundary keeps a recovery only when this holds; checked restore
+/// enforces the same two checks.
+pub(crate) fn checkpoint_describes_board(state: &GameState) -> bool {
+    checkpoint_seats_match(state)
+        && state
+            .payment_transaction
+            .as_deref()
+            .and_then(|transaction| transaction.recovered.as_deref())
+            .is_none_or(|checkpoint| {
+                crate::types::game_state::recovered_prompt_names_live_objects(&checkpoint.state)
+            })
+}
+
 /// CR 104.3a + CR 800.4a: whether the live recovery checkpoint, if any,
 /// describes the canonical seats: the same players with the same departures.
 /// A checkpoint taken before a departure cannot execute on the board after
@@ -832,7 +889,7 @@ fn hydrate_runtime_authorities(shadow: &mut GameState, live: &GameState) {
     });
 }
 
-/// CR 614.17c + CR 616.1f + CR 800.4a: settle a parked replacement prompt the
+/// CR 614.17c + CR 616.1 + CR 800.4a: settle a parked replacement prompt the
 /// departure just changed, so the checkpoint never stores a prompt the game
 /// would no longer offer. A draw that can no longer happen settles as the
 /// no-replacement outcome — the draw is clamped and its payment resumes — for
@@ -920,7 +977,7 @@ pub(crate) fn project(state: &GameState) -> GameState {
             shadow.payment_transaction_just_handled = false;
             shadow
         }
-        Ok(ReplayOutcome::Failed) | Err(_) => {
+        Ok(ReplayOutcome::Failed { .. }) | Err(_) => {
             let mut base = state.clone();
             base.payment_transaction = None;
             base.payment_transaction_replay = false;

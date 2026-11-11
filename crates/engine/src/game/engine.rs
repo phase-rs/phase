@@ -11502,14 +11502,8 @@ fn run_auto_pass_loop(
     state: &mut GameState,
     result: &mut ActionResult,
 ) -> Result<bool, EngineError> {
-    // Per-dispatch resource ceilings for a runaway mandatory cascade.
-    // Sized above the largest legitimate single-dispatch burst (a Scute Swarm
-    // landfall copies every Scute in one resolution — tested boards reach ~2,936
-    // permanents) yet far below the WASM linear-memory exhaustion threshold
-    // (hundreds of thousands of objects). The iteration cap below is the
-    // sustained-growth backstop; these deltas catch heavy-per-iteration loops.
-    const MAX_EVENT_GROWTH: usize = 50_000;
-    const MAX_OBJECT_GROWTH: usize = 16_000;
+    // The iteration cap below is the sustained-growth backstop; the shared
+    // growth ceilings (`runaway_growth_exceeded`) catch heavy-per-iteration loops.
     let events_baseline = result.events.len();
     let objects_baseline = state.objects.len();
 
@@ -11618,10 +11612,10 @@ fn run_auto_pass_loop(
                         // A mandatory cascade growing the board or
                         // event stream past the resource ceiling cannot settle —
                         // halt gracefully rather than exhaust WASM memory.
-                        if result.events.len().saturating_sub(events_baseline) > MAX_EVENT_GROWTH
-                            || state.objects.len().saturating_sub(objects_baseline)
-                                > MAX_OBJECT_GROWTH
-                        {
+                        if runaway_growth_exceeded(
+                            result.events.len().saturating_sub(events_baseline),
+                            state.objects.len().saturating_sub(objects_baseline),
+                        ) {
                             emit_resolution_halt(state, result);
                             return Ok(advanced);
                         }
@@ -11862,6 +11856,22 @@ pub(crate) fn resume_auto_pass_after_resolve_all(
             )
         }
     }
+}
+
+/// Per-dispatch resource ceilings for runaway mandatory work. Sized above the
+/// largest legitimate single-dispatch burst (a Scute Swarm landfall copies every
+/// Scute in one resolution — tested boards reach ~2,936 permanents) yet far
+/// below the WASM linear-memory exhaustion threshold (hundreds of thousands of
+/// objects).
+const MAX_EVENT_GROWTH: usize = 50_000;
+const MAX_OBJECT_GROWTH: usize = 16_000;
+
+/// The engine's one runaway authority: whether work done in one dispatch grew
+/// the event stream or the board past what the engine settles in a dispatch.
+/// The auto-pass drive checks it between resolutions; work that runs inside a
+/// single resolution (a repeated payment) checks it between its own steps.
+pub(crate) fn runaway_growth_exceeded(events_grown: usize, objects_grown: usize) -> bool {
+    events_grown > MAX_EVENT_GROWTH || objects_grown > MAX_OBJECT_GROWTH
 }
 
 /// CR 732.2: settle a runaway mandatory cascade gracefully. Pauses resolution,
@@ -12886,8 +12896,9 @@ fn apply_action(
         // the base the departure changed (`settle_after_outside_action`). CR
         // 104.3a: the departure itself must survive a fallible payment recovery,
         // so a recovery that fails, records an unrepresentable life change, or
-        // would leave a checkpoint that does not include the departure returns
-        // to the departure and retires the payment.
+        // would leave a checkpoint that does not describe the departed board
+        // (its seats, or a parked prompt naming an object that left) returns to
+        // the departure and retires the payment.
         let departed = pre_action.as_ref().map(|_| state.clone());
         let settled = match payment_transaction::settle_after_outside_action(
             state,
@@ -12896,7 +12907,7 @@ fn apply_action(
         ) {
             Ok(settled)
                 if boundary_life_change_failure(state).is_none()
-                    && payment_transaction::checkpoint_seats_match(state) =>
+                    && payment_transaction::checkpoint_describes_board(state) =>
             {
                 settled
             }
