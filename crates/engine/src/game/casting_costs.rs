@@ -3190,6 +3190,36 @@ fn selected_battlefield_departures<'a>(
     group
 }
 
+/// CR 406.6: Whether this cost move's own zone-pipeline request records the
+/// "exiled with" link at delivery. Only the delve exile does (it is the casting
+/// spell's own cost); every other cost move records its per-turn link through
+/// [`record_untracked_cost_exile`], so each delivered object has exactly one
+/// link authority.
+fn cost_move_tracks_exile_by_source(completion: &PendingCostMoveCompletion) -> bool {
+    matches!(
+        completion,
+        PendingCostMoveCompletion::FinalizeDelvedCast { .. }
+    )
+}
+
+/// CR 406.6: Index a delivered cost object in the "exiled with [source] this
+/// turn" relation unless the move's request already tracked it.
+///
+/// Keyed on the object's LIVE zone (`costs::record_delivered_cost_exile`
+/// self-guards), never the requested destination: a Hand request that a `Moved`
+/// replacement redirects to exile must still link, and gating on the request
+/// could only drop a correct link.
+fn record_untracked_cost_exile(
+    state: &mut GameState,
+    completion: &PendingCostMoveCompletion,
+    object_id: ObjectId,
+    source_id: ObjectId,
+) {
+    if !cost_move_tracks_exile_by_source(completion) {
+        super::costs::record_delivered_cost_exile(state, object_id, source_id);
+    }
+}
+
 /// CR 601.2h + CR 616.1: Move `chosen[start_at_index..]` through the zone pipeline as
 /// cost moves. A move that parks for a replacement choice leaves the typed `Cast` root
 /// holding `pending`, `completion` and the departure `ledger`, parks the span's
@@ -3205,6 +3235,9 @@ fn move_cost_objects(
     start_at_index: usize,
     destination: Zone,
     completion: &PendingCostMoveCompletion,
+    // CR 118.11: the count this cost called for, carried across every pause so
+    // the completion can publish it. `None` for cost shapes that owe no count.
+    requested_cost_count: Option<u32>,
     cost_event_start: usize,
     ledger: &mut CostMoveLedger,
     events: &mut Vec<GameEvent>,
@@ -3213,14 +3246,13 @@ fn move_cost_objects(
         let mut request = ZoneMoveRequest::cost(object_id, destination, pending.object_id);
         // CR 406.6: the delve exile is the casting spell's own cost, so a delivered
         // card is linked to that spell.
-        if matches!(
-            completion,
-            PendingCostMoveCompletion::FinalizeDelvedCast { .. }
-        ) {
+        if cost_move_tracks_exile_by_source(completion) {
             request = request.track_exiled_by_source();
         }
         match zone_pipeline::move_object(state, request, events) {
-            ZoneMoveResult::Done => {}
+            ZoneMoveResult::Done => {
+                record_untracked_cost_exile(state, completion, object_id, pending.object_id);
+            }
             ZoneMoveResult::NeedsChoice(choice_player) => {
                 // CR 603.10a: the departures so far, and (while a group can still
                 // form) their events, travel with the root so terminal completion
@@ -3234,6 +3266,10 @@ fn move_cost_objects(
                     paused_at_index: index,
                     destination,
                     completion: completion.clone(),
+                    // CR 118.11: a multi-object cost (Whirling Catapult exiles two)
+                    // can pause a SECOND time here. Carry the owed count forward, or
+                    // it resets and the completion publishes nothing.
+                    requested_cost_count,
                     deferred_cost_events: std::mem::take(&mut ledger.deferred_cost_events),
                     departure_record_indices: std::mem::take(&mut ledger.departure_record_indices),
                 });
@@ -3271,6 +3307,9 @@ fn finish_cost_object_moves(
     start_at_index: usize,
     destination: Zone,
     completion: PendingCostMoveCompletion,
+    // CR 118.11: the count this cost called for, carried across every pause so
+    // the completion can publish it. `None` for cost shapes that owe no count.
+    requested_cost_count: Option<u32>,
     cost_event_start: usize,
     park_events_after_completion: bool,
     mut ledger: CostMoveLedger,
@@ -3284,6 +3323,7 @@ fn finish_cost_object_moves(
         start_at_index,
         destination,
         &completion,
+        requested_cost_count,
         cost_event_start,
         &mut ledger,
         events,
@@ -3334,6 +3374,18 @@ fn finish_cost_object_moves(
         &chosen,
         CostMoveOutcome::Relocation,
     );
+
+    // CR 118.11: "The actions performed when paying a cost may be modified by
+    // effects. Even if they are ... the cost has still been paid." The paid count
+    // is therefore the count the cost CALLED FOR, not how many objects a
+    // replacement let arrive. An unpaused payment publishes this inline in
+    // `costs::pay_ability_cost_inner`; a payment that paused returns before that
+    // write, so it publishes here — the first point at which the paused object and
+    // every remaining leg have settled. A cost owing no count leaves the value
+    // untouched.
+    if let Some(requested) = requested_cost_count {
+        state.last_effect_count = Some(requested as i32);
+    }
 
     let waiting_for = match completion {
         PendingCostMoveCompletion::FinishPending => {
@@ -3515,6 +3567,7 @@ fn finish_selected_return_to_hand_after_automatic(
         0,
         Zone::Hand,
         PendingCostMoveCompletion::FinishPending,
+        None,
         cost_event_start,
         park_events_after_completion,
         CostMoveLedger::default(),
@@ -3582,6 +3635,7 @@ pub(crate) fn resume_interrupted_cost_payment(
             paused_at_index,
             destination,
             completion,
+            requested_cost_count,
             deferred_cost_events,
             departure_record_indices,
         }) = state.pending_cost_move_resume.take()
@@ -3593,6 +3647,18 @@ pub(crate) fn resume_interrupted_cost_payment(
                 player: state.active_player,
             });
         };
+        // CR 406.6: the paused item settled during the replacement choice, and the
+        // loop below resumes at `paused_at_index + 1` — so nothing else records it.
+        // A one-card deterministic library-exile cost (Thought Lash, Phyrexian
+        // Devourer) that pauses and ends in exile would otherwise lose its
+        // "exiled with [source] this turn" link entirely.
+        //
+        // Unconditional for the same reason as the delivery site above: the
+        // recorder self-guards on the live zone, so keying on the requested
+        // destination can only drop correct links.
+        if let Some(&paused_object) = chosen.get(paused_at_index) {
+            record_untracked_cost_exile(state, &completion, paused_object, pending.object_id);
+        }
         return finish_cost_object_moves(
             state,
             player,
@@ -3601,6 +3667,7 @@ pub(crate) fn resume_interrupted_cost_payment(
             paused_at_index + 1,
             destination,
             completion,
+            requested_cost_count,
             replacement_action_cost_event_start.unwrap_or(events.len()),
             true,
             CostMoveLedger {
@@ -4213,6 +4280,7 @@ fn pay_delve_at_commit(
         0,
         Zone::Exile,
         &completion,
+        None,
         events.len(),
         &mut CostMoveLedger::default(),
         events,
@@ -5488,6 +5556,7 @@ pub(crate) fn handle_return_to_hand_for_cost(
         0,
         Zone::Hand,
         PendingCostMoveCompletion::FinishPending,
+        None,
         cost_event_start,
         false,
         CostMoveLedger::default(),
@@ -6242,6 +6311,7 @@ pub(crate) fn handle_behold_for_cost(
             0,
             Zone::Exile,
             PendingCostMoveCompletion::FinishPending,
+            None,
             cost_event_start,
             false,
             CostMoveLedger::default(),
@@ -6534,6 +6604,7 @@ fn finish_exile_selection_for_cost(
         0,
         Zone::Exile,
         PendingCostMoveCompletion::FinishPending,
+        None,
         cost_event_start,
         false,
         CostMoveLedger::default(),
@@ -6621,6 +6692,7 @@ pub(crate) fn handle_exile_aggregate_for_cost(
         0,
         Zone::Exile,
         PendingCostMoveCompletion::PublishExileTrackedSet,
+        None,
         cost_event_start,
         false,
         CostMoveLedger::default(),
@@ -7216,6 +7288,7 @@ fn surface_next_interactive_activation_cost_leg(
             ));
         }
         let mut pending = pending.clone();
+        let ability_index = pending.activation_ability_index;
         pending.activation_cost = remove_first_activation_cost_matching(
             pending
                 .activation_cost
@@ -7223,6 +7296,93 @@ fn surface_next_interactive_activation_cost_leg(
                 .expect("checked activation cost is present"),
             |cost| matches!(cost, AbilityCost::ExileWithAggregate { .. }),
         );
+        // CR 601.2h + CR 602.2b: "First, they pay all costs that don't involve
+        // random elements or moving objects from the library to a public zone,
+        // in any order. Then they pay all remaining costs in any order."
+        //
+        // This scheduler runs BEFORE the deterministic payment authority, so
+        // without this block a library-to-public aggregate exile is offered —
+        // and its cards moved — while tier-1 legs (tap, mana) are still unpaid.
+        // The later generic `ExileWithAggregate` payment arm is deliberately a
+        // no-op once this probe has stripped the leg, so it cannot repair the
+        // order afterwards. Settle the tier-1 remainder through the SAME
+        // authority the deterministic path uses (`is_library_to_public_zone_cost`
+        // is shared with the leaf partition in `costs.rs`), then surface the
+        // tier-2 prompt with nothing left to pay on resume.
+        //
+        // CR 400.2 scopes this: graveyard/battlefield/exile are public, so a
+        // GRAVEYARD aggregate is public->public, stays tier 1, and is untouched
+        // here — Baron Helmut Zemo's Boast keeps its current scheduling.
+        let aggregate_leg = AbilityCost::ExileWithAggregate {
+            filter: filter.clone(),
+            function,
+            property,
+            comparator,
+            value,
+            zone,
+        };
+        if super::costs::is_library_to_public_zone_cost(&aggregate_leg) {
+            if let Some(tier_one) = pending.activation_cost.take() {
+                // CR 601.2f + CR 601.2h: the total cost is locked before any of
+                // it is paid; an `Open` carrier is refused with no side effect.
+                super::casting::require_locked_activation_cost(
+                    pending.activation_cost_snapshot.as_deref(),
+                    super::casting::ActivationCostGuardSite::LibraryAggregateTierOne,
+                )?;
+                match super::costs::pay_ability_cost_for_activation(
+                    state,
+                    player,
+                    source_id,
+                    &tier_one,
+                    ability_index,
+                    &mut pending.ability.context.cost_removed_counter_amount,
+                    events,
+                )? {
+                    super::casting::PaymentOutcome::Paid => {}
+                    // CR 614.6 + CR 616.1: a replacement interrupted the tier-1
+                    // payment and owns the next interactive step, so hand the
+                    // pause back as the action's wait and let the cost-move
+                    // continuation resume the activation.
+                    //
+                    // CR 601.2h: "Partial payments are not allowed." The
+                    // aggregate leg was stripped above for the prompt this pause
+                    // pre-empts, so it goes back onto the residual AFTER the
+                    // unpaid tier-1 suffix. The continuation finishes through
+                    // the payment boundary, whose remaining-cost dispatch
+                    // re-enters this scheduler: the rest of tier 1 settles
+                    // first, then this leg's `ExileAggregate` prompt is surfaced
+                    // before the ability can reach the stack.
+                    //
+                    // Returning `Ok(None)` here would be wrong: the no-target
+                    // caller (`casting.rs`) ignores `state.pending_cast` after a
+                    // `None` and proceeds with its OWN local `PendingCast`, so
+                    // the paused remainder would be dropped. This mirrors the
+                    // established paused-activation handling in this file.
+                    super::casting::PaymentOutcome::Paused { remaining_cost } => {
+                        pending.activation_cost = super::costs::combine_remaining_costs(
+                            remaining_cost,
+                            std::slice::from_ref(&aggregate_leg),
+                        );
+                        if let Some(pending) =
+                            attach_pending_cast_to_cost_move(state, Box::new(pending))
+                        {
+                            state.pending_cast = Some(pending);
+                        }
+                        return Ok(Some(state.waiting_for.clone()));
+                    }
+                    // `pay_ability_cost_for_activation` maps `Failed` to
+                    // `Err(ActionNotAllowed)` before returning, so this arm is
+                    // unreachable; keep it explicit rather than wildcarding so a
+                    // future outcome variant forces a decision here.
+                    super::casting::PaymentOutcome::Failed { reason } => {
+                        return Err(EngineError::ActionNotAllowed(reason.reason));
+                    }
+                }
+                // Paid exactly once: `take()` above already emptied the resume
+                // payload, so answering the prompt cannot pay these legs again.
+                pending.mark_activation_cost_committed();
+            }
+        }
         return Ok(Some(WaitingFor::PayCost {
             player,
             kind: PayCostKind::ExileAggregate {
@@ -8158,6 +8318,21 @@ pub(super) fn push_activated_ability_to_stack(
             &mut resolved,
             cost,
         );
+        // CR 608.2k + CR 608.2h: a targetful activation reaches its payment through
+        // this seam rather than the direct path, so it needs the SAME cost-paid
+        // bindings that path applies -- both of them, not just self-discard.
+        // Without this, an activation whose deterministic top-of-library exile cost
+        // is later referred to by its own effect ("the exiled card") has no
+        // pre-move referent at all, because the binding must be captured before the
+        // payment moves the card. Self-gating: `top_library_exile_cost_count`
+        // yields `None` for any cost with no `Zone::Library` exile leg (recursing
+        // into `Composite`), so this is a no-op for every other cost shape.
+        let top_library_exile_cost_ids = super::casting::stamp_top_library_exile_cost_paid_object(
+            state,
+            player,
+            &mut resolved,
+            cost,
+        );
         if should_record_loyalty
             && !super::planeswalker::can_activate_loyalty_ability(
                 state,
@@ -8207,6 +8382,11 @@ pub(super) fn push_activated_ability_to_stack(
             super::planeswalker::record_loyalty_activation(state, source_id, player);
             pending_loyalty_activation_player = None;
         }
+        resolved.settle_cost_paid_provenance_recursive(
+            state,
+            &top_library_exile_cost_ids,
+            CostMoveOutcome::Relocation,
+        );
     }
 
     // CR 702.170b: Plot is a special action that never uses the stack. Its
@@ -13890,6 +14070,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
                 resolution_success_waiting_for: resolution_success_waiting_for.map(Box::new),
                 prepaid_actual_mana_spent,
             },
+            None,
             cost_event_start,
             false,
             CostMoveLedger::default(),
@@ -15134,6 +15315,7 @@ fn spell_graveyard_replacement_def(
 /// body for the exile and hand graveyard-replacement riders.
 fn self_ref_change_zone(destination: Zone) -> Effect {
     Effect::ChangeZone {
+        library_shuffle: Default::default(),
         destination,
         origin: None,
         target: TargetFilter::SelfRef,
@@ -20419,6 +20601,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             destination: Zone::Exile,
                             origin: None,
                             target: TargetFilter::Any,

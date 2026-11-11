@@ -40,6 +40,7 @@ fn enter_via_change_zone(runner_state: &mut engine::types::game_state::GameState
             destination: Zone::Battlefield,
             target: TargetFilter::SpecificObject { id: card },
             owner_library: false,
+            library_shuffle: Default::default(),
             enter_transformed: false,
             enters_under: None,
             enter_tapped: engine::types::zones::EtbTapState::Unspecified,

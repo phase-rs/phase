@@ -483,36 +483,7 @@ pub(crate) fn eliminate_players(
                 crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
             );
         }
-        // Terminal: drop trigger scaffolding the client would otherwise show as
-        // a stuck stack / ordering prompt.
-        let mut terminal_firings = state
-            .pending_trigger_order
-            .take()
-            .into_iter()
-            .flat_map(|order| order.groups)
-            .flat_map(|group| group.triggers)
-            .map(|context| context.firing())
-            .collect::<Vec<_>>();
-        terminal_firings.extend(
-            std::mem::take(&mut state.deferred_triggers)
-                .into_iter()
-                .map(|context| context.firing()),
-        );
-        terminal_firings.extend(state.pending_trigger_firing.take());
-        crate::game::triggers::release_pending_trigger_construction(state);
-        // CR 117.3c: The construction priority recipient is scheduling state for
-        // a batch that no longer exists. Leaving it installed would durably
-        // serialize a departed player into a terminal `GameOver` snapshot — the
-        // exact leak the surrounding comment already calls out for the reused
-        // singleton engine. The terminal arm needs no re-point, because there is
-        // no later construction to route.
-        state.pending_trigger_construction_priority_recipient = None;
-        for firing in terminal_firings {
-            crate::game::lifecycle::record_delayed_terminal(
-                firing,
-                crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
-            );
-        }
+        retire_finished_game_triggers(state);
         // CR 104.1: the game is over; no owner arrangement is owed to a finished game.
         state.pending_mass_library_order_choice = None;
         // CR 104.1: the game is over; no player-scope sacrifice is owed to a finished game.
@@ -2198,6 +2169,152 @@ pub(super) fn end_game(
 /// (restored from [`GameState::game_end`] without a second `GameEvent::GameOver`).
 pub(super) fn ensure_game_over_if_terminal(state: &mut GameState, events: &mut Vec<GameEvent>) {
     check_game_over(state, events);
+}
+
+/// CR 104.1 + CR 117.2e: while a resolution's carrier is installed no player has priority, so
+/// everything parked outside the resolution stack at that moment was, by rule, started by that
+/// resolution: its own instructions and payments (CR 608.2c), a spell it instructed a player to
+/// cast (CR 608.2g) with that cast's cost roots, payment prompt and reversal record, mana abilities
+/// activated while paying (CR 605.3a) and the triggered mana abilities they raised (CR 605.4a), the
+/// CR 616.1 replacement choices any of those moves raised, and the sessions it opened (a library
+/// search, CR 701.23a; a private look, CR 701.20e; a reveal, CR 701.20a). None of it is resumed in
+/// a finished game, so it is dropped with the resolution. Nothing is settled, published or
+/// reversed: the completed part of a paused cost already happened, the abilities it triggered would
+/// only be put on the stack the next time a player would receive priority (CR 603.3), which a
+/// finished game never reaches, and nothing moves (an instructed spell's announcement stays on the
+/// stack with its card where it was, as every other spell of a finished game stays where it is).
+/// Where the engine keeps a provisional priority window under a live carrier (a departure from
+/// CR 502.4 / CR 514.3, or a Resolve All session), a root a player opened from that window is
+/// dropped too: CR 104.1 owes it nothing either.
+///
+/// Without a carrier there is no resolution to own the parked work: a carrier-less frame
+/// (a triggered mana ability, CR 605.4a; a beginning-of-game action, CR 103.6) belongs to the
+/// process around it, so nothing is dropped here.
+fn retire_parked_resolution_work(state: &mut GameState) {
+    if state.resolving_stack_entry.is_none() {
+        return;
+    }
+    state.pending_cast = None;
+    state.pending_cost_move_resume = None;
+    state.pending_deferred_life_cost_resume = None;
+    state.pending_discard_for_cost = None;
+    state.pending_triggered_mana_resume = None;
+    state.spell_cast_reversal = None;
+    state.pending_replacement = None;
+    state.replacement_may_cost_paused = false;
+    super::replacement::abandon_post_replacement_continuation(state);
+    state.pending_liminal_entry_resume = None;
+    // CR 104.1 + CR 614.12a: abandon the uncommitted projections and their
+    // remaining batches; already-entered objects stay in their actual zones.
+    state.liminal_entries.clear();
+    state.payment_transaction = None;
+    state.payment_transaction_replay = false;
+    state.payment_transaction_just_handled = false;
+    state.pending_player_scope_unless_payment = None;
+    state.pending_player_scope_sacrifice_choice = None;
+    state.pending_mass_library_order_choice = None;
+    state.pending_discard_batch = None;
+    state.pending_single_discard = None;
+    state.pending_damage_post_loss = None;
+    state.pending_exile_from_top_until = None;
+    state.pending_scoped_library_search = None;
+    state.pending_library_search_delivery = None;
+    state.pending_search_found_batch = None;
+    state.pending_die_roll_instruction = None;
+    state.pending_resolution_completion = None;
+    state.entering_aura_authority = None;
+    // The sessions the resolution opened end with it: a library search and the
+    // control of its decision (CR 701.23a), a private look (CR 701.20e), and a
+    // reveal (CR 701.20a). Static reveals are re-derived on the next derive pass.
+    state.active_library_searches = Default::default();
+    state.active_search_decision_controls = Default::default();
+    state.private_look_ids.clear();
+    state.private_look_player = None;
+    state.revealed_cards.clear();
+}
+
+/// CR 104.1 + CR 603.3: a finished game never gives priority to publish queued
+/// triggers. Retire their existing firing identities through the same authority
+/// whether the game ended through elimination or during a resolution.
+fn retire_finished_game_triggers(state: &mut GameState) {
+    // Terminal: drop trigger scaffolding the client would otherwise show as
+    // a stuck stack / ordering prompt.
+    let mut terminal_firings = state
+        .pending_trigger_order
+        .take()
+        .into_iter()
+        .flat_map(|order| order.groups)
+        .flat_map(|group| group.triggers)
+        .map(|context| context.firing())
+        .collect::<Vec<_>>();
+    terminal_firings.extend(
+        std::mem::take(&mut state.deferred_triggers)
+            .into_iter()
+            .map(|context| context.firing()),
+    );
+    terminal_firings.extend(state.pending_trigger_firing.take());
+    crate::game::triggers::release_pending_trigger_construction(state);
+    // CR 117.3c: The construction priority recipient is scheduling state for
+    // a batch that no longer exists. Leaving it installed would durably
+    // serialize a departed player into a terminal `GameOver` snapshot — the
+    // terminal snapshot. No re-point is needed: there is no later construction
+    // to route.
+    state.pending_trigger_construction_priority_recipient = None;
+    for firing in terminal_firings {
+        crate::game::lifecycle::record_delayed_terminal(
+            firing,
+            crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+        );
+    }
+}
+
+/// CR 104.1: a game ends immediately, so a resolution still under way when it ended —
+/// paused on a player's choice (a "you may", a cipher offer, a keep choice ...) — owes
+/// nothing more: every frame it parked and its carrier are retired, the carrier with the
+/// `Eliminated` disposition the game-over arm of `eliminate_players` gives the rest of a
+/// finished game's scaffolding (CR 104.1: the CR 608.2n final part a spell still owes is not
+/// performed either). Work the resolution parked outside the stack
+/// (`retire_parked_resolution_work`) goes first, then its frames, then its carrier.
+///
+/// Called only at the action boundary (`engine::settle_finished_game`, which every boundary
+/// that reconciles a terminal result reaches), after every resolver has unwound. `end_game`
+/// is not the place: a resolution reaches it mid-chain (CR 104.3e / CR 104.2b effects, the
+/// CR 104.4b draw inside a repeat) while its caller still owns its frames, and the same chain
+/// can park a further prompt after it. `game_end` is the authority, not `waiting_for`: a
+/// best-of-three match may already have replaced `GameOver` with its sideboarding prompt.
+pub(super) fn retire_finished_game_resolution(state: &mut GameState) {
+    if state.game_end.is_none() {
+        return;
+    }
+    // A resolving spell may already have completed its final part. Its queued
+    // triggers still belong to the ended game even after that carrier is gone.
+    retire_finished_game_triggers(state);
+    // CR 104.1: no later priority window can present queued miracle reveals,
+    // remaining paradigm offers, or Gotcha offers, even without a live carrier.
+    state.pending_miracle_offers.clear();
+    state.pending_paradigm_remaining_offers = None;
+    state.un_actions.pending_offers.clear();
+    state.un_actions.gotcha_offers.clear();
+    let resolution_live =
+        state.resolving_stack_entry.is_some() || !state.resolution_stack.is_empty();
+    if !resolution_live {
+        return;
+    }
+    // The parked work goes with its carrier: a parked frame can name a return-result
+    // occurrence that the carrier's retirement clears, so neither may outlive the other.
+    retire_parked_resolution_work(state);
+    // Frames first, so the carrier abandonment below finds no continuation left to clear
+    // instead of a direct-choice frame it cannot address.
+    state.resolution_stack.abandon_all_frames();
+    crate::game::stack::abandon_active_resolution_carrier(
+        state,
+        crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+    );
+    // CR 104.1: the abandonment keeps an owed spell's carrier; a finished game retires it too.
+    crate::game::stack::finish_resolving_stack_entry(
+        state,
+        crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+    );
 }
 
 #[cfg(test)]
