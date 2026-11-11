@@ -4973,10 +4973,10 @@ pub(crate) fn loop_states_cover_modulo_object_growth(
     bump_loop_detect_cost(|cost| cost.compares_cover_modulo_object_growth += 1);
     // Flush BOTH clones once, up front, then project out the monotone
     // resources for the board/GameState equality axes.
-    let pf = flush_clone(prior);
-    let cf = flush_clone(current);
+    let mut pf = flush_clone(prior);
+    let mut cf = flush_clone(current);
     // CR 603.7c: the stack is set aside below, so a fired carrier's pin is judged here.
-    if stack_holds_stale_target_pin(&pf) || stack_holds_stale_target_pin(&cf) {
+    if stack_holds_superseded_pin(&mut pf) || stack_holds_superseded_pin(&mut cf) {
         return false;
     }
     let mut pa = project_out_resources(&pf);
@@ -5437,32 +5437,29 @@ pub(crate) fn loop_states_cover_modulo_fodder_growth(
         .is_empty()
 }
 
-/// CR 603.7c + CR 400.7: whether a stack entry's ability chain holds a keyed or positional
-/// target pin that no longer names the live object ("if that object left that zone and then
-/// returned, it's a new object and thus won't be affected"). The two covers that set the
-/// stack aside ask this of each frame: every other comparator keeps the stack, where the
-/// ranked pin itself separates a live carrier from a stale one.
-fn stack_holds_stale_target_pin(state: &GameState) -> bool {
-    fn chain_is_stale(state: &GameState, ability: &crate::types::ability::ResolvedAbility) -> bool {
-        ability
-            .target_incarnations
-            .iter()
-            .chain(ability.target_pins.iter().flatten())
-            .any(|pin| {
-                state
-                    .objects
-                    .get(&pin.object_id)
-                    .is_none_or(|object| object.incarnation != pin.incarnation)
-            })
-            || ability
-                .child_links()
-                .any(|(_, child)| chain_is_stale(state, child))
+/// CR 603.7c + CR 400.7: whether a stack entry's ability chain holds a pin that no longer
+/// names the live object ("if that object left that zone and then returned, it's a new object
+/// and thus won't be affected"), or names an object that is gone. The pins are exactly the
+/// ones loop normalization ranks, read through the same visitor,
+/// [`ResolvedAbility::for_each_loop_pin_mut`](crate::types::ability::ResolvedAbility::for_each_loop_pin_mut),
+/// which writes nothing here. The two covers that set the stack aside ask this of each frame:
+/// every other comparator keeps the stack, where the ranked pin itself separates a live
+/// carrier from a stale one. A pin that is stale in both frames is refused too, which can only
+/// miss a cover.
+fn stack_holds_superseded_pin(state: &mut GameState) -> bool {
+    let GameState { stack, objects, .. } = state;
+    let mut superseded = false;
+    for entry in stack.iter_mut() {
+        let source_id = entry.source_id;
+        if let Some(ability) = entry.ability_mut() {
+            ability.for_each_loop_pin_mut(source_id, &mut |object_id, incarnation| {
+                superseded |= objects
+                    .get(&object_id)
+                    .is_none_or(|object| object.incarnation != *incarnation);
+            });
+        }
     }
-    state
-        .stack
-        .iter()
-        .filter_map(|entry| entry.ability())
-        .any(|ability| chain_is_stale(state, ability))
+    superseded
 }
 
 /// A condition of [`loop_states_cover_modulo_fodder_growth`] that refused a frame pair, in the
@@ -5474,11 +5471,11 @@ pub enum FodderCoverRefusal {
     StackEntryRead,
     NonObjectRemainder,
     LoyaltyActivationCount,
-    /// CR 603.7c + CR 400.7: a stack entry holds a target pin on an object that has left
-    /// and returned or is gone. This cover sets the stack aside, so the ranked pin never
-    /// reaches its comparand; it refuses the pair instead of certifying across a fired
-    /// carrier that would now do nothing.
-    StaleStackTargetPin,
+    /// CR 603.7c + CR 400.7: a stack entry holds a pin on an object that has left and
+    /// returned or is gone. This cover sets the stack aside, so the ranked pin never reaches
+    /// its comparand; it refuses the pair instead of certifying across a fired carrier whose
+    /// resolution may now differ.
+    SupersededStackPin,
 }
 
 /// CR 732.2a: the object-growth producer's verdict on its three settle frames, by the recurrence
@@ -5537,11 +5534,11 @@ pub(crate) fn fodder_growth_cover_refusals(
 
     bump_loop_detect_cost(|cost| cost.compares_cover_modulo_fodder_growth += 1);
     let mut refusals = Vec::new();
-    let pf = flush_clone(prior);
-    let cf = flush_clone(current);
+    let mut pf = flush_clone(prior);
+    let mut cf = flush_clone(current);
     // CR 603.7c: the stack is set aside below, so a fired carrier's pin is judged here.
-    if stack_holds_stale_target_pin(&pf) || stack_holds_stale_target_pin(&cf) {
-        refusals.push(FodderCoverRefusal::StaleStackTargetPin);
+    if stack_holds_superseded_pin(&mut pf) || stack_holds_superseded_pin(&mut cf) {
+        refusals.push(FodderCoverRefusal::SupersededStackPin);
     }
     let mut pa = project_out_resources(&pf);
     let mut pb = project_out_resources(&cf);
@@ -10698,22 +10695,40 @@ mod tests {
     /// compare, so the ranked pin of a fired carrier never reaches their comparand. Each
     /// judges the stack itself first: a pair with a stack entry pinned to a recipient that
     /// left and returned is refused, and the same pair with the pin on the live recipient,
-    /// minted earlier or later, is not refused on that ground.
+    /// minted earlier or later, is not refused on that ground. The pin is read through the
+    /// loop pin visitor, so a pin that is not a target is judged too: the last case holds the
+    /// recipient only as an Attach host binding (CR 701.3a).
     #[test]
     fn loop_stack_dropping_covers_refuse_a_stale_fired_carrier() {
-        for carrier in [
-            PinCarrier::FiredDestroy,
-            PinCarrier::FiredSacrifice,
-            PinCarrier::AnnouncedSpellTarget,
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        for (carrier, attach_host) in [
+            (PinCarrier::FiredDestroy, false),
+            (PinCarrier::FiredSacrifice, false),
+            (PinCarrier::AnnouncedSpellTarget, false),
+            (PinCarrier::FiredDestroy, true),
         ] {
-            let live = pinned_frame(carrier, 5, 5);
-            let later = pinned_frame(carrier, 8, 8);
-            let stale = pinned_frame(carrier, 8, 5);
+            let pinned_frame = |live: u64, pin: u64| {
+                let mut frame = pinned_frame(carrier, live, pin);
+                if attach_host {
+                    let ability = frame.stack[0].ability_mut().unwrap();
+                    ability.target_incarnations.clear();
+                    ability
+                        .context
+                        .attach_target_bindings
+                        .bind_host(ObjectIncarnationRef::of(ObjectId(21), pin));
+                }
+                frame
+            };
+            let carrier = (carrier, attach_host);
+            let live = pinned_frame(5, 5);
+            let later = pinned_frame(8, 8);
+            let stale = pinned_frame(8, 5);
             let fodder = live.objects[&ObjectId(20)].clone();
             let refuses_pin = |prior: &GameState, current: &GameState| {
                 fodder_growth_cover_refusals(prior, current, &fodder, PlayerId(0))
                     .0
-                    .contains(&FodderCoverRefusal::StaleStackTargetPin)
+                    .contains(&FodderCoverRefusal::SupersededStackPin)
             };
             assert!(
                 !refuses_pin(&live, &later),
@@ -10726,7 +10741,7 @@ mod tests {
             // The object-growth cover needs a pair it admits: a steady inert-token engine
             // grown by one token, with the fired carrier on the stack of both frames.
             let grown = |live: u64, pin: u64| {
-                let donor = pinned_frame(carrier, live, pin);
+                let donor = pinned_frame(live, pin);
                 let (mut prior, mut current) = og_cover_base();
                 for frame in [&mut prior, &mut current] {
                     for id in [ObjectId(20), ObjectId(21)] {
@@ -11015,47 +11030,68 @@ mod tests {
     /// CR 608.2k: recipient keys follow the ability that OWNS the event. Matsu-Tribe Sniper
     /// ("Whenever this creature deals damage to a creature, tap that creature and it doesn't
     /// untap during its controller's next untap step.") reads the recipient of its own event.
-    /// An Innocent Bystander trigger beside it ("Whenever this creature is dealt 3 or more
-    /// damage, investigate.") reads none. The review named Stuffy Doll for the non-reader;
-    /// this fixture uses the Bystander's Investigate instead, which the same classifier
-    /// answers the same way, and does not exercise the Doll's own damage effect.
-    /// The Sniper must not keep the Bystander's key: two frames that
-    /// differ only in whether the Bystander's recorded recipient epoch is still live are the
-    /// same position for every ability that can read anything.
+    /// A Stuffy Doll trigger beside it ("Whenever this creature is dealt damage, it deals that
+    /// much damage to the chosen player."), parsed from the card's Oracle text, reads the
+    /// event's amount and the chosen player, never the recipient. The Sniper must not keep the
+    /// Doll's key: two frames that differ only in whether the Doll's recorded recipient epoch
+    /// is still live are the same position for every ability that can read anything.
     #[test]
     fn loop_recipient_keys_follow_the_owning_reader() {
-        use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::scenario::GameScenario;
+        use crate::types::ability::{Effect, TargetRef};
         use crate::types::events::GameEvent;
         use crate::types::game_state::{DamageRecord, StackEntry};
 
-        /// `sniper` / `bystander_epoch`: the recipient epoch each damage row recorded. Both
+        // Stuffy Doll's damage trigger as the Oracle parser produces it.
+        let doll_trigger = {
+            let mut scenario = GameScenario::new();
+            let doll = scenario
+                .add_creature_from_oracle(
+                    PlayerId(1),
+                    "Stuffy Doll",
+                    0,
+                    1,
+                    "Indestructible\nAs this creature enters, choose a player.\nWhenever this creature is dealt damage, it deals that much damage to the chosen player.\n{T}: This creature deals 1 damage to itself.",
+                )
+                .id();
+            let runner = scenario.build();
+            let execute = runner.state().objects[&doll]
+                .trigger_definitions
+                .iter_all()
+                .find_map(|entry| entry.definition.execute.clone())
+                .expect("the Doll's damage trigger parsed");
+            assert!(
+                matches!(execute.effect.as_ref(), Effect::DealDamage { .. }),
+                "reach guard: the Doll's trigger deals damage, {:?}",
+                execute.effect
+            );
+            execute
+        };
+
+        /// `sniper` / `doll_epoch`: the recipient epoch each damage row recorded. Both
         /// recipients are live at 7. `unowned` adds a carrier with no paired ability.
-        fn mixed(sniper: u64, bystander_epoch: u64, unowned: bool) -> GameState {
+        let mixed = |sniper: u64, doll_epoch: u64, unowned: bool| -> GameState {
             // stack[0]: the fixture's reader, dealer 20 -> recipient 21.
             let mut state = relational_recipient_frame(Some(sniper), false, false);
             let dealer = ObjectId(20);
-            let bystander = battlefield_creature(&mut state, 22, 1);
-            state.objects.get_mut(&bystander).unwrap().incarnation = 7;
+            let doll = battlefield_creature(&mut state, 22, 1);
+            state.objects.get_mut(&doll).unwrap().incarnation = 7;
             let event = GameEvent::DamageDealt {
                 source_id: dealer,
                 source_incarnation: Some(3),
-                target: TargetRef::Object(bystander),
+                target: TargetRef::Object(doll),
                 amount: 3,
                 is_combat: false,
                 excess: 0,
             };
             state.stack.push_back(StackEntry {
                 id: ObjectId(101),
-                source_id: bystander,
+                source_id: doll,
                 controller: PlayerId(1),
                 kind: StackEntryKind::TriggeredAbility {
-                    source_id: bystander,
-                    ability: Box::new(ResolvedAbility::new(
-                        Effect::Investigate,
-                        vec![],
-                        bystander,
-                        PlayerId(1),
-                    )),
+                    source_id: doll,
+                    ability: Box::new(build_resolved_from_def(&doll_trigger, doll, PlayerId(1))),
                     condition: None,
                     trigger_event: Some(event.clone()),
                     description: None,
@@ -11068,14 +11104,14 @@ mod tests {
             state.damage_dealt_this_turn.push_back(DamageRecord {
                 source_id: dealer,
                 source_incarnation: Some(3),
-                target: TargetRef::Object(bystander),
-                target_incarnation: Some(bystander_epoch),
+                target: TargetRef::Object(doll),
+                target_incarnation: Some(doll_epoch),
                 amount: 3,
                 ..Default::default()
             });
             state.current_trigger_event = unowned.then_some(event);
             state
-        }
+        };
 
         let both_live = mixed(7, 7, false);
         assert_eq!(
