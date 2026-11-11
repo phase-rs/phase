@@ -11097,6 +11097,19 @@ fn target_filter_for_last_revealed_sub(effect: &Effect) -> Option<&TargetFilter>
     }
 }
 
+/// CR 701.20e + CR 608.2c: whether the parent instruction hands its
+/// empty-targeted child no object at all — no targets (a look at the
+/// controller's own library), or only player targets ("target player's
+/// library", "that player"). A child whose `ParentTarget` names the object the
+/// look produced has nothing to inherit in that case, so the resolution's
+/// reveal ledger supplies it (see [`inject_last_revealed_targets`]).
+fn parent_hand_off_supplies_no_object(ability: &ResolvedAbility) -> bool {
+    !ability
+        .targets
+        .iter()
+        .any(|target| matches!(target, TargetRef::Object(_)))
+}
+
 fn inject_last_revealed_targets(
     state: &GameState,
     parent_ability: &ResolvedAbility,
@@ -25777,7 +25790,22 @@ fn resolve_chain_body(
             progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
-            && effect_writes_last_revealed_ids(&ability.effect)
+            && (effect_writes_last_revealed_ids(&ability.effect)
+                // CR 701.20e + CR 608.2c: a look/reveal result stays the
+                // chain's "it" through an intervening instruction that took no
+                // object of its own — Wand of Denial's "Look at the top card of
+                // target player's library. If it's a nonland card, you may pay
+                // 2 life. If you do, put it into that player's graveyard."
+                // hands `PayCost` only the look's PLAYER target, and a player
+                // can never satisfy the trailing move's object anaphor. The
+                // reveal ledger is this resolution's only object provenance,
+                // so bind it exactly as the immediate-producer case below does
+                // instead of inheriting the player in the generic branch.
+                || (parent_hand_off_supplies_no_object(ability)
+                    && matches!(
+                        target_filter_for_last_revealed_sub(&sub.effect),
+                        Some(TargetFilter::ParentTarget)
+                    )))
             && (target_filter_for_last_revealed_sub(&sub.effect).is_some()
                 || effect_consumes_parent_object_referent(&sub.effect)
                 || has_member_driven_repeat(sub.as_ref()))

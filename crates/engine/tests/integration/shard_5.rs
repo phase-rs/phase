@@ -375,6 +375,7 @@ mod volatile_fault_that_player_search;
 mod vorinclex_loyalty_actor_scope;
 mod vraska_betrayals_sting;
 mod waiting_for_actor_authority_census;
+mod wand_of_denial_optional_life_move;
 mod wand_of_orcus_compound_subject_6965;
 mod ward_discard_cost_shapes;
 mod ward_of_bones_relative_count_cast_prohibition;
