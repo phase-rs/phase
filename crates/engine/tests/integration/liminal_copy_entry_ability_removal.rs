@@ -15,15 +15,19 @@
 //!   enter.
 //!
 //! Every row casts or activates through the production pipeline, answers each prompt, and
-//! settles at the completion boundary.
+//! settles at the completion boundary. The paused Clone Legion rows also run through the
+//! engine's save/restore pipeline at every prompt, and must settle exactly as they do live.
 
+use std::collections::BTreeMap;
+
+use crate::support::shared_card_db;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{ChosenAttribute, Effect};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -242,7 +246,7 @@ fn assert_settled(runner: &GameRunner, row: &str) {
 }
 
 /// What one prompt looked like when it was raised.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum Prompt {
     /// An as-enters `NamedChoice`, and the player it went to.
     Named { player: PlayerId },
@@ -250,37 +254,197 @@ enum Prompt {
     Replacement,
 }
 
+/// How a row carries its pauses: in memory, or through the save/restore wire.
+#[derive(Clone, Copy)]
+enum PauseCarry {
+    Live,
+    SavedAndRestored,
+}
+
+/// The prompts a driven row answered, each with the tokens the innermost parked CopyToken
+/// owner had already created when it was answered (`None` with no owner parked).
+#[derive(Debug, PartialEq)]
+struct Answered {
+    prompts: Vec<Prompt>,
+    parked_created_ids: Vec<Option<Vec<ObjectId>>>,
+}
+
+/// The engine's own save / undo / P2P restore pipeline (`PersistedGameState`'s trusted
+/// envelope), with the deferred production reload (as
+/// `twinflame_paused_copy_referent.rs::save_and_restore`) — not a bare
+/// `serde_json::from_str::<GameState>`.
+fn save_and_restore(runner: &GameRunner) -> GameRunner {
+    let db = shared_card_db().expect("REACH-GUARD: a restore needs the integration CardDB");
+    let json = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the paused state serializes");
+    let state = serde_json::from_str::<PersistedGameState>(&json)
+        .expect("the paused state decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+        .expect("the paused state is admissible")
+        .finalize_after_rehydration(|state| {
+            engine::game::rehydrate_game_from_card_db_with_finalization(
+                state,
+                db,
+                engine::game::CardDbRehydrationFinalization::Defer,
+            );
+            Ok(())
+        })
+        .expect("the restored state is publishable");
+    GameRunner::from_state(state)
+}
+
+/// Carries the paused game to the answer. Saved and restored, it comes back at the same
+/// prompt with the same resolution stack: the parked CopyToken owner's `created_ids` (and a
+/// liminal entry's) are what a paused resume reads for its co-entrants
+/// (`token_copy::copy_token_co_entrants`), since the tokens a drain publishes aren't
+/// serialized.
+fn carry_pause(runner: &mut GameRunner, carry: PauseCarry) {
+    match carry {
+        PauseCarry::Live => {}
+        PauseCarry::SavedAndRestored => {
+            let waiting = runner.state().waiting_for.clone();
+            let stack = runner.state().resolution_stack.clone();
+            *runner = save_and_restore(runner);
+            assert_eq!(
+                runner.state().waiting_for,
+                waiting,
+                "the restored game is at the same prompt"
+            );
+            assert_eq!(
+                runner.state().resolution_stack,
+                stack,
+                "the parked resolution stack crosses the wire unchanged"
+            );
+        }
+    }
+}
+
+/// The tokens the innermost parked CopyToken owner has created, the frame
+/// `copy_token_co_entrants` reads.
+fn parked_created_ids(runner: &GameRunner) -> Option<Vec<ObjectId>> {
+    runner
+        .state()
+        .resolution_stack
+        .iter()
+        .filter_map(|frame| match frame {
+            ResolutionFrame::CopyToken(owner) => Some(owner.created_ids.clone()),
+            _ => None,
+        })
+        .last()
+}
+
 /// Passes priority and answers every prompt (first option / first replacement) until the
 /// game settles. `observe` sees the state at each prompt, before it is answered.
-fn drive(runner: &mut GameRunner, mut observe: impl FnMut(&GameRunner, &Prompt)) -> Vec<Prompt> {
-    let mut prompts = Vec::new();
+fn drive(runner: &mut GameRunner, observe: impl FnMut(&GameRunner, &Prompt)) -> Vec<Prompt> {
+    drive_carried(runner, PauseCarry::Live, observe).prompts
+}
+
+/// [`drive`], carrying each prompt per `carry` before it is observed and answered. The
+/// final priority pass is never carried.
+fn drive_carried(
+    runner: &mut GameRunner,
+    carry: PauseCarry,
+    mut observe: impl FnMut(&GameRunner, &Prompt),
+) -> Answered {
+    let mut answered = Answered {
+        prompts: Vec::new(),
+        parked_created_ids: Vec::new(),
+    };
     for _ in 0..64 {
-        let action = match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return prompts,
-            WaitingFor::Priority { .. } => GameAction::PassPriority,
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::NamedChoice { .. } | WaitingFor::ReplacementChoice { .. }
+        ) {
+            carry_pause(runner, carry);
+        }
+        let (action, prompt) = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return answered,
+            WaitingFor::Priority { .. } => (GameAction::PassPriority, None),
             WaitingFor::NamedChoice {
                 player, options, ..
-            } => {
-                let prompt = Prompt::Named { player: *player };
-                observe(runner, &prompt);
-                prompts.push(prompt);
+            } => (
                 GameAction::ChooseOption {
                     choice: options[0].clone(),
-                }
-            }
-            WaitingFor::ReplacementChoice { .. } => {
-                let prompt = Prompt::Replacement;
-                observe(runner, &prompt);
-                prompts.push(prompt);
-                GameAction::ChooseReplacement { index: 0 }
-            }
+                },
+                Some(Prompt::Named { player: *player }),
+            ),
+            WaitingFor::ReplacementChoice { .. } => (
+                GameAction::ChooseReplacement { index: 0 },
+                Some(Prompt::Replacement),
+            ),
             _ => panic!("unexpected prompt {}", runner.waiting_for_kind()),
         };
+        if let Some(prompt) = prompt {
+            observe(runner, &prompt);
+            answered.parked_created_ids.push(parked_created_ids(runner));
+            answered.prompts.push(prompt);
+        }
         runner
             .act(action)
             .unwrap_or_else(|err| panic!("action rejected: {err:?}"));
     }
     panic!("the game did not settle");
+}
+
+/// One battlefield token as a settled row left it.
+#[derive(Debug, PartialEq)]
+struct TokenOutcome {
+    id: ObjectId,
+    name: String,
+    counters: BTreeMap<CounterType, u32>,
+    power: Option<i32>,
+    toughness: Option<i32>,
+    chosen: Vec<ChosenAttribute>,
+}
+
+/// What a settled row produced: its answered prompts and every battlefield token.
+#[derive(Debug, PartialEq)]
+struct RowOutcome {
+    answered: Answered,
+    tokens: Vec<TokenOutcome>,
+}
+
+fn row_outcome(runner: &GameRunner, answered: Answered) -> RowOutcome {
+    let mut tokens: Vec<TokenOutcome> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| obj.is_token && obj.zone == Zone::Battlefield)
+        .map(|obj| TokenOutcome {
+            id: obj.id,
+            name: obj.name.clone(),
+            counters: obj.counters.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            power: obj.power,
+            toughness: obj.toughness,
+            chosen: obj.chosen_attributes.clone(),
+        })
+        .collect();
+    tokens.sort_by_key(|token| token.id);
+    RowOutcome { answered, tokens }
+}
+
+/// Runs `row` saved and restored at every prompt, then live, and requires the same
+/// outcome: the same prompts, the same parked owner at each, and the same tokens with the
+/// same counters, P/T and choices. Reach-guarded on a save made while a parked owner
+/// already held a created token.
+fn assert_restored_row_matches_live(row: impl Fn(PauseCarry) -> RowOutcome, name: &str) {
+    let restored = row(PauseCarry::SavedAndRestored);
+    assert!(
+        restored
+            .answered
+            .parked_created_ids
+            .iter()
+            .flatten()
+            .any(|ids| !ids.is_empty()),
+        "REACH-GUARD {name}: a save was made with a parked owner holding created tokens, got \
+         {:?}",
+        restored.answered.parked_created_ids
+    );
+    assert_eq!(
+        restored,
+        row(PauseCarry::Live),
+        "{name}: the restored run settles as the live run does"
+    );
 }
 
 fn named_prompts(prompts: &[Prompt]) -> Vec<PlayerId> {
@@ -587,6 +751,17 @@ fn clone_legion(
     extra: impl FnOnce(&mut GameScenario),
     observe: impl FnMut(&GameRunner, &Prompt),
 ) -> (GameRunner, Vec<Prompt>) {
+    let (runner, answered) = clone_legion_carried(donors, extra, PauseCarry::Live, observe);
+    (runner, answered.prompts)
+}
+
+/// [`clone_legion`], carrying each prompt per `carry`.
+fn clone_legion_carried(
+    donors: &[Donor],
+    extra: impl FnOnce(&mut GameScenario),
+    carry: PauseCarry,
+    observe: impl FnMut(&GameRunner, &Prompt),
+) -> (GameRunner, Answered) {
     let mut scenario = board();
     extra(&mut scenario);
     for donor in donors {
@@ -595,8 +770,8 @@ fn clone_legion(
     let spell = free_spell(&mut scenario, "Clone Legion", false, CLONE_LEGION);
     let mut runner = scenario.build();
     runner.cast(spell).target_player(P1).commit();
-    let prompts = drive(&mut runner, observe);
-    (runner, prompts)
+    let answered = drive_carried(&mut runner, carry, observe);
+    (runner, answered)
 }
 
 /// T6 (X1): Clone Legion over [Margle, Triskelion]. The tokens enter at the same time, so
@@ -672,13 +847,31 @@ fn clone_legion_choices_before_and_after_a_co_entering_margle_copy() {
 /// battlefield; both choices are offered.
 #[test]
 fn clone_legion_choice_after_a_pause_still_sees_the_earlier_margle_copy_as_co_entrant() {
+    clone_legion_choice_after_a_pause(PauseCarry::Live);
+}
+
+/// T10 saved and restored at each choice: the second Voice copy's batch is drained on resume,
+/// and the drain publishes the parked owner's serialized `created_ids` (the Margle copy
+/// included) as its co-entrants (`token_copy::publish_committed_copy_tokens`).
+#[test]
+fn clone_legion_choice_after_a_pause_still_sees_the_earlier_margle_copy_as_co_entrant_across_save_and_restore(
+) {
+    assert_restored_row_matches_live(clone_legion_choice_after_a_pause, "T10");
+}
+
+fn clone_legion_choice_after_a_pause(carry: PauseCarry) -> RowOutcome {
     let mut margle_at_prompt = Vec::new();
-    let (runner, prompts) = clone_legion(
+    let (runner, answered) = clone_legion_carried(
         &[MARGLE_DONOR, VOICE_DONOR, VOICE_DONOR],
         |_| {},
+        carry,
         |runner, _| margle_at_prompt.push(battlefield_tokens(runner, MARGLE_NAME).len()),
     );
-    assert_eq!(named_prompts(&prompts), vec![P0, P0], "two choices");
+    assert_eq!(
+        named_prompts(&answered.prompts),
+        vec![P0, P0],
+        "two choices"
+    );
     assert_eq!(
         margle_at_prompt,
         vec![1, 1],
@@ -688,30 +881,59 @@ fn clone_legion_choice_after_a_pause_still_sees_the_earlier_margle_copy_as_co_en
     let voices = battlefield_tokens(&runner, VOICE_NAME);
     assert_eq!(voices.len(), 2);
     assert!(voices.iter().all(|voice| has_color_choice(&runner, *voice)));
+    row_outcome(&runner, answered)
 }
 
 /// T11 (X5): Parallel Lives doubles each batch. Both Margle copies co-enter with both Voice
 /// copies, so both choices are offered.
 #[test]
 fn clone_legion_doubled_batches_keep_every_margle_copy_as_co_entrant() {
-    let mut margle_at_prompt = Vec::new();
-    let (runner, prompts) = clone_legion(
+    clone_legion_doubled_batches(PauseCarry::Live);
+}
+
+/// T11 saved and restored at each choice: the second Voice copy of the doubled batch enters
+/// on resume from the first one's choice, where both Margle copies are co-entrants through
+/// the parked owner's serialized `created_ids` (`token_copy::copy_token_co_entrants`).
+#[test]
+fn clone_legion_doubled_batches_keep_every_margle_copy_as_co_entrant_across_save_and_restore() {
+    assert_restored_row_matches_live(clone_legion_doubled_batches, "T11");
+}
+
+fn clone_legion_doubled_batches(carry: PauseCarry) -> RowOutcome {
+    let mut margles_at_prompt = Vec::new();
+    let (runner, answered) = clone_legion_carried(
         &[MARGLE_DONOR, VOICE_DONOR],
         |scenario| {
             scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
         },
-        |runner, _| margle_at_prompt.push(battlefield_tokens(runner, MARGLE_NAME).len()),
+        carry,
+        |runner, _| margles_at_prompt.push(battlefield_tokens(runner, MARGLE_NAME)),
     );
-    assert_eq!(named_prompts(&prompts), vec![P0, P0], "two choices");
     assert_eq!(
-        margle_at_prompt,
+        named_prompts(&answered.prompts),
+        vec![P0, P0],
+        "two choices"
+    );
+    assert_eq!(
+        margles_at_prompt.iter().map(Vec::len).collect::<Vec<_>>(),
         vec![2, 2],
         "REACH-GUARD: both Margle copies are on the battlefield at both prompts"
+    );
+    let parked_at_first = answered.parked_created_ids[0]
+        .as_deref()
+        .expect("REACH-GUARD: the CopyToken owner is parked at the first choice");
+    assert!(
+        margles_at_prompt[0]
+            .iter()
+            .all(|margle| parked_at_first.contains(margle)),
+        "REACH-GUARD: the parked owner lists both Margle copies when the first choice is \
+         answered, got {parked_at_first:?}"
     );
     assert_settled(&runner, "T11");
     let voices = battlefield_tokens(&runner, VOICE_NAME);
     assert_eq!(voices.len(), 2, "Parallel Lives doubled the Voice copy");
     assert!(voices.iter().all(|voice| has_color_choice(&runner, *voice)));
+    row_outcome(&runner, answered)
 }
 
 /// T12 (X6): Clone Legion over [Margle, Voice, Triskelion]: the non-liminal Triskelion
@@ -719,13 +941,31 @@ fn clone_legion_doubled_batches_keep_every_margle_copy_as_co_entrant() {
 /// co-entrant.
 #[test]
 fn clone_legion_non_liminal_batch_after_a_liminal_pause_sees_the_margle_copy_as_co_entrant() {
+    clone_legion_non_liminal_batch_after_a_liminal_pause(PauseCarry::Live);
+}
+
+/// T12 saved and restored at the Voice copy's choice: the Triskelion batch is drained on
+/// resume, and the drain publishes the parked owner's serialized `created_ids` (the Margle
+/// copy included) as its co-entrants (`token_copy::publish_committed_copy_tokens`).
+#[test]
+fn clone_legion_non_liminal_batch_after_a_liminal_pause_sees_the_margle_copy_as_co_entrant_across_save_and_restore(
+) {
+    assert_restored_row_matches_live(clone_legion_non_liminal_batch_after_a_liminal_pause, "T12");
+}
+
+fn clone_legion_non_liminal_batch_after_a_liminal_pause(carry: PauseCarry) -> RowOutcome {
     let mut margle_at_prompt = Vec::new();
-    let (runner, prompts) = clone_legion(
+    let (runner, answered) = clone_legion_carried(
         &[MARGLE_DONOR, VOICE_DONOR, TRISKELION_DONOR],
         |_| {},
+        carry,
         |runner, _| margle_at_prompt.push(battlefield_tokens(runner, MARGLE_NAME).len()),
     );
-    assert_eq!(named_prompts(&prompts), vec![P0], "the Voice copy's choice");
+    assert_eq!(
+        named_prompts(&answered.prompts),
+        vec![P0],
+        "the Voice copy's choice"
+    );
     assert_eq!(
         margle_at_prompt,
         vec![1],
@@ -740,6 +980,7 @@ fn clone_legion_non_liminal_batch_after_a_liminal_pause_sees_the_margle_copy_as_
     let trisk = the_token(&runner, TRISKELION_NAME);
     assert_eq!(plus_counters(&runner, trisk), 3, "the counters were placed");
     assert_eq!(power_toughness(&runner, trisk), (Some(6), Some(6)));
+    row_outcome(&runner, answered)
 }
 
 /// Applied Geometry copying P0's Gemstone Mine, under Humility or nothing.
@@ -798,6 +1039,20 @@ fn applied_geometry_creature_copy_of_a_land_under_humility_enters_without_its_co
 /// batch is still a co-entrant there, so the Voice copy's choice is offered.
 #[test]
 fn clone_legion_compound_event_delivery_keeps_the_earlier_margle_copy_as_co_entrant() {
+    clone_legion_compound_event_delivery(PauseCarry::Live);
+}
+
+/// T14 saved and restored at every replacement-order choice and at the Voice copy's
+/// choice: each is raised with the owner parked, and the resumed compound-event delivery
+/// publishes its serialized `created_ids` (the Margle copy included) as the Voice copy's
+/// co-entrants (`token_copy::publish_committed_copy_tokens`).
+#[test]
+fn clone_legion_compound_event_delivery_keeps_the_earlier_margle_copy_as_co_entrant_across_save_and_restore(
+) {
+    assert_restored_row_matches_live(clone_legion_compound_event_delivery, "T14");
+}
+
+fn clone_legion_compound_event_delivery(carry: PauseCarry) -> RowOutcome {
     let mut scenario = board();
     let case = {
         let mut builder = scenario.add_creature(P0, "Case of the Pilfered Proof", 0, 0);
@@ -827,7 +1082,7 @@ fn clone_legion_compound_event_delivery_keeps_the_earlier_margle_copy_as_co_entr
     // (CopyToken owner on top, Margle copies, Clues) at each replacement-order prompt.
     let mut replacement_prompts = Vec::new();
     let mut margle_at_named = Vec::new();
-    let prompts = drive(&mut runner, |runner, prompt| match prompt {
+    let answered = drive_carried(&mut runner, carry, |runner, prompt| match prompt {
         Prompt::Replacement => replacement_prompts.push((
             runner
                 .state()
@@ -839,7 +1094,11 @@ fn clone_legion_compound_event_delivery_keeps_the_earlier_margle_copy_as_co_entr
         )),
         Prompt::Named { .. } => margle_at_named.push(battlefield_tokens(runner, MARGLE_NAME).len()),
     });
-    assert_eq!(named_prompts(&prompts), vec![P0], "the Voice copy's choice");
+    assert_eq!(
+        named_prompts(&answered.prompts),
+        vec![P0],
+        "the Voice copy's choice"
+    );
     assert_eq!(
         margle_at_named,
         vec![1],
@@ -867,4 +1126,5 @@ fn clone_legion_compound_event_delivery_keeps_the_earlier_margle_copy_as_co_entr
         .resolution_stack
         .iter()
         .all(|frame| !matches!(frame, ResolutionFrame::CopyToken(_))));
+    row_outcome(&runner, answered)
 }
