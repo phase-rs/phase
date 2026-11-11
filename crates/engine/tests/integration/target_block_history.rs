@@ -2264,3 +2264,105 @@ fn the_announced_creature_does_not_reach_past_the_next_instruction() {
     );
     assert_eq!(runner.state().objects[&t].damage_marked, 0);
 }
+
+const SWOOPING_PTERANODON: &str = "Flying, haste\nWhenever this creature or another Dinosaur you control with flying enters, gain control of target creature an opponent controls until end of turn. Untap that creature. It gains flying and haste until end of turn. At the beginning of the next end step, target land deals 3 damage to that creature.";
+
+/// CR 115.9a + CR 603.3d: a delayed ability that chooses its own target when it
+/// triggers has that target, though it also names a creature from its creation.
+/// Swooping Pteranodon's "At the beginning of the next end step, target land
+/// deals 3 damage to that creature." chooses one land, so Bolt Bend can target
+/// it, and its retarget offers only the land's slot, not "that creature".
+#[test]
+fn a_delayed_ability_that_chooses_a_target_has_that_single_target() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let pteranodon = s
+        .add_creature_to_hand_from_oracle(P0, "Swooping Pteranodon", 3, 3, SWOOPING_PTERANODON)
+        .with_subtypes(vec!["Dinosaur"])
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let x = s.add_creature(P1, "X", 2, 5).id();
+    let land = s.add_basic_land(P0, ManaColor::Red);
+    let land2 = s.add_basic_land(P0, ManaColor::Red);
+    let bend = free_spell(&mut s, P0, "Bolt Bend", BOLT_BEND);
+    s.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    s.with_library_top(P1, &["Forest", "Forest", "Forest"]);
+    let mut runner = s.build();
+    runner.cast(pteranodon).commit();
+    for _ in 0..20 {
+        match &runner.state().waiting_for {
+            WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(x)),
+                    })
+                    .expect("target X");
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(
+        runner.state().objects[&x].controller,
+        P0,
+        "reach: the trigger resolved on X"
+    );
+    for _ in 0..300 {
+        if runner.state().phase == Phase::End
+            && matches!(
+                runner.state().waiting_for,
+                WaitingFor::TriggerTargetSelection { .. }
+            )
+        {
+            break;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    })
+                    .expect("no attackers");
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(land)),
+        })
+        .expect("the delayed ability targets a land");
+    pass_until(&mut runner, "end step priority", |s| {
+        s.stack.len() == 1
+            && matches!(s.waiting_for, WaitingFor::Priority { player } if player == P0)
+    });
+    let delayed = runner.state().stack[0].id;
+    assert!(
+        runner.state().stack[0]
+            .ability()
+            .is_some_and(|a| a.targets.contains(&TargetRef::Object(land))),
+        "reach: the delayed ability chose the land"
+    );
+    let legal = bolt_bend_targets(&mut runner, bend);
+    assert_eq!(legal, vec![TargetRef::Object(delayed)], "one chosen target");
+    pass_until(&mut runner, "Bolt Bend's retarget", |s| {
+        matches!(s.waiting_for, WaitingFor::RetargetChoice { .. })
+    });
+    let WaitingFor::RetargetChoice {
+        current_targets,
+        legal_new_targets,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        unreachable!()
+    };
+    assert_eq!(current_targets, &vec![TargetRef::Object(land)]);
+    assert!(legal_new_targets.contains(&TargetRef::Object(land2)));
+    assert!(!legal_new_targets.contains(&TargetRef::Object(x)));
+}

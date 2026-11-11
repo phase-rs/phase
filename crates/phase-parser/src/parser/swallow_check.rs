@@ -6458,9 +6458,11 @@ fn detect_combat_history_relation(
     let represented = |direction: BlockPairDirection, scope: CombatHistoryScope| {
         evidence.count_outside::<FilterProp>(
             |node| {
-                node.get("type")
-                    .and_then(|tag| tag.as_str())
-                    .is_some_and(|tag| matches!(tag, "Not" | "AnyOf" | "Or"))
+                <FilterProp as serde::Deserialize>::deserialize(node).is_ok_and(|prop| {
+                    matches!(prop, FilterProp::Not { .. } | FilterProp::AnyOf { .. })
+                }) || <TargetFilter as serde::Deserialize>::deserialize(node).is_ok_and(|filter| {
+                    matches!(filter, TargetFilter::Not { .. } | TargetFilter::Or { .. })
+                })
             },
             |prop| {
                 matches!(
@@ -16039,6 +16041,20 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 },
             ]),
             "an unrestricted Or branch doesn't restrict"
+        );
+        // Only a filter's own negation or disjunction is a barrier: another enum's
+        // union of restricting populations (`CardTypeSetSource::AnyOf`) still
+        // carries both relations.
+        let union = serde_json::json!([{
+            "type": "AnyOf",
+            "sources": [restricting.clone(), restricting.clone()],
+        }]);
+        let evidence = UnitEvidence::from_json_for_test(&union.to_string());
+        let mut diagnostics = Vec::new();
+        detect_combat_history_relation(text, text, &evidence, &mut diagnostics);
+        assert!(
+            diagnostics.is_empty(),
+            "a union of populations restricts each"
         );
     }
 
