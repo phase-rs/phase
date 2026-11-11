@@ -5580,11 +5580,11 @@ mod tests {
             )
             .expect("CR 104.3a: the concession is published");
         assert!(
-            handled.result.events.iter().any(|event| matches!(
+            handled.result.1.iter().any(|event| matches!(
                 event,
                 GameEvent::PlayerEliminated { player_id } if *player_id == conceder
             )),
-            "the departure event is published with the action"
+            "the departure event is in the published event batch"
         );
         {
             let session = mgr.try_session(&code).unwrap();
