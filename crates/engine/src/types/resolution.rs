@@ -2072,20 +2072,6 @@ impl ResolutionStack {
             .then_some(group.logical_group_id)
     }
 
-    /// CR 730.3 + CR 616.1: whether the active frame is a component child that
-    /// a resumed delivery of `member` just handed its departure to: a batch
-    /// linked to `owner` for that exact member. Its handback, not the resume,
-    /// classifies the member.
-    pub(crate) fn active_component_child_of(
-        &self,
-        owner: crate::types::identifiers::LogicalZoneChangeGroupId,
-        member: ObjectIncarnationRef,
-    ) -> bool {
-        self.active_batch_delivery()
-            .and_then(|child| child.component_delivery_parent.as_ref())
-            .is_some_and(|link| link.parent_group_id == owner && link.member == member)
-    }
-
     /// CR 730.3: the group of the announcing owner a settled component child
     /// hands its departure back to — the frame now on top of the stack.
     pub(crate) fn component_owner_group_mut(

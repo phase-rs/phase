@@ -591,6 +591,12 @@ pub(crate) fn eliminate_players(
                     "a canceled zone-change pause did not resume its tail: {error}"
                 );
             }
+            // CR 117.5 + CR 704.3: a player is about to receive priority after
+            // the resumed resolution, so state-based actions are performed
+            // first; what they and the resumed moves trigger is queued below.
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                super::sba::check_state_based_actions(state, &mut resumed);
+            }
             // CR 603.2c: an owner the resume parks again holds its collected
             // occurrences for its own settlement; they are not collected here.
             let retained = super::engine_priority::retained_logical_zone_events(state);

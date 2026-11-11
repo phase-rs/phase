@@ -16,6 +16,10 @@
 //!    put it onto the battlefield."
 //!   Rebuking Ceremony: "Put two target artifacts on top of their owners'
 //!    libraries."
+//!   Kederekt Leviathan: "When this creature enters, return all other nonland
+//!    permanents to their owners' hands. / Unearth {6}{U} (...)"
+//!   Dryad Arbor: a 1/1 Land Creature — Forest Dryad.
+//!   Benalish Marshal: "Other creatures you control get +1/+1."
 //!   Kor Skyfisher: "Flying / When this creature enters, return a permanent you
 //!    control to its owner's hand."
 //!   Ninth Bridge Patrol: "Whenever another creature you control leaves the
@@ -459,8 +463,9 @@ fn rebuking_ceremony_concession_during_the_prompt_places_the_surviving_artifact_
         let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, true);
         let label = format!("{pile_shape:?}");
 
-        // CR 401.4: "on top" placement is delivered last-target-first, so the
-        // merged permanent (second target) moves before the surviving artifact.
+        // Rebuking Ceremony's top-of-library placement delivers its targets
+        // last first, so the merged permanent (second target) moves before the
+        // surviving artifact.
         cast_until_resolved_or_asked(&mut runner, ceremony, &[surviving, pile.survivor]);
         assert_commander_prompt(runner.state(), P1, pile.brokkos);
         assert_eq!(runner.state().objects[&surviving].zone, Zone::Battlefield);
@@ -569,11 +574,77 @@ fn concession_resume_that_parks_again_opens_the_next_commander_prompt() {
     assert_eq!(runner.state().objects[&ceremony].zone, Zone::Graveyard);
 }
 
+/// CR 117.5 + CR 704.3 + CR 704.5g: a concession whose resume finishes the
+/// resolution of a triggered ability (which owes no spell final part, so no
+/// later boundary checks them) performs state-based actions before any player
+/// receives priority. Kederekt Leviathan's
+/// enters trigger returns all other nonland permanents; Karn, Silver Golem (P1's
+/// commander) moves first and parks on P1's command-zone choice, and P1
+/// concedes. The resumed trigger returns Benalish Marshal, and P2's Dryad Arbor
+/// (a land, so it stays) is left a 1/1 with 1 damage and is destroyed before
+/// the concession hands out priority.
+#[test]
+fn concession_resume_of_a_triggered_ability_performs_state_based_actions() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let karn = scenario.add_real_card(P1, "Karn, Silver Golem", Zone::Battlefield, db);
+    let marshal = scenario.add_real_card(P2, "Benalish Marshal", Zone::Battlefield, db);
+    let arbor = scenario.add_real_card(P2, "Dryad Arbor", Zone::Battlefield, db);
+    let leviathan = scenario.add_real_card(P0, "Kederekt Leviathan", Zone::Hand, db);
+    scenario.with_mana_pool(P0, mana(ManaType::Blue, 8));
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&karn)
+        .expect("Karn exists")
+        .is_commander = true;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&arbor)
+        .expect("Dryad Arbor exists")
+        .damage_marked = 1;
+
+    cast_until_resolved_or_asked(&mut runner, leviathan, &[]);
+    for _ in 0..6 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes while the trigger resolves");
+    }
+    assert_commander_prompt(runner.state(), P1, karn);
+    assert!(
+        runner.state().stack.is_empty(),
+        "the enters trigger is resolving, not waiting on the stack"
+    );
+    assert_eq!(runner.state().objects[&marshal].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&arbor].toughness, Some(2));
+
+    let conceded = concede(&mut runner, P1);
+    assert!(
+        matches!(conceded.waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        conceded.waiting_for
+    );
+    resolution_finished(runner.state());
+    assert_eq!(runner.state().objects[&marshal].zone, Zone::Hand);
+    assert_eq!(
+        runner.state().objects[&arbor].zone,
+        Zone::Graveyard,
+        "CR 704.5g: the lethally damaged creature is destroyed before priority"
+    );
+}
+
 /// CR 800.4a + CR 117.2e + CR 730.3: Chaos Warp's owner iteration parks on
 /// Brokkos's CR 903.9b prompt and the owner — the prompt's chooser — concedes.
 /// Every component leaves the game with P1, and the owner iteration and its
 /// continuation finish within the concession: nothing is parked when priority
-/// is given.
+/// is given, and the departed owner's shuffle, reveal and put-onto-battlefield
+/// do nothing.
 #[test]
 fn chaos_warp_owner_concession_during_the_prompt_finishes_before_priority() {
     for pile_shape in [Pile::BrokkosUnderMender, Pile::MenderOverBrokkos] {
@@ -602,6 +673,25 @@ fn chaos_warp_owner_concession_during_the_prompt_finishes_before_priority() {
             runner.state().objects[&warp].zone,
             Zone::Graveyard,
             "{label}"
+        );
+        assert!(
+            !conceded.events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id: P1,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } | GameEvent::CardsRevealed { player: P1, .. }
+            )),
+            "{label}: CR 800.4a: the departed owner neither shuffles nor reveals"
+        );
+        assert!(
+            runner
+                .state()
+                .battlefield
+                .iter()
+                .all(|id| runner.state().objects[id].owner != P1),
+            "{label}: nothing of the departed owner's is put onto the battlefield"
         );
         for component in [pile.mender, pile.brokkos] {
             assert_eq!(
@@ -735,8 +825,9 @@ fn kor_skyfisher_selection_hands_a_parked_component_back_to_its_loop() {
 /// move replacement such as Rest in Peace's graveyard redirect; no printed card
 /// replaces a move into a library, so this one is staged directly. Answering it
 /// resumes the original member, whose split then either delivers every
-/// component at once (Brokkos not a commander) or parks again on the survivor's
-/// own component (Brokkos is the survivor and the commander). Both owners —
+/// component at once (Brokkos not a commander), delivers the survivor and parks
+/// on a later component (Brokkos under Circuit Mender), or parks again on the
+/// survivor's own component (Brokkos is the survivor and the commander). Both owners —
 /// Totally Lost's batch and Chaos Warp's owner iteration — finish and collect
 /// the departure exactly as the unparked control does.
 #[test]
@@ -744,6 +835,8 @@ fn resumed_merged_member_settles_once_whether_its_components_park_or_not() {
     for spell_name in ["Totally Lost", "Chaos Warp"] {
         for (pile_shape, component_answer) in [
             (Pile::BrokkosUnderMender, None),
+            (Pile::BrokkosUnderMender, Some(0)),
+            (Pile::BrokkosUnderMender, Some(1)),
             (Pile::MenderOverBrokkos, Some(0)),
             (Pile::MenderOverBrokkos, Some(1)),
         ] {
