@@ -2672,11 +2672,17 @@ fn begin_staged_arrangement(state: &GameState, owner: &mut PendingBatchDeliverie
                 || announced
                     .iter()
                     .any(|member| staged_member_placement_is_replacement(member)));
+        // CR 401.7: without an owner permutation the group keeps the legacy
+        // sequential result. Each later arrival at the top or at a fixed slot
+        // ("Nth from the top", "just beneath the top X") lands above the
+        // earlier ones, so the derived block is the reverse announcement order.
         let ordered: Vec<&StagedBatchMember> = if needs_prompt {
             announced.clone()
         } else if matches!(
             position,
-            LibraryPosition::Top | LibraryPosition::NthFromTop { .. }
+            LibraryPosition::Top
+                | LibraryPosition::NthFromTop { .. }
+                | LibraryPosition::BeneathTop { .. }
         ) {
             announced.iter().rev().copied().collect()
         } else {
@@ -13074,6 +13080,69 @@ mod staged_batch_tests {
                     .copied()
                     .collect::<Vec<_>>(),
                 expected
+            );
+        }
+    }
+
+    /// CR 401.7: an unprompted "just beneath the top X cards" pair keeps the
+    /// sequential result (A then B leaves B above A) and clamps as one block
+    /// at the bottom of a library shorter than X.
+    #[test]
+    fn derived_beneath_top_pair_keeps_sequential_order_and_short_library_clamp() {
+        for count in [0, 1, 3] {
+            let mut state = GameState::new_two_player(42);
+            effect_source(&mut state);
+            let sentinels: Vec<_> = (0..count)
+                .map(|index| library_card(&mut state, index + 10))
+                .collect();
+            let a = graveyard_card(&mut state, 1);
+            let b = graveyard_card(&mut state, 2);
+            let position = LibraryPosition::BeneathTop {
+                depth: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            };
+            let members = [a, b]
+                .into_iter()
+                .map(|id| {
+                    staged_member(
+                        &state,
+                        id,
+                        Some(approved_library_event(&state, id, position.clone())),
+                        StagedBatchMemberState::Approved,
+                        Zone::Library,
+                        Some(position.clone()),
+                    )
+                })
+                .collect();
+            let group_id = push_approved_staged(&mut state, members, BatchDeliveryStage::Approving);
+            let mut owner = take_owner(&mut state, group_id);
+            begin_staged_arrangement(&state, &mut owner);
+            let staged = owner.staged.as_ref().unwrap();
+            assert_eq!(staged.stage, BatchDeliveryStage::Delivering);
+            assert_eq!(staged.arrangements.len(), 1);
+            assert_eq!(
+                staged.arrangements[0].status,
+                StagedArrangementStatus::Derived,
+                "no owner permutation is offered"
+            );
+            owner
+                .validate_staged()
+                .expect("fixed-depth group validates");
+            assert!(publish_next_staged_arrangement(&mut state, &mut owner).is_none());
+            assert_eq!(
+                deliver_staged_members(&mut state, &mut owner, &mut Vec::new()),
+                StagedStop::Delivered
+            );
+            let mut expected = sentinels;
+            let base = expected.len().min(1);
+            expected.splice(base..base, [b, a]);
+            assert_eq!(
+                state
+                    .library_of(PlayerId(0))
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                expected,
+                "initial library length {count}"
             );
         }
     }
