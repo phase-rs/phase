@@ -1111,13 +1111,15 @@ fn host_reentering_starts_a_new_snapshot() {
     let state = runner.state_mut();
     start_blessing_grant(state, &board, 118);
     evaluate_protection_layers(state);
+    assert_eq!(
+        attachment_illegality(state, board.white_equipment, board.host),
+        None,
+        "reach guard: the first incarnation's snapshot exempts it"
+    );
     let [occurrence] = <[_; 1]>::try_from(already_attached_occurrences(state, board.host))
         .expect("one ridered grant");
-    assert_eq!(
-        protection_snapshot_ids(state, board.recipient, occurrence.clone(), 0, board.host),
-        vec![board.white_equipment],
-        "reach guard: the first incarnation's snapshot"
-    );
+    let first_snapshot =
+        protection_snapshot_ids(state, board.recipient, occurrence.clone(), 0, board.host);
 
     for equipment in [board.white_equipment, board.later_white_equipment] {
         state.objects.get_mut(&equipment).unwrap().attached_to = None;
@@ -1127,19 +1129,6 @@ fn host_reentering_starts_a_new_snapshot() {
     host.bump_incarnation();
     let incarnation = host.incarnation;
     evaluate_protection_layers(state);
-    assert!(
-        state.objects[&board.recipient]
-            .protection_start_snapshots
-            .keys()
-            .all(|key| key.host.incarnation == incarnation),
-        "the departed incarnation's snapshot is pruned"
-    );
-    assert_eq!(
-        protection_snapshot_ids(state, board.recipient, occurrence, 0, board.host),
-        Vec::<ObjectId>::new(),
-        "nothing was attached when the effect started on the new object"
-    );
-
     state
         .objects
         .get_mut(&board.white_equipment)
@@ -1153,7 +1142,22 @@ fn host_reentering_starts_a_new_snapshot() {
         .push(board.white_equipment);
     assert_eq!(
         attachment_illegality(state, board.white_equipment, board.host),
-        Some(AttachIllegality::Protection)
+        Some(AttachIllegality::Protection),
+        "the departed incarnation's snapshot must not exempt it"
+    );
+
+    assert_eq!(first_snapshot, vec![board.white_equipment]);
+    assert!(
+        state.objects[&board.recipient]
+            .protection_start_snapshots
+            .keys()
+            .all(|key| key.host.incarnation == incarnation),
+        "the departed incarnation's snapshot is pruned"
+    );
+    assert_eq!(
+        protection_snapshot_ids(state, board.recipient, occurrence, 0, board.host),
+        Vec::<ObjectId>::new(),
+        "nothing was attached when the effect started on the new object"
     );
 }
 
