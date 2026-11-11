@@ -4848,7 +4848,13 @@ impl ResolvedAbility {
     /// - `control_change_instruction` holds a capture id, not an incarnation:
     ///   it keys a resolution-scoped table loop normalization clears, and a
     ///   frame holding a resolution in progress is not loop-comparable;
-    /// - `cast_occurrence` is a journal coordinate, zeroed separately.
+    /// - `cast_occurrence` is a journal coordinate, zeroed separately;
+    /// - `cost_paid_objects`: `PartialEq` compares that list by object id only
+    ///   (CR 601.2h), so ranking its records' incarnations would change no
+    ///   comparison. A record whose object left and returned between two frames
+    ///   is therefore not told apart from a live one, though
+    ///   `choose_from_zone` reads its liveness; this predates the loop pins and
+    ///   is a known residual.
     pub(crate) fn for_each_loop_pin_mut(
         &mut self,
         source_id: ObjectId,

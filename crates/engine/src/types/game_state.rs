@@ -36045,9 +36045,10 @@ impl GameState {
     /// `DamageDealt` / `CombatDamageDealtToPlayer` and the CR 702.110b
     /// exploiter stamp of `CreatureExploited`), the may-trigger
     /// origins and stored answers, the pins every ability that can still
-    /// resolve captured (`ResolvedAbility::for_each_loop_pin_mut`: keyed and
-    /// positional target pins, CR 603.7c + CR 601.2c, and the announced
-    /// source epoch), the turn and combat block-history pairs
+    /// resolve captured (`ResolvedAbility::for_each_loop_pin_mut`, whose doc
+    /// lists them, the attachment pins inside the snapshots
+    /// `ResolvedAbility::for_each_loop_lki_snapshot_mut` visits, and the
+    /// creation lookback event each keeps), the turn and combat block-history pairs
     /// (CR 509.1g), the live incarnation of every object those or a tracked-set
     /// origin (CR 608.2c) name, and the attachment incarnation pins the
     /// retained `lki_by_incarnation` snapshots carry. Ranks count down from the
@@ -37617,8 +37618,19 @@ impl GameState {
             may_trigger_auto_choices: _,
             pending_triggered_mana_resume: _,
             resolution_stack: _,
+            // COMPARED RAW — departed stack records (CR 400.7 last-known information),
+            // pruned to the ones a retained carrier names, keyed by a raw incarnation and
+            // holding a raw ability: a different key only splits two frames, while the
+            // record's ability pins are not ranked, so a record kept unchanged across a
+            // re-incarnation of an object it pins could merge, in principle.
             departed_stack_spells: _,
             departed_activated_abilities: _,
+            // COMPARED RAW — floating shields and their riders: `pending_shields_loop_eq`
+            // compares each `ReplacementDefinition` and every rider `ResolvedAbility` by
+            // value, so their pins are not ranked. A shield that persists unchanged across
+            // a re-incarnation of an object its rider pins could merge, in principle.
+            replacement_continuations: _,
+            pending_damage_replacements: _,
             // NOT CARRIED AT A SAMPLE — a bare `Vec<GameEvent>`, compared raw, so a
             // `ZoneChanged` record inside it would hold unranked pins; but
             // `is_loop_comparable` requires both empty, so no sampled position holds one.
@@ -37894,9 +37906,7 @@ impl GameState {
             monarch: _,
             city_blessing: _,
             enduring_story: _,
-            replacement_continuations: _,
             restrictions: _,
-            pending_damage_replacements: _,
             pending_step_end_mana_handlers: _,
             pending_phase_transition_progress: _,
             deferred_step_trigger_resume: _,
@@ -38092,7 +38102,7 @@ impl GameState {
     /// not loop-comparable: it never compares equal, so no draw or shortcut is
     /// certified from it. That is a parked resolution frame, a pre-roll die
     /// instruction, a staged payment or a pending cast — each holds abilities
-    /// whose pins no loop visitor walks (CR 603.7c), so comparing them raw could
+    /// whose pins no loop visitor walks (CR 400.7), so comparing them raw could
     /// equate a live pin with a stale one — or a player-scope sacrifice
     /// completion, a discard or combat-lifelink batch, deferred entry events, or
     /// undispatched attack/blocker declaration events.

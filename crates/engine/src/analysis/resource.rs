@@ -4975,8 +4975,8 @@ pub(crate) fn loop_states_cover_modulo_object_growth(
     // resources for the board/GameState equality axes.
     let mut pf = flush_clone(prior);
     let mut cf = flush_clone(current);
-    // CR 603.7c: the stack is set aside below, so a fired carrier's pin is judged here.
-    if stack_holds_superseded_pin(&mut pf) || stack_holds_superseded_pin(&mut cf) {
+    // CR 400.7: the stack is set aside below, so a stack carrier's pins are judged here.
+    if stack_pins_superseded_apart(&mut pf, &mut cf) {
         return false;
     }
     let mut pa = project_out_resources(&pf);
@@ -5437,29 +5437,44 @@ pub(crate) fn loop_states_cover_modulo_fodder_growth(
         .is_empty()
 }
 
-/// CR 603.7c + CR 400.7: whether a stack entry's ability chain holds a pin that no longer
-/// names the live object ("if that object left that zone and then returned, it's a new object
-/// and thus won't be affected"), or names an object that is gone. The pins are exactly the
-/// ones loop normalization ranks, read through the same visitor,
+/// CR 400.7: for each stack entry, bottom first, whether each pin its ability chain holds
+/// still names the live object. A pin on an object that left and returned, or that is gone,
+/// names a new object or none (CR 400.7), so a delayed trigger "won't affect it" (CR 603.7c)
+/// and a target is illegal (CR 608.2b). The pins are the ones loop normalization ranks, read
+/// through the same visitor,
 /// [`ResolvedAbility::for_each_loop_pin_mut`](crate::types::ability::ResolvedAbility::for_each_loop_pin_mut),
-/// which writes nothing here. The two covers that set the stack aside ask this of each frame:
-/// every other comparator keeps the stack, where the ranked pin itself separates a live
-/// carrier from a stale one. A pin that is stale in both frames is refused too, which can only
-/// miss a cover.
-fn stack_holds_superseded_pin(state: &mut GameState) -> bool {
+/// which writes nothing here.
+fn stack_pin_liveness(state: &mut GameState) -> Vec<Vec<bool>> {
     let GameState { stack, objects, .. } = state;
-    let mut superseded = false;
-    for entry in stack.iter_mut() {
-        let source_id = entry.source_id;
-        if let Some(ability) = entry.ability_mut() {
-            ability.for_each_loop_pin_mut(source_id, &mut |object_id, incarnation| {
-                superseded |= objects
-                    .get(&object_id)
-                    .is_none_or(|object| object.incarnation != *incarnation);
-            });
-        }
-    }
-    superseded
+    stack
+        .iter_mut()
+        .map(|entry| {
+            let source_id = entry.source_id;
+            let mut live = Vec::new();
+            if let Some(ability) = entry.ability_mut() {
+                ability.for_each_loop_pin_mut(source_id, &mut |object_id, incarnation| {
+                    live.push(
+                        objects
+                            .get(&object_id)
+                            .is_some_and(|object| object.incarnation == *incarnation),
+                    );
+                });
+            }
+            live
+        })
+        .collect()
+}
+
+/// CR 400.7 + CR 603.7c + CR 608.2b: whether the two frames disagree about which stack pins
+/// still name their object. The two covers that set the stack aside ask this; every other
+/// comparator keeps the stack, where the ranked pin itself separates a live carrier from a
+/// stale one. A frame pair whose stacks hold no superseded pin is not judged here, as before;
+/// a superseded pin held at the same place in both frames (a Clue that sacrificed itself to
+/// pay for its own ability, say) is the same position and is not refused.
+fn stack_pins_superseded_apart(prior: &mut GameState, current: &mut GameState) -> bool {
+    let (prior, current) = (stack_pin_liveness(prior), stack_pin_liveness(current));
+    let superseded = |frame: &[Vec<bool>]| frame.iter().flatten().any(|live| !live);
+    (superseded(&prior) || superseded(&current)) && prior != current
 }
 
 /// A condition of [`loop_states_cover_modulo_fodder_growth`] that refused a frame pair, in the
@@ -5471,10 +5486,10 @@ pub enum FodderCoverRefusal {
     StackEntryRead,
     NonObjectRemainder,
     LoyaltyActivationCount,
-    /// CR 603.7c + CR 400.7: a stack entry holds a pin on an object that has left and
-    /// returned or is gone. This cover sets the stack aside, so the ranked pin never reaches
-    /// its comparand; it refuses the pair instead of certifying across a fired carrier whose
-    /// resolution may now differ.
+    /// CR 400.7 + CR 603.7c + CR 608.2b: the frames disagree about which stack pins still
+    /// name their object (one has left and returned or is gone). This cover sets the stack
+    /// aside, so the ranked pin never reaches its comparand; it refuses the pair instead of
+    /// certifying across a carrier whose resolution differs between them.
     SupersededStackPin,
 }
 
@@ -5536,8 +5551,8 @@ pub(crate) fn fodder_growth_cover_refusals(
     let mut refusals = Vec::new();
     let mut pf = flush_clone(prior);
     let mut cf = flush_clone(current);
-    // CR 603.7c: the stack is set aside below, so a fired carrier's pin is judged here.
-    if stack_holds_superseded_pin(&mut pf) || stack_holds_superseded_pin(&mut cf) {
+    // CR 400.7: the stack is set aside below, so a stack carrier's pins are judged here.
+    if stack_pins_superseded_apart(&mut pf, &mut cf) {
         refusals.push(FodderCoverRefusal::SupersededStackPin);
     }
     let mut pa = project_out_resources(&pf);
@@ -10691,13 +10706,14 @@ mod tests {
         }
     }
 
-    /// CR 603.7c: the fodder-growth and object-growth covers set the stack aside before they
-    /// compare, so the ranked pin of a fired carrier never reaches their comparand. Each
-    /// judges the stack itself first: a pair with a stack entry pinned to a recipient that
-    /// left and returned is refused, and the same pair with the pin on the live recipient,
-    /// minted earlier or later, is not refused on that ground. The pin is read through the
-    /// loop pin visitor, so a pin that is not a target is judged too: the last case holds the
-    /// recipient only as an Attach host binding (CR 701.3a).
+    /// CR 400.7 + CR 603.7c: the fodder-growth and object-growth covers set the stack aside
+    /// before they compare, so the ranked pin of a stack carrier never reaches their
+    /// comparand. Each judges the stack itself first: a pair in which one frame's stack entry
+    /// is pinned to the live recipient and the other's to a recipient that left and returned
+    /// is refused; the same entry pinned live in both, minted earlier or later, or stale in
+    /// both, is the same position and is not refused on that ground. The pin is read through
+    /// the loop pin visitor, so a pin that is not a target is judged too: the last case holds
+    /// the recipient only as an Attach host binding (CR 701.3a).
     #[test]
     fn loop_stack_dropping_covers_refuse_a_stale_fired_carrier() {
         use crate::types::identifiers::ObjectIncarnationRef;
@@ -10738,6 +10754,10 @@ mod tests {
                 refuses_pin(&later, &stale) && refuses_pin(&stale, &later),
                 "{carrier:?}: fodder cover, live against stale"
             );
+            assert!(
+                !refuses_pin(&stale, &stale.clone()),
+                "{carrier:?}: fodder cover, the same stale pin in both frames"
+            );
             // The object-growth cover needs a pair it admits: a steady inert-token engine
             // grown by one token, with the fired carrier on the stack of both frames.
             let grown = |live: u64, pin: u64| {
@@ -10763,13 +10783,16 @@ mod tests {
             for (prior, current, shape) in [
                 (&live_prior, &stale_current, "live then stale"),
                 (&stale_prior, &live_current, "stale then live"),
-                (&stale_prior, &stale_current, "stale in both"),
             ] {
                 assert!(
                     !loop_states_cover_modulo_object_growth(prior, current),
                     "{carrier:?}: object-growth cover, {shape}"
                 );
             }
+            assert!(
+                loop_states_cover_modulo_object_growth(&stale_prior, &stale_current),
+                "{carrier:?}: object-growth cover, the same stale pin in both frames"
+            );
         }
     }
 
