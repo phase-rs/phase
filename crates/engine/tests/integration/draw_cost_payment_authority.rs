@@ -2158,7 +2158,9 @@ fn sandbox_mutations_are_refused_while_a_recovered_payment_is_parked() {
 
 /// P0's life gain equal to the cards in P0's hand: harmless on the canonical
 /// board, where the staged payment's drawn card is not yet in hand, and
-/// unrepresentable at `i32::MAX` life once the payment has drawn.
+/// unrepresentable at `i32::MAX` life once the payment has drawn. No printed
+/// card has this shape; it probes the engine's numeric capacity, which is
+/// where a recovery can fail.
 fn gain_hand_size() -> Effect {
     Effect::GainLife {
         amount: QuantityExpr::Ref {

@@ -2130,11 +2130,11 @@ struct RepeatedDrawUnlessPayment {
 ///   the engine can represent in one resolution, so the choice to pay is
 ///   refused before any instruction runs
 ///   ([`repeated_draw_exceeds_one_resolution`]) and the player may still
-///   decline. The ceiling inside the loop is the backstop for a dispatch that
-///   reaches it anyway, which needs more game-changing instructions than the
-///   ceiling with no work-performing replacement at the choice (a library of
-///   more cards than the ceiling): that action, a replacement answer on a
-///   resumed payment included, is refused and rolled back whole, as an
+///   decline; so is a count the drawer's library could feed past it. The
+///   ceiling inside the loop is the backstop for a dispatch that reaches it
+///   anyway, which needs a work-performing replacement that was not
+///   applicable at the choice and became so mid-payment (no printed card
+///   does): that action is refused and rolled back whole, as an
 ///   unrepresentable life change is.
 fn pay_repeated_draw_unless_cost(
     state: &mut GameState,
@@ -2278,11 +2278,20 @@ fn unrepresentable_repeated_payment() -> EngineError {
 }
 
 /// CR 118.11 + CR 614.1: whether paying `owed` instructions could exceed
-/// [`SYNCHRONOUS_INSTRUCTION_CEILING`]: more instructions than the ceiling are
-/// owed, and a draw replacement that performs work of its own applies to the
-/// drawer, so the instructions could keep changing the game without reaching
-/// a fixed point. Decided at the choice to pay, where refusing leaves the
-/// player free to decline.
+/// [`SYNCHRONOUS_INSTRUCTION_CEILING`] in one dispatch, decided at the choice
+/// to pay, where refusing leaves the player free to decline. More
+/// instructions than the ceiling must be owed, and either:
+/// - a mandatory draw replacement that performs work of its own applies to
+///   the drawer, so the instructions could keep changing the game without
+///   reaching a fixed point; or
+/// - the drawer's library holds at least the ceiling's cards. Every other
+///   instruction that changes the game moves a card out of that library
+///   (a draw, a Dredge mill), and the first attempt from an empty library is
+///   one more edit, so the instructions after any answer could pass the
+///   ceiling only then (conservative for a multi-card instruction).
+///
+/// Together these keep the loop's backstop from refusing an answer to a
+/// resumed payment.
 fn repeated_draw_exceeds_one_resolution(
     state: &GameState,
     payment: &RepeatedDrawUnlessPayment,
@@ -2297,13 +2306,20 @@ fn repeated_draw_exceeds_one_resolution(
     let Effect::Draw { target, .. } = effect.as_ref() else {
         return false;
     };
-    effects::resolve_player_for_context_ref(state, &payment.pending_effect, target)
-        .is_some_and(|drawer| replacement::draw_replacement_performs_work(state, drawer))
+    effects::resolve_player_for_context_ref(state, &payment.pending_effect, target).is_some_and(
+        |drawer| {
+            replacement::draw_replacement_performs_work(state, drawer)
+                || state.players.get(drawer.0 as usize).is_some_and(|seat| {
+                    seat.library.len() >= SYNCHRONOUS_INSTRUCTION_CEILING as usize
+                })
+        },
+    )
 }
 
-/// CR 104.4b + CR 118.11: whether an instruction left the game exactly as it
-/// found it, by the same semantic equality loop detection uses (derived caches
-/// excluded), with the instruction's own journal entries set aside.
+/// CR 118.11: whether an instruction left the game exactly as it found it, by
+/// the semantic `GameState` equality the engine's loop detection (CR 104.4b)
+/// also uses (derived caches excluded), with the instruction's own journal
+/// entries set aside.
 fn instruction_changed_nothing(before: &GameState, after: &GameState) -> bool {
     let mut unjournaled = after.clone();
     unjournaled.resolved_rules_journal = before.resolved_rules_journal.clone();

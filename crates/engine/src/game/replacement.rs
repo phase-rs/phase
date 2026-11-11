@@ -10311,9 +10311,11 @@ fn rule_derived_candidate_executes(
 /// to `player`'s next one-card draw, at either proposal stage, performs work
 /// of its own (an execute ability: Hullbreacher's Treasure, Notion Thief's
 /// draw) rather than only modifying or skipping the draw. Each such draw can
-/// change the game without ever reaching a fixed point. An optional one asks
-/// its player every time, so it is bounded by their answers. Conservative: a
-/// bounded mandatory execute (Notion Thief, Laboratory Maniac) counts too.
+/// change the game without ever reaching a fixed point. An optional one is
+/// not counted: it is answered for each draw, and the work of a printed one
+/// (Dredge's mill) takes cards from the drawer's library, which the caller's
+/// library bound covers. Conservative: a bounded mandatory execute (Notion
+/// Thief, Laboratory Maniac) counts too.
 pub(crate) fn draw_replacement_performs_work(state: &GameState, player: PlayerId) -> bool {
     [DrawEventStage::Instruction, DrawEventStage::Individual]
         .into_iter()

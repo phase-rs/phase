@@ -2243,13 +2243,61 @@ fn a_payment_that_could_pass_the_ceiling_is_refused_before_any_choice() {
     });
     advance_through_upkeep(&mut runner);
     let prompt = runner.state().waiting_for.clone();
-    runner
+    let error = runner
         .act(GameAction::PayUnlessCost { pay: true })
         .expect_err("the payment could change the game past one resolution");
+    assert!(
+        matches!(
+            &error,
+            engine::game::engine::EngineError::ActionNotAllowed(reason)
+                if reason.contains("more than 1024 instructions is not representable")
+        ),
+        "{error:?}"
+    );
     assert_eq!(
         runner.state().waiting_for,
         prompt,
         "no replacement prompt was opened"
+    );
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("declining stays legal");
+    assert_eq!(zone_of(&runner, vortex), Zone::Graveyard);
+}
+
+/// CR 118.11 + CR 702.52a: a library of more cards than one resolution
+/// performs could feed the instructions after any answer past the ceiling.
+/// Accepting Stinkweed Imp's Dredge on the first draw returns the Imp, and
+/// every later instruction would be a real draw from 1,100 cards; that answer
+/// could never be performed. The payment is refused at the choice instead, so
+/// no answer to it is refused later, and the player declines.
+#[test]
+fn a_payment_a_large_library_could_feed_past_the_ceiling_is_refused_before_any_choice() {
+    const AGE: u32 = 1_025;
+    let names = library_names(1_100);
+    let library: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &library, |scenario| {
+        scenario
+            .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text(STINKWEED_IMP_ORACLE);
+    });
+    advance_through_upkeep(&mut runner);
+    let prompt = runner.state().waiting_for.clone();
+    let error = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect_err("the library could feed the payment past one resolution");
+    assert!(
+        matches!(
+            &error,
+            engine::game::engine::EngineError::ActionNotAllowed(reason)
+                if reason.contains("more than 1024 instructions is not representable")
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        runner.state().waiting_for,
+        prompt,
+        "no Dredge prompt was opened"
     );
     runner
         .act(GameAction::PayUnlessCost { pay: false })
