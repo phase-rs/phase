@@ -21841,7 +21841,8 @@ pub enum AutoPassMode {
 ///   client-only preference is invisible to it. Inside a rechecking
 ///   (`RecheckNoMeaningfulPriorityAction`) stack-resolution session that loop
 ///   also executes the ladder's standing rungs (Full Control, yields, own
-///   object on top unless held for a removable mana source) through
+///   object on top unless held for a mana source it can remove, or, for an
+///   activated ability, waste an untap on as its own source) through
 ///   `priority::standing_priority_pass`, the same
 ///   authority the recommendation uses; a Committed session consults only its
 ///   Full Control rung.
