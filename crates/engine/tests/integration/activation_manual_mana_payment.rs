@@ -4430,45 +4430,64 @@ fn a_manual_activation_cannot_sacrifice_its_mana_fodder_again() {
     );
 }
 
-/// CR 118.10 + CR 601.2g + CR 605.3a: the same holds when one sacrifice to
-/// Ashnod's Altar makes exactly the activation's mana. "{2}, Sacrifice a
-/// creature" with a lone creature is offered in no mode, so no manual window
-/// can strand a creature sacrificed for mana the activation then can't use; a
-/// second creature makes it offered for a manual payment.
+/// CR 118.10 + CR 601.2g + CR 605.3a + CR 113.7a: the same holds when one
+/// sacrifice to Ashnod's Altar makes exactly the activation's mana. Thallid
+/// Soothsayer ("{2}, Sacrifice a creature: Draw a card.") is itself a creature,
+/// so it is its own activation's source and sacrifice fodder at once. As P0's
+/// lone creature it is offered in no mode: sacrificed to the Altar for the
+/// {2}, it leaves nothing for "Sacrifice a creature", so no manual window can
+/// strand a creature sacrificed for mana the activation then can't use. With
+/// Grizzly Bears beside it, the Bears fund the {2} and the Soothsayer pays its
+/// own sacrifice: it is offered for a manual payment and the draw resolves.
 #[test]
 fn a_lone_creature_cannot_fund_the_mana_and_pay_the_sacrifice() {
-    let board = |creatures: usize| {
+    let board = |bears: bool| {
         let mut scenario = scenario_at_main();
-        let altar = scenario
-            .add_artifact_from_oracle(
-                P0,
-                "Two-Mana Sacrifice Altar",
-                "{2}, Sacrifice a creature: Draw a card.",
-            )
-            .with_mana_cost(ManaCost::generic(2))
-            .id();
-        scenario
-            .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
-            .with_mana_cost(ManaCost::generic(3));
-        for _ in 0..creatures {
-            scenario.add_vanilla(P0, 2, 2);
-        }
+        let soothsayer = add(&mut scenario, P0, "Thallid Soothsayer", Zone::Battlefield);
+        let altar = add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+        let fodder = bears.then(|| add(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield));
         scenario.add_card_to_library_top(P0, "Drawn card");
-        (scenario.build(), altar)
+        (build(scenario), soothsayer, altar, fodder)
     };
 
-    let (runner, altar) = board(1);
+    let (runner, soothsayer, _, _) = board(false);
     assert!(
-        offered_modes(&runner, altar).is_empty(),
-        "the lone creature can fund the {{2}} or pay the sacrifice, not both"
+        offered_modes(&runner, soothsayer).is_empty(),
+        "the lone Soothsayer can fund the {{2}} or pay the sacrifice, not both"
     );
 
-    let (runner, altar) = board(2);
+    let (mut runner, soothsayer, altar, fodder) = board(true);
+    let fodder = fodder.expect("the Bears are on the battlefield");
     assert_eq!(
-        offered_modes(&runner, altar),
+        offered_modes(&runner, soothsayer),
         vec![CastPaymentMode::Manual],
-        "a second creature pays the sacrifice"
+        "the Bears fund the {{2}} and the Soothsayer pays its own sacrifice"
     );
+    let hand_before = hand_size(&runner, P0);
+    let index = non_mana_ability_index(&runner, soothsayer);
+    let waiting_for = activate_index(&mut runner, soothsayer, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(&mut runner, altar, &[fodder], None);
+    assert_eq!(pool_total(&runner), 2, "the Altar made {{C}}{{C}}");
+    let waiting_for = pass(&mut runner);
+    assert!(
+        is_cost_prompt(&waiting_for, |kind| *kind == PayCostKind::Sacrifice),
+        "the Soothsayer's own sacrifice follows the window: {waiting_for:?}"
+    );
+    let waiting_for = select_cards(&mut runner, &[soothsayer]);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(
+        in_zone(&runner, fodder, Zone::Graveyard),
+        "the Bears paid the mana"
+    );
+    assert!(
+        in_zone(&runner, soothsayer, Zone::Graveyard),
+        "the Soothsayer paid the sacrifice"
+    );
+    assert_eq!(pool_total(&runner), 0, "the {{2}} was paid");
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), hand_before + 1, "the draw resolved");
 }
 
 /// CR 601.2g + CR 605.3b + CR 118.10: the offered manual activation completes:
@@ -6690,4 +6709,228 @@ fn grand_architect_tapping_a_blued_pili_pala_funds_jayemdae_tome() {
 
     resolve_stack(&mut runner);
     assert_eq!(hand_size(&runner, P0), hand_before + 1, "the Tome drew");
+}
+
+/// Five ordinary floating mana — colorless, from no snow source.
+fn ordinary_floating_mana(scenario: &mut GameScenario, amount: usize) {
+    scenario.with_mana_pool(
+        P0,
+        (0..amount)
+            .map(|_| {
+                engine::types::mana::ManaUnit::new(
+                    engine::types::mana::ManaType::Colorless,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                )
+            })
+            .collect(),
+    );
+}
+
+/// CR 107.4h + CR 106.3 + CR 605.3a (#10190 seventh review): a conversion that
+/// leaves the pool's size and types alone is progress when it moves mana onto
+/// a snow source. Mouth of Ronom's "{4}{S}, {T}, Sacrifice this land: It deals
+/// 4 damage to target creature." with five ordinary floating mana and a tapped
+/// Skyshroud Elf ("{1}: Add {R} or {W}.") that Rimefeather Owl ("Permanents
+/// with ice counters on them are snow.") makes snow through an ice counter: one
+/// conversion turns an ordinary unit into snow mana for the {S}. The ability is
+/// offered for a manual payment and the damage resolves. The nonsnow control —
+/// the same board without the ice counter — converts to nonsnow mana, so
+/// nothing can pay the {S} and it is offered in no mode.
+#[test]
+fn a_snow_conversion_funds_mouth_of_ronom_and_a_nonsnow_one_does_not() {
+    for snow in [true, false] {
+        let mut scenario = scenario_at_main();
+        let mouth = add(&mut scenario, P0, "Mouth of Ronom", Zone::Battlefield);
+        let elf = add(&mut scenario, P0, "Skyshroud Elf", Zone::Battlefield);
+        add(&mut scenario, P0, "Rimefeather Owl", Zone::Battlefield);
+        let target = add(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
+        if snow {
+            scenario.with_counter(elf, CounterType::Generic("ice".to_string()), 1);
+        }
+        ordinary_floating_mana(&mut scenario, 5);
+        let mut runner = build(scenario);
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&elf)
+            .expect("the Elf")
+            .tapped = true;
+        let index = ability_index_of(&runner, mouth, "damage");
+        assert_eq!(pool_total(&runner), 5, "reach: five ordinary mana float");
+
+        if !snow {
+            assert!(
+                offered_payment_modes(&runner, mouth, index).is_empty(),
+                "a nonsnow conversion pays no {{S}}"
+            );
+            continue;
+        }
+        assert!(
+            runner.state().objects[&elf]
+                .card_types
+                .supertypes
+                .contains(&engine::types::card_type::Supertype::Snow),
+            "reach: the ice counter makes the Elf snow"
+        );
+        assert_eq!(
+            offered_payment_modes(&runner, mouth, index),
+            vec![CastPaymentMode::Manual],
+            "one conversion through the snow Elf pays the {{S}}"
+        );
+        let waiting_for = activate_index(&mut runner, mouth, index, CastPaymentMode::Manual);
+        let waiting_for = match waiting_for {
+            WaitingFor::TargetSelection { .. } => choose_targets(&mut runner, &[target]),
+            other => other,
+        };
+        assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+        let convert = ability_index_of(&runner, elf, "{1}: Add");
+        let waiting_for = act(
+            &mut runner,
+            GameAction::ActivateAbility {
+                source_id: elf,
+                ability_index: convert,
+                payment_mode: CastPaymentMode::Auto,
+            },
+        );
+        let waiting_for = match waiting_for {
+            WaitingFor::ChooseManaColor { .. } => act(
+                &mut runner,
+                GameAction::ChooseManaColor {
+                    choice: engine::types::game_state::ManaChoice::SingleColor(
+                        engine::types::mana::ManaType::Red,
+                    ),
+                    count: 1,
+                },
+            ),
+            other => other,
+        };
+        assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+        assert_eq!(
+            pool_total(&runner),
+            5,
+            "the conversion kept the pool's size"
+        );
+        let waiting_for = pass(&mut runner);
+        assert!(is_priority(&waiting_for), "{waiting_for:?}");
+        assert!(
+            in_zone(&runner, mouth, Zone::Graveyard),
+            "the Mouth was sacrificed"
+        );
+        assert_eq!(pool_total(&runner), 0, "the {{4}}{{S}} was paid");
+
+        resolve_stack(&mut runner);
+        assert!(
+            in_zone(&runner, target, Zone::Graveyard),
+            "the 4 damage resolved"
+        );
+    }
+}
+
+const STAFF_DRAW: &str = "{5}, {T}: Draw a card.";
+
+/// CR 601.2g + CR 605.3b + CR 118.10 (#10190 seventh review): a mana ability
+/// resolves at once, on the board the window's earlier activations left, so a
+/// producer can count on mana another made possible and can be activated
+/// before its source pays another's cost. Staff of Domination's "{5}, {T}:
+/// Draw a card." with Ashnod's Altar ("Sacrifice a creature: Add {C}{C}."),
+/// Grizzly Bears and Deathbloom Ritualist ("{T}: Add X mana of any one color,
+/// where X is the number of creature cards in your graveyard.") and an empty
+/// graveyard and pool: sacrifice the Bears, tap the Ritualist for one, then
+/// sacrifice the Ritualist. That is offered for a manual payment and the draw
+/// resolves. Without the Bears the Ritualist taps for nothing and two mana is
+/// all the window makes, so it is offered in no mode.
+#[test]
+fn deathbloom_ritualist_tapped_between_altar_sacrifices_funds_staff_of_domination() {
+    for bears in [true, false] {
+        let mut scenario = scenario_at_main();
+        let staff = add(&mut scenario, P0, "Staff of Domination", Zone::Battlefield);
+        let altar = add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+        let ritualist = add(&mut scenario, P0, "Deathbloom Ritualist", Zone::Battlefield);
+        let fodder = bears.then(|| add(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield));
+        scenario.add_card_to_library_top(P0, "Drawn card");
+        let mut runner = build(scenario);
+        let index = ability_index_of(&runner, staff, "Draw a card");
+        assert_eq!(pool_total(&runner), 0, "reach: the pool is empty");
+        assert!(
+            runner.state().players[P0.0 as usize].graveyard.is_empty(),
+            "reach: the graveyard is empty"
+        );
+
+        let Some(fodder) = fodder else {
+            assert!(
+                offered_payment_modes(&runner, staff, index).is_empty(),
+                "without the Bears the window makes only {{C}}{{C}}"
+            );
+            continue;
+        };
+        assert_eq!(
+            offered_payment_modes(&runner, staff, index),
+            vec![CastPaymentMode::Manual],
+            "Bears, Ritualist for one, then the Ritualist make {STAFF_DRAW}'s {{5}}"
+        );
+        let hand_before = hand_size(&runner, P0);
+        let waiting_for = activate_index(&mut runner, staff, index, CastPaymentMode::Manual);
+        assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+        activate_in_window(&mut runner, altar, &[fodder], None);
+        assert_eq!(pool_total(&runner), 2, "the Bears made {{C}}{{C}}");
+        activate_in_window(
+            &mut runner,
+            ritualist,
+            &[],
+            Some(engine::types::game_state::ManaChoice::SingleColor(
+                engine::types::mana::ManaType::Green,
+            )),
+        );
+        assert_eq!(pool_total(&runner), 3, "one creature card: X = 1");
+        activate_in_window(&mut runner, altar, &[ritualist], None);
+        assert_eq!(pool_total(&runner), 5, "the Ritualist made {{C}}{{C}}");
+        let waiting_for = pass(&mut runner);
+        assert!(is_priority(&waiting_for), "{waiting_for:?}");
+        assert!(tapped(&runner, staff), "the {{T}} was paid");
+        assert_eq!(pool_total(&runner), 0, "the {{5}} was paid");
+
+        resolve_stack(&mut runner);
+        assert_eq!(hand_size(&runner, P0), hand_before + 1, "the draw resolved");
+    }
+}
+
+/// CR 601.2g + CR 118.10 (#10190 seventh review): the same holds for a
+/// producer whose amount is printed. Llanowar Elves ("{T}: Add {G}.") must tap
+/// before Ashnod's Altar sacrifices it, as the automatic payer runs after the
+/// window, when it is gone. With Grizzly Bears beside it, tap the Elves, then
+/// sacrifice both: {G}{C}{C}{C}{C} pays Staff of Domination's "{5}, {T}: Draw a
+/// card." It is offered for a manual payment and the draw resolves.
+#[test]
+fn llanowar_elves_tapped_before_the_altar_sacrifices_it_funds_staff_of_domination() {
+    let mut scenario = scenario_at_main();
+    let staff = add(&mut scenario, P0, "Staff of Domination", Zone::Battlefield);
+    let altar = add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+    let elves = add(&mut scenario, P0, "Llanowar Elves", Zone::Battlefield);
+    let bears = add(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+    scenario.add_card_to_library_top(P0, "Drawn card");
+    let mut runner = build(scenario);
+    let index = ability_index_of(&runner, staff, "Draw a card");
+
+    assert_eq!(
+        offered_payment_modes(&runner, staff, index),
+        vec![CastPaymentMode::Manual],
+        "the Elves' {{G}} and two sacrifices make the {{5}}"
+    );
+    let hand_before = hand_size(&runner, P0);
+    let waiting_for = activate_index(&mut runner, staff, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(&mut runner, elves, &[], None);
+    assert_eq!(pool_total(&runner), 1, "the Elves made {{G}}");
+    activate_in_window(&mut runner, altar, &[elves], None);
+    activate_in_window(&mut runner, altar, &[bears], None);
+    assert_eq!(pool_total(&runner), 5);
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, staff), "the {{T}} was paid");
+    assert_eq!(pool_total(&runner), 0, "the {{5}} was paid");
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), hand_before + 1, "the draw resolved");
 }

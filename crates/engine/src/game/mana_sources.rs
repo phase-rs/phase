@@ -2885,18 +2885,40 @@ pub(crate) fn player_choice_mana_ability_passes_screen(
     if !player_choice_mana_ability_shape(ability) {
         return false;
     }
-    if has_tap_component(&ability.cost) {
-        // CR 107.5 + CR 118.3: a tapped source can't pay a {T} cost, so it is
-        // refused before any of its cost's choices are gathered.
-        if state.objects.get(&object_id).is_none_or(|obj| obj.tapped) {
-            return false;
-        }
-        // A tap cost that chooses an object (CR 605.3a) belongs here with the
-        // ambiguous non-tap costs (KCI's "Sacrifice an artifact", discard,
-        // pay-life); a choice-free tap ability pays through the tap path.
-        if !mana_abilities::cost_requires_object_choice(state, controller, object_id, ability) {
-            return false;
-        }
+    // A tap cost that chooses an object (CR 605.3a) belongs here with the
+    // ambiguous non-tap costs (KCI's "Sacrifice an artifact", discard,
+    // pay-life); a choice-free tap ability pays through the tap path.
+    if has_tap_component(&ability.cost)
+        && !mana_abilities::cost_requires_object_choice(state, controller, object_id, ability)
+    {
+        return false;
+    }
+    window_mana_ability_passes_screen(state, controller, object_id, idx, ability, gates)
+}
+
+/// CR 605.3a + CR 107.5 + CR 118.3: the readiness checks of
+/// [`player_choice_mana_ability_passes_screen`] that hold for any mana ability
+/// a payment window activates, whatever its cost's shape: its source's
+/// readiness (a tapped source can't pay a {T} cost), its activation
+/// restrictions and condition, and its cost's non-mana legs, decided without a
+/// legality simulation.
+pub(crate) fn window_mana_ability_passes_screen(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    idx: usize,
+    ability: &AbilityDefinition,
+    gates: &mana_abilities::ManaActivationGates,
+) -> bool {
+    if !is_payment_mana_ability(ability) {
+        return false;
+    }
+    // CR 107.5 + CR 118.3: a tapped source can't pay a {T} cost, so it is
+    // refused before any of its cost's choices are gathered.
+    if has_tap_component(&ability.cost)
+        && state.objects.get(&object_id).is_none_or(|obj| obj.tapped)
+    {
+        return false;
     }
     if !mana_abilities::mana_ability_ready_without_simulation_gated(
         state,
@@ -2913,6 +2935,105 @@ pub(crate) fn player_choice_mana_ability_passes_screen(
         return false;
     }
     matches!(&*ability.effect, Effect::Mana { .. })
+}
+
+/// CR 601.2g + CR 605.3a + CR 118.10: the choice-free mana abilities — those
+/// the automatic payer activates itself, which
+/// [`player_choice_mana_abilities_for_payment`] leaves out — whose source the
+/// cost of one of `candidates` can take off the battlefield (Ashnod's Altar's
+/// "Sacrifice a creature" can take Deathbloom Ritualist). The automatic payer
+/// runs after the window, when such a source may be gone, so its mana counts
+/// only when the window activates it before its source pays that cost.
+pub(crate) fn window_consumable_mana_abilities(
+    state: &GameState,
+    controller: PlayerId,
+    candidates: &[(ObjectId, usize)],
+) -> Vec<(ObjectId, usize)> {
+    let mut consumable: Vec<ObjectId> = Vec::new();
+    for &(object_id, index) in candidates {
+        let Some(ability) = state
+            .objects
+            .get(&object_id)
+            .and_then(|obj| obj.abilities.get(index))
+        else {
+            continue;
+        };
+        let sacrificed =
+            mana_abilities::sacrifice_cost_choice(state, controller, object_id, ability)
+                .map(|(_, objects)| objects);
+        let exiled = mana_abilities::exile_cost_choice(state, controller, object_id, ability)
+            .filter(|(_, zone, _)| *zone == Zone::Battlefield)
+            .map(|(_, _, objects)| objects);
+        for object in sacrificed.into_iter().chain(exiled).flatten() {
+            if !consumable.contains(&object) {
+                consumable.push(object);
+            }
+        }
+    }
+    state
+        .battlefield
+        .iter()
+        .filter(|id| consumable.contains(id))
+        .filter_map(|id| Some((*id, state.objects.get(id)?)))
+        .filter(|(_, obj)| obj.controller == controller)
+        .flat_map(|(object_id, obj)| {
+            obj.abilities
+                .iter()
+                .enumerate()
+                .filter(|(_, ability)| {
+                    is_payment_mana_ability(ability) && !player_choice_mana_ability_shape(ability)
+                })
+                .map(move |(idx, _)| (object_id, idx))
+        })
+        .collect()
+}
+
+/// CR 601.2g + CR 605.3b: whether a mana ability of `controller`'s permanents
+/// adds an amount read from the board, which the window's own activations can
+/// change: Deathbloom Ritualist's "{T}: Add X mana of any one color, where X is
+/// the number of creature cards in your graveyard" adds more once Ashnod's
+/// Altar has sacrificed a creature. A capacity read now is then no bound on
+/// the window. An amount the ability's cost announces (Calciform Pools'
+/// "Remove X storage counters") is sized by the largest announceable X.
+pub(crate) fn has_board_sized_mana_ability(state: &GameState, controller: PlayerId) -> bool {
+    state.battlefield.iter().any(|&object_id| {
+        state
+            .objects
+            .get(&object_id)
+            .filter(|obj| obj.zone == Zone::Battlefield && obj.controller == controller)
+            .is_some_and(|obj| {
+                obj.abilities.iter().any(|ability| {
+                    is_payment_mana_ability(ability)
+                        && mana_amount_reads_board(state, controller, object_id, ability)
+                })
+            })
+    })
+}
+
+/// Whether one mana ability's amount is read from the board
+/// ([`has_board_sized_mana_ability`]).
+fn mana_amount_reads_board(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> bool {
+    let Effect::Mana { produced, .. } = &*ability.effect else {
+        return false;
+    };
+    // CR 106.1: one mana of each distinct color among some permanents.
+    if matches!(
+        produced,
+        ManaProduction::DistinctColorsAmongPermanents { .. }
+    ) {
+        return true;
+    }
+    let mut counted = false;
+    produced.for_each_quantity_expr(&mut |quantity| {
+        counted |= !matches!(quantity, QuantityExpr::Fixed { .. });
+    });
+    counted
+        && mana_abilities::largest_announceable_x(state, controller, object_id, ability).is_none()
 }
 
 /// CR 117.1d + CR 601.2g: One activation's producible mana shape for the

@@ -24109,6 +24109,13 @@ fn activation_window_mana_may_suffice(
     }) {
         return true;
     }
+    // CR 601.2g + CR 605.3b: each mana ability resolves at once, on the board
+    // the window's earlier activations left, so an amount read from the board
+    // is only provisional now: Deathbloom Ritualist adds one more mana for each
+    // creature Ashnod's Altar has already put in the graveyard.
+    if super::mana_sources::has_board_sized_mana_ability(state, player) {
+        return true;
+    }
     let Some(residual) =
         spell_cost_residual_after_pool(state, player, Some(source_id), &mana, Some(&payment_ctx))
     else {
@@ -28316,7 +28323,9 @@ enum WitnessOutcome {
 /// CR 601.2g + CR 605.3a + CR 605.3b + CR 118.10: whether `player` can activate,
 /// during the activation's CR 601.2g opportunity, mana abilities the automatic
 /// payer never activates (a sacrifice, discard or other object-choosing cost:
-/// Ashnod's Altar) so that `payable` then accepts the whole `cost` — its mana
+/// Ashnod's Altar), and the choice-free ones whose source such a cost can
+/// consume (Deathbloom Ritualist, tapped before the Altar sacrifices it), so
+/// that `payable` then accepts the whole `cost` — its mana
 /// from the pool those abilities filled, its other components from what their
 /// costs left behind. Each candidate is activated on a clone through the real
 /// mana-ability authority, and every prompt it raises is answered through the
@@ -28348,9 +28357,15 @@ fn mana_ability_window_mana_witness(
     // can fund it while it stays untapped (Cryptic Trilobite), and the payment
     // authority refuses a route that spends what the rest of the cost needs.
     // Readiness is decided per board, inside the search's budget.
-    let candidates: Vec<(ObjectId, usize)> =
+    let mut candidates: Vec<(ObjectId, usize)> =
         super::mana_sources::player_choice_mana_abilities_for_payment(state, player).collect();
-    let distinguished_mana_types = payment_distinguished_mana_types(
+    // CR 601.2g + CR 118.10: a choice-free producer whose source a candidate's
+    // cost can sacrifice contributes only when the window activates it first:
+    // tapping Deathbloom Ritualist, then sacrificing it to Ashnod's Altar.
+    let consumable =
+        super::mana_sources::window_consumable_mana_abilities(state, player, &candidates);
+    candidates.extend(consumable.iter().copied());
+    let distinctions = payment_distinctions(
         state,
         cost,
         &candidates,
@@ -28373,10 +28388,11 @@ fn mana_ability_window_mana_witness(
         cost,
         payable,
         candidates: &candidates,
+        consumable: &consumable,
         budget: MANA_ABILITY_WINDOW_WITNESS_BUDGET,
         _color_constraint: activation_context.mana_color_constraint,
         payment_context: activation_context,
-        distinguished_mana_types,
+        distinctions,
         spend_contexts,
         reached: Vec::new(),
         frontier: std::collections::VecDeque::new(),
@@ -28396,25 +28412,65 @@ fn mana_ability_window_mana_witness(
     search.run(window)
 }
 
-/// CR 106.1 + CR 107.4: the mana types the window's payments can tell apart —
-/// each type some mana symbol of `cost`, or of a candidate mana ability's own
-/// cost, can be paid with. Also includes the final activation's color constraint
-/// (Throne of Eldraine: "Spend only mana of the chosen color") so that mana
-/// abilities producing that color are tried. A unit of any other type pays only
-/// generic mana, so one such type stands for all of them. `None` when a symbol
-/// is paid by something beyond the unit's type ({S}: snow), which no such
-/// stand-in keeps.
-fn payment_distinguished_mana_types(
+/// CR 106.3 + CR 107.4h: a fact about the source a unit of mana came from that
+/// some mana symbol reads beyond the unit's type. Two units of one type differ
+/// to a payment when one meets a demanded provenance and the other doesn't.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceProvenance {
+    /// CR 107.4h: {S} "can be paid with one mana of any type produced by a
+    /// snow source."
+    Snow,
+    /// A symbol paid only with mana from a source that could produce two or
+    /// more colors ([`mana_payment::ShardRequirement::TwoOrMoreColorSource`]).
+    TwoOrMoreColorSource,
+}
+
+impl SourceProvenance {
+    /// Whether mana of `shape` has this provenance.
+    fn met_by(self, shape: &crate::types::mana::ManaShape) -> bool {
+        match self {
+            SourceProvenance::Snow => shape.is_snow(),
+            SourceProvenance::TwoOrMoreColorSource => shape.source_could_produce_two_or_more_colors,
+        }
+    }
+}
+
+/// CR 106.1 + CR 107.4: what the window's payments can tell apart in a unit
+/// of mana ([`payment_distinctions`]).
+#[derive(Debug, Clone, Default)]
+struct PaymentDistinctions {
+    /// The mana types some symbol can be paid with. A unit of any other type
+    /// pays only generic mana, so one such type stands for all of them.
+    types: Vec<ManaType>,
+    /// The source provenances some symbol demands (CR 107.4h: {S}). They are
+    /// facts about the source, not the type, so they never tell two answers
+    /// to one color prompt apart.
+    provenances: Vec<SourceProvenance>,
+}
+
+/// CR 106.1 + CR 107.4 + CR 107.4h: what the window's payments can tell apart
+/// — each type some mana symbol of `cost`, or of a candidate mana ability's
+/// own cost, can be paid with, and each source provenance one demands (Mouth
+/// of Ronom's {S}: mana from a snow source). Also includes the final
+/// activation's color constraint (Throne of Eldraine: "Spend only mana of the
+/// chosen color") so that mana abilities producing that color are tried.
+fn payment_distinctions(
     state: &GameState,
     cost: &AbilityCost,
     candidates: &[(ObjectId, usize)],
     color_constraint: ActivationManaColorConstraint,
-) -> Option<Vec<ManaType>> {
+) -> PaymentDistinctions {
     use mana_payment::ShardRequirement;
     let candidate_costs = candidates.iter().filter_map(|(id, index)| {
         let def = state.objects.get(id)?.abilities.get(*index)?;
         super::mana_abilities::mana_sub_cost_of(&def.cost).cloned()
     });
+    let mut distinctions = PaymentDistinctions::default();
+    let mut demand = |provenance: SourceProvenance| {
+        if !distinctions.provenances.contains(&provenance) {
+            distinctions.provenances.push(provenance);
+        }
+    };
     let mut types = Vec::new();
     for mana in std::iter::once(activation_mana_component(cost)).chain(candidate_costs) {
         let ManaCost::Cost { shards, .. } = &mana else {
@@ -28433,7 +28489,10 @@ fn payment_distinguished_mana_types(
                     types.extend([ManaType::Colorless, unit]);
                 }
                 ShardRequirement::X => {}
-                ShardRequirement::Snow | ShardRequirement::TwoOrMoreColorSource => return None,
+                ShardRequirement::Snow => demand(SourceProvenance::Snow),
+                ShardRequirement::TwoOrMoreColorSource => {
+                    demand(SourceProvenance::TwoOrMoreColorSource);
+                }
             }
         }
     }
@@ -28442,7 +28501,8 @@ fn payment_distinguished_mana_types(
     if let ActivationManaColorConstraint::Only(color) = color_constraint {
         types.push(ManaType::from(color));
     }
-    Some(types)
+    distinctions.types = types;
+    distinctions
 }
 
 struct ManaWindowWitnessSearch<'a, F> {
@@ -28453,16 +28513,20 @@ struct ManaWindowWitnessSearch<'a, F> {
     cost: &'a AbilityCost,
     payable: &'a F,
     candidates: &'a [(ObjectId, usize)],
+    /// The choice-free candidates the window activates only because another
+    /// candidate's cost can consume their source
+    /// ([`super::mana_sources::window_consumable_mana_abilities`]).
+    consumable: &'a [(ObjectId, usize)],
     budget: usize,
     /// CR 106.6: the final activation's color constraint. Not used for
     /// filtering intermediate mana ability color choices (those are filtered
-    /// by distinguished_mana_types and pool_composition).
+    /// by the window's distinctions and pool_composition).
     _color_constraint: ActivationManaColorConstraint,
     /// CR 106.6: the activation's own payment context, so a candidate's
     /// restricted mana is judged exactly as the live window judges it.
     payment_context: ActivationPaymentContext,
-    /// [`payment_distinguished_mana_types`] of the cost.
-    distinguished_mana_types: Option<Vec<ManaType>>,
+    /// [`payment_distinctions`] of the cost.
+    distinctions: PaymentDistinctions,
     /// CR 106.6: the payment context of each candidate whose own cost spends
     /// mana — an intermediate payment of the window
     /// ([`Self::pool_composition`]).
@@ -28494,9 +28558,10 @@ type ActivationCounts = (
 type ReachedKey = (u64, Vec<(PoolCompositionKey, usize)>);
 
 /// One bucket of [`ManaWindowWitnessSearch::pool_composition`]: the unit's
-/// told-apart type (`None` for the stand-in), and whether each of the window's
-/// payments may spend it.
-type PoolCompositionKey = (Option<ManaType>, Vec<bool>);
+/// told-apart type (`None` for the stand-in), whether it meets each demanded
+/// source provenance ([`PaymentDistinctions::provenances`]), and whether each
+/// of the window's payments may spend it.
+type PoolCompositionKey = (Option<ManaType>, Vec<bool>, Vec<bool>);
 
 impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
     /// Whether some sequence of activations from `window` reaches a board on
@@ -28559,14 +28624,26 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
             // it on a board the budget pays for. Output restrictions (CR 106.6)
             // are NOT checked here; they are evaluated in pool_composition when
             // mana is actually spent.
-            if !super::mana_sources::player_choice_mana_ability_passes_screen(
-                board,
-                player,
-                mana_source,
-                index,
-                def,
-                &gates,
-            ) {
+            let ready = if self.consumable.contains(&(mana_source, index)) {
+                super::mana_sources::window_mana_ability_passes_screen(
+                    board,
+                    player,
+                    mana_source,
+                    index,
+                    def,
+                    &gates,
+                )
+            } else {
+                super::mana_sources::player_choice_mana_ability_passes_screen(
+                    board,
+                    player,
+                    mana_source,
+                    index,
+                    def,
+                    &gates,
+                )
+            };
+            if !ready {
                 continue;
             }
             let class = self.candidate_class(board, mana_source, index);
@@ -28854,19 +28931,14 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
     /// (Molten Slagheap -> Blood Celebrant) may produce colors that are then
     /// converted. The final constraint is enforced in pool_composition when mana
     /// is actually spent. Answers that differ only in types no payment tells
-    /// apart ([`payment_distinguished_mana_types`]) are one answer.
+    /// apart ([`payment_distinctions`]) are one answer. A demanded source
+    /// provenance ({S}) is the same for every answer of one activation, so it
+    /// splits none of them.
     fn payment_relevant_mana_choice_answers<'p>(
         &self,
         prompt: &'p ManaChoicePrompt,
     ) -> Box<dyn Iterator<Item = ManaChoice> + 'p> {
-        let Some(distinguished) = self.distinguished_mana_types.clone() else {
-            return match prompt {
-                ManaChoicePrompt::AnyCombination { count, options } => {
-                    any_combination_answers(*count, options.clone())
-                }
-                _ => mana_choice_answers(prompt),
-            };
-        };
+        let distinguished = self.distinctions.types.clone();
         // The told-apart types an answer offers, then one stand-in for
         // the rest.
         let representatives = |options: &[ManaType]| -> Vec<ManaType> {
@@ -28925,10 +28997,13 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
         }
     }
 
-    /// CR 106.1 + CR 107.4 + CR 106.6: the pool as the payments of this window
-    /// see it — each unit keyed by its type when some payment tells that type
-    /// apart (one stand-in for every other type, all of which pay only generic
-    /// mana), and by which payments may spend it at all: the activation's own
+    /// CR 106.1 + CR 107.4 + CR 107.4h + CR 106.6: the pool as the payments of
+    /// this window see it — each unit keyed by its type when some payment tells
+    /// that type apart (one stand-in for every other type, all of which pay
+    /// only generic mana), by each source provenance a symbol demands (a
+    /// conversion through a snow Skyshroud Elf turns ordinary mana into mana
+    /// that pays Mouth of Ronom's {S}), and by which payments may spend it at
+    /// all: the activation's own
     /// ([`Self::payment_context`]) and each candidate's mana cost
     /// ([`Self::spend_contexts`]). A conversion that leaves the pool's total
     /// and its printed-symbol types alone can still make mana spendable that
@@ -28949,14 +29024,21 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
         let mut composition: Vec<(PoolCompositionKey, usize)> = Vec::new();
         for (shape, count) in player.mana_pool.shapes() {
             let kind = self
-                .distinguished_mana_types
-                .as_deref()
-                .and_then(|types| types.contains(&shape.color).then_some(shape.color));
+                .distinctions
+                .types
+                .contains(&shape.color)
+                .then_some(shape.color);
+            let provenance = self
+                .distinctions
+                .provenances
+                .iter()
+                .map(|provenance| provenance.met_by(shape))
+                .collect();
             let spendable = spend_contexts
                 .iter()
                 .map(|ctx| mana_payment::mana_unit_permits_payment_context(shape, ctx))
                 .collect();
-            let key = (kind, spendable);
+            let key = (kind, provenance, spendable);
             match composition.iter_mut().find(|(known, _)| *known == key) {
                 Some((_, total)) => *total += count,
                 None => composition.push((key, count)),
