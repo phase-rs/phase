@@ -204,6 +204,13 @@
         "label": "Libellé",
         "fallback": "Choix"
       }
+    },
+    "attacking": {
+      "you": "Vous attaque",
+      "player": "Attaque {{player}}",
+      "yourPlaneswalker": "Attaque votre planeswalker {{name}}",
+      "planeswalker": "Attaque le planeswalker {{name}} de {{player}}",
+      "battle": "Attaque la bataille {{name}}"
     }
   },
   "actionButton": {
@@ -436,7 +443,10 @@
     "assignRemaining_other": "Assigner {{count}} de plus",
     "confirmDistribute_one": "Déclarer {{count}} attaquant",
     "confirmDistribute_other": "Déclarer {{count}} attaquants",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Totaux d'attaque",
+    "targetTotal_one": "{{count}} attaquant · {{damage}} blessures",
+    "targetTotal_other": "{{count}} attaquants · {{damage}} blessures"
   },
   "fullControl": {
     "label": "Contrôle",
@@ -822,7 +832,9 @@
     "lethalBadge": "Létal",
     "planeswalkerLoyalty": "Planeswalker (loyauté : {{loyalty}})",
     "defendingPlayerTrample": "Joueur défenseur (Piétinement)",
-    "pwControllerTrample": "Contrôleur du PW (Piétinement sur PW)"
+    "pwControllerTrample": "Contrôleur du PW (Piétinement sur PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo": "Assigner les {{amount}} blessures restantes à {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",

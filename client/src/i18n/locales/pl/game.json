@@ -204,6 +204,13 @@
         "label": "Etykieta",
         "fallback": "Wybór"
       }
+    },
+    "attacking": {
+      "you": "Atakuje ciebie",
+      "player": "Atakuje: {{player}}",
+      "yourPlaneswalker": "Atakuje twojego planeswalkera {{name}}",
+      "planeswalker": "Atakuje planeswalkera {{name}} gracza {{player}}",
+      "battle": "Atakuje bitwę {{name}}"
     }
   },
   "actionButton": {
@@ -436,7 +443,10 @@
     "assignRemaining_other": "Przydziel jeszcze {{count}}",
     "confirmDistribute_one": "Zadeklaruj {{count}} atakującego",
     "confirmDistribute_other": "Zadeklaruj {{count}} atakujących",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Sumy ataku",
+    "targetTotal_one": "{{count}} atakujący · {{damage}} obrażeń",
+    "targetTotal_other": "{{count}} atakujących · {{damage}} obrażeń"
   },
   "fullControl": {
     "label": "Kontrola",
@@ -822,7 +832,9 @@
     "lethalBadge": "Śmiertelne",
     "planeswalkerLoyalty": "Wędrowiec (lojalność: {{loyalty}})",
     "defendingPlayerTrample": "Broniący gracz (Tratowanie)",
-    "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)"
+    "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo": "Przydziel pozostałe {{amount}} obrażeń do: {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",

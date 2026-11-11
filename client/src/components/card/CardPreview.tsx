@@ -7,7 +7,7 @@ import {
 } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
-import type { ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
+import type { AttackerInfo, ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
 import { ABILITY_BLOCK_REASON_KEY } from "../../viewmodel/abilityBlockReason.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 import { abilityLabel, loyaltyBadge, spellCostDisplay, stripLoyaltyCostPrefix } from "../../viewmodel/costLabel.ts";
@@ -22,6 +22,8 @@ import { faceDownMarkerRef } from "./faceDownMarker.ts";
 import { shouldRenderCardBack } from "../../viewmodel/cardProps.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useBackFaceSpellCost } from "../../hooks/useBackFaceSpellCost.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore, type MobileHandGesture } from "../../stores/uiStore.ts";
@@ -1422,6 +1424,36 @@ function CardInfoPanel({
   const keywordSources = buildGrantedKeywordSources(attribution, obj.id, deref);
   const ptSources = buildPTSources(attribution, obj.id, deref);
   const chosenAttributes = obj.chosen_attributes ?? [];
+  // CR 506.3 + CR 508.1b: the engine-declared target of this creature's attack, if it is attacking.
+  const attacker = useGameStore((s) =>
+    s.gameState?.combat?.attackers.find((a) => a.object_id === obj.id),
+  );
+  const myId = usePlayerId();
+
+  const formatAttackTarget = ({ attack_target: target, defending_player }: AttackerInfo): string => {
+    switch (target.type) {
+      case "Player":
+        return target.data === myId
+          ? t("preview.attacking.you")
+          : t("preview.attacking.player", { player: getOpponentDisplayName(target.data) });
+      case "Planeswalker": {
+        const name = objects?.[String(target.data)]?.name;
+        // CR 506.2: the planeswalker's controller is the defending player the engine recorded.
+        return defending_player === myId
+          ? t("preview.attacking.yourPlaneswalker", { name })
+          : t("preview.attacking.planeswalker", {
+              name,
+              player: getOpponentDisplayName(defending_player),
+            });
+      }
+      case "Battle":
+        return t("preview.attacking.battle", { name: objects?.[String(target.data)]?.name });
+      default: {
+        const _exhaustive: never = target;
+        return _exhaustive;
+      }
+    }
+  };
 
   const formatChosenAttribute = (attribute: ChosenAttribute): { label: string; value: string } => {
     switch (attribute.type) {
@@ -1485,6 +1517,9 @@ function CardInfoPanel({
       <div className="font-semibold text-gray-300">
         <RichLabel text={formatTypeLine(obj.card_types, obj.keywords)} size="xs" />
       </div>
+      {attacker && (
+        <div className="mt-1 font-semibold text-red-300">⚔ {formatAttackTarget(attacker)}</div>
+      )}
 
       {activateLabels.length > 0 && (
         <div className="mt-1 text-cyan-300/90">

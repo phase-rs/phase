@@ -19,6 +19,8 @@ use std::num::NonZeroUsize;
 
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::{declared_targets_in_chain, flatten_targets_in_chain};
+use crate::game::combat_damage::combat_damage_to_defender;
+use crate::game::effects::deal_damage::DamageContext;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{AttachTarget, DisplaySource, GameObject};
 use crate::game::stack::{
@@ -624,6 +626,19 @@ pub struct SharedPilesView {
     pub graveyard: Option<PlayerId>,
 }
 
+/// CR 510.1a + CR 702.4b + CR 120.3a/b: display-only projection, at the current
+/// state, of what a creature that may attack would do to a player if it attacks
+/// and is not blocked. Computed before replacement and prevention effects
+/// (CR 614.1 / CR 615.1), which apply only as the damage event happens.
+/// Not a game action; recomputed on every snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnblockedAttackPreview {
+    /// CR 510.1a + CR 702.4b: combat damage across every damage step it would assign in.
+    pub damage: u32,
+    /// CR 120.3a / CR 120.3b: life loss that damage causes a player (0 for infect).
+    pub life_loss: u32,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
@@ -1013,6 +1028,12 @@ pub struct DerivedViews {
     /// `Life` axis for that seat is rising; only non-`Finite` entries are emitted.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub life_magnitude: BTreeMap<PlayerId, DisplayMagnitude>,
+
+    /// CR 508.1a + CR 510.1a + CR 120.3a/b: per-candidate-attacker projection of unblocked
+    /// damage, published only while the attack declaration prompt is open; keyed by attacker
+    /// id. Display-only; before replacement and prevention effects (CR 614.1 / CR 615.1).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub unblocked_attack_previews: HashMap<ObjectId, UnblockedAttackPreview>,
 }
 
 /// Serialize-only wrapper. The wire shape is
@@ -1545,6 +1566,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         current_target_kind: current_target_kind(state),
         dungeon_rooms: dungeon_rooms(state),
         storm_count: storm_count(state),
+        unblocked_attack_previews: unblocked_attack_previews(state),
         ..DerivedViews::default()
     };
 
@@ -2212,6 +2234,34 @@ fn storm_count(state: &GameState) -> u32 {
             | StackEntryKind::CombatDamage { .. } => None,
         })
         .unwrap_or_else(|| spells_cast_this_turn(state))
+}
+
+/// CR 508.1a: one unblocked-attack projection per creature the open attack
+/// declaration prompt lets attack; empty in every other state (just-in-time).
+fn unblocked_attack_previews(state: &GameState) -> HashMap<ObjectId, UnblockedAttackPreview> {
+    let WaitingFor::DeclareAttackers {
+        valid_attacker_ids, ..
+    } = &state.waiting_for
+    else {
+        return HashMap::new();
+    };
+    valid_attacker_ids
+        .iter()
+        .filter_map(|&id| {
+            // CR 510.1b + CR 702.4b: unblocked attacker's damage over both damage steps — the
+            // shared authority.
+            let damage = combat_damage_to_defender(state, id, &[]).max(0) as u32;
+            let has_infect = DamageContext::from_source(state, id)?.has_infect;
+            let life_loss = if has_infect {
+                // CR 120.3b: infect damage to a player is poison counters, not life loss.
+                0
+            } else {
+                // CR 120.3a: damage to a player without infect is that much life loss.
+                damage
+            };
+            Some((id, UnblockedAttackPreview { damage, life_loss }))
+        })
+        .collect()
 }
 
 /// The table-wide count of spells actually cast this turn. This is intentionally

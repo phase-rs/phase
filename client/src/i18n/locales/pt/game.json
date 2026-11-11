@@ -204,6 +204,13 @@
         "label": "Rótulo",
         "fallback": "Escolha"
       }
+    },
+    "attacking": {
+      "you": "Atacando você",
+      "player": "Atacando {{player}}",
+      "yourPlaneswalker": "Atacando seu planeswalker {{name}}",
+      "planeswalker": "Atacando o planeswalker {{name}} de {{player}}",
+      "battle": "Atacando a batalha {{name}}"
     }
   },
   "actionButton": {
@@ -436,7 +443,10 @@
     "assignRemaining_other": "Atribuir mais {{count}}",
     "confirmDistribute_one": "Declarar {{count}} Atacante",
     "confirmDistribute_other": "Declarar {{count}} Atacantes",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Totais de ataque",
+    "targetTotal_one": "{{count}} atacante · {{damage}} de dano",
+    "targetTotal_other": "{{count}} atacantes · {{damage}} de dano"
   },
   "fullControl": {
     "label": "Controle",
@@ -822,7 +832,9 @@
     "lethalBadge": "Letal",
     "planeswalkerLoyalty": "Planeswalker (lealdade: {{loyalty}})",
     "defendingPlayerTrample": "Jogador Defensor (Atropelar)",
-    "pwControllerTrample": "Controlador do PW (Atropelar Sobre PW)"
+    "pwControllerTrample": "Controlador do PW (Atropelar Sobre PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo": "Atribuir os {{amount}} de dano restantes a {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",

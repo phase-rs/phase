@@ -204,6 +204,13 @@
         "label": "Label",
         "fallback": "Auswahl"
       }
+    },
+    "attacking": {
+      "you": "Greift dich an",
+      "player": "Greift {{player}} an",
+      "yourPlaneswalker": "Greift deinen Planeswalker {{name}} an",
+      "planeswalker": "Greift den Planeswalker {{name}} von {{player}} an",
+      "battle": "Greift die Schlacht {{name}} an"
     }
   },
   "actionButton": {
@@ -436,7 +443,10 @@
     "assignRemaining_other": "Noch {{count}} zuweisen",
     "confirmDistribute_one": "{{count}} Angreifer erklären",
     "confirmDistribute_other": "{{count}} Angreifer erklären",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Angriffssummen",
+    "targetTotal_one": "{{count}} Angreifer · {{damage}} Schaden",
+    "targetTotal_other": "{{count}} Angreifer · {{damage}} Schaden"
   },
   "fullControl": {
     "label": "Kontrolle",
@@ -822,7 +832,9 @@
     "lethalBadge": "Tödlich",
     "planeswalkerLoyalty": "Planeswalker (Loyalität: {{loyalty}})",
     "defendingPlayerTrample": "Verteidigender Spieler (Trampelschaden)",
-    "pwControllerTrample": "PW-Beherrscher (Trampelschaden über PW)"
+    "pwControllerTrample": "PW-Beherrscher (Trampelschaden über PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo": "Die verbleibenden {{amount}} Schaden {{target}} zuteilen"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
