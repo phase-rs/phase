@@ -19,8 +19,7 @@ use crate::game::filter::{
 use crate::game::game_object::PhaseOutCause;
 use crate::game::phasing::{phase_in_object, phase_in_player, phase_out_object, phase_out_player};
 use crate::types::ability::{
-    phase_out_filter_is_context_union, Effect, EffectError, EffectKind, ResolvedAbility,
-    TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -162,15 +161,7 @@ pub(super) fn collect_object_targets(
     ability: &ResolvedAbility,
     target: &TargetFilter,
 ) -> Vec<ObjectId> {
-    // CR 115.10a: only a union of already-bound references is collected leg by
-    // leg. A mixed union (`Or[SelfRef, Typed(..)]`) is one stack-target
-    // declaration, so it falls through to the single-filter path below where the
-    // announced target keeps precedence.
-    let context_union_legs = match target {
-        TargetFilter::Or { filters } if phase_out_filter_is_context_union(target) => Some(filters),
-        _ => None,
-    };
-    if let Some(filters) = context_union_legs {
+    if let TargetFilter::Or { filters } = target {
         // CR 702.26g + CR 702.26h: gather the whole batch before phasing any
         // member, so an attachment selected with its host phases indirectly.
         let mut seen = HashSet::new();
@@ -412,70 +403,6 @@ mod tests {
             collect_object_targets(&state, &ability, &TargetFilter::SelfRef),
             vec![chosen],
             "standalone explicit-target precedence is unchanged"
-        );
-    }
-
-    /// CR 115.10a: `Or[SelfRef, Typed(creature)]` ("target creature or this
-    /// permanent") is one stack-target declaration, so only the announced target
-    /// phases out; the all-context union `Or[SelfRef, ParentTarget]` still
-    /// collects the source as well. Removing the `phase_out_filter_is_context_union`
-    /// gate in `collect_object_targets` adds the source to the mixed result.
-    /// No printed card has the mixed shape today; the nearest printed phase-out
-    /// declarations are Reality Ripple's single `Or` typed target and
-    /// U.S.S. Defiant's context union.
-    #[test]
-    fn mixed_target_declaration_union_phases_out_only_the_announced_target() {
-        use crate::game::game_object::PhaseStatus;
-        use crate::types::ability::TypedFilter;
-
-        let mut state = GameState::new_two_player(42);
-        let source = add_creature(&mut state, PlayerId(0), "Source");
-        let announced = add_creature(&mut state, PlayerId(0), "Announced");
-        let unrelated = add_creature(&mut state, PlayerId(0), "Unrelated");
-        let mixed = TargetFilter::Or {
-            filters: vec![
-                TargetFilter::SelfRef,
-                TargetFilter::Typed(TypedFilter::creature()),
-            ],
-        };
-        let context_union = TargetFilter::Or {
-            filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
-        };
-        let ability_for = |target: &TargetFilter| {
-            ResolvedAbility::new(
-                Effect::PhaseOut {
-                    target: target.clone(),
-                },
-                vec![TargetRef::Object(announced)],
-                source,
-                PlayerId(0),
-            )
-        };
-
-        // Control (positive reach guard): the all-context union still includes
-        // the source alongside the announced target.
-        assert_eq!(
-            collect_object_targets(&state, &ability_for(&context_union), &context_union),
-            vec![source, announced]
-        );
-        let mixed_ability = ability_for(&mixed);
-        assert_eq!(
-            collect_object_targets(&state, &mixed_ability, &mixed),
-            vec![announced]
-        );
-
-        // Production resolver: the source stays phased in.
-        resolve(&mut state, &mixed_ability, &mut Vec::new()).unwrap();
-        assert_eq!(
-            state.objects[&announced].phase_status,
-            PhaseStatus::PhasedOut {
-                cause: PhaseOutCause::Directly
-            }
-        );
-        assert_eq!(state.objects[&source].phase_status, PhaseStatus::PhasedIn);
-        assert_eq!(
-            state.objects[&unrelated].phase_status,
-            PhaseStatus::PhasedIn
         );
     }
 
