@@ -4061,12 +4061,14 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
     // board-reading component (a bare `Typed` under `LoopFirewall` relaxes — the
     // coverability gate).
     let base = match ctx {
+        // CR 404.1: a census of a graveyard counts its cards.
         FilterReadContext::LiveBoardCensus => Axes {
             event: false,
             sibling: SiblingReads::filtered(x, CharacteristicKinds::EMPTY, mode),
             projected: false,
             history: HistoryReads::NONE,
-        },
+        }
+        .or(x.extract_in_zone().map_or(Axes::NONE, Axes::zone_count)),
         FilterReadContext::SnapshotOrEvent => Axes::NONE,
     };
     base.or(match x {
@@ -8935,6 +8937,13 @@ mod tests {
                 "Boneyard Wurm",
                 "Boneyard Wurm's power and toughness are each equal to the number of creature \
                  cards in your graveyard.",
+            ),
+            (
+                "Boneyard Mycodrax",
+                "Boneyard Mycodrax's power and toughness are each equal to the number of other \
+                 creature cards in your graveyard.\nScavenge {4}{B} ({4}{B}, Exile this card \
+                 from your graveyard: Put a number of +1/+1 counters equal to this card's power \
+                 on target creature. Scavenge only as a sorcery.)",
             ),
         ] {
             assert!(
