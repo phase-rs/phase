@@ -6351,6 +6351,7 @@ pub(crate) fn create_warp_delayed_trigger(
     let exile_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: crate::types::ability::TargetFilter::SelfRef,
@@ -10220,6 +10221,7 @@ mod tests {
 
         let resolved = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -10270,6 +10272,7 @@ mod tests {
 
         let resolved = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -11446,6 +11449,7 @@ mod tests {
                     prevention_tally: Vec::new(),
                     lives_before: vec![20, 20],
                     sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                    phase_c_remnant: None,
                 }));
             assert!(
                 !priority_checkpoint_is_settled(&state),
@@ -17945,6 +17949,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::SelfRef,

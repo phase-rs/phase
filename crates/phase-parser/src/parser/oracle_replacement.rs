@@ -1093,6 +1093,7 @@ fn parse_search_found_replacement(original: &str, lower: &str) -> Option<Replace
             destination: parsed.exile.destination,
             target: parsed.exile.target,
             owner_library: false,
+            library_shuffle: Default::default(),
             enter_transformed: false,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -1281,6 +1282,7 @@ fn parse_self_enters_pay_cost_replacement(
             destination: Zone::Graveyard,
             target: TargetFilter::SelfRef,
             owner_library: false,
+            library_shuffle: Default::default(),
             enter_transformed: false,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -7579,6 +7581,7 @@ fn parse_creature_die_exile_replacement(
                 origin: None,
                 target: TargetFilter::SelfRef,
                 owner_library: false,
+                library_shuffle: Default::default(),
                 enter_transformed: false,
                 enters_under: None,
                 enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -7725,6 +7728,7 @@ fn parse_creature_enter_wasnt_cast_exile_replacement(
             origin: None,
             target: TargetFilter::SelfRef,
             owner_library: false,
+            library_shuffle: Default::default(),
             enter_transformed: false,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -7975,6 +7979,7 @@ fn self_die_exile_anaphor_execute(
             origin: None,
             target: TargetFilter::SelfRef,
             owner_library: false,
+            library_shuffle: Default::default(),
             enter_transformed: false,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -8516,6 +8521,7 @@ fn parse_graveyard_redirect_replacement(
             origin: None,
             target: TargetFilter::SelfRef,
             owner_library: false,
+            library_shuffle: Default::default(),
             enter_transformed: false,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
@@ -9131,11 +9137,7 @@ fn parse_oneshot_prevent_damage_tail(
     all_consuming(delimited(
         multispace0,
         pair(
-            map_opt(parse_damage_noun_with_scope, |scope| match scope {
-                Some(CombatDamageScope::CombatOnly) => Some(PreventionScope::CombatDamage),
-                None => Some(PreventionScope::AllDamage),
-                Some(CombatDamageScope::NoncombatOnly) => None,
-            }),
+            parse_prevention_damage_noun,
             opt(preceded(char(' '), parse_damage_target_phrase)),
         ),
         multispace0,
@@ -13719,6 +13721,19 @@ fn parse_damage_noun_with_scope(input: &str) -> OracleResult<'_, Option<CombatDa
     .parse(input)
 }
 
+/// CR 615.1a + CR 120.2a: the damage noun of a prevention clause through the shared
+/// [`parse_damage_noun_with_scope`] authority, narrowed to the scopes a prevention
+/// shield carries: "combat damage" -> `CombatDamage`, bare "damage" -> `AllDamage`;
+/// "noncombat damage" has no `PreventionScope` and is an `Err`.
+pub(crate) fn parse_prevention_damage_noun(input: &str) -> OracleResult<'_, PreventionScope> {
+    map_opt(parse_damage_noun_with_scope, |scope| match scope {
+        Some(CombatDamageScope::CombatOnly) => Some(PreventionScope::CombatDamage),
+        None => Some(PreventionScope::AllDamage),
+        Some(CombatDamageScope::NoncombatOnly) => None,
+    })
+    .parse(input)
+}
+
 /// CR 614.9 + CR 301.5a + CR 303.4b: the recipient slot of a DURABLE (printed,
 /// object-hosted) redirection — the "... is dealt to <recipient> instead" tail of
 /// [`parse_redirection_spine`]. Returns the `TargetFilter` stored in
@@ -17826,7 +17841,7 @@ mod tests {
                 Effect::ChangeZoneAll {
                     destination: Zone::Library,
                     target: TargetFilter::PostReplacementDamageTarget,
-                    library_shuffle: crate::types::ability::MassLibraryShuffleMode::TerminalShuffle,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::TerminalShuffle,
                     ..
                 }
             ),

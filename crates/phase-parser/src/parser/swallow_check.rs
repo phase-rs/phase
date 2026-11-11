@@ -14714,6 +14714,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             let mut exile = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target,
@@ -15334,6 +15335,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Hand,
                     target: TargetFilter::ParentTarget,

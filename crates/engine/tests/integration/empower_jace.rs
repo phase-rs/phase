@@ -29,7 +29,7 @@ use engine::types::actions::{DebugAction, DebugTokenRequest, GameAction};
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, ReplacementChoiceKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -1709,4 +1709,121 @@ fn p_d_counter_replacement_pause_inside_the_post_action() {
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
+}
+
+// ---------------------------------------------------------------------------
+// C2.10: Jace, Reality Sculptor's [0] activation gate
+// ---------------------------------------------------------------------------
+
+/// Jace, Reality Sculptor at 5 loyalty plus one Jace token carrying
+/// `token_loyalty`, against an opponent whose library has three cards. Returns
+/// the runner and the Reality Sculptor's id.
+fn reality_sculptor_with_jace_token(token_loyalty: u32) -> (GameRunner, ObjectId) {
+    let mut scenario = main_phase_scenario();
+    scenario.with_library_top(
+        P1,
+        &["Opponent Card A", "Opponent Card B", "Opponent Card C"],
+    );
+    let rs = scenario
+        .add_planeswalker_from_oracle(
+            P0,
+            "Jace, Reality Sculptor",
+            "Jace",
+            5,
+            JACE_REALITY_SCULPTOR,
+        )
+        .id();
+    let mut runner = scenario.build();
+    seed_jace_token(&mut runner, P0, token_loyalty);
+    (runner, rs)
+}
+
+/// C2.10 — CR 602.5 + CR 122.1e: with 5 + 19 = 24 loyalty counters among Jaces,
+/// the [0] ability's "Activate only if there are twenty-five or more loyalty
+/// counters among Jaces you control" is unmet, so activation is rejected and
+/// no cost is paid.
+#[test]
+fn c2_10_zero_ability_is_rejected_below_the_loyalty_threshold() {
+    let (mut runner, rs) = reality_sculptor_with_jace_token(19);
+    assert_eq!(
+        loyalty(runner.state(), rs),
+        Some(5),
+        "reach guard: Reality Sculptor starts at 5 loyalty"
+    );
+    assert!(
+        !engine::game::planeswalker::can_activate_loyalty_ability(runner.state(), rs, P0, 2),
+        "24 loyalty among Jaces is below the printed threshold"
+    );
+
+    let result = runner.act(GameAction::ActivateAbility {
+        source_id: rs,
+        ability_index: 2,
+        payment_mode: CastPaymentMode::Auto,
+    });
+    assert!(
+        result.is_err(),
+        "the [0] activation must be rejected at 24 loyalty"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "nothing was put on the stack"
+    );
+    assert_eq!(loyalty(runner.state(), rs), Some(5), "no cost was paid");
+}
+
+/// C2.10 control — CR 602.5 + CR 122.1e: at 5 + 20 = 25 loyalty the same [0]
+/// activation is legal and resolves "Exile all but the bottom card of each
+/// opponent's library."
+#[test]
+fn c2_10b_zero_ability_resolves_at_the_loyalty_threshold() {
+    let (mut runner, rs) = reality_sculptor_with_jace_token(20);
+    assert!(
+        engine::game::planeswalker::can_activate_loyalty_ability(runner.state(), rs, P0, 2),
+        "25 loyalty among Jaces meets the printed threshold"
+    );
+
+    let outcome = runner.activate(rs, 2).resolve();
+    assert_eq!(
+        outcome.state().players[1].library.len(),
+        1,
+        "exile all but the bottom card leaves exactly one card"
+    );
+    assert_eq!(
+        loyalty(outcome.state(), rs),
+        Some(5),
+        "[0] changes no loyalty"
+    );
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// C2.10c — CR 109.5 + CR 602.5: the count is scoped to "Jaces you control",
+/// so an opponent's Jace does not contribute to the activating player's
+/// threshold.
+#[test]
+fn c2_10c_opponents_jaces_do_not_count_toward_the_threshold() {
+    let mut scenario = main_phase_scenario();
+    let rs = scenario
+        .add_planeswalker_from_oracle(
+            P0,
+            "Jace, Reality Sculptor",
+            "Jace",
+            5,
+            JACE_REALITY_SCULPTOR,
+        )
+        .id();
+    let mut runner = scenario.build();
+    seed_jace_token(&mut runner, P0, 19);
+    let theirs = seed_jace_token(&mut runner, P1, 30);
+    assert_eq!(
+        loyalty(runner.state(), theirs),
+        Some(30),
+        "reach guard: the opponent's Jace is above the threshold on its own"
+    );
+    assert!(
+        !engine::game::planeswalker::can_activate_loyalty_ability(runner.state(), rs, P0, 2),
+        "P0's 24 loyalty does not borrow P1's 30 loyalty"
+    );
 }

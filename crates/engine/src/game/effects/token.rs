@@ -4616,6 +4616,7 @@ fn lander_ability() -> AbilityDefinition {
             AbilityKind::Activated,
             // CR 614.1c: "enters tapped" is an as-enters replacement effect.
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -5232,7 +5233,7 @@ fn refresh_token_art_descriptor(
 /// CR 111.3 + CR 111.10: Apply predefined token abilities first; fall back to
 /// catalog `rules_text` only when the predefined path contributed nothing
 /// (artifacts, Roles, Incubator, …).
-pub(super) fn inject_resolved_token_abilities(
+pub(crate) fn inject_resolved_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
@@ -9203,6 +9204,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::SelfRef,

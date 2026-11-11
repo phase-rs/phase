@@ -7626,6 +7626,7 @@ mod tests {
         }
         fn change_zone(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin,
                 destination,
                 target,
@@ -11616,6 +11617,7 @@ mod tests {
         // `state.exile_links` (see `change_zone::execute_zone_move`).
         let etb = ResolvedAbility::new(
             Ef::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,

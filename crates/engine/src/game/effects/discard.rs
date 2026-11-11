@@ -1871,6 +1871,7 @@ mod tests {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SelfRef,
@@ -1902,6 +1903,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::SelfRef,
@@ -2077,6 +2079,7 @@ mod tests {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -2211,6 +2214,7 @@ mod tests {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,

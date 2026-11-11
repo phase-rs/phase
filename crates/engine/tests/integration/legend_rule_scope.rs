@@ -241,6 +241,7 @@ fn a_paused_legend_move_stops_the_rest_of_the_sba_pass() {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     destination,
                     origin: None,
                     target: TargetFilter::SelfRef,

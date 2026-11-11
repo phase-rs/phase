@@ -49,6 +49,7 @@ fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefin
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 destination: redirected_to,
                 origin: None,
                 target: TargetFilter::SelfRef,

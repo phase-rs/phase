@@ -2545,9 +2545,10 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     settle_finished_game(state, result);
 }
 
-/// CR 104.1 + CR 100.4: a finished game goes to its match here, and the wait the match leaves
-/// is the action's result.
+/// CR 104.1 + CR 100.4: a finished game first retires the resolution it was in the middle of,
+/// then goes to its match here; the wait the match leaves is the action's result.
 fn settle_finished_game(state: &mut GameState, result: &mut ActionResult) {
+    super::elimination::retire_finished_game_resolution(state);
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
         match_flow::handle_game_over_transition(state);
         result.waiting_for = state.waiting_for.clone();
@@ -5785,7 +5786,8 @@ fn synthesized_charge_points(
 }
 
 /// Whether this engine will drive `count` repetitions of `proposal` on this board — the one
-/// authority both the responder's seam and the consumption seam ask.
+/// authority the responder's seam, the consumption seam and `ai_support`'s structural legality
+/// hatch all ask.
 ///
 /// IMPLEMENTATION BUDGET BOUND (see `MAX_SHORTCUT_CYCLES`), deliberately NOT labelled as a
 /// CR 732.2a constraint, for the same reason the declare-site arm is not: the rules place no
@@ -5801,7 +5803,14 @@ fn synthesized_charge_points(
 /// Reads `state` and `proposal.per_cycle`; never `proposal.count`. That is what lets the
 /// responder's seam ask it about the count a named place would MINT, on a proposal still
 /// carrying the count that place replaces.
-fn shortcut_count_is_drivable(
+///
+/// Three callers, and they must stay one rule: this module's `handle_respond_to_shortcut` refusal,
+/// its consumption guard, and `ai_support`'s structural legality hatch
+/// (`structurally_valid_shortcut_response`), which admits a `Shorten` without cloning the state
+/// when this answers `true` and the place is inside the proposal's own range. A second derivation in the hatch would be free to drift
+/// from the reducer in either direction: dropping a legal answer, or admitting one the reducer
+/// refuses — which is the direction that spends a clone and still returns a rejection.
+pub(crate) fn shortcut_count_is_drivable(
     state: &GameState,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     count: u32,
@@ -10706,6 +10715,36 @@ fn pass_priority_once_with_pipeline(
     }
     // No else-branch: a bare handoff or an empty-stack pass-to-advance-phase does NOT
     // touch the ring (leave-intact), so accumulation survives the inter-resolution beats.
+
+    // Horde Magic: reveal-and-resolve the NEXT card of the Horde's wave. After a
+    // Horde spell resolves and priority returns to the active player with an
+    // empty stack, cast the next revealed card before the phase can advance.
+    // `maybe_reveal_next` self-gates on an empty stack and a positive budget
+    // (the budget IS the wave-active marker — see its doc comment for why no
+    // turn/phase gate is needed), so this fires only for a genuine wave
+    // continuation and is inert otherwise. The `player == active` guard skips
+    // beats where a non-active survivor holds priority (they may respond to
+    // each Horde spell first).
+    if matches!(wf, WaitingFor::Priority { player } if player == state.active_player) {
+        if let Some(next) = crate::game::horde::maybe_reveal_next(state, events) {
+            sync_waiting_for(state, &next);
+            return Ok(PriorityPassPipelineOutcome {
+                waiting_for: next,
+                session_restored,
+            });
+        }
+        // Horde Magic (advanced rule): after the precombat wave, the same seam
+        // drives the Horde's post-combat activation beat — one ability per
+        // empty-stack priority window. `maybe_activate_next_ability` self-gates on
+        // PostCombatMain + the ruleset axis, so this is inert otherwise.
+        if let Some(next) = crate::game::horde::maybe_activate_next_ability(state, events) {
+            sync_waiting_for(state, &next);
+            return Ok(PriorityPassPipelineOutcome {
+                waiting_for: next,
+                session_restored,
+            });
+        }
+    }
 
     Ok(PriorityPassPipelineOutcome {
         waiting_for: wf,
@@ -19360,7 +19399,7 @@ fn handle_play_land(
     // e.g. Mindslaver), which always act on the active player's own
     // resources regardless of who submits the choice — that path is
     // unaffected since it never uses shared team turns.
-    let player = if state.format_config.topology().has_shared_team_turns() {
+    let player = if super::topology::side_takes_shared_turn(state, state.active_player) {
         if !super::topology::team_members(state, state.active_player).contains(&acting_player) {
             return Err(EngineError::ActionNotAllowed(
                 "Only the active team may play lands during its turn".to_string(),
@@ -20989,7 +21028,20 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
     if let Some(archenemy) = super::topology::archenemy(state) {
         // CR 904.6: The archenemy takes the first turn. Default Archenemy does
         // not run the CR 103.1 starting-player contest.
-        return start_game_with_starting_player(state, archenemy);
+        //
+        // Horde Magic reuses the OneVsMany topology (the Horde is the archenemy
+        // seat) but INVERTS the turn order: the survivors take the first turn (and
+        // several setup turns) before the Horde acts. `FormatConfig::starting_player`
+        // already returns a survivor for Horde, and `GameState::new` seeds the
+        // Horde's `turns_to_skip` so the survivor team takes `survivor_setup_turns`
+        // turns first — but only if the game actually STARTS on the survivor. Use
+        // the configured starting player for Horde instead of forcing the archenemy.
+        let first = if state.format_config.format == crate::types::format::GameFormat::Horde {
+            state.format_config.starting_player()
+        } else {
+            archenemy
+        };
+        return start_game_with_starting_player(state, first);
     }
 
     // CR 103.1 / CR 706: roll one d20 per seat; the high roller becomes the
@@ -21039,7 +21091,15 @@ pub fn start_game_with_starting_player(
     let before = state.clone();
     let mut events = Vec::new();
     state.outside_game_cards_brought_in.clear();
-    let starting_player = super::topology::archenemy(state).unwrap_or(starting_player);
+    // CR 904.6: default Archenemy forces the archenemy to take the first turn,
+    // overriding any passed starter. Horde reuses the OneVsMany topology but the
+    // survivors go first, so it must honor the passed starting player (a survivor)
+    // rather than snapping back to the Horde seat.
+    let starting_player = if state.format_config.format == crate::types::format::GameFormat::Horde {
+        starting_player
+    } else {
+        super::topology::archenemy(state).unwrap_or(starting_player)
+    };
 
     if state.match_config.match_type == MatchType::Bo3
         && state.players.len() != 2
@@ -29621,6 +29681,7 @@ mod resolving_carrier_settle_tests {
                                 .execute(AbilityDefinition::new(
                                     AbilityKind::Spell,
                                     Effect::ChangeZone {
+                                        library_shuffle: Default::default(),
                                         destination: Zone::Exile,
                                         origin: None,
                                         target: TargetFilter::SelfRef,

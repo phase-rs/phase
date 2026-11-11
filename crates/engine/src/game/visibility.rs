@@ -174,6 +174,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }
+        | WaitingFor::HeroEventChoice { .. }
         | WaitingFor::EffectZoneChoice { .. }
         | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
         | WaitingFor::LearnChoice { .. }
@@ -999,6 +1000,7 @@ pub(crate) fn identity_projection_for_viewer(
         .planar_deck
         .iter()
         .chain(state.scheme_deck.iter())
+        .chain(state.boss_deck.iter())
         .copied()
         .collect();
     for obj_id in supplementary_deck_ids {
@@ -1161,6 +1163,7 @@ pub(crate) fn identity_projection_for_unseated_viewer(
         .planar_deck
         .iter()
         .chain(state.scheme_deck.iter())
+        .chain(state.boss_deck.iter())
         .chain(state.exile.iter())
     {
         if state
@@ -2664,6 +2667,28 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         }
     }
 
+    // Digital-only Alchemy spellbook draft (no CR entry): a draft's offer is a
+    // private random sample shown only to the drafting player, so other viewers
+    // see the prompt without its options.
+    if let WaitingFor::SpellbookDraft {
+        player,
+        source_id,
+        destination,
+        tapped,
+        ..
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::SpellbookDraft {
+                player,
+                source_id,
+                options: Vec::new(),
+                destination,
+                tapped,
+            };
+        }
+    }
+
     // CR 101.4a + CR 701.23i: A simultaneous multi-player library search keeps
     // each prior searcher's found cards private while later players decide.
     // `SearchChoice` above hides the current candidate list, but the protocol's
@@ -4008,6 +4033,15 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     obj.spellbook.clear();
     obj.parse_warnings.clear();
     obj.back_face = None;
+    // CR 400.2: a hidden card's token-ness identifies its pile position
+    // (Horde libraries mix tokens and cards), so it redacts like every other
+    // printed characteristic — mirroring `redact_zone_change_record`'s
+    // `record.is_token = false`. The Horde-deck flag and the pinned library
+    // rarity go with it: both are loader-seeded per-card metadata with no
+    // public face while hidden.
+    obj.is_token = false;
+    obj.is_horde_deck_token = false;
+    obj.horde_library_rarity = None;
     obj.specialize_faces = None;
     obj.cleave_variant = None;
     obj.modal = None;
@@ -10525,6 +10559,30 @@ mod tests {
         assert_eq!(filtered.scheme_deck, im::vector![scheme_id]);
     }
 
+    #[test]
+    fn boss_pile_cards_are_hidden_from_all_viewers() {
+        let mut state = GameState::new_two_player(42);
+        let boss_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Secret Boss".to_string(),
+            Zone::Command,
+        );
+        state.objects.get_mut(&boss_id).unwrap().face_down = true;
+        state.boss_deck.push_back(boss_id);
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let filtered = filter_state_for_viewer(&state, viewer);
+            assert_eq!(
+                filtered.objects.get(&boss_id).map(|obj| obj.name.as_str()),
+                Some("Hidden Card"),
+                "boss pile identity hidden from {viewer:?}"
+            );
+            assert_eq!(filtered.boss_deck, im::vector![boss_id]);
+        }
+    }
+
     /// CR 400.2 makes the command zone public "except for those cards that some rule or
     /// effect specifically allow to be face down". No rule states outright that an
     /// Attraction deck is face down; three ENTAIL it. CR 701.51b opens one by turning the
@@ -11445,6 +11503,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,
@@ -11632,6 +11691,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,
@@ -12507,6 +12567,7 @@ mod tests {
                 paused_at_index: 0,
                 destination: Zone::Exile,
                 completion: PendingCostMoveCompletion::FinishPending,
+                requested_cost_count: None,
                 deferred_cost_events: Vec::new(),
                 departure_record_indices: Vec::new(),
             },
@@ -12526,6 +12587,7 @@ mod tests {
                     phyrexian_choices: None,
                     pre_payment_checks: None,
                 },
+                requested_cost_count: None,
                 deferred_cost_events: Vec::new(),
                 departure_record_indices: Vec::new(),
             },
@@ -12815,6 +12877,7 @@ mod tests {
                 prevention_tally: Vec::new(),
                 lives_before: vec![20, 20],
                 sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                phase_c_remnant: None,
             }));
 
         let authoritative = serde_json::to_string(&state.pending_combat_lifelink)

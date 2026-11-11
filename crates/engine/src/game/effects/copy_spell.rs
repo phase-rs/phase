@@ -2574,6 +2574,7 @@ mod tests {
         // Push original targeted spell (Anguished Unmaking-style)
         let original_ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: crate::types::zones::Zone::Exile,
                 target: TargetFilter::Any,
@@ -4073,6 +4074,7 @@ mod tests {
         ) {
             let ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(origin),
                     destination,
                     target: TargetFilter::Any,

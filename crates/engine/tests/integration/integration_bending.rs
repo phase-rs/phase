@@ -989,6 +989,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
 
     let change_zone_ability = ResolvedAbility {
         effect: Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -1006,6 +1007,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -1330,6 +1332,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
 
     let change_zone_ability = ResolvedAbility {
         effect: Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -1347,6 +1350,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -2173,6 +2177,7 @@ fn build_earthbend_ability(
     let return_effect_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::TriggeringSource,

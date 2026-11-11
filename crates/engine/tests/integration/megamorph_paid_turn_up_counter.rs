@@ -293,6 +293,7 @@ fn a_paused_megamorph_payment_still_places_the_counter() {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     destination: Zone::Graveyard,
                     origin: None,
                     target: TargetFilter::SelfRef,

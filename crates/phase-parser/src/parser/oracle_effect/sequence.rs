@@ -662,7 +662,7 @@ fn parse_reveal_until_all_to_zone_continuation(input: &str) -> OracleResult<'_, 
 
 /// CR 701.20a: Detect the rest-pile zone in a `RevealUntil` continuation
 /// chunk. The "rest" subject may be phrased as "the rest" / "all other cards
-/// revealed this way" / "the other cards" — and may be governed by an
+/// revealed this way" — and may be governed by an
 /// imperative verb that itself encodes the zone ("exile all other cards
 /// revealed this way" → Exile).
 ///
@@ -731,6 +731,117 @@ fn parse_reveal_until_rest_zone_and_order(lower: &str) -> (Option<Zone>, DigRest
     (rest_zone, rest_order)
 }
 
+/// CR 701.20a + CR 701.20e + CR 608.2c: The remainder clause of a REVEAL
+/// instruction — "Put all other cards revealed this way into your graveyard"
+/// (Reviving Vapors) — recognized where it stands apart from that instruction
+/// because an intervening clause reads the revealed card first ("You gain life
+/// equal to that card's mana value"). Folding it into the `Dig` would move the
+/// remainder BEFORE the intervening clause, violating CR 608.2c's written
+/// order, so it stays its own instruction and names its population by
+/// provenance: `TargetFilter::LastRevealed` scoped to `origin: Library`, i.e.
+/// "the cards the preceding reveal revealed that are still in the library".
+/// Those are the complement only because the kept cards have already left the
+/// library, so a reveal whose selected cards are routed by downstream
+/// sub_abilities (Zimone's Experiment) is untouched — including when the
+/// player selected nothing.
+///
+/// Refused rather than guessed, leaving the clause unabsorbed:
+///  * a clause whose destination phrase is not explicitly understood;
+///  * a library remainder whose order the owner chooses (CR 401.4): this
+///    instruction owns no ordering prompt of its own.
+pub(super) fn parse_revealed_remainder_clause(input: &str) -> Option<ContinuationAst> {
+    let lower = input.trim().to_lowercase();
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("then "))
+        .parse(lower.as_str())
+        .ok()?;
+    // CR 701.20a: the imperative verb may itself name the zone ("exile all
+    // other cards revealed this way").
+    let (rest, verb_exiles) = alt((
+        value(
+            true,
+            alt((tag::<_, _, OracleError<'_>>("exile "), tag("exiles "))),
+        ),
+        value(false, alt((tag("put "), tag("puts ")))),
+    ))
+    .parse(rest)
+    .ok()?;
+    // CR 608.2c: only the REST subject belongs to this arm. "all cards revealed
+    // this way" names the whole revealed pile and is a different instruction.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("all other cards revealed this way"),
+        tag("the other cards revealed this way"),
+        tag("other cards revealed this way"),
+        tag("all other cards"),
+        tag("the other cards"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, explicit) = opt(parse_revealed_remainder_destination).parse(rest).ok()?;
+    let (destination, rest_order) = match explicit {
+        Some(parsed) => parsed,
+        // CR 701.20a: a bare "exile <the rest>" routes to exile.
+        None if verb_exiles => (Zone::Exile, DigRestOrder::Preserve),
+        None => return None,
+    };
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+    rest.is_empty()
+        .then_some(ContinuationAst::RevealedRemainder {
+            destination,
+            rest_order,
+        })
+}
+
+/// CR 701.20a + CR 608.2c: may the backward scan from a "revealed this way"
+/// remainder be carried ACROSS this clause to an earlier reveal?
+///
+/// The remainder names the population of ONE public reveal, and the engine keeps
+/// exactly one such population (`GameState::last_revealed_ids`). A clause that
+/// publishes a new one — a `Clash` clears the ledger and refills it with both
+/// clashing players' top cards, and every other reveal producer overwrites it
+/// just the same — therefore re-points a later remainder at cards the reveal
+/// never produced. Written order (CR 608.2c) does not make that reading legal:
+/// it makes the clause a NEW antecedent, and the remainder no longer refers to
+/// the earlier reveal at all.
+///
+/// The test is a POSITIVE proof, deliberately an allow-list of effects that
+/// cannot touch the reveal ledger rather than a survey of the ones that can: a
+/// producer missed by a deny-list is exactly the defect this guards against,
+/// while an observer missed by the allow-list only leaves an honest gap at its
+/// written position. Wrappers (`CreateDelayedTrigger`, `TargetOnly`, …) are NOT
+/// crossed even when they happen to nest an observer: their own resolution is
+/// not proved to be reveal-free, so the honest answer is "unproved".
+pub(super) fn clause_preserves_reveal_population(effect: &Effect) -> bool {
+    // Pure life arithmetic. It reads the settled card's mana value and moves no
+    // card, so it cannot publish or replace a reveal (Reviving Vapors' "You gain
+    // life equal to that card's mana value"). Extending this allow-list means
+    // proving the new clause reveal-free; there is deliberately no deny-list to
+    // add to, because a missed producer is the defect this predicate guards.
+    matches!(effect, Effect::GainLife { .. })
+}
+
+/// CR 608.2c: The destination a "the other cards revealed this way" clause
+/// states, read through the shared partition-destination grammar
+/// ([`parse_choice_partition_destination`]) so this path cannot drift from the
+/// engine's single authority for "into your graveyard" / "into their hand" /
+/// "on the bottom of ... library" spellings.
+///
+/// CR 400.5 + CR 401.4: a library remainder is accepted only with an explicit
+/// randomization instruction. An owner-ordered remainder needs an ordering
+/// prompt this instruction does not own, so it stays refused (the caller sees a
+/// parse miss) rather than silently kept in place.
+///
+/// CR 404.3: an owner-ordered graveyard remainder also needs an ordering prompt
+/// this instruction does not own, so it stays refused rather than silently
+/// delivered in collection order.
+fn parse_revealed_remainder_destination(input: &str) -> OracleResult<'_, (Zone, DigRestOrder)> {
+    let (input, destination) = parse_choice_partition_destination(input)?;
+    if destination != Zone::Library {
+        return Ok((input, (destination, DigRestOrder::Preserve)));
+    }
+    let (input, _) = tag::<_, _, OracleError<'_>>(" in a random order").parse(input)?;
+    Ok((input, (Zone::Library, DigRestOrder::Random)))
+}
+
 /// Whole-line dig continuation "put the rest on the bottom of <owner's> library
 /// [in a random order | in any order]" following a `Dig` or `ChooseFromZone`.
 ///
@@ -770,6 +881,14 @@ pub(super) fn parse_choice_partition_destination(
     input: &str,
 ) -> Result<(&str, Zone), nom::Err<OracleError<'_>>> {
     alt((
+        // CR 400.3: "their owners' graveyards" is the plural-owner form of the
+        // same destination (Dance, Pathetic Marionette): each card goes to its
+        // own owner's graveyard. Its own arm keeps the plural noun from pairing
+        // with a singular possessive.
+        value(
+            Zone::Graveyard,
+            tag::<_, _, OracleError<'_>>(" into their owners' graveyards"),
+        ),
         preceded(
             (
                 tag::<_, _, OracleError<'_>>(" into "),
@@ -5329,6 +5448,7 @@ pub(super) fn apply_clause_continuation(
                 Some(Zone::Library)
             };
             let put_effect = Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: put_origin,
                 destination,
                 target: TargetFilter::Any,
@@ -5858,6 +5978,82 @@ pub(super) fn apply_clause_continuation(
                 }
             }
         }
+        // CR 701.20a + CR 701.20e + CR 608.2c: the remainder named separately
+        // from the reveal that produced it (Reviving Vapors' trailing "Put all
+        // other cards revealed this way into your graveyard"). It stays its own
+        // instruction, after the clause that reads the revealed card, and
+        // addresses the revealed cards still in the library — the complement,
+        // named by provenance instead of an inferred tracked-set move.
+        ContinuationAst::RevealedRemainder {
+            destination,
+            rest_order,
+        } => {
+            // CR 701.20a + CR 608.2c: the clause says "revealed this way", so
+            // it names the population of a PUBLIC reveal instruction. The
+            // complement is only defined from `LastRevealed` in the library
+            // if the selected cards departed the library (`destination: Some(dest)`
+            // where `dest != Library`). A private look or a reveal-only Dig
+            // whose selected cards remain in the library cannot absorb it.
+            let public_reveal = env
+                .resolve(
+                    defs,
+                    super::assembly::AntecedentSelector::LastWithRole(
+                        super::assembly::AntecedentRole::DigOrRevealUntil,
+                    ),
+                    None,
+                    super::assembly::OnMiss::Ignore,
+                )
+                .is_some_and(|index| {
+                    matches!(
+                        &*defs[index].effect,
+                        Effect::Dig {
+                            reveal: true,
+                            destination: Some(dest),
+                            ..
+                        } if *dest != Zone::Library
+                    )
+                });
+            if !public_reveal {
+                defs.push(AbilityDefinition::new(
+                    kind,
+                    Effect::unimplemented(
+                        "revealed_remainder_without_reveal",
+                        "all other cards revealed this way",
+                    ),
+                ));
+                return;
+            }
+            // CR 404.3: an owner-ordered graveyard remainder needs an ordering
+            // prompt this instruction does not own; rather than delivering in
+            // arbitrary engine order, keep this shape honest as an unsupported gap.
+            if destination == Zone::Graveyard {
+                defs.push(AbilityDefinition::new(
+                    kind,
+                    Effect::unimplemented(
+                        "revealed_remainder_graveyard_order",
+                        "all other cards revealed this way into graveyard",
+                    ),
+                ));
+                return;
+            }
+            defs.push(AbilityDefinition::new(
+                kind,
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Library),
+                    destination,
+                    target: TargetFilter::LastRevealed,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: (destination == Zone::Library)
+                        .then_some(LibraryPosition::Bottom),
+                    library_shuffle: Default::default(),
+                    random_order: matches!(rest_order, DigRestOrder::Random),
+                },
+            ));
+        }
         ContinuationAst::DigFromAmong {
             quantity,
             filter: card_filter,
@@ -6204,6 +6400,7 @@ pub(super) fn apply_clause_continuation(
                         let mut def = AbilityDefinition::new(
                             kind,
                             Effect::ChangeZone {
+                                library_shuffle: Default::default(),
                                 // CR 400.3: a bounded "put up to N <filter> milled
                                 // this way onto the battlefield face down" form
                                 // must scan the milled cards' actual zone (the
@@ -6387,6 +6584,7 @@ pub(super) fn apply_clause_continuation(
                 let mut chosen_def = AbilityDefinition::new(
                     kind,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: chosen_destination,
                         target: TargetFilter::Any,
@@ -6405,6 +6603,7 @@ pub(super) fn apply_clause_continuation(
                 let mut rest_def = AbilityDefinition::new(
                     kind,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: rest_destination,
                         target: TargetFilter::Any,
@@ -7409,6 +7608,10 @@ pub(super) fn continuation_absorbs_current(
         // rider is always absorbed into that effect (never a standalone effect).
         ContinuationAst::ExcessDamageToController { .. } => true,
         ContinuationAst::PutRest { .. } => true,
+        // CR 701.20a + CR 701.20e: recognition is gated on a preceding reveal
+        // instruction, and lowering appends the explicit `LastRevealed`
+        // complement move as its own instruction.
+        ContinuationAst::RevealedRemainder { .. } => true,
         ContinuationAst::ChooseFromExile { .. } => true,
         ContinuationAst::SearchRevealResult => true,
         ContinuationAst::SearchResultClauseHandled => true,
@@ -8722,6 +8925,10 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // resolving effects, not Dig-lookback-transparent.
         | Effect::ChooseCounterKind { .. }
         | Effect::PutChosenCounter { .. }
+        // Turtle Team-Up (no CR section — casual product): "the bosses play a
+        // card" consumes the library top, so a `DigFromAmong` continuation must
+        // NOT skip past it looking for an antecedent.
+        | Effect::HordePlayCard { .. } => false,
         | Effect::Unimplemented { .. } => false,
     }
 }
@@ -10903,6 +11110,17 @@ mod tests {
             parse_choice_partition_destination(" into the player's graveyard").ok(),
             Some(("", Zone::Graveyard))
         );
+        // CR 400.3: the plural-owner graveyard form (Dance, Pathetic
+        // Marionette) is its own arm, so it parses as `Graveyard` with no
+        // remainder. The singular noun stays refused with the plural
+        // possessive: "their owners' graveyard" names no single graveyard, and
+        // letting it fall through to the shared possessive arm would silently
+        // accept the mismatched pair.
+        assert_eq!(
+            parse_choice_partition_destination(" into their owners' graveyards").ok(),
+            Some(("", Zone::Graveyard))
+        );
+        assert!(parse_choice_partition_destination(" into their owners' graveyard").is_err());
     }
 
     /// SHAPE — CR 608.2c: a conditional destination owns movement; this
@@ -12255,6 +12473,7 @@ mod tests {
     #[test]
     fn multi_zone_search_put_restatement_absorbed_after_origin_none_destination() {
         let previous = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -12280,6 +12499,7 @@ mod tests {
     #[test]
     fn search_exile_them_followup_is_absorbed_after_library_exile_destination() {
         let previous = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Exile,
             target: TargetFilter::Any,
@@ -12302,6 +12522,7 @@ mod tests {
     #[test]
     fn search_exile_face_down_followup_uses_compositional_reference_grammar() {
         let previous = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Exile,
             target: TargetFilter::Any,
