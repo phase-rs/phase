@@ -2273,6 +2273,96 @@ mod feldon_tokens {
         );
     }
 
+    const SUPERIOR_SPIDER_MAN: &str = "Mind Swap — You may have Superior Spider-Man enter as a copy of any creature card in a graveyard, except his name is Superior Spider-Man and he's a 4/4 Spider Human Hero in addition to his other types. When you do, exile that card.";
+    const PARALLEL_LIVES: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.";
+
+    /// Soul Warden's life gain when Feldon makes four Superior Spider-Man tokens
+    /// (Doubling Season and Parallel Lives) that copy Hill Giant three times and
+    /// then `last`. Each copy runs Superior Spider-Man's own rider chain while the
+    /// later tokens are still to enter.
+    fn warden_life_for_spider_man_copies(last: SecondCopy) -> i32 {
+        let (mut scenario, feldon) = setup();
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", SEASON);
+        scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+        let spider_man = scenario
+            .add_creature_to_graveyard(P0, "Superior Spider-Man", 4, 4)
+            .as_legendary()
+            .with_subtypes(vec!["Spider", "Human", "Hero"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Black],
+                generic: 2,
+            })
+            .from_oracle_text(SUPERIOR_SPIDER_MAN)
+            .id();
+        let hill_giant = graveyard_hill_giant(&mut scenario);
+        let hushbringer = graveyard_hushbringer(&mut scenario);
+        let triskelion = graveyard_triskelion(&mut scenario);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        runner
+            .activate(feldon, 0)
+            .target_object(spider_man)
+            .resolve();
+        let mut tokens = Vec::new();
+        for _ in 0..3 {
+            let (token, _) = choose_copy(&mut runner, hill_giant);
+            // Reach guard: this entrant is on the battlefield and the next
+            // token's copy offer is open.
+            assert_eq!(runner.state().objects[&token].zone, Zone::Battlefield);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            tokens.push(token);
+        }
+        let (token, _) = choose_copy(
+            &mut runner,
+            match last {
+                SecondCopy::Hushbringer => hushbringer,
+                SecondCopy::Triskelion => triskelion,
+            },
+        );
+        tokens.push(token);
+        tokens.sort();
+        tokens.dedup();
+        assert_eq!(
+            tokens.len(),
+            4,
+            "Season and Parallel Lives make four entrants"
+        );
+        for _ in 0..8 {
+            runner.advance_until_stack_empty();
+            let WaitingFor::OrderTriggers { triggers, .. } = &runner.state().waiting_for else {
+                break;
+            };
+            let order = (0..triggers.len()).collect();
+            runner.act(GameAction::OrderTriggers { order }).unwrap();
+        }
+        assert_token_entry_complete(&mut runner);
+        runner.life(P0) - life
+    }
+
+    /// CR 603.6a: all four tokens are one entry event, so Hushbringer, the last
+    /// of them, is on the battlefield when it is checked, and Soul Warden
+    /// triggers for none. The rider chain each earlier copy runs ("When you do,
+    /// exile that card.") passes instruction boundaries of its own; they do not
+    /// complete the instruction that is still putting tokens onto the
+    /// battlefield.
+    #[test]
+    fn a_copy_rider_chain_between_co_entrants_does_not_complete_the_entry_event() {
+        assert_eq!(
+            warden_life_for_spider_man_copies(SecondCopy::Triskelion),
+            4,
+            "positive control: without a suppressor Soul Warden sees all four entrants"
+        );
+        assert_eq!(
+            warden_life_for_spider_man_copies(SecondCopy::Hushbringer),
+            0,
+            "the completed entry event includes Hushbringer"
+        );
+    }
+
     #[test]
     fn t8_triskelion_self_counters_and_spark_share_one_scales_application() {
         let (mut scenario, feldon) = setup();

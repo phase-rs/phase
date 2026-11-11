@@ -9654,7 +9654,7 @@ fn action_has_settled(state: &GameState) -> bool {
 /// an entrant held liminal for its copy choice, a token committed before its
 /// entry record, and an entry parked for its own mid-entry choice. A pause
 /// that holds none of them belongs to a later instruction, not to an entry.
-fn battlefield_entry_in_progress(state: &GameState) -> bool {
+pub(crate) fn battlefield_entry_in_progress(state: &GameState) -> bool {
     state.pending_replacement.is_some()
         || !state.liminal_entries.is_empty()
         || state.pending_token_battlefield_entry.is_some()
@@ -9665,8 +9665,10 @@ fn battlefield_entry_in_progress(state: &GameState) -> bool {
 /// battlefield completed? An instruction boundary
 /// (`effects::settle_entries_before_instruction`) has passed since it was
 /// recorded (`GameState::completed_instruction_zone_changes`), or it was
-/// recorded on an earlier turn. Neither happens while a co-entering step or a
-/// choice of the same instruction is outstanding.
+/// recorded on an earlier turn. The boundary records nothing while a
+/// co-entering step, a choice of the same instruction, or any other
+/// battlefield entry is outstanding ([`battlefield_entry_in_progress`]: a rider
+/// chain run inside an entry passes boundaries of its own).
 fn battlefield_entry_instruction_completed(state: &GameState, event: &GameEvent) -> bool {
     matches!(
         event,
@@ -46289,8 +46291,10 @@ pub mod tests {
         park_co_entrant_mid_entry(&mut state);
         park_observer_triggers_if_paused(&mut state, &mut events, 0);
         assert!(state.battlefield_entry_observation(&record).is_none());
-        // The boundary runs in a later answer, whose buffer does not hold the entry:
-        // it records the completed instructions' ledger rows and observes the entrants.
+        // The co-entrant finishes entering, and the boundary runs in a later answer,
+        // whose buffer does not hold the entry: it records the completed
+        // instructions' ledger rows and observes the entrants.
+        state.deferred_entry_events.clear();
         state.completed_instruction_zone_changes = state.zone_changes_this_turn.len();
         crate::game::zones::settle_battlefield_entry_observations(&mut state, &[]);
         assert!(
@@ -46305,6 +46309,7 @@ pub mod tests {
             &mut later_events,
         )
         .expect("later entrant exists");
+        park_co_entrant_mid_entry(&mut state);
         park_observer_triggers_if_paused(&mut state, &mut later_events, 0);
         assert_eq!(
             state.deferred_triggers.len(),

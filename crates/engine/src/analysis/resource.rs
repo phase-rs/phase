@@ -8804,6 +8804,9 @@ fn project_out_resources(state: &GameState) -> GameState {
     // append-only event journals a loop pumps.
     s.zone_changes_this_turn.clear();
     s.battlefield_entry_observations.clear();
+    // Indexes the ledger cleared above; a loop that passes an instruction
+    // boundary advances it every period.
+    s.completed_instruction_zone_changes = 0;
     s.battlefield_entries_this_turn.clear();
     s.created_tokens_this_turn.clear();
     s.players_who_created_token_this_turn.clear();
@@ -15802,6 +15805,19 @@ mod tests {
         let projected = project_out_resources(&state);
 
         assert!(projected.battlefield_entry_observations.is_empty());
+    }
+
+    /// The completed-instruction bound indexes the zone-change ledger, which the
+    /// projection clears; two periods of a loop that passes an instruction
+    /// boundary differ only in it (CR 732.2a).
+    #[test]
+    fn project_out_resources_clears_completed_instruction_zone_changes() {
+        let mut state = GameState::new_two_player(7);
+        state.completed_instruction_zone_changes = 3;
+
+        let projected = project_out_resources(&state);
+
+        assert_eq!(projected.completed_instruction_zone_changes, 0);
     }
 
     /// The cover admits growth beside a non-grown permanent with a spell-kind class-reading pump;

@@ -5267,7 +5267,12 @@ fn settle_entries_before_instruction(
     }
     // CR 608.2c + CR 603.6a: every instruction before `next` has completed, so every entry
     // recorded so far is a completed entry event, whether or not its observation is deferred.
-    state.completed_instruction_zone_changes = state.zone_changes_this_turn.len();
+    // Not while a battlefield entry is still being made: a chain run inside that entry (a copy
+    // or post-replacement rider) has boundaries of its own, and the instruction that put its
+    // earlier co-entrants onto the battlefield has not completed.
+    if !crate::game::triggers::battlefield_entry_in_progress(state) {
+        state.completed_instruction_zone_changes = state.zone_changes_this_turn.len();
+    }
     if entry_observation_deferred(state, next, completed) {
         return;
     }
