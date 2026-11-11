@@ -1811,11 +1811,13 @@ fn pay_raptor_with_restricted_base_and_overgrowth(fixed_base: bool) {
             !rows.is_empty(),
             "reach: the actual restricted ability offers rows"
         );
+        // The canonical row has two base units and one Aura choice marker;
+        // live grouped output supplies both of Overgrowth's actual G units.
         assert!(rows.iter().all(|row| !row.restrictions.is_empty()
             && row
                 .atomic_combination
                 .as_ref()
-                .is_some_and(|units| units.len() == 4)
+                .is_some_and(|units| units.len() == 3)
             && row.taps_for_mana_overrides.len() == 1
             && row.taps_for_mana_overrides[0].0.source.object_id == aura));
         if fixed_base {
@@ -1985,12 +1987,14 @@ fn restricted_base_does_not_hide_unrestricted_aura_generic_payment() {
         let granted = assert_any_one(&r, land);
         let rows = activatable_land_mana_options(r.state(), land, P0);
         assert!(!rows.is_empty());
+        // Overgrowth adds one canonical choice marker to the two base units;
+        // its full G/G production is checked after the public payment below.
         assert!(rows.iter().all(|row| row.ability_index == Some(granted)
             && !row.restrictions.is_empty()
             && row
                 .atomic_combination
                 .as_ref()
-                .is_some_and(|units| units.len() == if with_aura { 4 } else { 2 })));
+                .is_some_and(|units| units.len() == if with_aura { 3 } else { 2 })));
         let restrictions = rows[0].restrictions.clone();
         let index = activated_ability_definitions(r.state(), stone)
             .iter()
