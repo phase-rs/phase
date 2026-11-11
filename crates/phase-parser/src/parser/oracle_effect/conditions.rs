@@ -5034,11 +5034,7 @@ fn announced_object_roles(clause: &super::ParsedEffectClause) -> Option<Announce
         }
         children.extend(definition.mode_abilities.iter());
     }
-    Some(AnnouncedRoles {
-        head,
-        descendants,
-        head_acts: !matches!(clause.effect, Effect::TargetOnly { .. }),
-    })
+    Some(AnnouncedRoles { head, descendants })
 }
 
 /// CR 601.2c + CR 608.2c: the announced roles of a clause tree, split by the
@@ -5046,21 +5042,19 @@ fn announced_object_roles(clause: &super::ParsedEffectClause) -> Option<Announce
 ///
 /// Ownership is what the suffix can bind. The condition is stamped on the HEAD
 /// definition (`strip_suffix_conditional` strips it from the head's text), and
-/// `parent_target_controller` (engine `ability_utils.rs`) reads only that
-/// ability's own `targets` plus its `effect_context_object` snapshot. Both flow
-/// parent to child (a sub-ability inherits the parent's targets and snapshot),
-/// never child to parent, so a role announced on a descendant is unreadable by
-/// the gated head and can leave it counting zero.
+/// the engine evaluates it against the head before the head's effect, reading
+/// `parent_target_controller` (engine `ability_utils.rs`): the head's own
+/// `targets`, else its `effect_context_object`. Targets are assigned per node,
+/// and both a parent's targets and the snapshot its effect produces are handed
+/// parent to child, never child to parent, so the gated head reads only a role
+/// it announces itself. That includes a `TargetOnly` head: it owns the slot, and
+/// its acting child is a continuation step that a false gate skips and a true
+/// gate hands the head's targets to.
 struct AnnouncedRoles {
     /// Roles announced by the head effect and its own unless-payer.
     head: Vec<TargetFilter>,
     /// Roles announced anywhere below the head (sub, else and mode nodes).
     descendants: Vec<TargetFilter>,
-    /// False when the head effect is the structural `TargetOnly` wrapper: a
-    /// head condition gates only the head's own effect (the engine hands off to
-    /// the sub-ability as the next chain link), so a wrapper's condition would
-    /// not gate the instruction that acts on the target.
-    head_acts: bool,
 }
 
 impl AnnouncedRoles {
@@ -5141,15 +5135,14 @@ fn stack_announced_roles(effect_text: &str, ctx: &ParseContext) -> Option<Announ
 
 /// CR 115.1d: the one announced object target of an instruction, owned by the
 /// head the condition is attached to, or `None` when the declaration is not
-/// exactly one controller-capable object role. A
-/// companion player, a payer, a child role, or any other second role makes the
-/// suffix decline.
+/// exactly one controller-capable object role. A companion player, a payer, a
+/// child role, or any other second role makes the suffix decline.
 fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<TargetFilter> {
     let mut roles = stack_announced_roles(effect_text, ctx)?;
-    // Bind only a role the gated head can read at resolution: the one role is
-    // the head's own, nothing below the head announces a target (those are
-    // unreadable by the head), and the head is the instruction that acts.
-    if roles.head.len() != 1 || !roles.descendants.is_empty() || !roles.head_acts {
+    // Bind only a role the gated head can read at resolution: the head owns
+    // exactly one role. A descendant role is unreadable by the head when it is
+    // the only one, and makes the referent ambiguous when the head has one too.
+    if roles.head.len() != 1 || !roles.descendants.is_empty() {
         return None;
     }
     let filter = roles.head.pop()?;
@@ -11856,19 +11849,41 @@ mod tests {
         );
     }
 
+    /// The one ability a full `parse_oracle_text` run produces for `text`, and
+    /// its parse warnings.
+    fn parse_single_ability(
+        text: &str,
+        name: &str,
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> (
+        AbilityDefinition,
+        Vec<crate::parser::oracle_ir::diagnostic::OracleDiagnostic>,
+    ) {
+        let types: Vec<String> = types.iter().map(|t| (*t).to_owned()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|t| (*t).to_owned()).collect();
+        let parsed = parse_oracle_text(text, name, &[], &types, &subtypes);
+        let [ability] = parsed.abilities.as_slice() else {
+            panic!("{text}: expected one ability, got {:?}", parsed.abilities);
+        };
+        (ability.clone(), parsed.parse_warnings)
+    }
+
+    /// Every definition below `head` along its sub-ability chain.
+    fn sub_chain(head: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+        std::iter::successors(head.sub_ability.as_deref(), |def| {
+            def.sub_ability.as_deref()
+        })
+        .collect()
+    }
+
     /// CR 601.2c + CR 608.2c: the suffix binds only a role the gated head owns.
-    /// Skulking Killer, Unified Will and a compound head with a targetless child
-    /// each announce their single role on the head and nothing below it (the
-    /// mirror image of `child_only_target_cannot_be_read_by_the_gated_head`).
+    /// Skulking Killer, Unified Will, a compound head with a targetless child and
+    /// a `TargetOnly` head with an acting child each announce their single role
+    /// on the head and nothing below it (the mirror image of
+    /// `child_only_target_suffix_is_an_explicit_gap`).
     #[test]
     fn bound_role_is_owned_by_the_head() {
-        let compound =
-            "Target creature gets -2/-2 until end of turn and gains haste until end of turn";
-        let (compound_clause, _) = clause_and_timing(compound);
-        assert!(
-            compound_clause.sub_ability.is_some(),
-            "reach guard: the compound has a targetless child"
-        );
         for (effect, condition) in [
             (
                 "Target creature an opponent controls gets -2/-2 until end of turn",
@@ -11878,87 +11893,157 @@ mod tests {
                 "Counter target spell",
                 "you control more creatures than that spell's controller",
             ),
-            (compound, "its controller controls no creatures"),
+            (
+                "Target creature gets -2/-2 until end of turn and gains haste until end of turn",
+                "its controller controls no creatures",
+            ),
+            (
+                "Target creature deals 2 damage to each other creature",
+                "that creature's controller controls no other creatures",
+            ),
         ] {
             let roles = stack_announced_roles(effect, &trigger_ctx()).expect("reach guard");
             assert_eq!(roles.head.len(), 1, "{effect}: the head owns the role");
             assert!(roles.descendants.is_empty(), "{effect}");
-            assert!(roles.head_acts, "{effect}");
             assert_full_strip_binds(effect, condition);
         }
     }
 
-    /// CR 601.2c + CR 608.2c (review 12): Coastal Wizard's printed instruction
-    /// "Return this creature and another target creature to their owners'
-    /// hands." lowers the self-bounce head and the independently targeted second
-    /// bounce as separate nodes, so the only announced target is on the CHILD.
-    /// The engine's `parent_target_controller` reads the gated instruction's own
-    /// targets and its `effect_context_object` snapshot, both of which flow from
-    /// parent to child, so a head gated on "that creature's controller" cannot
-    /// read it and could count zero. The suffix is synthetic. Full parsing:
-    /// first prove the topology positively, then prove no controller gate is
-    /// stamped anywhere.
+    /// CR 601.2c + CR 608.2c: through full parsing, a head that owns the single
+    /// announced role carries the gate, and every node below it is a
+    /// condition-free continuation step that declares no target of its own (the
+    /// engine skips it when the head's gate is false and hands it the head's
+    /// targets when it is true). Both rows are synthetic: a compound head with a
+    /// targetless child (nearest printed analogue: Skulking Killer's "target
+    /// creature an opponent controls gets -2/-2 until end of turn"), and a
+    /// `TargetOnly` head whose child acts (nearest printed analogue: Chandra's
+    /// Ignition, "Target creature you control deals damage equal to its power to
+    /// each other creature and each opponent.").
     #[test]
-    fn child_only_target_cannot_be_read_by_the_gated_head() {
-        let printed = "Return this creature and another target creature to their owners' hands";
+    fn head_owned_role_gates_the_whole_clause_through_full_parsing() {
         let condition = "that creature's controller controls no other creatures";
-        let plain = parse_effect_chain(printed, AbilityKind::Activated);
-        assert!(
-            plain
-                .effect
-                .target_filter()
-                .is_none_or(TargetFilter::is_context_ref),
-            "reach guard: the head names no declared target: {:?}",
-            plain.effect
+        for effect in [
+            "Target creature gets -2/-2 until end of turn and gains haste until end of turn",
+            "Target creature deals 2 damage to each other creature",
+        ] {
+            let (head, warnings) = parse_single_ability(
+                &format!("{effect} if {condition}."),
+                "Synthetic",
+                &["Instant"],
+                &[],
+            );
+            assert!(warnings.is_empty(), "{effect}: {warnings:?}");
+            assert!(
+                head.effect
+                    .target_filter()
+                    .is_some_and(|filter| !filter.is_context_ref()),
+                "{effect}: the head declares the target: {:?}",
+                head.effect
+            );
+            let (seam, _, _) = full_strip(effect, condition);
+            assert!(seam.is_some(), "reach guard: the strip binds {effect}");
+            assert_eq!(head.condition, seam, "{effect}: the gate is on the head");
+            let children = sub_chain(&head);
+            assert!(!children.is_empty(), "reach guard: {effect} has a child");
+            for child in children {
+                assert!(
+                    child
+                        .effect
+                        .target_filter()
+                        .is_none_or(TargetFilter::is_context_ref),
+                    "{effect}: the child declares no target: {:?}",
+                    child.effect
+                );
+                assert_eq!(child.condition, None, "{effect}");
+                assert_eq!(
+                    child.sub_link,
+                    crate::types::ability::SubAbilityLink::ContinuationStep,
+                    "{effect}"
+                );
+            }
+        }
+        let (head, _) = parse_single_ability(
+            &format!("Target creature deals 2 damage to each other creature if {condition}."),
+            "Synthetic",
+            &["Instant"],
+            &[],
         );
-        let child = plain
-            .sub_ability
-            .as_deref()
-            .expect("reach guard: the second bounce is a separate child");
-        assert!(
-            child
-                .effect
-                .target_filter()
-                .is_some_and(|filter| !filter.is_context_ref()),
-            "reach guard: the child owns the only announced target: {:?}",
-            child.effect
-        );
-        assert_eq!(child.target_choice_timing, TargetChoiceTiming::Stack);
-        let roles = stack_announced_roles(printed, &trigger_ctx()).expect("reach guard");
-        assert_eq!((roles.head.len(), roles.descendants.len()), (0, 1));
-        assert!(
-            !nom_primitives::scan_contains(&format!("{plain:?}"), "ParentTargetController"),
-            "reach guard: no controller gate before the suffix"
-        );
-
-        let suffixed =
-            parse_effect_chain(&format!("{printed} if {condition}"), AbilityKind::Activated);
-        assert_eq!(suffixed.condition, None);
-        assert!(
-            !nom_primitives::scan_contains(&format!("{suffixed:?}"), "ParentTargetController"),
-            "the suffix must not become a controller gate on any node: {suffixed:?}"
-        );
-        assert_full_strip_declines(printed, condition);
+        assert!(matches!(*head.effect, Effect::TargetOnly { .. }));
     }
 
-    /// CR 608.2c: a `TargetOnly` head is the structural wrapper that only
-    /// designates the target; the instruction that acts is on its sub-ability.
-    /// The head's condition gates the head's own effect, and the engine's false
-    /// path hands off only to an unconditional sequential sibling, so it is not
-    /// proven to gate the acting child; the probe declines the wrapper. Synthetic
-    /// composition; the nearest printed analogue is Master's Rebuke's
-    /// "Target creature you control deals damage equal to its power to ...".
+    /// CR 601.2c + CR 608.2c (review 12): Coastal Wizard's printed ability
+    /// "{T}: Return this creature and another target creature to their owners'
+    /// hands." lowers the self-bounce head and the independently targeted second
+    /// bounce as separate nodes, so the only announced target is on the CHILD.
+    /// The gate would be stamped on the head, which reads only its own targets
+    /// and a snapshot handed down from a parent, so it cannot read the child's
+    /// slot; and gating the child alone would leave the head's self-bounce
+    /// ungated. The suffix "if that creature's controller controls no other
+    /// creatures" is synthetic. Full parsing: first assert the child-only slot
+    /// positively, then assert the suffix is an explicit condition gap rather
+    /// than a controller gate on any node.
     #[test]
-    fn target_only_wrapper_head_declines() {
-        let effect =
-            "Target creature you control deals 2 damage to each other creature you control";
-        let (clause, _) = clause_and_timing(effect);
-        assert!(matches!(clause.effect, Effect::TargetOnly { .. }));
-        assert!(clause.sub_ability.is_some(), "reach guard: acting child");
-        let roles = stack_announced_roles(effect, &trigger_ctx()).expect("reach guard");
-        assert_eq!((roles.head.len(), roles.descendants.len()), (1, 0));
-        assert!(!roles.head_acts);
-        assert_full_strip_declines(effect, "its controller controls no creatures");
+    fn child_only_target_suffix_is_an_explicit_gap() {
+        let printed = "Return this creature and another target creature to their owners' hands";
+        let condition = "that creature's controller controls no other creatures";
+        let activation_window = "Activate only during your turn, before attackers are declared.";
+        for (text, suffixed) in [
+            (format!("{{T}}: {printed}. {activation_window}"), false),
+            (
+                format!("{{T}}: {printed} if {condition}. {activation_window}"),
+                true,
+            ),
+        ] {
+            let (head, warnings) =
+                parse_single_ability(&text, "Coastal Wizard", &["Creature"], &["Human", "Wizard"]);
+            assert!(
+                matches!(
+                    &*head.effect,
+                    Effect::Bounce {
+                        target: TargetFilter::SelfRef,
+                        destination: None,
+                        ..
+                    }
+                ),
+                "{text}: the head bounces this creature and declares no target: {:?}",
+                head.effect
+            );
+            let [child] = sub_chain(&head)[..] else {
+                panic!("{text}: expected one child, got {:?}", head.sub_ability);
+            };
+            assert!(
+                matches!(
+                    &*child.effect,
+                    Effect::Bounce { target, .. } if !target.is_context_ref()
+                ),
+                "{text}: the child owns the only announced target: {:?}",
+                child.effect
+            );
+            assert_eq!(
+                child.target_choice_timing,
+                TargetChoiceTiming::Stack,
+                "{text}"
+            );
+            assert_eq!(head.condition, None, "{text}");
+            assert_eq!(child.condition, None, "{text}");
+            let gaps: Vec<_> = warnings.iter().filter_map(|w| w.gap()).collect();
+            if suffixed {
+                assert_eq!(
+                    gaps,
+                    vec![
+                        &crate::parser::oracle_ir::diagnostic::ClauseGap::Condition {
+                            guard: condition.to_string()
+                        }
+                    ],
+                    "{text}: the suffix must be an explicit gap: {warnings:?}"
+                );
+            } else {
+                assert!(warnings.is_empty(), "{text}: {warnings:?}");
+            }
+        }
+        let roles = stack_announced_roles(printed, &trigger_ctx()).expect("reach guard");
+        assert_eq!((roles.head.len(), roles.descendants.len()), (0, 1));
+        assert_full_strip_declines(printed, condition);
     }
 
     /// CR 608.2d + CR 107.4 + CR 202.1: Omnath, Locus of All — "you may reveal

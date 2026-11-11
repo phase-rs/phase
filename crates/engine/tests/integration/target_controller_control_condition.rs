@@ -7,14 +7,19 @@
 //!   as it resolves, it does nothing (2021-11-19 ruling).
 //! - Unified Will: "Counter target spell if you control more creatures than that
 //!   spell's controller."
+//! - A SYNTHETIC instant whose head is the `TargetOnly` wrapper: the head owns
+//!   the target and the gate, and its continuation child acts on that target.
 //!
-//! Every card is a printed card staged from its verbatim Oracle text
-//! (`client/public/card-data.json`). Hill Giant and Grizzly Bears are vanilla.
+//! Every other card is a printed card staged from its verbatim Oracle text
+//! (`client/public/card-data.json`). Hill Giant, Grizzly Bears and Craw Wurm are
+//! vanilla.
 //!
 //! REVERT DISCRIMINATORS: `skulking_killer_does_nothing_when_that_opponent_controls_another_creature`
-//! (the condition is dropped → the Giant becomes 1/1) and
+//! (the condition is dropped → the Giant becomes 1/1),
 //! `unified_will_does_not_counter_when_counts_are_equal` (the condition is
-//! dropped → the Giant is countered).
+//! dropped → the Giant is countered), and
+//! `target_only_head_gate_fails_and_skips_its_child` (the condition is declined
+//! as a gap → the Bears die).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
@@ -394,4 +399,62 @@ fn unified_will_compares_against_that_spells_controller() {
 
     assert_eq!(zone(&runner, will), Zone::Graveyard);
     assert_eq!(zone(&runner, giant), Zone::Graveyard);
+}
+
+/// SYNTHETIC instant (nearest printed analogue: Chandra's Ignition, "Target
+/// creature you control deals damage equal to its power to each other creature
+/// and each opponent."). The parser lowers it to a `TargetOnly` head that owns
+/// the only target and carries the condition, with the damage on a
+/// condition-free continuation child that reads the head's target.
+const TARGET_DEALS_TO_EACH_OTHER: &str = "Target creature deals 2 damage to each other creature \
+                                          if that creature's controller controls no other \
+                                          creatures.";
+
+/// P0 casts the synthetic instant targeting P1's Hill Giant while P0 controls
+/// Grizzly Bears; returns the runner, the Giant and the Bears.
+fn target_only_head_against_hill_giant(
+    p1_second_creature: bool,
+) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic Target-Only Head",
+            true,
+            TARGET_DEALS_TO_EACH_OTHER,
+        )
+        .id();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let giant = scenario.add_creature(P1, "Hill Giant", 3, 3).id();
+    if p1_second_creature {
+        scenario.add_creature(P1, "Craw Wurm", 6, 4);
+    }
+    let mut runner = scenario.build();
+    runner.cast(spell).target_objects(&[giant]).resolve();
+    runner.advance_until_stack_empty();
+    assert_resolved(&runner);
+    (runner, giant, bears)
+}
+
+/// T-R1: CR 608.2c — the `TargetOnly` head reads its own target's controller.
+/// P1 controls only the Giant, so the gate holds and the child, handed the
+/// head's target, has the Giant deal 2 damage to each other creature.
+#[test]
+fn target_only_head_gate_holds_and_its_child_acts_on_the_head_target() {
+    let (runner, giant, bears) = target_only_head_against_hill_giant(false);
+
+    assert_eq!(zone(&runner, bears), Zone::Graveyard);
+    assert_eq!(zone(&runner, giant), Zone::Battlefield);
+    assert_eq!(runner.state().objects[&giant].damage_marked, 0);
+}
+
+/// T-R2: CR 608.2c — the target's controller controls another creature, so the
+/// head's gate is false and its continuation child does not deal damage.
+#[test]
+fn target_only_head_gate_fails_and_skips_its_child() {
+    let (runner, _giant, bears) = target_only_head_against_hill_giant(true);
+
+    assert_eq!(zone(&runner, bears), Zone::Battlefield);
+    assert_eq!(runner.state().objects[&bears].damage_marked, 0);
 }
