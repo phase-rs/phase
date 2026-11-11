@@ -9622,14 +9622,13 @@ fn battlefield_entry_key(event: &GameEvent) -> Option<(u32, usize, ObjectId)> {
     }
 }
 
-/// CR 608.2c + CR 614.12a + CR 616.1f: is a resolution paused on one of its own
-/// prompts? `pending_replacement` is read as a field because the record is parked
-/// before its wait is installed (see `engine_priority::run_post_action_pipeline`).
-fn resolution_is_suspended(state: &GameState) -> bool {
-    state.pending_replacement.is_some()
-        || (!matches!(state.waiting_for, WaitingFor::Priority { .. })
-            && (!state.resolution_stack.is_empty()
-                || super::engine_resolution_choices::handles(&state.waiting_for)))
+/// CR 117.5 + CR 614.12a + CR 616.1f: has the action settled? `Priority` with no
+/// replacement parked is the complement of "any pause", so no prompt shape is
+/// enumerated, as in `effects::token::realize_settled_token_battlefield_entry`.
+/// `pending_replacement` is read as a field because the record is parked before
+/// its wait is installed (see `engine_priority::run_post_action_pipeline`).
+fn action_has_settled(state: &GameState) -> bool {
+    matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.pending_replacement.is_none()
 }
 
 /// CR 603.6a + CR 611.3c: has the instruction that put this permanent onto the
@@ -9658,31 +9657,30 @@ fn battlefield_entry_is_observed(state: &GameState, event: &GameEvent) -> bool {
 /// trigger suppression or characteristic-changing static would be missed, and a
 /// firing limit could be spent on an event the completed state does not match.
 ///
-/// So a battlefield entry that reaches a collector while its resolution is
-/// suspended and its instruction has not completed is held in
+/// So a battlefield entry that reaches a collector before its action has
+/// settled, and whose entering instruction has not completed, is held in
 /// `GameState::unsettled_entry_batch_events` instead of being matched. It is
 /// released, ahead of the caller's own events, to the first collector that runs
-/// once the instruction has completed or the resolution is no longer suspended.
-/// That collector matches the whole event in one scan against the completed
-/// state, so batched ("one or more", CR 603.2c) definitions and firing limits
-/// see it once.
+/// once the instruction has completed or the action has settled. That collector
+/// matches the whole event in one scan against the completed state, so batched
+/// ("one or more", CR 603.2c) definitions and firing limits see it once.
 ///
-/// Every collector that can be handed an entry of a suspended resolution routes
+/// Every collector that can be handed an entry of an unsettled action routes
 /// through here: the post-action scan and both paused-observer helpers. Entries
 /// a logical zone-change owner still retains stay with that owner.
 pub(crate) fn settle_entry_batch_scan(
     state: &mut GameState,
     candidates: Vec<GameEvent>,
 ) -> Vec<GameEvent> {
-    let suspended = resolution_is_suspended(state);
-    if !suspended && state.unsettled_entry_batch_events.is_empty() {
+    let unsettled = !action_has_settled(state);
+    if !unsettled && state.unsettled_entry_batch_events.is_empty() {
         return candidates;
     }
     let held = std::mem::take(&mut state.unsettled_entry_batch_events);
     let held_keys: Vec<_> = held.iter().filter_map(battlefield_entry_key).collect();
     let (mut scan, still_held): (Vec<_>, Vec<_>) = held
         .into_iter()
-        .partition(|event| !suspended || battlefield_entry_is_observed(state, event));
+        .partition(|event| !unsettled || battlefield_entry_is_observed(state, event));
     state.unsettled_entry_batch_events = still_held;
     let mut owner_retained: Option<Vec<GameEvent>> = None;
     for event in candidates {
@@ -9694,7 +9692,7 @@ pub(crate) fn settle_entry_batch_scan(
         if held_keys.contains(&key) {
             continue;
         }
-        if !suspended || battlefield_entry_is_observed(state, &event) {
+        if !unsettled || battlefield_entry_is_observed(state, &event) {
             scan.push(event);
             continue;
         }
@@ -9713,9 +9711,7 @@ pub(crate) fn settle_entry_batch_scan(
 /// have not been checked. They must be before any player receives priority, so
 /// the action boundary runs the scan for handlers that reach no pipeline.
 pub(crate) fn settled_entry_batch_awaits_scan(state: &GameState) -> bool {
-    !state.unsettled_entry_batch_events.is_empty()
-        && matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && !resolution_is_suspended(state)
+    !state.unsettled_entry_batch_events.is_empty() && action_has_settled(state)
 }
 
 /// CR 603.2 + CR 603.7: Park delayed observer triggers if the action paused
