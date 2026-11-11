@@ -675,7 +675,33 @@ pub(crate) fn eliminate_players(
         if let Some(waiting_pid) = state.waiting_for.acting_player() {
             if !players::is_alive(state, waiting_pid) {
                 let next = players::next_player(state, waiting_pid);
-                state.waiting_for = WaitingFor::Priority { player: next };
+                let owed = match state.waiting_for {
+                    // CR 805.10b: the active team's attack is declared by its remaining active
+                    // player.
+                    WaitingFor::DeclareAttackers { .. }
+                        if players::teammates(state, waiting_pid)
+                            .contains(&state.active_player) =>
+                    {
+                        Some(super::combat::build_declare_attackers_waiting_for(state))
+                    }
+                    // CR 509.1 + CR 805.10d: the remaining defending players still declare
+                    // blockers.
+                    WaitingFor::DeclareBlockers { .. } => {
+                        super::combat::next_defending_player_to_declare_blockers(state).map(
+                            |defender| {
+                                super::combat::build_declare_blockers_waiting_for(state, defender)
+                            },
+                        )
+                    }
+                    // CR 510.2 + CR 805.10f: the remaining assignments are announced before
+                    // combat damage is dealt, with no priority in between.
+                    WaitingFor::AssignCombatDamage { .. }
+                    | WaitingFor::AssignBlockerDamage { .. } => {
+                        super::combat_damage::resolve_combat_damage(state, events)
+                    }
+                    _ => None,
+                };
+                state.waiting_for = owed.unwrap_or(WaitingFor::Priority { player: next });
             }
         }
 

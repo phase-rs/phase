@@ -10,7 +10,9 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::Duration;
 use engine::types::actions::GameAction;
 use engine::types::format::{ChallengeDeck, FormatConfig};
-use engine::types::game_state::{GameState, PendingCombatPhaseSkip, WaitingFor};
+use engine::types::game_state::{
+    CombatDamageAssignmentMode, GameState, PendingCombatPhaseSkip, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -576,5 +578,233 @@ fn the_remaining_horde_seat_is_the_active_player() {
             (runner.state().turn_number, runner.state().active_player),
             (4, P2)
         );
+    }
+}
+
+fn pass_to_prompt(runner: &mut GameRunner) {
+    while priority_seat(runner).is_some() {
+        pass(runner);
+    }
+}
+
+fn declare_attacks(
+    runner: &mut GameRunner,
+    attacks: &[(ObjectId, PlayerId)],
+    bands: Vec<Vec<ObjectId>>,
+) {
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: attacks
+                .iter()
+                .map(|&(attacker, defender)| (attacker, AttackTarget::Player(defender)))
+                .collect(),
+            bands,
+        })
+        .expect("CR 508.1a: the active player declares attackers");
+}
+
+fn declare_blocks(runner: &mut GameRunner, assignments: Vec<(ObjectId, ObjectId)>) {
+    runner
+        .act(GameAction::DeclareBlockers { assignments })
+        .expect("CR 509.1a: the defending player declares blockers");
+}
+
+fn assign_combat_damage(runner: &mut GameRunner, assignments: Vec<(ObjectId, u32)>) {
+    runner
+        .act(GameAction::AssignCombatDamage {
+            mode: CombatDamageAssignmentMode::Normal,
+            assignments,
+            trample_damage: 0,
+            controller_damage: 0,
+        })
+        .expect("CR 510.1c: the attacker's controller divides its damage");
+}
+
+/// CR 805.10b: when the engine's active player leaves at the team's declare-attackers prompt,
+/// the teammate now active declares the team's attack.
+#[test]
+fn a_remaining_teammate_declares_the_attack_left_open_by_its_active_player() {
+    for leaves in [false, true] {
+        let db = shared_card_db().expect("card db");
+        let mut scenario = archenemy_board();
+        let p2_bears = scenario.add_real_card(P2, "Grizzly Bears", Zone::Battlefield, db);
+        let p1_bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+        let mut runner = archenemy(scenario);
+        pass_to_prompt(&mut runner);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { player: P1, .. }
+        ));
+        if leaves {
+            concede(&mut runner, P1);
+        }
+        let WaitingFor::DeclareAttackers {
+            player,
+            mut valid_attacker_ids,
+            ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!("leaves={leaves}: {:?}", runner.state().waiting_for);
+        };
+        assert_eq!(player, if leaves { P2 } else { P1 });
+        let mut attackers = if leaves {
+            vec![p2_bears]
+        } else {
+            vec![p2_bears, p1_bears]
+        };
+        valid_attacker_ids.sort_unstable();
+        attackers.sort_unstable();
+        assert_eq!(valid_attacker_ids, attackers);
+        let attacks: Vec<_> = attackers.iter().map(|&a| (a, P0)).collect();
+        declare_attacks(&mut runner, &attacks, vec![]);
+        walk(&mut runner, |state| state.turn_number == 2);
+        assert_eq!(runner.state().players[0].life, if leaves { 38 } else { 36 });
+    }
+}
+
+/// CR 509.1 + CR 805.10d: when a defending player leaves at its declare-blockers prompt, its
+/// teammate still declares its blocks.
+#[test]
+fn a_remaining_defender_declares_blockers_after_a_defender_leaves_at_its_prompt() {
+    for leaves in [false, true] {
+        let db = shared_card_db().expect("card db");
+        let mut scenario = archenemy_board();
+        let at_p1 = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+        let at_p2 = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+        scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+        let blocker = scenario.add_real_card(P2, "Grizzly Bears", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.turn_number = 3;
+            state.active_player = P0;
+            state.phase = Phase::PreCombatMain;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+            state.priority_passes.clear();
+        }
+        pass_to_prompt(&mut runner);
+        declare_attacks(&mut runner, &[(at_p1, P1), (at_p2, P2)], vec![]);
+        pass_to_prompt(&mut runner);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { player: P1, .. }
+        ));
+        if leaves {
+            concede(&mut runner, P1);
+        } else {
+            declare_blocks(&mut runner, vec![]);
+        }
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::DeclareBlockers { player: P2, .. }
+            ),
+            "leaves={leaves}: {:?}",
+            runner.state().waiting_for
+        );
+        declare_blocks(&mut runner, vec![(blocker, at_p2)]);
+        walk(&mut runner, |state| state.turn_number == 3);
+        assert_eq!(runner.state().players[2].life, 20);
+        assert!(!runner.state().battlefield.contains(&at_p2));
+    }
+}
+
+/// CR 510.1c + CR 510.2 + CR 805.10f: when the active player leaves while dividing its
+/// attacker's combat damage, its teammate divides its own attacker's damage before any is dealt.
+#[test]
+fn a_remaining_teammate_assigns_combat_damage_after_its_active_player_leaves_mid_assignment() {
+    for leaves in [false, true] {
+        let db = shared_card_db().expect("card db");
+        let mut scenario = archenemy_board();
+        let p1_bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+        let p2_bears = scenario.add_real_card(P2, "Grizzly Bears", Zone::Battlefield, db);
+        let blockers: Vec<_> = (0..4)
+            .map(|_| scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db))
+            .collect();
+        let mut runner = archenemy(scenario);
+        pass_to_prompt(&mut runner);
+        declare_attacks(&mut runner, &[(p1_bears, P0), (p2_bears, P0)], vec![]);
+        pass_to_prompt(&mut runner);
+        declare_blocks(
+            &mut runner,
+            vec![
+                (blockers[0], p1_bears),
+                (blockers[1], p1_bears),
+                (blockers[2], p2_bears),
+                (blockers[3], p2_bears),
+            ],
+        );
+        pass_to_prompt(&mut runner);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::AssignCombatDamage { player: P1, attacker_id, .. } if attacker_id == p1_bears
+        ));
+        if leaves {
+            concede(&mut runner, P1);
+        } else {
+            assign_combat_damage(&mut runner, vec![(blockers[0], 2)]);
+        }
+        let WaitingFor::AssignCombatDamage {
+            player,
+            attacker_id,
+            ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!("leaves={leaves}: {:?}", runner.state().waiting_for);
+        };
+        assert_eq!((player, attacker_id), (P2, p2_bears));
+        assign_combat_damage(&mut runner, vec![(blockers[2], 2)]);
+        let battlefield = &runner.state().battlefield;
+        assert!(!battlefield.contains(&blockers[2]) && battlefield.contains(&blockers[3]));
+        assert!(!battlefield.contains(&p2_bears));
+    }
+}
+
+/// CR 702.22k + CR 805.4a: when the active player leaves while dividing a blocker's damage
+/// among a band, the teammate now active divides it.
+#[test]
+fn a_remaining_teammate_divides_blocker_damage_after_its_active_player_leaves_mid_division() {
+    for leaves in [false, true] {
+        let db = shared_card_db().expect("card db");
+        let mut scenario = archenemy_board();
+        let wolves = scenario.add_real_card(P2, "Timber Wolves", Zone::Battlefield, db);
+        let bears = scenario.add_real_card(P2, "Grizzly Bears", Zone::Battlefield, db);
+        let blocker = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+        let mut runner = archenemy(scenario);
+        pass_to_prompt(&mut runner);
+        declare_attacks(
+            &mut runner,
+            &[(wolves, P0), (bears, P0)],
+            vec![vec![wolves, bears]],
+        );
+        pass_to_prompt(&mut runner);
+        declare_blocks(&mut runner, vec![(blocker, wolves)]);
+        pass_to_prompt(&mut runner);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::AssignBlockerDamage { player: P1, .. }
+        ));
+        if leaves {
+            concede(&mut runner, P1);
+        }
+        let WaitingFor::AssignBlockerDamage {
+            player, blocker_id, ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!("leaves={leaves}: {:?}", runner.state().waiting_for);
+        };
+        assert_eq!(
+            (player, blocker_id),
+            (if leaves { P2 } else { P1 }, blocker)
+        );
+        runner
+            .act(GameAction::AssignBlockerDamage {
+                assignments: vec![(wolves, 2)],
+            })
+            .expect("CR 702.22k: the active player divides the blocker's damage");
+        let battlefield = &runner.state().battlefield;
+        assert!(!battlefield.contains(&wolves) && battlefield.contains(&bears));
+        assert!(!battlefield.contains(&blocker));
     }
 }
