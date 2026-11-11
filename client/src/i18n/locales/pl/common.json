@@ -13,7 +13,8 @@
   "quantityRef": {
     "highestNumber": "najwyższa liczba",
     "lowestNumber": "najniższa liczba",
-    "chosenNumber": "wybrana liczba"
+    "chosenNumber": "wybrana liczba",
+    "energyPaidOrLostThisTurn": "energia zapłacona lub utracona w tej turze"
   },
   "scryOutcome": {
     "title": "Wróżenie zakończone",

@@ -249,7 +249,7 @@ pub(crate) fn chain_has_mana_effect(ability: &AbilityDefinition) -> bool {
 
 /// Return true if the ability's effect chain includes `Effect::SearchLibrary`
 /// whose filter references a Land (not any-card tutors).
-fn chain_searches_for_land(ability: &AbilityDefinition) -> bool {
+pub(crate) fn chain_searches_for_land(ability: &AbilityDefinition) -> bool {
     collect_chain_effects(ability).iter().any(|e| {
         matches!(
             e,
@@ -370,6 +370,7 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination,
                 target: TargetFilter::Typed(TypedFilter::land()),
@@ -559,6 +560,7 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::Typed(
@@ -610,6 +612,7 @@ mod tests {
         fetch_ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::land()),

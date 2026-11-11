@@ -954,7 +954,7 @@ fn wizards_rockets_x_mana_ability_uses_up_magus_and_copies_nothing() {
         matches!(
             &runner.state().waiting_for,
             WaitingFor::PayAmountChoice {
-                resource: PayableResource::ManaGeneric { .. },
+                resource: PayableResource::Mana { .. },
                 source_id,
                 pending_mana_ability: Some(_),
                 ..

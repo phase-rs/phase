@@ -1,0 +1,246 @@
+{
+  "id": "kamigawa-block-cbs",
+  "name": "Champions of Kamigawa / Betrayers of Kamigawa / Saviors of Kamigawa",
+  "sets": {
+    "CHK": {
+      "class_bonus": {
+        "spirit": 0.55,
+        "arcane_spell": 0.45,
+        "removal": 0.9,
+        "evasive_threat": 0.55,
+        "soulshift": 0.45,
+        "splice": 0.45,
+        "combat_trick": 0.15,
+        "mana_fixing": 0.25
+      },
+      "threat_need": {
+        "target": 4,
+        "bonus": 1.25,
+        "definition": "Reliable finishers, evasive threats, or creatures that dominate combat; not simply any creature."
+      }
+    },
+    "BOK": {
+      "class_bonus": {
+        "ninja": 0.8,
+        "ninjutsu_enabler": 0.65,
+        "spirit": 0.4,
+        "arcane_spell": 0.35,
+        "removal": 0.9,
+        "evasive_threat": 0.55,
+        "equipment": 0.25,
+        "soulshift": 0.35,
+        "splice": 0.35
+      },
+      "threat_need": {
+        "target": 4,
+        "bonus": 1.25,
+        "definition": "Reliable finishers, evasive threats, or creatures that dominate combat; not simply any creature."
+      }
+    },
+    "SOK": {
+      "class_bonus": {
+        "spirit": 0.5,
+        "arcane_spell": 0.35,
+        "channel": 0.45,
+        "removal": 0.85,
+        "evasive_threat": 0.55,
+        "combat_trick": 0.2,
+        "soulshift": 0.35,
+        "splice": 0.3
+      },
+      "threat_need": {
+        "target": 4,
+        "bonus": 1.25,
+        "definition": "Reliable finishers, evasive threats, or creatures that dominate combat; not simply any creature."
+      }
+    }
+  },
+  "card_bonus": {
+    "cage of hands": 4.0,
+    "glacial ray": 4.0,
+    "rend flesh": 3.5,
+    "horobi's whisper": 3.5,
+    "kodama's reach": 2.0,
+    "sakura-tribe elder": 2.0,
+    "kodama's might": 0.5,
+    "hana kami": 0.75,
+    "soilshaper": 0.5,
+    "burr grafter": 1.0,
+    "kami of the hunt": 1.0,
+    "moss kami": 0.5,
+    "kami of ancient law": 1.0,
+    "kabuto moth": 3.5,
+    "waxmane baku": 1.5,
+    "thief of hope": 2.25,
+    "nezumi cutthroat": 1.5,
+    "okiba-gang shinobi": 1.75,
+    "ronin houndmaster": 1.0,
+    "glitterfang": 0.0,
+    "soratami cloudskater": 1.25,
+    "soratami rainshaper": 1.25,
+    "kami of the painted road": 0.5,
+    "hundred-talon strike": 0.0,
+    "reciprocate": 0.0,
+    "struggle for sanity": 0.0,
+    "sift through sands": 0.5,
+    "earthshaker": 0.75,
+    "blind with anger": 1.75,
+    "ronin warclub": 0.25,
+    "commune with nature": 0.25,
+    "keiga, the tide star": 4.0,
+    "kokusho, the evening star": 4.0,
+    "kodama of the north tree": 2.75,
+    "kodama of the south tree": 2.75,
+    "kiki-jiki, mirror breaker": 2.0,
+    "ninja of the deep hours": 3.0,
+    "mistblade shinobi": 1.75,
+    "skullsnatcher": 1.0,
+    "walker of secret ways": 1.0,
+    "higure, the still wind": 2.0,
+    "throat slitter": 2.25,
+    "shuko": 0.75,
+    "umezawa's jitte": 20.0,
+    "ronin cliffrider": 1.0,
+    "frostling": 0.5,
+    "frostwielder": 1.25,
+    "ogre marauder": 1.75,
+    "ronin cavekeeper": 0.5,
+    "budoka pupil": 1.0,
+    "callow jushi": 1.0,
+    "genju of the cedars": 1.0,
+    "genju of the falls": 0.75,
+    "genju of the fields": 0.75,
+    "genju of the fens": 0.75,
+    "genju of the spires": 1.0,
+    "sway of the stars": 0.0,
+    "patron of the nezumi": 1.5,
+    "patron of the kitsune": 1.5,
+    "patron of the moon": 1.5,
+    "patron of the akki": 1.25,
+    "patron of the orochi": 1.5,
+    "shinen of life's roar": 2.0,
+    "shinen of flight's wings": 1.25,
+    "shinen of fury's fire": 1.25,
+    "shinen of fear's chill": 1.0,
+    "shinen of stars' light": 0.75,
+    "arashi, the sky asunder": 2.5,
+    "kagemaro, first to suffer": 2.5,
+    "maga, traitor to mortals": 2.0,
+    "kira, great glass-spinner": 3.5,
+    "stampeding serow": 1.5,
+    "kashi-tribe elite": 1.0,
+    "thoughts of ruin": 0.0,
+    "rushing-tide zubera": 0.75,
+    "inner-chamber guard": 0.25,
+    "kagemaro's clutch": 0.75,
+    "charge across the araba": 0.25,
+    "spiraling embers": 1.0,
+    "celestial kirin": 2.0,
+    "infernal kirin": 1.5,
+    "kuro, pitlord": 1.0,
+    "kiyomaro, first to stand": 1.75,
+    "arcane teachings": 0.75,
+    "soulless revival": 0.75,
+    "devouring rage": 0.25,
+    "recall": 0.0,
+    "soul of magma": 0.25,
+    "long-forgotten gohei": 0.25,
+    "baku altar": 0.25,
+    "scroll of origins": 0.0,
+    "yosei, the morning star": 4.0
+  },
+  "scoring_model": {
+    "mode": "additive",
+    "formula": "base_card_rating + set_class_bonus + card_bonus + archetype_synergy + deck_need_bonus + draft_signal_bonus",
+    "note": "Every configured value is an incremental bonus, not a replacement for the base card rating. Do not apply the same mechanic twice through duplicate tags. Card bonuses are deliberately selective: the base rating should handle ordinary playables."
+  },
+  "adaptive_draft_policy": {
+    "mode": "adaptive",
+    "pack_order": [
+      "CHK",
+      "BOK",
+      "SOK"
+    ],
+    "draft_stages": {
+      "early": {
+        "pick_range": [
+          1,
+          5
+        ],
+        "raw_power_weight": 1.0,
+        "deck_fit_weight": 0.2,
+        "color_commitment": "very_low"
+      },
+      "middle": {
+        "pick_range": [
+          6,
+          9
+        ],
+        "raw_power_weight": 0.8,
+        "deck_fit_weight": 0.7,
+        "color_commitment": "low"
+      },
+      "late": {
+        "pick_range": [
+          10,
+          15
+        ],
+        "raw_power_weight": 0.6,
+        "deck_fit_weight": 1.0,
+        "color_commitment": "moderate"
+      }
+    },
+    "archetype_detection": {
+      "minimum_signals": 3,
+      "signals": "Count distinct quality enablers/payoffs and functional synergies, not raw card count. A single powerful card should not lock the draft into a lane.",
+      "supported_themes": [
+        "red_green_spirits_arcane",
+        "white_black_spirits_soulshift",
+        "blue_black_ninjas_tempo",
+        "blue_white_evasion_tempo",
+        "red_black_aggression",
+        "green_midrange_spirits",
+        "arcane_splice_control",
+        "five_color_goodstuff"
+      ],
+      "behavior": "Track multiple themes simultaneously. Reassess after each pick and each pack transition; do not force an archetype from one signal."
+    },
+    "deck_fit": {
+      "consider": [
+        "mana_curve",
+        "colored_mana_requirements",
+        "removal",
+        "evasion",
+        "creature_count",
+        "threat_quality",
+        "card_advantage",
+        "spirit_count",
+        "arcane_count",
+        "soulshift_chain",
+        "splice_targets",
+        "ninjutsu_enablers",
+        "ninja_payoffs",
+        "combat_tricks",
+        "mana_fixing"
+      ],
+      "color_policy": "No fixed color preference. Penalize off-color cards only as commitment increases; use signals from both card quality and likely open colors.",
+      "splash_policy": "Splash only high-impact cards or premium removal when fixing and mana costs support it. Avoid splashing double-pip cards or weakening early plays."
+    },
+    "deck_need_bonus": {
+      "enabled": true,
+      "maximum_per_card": 2.0,
+      "note": "Use diminishing returns. Prioritize enough early plays, interaction, evasion, and real finishers. Do not award repeated bonus for simply accumulating Spirits or Arcane cards once the deck has sufficient density."
+    },
+    "archetype_synergy_bonus": {
+      "enabled": true,
+      "maximum_per_card": 2.5,
+      "note": "Apply only when the pool demonstrates the relevant theme. Synergy is incremental and must not duplicate set_class_bonus or card_bonus. Strongest recurring patterns include Spirit/Arcane/Soulshift, Ninja/evasion, and tempo/evasion."
+    },
+    "color_commitment": {
+      "early_picks": 0.0,
+      "middle_picks": 0.5,
+      "late_picks": 1.0,
+      "note": "These are maximum penalty multipliers, not flat card penalties; actual penalty should scale with colored mana cost and current color concentration."
+    }
+  }
+}

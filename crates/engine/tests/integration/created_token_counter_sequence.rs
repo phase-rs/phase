@@ -21,7 +21,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ChooseOneOfKind, ConjureCard, ConjureSource, Effect,
-    PlayerFilter, PtValue, QuantityExpr, ResolvedAbility, SubAbilityLink, TargetFilter,
+    PlayerFilter, PtValue, QuantityExpr, ResolvedAbility, SpellbookSelection, SubAbilityLink,
+    TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -869,7 +870,9 @@ fn a_later_conjure_is_the_placement_referent() {
     assert_eq!(plus_one_counters(state, the_soldier(state)), 0);
 }
 
-fn spellbook_chain_board(random: bool) -> (GameRunner, ResolvedAbility, Vec<ObjectId>) {
+fn spellbook_chain_board(
+    selection: SpellbookSelection,
+) -> (GameRunner, ResolvedAbility, Vec<ObjectId>) {
     let (mut runner, source) = chain_board();
     runner
         .state_mut()
@@ -885,7 +888,7 @@ fn spellbook_chain_board(random: bool) -> (GameRunner, ResolvedAbility, Vec<Obje
             Effect::DraftFromSpellbook {
                 destination: Zone::Battlefield,
                 tapped: false,
-                random,
+                selection,
             },
             plus_one_on_last_created(),
         ],
@@ -905,7 +908,7 @@ fn assert_drafted_card_has_the_counter(state: &GameState, before: &[ObjectId]) {
 /// so a later `LastCreated` placement goes on it (random path, no pause).
 #[test]
 fn a_later_random_spellbook_draft_is_the_placement_referent() {
-    let (mut runner, ability, before) = spellbook_chain_board(true);
+    let (mut runner, ability, before) = spellbook_chain_board(SpellbookSelection::Random);
     resolve_chain(&mut runner, &ability);
     assert_drafted_card_has_the_counter(runner.state(), &before);
 }
@@ -915,7 +918,7 @@ fn a_later_random_spellbook_draft_is_the_placement_referent() {
 /// placement runs.
 #[test]
 fn a_later_chosen_spellbook_draft_is_the_placement_referent() {
-    let (mut runner, ability, before) = spellbook_chain_board(false);
+    let (mut runner, ability, before) = spellbook_chain_board(SpellbookSelection::Chosen);
     resolve_chain(&mut runner, &ability);
     assert!(
         matches!(

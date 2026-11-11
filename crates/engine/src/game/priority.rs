@@ -1437,6 +1437,7 @@ mod tests {
             // Patron of the Moon: lands from hand onto the battlefield.
             let put_lands = own_top(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Hand),
                     destination: Zone::Battlefield,
                     target: TargetFilter::Typed(TypedFilter::land()),
@@ -1459,6 +1460,7 @@ mod tests {
             // operand naming the found card.
             let found_card_to_hand = own_top(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Hand,
                     target: TargetFilter::Any,
@@ -1723,7 +1725,7 @@ mod tests {
                     enter_with_counters: vec![],
                     face_down_profile: None,
                     library_position: None,
-                    library_shuffle: crate::types::ability::MassLibraryShuffleMode::default(),
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::default(),
                     random_order: false,
                 },
                 vec![],
