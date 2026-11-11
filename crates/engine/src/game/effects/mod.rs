@@ -21992,12 +21992,12 @@ fn resolve_chain_body(
     // the instruction itself does nothing (`host_effect_impossible`).
     //
     // CR 608.2c + CR 608.2h: the instructions after it read that host through
-    // "it" / "that land's controller". With no live host they must never fall
+    // "it" / "that land's controller". With no host the head can act on, they must never fall
     // back to the ability's source or to any other object, so the chain is
     // pruned before anything dispatches: with no information about the host,
     // every instruction that depends on it goes; with a known host the head
-    // cannot act on (`Unaffectable`: departed, phased out, or no longer
-    // matching), the ones that need the object itself go and the ones that
+    // cannot act on (`Unaffectable`: departed or phased out), the ones that
+    // need the object itself go and the ones that
     // read only its controller or owner stay, reading that snapshot
     // (`unaffectable_host_context`).
     let host_binding = crate::game::targeting::bind_resolution_attachment_hosts(state, ability);
@@ -24669,7 +24669,7 @@ fn resolve_chain_body(
                 .flatten()
         })
         // CR 608.2h: an unaffectable host's information (last known for a
-        // departed host, current for a phased-out or no-longer-matching one),
+        // departed host, current for a phased-out one),
         // for the metadata-only instructions its pruned chain kept. CR 701.24c: a kept
         // instruction that shuffles the host owner's library still randomizes
         // it — the objects it would shuffle in need not be in the zone they
@@ -27156,7 +27156,7 @@ enum MissingParentReferent {
     /// controller and owner included, and so does a grant to it.
     HostObjectAndMetadata,
     /// CR 608.2h + CR 702.26b: a known host the instruction cannot act on
-    /// (departed, phased out, or no longer matching) whose information names
+    /// (departed or phased out) whose information names
     /// its controller and owner: only the instructions that need the object
     /// itself go, a grant to it included.
     HostObject,

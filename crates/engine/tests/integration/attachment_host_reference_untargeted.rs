@@ -3035,3 +3035,104 @@ fn dramatic_accusation_shuffles_a_phased_out_hosts_owners_library() {
         s.player_actions_this_turn
     );
 }
+
+const REALITY_RIPPLE: &str = "Target artifact, creature, or land phases out. (While it's phased out, it's treated as though it doesn't exist. It phases in before its controller untaps during their next untap step.)";
+
+/// CR 113.7a + CR 608.2h + CR 702.26b: Orcish Mine's last-counter trigger is
+/// on the stack when P1 phases the enchanted land out (the Mine phases out
+/// with it, indirectly). "Destroy enchanted land" cannot affect a phased-out
+/// permanent, so the land stays; the trigger exists independently of its
+/// source, and "that land's controller" is still known (phasing changes no
+/// control, CR 702.26d), so that player is dealt 2 damage.
+#[test]
+fn orcish_mine_damages_a_phased_out_lands_controller() {
+    let ore = engine::types::counter::parse_counter_type("ore");
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let land = sc.add_basic_land(P1, engine::types::mana::ManaColor::Red);
+    let mine = aura_on_battlefield(&mut sc, P0, "Orcish Mine", ORCISH_MINE);
+    // The enters-with-three-counters replacement is not under test.
+    sc.with_counter(mine, ore.clone(), 1);
+    let ripple = sc
+        .add_spell_to_hand_from_oracle(P1, "Reality Ripple", true, REALITY_RIPPLE)
+        .with_mana_cost(free_cost())
+        .id();
+    sc.with_library_top(P0, &["Card A", "Card B", "Card C"]);
+    sc.with_library_top(P1, &["Card D", "Card E", "Card F"]);
+    let mut runner = sc.build();
+    attach(&mut runner, mine, land);
+
+    // From P1's end step into P0's upkeep: the upkeep removal takes the last
+    // ore counter and the last-counter trigger goes on the stack.
+    {
+        let state = runner.state_mut();
+        state.phase = Phase::End;
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
+    runner.advance_to_phase(Phase::Upkeep);
+    assert_eq!(runner.state().active_player, P0, "reach: P0's upkeep");
+    for _ in 0..64 {
+        let s = runner.state();
+        let ore_left = s.objects[&mine].counters.get(&ore).copied().unwrap_or(0);
+        if ore_left == 0
+            && trigger_on_stack(s, mine)
+            && matches!(s.waiting_for, WaitingFor::Priority { player } if player == P0)
+        {
+            break;
+        }
+        assert!(
+            !(s.stack.is_empty() && ore_left == 0),
+            "the last-counter trigger never reached the stack"
+        );
+        let action = match &s.waiting_for {
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+                order: (0..triggers.len()).collect(),
+            },
+            other => panic!("unexpected prompt: {other:?}"),
+        };
+        runner.act(action).expect("the no-choice answer is legal");
+    }
+    assert!(
+        trigger_on_stack(runner.state(), mine),
+        "reach: the last-counter trigger is on the stack"
+    );
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+        "reach: P1 holds priority with the trigger on the stack"
+    );
+
+    p1_responds(&mut runner, ripple, land);
+    let s = runner.state();
+    assert!(
+        !s.objects[&land].is_phased_in(),
+        "reach: the land phased out"
+    );
+    assert!(
+        !s.objects[&mine].is_phased_in(),
+        "reach: the Mine phased out with it (indirect phasing)"
+    );
+    assert!(
+        trigger_on_stack(s, mine),
+        "reach: the trigger is still on the stack after its source phased out"
+    );
+
+    drive_until(&mut runner, mine, false, stack_settled);
+    let s = runner.state();
+    assert_eq!(
+        s.objects[&land].zone,
+        Zone::Battlefield,
+        "the head could not destroy a phased-out land"
+    );
+    assert_eq!(
+        s.players[P1.0 as usize].life, 18,
+        "CR 113.7a + CR 608.2h: the trigger still deals 2 damage to that land's controller"
+    );
+    assert_eq!(
+        s.players[P0.0 as usize].life, 20,
+        "not the Mine's controller"
+    );
+}

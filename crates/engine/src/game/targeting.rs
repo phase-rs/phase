@@ -2291,9 +2291,10 @@ pub(crate) enum ResolutionHostBinding {
     /// The live host, bound (pinned to its incarnation) into the node's targets.
     Bound(Box<ResolvedAbility>),
     /// CR 115.10a + CR 303.4b + CR 301.5f + CR 400.7: the node names its
-    /// source's host, but nothing proves which object that is — the source is
-    /// attached to nothing, or nothing records what it was attached to. The
-    /// instruction does nothing, and neither does any instruction after it that
+    /// source's host, but there is no host it can act on and no information to
+    /// read — the source is attached to nothing, the phased-in host no longer
+    /// meets the description, or nothing records what the source was attached
+    /// to. The instruction does nothing, and neither does any instruction after it that
     /// reads the host, its controller or its owner; none may fall back to a
     /// filter scan ("any creature with an Aura attached") or to an object
     /// reusing a departed host's storage id.
@@ -2307,9 +2308,8 @@ pub(crate) enum ResolutionHostBinding {
     /// - CR 608.2h + CR 400.7: the source and the host it was last attached to
     ///   have both left the battlefield — the host's last known information,
     ///   pinned to the incarnation that left, so it names no current object.
-    /// - CR 702.26b: the host is still on the battlefield but phased out
-    ///   (treated as though it does not exist), or it no longer meets the
-    ///   recipient's description ("enchanted *creature*") — the live host's
+    /// - CR 702.26b + CR 702.26d: the host is still on the battlefield but
+    ///   phased out (treated as though it does not exist) — the live host's
     ///   current information, pinned to its current incarnation.
     ///
     /// CR 701.24c: a kept "shuffle ... into its owner's library" still shuffles
@@ -2343,22 +2343,21 @@ pub(crate) fn bind_resolution_attachment_hosts(
             bound.replace_target_occurrences(vec![(TargetRef::Object(host.object_id), Some(host))]);
             ResolutionHostBinding::Bound(Box::new(bound))
         }
-        // CR 702.26b + CR 608.2h: a phased-out host, or one that no longer
-        // meets the description, is still the known host: its controller and
-        // owner are read from its current information.
-        HostProvenance::Live(host) => {
-            state
-                .objects
-                .get(&host.object_id)
-                .map_or(ResolutionHostBinding::Absent, |object| {
-                    ResolutionHostBinding::Unaffectable(Box::new(
-                        crate::types::ability::CostPaidObjectSnapshot::capture(
-                            object,
-                            object.snapshot_public_characteristics(),
-                        ),
-                    ))
-                })
-        }
+        // CR 702.26b + CR 702.26d + CR 608.2h: a phased-out host is still the
+        // known host; phasing changes neither its zone nor its control, so its
+        // current controller and owner are its last known ones.
+        HostProvenance::Live(host) => state
+            .objects
+            .get(&host.object_id)
+            .filter(|object| !object.is_phased_in())
+            .map_or(ResolutionHostBinding::Absent, |object| {
+                ResolutionHostBinding::Unaffectable(Box::new(
+                    crate::types::ability::CostPaidObjectSnapshot::capture(
+                        object,
+                        object.snapshot_public_characteristics(),
+                    ),
+                ))
+            }),
         HostProvenance::Unknown => ResolutionHostBinding::Absent,
         HostProvenance::Departed { host, record } => {
             let record = &state.zone_changes_this_turn[record];

@@ -2391,9 +2391,10 @@ impl PrintedTargetWord {
 /// permanent" or "that land's controller", and through nothing else (a later
 /// sentence that only modifies the head, "That creature can't be
 /// regenerated.", folds into the same node). CR 608.2c: those followers read
-/// the host the head bound. Without a live host the head does nothing; CR
-/// 608.2h: followers that read only the host's controller or owner read its
-/// last known information, and followers that need the host itself do nothing
+/// the host the head bound. When the head cannot act on the host (departed or
+/// phased out) it does nothing; CR 608.2h: followers that read only the host's
+/// controller or owner read its information (last known for a departed host),
+/// and followers that need the host itself do nothing
 /// (`effects::resolve_chain_body`). A chain with any other follower, one that
 /// acts on its own subject or reads the host some other way (as a damage
 /// source, or as a number through an object scope), keeps its stack-time
