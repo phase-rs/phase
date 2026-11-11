@@ -9391,7 +9391,7 @@ mod tests {
     /// the ledger is reset per batch. The earlier id lives only in the owner's buffer.
     #[test]
     fn emit_committed_copy_token_entry_merges_the_ledger_into_the_active_copy_token_owner() {
-        use crate::types::game_state::PendingCopyTokenResolution;
+        use crate::types::game_state::{OfferedBatchCustody, PendingCopyTokenResolution};
         use std::collections::VecDeque;
 
         let mut state = GameState::new_two_player(42);
@@ -9415,6 +9415,7 @@ mod tests {
             effect_kind: EffectKind::CopyTokenOf,
             source_id: earlier,
             referent_set: None,
+            offered_batch: OfferedBatchCustody::Settled,
         });
         assert!(
             state.last_created_token_ids.is_empty(),
@@ -9472,7 +9473,7 @@ mod tests {
     /// Both leave the PRESENT row passing, so neither is caught by a fixture that never ran.
     #[test]
     fn a_vanished_token_never_reaches_the_anaphora_slot_through_the_copy_batch_buffer() {
-        use crate::types::game_state::PendingCopyTokenResolution;
+        use crate::types::game_state::{OfferedBatchCustody, PendingCopyTokenResolution};
         use std::collections::VecDeque;
 
         /// The two routes that publish a single just-created id while a copy batch is in flight.
@@ -9517,6 +9518,7 @@ mod tests {
                 effect_kind: EffectKind::CopyTokenOf,
                 source_id,
                 referent_set: None,
+                offered_batch: OfferedBatchCustody::Settled,
             });
             assert!(
                 state.active_copy_token().is_some(),

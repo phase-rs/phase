@@ -1220,7 +1220,7 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
             ambiguous_production.len(),
             ambiguous.len() - ambiguous_production.len()
         ),
-        (5, 0),
+        (6, 0),
         "the argument-ambiguous mutator surface on the two anaphora containers moved. These are \
          the calls whose SINGLE-ID-ness this census cannot read, so they are pinned instead of \
          classified. If the new call's argument is a bulk source (a `Vec`, a \
@@ -1255,17 +1255,27 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
     // list yet. It replaced four assignments of ledger 3 onto the owner, which dropped the
     // earlier batches' tokens once a paused batch resumed (CR 608.2c), so it publishes nothing
     // the ledger's own guard withheld.
+    //
+    // #10762's substituted-batch custody added one more, in `token_copy.rs`: the resumed
+    // owner's adoption of a substituted batch, `drain_copy_token_resolution`'s first
+    // `.extend(state.last_created_token_ids.clone())`. A bulk argument (a clone of ledger 3):
+    // the tokens the creation that replaced the owner's offered batch published (CR 614.6),
+    // read once when the owner resumes with that batch still marked
+    // (`OfferedBatchCustody::AtReplacementPrompt`). No delivery handed that batch's ids to the
+    // owner, so it lists none of them yet.
     assert_eq!(
         production_multiset(&ambiguous_production),
         vec![
             ("engine/src/game/effects/token.rs".to_string(), 2),
-            ("engine/src/game/effects/token_copy.rs".to_string(), 3),
+            ("engine/src/game/effects/token_copy.rs".to_string(), 4),
         ],
-        "per-file argument-ambiguous mutator multiset moved. All five of these are bulk \
+        "per-file argument-ambiguous mutator multiset moved. All six of these are bulk \
          republishes today — `resume_copy_token_batch_remainder`'s `.extend(status.created_ids)`, \
          the batch loop's `.extend(state.last_created_token_ids.clone())` pair, \
-         `repark_event_copy_frame`'s `.extend(ids)` and the ledger re-sync's `.extend(unlisted)` \
-         — and the pin exists so that a SIXTH cannot arrive without someone reading its argument"
+         `repark_event_copy_frame`'s `.extend(ids)`, the ledger re-sync's `.extend(unlisted)` and \
+         the resumed owner's adoption of a substituted batch (`drain_copy_token_resolution`'s \
+         first `.extend(state.last_created_token_ids.clone())`) — and the pin exists so that a \
+         SEVENTH cannot arrive without someone reading its argument"
     );
 }
 
