@@ -5103,6 +5103,7 @@ mod tests {
             source: ObjectId(9),
             source_lki: object.snapshot_public_characteristics(),
             source_zone: crate::types::zones::Zone::Battlefield,
+            source_token: crate::types::game_state::CapturedTokenBit::Known(object.is_token),
             ability_tag: None,
             is_loyalty_ability: false,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,

@@ -32114,7 +32114,7 @@ pub(crate) fn capture_target_facts(
                         // can date it — CR 730.2c + CR 730.2d let a merge flip the
                         // bit on the same object with no zone change to record,
                         // and the zone-change journal is turn-scoped.
-                        token: crate::types::game_state::AnnouncedTargetToken::Known(obj.is_token),
+                        token: crate::types::game_state::CapturedTokenBit::Known(obj.is_token),
                     })
             }
         })
@@ -32167,12 +32167,16 @@ pub(crate) fn capture_activation_record_from(
     let source = state.objects.get(&source_id)?;
     let source_lki = source.snapshot_public_characteristics();
     let source_zone = source.zone;
+    // CR 111.1 + CR 602.2: the source's own bit, captured with the snapshot a
+    // source-scoped modifier reads. See `CapturedTokenBit`.
+    let source_token = crate::types::game_state::CapturedTokenBit::Known(source.is_token);
     let targets = capture_target_facts(state, targets);
     Some(AbilityActivationRecord {
         activator: player,
         source: source_id,
         source_lki,
         source_zone,
+        source_token,
         ability_tag: def.and_then(|def| def.ability_tag),
         // CR 606.1: classified once, from the announcement-bound definition.
         is_loyalty_ability: def.map(ActivatedAbilityKind::of_definition)
@@ -35183,7 +35187,13 @@ struct AppliedAbilityCostModifier {
 #[derive(Clone, Copy)]
 enum ActivationSourceFacts<'a> {
     Live,
-    Recorded { lki: &'a LKISnapshot, zone: Zone },
+    Recorded {
+        lki: &'a LKISnapshot,
+        zone: Zone,
+        /// CR 111.1 + CR 602.2: the bit the source held when the ability was
+        /// announced, captured with the snapshot beside it.
+        token: crate::types::game_state::CapturedTokenBit,
+    },
 }
 
 impl ActivationSourceFacts<'_> {
@@ -35277,11 +35287,17 @@ fn reduce_ability_cost_non_target_gates_admit(
         ActivationSourceFacts::Live => {
             super::filter::matches_target_filter(state, view.source, affected, filter_ctx)
         }
-        ActivationSourceFacts::Recorded { lki, .. } => {
-            super::filter::matches_target_filter_on_lki_snapshot(
+        // CR 602.2 + CR 111.1: the recorded source answers the token leaves from
+        // the bit captured at its announcement — a source-scoped modifier
+        // ("abilities of nontoken creatures you control") must not read the
+        // present, and a snapshot cannot carry the bit (CR 707.2).
+        ActivationSourceFacts::Recorded { lki, token, .. } => {
+            super::filter::matches_target_filter_on_stated_lki(
                 state,
                 view.source,
                 lki,
+                None,
+                token.bit(),
                 affected,
                 filter_ctx,
             )
@@ -35368,6 +35384,7 @@ fn first_qualifying_activation_this_turn<'s>(
                 source_facts: ActivationSourceFacts::Recorded {
                     lki: &record.source_lki,
                     zone: record.source_zone,
+                    token: record.source_token,
                 },
                 active_keyword: record
                     .ability_tag

@@ -1511,6 +1511,9 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     super::mana_payment::retain_pooled_mana_producer_snapshots(state);
     // CR 400.7: LKI persists within a step but is invalidated on step transition.
     state.lki_cache.clear();
+    // CR 608.2h + CR 400.7: the storage-id-keyed departure token captures live
+    // exactly as long as the snapshots they are written beside — one step.
+    state.departure_token_cache.clear();
     state.lki_copiable_values.clear();
     state.lki_by_incarnation.clear();
     state.lki_copiable_values_by_incarnation.clear();

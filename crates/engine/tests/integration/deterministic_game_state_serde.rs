@@ -18,11 +18,11 @@ use engine::types::counter::CounterType;
 use engine::types::definitions::Definitions;
 use engine::types::events::{BoundActivationCost, GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    AbilityActivationRecord, ActivationTargetFact, AnnouncedTargetToken, AnnouncedTargetZone,
-    AutoPassMode, DepartedStackSpell, LKISnapshot, LandPlayRecord, LiminalEntrant, LiminalEntry,
-    LinkedExileLki, LinkedExileSnapshot, ManaSpentSourceSnapshot, PendingConniveReentry,
-    PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry, StackEntryKind,
-    StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
+    AbilityActivationRecord, ActivationTargetFact, AnnouncedTargetZone, AutoPassMode,
+    CapturedTokenBit, DepartedStackSpell, LKISnapshot, LandPlayRecord, LiminalEntrant,
+    LiminalEntry, LinkedExileLki, LinkedExileSnapshot, ManaSpentSourceSnapshot,
+    PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry,
+    StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
     StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TokenProjection,
     TrackedMemberOrigin, WaitingFor,
 };
@@ -131,6 +131,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::stack_trigger_event_batches", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::stack_trigger_firings", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_cache", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::departure_token_cache", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_copiable_values", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_by_incarnation", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_copiable_values_by_incarnation", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -414,6 +415,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
     for field in [
         "attribution",
         "lki_cache",
+        "departure_token_cache",
         "lki_copiable_values",
         "tracked_object_sets",
         "departed_activated_abilities",
@@ -1356,7 +1358,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        62,
+        63,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -2063,6 +2065,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 source: ObjectId(1),
                 source_lki: first_lki.clone(),
                 source_zone: engine::types::zones::Zone::Battlefield,
+                source_token: CapturedTokenBit::Known(true),
                 ability_tag: None,
                 is_loyalty_ability: false,
                 activation_cost: BoundActivationCost::Cost(Box::new(AbilityCost::Tap)),
@@ -2070,7 +2073,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                     id: ObjectId(2),
                     lki: Box::new(second_lki.clone()),
                     zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
-                    token: AnnouncedTargetToken::Known(false),
+                    token: CapturedTokenBit::Known(false),
                 }],
             }]),
         ),
@@ -2081,6 +2084,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 source: ObjectId(2),
                 source_lki: second_lki.clone(),
                 source_zone: engine::types::zones::Zone::Battlefield,
+                source_token: CapturedTokenBit::Known(false),
                 ability_tag: None,
                 is_loyalty_ability: true,
                 activation_cost: BoundActivationCost::Cost(Box::new(AbilityCost::Loyalty {
@@ -2090,6 +2094,10 @@ fn build_all_direct_numeric_maps_state() -> GameState {
             }]),
         ),
     ]));
+    // CR 111.1 + CR 608.2h: the storage-id-keyed departure bits pair with the
+    // snapshots above, one per storage id.
+    state.departure_token_cache =
+        im::HashMap::from_iter([(ObjectId(1), true), (ObjectId(2), false)]);
     state.lki_copiable_values = im::HashMap::from_iter([
         (ObjectId(1), intrinsic_copiable_values(&first)),
         (ObjectId(2), intrinsic_copiable_values(&second)),
@@ -2293,6 +2301,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "last_effect_counts_by_player",
         "stack_trigger_event_batches",
         "lki_cache",
+        "departure_token_cache",
         "lki_copiable_values",
         "lki_by_incarnation",
         "lki_copiable_values_by_incarnation",
@@ -2307,7 +2316,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     ];
     assert_eq!(
         direct_fields.len(),
-        47,
+        48,
         "private stack_trigger_firings is covered by its unit test"
     );
     for field in direct_fields {
@@ -3425,7 +3434,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
                     intensity: 0,
                 }),
                 zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
-                token: AnnouncedTargetToken::Known(false),
+                token: CapturedTokenBit::Known(false),
             },
             // The player axis carries no snapshot at all.
             ActivationTargetFact::Player(PlayerId(1)),
@@ -3483,7 +3492,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
         id: target_id,
         lki: lki.clone(),
         zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Graveyard),
-        token: AnnouncedTargetToken::Known(false),
+        token: CapturedTokenBit::Known(false),
     };
     let graveyard_json = serde_json::to_string(&graveyard_fact).expect("fact serializes");
     assert!(
@@ -3517,7 +3526,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
             id: target_id,
             lki: lki.clone(),
             zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
-            token: AnnouncedTargetToken::Known(false),
+            token: CapturedTokenBit::Known(false),
         },
         "silence is a different value from a stated battlefield"
     );
@@ -3531,7 +3540,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
         id: target_id,
         lki: lki.clone(),
         zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
-        token: AnnouncedTargetToken::Known(true),
+        token: CapturedTokenBit::Known(true),
     };
     let token_json = serde_json::to_string(&token_fact).expect("fact serializes");
     assert!(
@@ -3555,7 +3564,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
     };
     assert_eq!(
         *token,
-        AnnouncedTargetToken::Unknown,
+        CapturedTokenBit::Unknown,
         "CR 115.9: a record predating the capture states no token bit; it is not \
          a stated `false`"
     );
@@ -3565,7 +3574,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
             id: target_id,
             lki: lki.clone(),
             zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
-            token: AnnouncedTargetToken::Known(false),
+            token: CapturedTokenBit::Known(false),
         },
         "silence is a different value from a stated `false`"
     );

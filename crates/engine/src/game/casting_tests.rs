@@ -63067,6 +63067,128 @@ fn activation_cost_snapshot_round_trips_every_target_settlement_value() {
     }
 }
 
+/// CR 111.1 + CR 602.2: a source-scoped cost modifier reading a RECORDED
+/// activation answers the token leaves from the bit captured with the record —
+/// `Mutagen Man, Living Ooze` ("abilities of nontoken creatures you control cost
+/// … less") and `The Dining Car` are the live cards that narrow this way, and for
+/// a source that left, the record is the only evidence there is (CR 113.7a).
+///
+/// Revert-probe: reading the live object or refusing (`captured_token: None`)
+/// makes the `NonToken` assertion fail for the departed token source and inverts
+/// both assertions for the card source.
+#[test]
+fn a_recorded_source_answers_a_token_source_filter() {
+    use crate::types::game_state::CapturedTokenBit;
+
+    let mut state = GameState::new_two_player(42);
+    let token = create_object(
+        &mut state,
+        CardId(972),
+        PlayerId(0),
+        "Soldier".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&token).unwrap();
+        object.is_token = true;
+        object.card_types.core_types = vec![CoreType::Creature];
+    }
+    let lki = state.objects[&token].snapshot_public_characteristics();
+    // CR 111.7: the source left to pay its own cost.
+    let mut events = Vec::new();
+    zones::move_to_zone(&mut state, token, Zone::Graveyard, &mut events);
+
+    let view = ActivationView {
+        activator: PlayerId(0),
+        source: token,
+        source_facts: ActivationSourceFacts::Recorded {
+            lki: &lki,
+            zone: Zone::Battlefield,
+            token: CapturedTokenBit::Known(true),
+        },
+        active_keyword: Some("activated"),
+        is_mana: false,
+        is_loyalty: false,
+    };
+    let filter = |prop: FilterProp| {
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![prop]))
+    };
+    let ctx = crate::game::filter::FilterContext::neutral();
+    assert!(
+        reduce_ability_cost_non_target_gates_admit(
+            &state,
+            &view,
+            "activated",
+            ActivationExemption::None,
+            None,
+            Some(&filter(FilterProp::Token)),
+            PlayerId(0),
+            &ctx,
+        ),
+        "the departed token source still matches a `token` source filter"
+    );
+    assert!(
+        !reduce_ability_cost_non_target_gates_admit(
+            &state,
+            &view,
+            "activated",
+            ActivationExemption::None,
+            None,
+            Some(&filter(FilterProp::NonToken)),
+            PlayerId(0),
+            &ctx,
+        ),
+        "and does not match `nontoken`"
+    );
+}
+
+/// CR 111.1 + CR 400.7 + CR 602.2: an activation's journal row captures whether
+/// its SOURCE was a token, at the announcement, beside the snapshot a
+/// source-scoped cost modifier reads. `Mutagen Man, Living Ooze` and `The Dining
+/// Car` are the live cards whose `ReduceAbilityCost` static narrows on
+/// token-ness, and the recorded-source door has no other way to date the bit:
+/// the snapshot cannot carry it (CR 707.2).
+///
+/// Revert-probe: dropping the capture (the field defaulting to `Unknown`) makes
+/// both assertions fail — the modifier would then read a refusal for every
+/// source, including a plain nontoken creature.
+#[test]
+fn an_activation_record_captures_its_sources_token_bit() {
+    use crate::types::game_state::CapturedTokenBit;
+
+    let mut state = GameState::new_two_player(42);
+    let token = create_object(
+        &mut state,
+        CardId(970),
+        PlayerId(0),
+        "Soldier".to_string(),
+        Zone::Battlefield,
+    );
+    state.objects.get_mut(&token).unwrap().is_token = true;
+    let card = create_object(
+        &mut state,
+        CardId(971),
+        PlayerId(0),
+        "Grizzly Bears".to_string(),
+        Zone::Battlefield,
+    );
+
+    let token_row = capture_activation_record_from(&state, PlayerId(0), token, None, &[])
+        .expect("a live source yields a record");
+    assert_eq!(
+        token_row.source_token,
+        CapturedTokenBit::Known(true),
+        "the record states the token bit its source held at the announcement"
+    );
+    let card_row = capture_activation_record_from(&state, PlayerId(0), card, None, &[])
+        .expect("a live source yields a record");
+    assert_eq!(
+        card_row.source_token,
+        CapturedTokenBit::Known(false),
+        "and a card source states the opposite bit"
+    );
+}
+
 /// CR 602.2 + CR 601.2c: a journal row round-trips through the shared serde
 /// layer with both target shapes and both ability flags.
 #[test]
@@ -63092,6 +63214,9 @@ fn an_activation_journal_row_round_trips() {
         source,
         source_lki: state.objects[&source].snapshot_public_characteristics(),
         source_zone: crate::types::zones::Zone::Battlefield,
+        source_token: crate::types::game_state::CapturedTokenBit::Known(
+            state.objects[&source].is_token,
+        ),
         ability_tag: Some(crate::types::ability::AbilityTag::Boast),
         is_loyalty_ability: true,
         activation_cost: crate::types::events::BoundActivationCost::Unknown,
@@ -63103,7 +63228,7 @@ fn an_activation_journal_row_round_trips() {
                 zone: crate::types::game_state::AnnouncedTargetZone::Known(
                     state.objects[&target].zone,
                 ),
-                token: crate::types::game_state::AnnouncedTargetToken::Known(
+                token: crate::types::game_state::CapturedTokenBit::Known(
                     state.objects[&target].is_token,
                 ),
             },

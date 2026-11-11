@@ -728,7 +728,11 @@ fn visit_characteristic_leaf<'s>(
                                         )
                                     },
                                     |lki| {
-                                        crate::game::filter::matches_target_filter_on_lki_snapshot(
+                                        // CR 608.2h + CR 111.8: the snapshot and the
+                                        // token bit were written by the same
+                                        // departure, so the cached bit answers for
+                                        // exactly this last known information.
+                                        crate::game::filter::matches_target_filter_on_cached_departure_lki(
                                             state, oid, lki, filter, filter_ctx,
                                         )
                                     },
@@ -6009,8 +6013,11 @@ fn resolve_ref(
                     let read_live = |oid| {
                         crate::game::filter::matches_target_filter(state, oid, filter, &filter_ctx)
                     };
+                    // CR 608.2h + CR 111.8: the legacy slot holds the LATEST
+                    // departure's snapshot, whose token bit was captured by the same
+                    // write, so this door answers it instead of refusing the member.
                     let read_snapshot = |oid, lki| {
-                        crate::game::filter::matches_target_filter_on_lki_snapshot(
+                        crate::game::filter::matches_target_filter_on_cached_departure_lki(
                             state,
                             oid,
                             lki,
@@ -9981,7 +9988,7 @@ pub(crate) fn possessed_tracked_set_member(
             state.lki_cache.get(&oid).map_or_else(
                 || matches_target_filter(state, oid, filter, &filter_ctx),
                 |lki| {
-                    crate::game::filter::matches_target_filter_on_lki_snapshot(
+                    crate::game::filter::matches_target_filter_on_cached_departure_lki(
                         state,
                         oid,
                         lki,
@@ -21946,6 +21953,93 @@ mod tests {
             0,
             "and the departure capture must keep it out of a NonToken count"
         );
+    }
+
+    /// CR 608.2h + CR 608.2c + CR 111.1 + CR 111.8: a tracked set published by a
+    /// SELECTION stamps no producing origin (`publish_fresh_tracked_set_with_causes`
+    /// with no cause), so a member that later leaves the battlefield this step is
+    /// read through the legacy off-battlefield cache — the last known information
+    /// still kept at its storage id. Its token bit must answer from THAT snapshot's
+    /// own departure: `lki_cache` and the departure capture are written together by
+    /// the same `zones.rs` exit, so the cache entry cannot describe a different
+    /// epoch than the bit.
+    ///
+    /// This is the shape Ceaseless Conflict's own count reaches when the set was
+    /// published by a choice rather than by the destroy: refusing the leaf here
+    /// silently drops the member and counts 0 where the card says 1.
+    ///
+    /// Revert-probe: answering the unpinned door with no capture (the shape it
+    /// shipped with) makes the `NonToken` assertion fail — the departed nontoken
+    /// member drops out of the count.
+    #[test]
+    fn a_selection_published_member_keeps_its_token_bit_after_it_departs() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(904),
+            PlayerId(0),
+            "Ceaseless Conflict".to_string(),
+            Zone::Graveyard,
+        );
+        let member = create_object(
+            &mut state,
+            CardId(905),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&member)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        // CR 608.2c: the SELECTION publishes the set — no producing transition, so
+        // no member carries an origin stamp.
+        let set_id = crate::game::effects::publish_fresh_tracked_set_with_causes(
+            &mut state,
+            vec![member],
+            None,
+        );
+        assert!(
+            !state
+                .tracked_set_member_origins
+                .get(&set_id)
+                .is_some_and(|origins| origins.contains_key(&member)),
+            "fixture precondition: a selection-published member carries no origin"
+        );
+
+        // CR 111.7: the member leaves the battlefield after the selection, so the
+        // legacy path reads its last known information at the storage id.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, member, Zone::Graveyard, &mut events);
+        assert!(
+            !state.battlefield.contains(&member),
+            "fixture precondition: the member is off the battlefield"
+        );
+
+        let count = |prop: FilterProp| {
+            resolve_quantity(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize {
+                        filter: Box::new(TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Creature).properties(vec![prop]),
+                        )),
+                        caused_by: None,
+                    },
+                },
+                PlayerId(0),
+                source,
+            )
+        };
+        assert_eq!(
+            count(FilterProp::NonToken),
+            1,
+            "the departed member is a nontoken creature and must still be counted"
+        );
+        assert_eq!(count(FilterProp::Token), 0, "and it is not a token");
     }
 
     /// CR 608.2h + CR 111.8 + CR 115.9: a MISSING departure capture is UNKNOWN, not

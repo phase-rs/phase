@@ -1529,6 +1529,17 @@ pub struct AbilityActivationRecord {
         skip_serializing_if = "is_battlefield_zone"
     )]
     pub source_zone: Zone,
+    /// CR 111.1 + CR 400.7 + CR 602.2: whether the ability's SOURCE was a token
+    /// when the ability was announced, captured with the snapshot above.
+    ///
+    /// A modifier scoped to "abilities of nontoken creatures you control"
+    /// (Mutagen Man, Living Ooze; The Dining Car) reads this record's source, and
+    /// the snapshot cannot carry the bit (CR 707.2). The alternatives are both
+    /// unsound for the same reason they are for a target: the live object answers
+    /// with the present, and CR 730.2c + CR 730.2d let a merge flip the bit on the
+    /// same object with no zone change to record. See [`CapturedTokenBit`].
+    #[serde(default, skip_serializing_if = "CapturedTokenBit::is_unknown")]
+    pub source_token: CapturedTokenBit,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ability_tag: Option<crate::types::ability::AbilityTag>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1625,8 +1636,10 @@ impl<'de> Deserialize<'de> for AnnouncedTargetZone {
     }
 }
 
-/// CR 111.1 + CR 601.2c + CR 115.9: whether a committed target WAS a token at
-/// the moment it was announced, as the record STATES it.
+/// CR 111.1 + CR 400.7 + CR 601.2c + CR 602.2 + CR 115.9: whether a fact's
+/// subject WAS a token at the moment the fact was recorded, as the record STATES
+/// it — an announced target (CR 115.9) and an activation's own source (CR 602.2)
+/// alike.
 ///
 /// CR 115.9 makes "the state of the targets at the time they were selected" a
 /// reading of its own, and CR 111.1 makes token-ness one of the state's facts.
@@ -1645,7 +1658,7 @@ impl<'de> Deserialize<'de> for AnnouncedTargetZone {
 /// payload that predates this one as "not a token", which is exactly the silent
 /// answer the capture exists to replace.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum AnnouncedTargetToken {
+pub enum CapturedTokenBit {
     /// The record states no token bit: the payload predates the field. A leaf
     /// asked for a selection-time token answer then has no capture to answer
     /// from and must refuse rather than report the present or the default.
@@ -1655,7 +1668,7 @@ pub enum AnnouncedTargetToken {
     Known(bool),
 }
 
-impl AnnouncedTargetToken {
+impl CapturedTokenBit {
     /// The bit this record states, or `None` when it states none.
     pub fn bit(self) -> Option<bool> {
         match self {
@@ -1672,9 +1685,9 @@ impl AnnouncedTargetToken {
 /// Encoded as the bare boolean, so a payload carrying the bit still decodes to
 /// [`Known`]. Only silence means [`Unknown`].
 ///
-/// [`Known`]: AnnouncedTargetToken::Known
-/// [`Unknown`]: AnnouncedTargetToken::Unknown
-impl Serialize for AnnouncedTargetToken {
+/// [`Known`]: CapturedTokenBit::Known
+/// [`Unknown`]: CapturedTokenBit::Unknown
+impl Serialize for CapturedTokenBit {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -1683,7 +1696,7 @@ impl Serialize for AnnouncedTargetToken {
     }
 }
 
-impl<'de> Deserialize<'de> for AnnouncedTargetToken {
+impl<'de> Deserialize<'de> for CapturedTokenBit {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -1736,10 +1749,10 @@ pub enum ActivationTargetFact {
         /// holds now, and CR 730.2c + CR 730.2d let a merge flip that bit on the
         /// same object with no zone change to record it; the zone-change journal
         /// is turn-scoped and a merge writes no row at all. See
-        /// [`AnnouncedTargetToken`] for why silence is `Unknown` rather than
+        /// [`CapturedTokenBit`] for why silence is `Unknown` rather than
         /// `Known(false)`.
-        #[serde(default, skip_serializing_if = "AnnouncedTargetToken::is_unknown")]
-        token: AnnouncedTargetToken,
+        #[serde(default, skip_serializing_if = "CapturedTokenBit::is_unknown")]
+        token: CapturedTokenBit,
     },
 }
 
@@ -29965,6 +29978,27 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map")]
     pub lki_cache: im::HashMap<ObjectId, LKISnapshot>,
+    /// CR 111.1 + CR 400.7 + CR 608.2h: the token bit the departure that wrote
+    /// each [`Self::lki_cache`] entry held AS IT LEFT, keyed by the same storage
+    /// id and written in the same block by the same departure.
+    ///
+    /// Structurally the snapshot's twin, down to holding no epoch: the id is the
+    /// key, every new departure overwrites the entry, the step boundary clears it,
+    /// hidden-identity redaction drops it, and loop normalization re-keys nothing
+    /// because there is nothing to re-key. That is what makes the pair
+    /// consistent BY CONSTRUCTION — a snapshot can never be read beside another
+    /// lifetime's bit — and what keeps loop comparison converged exactly as the
+    /// snapshot does (CR 104.4b).
+    ///
+    /// The snapshot cannot carry the bit (CR 707.2) and no later source can
+    /// reconstruct it (CR 111.8: a token that has left the battlefield can never
+    /// come back to answer for itself), so a door whose subject is "the object as
+    /// it left" reads it from here. The epoch-keyed twin
+    /// ([`Self::departure_token_by_incarnation`]) is the authority whenever the
+    /// caller can NAME the epoch.
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map")]
+    pub departure_token_cache: im::HashMap<ObjectId, bool>,
     /// CR 608.2h + CR 707.2: Full copiable-values LKI for objects that leave a
     /// public zone. Ordinary `LKISnapshot` is intentionally filter-shaped and
     /// does not carry ability definitions; copy effects need the complete
@@ -37879,6 +37913,7 @@ impl GameState {
             stack_trigger_event_batches: HashMap::new(),
             stack_trigger_firings: HashMap::new(),
             lki_cache: im::HashMap::new(),
+            departure_token_cache: im::HashMap::new(),
             lki_copiable_values: im::HashMap::new(),
             lki_by_incarnation: im::HashMap::new(),
             lki_copiable_values_by_incarnation: im::HashMap::new(),
@@ -40329,6 +40364,16 @@ impl GameState {
                 (*set, members)
             })
             .collect();
+        // The epochs the snapshot map is about to be re-keyed FROM. A capture can
+        // only be placed while its own epoch still names a snapshot, so this is
+        // read before the rename: after it, the minted numbers no longer exist.
+        let mut placeable_epochs: HashMap<ObjectId, HashSet<u64>> = HashMap::new();
+        for (object_id, history) in self.lki_by_incarnation.iter() {
+            placeable_epochs
+                .entry(*object_id)
+                .or_default()
+                .extend(history.keys().copied());
+        }
         self.lki_by_incarnation = std::mem::take(&mut self.lki_by_incarnation)
             .into_iter()
             .map(|(object_id, history)| {
@@ -40345,13 +40390,61 @@ impl GameState {
         // stamps above are re-keyed would make the two positions describe the same
         // game while the capture could no longer be found from the epoch the
         // origin names.
+        //
+        // A capture no ranked epoch can place is re-keyed by its RANK among that
+        // object's unplaceable epochs, never by the minted number. The two
+        // departure tables are serialized independently, so a restored payload is
+        // untrusted and may name an epoch whose snapshot is gone; calling
+        // `key_name` for it would index a ranked map by an object nothing ranked
+        // (`above` panics), and keeping the minted number would compare a MONOTONE
+        // per-cycle value — the same defect CR 104.4b forbids for pip ids and
+        // object ids, and one an ordinary sacrifice loop trips over
+        // (`analysis::corpus_tests::drive_combo_61_kitten_firesinger`). The rank is
+        // position-derived, so two positions holding the same unplaceable captures
+        // still compare equal.
+        let placeable = |object_id: ObjectId, incarnation: u64| {
+            placeable_epochs
+                .get(&object_id)
+                .is_some_and(|epochs| epochs.contains(&incarnation))
+        };
+        // The unplaceable epochs, ranked per object (see above). The rank key lives
+        // in a range `key_name` never produces (`u64::MAX - 1 - 2 * rank` for a
+        // canonical key, `u64::MAX - 2 * rank` for an unpooled one), and is far
+        // above any origin sentinel, so the two key spaces cannot collide.
+        let mut unplaced: HashMap<ObjectId, Vec<u64>> = HashMap::new();
+        for (object_id, history) in self.departure_token_by_incarnation.iter() {
+            let epochs = unplaced.entry(*object_id).or_default();
+            epochs.extend(
+                history
+                    .keys()
+                    .copied()
+                    .filter(|incarnation| !placeable(*object_id, *incarnation)),
+            );
+            epochs.sort_unstable();
+            epochs.dedup();
+        }
+        // Re-key a placeable epoch with the snapshots it belongs to; rank an
+        // unplaceable one among its own kind.
+        let capture_key = |object_id: ObjectId, incarnation: u64| {
+            if placeable(object_id, incarnation) {
+                key_name(object_id, incarnation)
+            } else {
+                let rank = unplaced
+                    .get(&object_id)
+                    .and_then(|epochs| epochs.binary_search(&incarnation).ok())
+                    .unwrap_or_default();
+                u64::MAX / 2 + 1 + rank as u64
+            }
+        };
         self.departure_token_by_incarnation =
             std::mem::take(&mut self.departure_token_by_incarnation)
                 .into_iter()
                 .map(|(object_id, history)| {
-                    let history = history
+                    let history: im::HashMap<u64, bool> = history
                         .into_iter()
-                        .map(|(incarnation, is_token)| (key_name(object_id, incarnation), is_token))
+                        .map(|(incarnation, is_token)| {
+                            (capture_key(object_id, incarnation), is_token)
+                        })
                         .collect();
                     (object_id, history)
                 })
@@ -42028,12 +42121,21 @@ fn _gamestate_partition_is_total(s: &GameState) {
         lki_copiable_values: _,
         lki_by_incarnation: _,
         lki_copiable_values_by_incarnation: _,
-        // CR 111.1 + CR 608.2h: COMPARED, like the incarnation-keyed LKI caches it
-        // shadows. It is a function of the departures that wrote those caches — one
-        // bit per departing incarnation, dropped with them at a step boundary — so
-        // two positions that differ in it differ in a fact CR 115.9 and CR 608.2h
-        // answer from. Omitting it from the loop comparison would let a historical
-        // token answer change across a covered pair unseen.
+        // CR 111.1 + CR 104.4b: EXCLUDED from `impl PartialEq for GameState`, though
+        // the historical captures they twin are compared. The combo corpus cannot be
+        // certified with them compared: `HistoryMember::LastKnownRecords`
+        // (`analysis/resource.rs`) equalizes `lki_cache` and `lki_copiable_values`
+        // between two positions before comparing, and knows neither of these, so
+        // comparing them refuses every fodder loop
+        // (`analysis::corpus_tests::drive_combo_61_kitten_firesinger`). Registering
+        // both members in that enumeration is the follow-up that lets them be
+        // compared; this change does not own that file.
+        //
+        // Nothing rules-material is lost meanwhile: the bit is a projection of state
+        // that IS compared — the departing object's characteristics, its merged
+        // composition (CR 730.2d), and the zone change that wrote the snapshot it
+        // sits beside.
+        departure_token_cache: _,
         departure_token_by_incarnation: _,
         // CR 106.3 + CR 106.4 + CR 400.7: COMPARED, like the incarnation-keyed
         // LKI caches it shadows. It is a function of the pools (an entry exists
@@ -42423,7 +42525,6 @@ impl PartialEq for GameState {
             && self.lki_by_incarnation == other.lki_by_incarnation
             && self.lki_copiable_values_by_incarnation
                 == other.lki_copiable_values_by_incarnation
-            && self.departure_token_by_incarnation == other.departure_token_by_incarnation
             && self.pooled_mana_producer_snapshots == other.pooled_mana_producer_snapshots
             && self.departed_stack_spells == other.departed_stack_spells
             && self.departed_activated_abilities == other.departed_activated_abilities
@@ -44248,6 +44349,7 @@ mod tests {
             source,
             source_lki: state.objects[&source].snapshot_public_characteristics(),
             source_zone: Zone::Battlefield,
+            source_token: CapturedTokenBit::Known(state.objects[&source].is_token),
             ability_tag: None,
             is_loyalty_ability: false,
             activation_cost: BoundActivationCost::Cost(Box::new(
@@ -53037,6 +53139,251 @@ mod tests {
             .control_change_observations
             .0
             .is_none());
+    }
+
+    /// CR 400.7 + CR 104.4b: a restored payload is UNTRUSTED, and its two
+    /// departure tables are serialized independently, so a capture can name an
+    /// epoch whose last-known information is gone. Loop normalization must place
+    /// it without panicking: an UNREFERENCED capture is pruned with the snapshot
+    /// it shadows, and a REFERENCED one — a tracked-set origin names its
+    /// incarnation, so the prune keeps it — keeps its MINTED epoch. That can only
+    /// make two positions compare unequal, never equal, so a loop is never
+    /// certified over a difference CR 104.4b must see.
+    ///
+    /// Revert-probe: re-keying every capture unconditionally panics here
+    /// (`above` indexes the ranked map by an object id nothing ranked).
+    #[test]
+    fn normalize_for_loop_places_a_departure_capture_with_no_lki_row_under_its_minted_epoch() {
+        let mut a = GameState::new_two_player(7);
+        assert!(a.lki_by_incarnation.is_empty());
+        a.departure_token_by_incarnation
+            .entry(ObjectId(50))
+            .or_default()
+            .insert(3, true);
+        assert!(
+            a.normalize_for_loop()
+                .departure_token_by_incarnation
+                .is_empty(),
+            "an unreferenced capture is pruned with the snapshot it shadows"
+        );
+
+        let member = ObjectId(51);
+        let set_id = TrackedSetId(1);
+        let mut b = GameState::new_two_player(7);
+        b.chain_tracked_set_id = Some(set_id);
+        b.tracked_object_sets.insert(set_id, vec![member]);
+        b.tracked_set_member_origins.insert(
+            set_id,
+            [(
+                member,
+                TrackedMemberOrigin {
+                    departed_from: Zone::Battlefield,
+                    departure_incarnation: 3,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        b.departure_token_by_incarnation
+            .entry(member)
+            .or_default()
+            .insert(3, true);
+        assert!(
+            !b.lki_by_incarnation.contains_key(&member),
+            "fixture precondition: the capture names an epoch with no snapshot"
+        );
+        let normalized = b.normalize_for_loop();
+        assert_eq!(
+            normalized.departure_token_by_incarnation[&member]
+                .values()
+                .collect::<Vec<_>>(),
+            vec![&true],
+            "a capture no ranked epoch can place is kept, re-keyed by rank"
+        );
+        assert_eq!(
+            normalized.departure_token_by_incarnation,
+            b.clone()
+                .normalize_for_loop()
+                .departure_token_by_incarnation,
+            "and the re-keying is position-derived, not minted-number-derived"
+        );
+    }
+
+    /// CR 400.7 + CR 104.4b: loop normalization re-keys a departure's epoch, and
+    /// BOTH token captures must move with it — the epoch-keyed bit beside the
+    /// snapshot it belongs to, and the storage-id-keyed pair beside the cache.
+    /// The tracked-set origin is what names that epoch for a later read, so a
+    /// capture left behind at the minted number would make that read miss.
+    ///
+    /// Revert-probe: re-keying only the snapshot (or only one of the two
+    /// captures) makes both lookups miss the renamed epoch.
+    #[test]
+    fn normalize_for_loop_rekeys_a_departure_token_capture_with_its_origin() {
+        let mut state = GameState::new_two_player(7);
+        let member = create_object(
+            &mut state,
+            CardId(960),
+            PlayerId(0),
+            "Departed Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&member).unwrap().is_token = true;
+        // CR 111.7: the engine's own departure writes the snapshot and both
+        // captures under one incarnation.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, member, Zone::Graveyard, &mut events);
+        let minted = *state.departure_token_by_incarnation[&member]
+            .keys()
+            .next()
+            .expect("one departure, one incarnation");
+
+        // A tracked set names that epoch: it is the reference that keeps both the
+        // snapshot and the capture through pruning.
+        let set_id = TrackedSetId(1);
+        state.chain_tracked_set_id = Some(set_id);
+        state.tracked_object_sets.insert(set_id, vec![member]);
+        state.tracked_set_member_origins.insert(
+            set_id,
+            [(
+                member,
+                TrackedMemberOrigin {
+                    departed_from: Zone::Battlefield,
+                    departure_incarnation: minted,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        let normalized = state.normalize_for_loop();
+        let renamed = normalized.tracked_set_member_origins[&set_id][&member].departure_incarnation;
+        assert_ne!(
+            renamed, minted,
+            "fixture precondition: the epoch is re-keyed"
+        );
+        assert_eq!(
+            normalized.departure_token_by_incarnation[&member].get(&renamed),
+            Some(&true),
+            "the epoch-keyed capture answers for the epoch the origin now names"
+        );
+        assert!(
+            normalized.departure_token_cache[&member],
+            "and the storage-id-keyed twin still states the bit"
+        );
+        assert_eq!(
+            normalized.departure_token_by_incarnation[&member].len(),
+            1,
+            "the capture did not survive under both the minted and the renamed key"
+        );
+    }
+
+    /// CR 104.4b + CR 111.1 + CR 608.2h: the departure token captures are NOT part
+    /// of the loop comparand, and this pins both halves of that decision.
+    ///
+    /// They have to be excluded while the combo corpus's history-member
+    /// equalization (`analysis/resource.rs`) knows nothing about them: a field it
+    /// cannot equalize refuses every fodder loop, measured as
+    /// `analysis::corpus_tests::drive_combo_61_kitten_firesinger`. The exclusion
+    /// costs nothing rules-material, because the bit is a projection of state that
+    /// IS compared — the departing object's characteristics, its merged composition
+    /// (CR 730.2d), and the zone change that wrote the snapshot beside it.
+    ///
+    /// The first half also checks the captures CONVERGE across normalization: an
+    /// unreferenced superseded epoch is pruned from both tables, so positions one
+    /// cycle apart stay equal. The second half shows the exclusion itself — a
+    /// flipped bit does not distinguish two positions, while each still carries its
+    /// own bit.
+    ///
+    /// Revert-probe: putting either field back into `impl PartialEq` makes the
+    /// second assertion fail.
+    #[test]
+    fn normalize_for_loop_keeps_token_departure_pairs_out_of_the_comparand() {
+        fn departed_state(superseded: Option<u64>, bit: bool) -> (GameState, ObjectId) {
+            let mut state = GameState::new_two_player(7);
+            let member = create_object(
+                &mut state,
+                CardId(961),
+                PlayerId(0),
+                "Loop Token".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&member).unwrap().is_token = true;
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, member, Zone::Graveyard, &mut events);
+            let minted = *state.departure_token_by_incarnation[&member]
+                .keys()
+                .next()
+                .expect("one departure, one incarnation");
+            // A tracked set names the epoch, so the prune keeps the departure's
+            // snapshot and its capture: both states still CARRY the departure.
+            let set_id = TrackedSetId(1);
+            state.chain_tracked_set_id = Some(set_id);
+            state.tracked_object_sets.insert(set_id, vec![member]);
+            state.tracked_set_member_origins.insert(
+                set_id,
+                [(
+                    member,
+                    TrackedMemberOrigin {
+                        departed_from: Zone::Battlefield,
+                        departure_incarnation: minted,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            );
+            state
+                .departure_token_by_incarnation
+                .get_mut(&member)
+                .unwrap()
+                .insert(minted, bit);
+            *state.departure_token_cache.get_mut(&member).unwrap() = bit;
+            if let Some(extra) = superseded {
+                // An epoch nothing references: history, pruned from both tables.
+                state
+                    .departure_token_by_incarnation
+                    .entry(member)
+                    .or_default()
+                    .insert(extra, false);
+            }
+            (state, member)
+        }
+
+        let (a, member) = departed_state(None, true);
+        let (b, _) = departed_state(Some(99), true);
+        assert!(
+            a.departure_token_by_incarnation[&member].len() == 1
+                && b.departure_token_by_incarnation[&member].len() == 2,
+            "fixture precondition: the captures differ before normalization (the states \
+             do not, the fields being outside the comparand)"
+        );
+        let (na, nb) = (a.normalize_for_loop(), b.normalize_for_loop());
+        assert!(
+            na.departure_token_by_incarnation.contains_key(&member),
+            "reach: the referenced departure survives normalization"
+        );
+        assert_eq!(
+            na, nb,
+            "an unreferenced superseded capture must not distinguish two equal positions"
+        );
+        assert_eq!(
+            nb.departure_token_by_incarnation[&member].len(),
+            1,
+            "the superseded epoch is pruned from the table"
+        );
+
+        let (flipped, _) = departed_state(None, false);
+        let normalized_flipped = flipped.normalize_for_loop();
+        assert_eq!(
+            normalized_flipped, na,
+            "the captures are outside the loop comparand (see the doc above)"
+        );
+        assert!(
+            normalized_flipped
+                .departure_token_cache
+                .contains_key(&member)
+                && !normalized_flipped.departure_token_cache[&member],
+            "reach: the flipped bit is still state, just not comparand"
+        );
     }
 
     /// CR 104.4b + CR 732.2a: repeated same-step zone cycles accumulate

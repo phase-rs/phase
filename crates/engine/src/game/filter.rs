@@ -32,7 +32,7 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
-    ActivationTargetFact, AnnouncedTargetToken, AnnouncedTargetZone, AttackDeclarationRecord,
+    ActivationTargetFact, AnnouncedTargetZone, AttackDeclarationRecord, CapturedTokenBit,
     CounterAddedRecord, DamageRecord, GameState, LKISnapshot, ManaSpentSourceSnapshot,
     SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
 };
@@ -6276,7 +6276,7 @@ pub(crate) fn matches_target_filter_on_announced_lki(
     object_id: ObjectId,
     lki: &LKISnapshot,
     zone: AnnouncedTargetZone,
-    token: AnnouncedTargetToken,
+    token: CapturedTokenBit,
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
@@ -6408,13 +6408,91 @@ pub fn matches_target_filter_on_departed_battlefield_lki(
             captured_incarnation: None,
             snapshot_zone: Some(Zone::Battlefield),
             // A departed subject is a look-back over the snapshot the caller
-            // holds, not a CR 115.9 selection-time reading of a chosen target, and
-            // this entry point carries no departure capture. The token leaves
-            // therefore refuse for it (`historical_token_identity`) rather than
-            // reading the live object or the journal; a caller that can name the
-            // departure epoch uses
-            // [`matches_target_filter_on_departed_lki_at_incarnation`].
-            captured_token: None,
+            // holds, not a CR 115.9 selection-time reading of a chosen target.
+            // The snapshot came from (or was cloned from) `lki_cache`, so its own
+            // departure's capture states the bit (CR 111.8); a caller that can
+            // NAME the epoch uses
+            // [`matches_target_filter_on_departed_lki_at_incarnation`] instead.
+            captured_token: cached_departed_token(state, object_id),
+        },
+    )
+}
+
+/// CR 608.2h + CR 400.7 + CR 111.8: the token bit the departure that wrote this
+/// storage id's [`GameState::lki_cache`] entry captured, or `None` when nothing
+/// departed at this id in this step.
+///
+/// CR 111.8 is why this pair exists: a token that has left the battlefield can
+/// never come back to answer for itself, so the departure is the only epoch that
+/// will ever state its bit, and the snapshot the door holds cannot carry it
+/// (CR 707.2). The capture is written in the SAME block as the snapshot it
+/// belongs to, so this can never pair one lifetime's snapshot with another's
+/// bit; a door that can NAME the epoch uses
+/// [`matches_target_filter_on_departed_lki_at_incarnation`] instead.
+fn cached_departed_token(state: &GameState, object_id: ObjectId) -> Option<bool> {
+    state.departure_token_cache.get(&object_id).copied()
+}
+
+/// CR 608.2h + CR 400.7: Evaluate a target filter against the departure
+/// snapshot a caller holds for the LATEST departure at this storage id — the
+/// shape [`GameState::lki_cache`] and every carrier cloned from it hold.
+///
+/// The token leaves answer from
+/// [`GameState::departure_token_cache`] ([`cached_departed_token`]), those
+/// captures having been written by the same departure as the snapshot. A caller
+/// that knows WHICH epoch its snapshot belongs to must use
+/// [`matches_target_filter_on_departed_lki_at_incarnation`]: this door cannot
+/// check that the cache still describes the snapshot it was handed.
+pub(crate) fn matches_target_filter_on_cached_departure_lki(
+    state: &GameState,
+    object_id: ObjectId,
+    lki: &LKISnapshot,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    matches_target_filter_on_stated_lki(
+        state,
+        object_id,
+        lki,
+        None,
+        cached_departed_token(state, object_id),
+        filter,
+        ctx,
+    )
+}
+
+/// CR 111.1 + CR 608.2h + CR 115.9: Evaluate a target filter against a snapshot
+/// whose owning fact STATES the subject's token bit.
+///
+/// This is the door for a caller whose capture already answered "was this a
+/// token at the epoch this snapshot belongs to?" — an announced target's
+/// `CapturedTokenBit`, or an activation record's capture of its own source
+/// (CR 602.2). `captured_token` is that answer; `None` (a record that predates
+/// the capture) leaves the leaf UNKNOWN, which the callers refuse rather than
+/// reconstructing from the live object or the journal.
+///
+/// `snapshot_zone` is the zone the snapshot was taken in, when the caller states
+/// one; CR 111.7 answers from it first.
+pub(crate) fn matches_target_filter_on_stated_lki(
+    state: &GameState,
+    object_id: ObjectId,
+    lki: &LKISnapshot,
+    snapshot_zone: Option<Zone>,
+    captured_token: Option<bool>,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    matches_target_filter_on_lki_snapshot_with_incarnation(
+        state,
+        object_id,
+        lki,
+        filter,
+        ctx,
+        LkiProjection {
+            entered_incarnation: None,
+            captured_incarnation: None,
+            snapshot_zone,
+            captured_token,
         },
     )
 }
@@ -7931,7 +8009,7 @@ fn build_battlefield_entry_token_object(
 /// Two shapes state it, and either may answer for the epoch being asked about:
 ///
 /// * `captured_bit` — the bit the caller's own fact states, captured beside the
-///   facts it travels with: the announcement's [`AnnouncedTargetToken`] for a
+///   facts it travels with: the announcement's [`CapturedTokenBit`] for a
 ///   CR 115.9 selection-time reading (captured in
 ///   `casting::capture_target_facts`), or a zone-change record's own `is_token`
 ///   for the departure that record is.
@@ -24710,7 +24788,7 @@ mod tests {
             id: target,
             lki: Box::new(selected),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
-            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
+            token: crate::types::game_state::CapturedTokenBit::Unknown,
         };
         let history = |prop: FilterProp| {
             declared_target_facts_match(
@@ -24802,7 +24880,7 @@ mod tests {
             id: target,
             lki: Box::new(selected),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
-            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
+            token: crate::types::game_state::CapturedTokenBit::Unknown,
         };
         let history = |filter: TargetFilter| {
             declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)
@@ -24882,7 +24960,7 @@ mod tests {
             id: ceased_token,
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
-            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
+            token: crate::types::game_state::CapturedTokenBit::Unknown,
         };
         assert!(
             !declared_target_facts_match(
@@ -24908,7 +24986,7 @@ mod tests {
             id: ceased_token,
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
-            token: crate::types::game_state::AnnouncedTargetToken::Known(true),
+            token: crate::types::game_state::CapturedTokenBit::Known(true),
         };
         assert!(
             declared_target_facts_match(
@@ -24928,7 +25006,7 @@ mod tests {
             id: live_token,
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
-            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
+            token: crate::types::game_state::CapturedTokenBit::Unknown,
         };
         assert!(
             !declared_target_facts_match(
@@ -24955,7 +25033,7 @@ mod tests {
             id: live_token,
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Graveyard),
-            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
+            token: crate::types::game_state::CapturedTokenBit::Unknown,
         };
         assert!(!declared_target_facts_match(
             &state,
@@ -24978,6 +25056,89 @@ mod tests {
             }),
             &ctx,
         ));
+    }
+
+    /// CR 111.1 + CR 111.8 + CR 400.7 + CR 608.2h: a subject that DEPARTED
+    /// answers the token leaves through the doors whose contract is "the object
+    /// as it left, at this storage id" — the tracked-set legacy cache and the
+    /// trigger/activated-source look-back. Both read the capture the departure
+    /// wrote beside its snapshot, because the snapshot cannot carry the bit
+    /// (CR 707.2) and a token can never come back to answer for itself (CR 111.8).
+    ///
+    /// The unpinned snapshot door is the control: it names no epoch and no pair,
+    /// so it still refuses — that door is for snapshots whose departure is not
+    /// the one at this storage id (a revealed card, a discarded card, a latched
+    /// context that pins its own epoch through the pinned door).
+    ///
+    /// Revert-probe: leaving the cache out (`captured_token: None`) makes the
+    /// first two assertions fail — the departed token drops out of every token
+    /// filter, which is what a "whenever a token dies" trigger would see.
+    #[test]
+    fn a_departed_token_answers_the_doors_that_hold_its_storage_id() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Door Source");
+        let token = add_creature(&mut state, PlayerId(0), "Departed Token");
+        state.objects.get_mut(&token).unwrap().is_token = true;
+
+        // CR 111.7: the engine's own departure writes `lki_cache` and the pair
+        // capture in one block.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, token, Zone::Graveyard, &mut events);
+        let lki = state.lki_cache[&token].clone();
+        assert!(
+            state.departure_token_cache.contains_key(&token),
+            "fixture precondition: the departure captured the bit beside its snapshot"
+        );
+
+        let ctx = FilterContext::from_source(&state, source);
+        assert!(
+            super::matches_target_filter_on_departed_battlefield_lki(
+                &state,
+                token,
+                &lki,
+                &prop_filter(FilterProp::Token),
+                &ctx,
+            ),
+            "a departed activated source still answers `token` (CR 113.7a)"
+        );
+        assert!(
+            !super::matches_target_filter_on_departed_battlefield_lki(
+                &state,
+                token,
+                &lki,
+                &prop_filter(FilterProp::NonToken),
+                &ctx,
+            ),
+            "and does not answer `nontoken`"
+        );
+        assert!(
+            super::matches_target_filter_on_cached_departure_lki(
+                &state,
+                token,
+                &lki,
+                &prop_filter(FilterProp::Token),
+                &ctx,
+            ),
+            "the tracked-set legacy cache answers from the same pair"
+        );
+
+        // The control: no epoch, no pair.
+        assert!(
+            !super::matches_target_filter_on_lki_snapshot(
+                &state,
+                token,
+                &lki,
+                &prop_filter(FilterProp::Token),
+                &ctx,
+            ) && !super::matches_target_filter_on_lki_snapshot(
+                &state,
+                token,
+                &lki,
+                &prop_filter(FilterProp::NonToken),
+                &ctx,
+            ),
+            "the unpinned door names no epoch, so it still refuses both leaves"
+        );
     }
 
     /// CR 608.2h + CR 111.8 + CR 115.9 + CR 108.2: an UNCAPTURED projection
@@ -25050,7 +25211,7 @@ mod tests {
             id: member,
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
-            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
+            token: crate::types::game_state::CapturedTokenBit::Unknown,
         };
         assert!(
             !declared_target_facts_match(
@@ -25199,7 +25360,7 @@ mod tests {
             id: host,
             lki: Box::new(named_epoch_snapshot("Soldier Token")),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
-            token: AnnouncedTargetToken::Known(true),
+            token: CapturedTokenBit::Known(true),
         };
 
         // Gemrazer mutates ON TOP: same ObjectId (CR 730.2c), nontoken from now
@@ -25234,7 +25395,7 @@ mod tests {
             id: host,
             lki: Box::new(named_epoch_snapshot("Gemrazer")),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
-            token: AnnouncedTargetToken::Known(false),
+            token: CapturedTokenBit::Known(false),
         };
         assert!(
             !matches(&after, prop_filter(FilterProp::Token)),
@@ -25261,7 +25422,7 @@ mod tests {
             id: host,
             lki: Box::new(named_epoch_snapshot("Gemrazer")),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
-            token: AnnouncedTargetToken::Unknown,
+            token: CapturedTokenBit::Unknown,
         };
         assert!(
             !matches(&unstated, prop_filter(FilterProp::Token))
@@ -25340,7 +25501,7 @@ mod tests {
             id: copy,
             lki: Box::new(named_epoch_snapshot("Gemrazer")),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
-            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
+            token: crate::types::game_state::CapturedTokenBit::Unknown,
         };
         let matches = |filter: TargetFilter| {
             declared_target_facts_match(&state, std::slice::from_ref(&selected), &filter, &ctx)
@@ -25419,7 +25580,7 @@ mod tests {
         );
 
         let ctx = FilterContext::from_source(&state, source);
-        let matches = |token: AnnouncedTargetToken, filter: TargetFilter| {
+        let matches = |token: CapturedTokenBit, filter: TargetFilter| {
             let fact = ActivationTargetFact::Object {
                 id: copy,
                 lki: Box::new(named_epoch_snapshot("Gemrazer")),
@@ -25433,14 +25594,14 @@ mod tests {
         // holds, and the merged permanent's present bit must not overturn it.
         assert!(
             matches(
-                AnnouncedTargetToken::Known(true),
+                CapturedTokenBit::Known(true),
                 prop_filter(FilterProp::Token)
             ),
             "the capture states the selection's own epoch: it was a token (CR 115.9)"
         );
         assert!(
             !matches(
-                AnnouncedTargetToken::Known(true),
+                CapturedTokenBit::Known(true),
                 prop_filter(FilterProp::NonToken)
             ),
             "and the live object's later nontoken bit is not that epoch's answer"
@@ -25450,14 +25611,14 @@ mod tests {
         // opposite captured bit.
         assert!(
             matches(
-                AnnouncedTargetToken::Known(false),
+                CapturedTokenBit::Known(false),
                 prop_filter(FilterProp::NonToken)
             ),
             "a selection made after the merge is a nontoken selection (CR 730.2d)"
         );
         assert!(
             !matches(
-                AnnouncedTargetToken::Known(false),
+                CapturedTokenBit::Known(false),
                 prop_filter(FilterProp::Token)
             ),
             "the entry row's pre-merge bit must not answer the post-merge selection"
@@ -25468,7 +25629,7 @@ mod tests {
         // and its zone axis still reads the battlefield it never left.
         assert!(
             matches(
-                AnnouncedTargetToken::Known(true),
+                CapturedTokenBit::Known(true),
                 prop_filter(FilterProp::InZone {
                     zone: Zone::Battlefield
                 })
@@ -25504,7 +25665,7 @@ mod tests {
             id: token,
             lki: Box::new(named_epoch_snapshot("Soldier Token")),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
-            token: AnnouncedTargetToken::Known(true),
+            token: CapturedTokenBit::Known(true),
         };
         // CR 514.2: the cleanup step ends "this turn" state — the journal the
         // derivation reads is one of them (`turns.rs`).
@@ -25570,7 +25731,7 @@ mod tests {
             id: host,
             lki: Box::new(named_epoch_snapshot("Bear")),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
-            token: AnnouncedTargetToken::Known(false),
+            token: CapturedTokenBit::Known(false),
         };
         let matches = |filter: TargetFilter| {
             declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)
@@ -25607,7 +25768,7 @@ mod tests {
                 id: card,
                 lki: Box::new(epoch_snapshot(&[], false)),
                 zone: AnnouncedTargetZone::Known(zone),
-                token: crate::types::game_state::AnnouncedTargetToken::Unknown,
+                token: crate::types::game_state::CapturedTokenBit::Unknown,
             };
             declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)
         };
@@ -25659,7 +25820,7 @@ mod tests {
             id: candidate,
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
-            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
+            token: crate::types::game_state::CapturedTokenBit::Unknown,
         };
         let matches = |filter: TargetFilter| {
             declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)

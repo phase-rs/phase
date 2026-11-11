@@ -2757,10 +2757,14 @@ pub(super) fn match_saga_chapter_ability(
             // CR 714.4 sacrifices it as soon as the final chapter ability leaves
             // the stack — and may have been replaced by a re-entered copy.
             let subject_matches = trigger.valid_card.as_ref().is_none_or(|filter| {
-                super::filter::matches_target_filter_on_lki_snapshot(
+                // CR 608.2h: the context names the incarnation this snapshot was
+                // taken under, so the token bit answers from that epoch's
+                // departure capture rather than refusing.
+                super::filter::matches_target_filter_on_departed_lki_at_incarnation(
                     state,
                     saga.identity.reference.object_id,
                     &saga.lki,
+                    saga.identity.reference.incarnation,
                     filter,
                     &super::filter::FilterContext::from_trigger_source(source_context),
                 )
@@ -4360,7 +4364,11 @@ pub(super) fn subject_filter_matches_with_lki(
     {
         if let Some(lki) = state.lki_cache.get(&object_id) {
             let ctx = super::filter::FilterContext::from_trigger_source(source_context);
-            return super::filter::matches_target_filter_on_lki_snapshot(
+            // CR 608.2h + CR 111.8: this snapshot is the storage id's latest
+            // departure, so its own departure's capture states the token bit —
+            // refusing there would drop a departed token from any "token" trigger
+            // filter.
+            return super::filter::matches_target_filter_on_cached_departure_lki(
                 state, object_id, lki, filter, &ctx,
             );
         }

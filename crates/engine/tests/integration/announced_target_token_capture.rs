@@ -38,7 +38,7 @@ use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    ActivationTargetFact, AnnouncedTargetToken, PersistedGameState, PersistedRestoreFinalization,
+    ActivationTargetFact, CapturedTokenBit, PersistedGameState, PersistedRestoreFinalization,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaColor, ManaUnit};
@@ -53,9 +53,9 @@ const TAPPER: &str = "{2}: Tap target creature.";
 /// Ceaseless Conflict's printed text, verbatim: a mass destroy whose follow-up
 /// counts the departed set. The count is a `FilteredTrackedSetSize` over the set
 /// `DestroyAll` published, so every member is read through its own departure
-/// snapshot and — since this change — its own departure token capture. The
-/// token it creates is 3/2 red and white, not a 1/1, which is why the assertions
-/// below count Spirits rather than trusting a size.
+/// snapshot and — since this change — its own departure token capture. The token
+/// it creates is 3/2 red and white, not a 1/1, which is why the assertions below
+/// count Spirits rather than trusting a size.
 const CEASELESS_CONFLICT: &str = "Destroy all creatures. Then create a 3/2 red and white \
                                  Spirit creature token for each nontoken creature you \
                                  controlled that was destroyed this way.";
@@ -70,7 +70,7 @@ fn mana(s: &mut GameScenario, player: PlayerId, n: usize) {
 }
 
 /// The announced token bit this activation's record states for `target`.
-fn announced_bit(runner: &GameRunner, target: ObjectId) -> AnnouncedTargetToken {
+fn announced_bit(runner: &GameRunner, target: ObjectId) -> CapturedTokenBit {
     let records = runner
         .state()
         .abilities_activated_this_turn_by_player
@@ -163,7 +163,7 @@ fn announced_token_capture_survives_a_same_named_merge_and_a_save_round_trip() {
     runner.activate(tapper, 0).target_object(host).resolve();
     assert_eq!(
         announced_bit(&runner, host),
-        AnnouncedTargetToken::Known(true),
+        CapturedTokenBit::Known(true),
         "the announcement must capture the token bit it saw"
     );
 
@@ -213,7 +213,7 @@ fn announced_token_capture_survives_a_same_named_merge_and_a_save_round_trip() {
     );
     assert_eq!(
         announced_bit(&runner, host),
-        AnnouncedTargetToken::Known(true),
+        CapturedTokenBit::Known(true),
         "CR 115.9: the restored record still states the SELECTION's token bit, \
          which the live object can no longer supply"
     );
@@ -253,6 +253,18 @@ fn ceaseless_conflict_counts_a_departed_token_from_its_departure_capture() {
 
     // CR 701.8a + CR 608.2c: the mass destroy and its "for each … destroyed this
     // way" follow-up, resolved as the one spell its Oracle text describes.
+    //
+    // Why the count is asked in the same resolution instead of after a journal
+    // clear: the tracked set it reads is RESOLUTION-scoped. Measured, not assumed
+    // — `tracked_object_sets` is empty the moment this resolution returns, so a
+    // later instruction (or a cleared journal) has no set left to count and would
+    // read 0 for reasons that have nothing to do with the token bit. The
+    // journal-vs-capture discrimination lives where a legal state can separate
+    // them: `quantity::tests::tracked_member_token_bit_comes_from_its_departure_capture`
+    // asks the same member filter with the journal empty. What THIS test
+    // discriminates is the capture itself: with the departure bit uncaptured
+    // (fix reverted) the member's token leaf refuses and the count is 0 instead
+    // of 1.
     resolve_oracle_effect(&mut runner, P0, CEASELESS_CONFLICT, "Ceaseless Conflict");
 
     // CR 701.8a: the destroy, not a state-based action, moved both of them.

@@ -53,7 +53,8 @@ use super::conditions::{
 };
 use super::filter::{
     matches_target_filter, matches_target_filter_on_damage_record_source,
-    matches_target_filter_on_lki_snapshot, spell_record_matches_filter, FilterContext,
+    matches_target_filter_on_departed_lki_at_incarnation, spell_record_matches_filter,
+    FilterContext,
 };
 use super::game_object::GameObject;
 use super::speed::{
@@ -4006,10 +4007,14 @@ fn event_is_suppressed_by_static_triggers_cached(
             let Some(trigger_source) = trigger_source else {
                 continue;
             };
-            if !matches_target_filter_on_lki_snapshot(
+            // CR 608.2h: the suppressor's context names the incarnation this
+            // snapshot was taken under, so the token bit answers from that
+            // epoch's departure capture.
+            if !matches_target_filter_on_departed_lki_at_incarnation(
                 state,
                 trigger_source.identity.reference.object_id,
                 &trigger_source.lki,
+                trigger_source.identity.reference.incarnation,
                 trigger_source_filter,
                 &filter_ctx,
             ) {
@@ -12523,10 +12528,13 @@ fn trigger_source_matches_doubler_filter(
     if source_is_still_on_battlefield {
         matches_target_filter(state, trigger.source_id, filter, &filter_context)
     } else {
-        matches_target_filter_on_lki_snapshot(
+        // CR 608.2h: the context names the incarnation it captured, so the token
+        // bit answers from that epoch's departure capture.
+        matches_target_filter_on_departed_lki_at_incarnation(
             state,
             trigger.source_id,
             &source_context.lki,
+            source_context.identity.reference.incarnation,
             filter,
             &filter_context,
         )
@@ -13004,10 +13012,13 @@ fn latched_scope_plan_matches(
                 && relative
                     .iter()
                     .all(|property| latched_relative_matches(state, watcher, *property, doubler))
-                && matches_target_filter_on_lki_snapshot(
+                // CR 608.2h: the latched context names the incarnation it
+                // captured, so the token bit answers from that epoch.
+                && matches_target_filter_on_departed_lki_at_incarnation(
                     state,
                     watcher.identity.reference.object_id,
                     &watcher.lki,
+                    watcher.identity.reference.incarnation,
                     characteristics,
                     &FilterContext::neutral(),
                 )
@@ -17833,7 +17844,10 @@ fn evaluate_trigger_condition_with_source(
                     return true;
                 }
                 state.lki_cache.get(&object_id).is_some_and(|lki| {
-                    super::filter::matches_target_filter_on_lki_snapshot(
+                    // CR 608.2h + CR 111.8: the cached snapshot is this storage
+                    // id's latest departure, whose token bit the same departure
+                    // captured.
+                    super::filter::matches_target_filter_on_cached_departure_lki(
                         state, object_id, lki, filter, &ctx,
                     )
                 })
@@ -18795,7 +18809,16 @@ fn attack_declaration_attacker_matches_filter(
         .get(&attacker_id)
         .and_then(|history| history.get(&attacking.incarnation))
         .is_some_and(|lki| {
-            matches_target_filter_on_lki_snapshot(state, attacker_id, lki, filter, context)
+            // CR 400.7 + CR 608.2h: the snapshot is pinned to the attacking
+            // incarnation, and so is the token bit.
+            matches_target_filter_on_departed_lki_at_incarnation(
+                state,
+                attacker_id,
+                lki,
+                attacking.incarnation,
+                filter,
+                context,
+            )
         })
 }
 

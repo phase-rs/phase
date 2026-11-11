@@ -335,6 +335,13 @@ pub(crate) fn apply_zone_exit_cleanup(
                 attachments,
             };
             state.lki_cache.insert(object_id, lki.clone());
+            // CR 111.1 + CR 400.7 + CR 608.2h: the storage-id-keyed twin of the
+            // epoch capture below, written HERE with the snapshot it shadows so a
+            // door that holds only the id (the tracked-set legacy cache, a trigger
+            // look-back, a departed activated source) cannot pair this lifetime's
+            // snapshot with another lifetime's bit. CR 111.8 makes it the last
+            // evidence a token epoch leaves.
+            state.departure_token_cache.insert(object_id, obj.is_token);
             state
                 .lki_by_incarnation
                 .entry(object_id)

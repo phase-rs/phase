@@ -4601,7 +4601,8 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
 /// observer holding a single snapshot read the hidden card's name or mana value.
 ///
 /// Policy, per table:
-/// - id-keyed LKI (`lki_cache`, `lki_by_incarnation`, `departure_token_by_incarnation`,
+/// - id-keyed LKI (`lki_cache`, `departure_token_cache`, `lki_by_incarnation`,
+///   `departure_token_by_incarnation`,
 ///   `lki_copiable_values`, `lki_copiable_values_by_incarnation`, `departed_stack_spells`,
 ///   `linked_exile_lki` keyed by a hidden source, and `pooled_mana_producer_snapshots`) is
 ///   dropped;
@@ -4636,6 +4637,10 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
 fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSet<ObjectId>) {
     for id in hidden_ids {
         state.lki_cache.remove(id);
+        // CR 111.1 + CR 400.2: the storage-id-keyed departure captures are written
+        // with the cache above, so they go with it; a survivor would still say a
+        // departed object exists under this id.
+        state.departure_token_cache.remove(id);
         state.lki_by_incarnation.remove(id);
         // CR 111.1 + CR 400.2: the departure token captures are keyed by the same
         // storage ids as the LKI above and are written with it, so they go with it.
@@ -5650,9 +5655,7 @@ mod tests {
             id,
             lki: Box::new(state.objects[&id].snapshot_public_characteristics()),
             zone: crate::types::game_state::AnnouncedTargetZone::Known(state.objects[&id].zone),
-            token: crate::types::game_state::AnnouncedTargetToken::Known(
-                state.objects[&id].is_token,
-            ),
+            token: crate::types::game_state::CapturedTokenBit::Known(state.objects[&id].is_token),
         };
 
         // (1) A fully-hidden cast naming a hidden target.
@@ -5719,7 +5722,7 @@ mod tests {
                 zone: crate::types::game_state::AnnouncedTargetZone::Known(
                     state.objects[&hidden_target].zone,
                 ),
-                token: crate::types::game_state::AnnouncedTargetToken::Known(
+                token: crate::types::game_state::CapturedTokenBit::Known(
                     state.objects[&hidden_target].is_token,
                 ),
             },
@@ -6510,6 +6513,9 @@ mod tests {
                 source: paid,
                 source_lki: state.objects[&paid].snapshot_public_characteristics(),
                 source_zone: Zone::Battlefield,
+                source_token: crate::types::game_state::CapturedTokenBit::Known(
+                    state.objects[&paid].is_token,
+                ),
                 ability_tag: None,
                 is_loyalty_ability: false,
                 activation_cost: crate::types::events::BoundActivationCost::Unknown,
@@ -11229,7 +11235,7 @@ mod tests {
                 zone: crate::types::game_state::AnnouncedTargetZone::Known(
                     state.objects[&hidden].zone,
                 ),
-                token: crate::types::game_state::AnnouncedTargetToken::Known(
+                token: crate::types::game_state::CapturedTokenBit::Known(
                     state.objects[&hidden].is_token,
                 ),
             },
