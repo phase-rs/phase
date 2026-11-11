@@ -2545,9 +2545,10 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     settle_finished_game(state, result);
 }
 
-/// CR 104.1 + CR 100.4: a finished game goes to its match here, and the wait the match leaves
-/// is the action's result.
+/// CR 104.1 + CR 100.4: a finished game first retires the resolution it was in the middle of,
+/// then goes to its match here; the wait the match leaves is the action's result.
 fn settle_finished_game(state: &mut GameState, result: &mut ActionResult) {
+    super::elimination::retire_finished_game_resolution(state);
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
         match_flow::handle_game_over_transition(state);
         result.waiting_for = state.waiting_for.clone();
@@ -5785,7 +5786,8 @@ fn synthesized_charge_points(
 }
 
 /// Whether this engine will drive `count` repetitions of `proposal` on this board — the one
-/// authority both the responder's seam and the consumption seam ask.
+/// authority the responder's seam, the consumption seam and `ai_support`'s structural legality
+/// hatch all ask.
 ///
 /// IMPLEMENTATION BUDGET BOUND (see `MAX_SHORTCUT_CYCLES`), deliberately NOT labelled as a
 /// CR 732.2a constraint, for the same reason the declare-site arm is not: the rules place no
@@ -5801,7 +5803,14 @@ fn synthesized_charge_points(
 /// Reads `state` and `proposal.per_cycle`; never `proposal.count`. That is what lets the
 /// responder's seam ask it about the count a named place would MINT, on a proposal still
 /// carrying the count that place replaces.
-fn shortcut_count_is_drivable(
+///
+/// Three callers, and they must stay one rule: this module's `handle_respond_to_shortcut` refusal,
+/// its consumption guard, and `ai_support`'s structural legality hatch
+/// (`structurally_valid_shortcut_response`), which admits a `Shorten` without cloning the state
+/// when this answers `true` and the place is inside the proposal's own range. A second derivation in the hatch would be free to drift
+/// from the reducer in either direction: dropping a legal answer, or admitting one the reducer
+/// refuses — which is the direction that spends a clone and still returns a rejection.
+pub(crate) fn shortcut_count_is_drivable(
     state: &GameState,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     count: u32,
@@ -10405,11 +10414,12 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
             // session so the player can respond — unless they have pre-committed
             // to yield priority for that exact triggered ability, in which case
             // the session keeps auto-passing through it. CR 117.1d + CR 605.3a:
-            // the player's own object that can move one of their activatable
-            // mana sources off the battlefield (`Held`) ends it too, since that
-            // activation is lost once the object resolves. (`UntilStackEmpty` is
-            // consent to resolve the stack itself, so it passes through.) The standing rungs
-            // are `priority::standing_priority_pass`'s; Full Control already
+            // `Held` ends it too: the player's own object that can move one of
+            // their activatable mana sources off the battlefield, or their own
+            // activated ability that would waste an untap on its own source. That
+            // mana is lost once the object resolves. (`UntilStackEmpty` is
+            // consent to resolve the stack itself, so it passes through.) The standing rungs are
+            // `priority::standing_priority_pass`'s; Full Control already
             // returned above, so `Withheld` cannot reach this arm.
             let top_needs_response = state.stack.last().is_some_and(|top| {
                 matches!(
@@ -10974,7 +10984,8 @@ fn stack_resolution_session_priority_decision(
                 }
                 StackResolutionPolicy::Committed => {
                     if !session.representatives.contains(&canonical_holder)
-                        && priority_player_has_meaningful_action(state)
+                        && (priority_player_has_meaningful_action(state)
+                            || window_held_for_mana(state, canonical_holder))
                     {
                         return StackResolutionSessionPriorityDecision::Pause;
                     }
@@ -10993,6 +11004,19 @@ fn stack_resolution_session_priority_decision(
     }
 }
 
+/// CR 117.1d + CR 605.3a + CR 117.3d: whether `player`'s own window over the
+/// top of the stack is held for a wasted untap on its own mana source. Another
+/// player's consent to resolve the stack doesn't pass it: the meaningful-action
+/// check never counts a mana activation, so it can't see that window. Only the
+/// bounded untap reason is asked (`priority::own_top_wastes_an_untap`): the
+/// departure reason's board read isn't run for another player's consent.
+fn window_held_for_mana(state: &GameState, player: PlayerId) -> bool {
+    state
+        .stack
+        .back()
+        .is_some_and(|top| priority::own_top_wastes_an_untap(state, player, top))
+}
+
 /// CR 117.3b + CR 117.3d + CR 117.4 + CR 732.2b: whether `participant` has
 /// authorized this stack-resolution session to pass its priority window over
 /// `window_top` inside the fenced cohort without a fresh decision. The single
@@ -11005,29 +11029,34 @@ fn stack_resolution_session_participant_authorizes_pass(
     participant: PlayerId,
     window_top: &StackEntry,
 ) -> bool {
-    let standing_pass = match priority::standing_priority_pass(state, participant, Some(window_top))
-    {
-        // CR 117.1: Full Control is a standing refusal to give up any window —
-        // the session's own representative's included.
-        priority::StandingPriorityPass::Withheld => return false,
-        priority::StandingPriorityPass::Granted => true,
-        // CR 117.1d + CR 605.3a: an own object that can remove an activatable
-        // mana source is no standing pass; only explicit consent skips it.
-        priority::StandingPriorityPass::Held | priority::StandingPriorityPass::Undecided => false,
-    };
     match session.policy {
+        // A representative consented to the session. A non-representative's
+        // skipped windows are not rechecked for a meaningful action (only its
+        // live window is, in `stack_resolution_session_priority_decision`).
+        // CR 117.1: Full Control is the one skipped window consent doesn't cover
+        // (an activated ability, the untap reason's entry, is never skipped), so
+        // the standing-pass ladder isn't read.
+        StackResolutionPolicy::Committed => !priority::holds_full_control(state, participant),
         // A verified AI pass authorizes later windows in this exact fenced
         // cohort; CR 117.3d + CR 732.2b: a representative's standing pass over
         // this window's top authorizes this window.
         StackResolutionPolicy::RecheckNoMeaningfulPriorityAction => {
+            let standing_pass =
+                match priority::standing_priority_pass(state, participant, Some(window_top)) {
+                    // CR 117.1: Full Control is a standing refusal to give up any
+                    // window — the session's own representative's included.
+                    priority::StandingPriorityPass::Withheld => return false,
+                    priority::StandingPriorityPass::Granted => true,
+                    // CR 117.1d + CR 605.3a: an own object that can remove an
+                    // activatable mana source, or an own activated ability that
+                    // would waste an untap on its own source, is no standing
+                    // pass; only explicit consent skips it.
+                    priority::StandingPriorityPass::Held
+                    | priority::StandingPriorityPass::Undecided => false,
+                };
             session.representatives.contains(&participant)
                 && (standing_pass || session.verified_pass_representatives.contains(&participant))
         }
-        // A representative consented to the session. A non-representative's
-        // skipped windows are not rechecked for a meaningful action (only its
-        // live window is, in `stack_resolution_session_priority_decision`);
-        // Full Control was enforced above.
-        StackResolutionPolicy::Committed => true,
     }
 }
 
@@ -11079,28 +11108,51 @@ pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Op
         .take_while(|(entry, fence)| fence.matches_captured_entry(entry))
         .map(|(entry, _)| entry);
     // `None` when the top entry is outside the fence.
-    fenced_prefix.next()?;
+    let top = fenced_prefix.next()?;
+    // Every run the resolver batches (`stack::resolve_next_with_limit`) is of
+    // triggered abilities, so a spell or an activated ability always resolves
+    // alone, and the window over one is read when it comes rather than looked
+    // ahead to: its window is judged against the board as it is then, after the
+    // entries above it resolved, not before (an untap above it may have untapped
+    // the source). Basalt Monolith's queued "{3}: Untap this artifact" entries
+    // each get their own window. A keyword action
+    // never batches either, but it isn't held for an untap, so its windows are
+    // still looked ahead to as before.
+    let resolves_alone = |entry: &StackEntry| match entry.kind {
+        StackEntryKind::Spell { .. } | StackEntryKind::ActivatedAbility { .. } => true,
+        StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => false,
+    };
+    if resolves_alone(top) {
+        return Some(1);
+    }
     // CR 117.3b + CR 117.4: resolving K entries skips every participant's
     // window over each of the next K − 1 entries, each with its own top; the
     // boundary ends before the first window a participant has not authorized
     // (CR 732.2b), so K = 1 + the authorized prefix of those windows. Each
     // window is judged against the board before anything resolves, so it cannot
     // see a mana source an earlier member untaps. That is sound for the `Held`
-    // rung because a batch consumes only windows this look-ahead authorized, and
-    // its members are either the resolver's fixed inert kinds or one repeated
-    // untargeted triggered ability. A member that untaps a mana source which a
-    // later identical member then removes, without pausing, is an accepted
+    // rung's removal reason, because a batch consumes only windows this
+    // look-ahead authorized, and its members are triggered abilities. A
+    // Committed session doesn't read it for a non-representative's skipped
+    // window: no batch kind (inert, self-counter, fixed life gain, fixed
+    // opponent effect, token) moves a mana source off the battlefield. Its untap
+    // reason is for an activated ability only, whose window is never looked
+    // ahead to. A member that untaps a mana source which a later
+    // identical member then removes, without pausing, is an accepted
     // under-approximation.
     let authorized_skipped_windows = fenced_prefix
         .take_while(|window_top| {
-            participants.iter().all(|&participant| {
-                stack_resolution_session_participant_authorizes_pass(
-                    state,
-                    session,
-                    participant,
-                    window_top,
-                )
-            })
+            !resolves_alone(window_top)
+                && participants.iter().all(|&participant| {
+                    stack_resolution_session_participant_authorizes_pass(
+                        state,
+                        session,
+                        participant,
+                        window_top,
+                    )
+                })
         })
         .count();
     let limit = u32::try_from(1 + authorized_skipped_windows).unwrap_or(u32::MAX);
@@ -11280,7 +11332,9 @@ fn run_auto_pass_loop(
                                 {
                                     break;
                                 }
-                                if priority_player_has_meaningful_action(state) {
+                                if priority_player_has_meaningful_action(state)
+                                    || window_held_for_mana(state, player)
+                                {
                                     break;
                                 }
                             }
@@ -29674,6 +29728,7 @@ mod resolving_carrier_settle_tests {
                                 .execute(AbilityDefinition::new(
                                     AbilityKind::Spell,
                                     Effect::ChangeZone {
+                                        library_shuffle: Default::default(),
                                         destination: Zone::Exile,
                                         origin: None,
                                         target: TargetFilter::SelfRef,
