@@ -8063,6 +8063,14 @@ fn parse_attach_recipient<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetF
     // "Whenever a Samurai or Warrior you control attacks alone … attach this
     // Equipment to it"). Pre-existing "her" / "him" → SelfRef carve-out is
     // preserved for legacy attach-to-self phrasings (e.g. "attach to her").
+    // CR 400.7j: after a battlefield move, a bare "it" host is the card that move
+    // put there (the forwarded `ParentTarget`), not the trigger subject.
+    if ctx.prior_clause_moves_to_battlefield {
+        let trimmed = text.trim_start();
+        if parse_neuter_attach_self_recipient(trimmed.to_ascii_lowercase().trim()).is_ok() {
+            return (TargetFilter::ParentTarget, &trimmed[trimmed.len()..]);
+        }
+    }
     let (target, rest) = parse_target_with_ctx(text, ctx);
     if matches!(target, TargetFilter::ParentTarget) {
         let trimmed = text.trim_start();
@@ -32090,6 +32098,12 @@ mod tests {
                 &["Artifact"][..],
                 &["Equipment"][..],
                 "Equipped creature gets +2/+2.\nWhenever a creature dealt damage by equipped creature this turn dies, return that card to the battlefield under your control. Attach this Equipment to that creature.\nEquip {4}",
+            ),
+            (
+                "Nim Deathmantle",
+                &["Artifact"][..],
+                &["Equipment"][..],
+                "Equipped creature gets +2/+2, has intimidate, and is a black Zombie. (A creature with intimidate can't be blocked except by artifact creatures and/or creatures that share a color with it.)\nWhenever a nontoken creature is put into your graveyard from the battlefield, you may pay {4}. If you do, return that card to the battlefield and attach this Equipment to it.\nEquip {4}",
             ),
         ] {
             let (parent_forwards, attachment, target) = first_trigger_attach(oracle, name, types, subtypes);

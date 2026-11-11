@@ -557,6 +557,67 @@ fn nim_deathmantle_equips_the_creature_it_returned() {
     assert_eq!(host_of(&runner, nim), Some(bear));
 }
 
+const MAKESHIFT_MANNEQUIN: &str = "Return target creature card from your graveyard to the battlefield with a mannequin counter on it. For as long as that creature has a mannequin counter on it, it has \"When this creature becomes the target of a spell or ability, sacrifice it.\"";
+
+/// CR 400.7 + CR 400.7j: Makeshift Mannequin returns the Bear while Nim Deathmantle's
+/// trigger waits; that Bear is a new object Nim's own return did not move, so Nim
+/// attaches to nothing.
+#[test]
+fn nim_deathmantle_does_not_equip_a_creature_another_effect_returned() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let nim = scenario
+        .add_artifact_from_oracle(P0, "Nim Deathmantle", NIM_DEATHMANTLE)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let bolt = scenario.add_bolt_to_hand(P0);
+    let mannequin = scenario
+        .add_spell_to_hand_from_oracle(P0, "Makeshift Mannequin", true, MAKESHIFT_MANNEQUIN)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.cast(bolt).target_object(bear).commit();
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    runner.act(GameAction::PassPriority).expect("P1 passes");
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Graveyard,
+        "reach guard: the Bear died"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: Nim's trigger waits"
+    );
+    let died_as = runner.state().objects[&bear].incarnation;
+
+    runner.cast(mannequin).target_object(bear).commit();
+    let (_, offered) = settle(&mut runner, true, &[]);
+
+    let returned = &runner.state().objects[&bear];
+    assert_eq!(returned.zone, Zone::Battlefield);
+    assert_ne!(
+        returned.incarnation, died_as,
+        "reach guard: Mannequin returned the Bear"
+    );
+    assert!(
+        returned
+            .counters
+            .keys()
+            .any(|counter| matches!(counter, CounterType::Generic(name) if name == "mannequin")),
+        "reach guard: the Bear is still Mannequin's object"
+    );
+    assert_eq!(offered, 1, "reach guard: Nim's payment was offered");
+    assert_eq!(host_of(&runner, nim), None);
+}
+
 const DEATHRENDER: &str = "Equipped creature gets +2/+2.\nWhenever equipped creature dies, you may put a creature card from your hand onto the battlefield and attach this Equipment to it.\nEquip {2}";
 
 const PRE_WAR_FORMALWEAR: &str = "When this Equipment enters, return target creature card with mana value 3 or less from your graveyard to the battlefield and attach this Equipment to it.\nEquipped creature gets +2/+2 and has vigilance.\nEquip {3}";
@@ -763,7 +824,7 @@ fn iron_man_flickered_before_its_trigger_resolves_equips_nothing() {
         .id();
     let bystander = scenario.add_creature(P0, "Bystander", 2, 2).id();
     let sword = scenario
-        .add_creature_to_hand(P0, "Test Sword", 0, 0)
+        .add_creature_to_hand(P0, "Bonesplitter", 0, 0)
         .as_artifact()
         .with_subtypes(vec!["Equipment"])
         .from_oracle_text("Equipped creature gets +2/+0.\nEquip {1}")
@@ -833,7 +894,7 @@ fn magnetic_snuffler_returns_the_equipment_attached_to_itself() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let equipment = scenario
-        .add_creature_to_graveyard(P0, "Grave Sword", 0, 0)
+        .add_creature_to_graveyard(P0, "Bonesplitter", 0, 0)
         .as_artifact()
         .with_subtypes(vec!["Equipment"])
         .from_oracle_text("Equipped creature gets +2/+0.\nEquip {1}")
