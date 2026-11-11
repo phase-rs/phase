@@ -6,9 +6,9 @@ pub use crate::types::ability::is_mana_ability;
 use crate::types::ability::{
     cost_has_component, is_chosen_remove_counter_cost_count, produces_mana_on_activation,
     AbilityCondition, AbilityCost, AbilityDefinition, CardSelectionMode, ChoiceValue,
-    ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, Effect, ManaProduction,
-    QuantityExpr, QuantityRef, ResolvedAbility, TapCreaturesSelectionMode, TargetFilter,
-    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_X,
+    ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, DoubleTarget, Effect,
+    ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility, TapCreaturesSelectionMode,
+    TargetFilter, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{ActivatedAbilityKind, BoundActivationCost, GameEvent, ManaTapState};
@@ -116,7 +116,7 @@ fn cost_removes_self_from_battlefield(cost: &Option<AbilityCost>) -> bool {
 /// permanent into mana and is deliberately **excluded**; Commander's Sphere,
 /// Powerstone, Springleaf Drum, and Skirk Prospector are **included**.
 ///
-/// For live availability use [`is_mana_ability`] directly — an untapped Treasure
+/// For live availability use [`is_mana_source_ability`] — an untapped Treasure
 /// genuinely is one mana available right now, which is why the two predicates must
 /// not be unified.
 ///
@@ -135,12 +135,38 @@ fn cost_removes_self_from_battlefield(cost: &Option<AbilityCost>) -> bool {
 /// with manabase development. This composition keeps the value **unchanged for
 /// every input** across the CR 605.1a amendment.
 ///
+/// The [`yields_mana_independent_of_pool`] conjunct does the same across the
+/// CR 701.10f admission: a pool doubling (Doubling Cube) became a mana ability,
+/// but its yield is the pool already present, so it is not a standing manabase
+/// source and this predicate's value is unchanged for every input.
+///
 /// Takes a single ability so callers compose with `.any()`; a permanent counts if
 /// **at least one** of its mana abilities is renewable (Crystal Vein carries both
 /// a renewable `{T}: Add {C}` and a self-sac `{T}, Sac: Add {C}{C}`).
 pub fn is_renewable_mana_ability(ability_def: &AbilityDefinition) -> bool {
     produces_mana_on_activation(ability_def)
+        // CR 701.10f: a doubling's yield is the pool already present, so it is not
+        // a standing manabase source.
+        && yields_mana_independent_of_pool(ability_def)
         && !cost_removes_self_from_battlefield(&ability_def.cost)
+}
+
+/// CR 701.10f: whether this ability's yield is fixed by the ability itself (a
+/// root `Effect::Mana`). A pool doubling (Doubling Cube) adds "an amount of
+/// mana of that type equal to the amount they already have", so its yield is
+/// the pool already present: it is a mana ability, but never by itself a
+/// source of mana.
+fn yields_mana_independent_of_pool(ability_def: &AbilityDefinition) -> bool {
+    matches!(*ability_def.effect, Effect::Mana { .. })
+}
+
+/// CR 605.1a + CR 701.10f: a mana ability that is by itself a source of mana —
+/// the predicate for heuristics that count mana sources or tally available
+/// mana. A Treasure counts (it genuinely is one mana available now); a pool
+/// doubling does not. Equal to [`is_mana_ability`] on every ability whose root
+/// is `Effect::Mana`; for routing and legality use [`is_mana_ability`].
+pub fn is_mana_source_ability(ability_def: &AbilityDefinition) -> bool {
+    is_mana_ability(ability_def) && yields_mana_independent_of_pool(ability_def)
 }
 
 /// CR 605.1b: A triggered ability is a mana ability iff all three hold:
@@ -294,11 +320,12 @@ pub(crate) fn is_resolving_triggered_mana(state: &GameState, ability: &ResolvedA
 }
 
 /// True iff every reachable link (via `sub_ability` and `else_ability` per
-/// CR 608.2c) has `Effect::Mana`. The "every link is mana" rule is the
+/// CR 608.2c) adds mana ([`Effect::adds_mana_on_resolution`]: `Effect::Mana` or a
+/// CR 701.10f pool doubling). The "every link is mana" rule is the
 /// conservative reading of CR 605.1b(c) — inline resolution skips priority,
 /// so any non-mana effect reachable during resolution forces stack use.
 fn chain_is_all_mana(ability: &ResolvedAbility) -> bool {
-    visit_links_all(ability, &|link| matches!(link.effect, Effect::Mana { .. }))
+    visit_links_all(ability, &|link| link.effect.adds_mana_on_resolution())
 }
 
 /// True iff **any** reachable link (via `sub_ability` and `else_ability`)
@@ -740,6 +767,27 @@ fn produce_mana_from_bound_ability(
                         grants.clone(),
                         *expiry,
                         source_could_produce_two_or_more_colors,
+                    )
+                }
+                // CR 605.3b + CR 701.10f: a doubling mana ability resolves inline;
+                // it adds, for each type, as much as the recipient already has —
+                // read now, after its cost was paid (CR 601.2h). Added mana carries
+                // no restriction (Doubling Cube ruling), so no restriction/grant/
+                // expiry templates apply.
+                Effect::Double {
+                    target_kind: DoubleTarget::ManaPool { color },
+                    ..
+                } => {
+                    // CR 605.3b: the doubling read every unit in the pool, so a
+                    // land refund (`UntapLandForMana`) could no longer reverse all
+                    // coupled mana — the recipient's undo window closes here.
+                    state.lands_tapped_for_mana.remove(&recipient);
+                    (
+                        super::effects::double::doubled_pool_mana(state, recipient, color.as_ref()),
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        false,
                     )
                 }
                 _ => (Vec::new(), Vec::new(), Vec::new(), None, false),
@@ -8027,6 +8075,185 @@ mod tests {
         .cost(AbilityCost::Tap);
         let non_mana_json = serde_json::to_value(&non_mana).unwrap();
         assert!(non_mana_json.get("is_mana_ability").is_none());
+    }
+
+    /// Doubling Cube, "{3}, {T}: Double the amount of each type of unspent mana
+    /// you have." — the shape the parser produces for it (checked against the
+    /// parser in `doubling_cube_is_a_mana_ability`).
+    fn doubling_cube_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Double {
+                target_kind: DoubleTarget::ManaPool { color: None },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(3),
+                },
+                AbilityCost::Tap,
+            ],
+        })
+    }
+
+    /// The first activated ability of a creature built from verbatim Oracle text.
+    fn parsed_creature_activated_ability(
+        name: &str,
+        power: i32,
+        toughness: i32,
+        oracle_text: &str,
+    ) -> AbilityDefinition {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature_from_oracle(P0, name, power, toughness, oracle_text)
+            .id();
+        let runner = scenario.build();
+        runner.state().objects[&id]
+            .abilities
+            .iter()
+            .find(|a| a.kind == AbilityKind::Activated)
+            .expect("an activated ability")
+            .clone()
+    }
+
+    /// K1 — CR 605.1a + CR 701.10f: doubling a pool's mana adds mana, the
+    /// ability has no target ("you" is a context reference), it is not a loyalty
+    /// ability and moves nothing to or from a library — so Doubling Cube's
+    /// ability is a mana ability, and the serialized UI flag says so.
+    #[test]
+    fn doubling_cube_is_a_mana_ability() {
+        let cube = doubling_cube_ability();
+        let mut scenario = GameScenario::new();
+        let parsed_id = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Doubling Cube",
+                "{3}, {T}: Double the amount of each type of unspent mana you have.",
+            )
+            .id();
+        let runner = scenario.build();
+        let parsed = runner.state().objects[&parsed_id]
+            .abilities
+            .iter()
+            .find(|a| a.kind == AbilityKind::Activated)
+            .expect("Doubling Cube's activated ability");
+        assert_eq!(parsed.effect, cube.effect, "the parser's effect shape");
+        assert_eq!(parsed.cost, cube.cost, "the parser's cost shape");
+
+        assert!(is_mana_ability(&cube));
+        assert!(is_mana_ability(parsed));
+        assert_eq!(
+            serde_json::to_value(&cube).unwrap()["is_mana_ability"],
+            serde_json::json!(true)
+        );
+        // Reach guard: the existing root-`Effect::Mana` admission still holds.
+        assert!(is_mana_ability(&colorless_tap_mana_ability()));
+    }
+
+    /// K1 negatives — CR 605.1a "could add mana" + CR 701.10e: doubling counters
+    /// adds no mana. Ferrafor, Young Yew's verbatim Oracle text.
+    #[test]
+    fn counter_doubling_is_not_a_mana_ability() {
+        let ferrafor = parsed_creature_activated_ability(
+            "Ferrafor, Young Yew",
+            4,
+            7,
+            "When Ferrafor enters, create a number of 1/1 green Saproling creature tokens \
+             equal to the number of counters among creatures target player controls.\n\
+             {T}: Double the number of each kind of counter on target creature.",
+        );
+        assert!(
+            matches!(
+                *ferrafor.effect,
+                Effect::Double {
+                    target_kind: DoubleTarget::Counters { .. },
+                    ..
+                }
+            ),
+            "reach: Ferrafor's ability is a counter doubling: {:?}",
+            ferrafor.effect
+        );
+        assert!(!is_mana_ability(&ferrafor));
+    }
+
+    /// K1 synthetic negatives (no printed card has these shapes): a pool doubling
+    /// that declares a target fails CR 605.1a "doesn't require a target"; one
+    /// with a loyalty cost fails "it's not a loyalty ability". Each is the Cube
+    /// shape with one node changed, so the paired positive is
+    /// `doubling_cube_is_a_mana_ability`.
+    #[test]
+    fn targeted_or_loyalty_pool_doubling_is_not_a_mana_ability() {
+        let mut targeted = doubling_cube_ability();
+        *targeted.effect = Effect::Double {
+            target_kind: DoubleTarget::ManaPool { color: None },
+            target: TargetFilter::Player,
+        };
+        assert!(!is_mana_ability(&targeted));
+
+        let loyalty = doubling_cube_ability().cost(AbilityCost::Loyalty { amount: 1 });
+        assert!(!is_mana_ability(&loyalty));
+
+        assert!(is_mana_ability(&doubling_cube_ability()), "reach guard");
+    }
+
+    /// K2 — CR 701.10f: a pool doubling's yield is the pool already present, so
+    /// it is not a standing manabase source; the development predicate keeps its
+    /// pre-admission value.
+    #[test]
+    fn doubling_cube_is_not_a_renewable_mana_ability() {
+        let cube = doubling_cube_ability();
+        assert!(
+            is_mana_ability(&cube),
+            "reach: Doubling Cube is a mana ability"
+        );
+        assert!(!is_renewable_mana_ability(&cube));
+        assert!(is_renewable_mana_ability(&colorless_tap_mana_ability()));
+        let treasure = crate::game::effects::token::predefined_token_abilities("Treasure");
+        assert!(!is_renewable_mana_ability(&treasure[0]));
+    }
+
+    /// K3 — CR 701.10f: `is_mana_source_ability` keeps the pre-admission
+    /// mana-ability verdict for every input — Doubling Cube is a mana ability but
+    /// adds no mana by itself; a Treasure is one mana available now.
+    #[test]
+    fn doubling_cube_is_not_a_mana_source_ability() {
+        let cube = doubling_cube_ability();
+        assert!(
+            is_mana_ability(&cube),
+            "reach: Doubling Cube is a mana ability"
+        );
+        assert!(!is_mana_source_ability(&cube));
+        assert!(is_mana_source_ability(&colorless_tap_mana_ability()));
+        let treasure = crate::game::effects::token::predefined_token_abilities("Treasure");
+        assert!(is_mana_source_ability(&treasure[0]));
+
+        // CR 605.1a "doesn't require a target": Jetfire, Ingenious Scientist's
+        // targeted `Effect::Mana` is neither.
+        let jetfire = parsed_creature_activated_ability(
+            "Jetfire, Ingenious Scientist",
+            3,
+            4,
+            "More Than Meets the Eye {3}{U} (You may cast this card converted for {3}{U}.)\n\
+             Flying\n\
+             Remove one or more +1/+1 counters from among artifacts you control: Target \
+             player adds that much {C}. This mana can't be spent to cast nonartifact spells. \
+             Convert Jetfire.",
+        );
+        assert!(
+            matches!(
+                *jetfire.effect,
+                Effect::Mana {
+                    target: Some(_),
+                    ..
+                }
+            ),
+            "reach: Jetfire's ability is a targeted mana effect: {:?}",
+            jetfire.effect
+        );
+        assert!(!is_mana_ability(&jetfire));
+        assert!(!is_mana_source_ability(&jetfire));
     }
 
     #[test]
