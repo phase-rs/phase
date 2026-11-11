@@ -1951,6 +1951,7 @@ mod tests {
         );
         let put_step = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -2055,6 +2056,7 @@ mod tests {
         // actual zone), as the parser now emits for multi-zone tutors.
         let put_step = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -2132,6 +2134,7 @@ mod tests {
         );
         let put_step = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::Any,
@@ -2384,6 +2387,7 @@ mod tests {
 
         let mut exile_step = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -2672,6 +2676,7 @@ mod tests {
         );
         let put_plains_step = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -2710,6 +2715,7 @@ mod tests {
         .sub_ability(put_plains_step);
         let put_forest_step = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,

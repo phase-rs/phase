@@ -1194,6 +1194,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Battlefield),
                     destination: Zone::Exile,
                     target: TargetFilter::SelfRef,

@@ -5783,6 +5783,7 @@ mod tests {
         let mut redirect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::Any,

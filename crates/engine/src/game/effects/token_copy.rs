@@ -4899,6 +4899,7 @@ mod tests {
 
         let cleanup = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::LastCreated,

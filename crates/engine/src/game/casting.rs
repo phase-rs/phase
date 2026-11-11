@@ -24090,6 +24090,8 @@ pub fn can_pay_ability_mana_cost_after_auto_tap_excluding(
     cost: &crate::types::mana::ManaCost,
     excluded_sources: &HashSet<ObjectId>,
 ) -> bool {
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_ability_mana_auto_tap_probe_clone();
     let mut simulated = state.clone();
     super::layers::flush_layers(&mut simulated);
 
