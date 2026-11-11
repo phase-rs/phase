@@ -47678,7 +47678,14 @@ fn parse_effect_chain_ir_body(
             && turn_cond.is_none()
             && target_has_cond.is_none()
         {
-            strip_routed_suffix_conditional(&text, ctx)
+            // CR 608.2c: the clause becomes the chain root only when no
+            // earlier clause of this chain has been pushed.
+            let position = if builder.clauses().is_empty() {
+                conditions::GatedInstructionPosition::ChainRoot
+            } else {
+                conditions::GatedInstructionPosition::AfterInstruction
+            };
+            strip_routed_suffix_conditional(&text, ctx, position)
         } else {
             (None, text)
         };

@@ -4946,8 +4946,8 @@ fn type_filter_every_branch_matches(
     }
 }
 
-/// CR 205.1 + CR 205.2: a typed axis is permanent when its core type is one of
-/// the permanent card types; `TypeFilter::Permanent` is the direct spelling.
+/// CR 110.4: a typed axis is permanent when its core type is one of the six
+/// permanent types; `TypeFilter::Permanent` is the direct spelling.
 fn type_filter_is_permanent(type_filter: &TypeFilter) -> bool {
     matches!(type_filter, TypeFilter::Permanent)
         || type_filter_to_core_type(type_filter).is_some_and(CoreType::is_permanent_type)

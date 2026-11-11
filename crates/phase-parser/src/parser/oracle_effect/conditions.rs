@@ -4715,7 +4715,8 @@ pub(super) fn strip_suffix_conditional(
     text: &str,
     ctx: &mut ParseContext,
 ) -> (Option<AbilityCondition>, String) {
-    let (routed, body) = strip_routed_suffix_conditional(text, ctx);
+    let (routed, body) =
+        strip_routed_suffix_conditional(text, ctx, GatedInstructionPosition::ChainRoot);
     (routed.map(|(condition, _)| condition), body)
 }
 
@@ -4726,6 +4727,7 @@ pub(super) fn strip_suffix_conditional(
 pub(super) fn strip_routed_suffix_conditional(
     text: &str,
     ctx: &mut ParseContext,
+    position: GatedInstructionPosition,
 ) -> (Option<(AbilityCondition, LeadingConditionRoute)>, String) {
     let general = |condition| Some((condition, LeadingConditionRoute::General));
     let lower = text.to_lowercase();
@@ -4857,7 +4859,7 @@ pub(super) fn strip_routed_suffix_conditional(
         parse_target_controller_control_condition_parts(condition_core)
     {
         let Some(condition) =
-            bind_target_controller_condition(referent, &condition, effect_prefix, ctx)
+            bind_target_controller_condition(referent, &condition, effect_prefix, ctx, position)
         else {
             return (None, text.to_string());
         };
@@ -4868,7 +4870,7 @@ pub(super) fn strip_routed_suffix_conditional(
         // connector), so the generic route parses the whole conjunction. When
         // the referent cannot bind, fail closed before that route can re-home
         // the left operand with an unbound `ParentTargetController`.
-        if !target_controller_referent_binds(referent, effect_prefix, ctx) {
+        if !target_controller_referent_binds(referent, effect_prefix, ctx, position) {
             return (None, text.to_string());
         }
     }
@@ -5041,8 +5043,9 @@ fn announced_object_roles(clause: &super::ParsedEffectClause) -> Option<Announce
 /// node that owns them.
 ///
 /// Ownership is what the suffix can bind. The condition is stamped on the HEAD
-/// definition (`strip_suffix_conditional` strips it from the head's text), and
-/// the engine evaluates it against the head before the head's effect, reading
+/// definition (the suffix strip removes it from the head's text). The probe runs
+/// only when that head is the chain root ([`GatedInstructionPosition`]), and the
+/// engine evaluates a root's gate on the root itself before its effect, reading
 /// `parent_target_controller` (engine `ability_utils.rs`): the head's own
 /// `targets`, else its `effect_context_object`. Targets are assigned per node,
 /// and both a parent's targets and the snapshot its effect produces are handed
@@ -5434,16 +5437,38 @@ fn parse_target_controller_control_condition_prefix(
     .map(|(referent, _condition)| referent)
 }
 
+/// CR 608.2c: where the instruction a trailing "if" gates sits in the effect
+/// chain being parsed, which decides the resolved node its gate is evaluated
+/// against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GatedInstructionPosition {
+    /// The first instruction of the chain. The engine evaluates its gate on its
+    /// own resolved node before its effect, so a target-controller read sees the
+    /// targets this instruction announced.
+    ChainRoot,
+    /// A later instruction, lowered as a sub-ability. The engine evaluates a
+    /// sub-ability's gate in the parent's hand-off against the PARENT's resolved
+    /// node (engine `effects/mod.rs`, the `sub.condition` check before the sub
+    /// is dispatched), so a target-controller read sees the preceding
+    /// instruction's targets, never this instruction's own.
+    AfterInstruction,
+}
+
 /// CR 608.2c + CR 115.1: whether the referent of a recognized target-controller
 /// condition has an antecedent in the gated instruction's single declared
-/// object target.
+/// object target, and the gate is evaluated where that target is readable: only
+/// the chain root's gate reads the root's own targets.
 fn target_controller_referent_binds(
     referent: nom_condition::TargetControllerReferent,
     effect_text: &str,
     ctx: &ParseContext,
+    position: GatedInstructionPosition,
 ) -> bool {
-    declared_single_object_target(effect_text, ctx)
-        .is_some_and(|target| referent_is_bound(referent, &target))
+    match position {
+        GatedInstructionPosition::ChainRoot => declared_single_object_target(effect_text, ctx)
+            .is_some_and(|target| referent_is_bound(referent, &target)),
+        GatedInstructionPosition::AfterInstruction => false,
+    }
 }
 
 /// CR 608.2c: a trailing condition on the controller of the gated
@@ -5460,8 +5485,9 @@ fn bind_target_controller_condition(
     condition: &StaticCondition,
     effect_text: &str,
     ctx: &ParseContext,
+    position: GatedInstructionPosition,
 ) -> Option<AbilityCondition> {
-    if !target_controller_referent_binds(referent, effect_text, ctx) {
+    if !target_controller_referent_binds(referent, effect_text, ctx, position) {
         return None;
     }
     let mut bridge_ctx = ctx.clone();
@@ -11210,6 +11236,8 @@ mod tests {
 
     /// CR 109.2b + CR 115.1: "that spell's controller" accepts a typed spell
     /// slot ("Counter target creature spell" lowers to And([StackSpell, Typed])).
+    /// Synthetic: Essence Scatter's printed instruction under Unified Will's
+    /// printed suffix (nearest printed card: Unified Will).
     #[test]
     fn you_control_more_than_a_typed_spell_target_controller() {
         let (cond, text) = strip_suffix_conditional(
@@ -11222,6 +11250,8 @@ mod tests {
 
     /// CR 109.4 + CR 111.1: Kraul Whipcracker's "destroy target token an
     /// opponent controls" is a property-only typed filter on the battlefield.
+    /// Synthetic: the printed instruction under a Skulking Killer-style suffix
+    /// (nearest printed card: Skulking Killer).
     #[test]
     fn property_only_token_target_binds_a_controller() {
         let (cond, text) = strip_suffix_conditional(
@@ -11234,6 +11264,9 @@ mod tests {
 
     /// CR 115.1 + CR 109.2b: the named-permanent branch proves the whole
     /// slot is a battlefield permanent; a typed creature SPELL does not.
+    /// Synthetic: Disenchant's, Kraul Whipcracker's and Essence Scatter's
+    /// printed instructions under Unified Will's comparison with a "that
+    /// permanent's" referent (nearest printed card: Unified Will).
     #[test]
     fn named_permanent_referent_requires_a_whole_battlefield_slot() {
         let (cond, _) = strip_suffix_conditional(
@@ -11256,7 +11289,9 @@ mod tests {
     }
 
     /// CR 109.2b: "that creature's controller" cannot name a creature spell
-    /// on the stack; only the spell noun can.
+    /// on the stack; only the spell noun can. Synthetic: Essence Scatter's
+    /// printed instruction under Unified Will's comparison with a "that
+    /// creature's" referent (nearest printed card: Unified Will).
     #[test]
     fn creature_noun_declines_a_creature_spell_slot() {
         let (cond, _) = strip_suffix_conditional(
@@ -11268,6 +11303,8 @@ mod tests {
 
     /// CR 205.2a + CR 109.4: Disenchant's "destroy target artifact or
     /// enchantment" is a typed disjunction; both branches are permanents.
+    /// Synthetic: the printed instruction under a Skulking Killer-style suffix
+    /// (nearest printed card: Skulking Killer).
     #[test]
     fn typed_disjunctive_permanent_target_binds_a_controller() {
         let (cond, text) = strip_suffix_conditional(
@@ -12044,6 +12081,76 @@ mod tests {
         let roles = stack_announced_roles(printed, &trigger_ctx()).expect("reach guard");
         assert_eq!((roles.head.len(), roles.descendants.len()), (0, 1));
         assert_full_strip_declines(printed, condition);
+    }
+
+    /// CR 608.2c (final review): a later instruction lowers as a sub-ability,
+    /// and the engine evaluates a sub-ability's gate against the PRECEDING
+    /// node, so a target-controller suffix on it would read the earlier
+    /// instruction's target. Such a suffix is an explicit gap even though the
+    /// same instruction, as a chain root, binds. Both texts are synthetic; the
+    /// nearest printed analogue of a second sentence that names its own target's
+    /// controller is Repulsive Mutation ("… Then counter up to one target spell
+    /// unless its controller pays …"), and the trigger row is Skulking Killer's
+    /// printed instruction behind a synthetic first sentence.
+    #[test]
+    fn target_controller_suffix_after_an_earlier_instruction_is_an_explicit_gap() {
+        for (text, types, gated_effect, condition) in [
+            (
+                "Tap target creature. Destroy target artifact if its controller controls no \
+                 creatures.",
+                "Instant",
+                "Destroy target artifact",
+                "its controller controls no creatures",
+            ),
+            (
+                "When this creature enters, you gain 1 life. Target creature an opponent \
+                 controls gets -2/-2 until end of turn if that opponent controls no other \
+                 creatures.",
+                "Creature",
+                "Target creature an opponent controls gets -2/-2 until end of turn",
+                "that opponent controls no other creatures",
+            ),
+        ] {
+            assert_full_strip_binds(gated_effect, condition);
+            let parsed = parse_oracle_text(text, "Synthetic", &[], &[types.to_owned()], &[]);
+            let root = match (parsed.abilities.as_slice(), parsed.triggers.as_slice()) {
+                ([ability], []) => ability.clone(),
+                ([], [trigger]) => {
+                    assert_eq!(trigger.condition, None, "{text}");
+                    trigger.execute.as_deref().expect("trigger body").clone()
+                }
+                _ => panic!("{text}: expected one ability or trigger: {parsed:?}"),
+            };
+            let children = sub_chain(&root);
+            let [gated] = children[..] else {
+                panic!("{text}: expected one later instruction, got {children:?}");
+            };
+            assert!(
+                gated
+                    .effect
+                    .target_filter()
+                    .is_some_and(|filter| !filter.is_context_ref()),
+                "reach guard: {text}: the later instruction declares its own target: {:?}",
+                gated.effect
+            );
+            assert_eq!(root.condition, None, "{text}");
+            assert_eq!(gated.condition, None, "{text}");
+            let gaps: Vec<_> = parsed
+                .parse_warnings
+                .iter()
+                .filter_map(|w| w.gap())
+                .collect();
+            assert_eq!(
+                gaps,
+                vec![
+                    &crate::parser::oracle_ir::diagnostic::ClauseGap::Condition {
+                        guard: condition.to_string()
+                    }
+                ],
+                "{text}: the suffix must be an explicit gap: {:?}",
+                parsed.parse_warnings
+            );
+        }
     }
 
     /// CR 608.2d + CR 107.4 + CR 202.1: Omnath, Locus of All — "you may reveal
