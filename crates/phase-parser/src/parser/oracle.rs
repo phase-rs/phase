@@ -5993,11 +5993,15 @@ fn parse_normalized_oracle_ir(
     // - gift (CR 702.174j): the gift effect happens first, and the engine wraps
     //   the first spell ability under a `GiftDelivery` root (`synthesize_gift`);
     // - overload (CR 702.96b): the overloaded spell requires no targets.
-    // MTGJSON lists each as a bare keyword name.
-    let card_spell_root = if mtgjson_keyword_names.iter().any(|k| {
-        ["fuse", "splice", "gift", "overload"]
-            .iter()
-            .any(|rewrite| k.eq_ignore_ascii_case(rewrite))
+    // Read from the card's own printed keyword lines, typed by the strict
+    // keyword router: a split card's halves reach this parser without their
+    // MTGJSON keyword names, but each half prints its "Fuse" line.
+    let card_spell_root = if normalized_oracle_text.split('\n').any(|line| {
+        let lower = strip_reminder_text(line).trim().to_lowercase();
+        matches!(
+            super::oracle_keyword::parse_router_keyword_fragment(&lower),
+            Some(Keyword::Fuse | Keyword::Splice { .. } | Keyword::Gift(_) | Keyword::Overload(_))
+        )
     }) {
         ResolvedChainRoot::Unproven
     } else {

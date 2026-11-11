@@ -5036,7 +5036,15 @@ fn announced_object_roles(clause: &super::ParsedEffectClause) -> Option<Announce
         }
         children.extend(definition.mode_abilities.iter());
     }
-    Some(AnnouncedRoles { head, descendants })
+    let shape = match clause.sub_ability {
+        None => GatedClauseShape::SingleInstruction,
+        Some(_) => GatedClauseShape::WithContinuation,
+    };
+    Some(AnnouncedRoles {
+        head,
+        descendants,
+        shape,
+    })
 }
 
 /// CR 601.2c + CR 608.2c: the announced roles of a clause tree, split by the
@@ -5050,14 +5058,31 @@ fn announced_object_roles(clause: &super::ParsedEffectClause) -> Option<Announce
 /// `targets`, else its `effect_context_object`. Targets are assigned per node,
 /// and both a parent's targets and the snapshot its effect produces are handed
 /// parent to child, never child to parent, so the gated head reads only a role
-/// it announces itself. That includes a `TargetOnly` head: it owns the slot, and
-/// its acting child is a continuation step that a false gate skips and a true
-/// gate hands the head's targets to.
+/// it announces itself.
 struct AnnouncedRoles {
     /// Roles announced by the head effect and its own unless-payer.
     head: Vec<TargetFilter>,
     /// Roles announced anywhere below the head (sub, else and mode nodes).
     descendants: Vec<TargetFilter>,
+    /// Whether the clause lowers to one node or to a head with a child.
+    shape: GatedClauseShape,
+}
+
+/// CR 608.2c: the node structure of the clause a suffix would gate.
+///
+/// A later printed instruction is appended below the clause's last node
+/// (assembly), and on a false gate the engine runs only the gated node's DIRECT
+/// sub when it is an independent instruction (engine `effects/mod.rs`, the
+/// condition-false path of `resolve_chain_body`). Below a single-node clause
+/// the next instruction is that direct sub, so it still happens "in the order
+/// written"; below a head with a continuation child (a compound such as "gets
+/// -2/-2 and gains haste", or a `TargetOnly` head and its acting child) it sits
+/// under the continuation and would be skipped with it. The suffix therefore
+/// binds only a single-node clause; the other shape stays an explicit gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatedClauseShape {
+    SingleInstruction,
+    WithContinuation,
 }
 
 impl AnnouncedRoles {
@@ -5140,13 +5165,17 @@ fn stack_announced_roles(effect_text: &str, ctx: &ParseContext) -> Option<Announ
 /// spell's or a triggered ability's), owned by the
 /// head the condition is attached to, or `None` when the declaration is not
 /// exactly one controller-capable object role. A companion player, a payer, a
-/// child role, or any other second role makes the suffix decline.
+/// child role, or any other second role makes the suffix decline, and so does a
+/// clause with a continuation child ([`GatedClauseShape`]).
 fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<TargetFilter> {
     let mut roles = stack_announced_roles(effect_text, ctx)?;
     // Bind only a role the gated head can read at resolution: the head owns
     // exactly one role. A descendant role is unreadable by the head when it is
     // the only one, and makes the referent ambiguous when the head has one too.
-    if roles.head.len() != 1 || !roles.descendants.is_empty() {
+    if roles.head.len() != 1
+        || !roles.descendants.is_empty()
+        || roles.shape != GatedClauseShape::SingleInstruction
+    {
         return None;
     }
     let filter = roles.head.pop()?;
@@ -11520,8 +11549,9 @@ mod tests {
 
     /// CR 608.2c + CR 115.1: Skulking Killer / Unified Will shapes that must
     /// keep binding at the full seam (the positives every decline row below is
-    /// the twin of), including a compound clause whose context-ref child must
-    /// not over-decline.
+    /// the twin of). A compound clause adds no role through its context-ref
+    /// child, but it declines on its shape
+    /// (`gated_clause_with_a_continuation_child_is_an_explicit_gap`).
     #[test]
     fn single_announced_object_role_still_binds() {
         let skulking = "Target creature an opponent controls gets -2/-2 until end of turn";
@@ -11537,14 +11567,13 @@ mod tests {
             unified,
             "you control more creatures than that spell's controller",
         );
-        // Compound positive: a child that only references the parent target adds
-        // no role (nearest printed analogue: Skulking Killer's pump body).
+        // A child that only references the parent target adds no role
+        // (synthetic; nearest printed analogue: Skulking Killer's pump body).
         let compound =
             "Target creature gets -2/-2 until end of turn and gains haste until end of turn";
         let (clause, _) = clause_and_timing(compound);
         assert!(clause.sub_ability.is_some(), "reach guard: compound child");
         announced_roles_reaching_count(compound, "its controller controls no creatures", 1);
-        assert_full_strip_binds(compound, "its controller controls no creatures");
     }
 
     /// CR 115.1 + CR 601.2c: every role the production enumerator records for a
@@ -11934,10 +11963,9 @@ mod tests {
         .collect()
     }
 
-    /// CR 601.2c + CR 608.2c: the suffix binds only a role the gated head owns.
-    /// Skulking Killer, Unified Will, a compound head with a targetless child and
-    /// a `TargetOnly` head with an acting child each announce their single role
-    /// on the head and nothing below it (the mirror image of
+    /// CR 601.2c + CR 608.2c: the suffix binds only a role the gated head owns,
+    /// on a single-node clause. Skulking Killer and Unified Will each announce
+    /// their single role on a head with nothing below it (the mirror image of
     /// `child_only_target_suffix_is_an_explicit_gap`).
     #[test]
     fn bound_role_is_owned_by_the_head() {
@@ -11950,82 +11978,105 @@ mod tests {
                 "Counter target spell",
                 "you control more creatures than that spell's controller",
             ),
-            (
-                "Target creature gets -2/-2 until end of turn and gains haste until end of turn",
-                "its controller controls no creatures",
-            ),
-            (
-                "Target creature deals 2 damage to each other creature",
-                "that creature's controller controls no other creatures",
-            ),
         ] {
             let roles = stack_announced_roles(effect, &trigger_ctx()).expect("reach guard");
             assert_eq!(roles.head.len(), 1, "{effect}: the head owns the role");
             assert!(roles.descendants.is_empty(), "{effect}");
+            assert_eq!(roles.shape, GatedClauseShape::SingleInstruction, "{effect}");
             assert_full_strip_binds(effect, condition);
         }
     }
 
-    /// CR 601.2c + CR 608.2c: through full parsing, a head that owns the single
-    /// announced role carries the gate, and every node below it is a
-    /// condition-free continuation step that declares no target of its own (the
-    /// engine skips it when the head's gate is false and hands it the head's
-    /// targets when it is true). Both rows are synthetic: a compound head with a
+    /// CR 608.2c (in the order written): a clause whose head owns the single
+    /// role but has a continuation child is an explicit gap, because a later
+    /// independent instruction is appended below that child and a false gate
+    /// would skip it with the child. Full parsing with an independent "Draw a
+    /// card." after the clause: the head owns the only target, its child is a
+    /// condition-free, target-less continuation step, and the draw follows as
+    /// an independent instruction; the suffix is one `Condition` gap and no node
+    /// carries a gate. Both clauses are synthetic: a compound head with a
     /// targetless child (nearest printed analogue: Skulking Killer's "target
     /// creature an opponent controls gets -2/-2 until end of turn"), and a
     /// `TargetOnly` head whose child acts (nearest printed analogue: Chandra's
     /// Ignition, "Target creature you control deals damage equal to its power to
     /// each other creature and each opponent.").
     #[test]
-    fn head_owned_role_gates_the_whole_clause_through_full_parsing() {
+    fn gated_clause_with_a_continuation_child_is_an_explicit_gap() {
         let condition = "that creature's controller controls no other creatures";
         for effect in [
             "Target creature gets -2/-2 until end of turn and gains haste until end of turn",
             "Target creature deals 2 damage to each other creature",
         ] {
-            let (head, warnings) = parse_single_ability(
-                &format!("{effect} if {condition}."),
-                "Synthetic",
-                &["Instant"],
-                &[],
-            );
-            assert!(warnings.is_empty(), "{effect}: {warnings:?}");
+            let roles = stack_announced_roles(effect, &trigger_ctx()).expect("reach guard");
+            assert_eq!(roles.head.len(), 1, "reach guard: {effect}: one head role");
+            assert!(roles.descendants.is_empty(), "reach guard: {effect}");
+            assert_eq!(roles.shape, GatedClauseShape::WithContinuation, "{effect}");
+            assert_full_strip_declines(effect, condition);
+
+            let text = format!("{effect} if {condition}. Draw a card.");
+            let (head, warnings) = parse_single_ability(&text, "Synthetic", &["Instant"], &[]);
             assert!(
                 head.effect
                     .target_filter()
                     .is_some_and(|filter| !filter.is_context_ref()),
-                "{effect}: the head declares the target: {:?}",
+                "reach guard: {text}: the head declares the target: {:?}",
                 head.effect
             );
-            let (seam, _, _) = full_strip(effect, condition);
-            assert!(seam.is_some(), "reach guard: the strip binds {effect}");
-            assert_eq!(head.condition, seam, "{effect}: the gate is on the head");
             let children = sub_chain(&head);
-            assert!(!children.is_empty(), "reach guard: {effect} has a child");
-            for child in children {
+            let [continuation @ .., draw] = &children[..] else {
+                panic!("reach guard: {text}: expected a child and the draw");
+            };
+            assert!(
+                !continuation.is_empty(),
+                "reach guard: {text}: a continuation"
+            );
+            for child in continuation {
                 assert!(
                     child
                         .effect
                         .target_filter()
                         .is_none_or(TargetFilter::is_context_ref),
-                    "{effect}: the child declares no target: {:?}",
+                    "reach guard: {text}: the child declares no target: {:?}",
                     child.effect
                 );
-                assert_eq!(child.condition, None, "{effect}");
                 assert_eq!(
                     child.sub_link,
                     crate::types::ability::SubAbilityLink::ContinuationStep,
-                    "{effect}"
+                    "reach guard: {text}"
                 );
             }
+            assert!(
+                matches!(*draw.effect, Effect::Draw { .. }),
+                "{:?}",
+                draw.effect
+            );
+            assert_eq!(
+                draw.sub_link,
+                crate::types::ability::SubAbilityLink::SequentialSibling,
+                "reach guard: {text}: the draw is an independent instruction"
+            );
+            assert_eq!(head.condition, None, "{text}");
+            for child in &children {
+                assert_eq!(child.condition, None, "{text}: {:?}", child.effect);
+            }
+            // The declined suffix is an explicit gap: either the compound
+            // splitter keeps it inside an unimplemented child, or the swallow
+            // detector reports it as a `Condition` gap.
+            let gaps: Vec<_> = warnings.iter().filter_map(|w| w.gap()).collect();
+            let condition_gap = crate::parser::oracle_ir::diagnostic::ClauseGap::Condition {
+                guard: condition.to_string(),
+            };
+            let unimplemented_suffix = children.iter().any(|child| {
+                child
+                    .effect
+                    .unimplemented_description()
+                    .is_some_and(|fragment| nom_primitives::scan_contains(fragment, condition))
+            });
+            assert!(
+                gaps == vec![&condition_gap] || (gaps.is_empty() && unimplemented_suffix),
+                "{text}: the suffix must be an explicit gap: {warnings:?} {children:?}"
+            );
         }
-        let (head, _) = parse_single_ability(
-            &format!("Target creature deals 2 damage to each other creature if {condition}."),
-            "Synthetic",
-            &["Instant"],
-            &[],
-        );
-        assert!(matches!(*head.effect, Effect::TargetOnly { .. }));
     }
 
     /// CR 601.2c + CR 608.2c: Coastal Wizard's printed ability
@@ -12188,96 +12239,133 @@ mod tests {
             .collect()
     }
 
-    /// CR 608.2c: a chain is proven to be its ability's resolved
-    /// root only at a trigger body, an activated ability's effect, or a card's
-    /// first spell line on a card that can neither fuse nor be spliced. Every
-    /// other chain may be attached under another node, whose gate the engine
-    /// evaluates against that node:
-    /// - a second targeted instruction joined to a first by " and " (synthetic;
-    ///   printed shape: Gurmag Rakshasa, "target creature an opponent controls
-    ///   gets -2/-2 until end of turn and target creature you control gets
-    ///   +2/+2 until end of turn", reordered). This row also declines without
-    ///   the root proof, so it is a positive witness only;
-    /// - a later spell paragraph (pinned separately by
-    ///   `target_controller_suffix_on_a_later_spell_paragraph_is_an_explicit_gap`);
-    /// - a fused half (CR 702.102d), a spliced card (CR 702.47a), a gift spell
-    ///   whose first spell ability the engine wraps under its gift delivery
-    ///   (CR 702.174j; printed shape: Long River's Pull) or an overloaded spell
-    ///   that requires no targets (CR 702.96b; printed shape: Cyclonic Rift),
-    ///   all synthetic: Unified Will's printed text on a card with that keyword.
-    ///
-    /// Each is an explicit condition gap, with no gate on any node.
+    /// CR 608.2c: a chain is proven to be its ability's resolved root only at a
+    /// trigger body, an activated ability's effect, or a card's first spell
+    /// line on a card whose spell is not rewritten at cast. A second targeted
+    /// instruction joined to a first by " and " is a later chunk of the same
+    /// chain and declines (synthetic; printed shape: Gurmag Rakshasa, "target
+    /// creature an opponent controls gets -2/-2 until end of turn and target
+    /// creature you control gets +2/+2 until end of turn", reordered). This
+    /// row also declines without the root proof, so it is a positive witness
+    /// only; the proof's own declines are pinned by
+    /// `target_controller_suffix_on_a_later_spell_paragraph_is_an_explicit_gap`
+    /// and `target_controller_suffix_on_a_spell_rewritten_at_cast_is_an_explicit_gap`.
     #[test]
     fn target_controller_suffix_on_an_unproven_root_is_an_explicit_gap() {
-        let unified_will =
-            "Counter target spell if you control more creatures than that spell's controller.";
-        for (text, types, keywords, gated_effect, condition) in [
+        let text = "When this creature enters, target creature you control gets +2/+2 until end \
+                    of turn and target creature an opponent controls gets -2/-2 until end of \
+                    turn if that opponent controls no other creatures.";
+        let gated_effect = "target creature an opponent controls gets -2/-2 until end of turn";
+        let condition = "that opponent controls no other creatures";
+        assert_full_strip_binds(gated_effect, condition);
+        let parsed = parse_oracle_text(text, "Synthetic", &[], &["Creature".to_owned()], &[]);
+        let definitions = all_chain_definitions(&parsed);
+        assert!(
+            definitions.iter().any(|def| def
+                .effect
+                .target_filter()
+                .is_some_and(|filter| !filter.is_context_ref())),
+            "reach guard: the gated instruction declares a target: {definitions:?}"
+        );
+        for def in &definitions {
+            assert_eq!(def.condition, None, "{:?}", def.effect);
+        }
+        assert_only_condition_gap(&parsed, condition);
+    }
+
+    /// The parse produced exactly one explicit `Condition` gap, for `condition`.
+    fn assert_only_condition_gap(parsed: &crate::parser::oracle::ParsedAbilities, condition: &str) {
+        let gaps: Vec<_> = parsed
+            .parse_warnings
+            .iter()
+            .filter_map(|w| w.gap())
+            .collect();
+        assert_eq!(
+            gaps,
+            vec![
+                &crate::parser::oracle_ir::diagnostic::ClauseGap::Condition {
+                    guard: condition.to_string()
+                }
+            ],
+            "the suffix must be an explicit gap: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 608.2c: a card whose spell is rewritten at cast has no spell line
+    /// proven to be its spell's resolved root with its printed targets, and the
+    /// fact is read from the card's own printed keyword line, the input
+    /// production supplies:
+    /// - fuse (CR 702.102d): Tear's printed text with the suffix, as a split
+    ///   card's half reaches the parser (with the export's
+    ///   `__force_keyword_extract__` sentinel instead of MTGJSON names);
+    /// - splice (CR 702.47a): Glacial Ray's printed splice line;
+    /// - gift (CR 702.174j): Long River's Pull's printed gift line;
+    /// - overload (CR 702.96b): Cyclonic Rift's printed overload line.
+    ///
+    /// Each spell line is synthetic ("Destroy target enchantment if its
+    /// controller controls no creatures."; nearest printed card: Tear, with
+    /// Skulking Killer's zero-count condition). The reach guard parses the same
+    /// spell line without a keyword line and asserts it binds.
+    #[test]
+    fn target_controller_suffix_on_a_spell_rewritten_at_cast_is_an_explicit_gap() {
+        let condition = "its controller controls no creatures";
+        let spell = format!("Destroy target enchantment if {condition}.");
+        let (seam, _, _) = full_strip("Destroy target enchantment", condition);
+        assert!(seam.is_some(), "reach guard: the strip binds at a root");
+        let (plain, warnings) = parse_single_ability(&spell, "Synthetic", &["Instant"], &[]);
+        assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+        assert_eq!(
+            plain.condition, seam,
+            "reach guard: the bare spell line binds"
+        );
+
+        let split_face = vec!["__force_keyword_extract__".to_owned()];
+        for (text, keywords) in [
             (
-                "When this creature enters, target creature you control gets +2/+2 until end \
-                 of turn and target creature an opponent controls gets -2/-2 until end of turn \
-                 if that opponent controls no other creatures.",
-                "Creature",
-                &[][..],
-                "target creature an opponent controls gets -2/-2 until end of turn",
-                "that opponent controls no other creatures",
+                format!(
+                    "{spell}\nFuse (You may cast one or both halves of this card from your \
+                     hand.)"
+                ),
+                split_face,
             ),
             (
-                unified_will,
-                "Instant",
-                &["Fuse".to_owned()][..],
-                "Counter target spell",
-                "you control more creatures than that spell's controller",
+                format!(
+                    "{spell}\nSplice onto Arcane {{1}}{{R}} (As you cast an Arcane spell, you \
+                     may reveal this card from your hand and pay its splice cost. If you do, \
+                     add this card's effects to that spell.)"
+                ),
+                vec!["Splice".to_owned()],
             ),
             (
-                unified_will,
-                "Instant",
-                &["Splice".to_owned()][..],
-                "Counter target spell",
-                "you control more creatures than that spell's controller",
+                format!(
+                    "Gift a card (You may promise an opponent a gift as you cast this spell. \
+                     If you do, they draw a card before its other effects.)\n{spell}"
+                ),
+                vec!["Gift".to_owned()],
             ),
             (
-                unified_will,
-                "Instant",
-                &["Gift".to_owned()][..],
-                "Counter target spell",
-                "you control more creatures than that spell's controller",
-            ),
-            (
-                unified_will,
-                "Instant",
-                &["Overload".to_owned()][..],
-                "Counter target spell",
-                "you control more creatures than that spell's controller",
+                format!(
+                    "{spell}\nOverload {{6}}{{U}} (You may cast this spell for its overload \
+                     cost. If you do, change \"target\" in its text to \"each.\")"
+                ),
+                vec!["Overload".to_owned()],
             ),
         ] {
-            assert_full_strip_binds(gated_effect, condition);
-            let parsed = parse_oracle_text(text, "Synthetic", keywords, &[types.to_owned()], &[]);
+            let parsed =
+                parse_oracle_text(&text, "Synthetic", &keywords, &["Instant".to_owned()], &[]);
             let definitions = all_chain_definitions(&parsed);
             assert!(
-                definitions.iter().any(|def| def
-                    .effect
-                    .target_filter()
-                    .is_some_and(|filter| !filter.is_context_ref())),
-                "reach guard: {text}: the gated instruction declares a target: {definitions:?}"
+                definitions.iter().any(|def| matches!(
+                    &*def.effect,
+                    Effect::Destroy { target, .. } if !target.is_context_ref()
+                )),
+                "reach guard: {text}: the targeted spell line parsed: {definitions:?}"
             );
             for def in &definitions {
                 assert_eq!(def.condition, None, "{text}: {:?}", def.effect);
             }
-            let gaps: Vec<_> = parsed
-                .parse_warnings
-                .iter()
-                .filter_map(|w| w.gap())
-                .collect();
-            assert_eq!(
-                gaps,
-                vec![
-                    &crate::parser::oracle_ir::diagnostic::ClauseGap::Condition {
-                        guard: condition.to_string()
-                    }
-                ],
-                "{text}: the suffix must be an explicit gap: {:?}",
-                parsed.parse_warnings
-            );
+            assert_only_condition_gap(&parsed, condition);
         }
     }
 
