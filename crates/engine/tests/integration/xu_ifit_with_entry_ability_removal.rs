@@ -12,7 +12,8 @@
 //! The class also includes every enter trigger of an entry being checked after the resolution's
 //! simultaneous "is/has" effect exists (CR 603.10 + CR 603.6a + CR 611.2e): the owner of a
 //! completed `ChangeZone` / `ChangeZoneAll` hands its entries to the post-action collector while
-//! a later instruction of the same resolution may still apply such an effect (R4, R4d, R8, R9).
+//! a later instruction of the same resolution may still apply such an effect (R4, R4d, R8, R8b,
+//! R9), including a `ChangeZone` resumed after a CR 616.1 replacement-ordering pause (R4p).
 //!
 //! Consequence (b) rows (entry-modifying abilities such as replacement effects) land in phase 2.
 //!
@@ -24,9 +25,16 @@
 //!   Dreadnought's ETB triggers) and keeps Haste and Trample in R5.
 //! - Dropping handed-off entries instead of handing them on fails R4d and R8.
 //! - Reverting only the `resolve_all` call site to the `Owner` delegate leaves R9 at P0 +1.
+//! - Reverting the resumed completion in `drain_pending_change_zone_iteration` to the `Owner`
+//!   delegates puts the Dreadnought's ETB beside Soul Warden's trigger in R4p.
+//! - Claiming handed-off entries in the consumed-before-priority ledger loses Soul Warden's
+//!   trigger in R4p.
+//! - Offering handed-off entries to settlement's latched batched pass fails R8b: Wayward Servant
+//!   does not trigger (P0 +0).
 
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -57,6 +65,12 @@ const WAYWARD_SERVANT: &str =
 const STORM_OF_SOULS: &str = "Return all creature cards from your graveyard to the battlefield. Each of them is a 1/1 Spirit with flying in addition to its other types. Exile Storm of Souls.";
 /// Drogskol Cavalry {5}{W}{W} Creature — Spirit Knight 4/4 — verbatim.
 const DROGSKOL_CAVALRY: &str = "Flying\nWhenever another Spirit you control enters, you gain 2 life.\n{3}{W}: Create a 1/1 white Spirit creature token with flying.";
+/// Archelos, Lagoon Mystic {1}{B}{G}{U} Legendary Creature — Turtle Shaman 2/4 — verbatim.
+const ARCHELOS_LAGOON_MYSTIC: &str = "As long as Archelos is tapped, other permanents enter tapped.\nAs long as Archelos is untapped, other permanents enter untapped.";
+/// Imposing Sovereign {1}{W} Creature — Human Noble 2/1 — verbatim.
+const IMPOSING_SOVEREIGN: &str = "Creatures your opponents control enter tapped.";
+/// Enduring Innocence {1}{W}{W} Enchantment Creature — Sheep Glimmer 2/1 — verbatim.
+const ENDURING_INNOCENCE: &str = "Lifelink\nWhenever one or more other creatures you control with power 2 or less enter, draw a card. This ability triggers only once each turn.\nWhen Enduring Innocence dies, if it was a creature, return it to the battlefield under its owner's control. It's an enchantment. (It's not a creature.)";
 
 fn main_phase() -> GameScenario {
     let mut scenario = GameScenario::new();
@@ -368,6 +382,128 @@ fn storm_of_souls_mass_entry_without_soul_warden_triggers_cavalry() {
     assert_eq!(giant_obj.zone, Zone::Battlefield);
     assert!(giant_obj.card_types.subtypes.iter().any(|s| s == "Spirit"));
     assert_eq!(outcome.life_delta(P0), 2, "Drogskol Cavalry");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "waiting_for: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty(), "stack must be empty");
+}
+
+/// CR 616.1e: answer a two-way entry tap-state ordering offered to P0 with `answer` first,
+/// through the public `GameAction`, and assert the offered pair.
+fn answer_tap_state_ordering(runner: &mut GameRunner, answer: &str) {
+    let index = match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player,
+            candidate_count: 2,
+            candidates,
+            ..
+        } => {
+            assert_eq!(*player, P0, "the entrant's controller orders (CR 616.1)");
+            for source in ["Imposing Sovereign", "Archelos, Lagoon Mystic"] {
+                assert!(
+                    candidates.iter().any(|c| c.source_name == source),
+                    "{source} must be offered: {candidates:?}"
+                );
+            }
+            candidates
+                .iter()
+                .position(|c| c.source_name == answer)
+                .unwrap_or_else(|| panic!("{answer} must be offered"))
+        }
+        other => panic!("expected the CR 616.1 tap-state ordering, got {other:?}"),
+    };
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("answer the tap-state ordering");
+}
+
+/// R4p — CR 616.1 + CR 611.2e + CR 603.10: the return pauses on a CR 616.1 ordering of
+/// Imposing Sovereign's "enter tapped" and Archelos's "enter untapped". After the answer the
+/// resumed ChangeZone completes and the parked "has no abilities" rider applies with the entry,
+/// so the Dreadnought's own ETB still never triggers, while Soul Warden's trigger for the same
+/// entry is checked once (P0 +1).
+#[test]
+fn xu_ifit_return_through_replacement_ordering_has_no_enters_trigger() {
+    let mut scenario = main_phase();
+    let xu = scenario
+        .add_creature_from_oracle(P0, "Xu-Ifit, Osteoharmonist", 2, 3, XU_IFIT)
+        .id();
+    let warden = scenario
+        .add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN)
+        .id();
+    scenario.add_creature_from_oracle(P0, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS_LAGOON_MYSTIC);
+    scenario.add_creature_from_oracle(P1, "Imposing Sovereign", 2, 1, IMPOSING_SOVEREIGN);
+    let dreadnought = add_dreadnought(&mut scenario);
+    let mut runner = scenario.build();
+    assert_eq!(trigger_count(&runner, dreadnought), 1, "parsed ETB trigger");
+    let life_before = runner.life(P0);
+
+    let _ = runner.activate(xu, 0).target_object(dreadnought).resolve();
+    // Reach: the return paused on the ordering before the Dreadnought entered.
+    assert_eq!(runner.state().objects[&dreadnought].zone, Zone::Graveyard);
+    answer_tap_state_ordering(&mut runner, "Imposing Sovereign");
+
+    // The resumed entry completed and the rider applied.
+    assert_eq!(runner.state().objects[&dreadnought].zone, Zone::Battlefield);
+    let types = subtypes(&runner, dreadnought);
+    for expected in ["Skeleton", "Phyrexian", "Dreadnought"] {
+        assert!(types.iter().any(|t| t == expected), "{expected}: {types:?}");
+    }
+    assert_eq!(trigger_count(&runner, dreadnought), 0, "no live triggers");
+    // Only Soul Warden's trigger waits on the stack; none has the Dreadnought as its source.
+    let sources: Vec<_> = runner.state().stack.iter().map(|e| e.source_id).collect();
+    assert_eq!(sources, vec![warden], "stack sources: {sources:?}");
+
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "waiting_for: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty(), "stack must be empty");
+    assert_eq!(
+        runner.life(P0) - life_before,
+        1,
+        "Soul Warden saw the entry"
+    );
+}
+
+/// R8b — CR 603.10 + CR 603.6a + CR 603.2c, a batched observer at the hand-off: Enduring
+/// Innocence ("one or more other creatures you control with power 2 or less") and Wayward
+/// Servant ("another Zombie you control") both check the Grizzly Bears' entry with Rise from
+/// the Grave's "is a black Zombie" effect applied, each once: P0 draws 1, P0 +1, P1 -1.
+#[test]
+fn rise_from_the_grave_entry_is_checked_once_by_a_batched_observer() {
+    let mut scenario = main_phase();
+    scenario
+        .add_creature_from_oracle(P0, "Enduring Innocence", 2, 1, ENDURING_INNOCENCE)
+        .with_subtypes(vec!["Sheep", "Glimmer"]);
+    scenario
+        .add_creature_from_oracle(P0, "Wayward Servant", 2, 2, WAYWARD_SERVANT)
+        .with_subtypes(vec!["Zombie"]);
+    scenario.add_card_to_library_top(P0, "Library Card");
+    let bears = scenario
+        .add_creature_to_graveyard(P1, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let rise = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rise from the Grave", false, RISE_FROM_THE_GRAVE)
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(rise).target_object(bears).resolve();
+
+    // Reach: the Bears entered under P0 as a Zombie.
+    let bears_obj = &outcome.state().objects[&bears];
+    assert_eq!(bears_obj.zone, Zone::Battlefield);
+    assert_eq!(bears_obj.controller, P0);
+    assert!(bears_obj.card_types.subtypes.iter().any(|s| s == "Zombie"));
+
+    assert_eq!(outcome.hand_drawn(P0), 1, "Enduring Innocence");
+    assert_eq!(outcome.life_delta(P0), 1, "Wayward Servant");
+    assert_eq!(outcome.life_delta(P1), -1, "Wayward Servant");
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "waiting_for: {:?}",

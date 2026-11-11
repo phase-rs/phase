@@ -4783,14 +4783,19 @@ pub(crate) fn append_and_collect_logical_zone_trigger_segment(
     group: &mut LogicalZoneChangeGroup,
     events: &[GameEvent],
 ) -> Result<(), String> {
-    append_and_collect_segment_for(state, group, events, EntryOccurrenceCollector::Owner)
+    append_and_collect_logical_zone_trigger_segment_for(
+        state,
+        group,
+        events,
+        EntryOccurrenceCollector::Owner,
+    )
 }
 
 /// Retain every `ZoneChanged` occurrence of one delivery segment on its owner, and collect
 /// ordinary triggers only for the occurrences `collector` leaves with the owner. A handed-off
 /// entry stays retained (outcome bookkeeping and completeness are unchanged) but is checked by
 /// the post-action collector instead (CR 603.10 + CR 611.2e).
-fn append_and_collect_segment_for(
+pub(crate) fn append_and_collect_logical_zone_trigger_segment_for(
     state: &mut GameState,
     group: &mut LogicalZoneChangeGroup,
     events: &[GameEvent],
@@ -4825,6 +4830,34 @@ pub(crate) enum EntryOccurrenceCollector {
     /// A later instruction may still apply an "is/has" effect simultaneously with the entry
     /// (CR 611.2e): the post-action collector checks the entry once that effect exists.
     AfterSimultaneousEntryEffects,
+}
+
+impl EntryOccurrenceCollector {
+    /// CR 603.2c + CR 603.10: the hand-off goes to the post-action collector of the action
+    /// that completes the owner, and that collector checks only this action's events
+    /// (`action_events`). If an entry among `owned_occurrences` was delivered by an earlier
+    /// action of a paused owner, no later collector would check it, so the owner keeps every
+    /// entry. The split is all-or-nothing because the owner's latched batched pass and the
+    /// post-action collector would each see "one or more" of the entries, and a batched
+    /// trigger must trigger only once for the event.
+    pub(crate) fn within_action<'a>(
+        self,
+        owned_occurrences: impl IntoIterator<Item = &'a GameEvent>,
+        action_events: &[GameEvent],
+    ) -> Self {
+        match self {
+            Self::Owner => Self::Owner,
+            Self::AfterSimultaneousEntryEffects => {
+                if owned_occurrences.into_iter().all(|event| {
+                    owner_collects_occurrence(self, event) || action_events.contains(event)
+                }) {
+                    Self::AfterSimultaneousEntryEffects
+                } else {
+                    Self::Owner
+                }
+            }
+        }
+    }
 }
 
 /// CR 603.10 + CR 611.2e: does the logical owner itself check `event`'s ordinary triggers?
@@ -4877,7 +4910,7 @@ pub(crate) fn complete_logical_zone_trigger_collection_for(
     final_events: &mut [GameEvent],
     collector: EntryOccurrenceCollector,
 ) -> Result<(), String> {
-    append_and_collect_segment_for(state, group, final_events, collector)?;
+    append_and_collect_logical_zone_trigger_segment_for(state, group, final_events, collector)?;
     latch_logical_zone_change_group_immediately_after(state, group);
 
     let post_event_members: Vec<_> = group
@@ -4984,10 +5017,30 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority(
     group: &LogicalZoneChangeGroup,
     events: &[GameEvent],
 ) {
+    mark_logical_zone_events_consumed_before_priority_for(
+        state,
+        group,
+        events,
+        EntryOccurrenceCollector::Owner,
+    );
+}
+
+/// `mark_logical_zone_events_consumed_before_priority` restricted to the occurrences
+/// `collector` left with the owner. A handed-off entry stays unclaimed, so the post-action
+/// collector checks it once the resolution's simultaneous "is/has" effects exist
+/// (CR 603.2c + CR 603.10 + CR 611.2e).
+pub(crate) fn mark_logical_zone_events_consumed_before_priority_for(
+    state: &mut GameState,
+    group: &LogicalZoneChangeGroup,
+    events: &[GameEvent],
+    collector: EntryOccurrenceCollector,
+) {
     let mut unclaimed_owned_zone_events: Vec<_> = group
         .all_origin_occurrences
         .iter()
-        .map(|occurrence| occurrence.event.clone())
+        .map(|occurrence| &occurrence.event)
+        .filter(|event| owner_collects_occurrence(collector, event))
+        .cloned()
         .collect();
     let occurrences = events
         .iter()
@@ -5023,20 +5076,9 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority(
 /// retained occurrences. Batched definitions use the carrier latches below;
 /// they are never rediscovered through the current live trigger surface.
 ///
-/// Production completion reaches settlement through
-/// `complete_logical_zone_trigger_collection_for`; this `Owner` entry point serves the unit
-/// tests that drive settlement directly.
-#[cfg(test)]
-pub(crate) fn collect_logical_zone_trigger_settlement(
-    state: &mut GameState,
-    group: &LogicalZoneChangeGroup,
-) -> Result<Vec<PendingTriggerContext>, String> {
-    collect_logical_zone_trigger_settlement_for(state, group, EntryOccurrenceCollector::Owner)
-}
-
-/// `collect_logical_zone_trigger_settlement` restricted to the occurrences `collector` leaves
-/// with the owner (CR 603.10 + CR 611.2e): a handed-off entry is neither replayed to the
-/// members nor offered to the latched batched pass.
+/// Settlement covers only the occurrences `collector` leaves with the owner (CR 603.10 +
+/// CR 611.2e): a handed-off entry is neither replayed to the members nor offered to the
+/// latched batched pass.
 fn collect_logical_zone_trigger_settlement_for(
     state: &mut GameState,
     group: &LogicalZoneChangeGroup,
@@ -20612,8 +20654,12 @@ pub mod tests {
             "the unchanged grant coalesces into its existing exact-ref latch"
         );
 
-        let settled = collect_logical_zone_trigger_settlement(&mut state, &group)
-            .expect("the coalesced grant settles from its retained all-origin events");
+        let settled = collect_logical_zone_trigger_settlement_for(
+            &mut state,
+            &group,
+            EntryOccurrenceCollector::Owner,
+        )
+        .expect("the coalesced grant settles from its retained all-origin events");
         assert_eq!(settled.len(), 1, "one unchanged ref produces one context");
         assert_eq!(
             settled[0].pending.ability.trigger_definition_ref.as_ref(),
@@ -20720,8 +20766,12 @@ pub mod tests {
             "final-layer discovery does not rediscover the removed grant"
         );
 
-        let settled = collect_logical_zone_trigger_settlement(&mut state, &group)
-            .expect("the removed pre-event grant remains resolvable");
+        let settled = collect_logical_zone_trigger_settlement_for(
+            &mut state,
+            &group,
+            EntryOccurrenceCollector::Owner,
+        )
+        .expect("the removed pre-event grant remains resolvable");
         assert_eq!(
             settled.len(),
             1,
@@ -51155,8 +51205,12 @@ pub mod tests {
             .expect("retain the observer's own occurrence");
         latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
 
-        let settled = collect_logical_zone_trigger_settlement(&mut state, &group)
-            .expect("complete departure contexts settle");
+        let settled = collect_logical_zone_trigger_settlement_for(
+            &mut state,
+            &group,
+            EntryOccurrenceCollector::Owner,
+        )
+        .expect("complete departure contexts settle");
         assert_eq!(
             settled
                 .iter()
@@ -51232,8 +51286,12 @@ pub mod tests {
             .expect("retain the observer's own occurrence");
         latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
 
-        let settled = collect_logical_zone_trigger_settlement(&mut state, &group)
-            .expect("complete departure contexts settle");
+        let settled = collect_logical_zone_trigger_settlement_for(
+            &mut state,
+            &group,
+            EntryOccurrenceCollector::Owner,
+        )
+        .expect("complete departure contexts settle");
         assert_eq!(
             settled
                 .iter()
@@ -51315,11 +51373,15 @@ pub mod tests {
         }
         latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
 
-        let settled: Vec<_> = collect_logical_zone_trigger_settlement(&mut state, &group)
-            .expect("batched latches settle")
-            .into_iter()
-            .filter(|context| context.pending.source_id == observer)
-            .collect();
+        let settled: Vec<_> = collect_logical_zone_trigger_settlement_for(
+            &mut state,
+            &group,
+            EntryOccurrenceCollector::Owner,
+        )
+        .expect("batched latches settle")
+        .into_iter()
+        .filter(|context| context.pending.source_id == observer)
+        .collect();
         (state, settled, observer, leader_ref)
     }
 
@@ -51388,8 +51450,12 @@ pub mod tests {
             .expect("retain second all-origin occurrence");
         latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
 
-        let settled = collect_logical_zone_trigger_settlement(&mut state, &group)
-            .expect("batched latches settle");
+        let settled = collect_logical_zone_trigger_settlement_for(
+            &mut state,
+            &group,
+            EntryOccurrenceCollector::Owner,
+        )
+        .expect("batched latches settle");
         assert_eq!(
             settled.len(),
             1,
@@ -51434,7 +51500,12 @@ pub mod tests {
             "a new incarnation cannot satisfy the original member's post-event authority"
         );
         assert!(
-            collect_logical_zone_trigger_settlement(&mut state, &group).is_err(),
+            collect_logical_zone_trigger_settlement_for(
+                &mut state,
+                &group,
+                EntryOccurrenceCollector::Owner
+            )
+            .is_err(),
             "settlement fails closed without an exact post-event context"
         );
     }

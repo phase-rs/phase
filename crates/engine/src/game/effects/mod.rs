@@ -2574,6 +2574,27 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             enter_attached_to,
             effect_kind,
         } = pending;
+        // CR 603.10 + CR 603.6a + CR 611.2e: a parked later "is/has" instruction of this
+        // resolution may still apply with the resumed entries, so they are checked once that
+        // effect exists. CR 603.2c: the hand-off goes to the collector of the action that
+        // completes this owner. A resume with members still to deliver may pause again, so it
+        // keeps its entries, as does an owner holding an entry delivered by an earlier action.
+        let collector = if remaining.is_empty() {
+            crate::game::effects::entry_occurrence_collector(state, None).within_action(
+                logical_zone_change_group
+                    .all_origin_occurrences
+                    .iter()
+                    .map(|occurrence| &occurrence.event)
+                    .chain(
+                        paused_current
+                            .iter()
+                            .flat_map(|paused| paused.delivery_events.iter()),
+                    ),
+                events,
+            )
+        } else {
+            crate::game::triggers::EntryOccurrenceCollector::Owner
+        };
         // CR 608.2c: the object that paused this iteration on a replacement
         // choice was delivered out-of-band by the replacement resume, not by
         // `remaining`. Count only its explicitly captured delivery slice; a
@@ -2583,10 +2604,11 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 paused_current.count,
                 crate::types::game_state::PausedZoneChangeDeliveryCount::NeedsCount
             ) {
-                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                crate::game::triggers::append_and_collect_logical_zone_trigger_segment_for(
                     state,
                     &mut logical_zone_change_group,
                     &paused_current.delivery_events,
+                    collector,
                 )
                 .expect("replacement-resumed ChangeZone delivery retains its exact segment");
             }
@@ -2802,10 +2824,11 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 }
             }
         }
-        crate::game::triggers::complete_logical_zone_trigger_collection(
+        crate::game::triggers::complete_logical_zone_trigger_collection_for(
             state,
             &mut logical_zone_change_group,
             &mut events[events_before_drain..],
+            collector,
         )
         .expect("completed resumed ChangeZone owns every terminal member outcome");
         if let Some((occurrence_id, result_id)) = pending_return_result_producer {
@@ -2826,13 +2849,15 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             events,
         );
         // The completed logical owner already collected these exact zone-change
-        // occurrences. Claim every occurrence from this action that belongs to
-        // the owner, including the resumed delivery emitted before this drain,
+        // occurrences. Claim every occurrence from this action that the owner
+        // collected, including the resumed delivery emitted before this drain,
         // so a replacement choice returning to Priority cannot scan it again.
-        crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
+        // A handed-off entry stays unclaimed for the post-action collector.
+        crate::game::triggers::mark_logical_zone_events_consumed_before_priority_for(
             state,
             &logical_zone_change_group,
             events,
+            collector,
         );
         // CR 614.13a: the resumed mass/targeted co-entry finished without pausing —
         // the whole ChangeZone entry event is complete, so clear the pre-entry

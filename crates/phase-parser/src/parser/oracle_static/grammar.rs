@@ -1273,7 +1273,7 @@ pub(crate) enum LossMember {
 /// never appear contiguously in the Oxford-comma form, so whole-phrase `tag()`
 /// arms would be dead code. None of the four tags share a prefix, so `alt`
 /// ordering carries no hazard. "has/have no abilities" (Xu-Ifit, Osteoharmonist)
-/// is the "has" form of the same ability removal and yields [Abilities].
+/// is the "has" form of the same ability removal and yields `LossMember::Abilities`.
 pub(crate) fn parse_loss_enumeration(input: &str) -> OracleResult<'_, Vec<LossMember>> {
     alt((
         preceded(

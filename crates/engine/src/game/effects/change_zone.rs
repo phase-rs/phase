@@ -1692,8 +1692,8 @@ pub fn resolve(
     // drain, which owns the trailing `EffectResolved`.)
     state.last_effect_count = Some(moved_count);
 
-    // CR 603.10 + CR 611.2e: a later "is/has" instruction of this resolution applies with this
-    // entry; its triggers are checked once that effect exists.
+    // CR 603.10 + CR 611.2e: when a later "is/has" instruction of this resolution may still apply
+    // with this entry, its triggers are checked once that effect exists; otherwise the owner checks them now.
     let collector =
         crate::game::effects::entry_occurrence_collector(state, ability.sub_ability.as_deref());
     crate::game::triggers::complete_logical_zone_trigger_collection_for(
@@ -3326,8 +3326,8 @@ pub fn resolve_all(
     // then draw that many cards."
     state.last_effect_count = Some(moved_count);
 
-    // CR 603.10 + CR 611.2e: a later "is/has" instruction of this resolution applies with this
-    // entry; its triggers are checked once that effect exists.
+    // CR 603.10 + CR 611.2e: when a later "is/has" instruction of this resolution may still apply
+    // with this entry, its triggers are checked once that effect exists; otherwise the owner checks them now.
     let collector =
         crate::game::effects::entry_occurrence_collector(state, ability.sub_ability.as_deref());
     crate::game::triggers::complete_logical_zone_trigger_collection_for(
