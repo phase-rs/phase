@@ -9596,10 +9596,27 @@ fn park_observer_triggers_if_paused_matching(
     );
     candidates.retain(keep);
     let candidates = paused_observer_trigger_events(state, candidates);
-    let trigger_events = settle_entry_batch_scan(state, candidates);
-    if !trigger_events.is_empty() {
-        collect_triggers_into_deferred(state, &trigger_events);
+    collect_action_end_triggers_into_deferred(state, &candidates);
+}
+
+/// CR 603.2 + CR 603.3b + CR 603.6a: the collect-only seam for a handler that
+/// collects its own slice as its action pauses or settles, instead of leaving
+/// it to the post-action scan. Battlefield entries pass the entry gate first
+/// ([`settle_entry_batch_scan`]); everything else is queued exactly as
+/// [`collect_triggers_into_deferred`] queues it.
+///
+/// Only for collectors that run as the action ends: the gate reads the action's
+/// wait, which is stale or provisional in the middle of a handler.
+pub(crate) fn collect_action_end_triggers_into_deferred(
+    state: &mut GameState,
+    events: &[GameEvent],
+) {
+    if action_has_settled(state) && state.unsettled_entry_batch_events.is_empty() {
+        collect_triggers_into_deferred(state, events);
+        return;
     }
+    let scan = settle_entry_batch_scan(state, events.to_vec());
+    collect_triggers_into_deferred(state, &scan);
 }
 
 /// CR 603.6a: the ledger identity of a battlefield-entry occurrence. The row
@@ -9665,9 +9682,10 @@ fn battlefield_entry_is_observed(state: &GameState, event: &GameEvent) -> bool {
 /// matches the whole event in one scan against the completed state, so batched
 /// ("one or more", CR 603.2c) definitions and firing limits see it once.
 ///
-/// Every collector that can be handed an entry of an unsettled action routes
-/// through here: the post-action scan and both paused-observer helpers. Entries
-/// a logical zone-change owner still retains stay with that owner.
+/// Every collector that runs as an action pauses or settles routes through
+/// here: the post-action scan, and [`collect_action_end_triggers_into_deferred`]
+/// for the paused-observer helpers and the resolution-choice answers. Entries a
+/// logical zone-change owner still retains stay with that owner.
 pub(crate) fn settle_entry_batch_scan(
     state: &mut GameState,
     candidates: Vec<GameEvent>,
@@ -9785,10 +9803,7 @@ pub(crate) fn collect_and_drain_observer_triggers_if_settled(
         &state.consumed_before_priority_trigger_events,
     );
     let candidates = paused_observer_trigger_events(state, candidates);
-    let trigger_events = settle_entry_batch_scan(state, candidates);
-    if !trigger_events.is_empty() {
-        collect_triggers_into_deferred(state, &trigger_events);
-    }
+    collect_action_end_triggers_into_deferred(state, &candidates);
     if !state.deferred_triggers.is_empty() {
         let _ = drain_deferred_trigger_queue(state, events);
     }

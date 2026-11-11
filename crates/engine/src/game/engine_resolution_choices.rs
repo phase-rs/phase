@@ -1023,7 +1023,7 @@ fn batch_or_drain_observer_triggers(
         // the parked queue for the pipeline's batch — otherwise the last
         // segment's triggers (e.g. the final Syphon Mind opponent discard) never
         // enter `deferred_triggers` and are lost when ordering runs (issue #1793).
-        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+        super::triggers::collect_action_end_triggers_into_deferred(state, &trigger_events);
         if announced {
             return Some(ResolutionChoiceOutcome::WaitingFor(
                 state.waiting_for.clone(),
@@ -1035,7 +1035,7 @@ fn batch_or_drain_observer_triggers(
     } else {
         // B2: paused — `run_post_action_pipeline` will not scan this action.
         // Park this move's observer triggers for a later settle.
-        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+        super::triggers::collect_action_end_triggers_into_deferred(state, &trigger_events);
         None
     }
 }
@@ -1060,7 +1060,7 @@ pub(crate) fn defer_observer_triggers_for_paused_choice(
             .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
             .collect();
     if !trigger_events.is_empty() {
-        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+        super::triggers::collect_action_end_triggers_into_deferred(state, &trigger_events);
     }
 }
 
@@ -1098,7 +1098,7 @@ fn collect_search_observer_triggers(
         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
         .collect();
     if !trigger_events.is_empty() {
-        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+        super::triggers::collect_action_end_triggers_into_deferred(state, &trigger_events);
     }
     // A search continuation can park another typed resolution frame. Let the
     // shared carrier authority prove that every such frame has drained before
@@ -6659,7 +6659,10 @@ pub(super) fn handle_resolution_choice(
                         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
                         .collect();
                 if !trigger_events.is_empty() {
-                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                    super::triggers::collect_action_end_triggers_into_deferred(
+                        state,
+                        &trigger_events,
+                    );
                 }
             }
 
@@ -6783,7 +6786,10 @@ pub(super) fn handle_resolution_choice(
                     .cloned()
                     .collect();
                 if !trigger_events.is_empty() {
-                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                    super::triggers::collect_action_end_triggers_into_deferred(
+                        state,
+                        &trigger_events,
+                    );
                 }
             }
 
@@ -9194,7 +9200,10 @@ pub(super) fn handle_resolution_choice(
                     .into_iter()
                     .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
                     .collect();
-                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                    super::triggers::collect_action_end_triggers_into_deferred(
+                        state,
+                        &trigger_events,
+                    );
                 }
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             }
@@ -9314,7 +9323,7 @@ pub(super) fn handle_resolution_choice(
                         .into_iter()
                         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
                         .collect();
-                super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                super::triggers::collect_action_end_triggers_into_deferred(state, &trigger_events);
             }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -9404,7 +9413,10 @@ pub(super) fn handle_resolution_choice(
                     .into_iter()
                     .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
                     .collect();
-                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                    super::triggers::collect_action_end_triggers_into_deferred(
+                        state,
+                        &trigger_events,
+                    );
                 }
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             }
@@ -9501,7 +9513,7 @@ pub(super) fn handle_resolution_choice(
                 .into_iter()
                 .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
                 .collect();
-                super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                super::triggers::collect_action_end_triggers_into_deferred(state, &trigger_events);
             }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
