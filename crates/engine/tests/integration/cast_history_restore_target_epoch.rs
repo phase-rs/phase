@@ -1086,6 +1086,75 @@ fn a_latch_stating_a_zone_the_announcement_pin_forbids_is_refused() {
     }
 }
 
+/// CR 601.2c + CR 400.7: the zone check is not optional-by-payload. Dropping the
+/// announcement pins must not turn it off: an ABSENT pin means the save recorded no
+/// departure, so the object is still in the zone it was announced in — which makes a
+/// restated zone a contradiction, not a stale record.
+///
+/// The honest pinless pack is admitted (its stated zone IS the live zone, because nothing
+/// moved the object); the same pack with the zone restated is refused even though the pins
+/// that would have caught it earlier are gone.
+#[test]
+fn a_pinless_latch_still_cannot_state_a_zone_the_object_never_left() {
+    let MidPaymentBoard {
+        runner,
+        spell,
+        heliod,
+        ..
+    } = bolt_announced_at_a_creature_heliod_mid_payment();
+
+    // The honest pinless control: same latch, pins dropped, zone untouched — ADMITTED.
+    {
+        let mut state = runner.state().clone();
+        let parked = state
+            .pending_cast
+            .as_deref_mut()
+            .expect("reach-guard: the ManaPayment prompt owns the cast");
+        parked.ability.target_pins.clear();
+        admitted(persisted_json(&state))
+            .expect("CR 601.2c: an honest latch is admitted even without its pins");
+    }
+
+    // Same pack, pins dropped AND the zone restated — REFUSED.
+    let mut state = runner.state().clone();
+    let parked = state
+        .pending_cast
+        .as_deref_mut()
+        .expect("reach-guard: the ManaPayment prompt owns the cast");
+    parked.ability.target_pins.clear();
+    let latched = parked
+        .committed_target_facts
+        .as_deref_mut()
+        .expect("reach-guard: the engine-written park carries its announced-target latch");
+    let fact = latched
+        .iter_mut()
+        .find(|fact| matches!(fact, ActivationTargetFact::Object { id, .. } if *id == heliod))
+        .expect("reach-guard: the latch names Heliod");
+    let ActivationTargetFact::Object { zone, .. } = fact else {
+        unreachable!("filtered to the object fact above");
+    };
+    *zone = AnnouncedTargetZone::Known(Zone::Graveyard);
+
+    match PersistedGameState::capture(state).into_game_state() {
+        Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+            spell_object_id,
+            reason:
+                AnnouncedTargetFactConflict::ZoneContradictsAnnouncement {
+                    target: TargetRef::Object(target),
+                    pinned,
+                    ..
+                },
+        }) => {
+            assert_eq!(spell_object_id, spell, "the refusal names the cast");
+            assert_eq!(target, heliod, "and the target");
+            assert_eq!(pinned, Zone::Battlefield, "against the zone it never left");
+        }
+        other => panic!(
+            "CR 601.2c + CR 400.7: dropping the pins must not disable the zone check, got {other:?}"
+        ),
+    }
+}
+
 /// CR 601.2d: Printed **Violent Eruption** is "{1}{R}{R}{R} — Violent Eruption
 /// deals 4 damage divided as you choose among any number of targets." (Scryfall,
 /// oracle text verified).

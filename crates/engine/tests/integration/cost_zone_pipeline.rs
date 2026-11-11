@@ -14988,6 +14988,175 @@ fn free_cast_with_tax_delve_commit_installs_single_exile_rider_across_replacemen
     assert_eq!(redirects, 1, "one graveyard redirect per free cast");
 }
 
+/// CR 601.2d + CR 601.2h: the X-DISTRIBUTION park is a prepaid root. X must be known before
+/// the mana is spent, so by the time the cast parks at `WaitingFor::DistributeAmong` the
+/// total cost is already paid — but the park rebuilds the cast with `PendingCast::new`,
+/// which states no amount and no finalization. The enumeration now skips only genuinely
+/// unpaid roots, so this one is admitted and its amount is validated.
+fn x_distribution_park() -> (GameRunner, ObjectId) {
+    const ORACLE: &str =
+        "Delve (Each card you exile from your graveyard while casting this spell pays for {1}.)\n\
+~ deals X damage divided as you choose among any number of targets.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Delve Volley", false, ORACLE)
+        .from_oracle_text_with_keywords(&["Delve"], ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red],
+            generic: 1,
+        })
+        .id();
+    let fuel = scenario.add_spell_to_graveyard(P0, "Delve Fuel", true).id();
+    scenario.with_mana_pool(
+        P0,
+        vec![engine::types::mana::ManaUnit::new(
+            ManaType::Red,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("delve spell reaches mana payment");
+    runner
+        .act(GameAction::ChooseX { value: 0 })
+        .expect("announce X = 0");
+    runner
+        .act(GameAction::TapForConvoke {
+            object_id: fuel,
+            mana_type: ManaType::Colorless,
+        })
+        .expect("fuel is selectable");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("payment reaches the post-payment distribution");
+    (runner, spell)
+}
+
+/// CR 700.14 + CR 601.2d + CR 601.2h: the X-distribution park is validated like every other
+/// prepaid root. It rebuilt the cast with `PendingCast::new`, so it stated neither an amount
+/// nor a finalization and the enumeration skipped it as unpaid — then completing the
+/// distribution read the amount off the spell COPY (`pay_delve_after_distribution` ->
+/// `recorded_mana_spent_to_cast`) and wrote it into `prepaid_actual_mana_spent`, which
+/// `resume_prepaid_spell_finalization` spends on CR 700.14's Expend ledger.
+#[test]
+fn restore_validates_the_x_distribution_park_against_the_journal() {
+    let (runner, spell) = x_distribution_park();
+    let recipient = engine::types::resolved_commands::ManaPaymentRecipient::Object(
+        engine::game::game_object::ObjectIncarnationRefExt::from_object(
+            &runner.state().objects[&spell],
+        ),
+    );
+    let settled_units = runner
+        .state()
+        .resolved_rules_journal
+        .spent_units_for_payer_and_recipient(P0, &recipient)
+        .expect("the journal recorded the caster's spend")
+        .iter()
+        .filter(|unit| !unit.is_convoke_payment())
+        .count();
+    let settled = settled_units as u32;
+
+    // REACH GUARD: this really is the post-payment distribution park.
+    {
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::DistributeAmong { .. }
+            ),
+            "reach-guard: the cast parks on its CR 601.2d distribution, got {:?}",
+            runner.state().waiting_for
+        );
+        let parked = runner
+            .state()
+            .pending_cast
+            .as_deref()
+            .expect("reach-guard: the distribution prompt owns the cast");
+        assert_eq!(
+            parked.prepaid_actual_mana_spent,
+            Some(settled),
+            "reach-guard: the rebuilt park now states the amount the payment settled"
+        );
+        assert_eq!(
+            runner.state().objects[&spell].mana_spent_to_cast_amount,
+            settled,
+            "reach-guard: and the finalizers stamped that same amount on the copy"
+        );
+        assert!(settled > 0, "reach-guard: this cast really spent mana");
+    }
+
+    // (a) The UNTOUCHED control: the honest save restores and completes the distribution.
+    {
+        let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+            .expect("the distribution park serializes");
+        let restored: PersistedGameState =
+            serde_json::from_str(&saved).expect("the distribution park deserializes");
+        let mut resumed = GameRunner::from_state(
+            restored
+                .into_game_state()
+                .expect("CR 601.2h: the untouched distribution park is admitted"),
+        );
+        resumed
+            .act(GameAction::DistributeAmong {
+                distribution: vec![],
+            })
+            .expect("the restored save completes its distribution");
+        assert!(
+            !matches!(
+                resumed.state().waiting_for,
+                WaitingFor::DistributeAmong { .. }
+            ),
+            "reach-guard: the restored save left the distribution prompt behind, got {:?}",
+            resumed.state().waiting_for
+        );
+    }
+
+    // (b) The forged copy: REFUSED. Nothing else in the save states an amount the resume
+    // could corroborate, so the copy is the only witness and it must agree with the journal.
+    let mut state = runner.state().clone();
+    state
+        .objects
+        .get_mut(&spell)
+        .expect("the spell object is in the save")
+        .mana_spent_to_cast_amount = settled + 1;
+    let error = PersistedGameState::capture(state)
+        .into_game_state()
+        .expect_err(
+            "CR 700.14: an X-distribution park whose copy states a payment nobody made must be \
+             refused, or the resume rewrites the cast's expenditure",
+        );
+    match error {
+        engine::types::game_state::PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+            source_id,
+            reason:
+                engine::types::game_state::PrepaidSpellCopyConflict::AmountDisagreesWithSettledSpend {
+                    copy_amount,
+                    settled: reported,
+                    ..
+                },
+        } => {
+            assert_eq!(source_id, spell, "the refusal names the cast it is about");
+            assert_eq!(copy_amount, settled + 1, "and the amount the copy states");
+            assert_eq!(
+                reported, settled_units,
+                "against the units the journal records (CR 118.3a)"
+            );
+        }
+        other => panic!(
+            "CR 601.2d + CR 700.14: the X-distribution park must be validated, got {other:?}"
+        ),
+    }
+}
+
 /// CR 601.2h + CR 616.1: completing a post-payment distribution pays the delve
 /// exile, which parks for competing `Moved` redirects; the choice resumes the commit.
 #[test]
@@ -15300,6 +15469,12 @@ const KAERVEKS_SPITE_SACRIFICE: &str = "As an additional cost to cast this spell
 ///
 /// The hand is otherwise empty, so the commit owes no discard and the parked continuation is
 /// exactly the sacrifice one.
+///
+/// A SINGLE graveyard redirect does NOT pause here: `pay_deferred_spell_sacrifices_at_commit`
+/// only returns `NeedsReplacementChoice` when the sacrifice actually raises a replacement
+/// CHOICE, so one redirect applies silently and the cast parks somewhere else entirely.
+/// Two competing "instead of a graveyard" replacements are what create the CR 616.1
+/// ordering, which is why this board carries Darksteel Colossus beside Rest in Peace.
 fn kaerveks_spite_sacrifice_park() -> (GameRunner, ObjectId) {
     const DARKSTEEL_COLOSSUS: &str = "Trample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)\nIndestructible (Effects that say \"destroy\" don't destroy this creature. A creature with indestructible can't be destroyed by damage.)\nIf Darksteel Colossus would be put into a graveyard from anywhere, reveal Darksteel Colossus and shuffle it into its owner's library instead.";
     const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";

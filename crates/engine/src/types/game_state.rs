@@ -19787,11 +19787,16 @@ impl GameState {
                     },
                 });
             }
-            // CR 601.2c + CR 400.7: bind each object fact's stated ZONE to the announcement
-            // pin recorded for the slot that declared it. A still-current pin proves the
-            // object has not changed zones since CR 601.2c, so the zone it was announced in
-            // is the zone it occupies now — a fact that says otherwise was captured at some
-            // other moment and is not this announcement.
+            // CR 601.2c + CR 400.7: check each object fact's stated ZONE against the
+            // announcement pin recorded for the slot that declared it. A still-current (or
+            // absent) pin means the object has not been recorded as leaving the zone since
+            // CR 601.2c, so the zone it was announced in is the zone it occupies now — a
+            // fact that says otherwise was captured at some other moment and is not this
+            // announcement.
+            //
+            // This is a CONSISTENCY check, not a provenance proof: it cannot show where a
+            // fact came from, only that it does not contradict the record the save still
+            // holds.
             //
             // This is the ONLY announcement-time property a save can still be checked
             // against. The characteristics the fact carries are likewise announcement-time
@@ -19811,12 +19816,15 @@ impl GameState {
                 else {
                     continue;
                 };
-                let Some(pin) = entry.pin.as_ref() else {
-                    continue;
-                };
-                if !pin.is_current(state) {
-                    // CR 400.7: the object left the announced zone since; the latch is the
-                    // only surviving record and owes nothing to the live board.
+                // CR 400.7: a pin that is present AND stale proves the object left the
+                // announced zone since CR 601.2c, so its live zone is not comparable and the
+                // latch is the only surviving record. An ABSENT pin is NOT that case: the
+                // save simply dropped the pin, and skipping on absence made this whole
+                // check optional-by-payload — drop `target_pins` (or null one slot) and a
+                // forged zone publishes freely. Absence therefore falls through to the same
+                // comparison, which an honest pinless save passes (its stated zone IS the
+                // live zone, because nothing moved it) and a forged one fails.
+                if entry.pin.as_ref().is_some_and(|pin| !pin.is_current(state)) {
                     continue;
                 }
                 let Some(object) = state.objects.get(id) else {

@@ -18696,6 +18696,21 @@ fn finalize_mana_payment_with_resume(
             // ride along here too, or a paid cost that moved a target would be
             // re-read from the moved object.
             pending_resumed.committed_target_facts = pending.committed_target_facts.clone();
+            // CR 601.2h + CR 700.14: the total cost is ALREADY PAID here — X had to be known
+            // before the mana could be spent — but `PendingCast::new` states no amount and
+            // this park copies neither `prepaid_actual_mana_spent` nor
+            // `prepaid_finalization` onto the rebuilt cast. That made the park look unpaid
+            // to the restore boundary, which then skipped it, and the distribution resume
+            // read the amount off the spell COPY (`pay_delve_after_distribution` ->
+            // `recorded_mana_spent_to_cast`) and wrote it into the cast that
+            // `resume_prepaid_spell_finalization` consumes for CR 700.14's Expend ledger.
+            // Carrying the amount here makes the park state what it settled, so the
+            // boundary validates it against the journal instead of trusting the copy.
+            pending_resumed.prepaid_actual_mana_spent = Some(
+                pending
+                    .prepaid_actual_mana_spent
+                    .unwrap_or_else(|| recorded_mana_spent_to_cast(state, pending.object_id)),
+            );
 
             // CR 601.2d: "divided evenly, rounded down" — EvenSplitDamage bypasses
             // interactive distribution. Remainder is intentionally lost per Oracle text.
@@ -19170,6 +19185,21 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             // ride along here too, or a paid cost that moved a target would be
             // re-read from the moved object.
             pending_resumed.committed_target_facts = pending.committed_target_facts.clone();
+            // CR 601.2h + CR 700.14: the total cost is ALREADY PAID here — X had to be known
+            // before the mana could be spent — but `PendingCast::new` states no amount and
+            // this park copies neither `prepaid_actual_mana_spent` nor
+            // `prepaid_finalization` onto the rebuilt cast. That made the park look unpaid
+            // to the restore boundary, which then skipped it, and the distribution resume
+            // read the amount off the spell COPY (`pay_delve_after_distribution` ->
+            // `recorded_mana_spent_to_cast`) and wrote it into the cast that
+            // `resume_prepaid_spell_finalization` consumes for CR 700.14's Expend ledger.
+            // Carrying the amount here makes the park state what it settled, so the
+            // boundary validates it against the journal instead of trusting the copy.
+            pending_resumed.prepaid_actual_mana_spent = Some(
+                pending
+                    .prepaid_actual_mana_spent
+                    .unwrap_or_else(|| recorded_mana_spent_to_cast(state, pending.object_id)),
+            );
 
             if unit == DistributionUnit::EvenSplitDamage && !targets.is_empty() {
                 let num = targets.len() as u32;
