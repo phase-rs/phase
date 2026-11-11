@@ -105,6 +105,7 @@ mod emptiness_mana_spent_evoke_5943;
 mod emrakul_control_turn_crash;
 mod end_blaze_epiphany_choose_exiled_this_way;
 mod end_combat_phase;
+mod energy_keyed_per_seat;
 #[cfg(feature = "proptest")]
 mod engine_invariants;
 mod enlightened_tutor_regression;

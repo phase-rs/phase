@@ -4,8 +4,8 @@ use engine::analysis::decision_template::{IterationCount, PinnedDecision, Replay
 use engine::analysis::loop_check::{LoopCertificate, ShortcutResponse, WinKind};
 use engine::analysis::loop_states_equal_modulo_resources;
 use engine::analysis::resource::{
-    history_covers_for_tests, FodderCoverRefusal, ObjectGrowthVerdict, RecurrenceCover,
-    ResourceAxis,
+    history_covers_for_tests, FodderCoverRefusal, ObjectGrowthVerdict, PeriodSignature,
+    RecurrenceCover, ResourceAxis,
 };
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
@@ -7631,7 +7631,8 @@ fn a_take_of_nineteen_at_nineteen_life_ends_the_game_where_the_hand_game_does() 
 /// CR 118.3 + CR 122.1 + CR 732.2a: Walking Ballista's "Remove a +1/+1 counter from this
 /// creature: It deals 1 damage to any target." spends counters nothing returns, and Aether Hub's
 /// "{T}, Pay {E}: Add one mana of any color." spends energy; each is offered at the repetitions
-/// its counters or energy pay for, P1's life binding first at 5.
+/// its counters or energy pay for, P1's life binding first at 5. P1's own energy takes no part in
+/// the period of the Hubs P0 taps (CR 107.14).
 #[test]
 fn a_period_spending_its_counters_or_energy_is_offered_at_its_hand_count() {
     assert_counted_offer(
@@ -7654,9 +7655,22 @@ fn a_period_spending_its_counters_or_energy_is_offered_at_its_hand_count() {
     let make = move |mode| {
         let mut hand = assault_hand(hub, (0, 0))(mode);
         hand.runner.state_mut().players[0].energy = 4;
+        hand.runner.state_mut().players[1].energy = 1;
         hand
     };
-    assert_counted_offer("Aether Hub, 4 energy", &make, (2, 2), HandStop::Spent);
+    for offered in assert_counted_offer("Aether Hub, 4 energy", &make, (2, 2), HandStop::Spent) {
+        let WaitingFor::LoopShortcut { certificate, .. } = &offered.waiting_for else {
+            unreachable!("assert_counted_offer returns offers")
+        };
+        let (PeriodSignature::EveryRepetition(period) | PeriodSignature::OneRepetition(period)) =
+            certificate
+                .per_cycle
+                .as_ref()
+                .expect("the offer carries its period");
+        let energy = &period.delta.energy;
+        assert_eq!(energy.keys().copied().collect::<Vec<_>>(), vec![P0]);
+        assert!(energy[&P0] < 0, "{energy:?}");
+    }
 }
 
 /// CR 732.2a: a count stops at the confirmer's cap, which the replay performed, however much

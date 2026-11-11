@@ -223,9 +223,9 @@ pub struct PlayerStatusView {
 /// neither attribution, nor which axes are unbounded, nor whether a collapse is coming.
 ///
 /// `player` is computed by [`attribution_player`] (NOT the raw producing
-/// controller): a payload-keyed axis (`Life(p)`/`DamageDealt(p)`/`LibraryDelta(p)`)
-/// routes to the player it names (the drain/mill victim or the lifegain/self-mill
-/// beneficiary), while aggregate axes route to the loop's controller.
+/// controller): a payload-keyed axis (each one [`payload_seat`] lists) routes to the player
+/// it names (the drain/mill victim, the lifegain/self-mill beneficiary, or the energy
+/// holder), while aggregate axes route to the loop's controller.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnboundedResourceView {
     pub player: PlayerId,
@@ -240,7 +240,7 @@ pub struct UnboundedResourceView {
 ///
 /// `rename_all` so the wire strings ARE the client's family literals — one type, no mirror map.
 /// Pinned against the client's `Record<ResourceAxisTag, UnboundedFamily>` by the
-/// `unbounded-family-tags.json` golden, which carries all 17 axis-tag→family pairs.
+/// `unbounded-family-tags.json` golden, which carries all 18 axis-tag→family pairs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UnboundedFamily {
@@ -441,7 +441,9 @@ pub fn family_of(axis: ResourceAxis) -> UnboundedFamily {
         ResourceAxis::Life(_) => UnboundedFamily::Life,
         ResourceAxis::DamageDealt(_) => UnboundedFamily::Damage,
         ResourceAxis::LibraryDelta(_) => UnboundedFamily::Mill,
-        ResourceAxis::Counter(_, _) | ResourceAxis::Poison(_) => UnboundedFamily::Counters,
+        ResourceAxis::Counter(_, _) | ResourceAxis::Poison(_) | ResourceAxis::Energy(_) => {
+            UnboundedFamily::Counters
+        }
         ResourceAxis::TokensCreated => UnboundedFamily::Tokens,
         ResourceAxis::CardsDrawn => UnboundedFamily::Cards,
         ResourceAxis::Casts => UnboundedFamily::Casts,
@@ -2412,6 +2414,8 @@ fn accepted_collapse_axes(state: &GameState, controller: PlayerId) -> BTreeSet<R
 ///   empty-draw loss and a self-mill the controller's own; the seat follows `p`.
 /// - CR 704.5c: `Poison(p)` — a poison ∞ drives the afflicted player toward the
 ///   10-poison loss, so it belongs to the VICTIM.
+/// - CR 107.14: `Energy(p)` — the reserve is `p`'s own, so it badges on its holder `p`, not on
+///   a victim.
 ///
 /// Every aggregate axis carries no victim `PlayerId` and therefore no seat.
 pub(crate) fn payload_seat(axis: ResourceAxis) -> Option<PlayerId> {
@@ -2419,7 +2423,8 @@ pub(crate) fn payload_seat(axis: ResourceAxis) -> Option<PlayerId> {
         ResourceAxis::Life(p)
         | ResourceAxis::DamageDealt(p)
         | ResourceAxis::LibraryDelta(p)
-        | ResourceAxis::Poison(p) => Some(p),
+        | ResourceAxis::Poison(p)
+        | ResourceAxis::Energy(p) => Some(p),
         ResourceAxis::Mana(_)
         | ResourceAxis::Counter(_, _)
         | ResourceAxis::Trigger(_)
@@ -2546,6 +2551,7 @@ fn object_growth_backing(
         | ResourceAxis::DamageDealt(_)
         | ResourceAxis::LibraryDelta(_)
         | ResourceAxis::Poison(_)
+        | ResourceAxis::Energy(_)
         | ResourceAxis::Trigger(_)
         | ResourceAxis::CardsDrawn
         | ResourceAxis::Casts
@@ -7607,6 +7613,7 @@ mod tests {
         assert_eq!(attribution_player(ResourceAxis::LibraryDelta(p1), p0), p1);
         // CR 704.5c: a poison ∞ belongs on the afflicted player's HUD, not the controller's.
         assert_eq!(attribution_player(ResourceAxis::Poison(p1), p0), p1);
+        assert_eq!(attribution_player(ResourceAxis::Energy(p1), p0), p1);
 
         // Aggregate axes (no victim PlayerId) attribute to the controller.
         assert_eq!(
@@ -8191,7 +8198,7 @@ mod tests {
 
         // One representative per tag. Payloads are arbitrary because `family_of` is
         // payload-independent by construction, exactly as the client's Record keys on the tag.
-        const AXIS_REPRESENTATIVES: [ResourceAxis; 17] = [
+        const AXIS_REPRESENTATIVES: [ResourceAxis; 18] = [
             ResourceAxis::Mana(ManaType::Colorless),
             ResourceAxis::Life(PlayerId(0)),
             ResourceAxis::DamageDealt(PlayerId(0)),
@@ -8209,6 +8216,7 @@ mod tests {
             ResourceAxis::LtbTriggers,
             ResourceAxis::SacTriggers,
             ResourceAxis::Poison(PlayerId(0)),
+            ResourceAxis::Energy(PlayerId(0)),
         ];
 
         // Tag extraction uses the SAME rule as the client's `axisTag`: externally-tagged serde
@@ -8250,7 +8258,7 @@ mod tests {
 
         assert_eq!(
             table.len(),
-            17,
+            18,
             "one entry per ResourceAxis tag — a duplicate representative silently shrinks this"
         );
         let committed: BTreeMap<String, UnboundedFamily> =

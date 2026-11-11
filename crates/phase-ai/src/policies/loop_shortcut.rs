@@ -336,7 +336,9 @@ fn buys_only_mana_and_combats(
                 | ResourceAxis::EtbTriggers
                 | ResourceAxis::LtbTriggers
                 | ResourceAxis::SacTriggers
-                | ResourceAxis::Poison(_) => false,
+                | ResourceAxis::Poison(_)
+                // CR 107.14: energy stays after the step ends, unlike mana, so a count buys it.
+                | ResourceAxis::Energy(_) => false,
             })
     })
 }
@@ -1951,6 +1953,50 @@ mod tests {
         for action in non_searching_choices(&state) {
             assert_eq!(action, Some(GameAction::DeclineShortcut), "{mode:?}");
         }
+    }
+
+    /// CR 107.14: a period that also gains its proposer energy buys something a count keeps.
+    #[test]
+    fn a_count_that_also_gains_energy_is_not_declined_as_mana_only() {
+        use engine::game::scenario::GameScenario;
+        use engine::game::scenario_db::GameScenarioDbExt;
+        use engine::types::game_state::LoopDetectionMode;
+        use engine::types::phase::Phase;
+
+        let db = integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, 80);
+        let ogre = scenario.add_real_card(P0, "Treasonous Ogre", Zone::Battlefield, &db);
+        scenario.with_library_top(P0, &["Wastes"; 10]);
+        scenario.with_library_top(P1, &["Wastes"; 10]);
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+        let ability = activated_ability(runner.state(), ogre, true);
+        let state = activate_to_offer(runner, ogre, &[ability]);
+        let count = schema_of(&state).iteration_count.clone();
+        assert_eq!(
+            kind_of(&verdict_for(
+                &state,
+                &offered_declare(&state, count.clone())
+            )),
+            "loop_shortcut_declare_buys_only_mana_and_combats"
+        );
+
+        let mut gained = state.clone();
+        let WaitingFor::LoopShortcut { certificate, .. } = &mut gained.waiting_for else {
+            unreachable!("activate_to_offer stands at the offer")
+        };
+        let (PeriodSignature::EveryRepetition(period) | PeriodSignature::OneRepetition(period)) =
+            certificate
+                .per_cycle
+                .as_mut()
+                .expect("the offer carries its period");
+        period.delta.energy.insert(P0, 1);
+        assert_ne!(
+            kind_of(&verdict_for(&gained, &offered_declare(&gained, count))),
+            "loop_shortcut_declare_buys_only_mana_and_combats"
+        );
     }
 
     /// CR 732.5 + CR 104.4b: Worldgorger Dragon under Animate Dead loops with P1's Lightning Bolt

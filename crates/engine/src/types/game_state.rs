@@ -20268,7 +20268,10 @@ impl LoopCollapseAxis {
             | ResourceAxis::EtbTriggers
             | ResourceAxis::LtbTriggers
             | ResourceAxis::SacTriggers
-            | ResourceAxis::Poison(_) => None,
+            | ResourceAxis::Poison(_)
+            // CR 732.2c: a batched `Counters` item grows `(ObjectId, CounterType)` pairs, which
+            // cannot deliver a player's energy, so the take performs the period instead.
+            | ResourceAxis::Energy(_) => None,
         }
     }
 }
@@ -55955,6 +55958,19 @@ mod tests {
             !produced.contains(&ResourceAxis::Mana(ManaType::Colorless)),
             "no batched item can schedule a mana axis — which is why a collapse preserves mana by \
              construction"
+        );
+    }
+
+    /// CR 107.14 + CR 732.2c: a seat's energy has no batched collapse item.
+    #[test]
+    fn a_seats_energy_has_no_batched_collapse_item() {
+        assert_eq!(
+            LoopCollapseAxis::from_resource_axis(ResourceAxis::Energy(PlayerId(0))),
+            None
+        );
+        assert_eq!(
+            LoopCollapseAxis::from_resource_axis(ResourceAxis::TokensCreated),
+            Some(LoopCollapseAxis::Tokens)
         );
     }
 

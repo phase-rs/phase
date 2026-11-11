@@ -586,6 +586,11 @@ pub struct ResourceVector {
     #[serde(with = "map_key_pairs")]
     pub poison: BTreeMap<PlayerId, i64>,
 
+    /// CR 107.14 + CR 122.1: energy counters keyed by the seat holding them — a seat pays {E}
+    /// only from its own reserve. **State-readable.**
+    #[serde(default, with = "map_key_pairs")]
+    pub energy: BTreeMap<PlayerId, i64>,
+
     /// CR 111: tokens created this analysis window. **Event-fed**, and additionally derived
     /// from a board pair by [`ResourceVector::period`] — the per-period producers hold no
     /// event stream, so a snapshot pair alone would report zero on an axis the offer publishes.
@@ -633,8 +638,7 @@ pub struct ResourceVector {
     /// CR 701.21: sacrifice triggers this window. **Event-fed.**
     pub sac_triggers: i64,
 
-    /// CR 122.1: counters by `(kind, object class)`. Includes +1/+1, loyalty,
-    /// and poison (poison/energy are keyed under [`ObjectClass::Player`]).
+    /// CR 122.1: counters on battlefield objects by `(kind, object class)`.
     /// **State-readable.**
     #[serde(with = "map_key_pairs")]
     pub counters: BTreeMap<(CounterClass, ObjectClass), i64>,
@@ -2689,25 +2693,12 @@ impl ResourceVector {
     /// [`Self::generic_triggers`]) are left at their `Default` (zero/empty); the
     /// harness feeds them from the event stream.
     pub fn snapshot(state: &GameState) -> ResourceVector {
-        Self::snapshot_among(state, |_| true, |_| true)
-    }
-
-    /// [`ResourceVector::snapshot`] with the seat-pooled axes summed over the seats `in_game`
-    /// keeps and the battlefield objects `kept` keeps (CR 800.4a).
-    fn snapshot_among(
-        state: &GameState,
-        in_game: impl Fn(PlayerId) -> bool,
-        kept: impl Fn(&GameObject) -> bool,
-    ) -> ResourceVector {
         let mut v = ResourceVector::default();
 
         // CR 106.1: floating mana, summed across every player's pool.
         for player in &state.players {
-            let pooled = in_game(player.id);
-            if pooled {
-                for (i, color) in MANA_INDEX.iter().enumerate() {
-                    v.mana[i] += player.mana_pool.count_color(*color) as i64;
-                }
+            for (i, color) in MANA_INDEX.iter().enumerate() {
+                v.mana[i] += player.mana_pool.count_color(*color) as i64;
             }
             // CR 119.1: per-player life.
             v.life.insert(player.id, player.life as i64);
@@ -2717,19 +2708,14 @@ impl ResourceVector {
             // CR 704.5c: poison counters, keyed by the VICTIM's `PlayerId` (10 ⇒ that
             // player loses) — mirrors the per-player `life`/`library_delta` maps above.
             v.poison.insert(player.id, player.poison_counters as i64);
-            // CR 122.1: energy reserve.
-            if pooled && player.energy > 0 {
-                v.counters.insert(
-                    (CounterClass::Energy, ObjectClass::Player),
-                    player.energy as i64,
-                );
-            }
+            // CR 107.14: each seat's own energy reserve.
+            v.energy.insert(player.id, player.energy as i64);
         }
 
         // CR 122.1: counters on battlefield objects, keyed by counter kind and
         // the bearer's object class.
         for id in &state.battlefield {
-            let Some(object) = state.objects.get(id).filter(|object| kept(object)) else {
+            let Some(object) = state.objects.get(id) else {
                 continue;
             };
             let class = object_class(object.card_types.core_types.as_slice());
@@ -2782,6 +2768,7 @@ impl ResourceVector {
             damage_dealt: map_delta(&before.damage_dealt, &after.damage_dealt),
             library_delta: map_delta(&before.library_delta, &after.library_delta),
             poison: map_delta(&before.poison, &after.poison),
+            energy: map_delta(&before.energy, &after.energy),
             tokens_created: after.tokens_created - before.tokens_created,
             cards_drawn: after.cards_drawn - before.cards_drawn,
             casts_this_step: after.casts_this_step - before.casts_this_step,
@@ -2828,6 +2815,7 @@ impl ResourceVector {
             damage_dealt: sum(&self.damage_dealt, &step.damage_dealt, times),
             library_delta: sum(&self.library_delta, &step.library_delta, times),
             poison: sum(&self.poison, &step.poison, times),
+            energy: sum(&self.energy, &step.energy, times),
             tokens_created: self
                 .tokens_created
                 .saturating_add(step.tokens_created.saturating_mul(times)),
@@ -2876,30 +2864,10 @@ impl ResourceVector {
     /// created and destroyed inside the period is not counted — an under-report, which
     /// understates the preview and leaves the conformance comparison symmetric.
     pub(crate) fn period(before: &GameState, after: &GameState) -> ResourceVector {
-        Self::period_among(before, after, |_| true)
-    }
-
-    /// CR 800.4a: [`ResourceVector::period`] measured over the seats `in_game` keeps, so a
-    /// repetition a seat departs on is compared without what that departure removed.
-    pub(crate) fn period_among(
-        before: &GameState,
-        after: &GameState,
-        in_game: impl Fn(PlayerId) -> bool + Copy,
-    ) -> ResourceVector {
-        // CR 800.4a: an object leaves the comparison iff the departure took it off the
-        // battlefield — its owner left, or a departed seat still controlled it once the control
-        // effects giving it that control ended (it was exiled); a reverted object stays.
-        let kept = |object: &GameObject| {
-            in_game(object.owner)
-                && (in_game(object.controller) || after.battlefield.contains(&object.id))
-        };
-        let mut v = Self::delta(
-            &Self::snapshot_among(before, in_game, kept),
-            &Self::snapshot_among(after, in_game, kept),
-        );
+        let mut v = Self::delta(&Self::snapshot(before), &Self::snapshot(after));
         v.tokens_created = crate::game::engine::minted_battlefield_ids(before, after)
             .into_iter()
-            .filter(|id| after.objects.get(id).is_some_and(|o| o.is_token && kept(o)))
+            .filter(|id| after.objects.get(id).is_some_and(|o| o.is_token))
             .count() as i64;
         v
     }
@@ -2954,6 +2922,7 @@ impl ResourceVector {
         // CR 704.5c: poison is a Gained axis (monotone rising toward the 10-loss), so a
         // poison-pumping loop stays net-progress.
         let poison = self.poison.values().map(|&n| (Component::Gained, n));
+        let energy = self.energy.values().map(|&n| (Component::Gained, n));
         let counters = self.counters.values().map(|&n| (Component::Gained, n));
         let triggers = self
             .generic_triggers
@@ -2978,6 +2947,7 @@ impl ResourceVector {
             .chain(library)
             .chain(damage)
             .chain(poison)
+            .chain(energy)
             .chain(counters)
             .chain(triggers)
             .chain(scalars)
@@ -3029,7 +2999,8 @@ impl ResourceVector {
     /// term — the victim's NEGATIVE `life` — is invisible through it. `game::interaction`'s
     /// CR 732.2a shortcut preview states what a repetition COSTS and would otherwise show a
     /// lethal drain as producing nothing. Order is fixed (mana, life, damage, library, poison,
-    /// counters, triggers, then the scalar axes) over `BTreeMap`s, so the result is deterministic.
+    /// energy, counters, triggers, then the scalar axes) over `BTreeMap`s, so the result is
+    /// deterministic.
     pub fn axis_components(&self) -> Vec<(ResourceAxis, i64)> {
         let mut out = Vec::new();
         for (i, &n) in self.mana.iter().enumerate() {
@@ -3055,6 +3026,11 @@ impl ResourceVector {
         for (pid, &n) in &self.poison {
             if n != 0 {
                 out.push((ResourceAxis::Poison(*pid), n));
+            }
+        }
+        for (pid, &n) in &self.energy {
+            if n != 0 {
+                out.push((ResourceAxis::Energy(*pid), n));
             }
         }
         for (&key, &n) in &self.counters {
@@ -3615,6 +3591,8 @@ pub enum ResourceAxis {
     /// CR 704.5c: poison counters on a player (10 ⇒ that player loses). Appended at
     /// the END to keep the derived `Ord` discriminant of every earlier variant stable.
     Poison(PlayerId),
+    /// CR 107.14 + CR 122.1: energy counters on a player. Appended last, as `Poison` was.
+    Energy(PlayerId),
 }
 
 /// CR 732.2a + CR 732.1b: what an `∞` mark on ONE [`ResourceAxis`] MEANS, and therefore WHO is
@@ -3697,7 +3675,8 @@ impl ResourceAxis {
             | ResourceAxis::EtbTriggers
             | ResourceAxis::LtbTriggers
             | ResourceAxis::SacTriggers
-            | ResourceAxis::Poison(_) => UnboundedMarkKind::DeferredAccrual,
+            | ResourceAxis::Poison(_)
+            | ResourceAxis::Energy(_) => UnboundedMarkKind::DeferredAccrual,
         }
     }
 }
@@ -10767,118 +10746,28 @@ mod tests {
         );
     }
 
-    fn plus_one_total(v: &ResourceVector) -> i64 {
-        v.counters
-            .iter()
-            .filter(|((class, _), _)| *class == CounterClass::Plus1Plus1)
-            .map(|(_, n)| *n)
-            .sum()
+    /// CR 107.14 + CR 732.2a: a repeated period spends its seat's energy once per repetition.
+    #[test]
+    fn advanced_by_sums_each_seats_energy() {
+        let step = ResourceVector {
+            energy: BTreeMap::from([(PlayerId(0), -2)]),
+            ..ResourceVector::default()
+        };
+        assert_eq!(
+            ResourceVector::default().advanced_by(&step, 3).energy,
+            BTreeMap::from([(PlayerId(0), -6)])
+        );
     }
 
-    /// CR 800.4a: a seat's departure takes its counters with it, so the scoped period drops
-    /// them and keeps a surviving seat's.
+    /// CR 107.14: energy is a gained resource, so a period that only gains energy progresses.
     #[test]
-    fn period_among_drops_a_departed_seats_objects() {
-        let mut before = GameState::new_two_player(7);
-        let kept = battlefield_creature(&mut before, 500, 0);
-        let gone = battlefield_creature(&mut before, 501, 1);
-        before
-            .objects
-            .get_mut(&gone)
-            .unwrap()
-            .counters
-            .insert(CounterType::Plus1Plus1, 1);
-        let mut after = before.clone();
-        after
-            .objects
-            .get_mut(&kept)
-            .unwrap()
-            .counters
-            .insert(CounterType::Plus1Plus1, 1);
-        after.battlefield.retain(|id| *id != gone);
-        let full = ResourceVector::period(&before, &after);
-        let scoped = ResourceVector::period_among(&before, &after, |seat| seat != PlayerId(1));
-        assert_eq!(plus_one_total(&full), 0);
-        assert_eq!(plus_one_total(&scoped), 1);
-    }
-
-    /// CR 800.4a, through the real `eliminate_player`: a survivor's object the leaver stole
-    /// reverts and stays, and a survivor's object that entered under the leaver is exiled, so
-    /// neither moves the scoped +1/+1 total.
-    #[test]
-    fn period_among_follows_the_departures_own_order() {
-        use crate::types::ability::{ContinuousModification, Duration, TargetFilter};
-        let depart = |before: &GameState| {
-            let mut after = before.clone();
-            crate::game::elimination::eliminate_player(&mut after, PlayerId(1), &mut Vec::new());
-            after
+    fn an_energy_gain_alone_is_net_progress() {
+        let gained = ResourceVector {
+            energy: BTreeMap::from([(PlayerId(0), 1)]),
+            ..ResourceVector::default()
         };
-        let survivor_object = |state: &mut GameState, name: &str| {
-            let id = crate::game::zones::create_object(
-                state,
-                CardId(1),
-                PlayerId(0),
-                name.to_string(),
-                Zone::Battlefield,
-            );
-            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
-            state
-                .objects
-                .get_mut(&id)
-                .unwrap()
-                .counters
-                .insert(CounterType::Plus1Plus1, 1);
-            id
-        };
-        let scoped = |before: &GameState, after: &GameState| {
-            plus_one_total(&ResourceVector::period_among(before, after, |seat| {
-                seat != PlayerId(1)
-            }))
-        };
-
-        let mut stolen = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 7);
-        let id = survivor_object(&mut stolen, "Stolen Bear");
-        stolen.add_transient_continuous_effect(
-            id,
-            PlayerId(1),
-            Duration::Permanent,
-            TargetFilter::SpecificObject { id },
-            vec![ContinuousModification::ChangeController],
-            None,
-        );
-        crate::game::layers::mark_layers_full(&mut stolen);
-        crate::game::layers::evaluate_layers(&mut stolen);
-        assert_eq!(stolen.objects[&id].controller, PlayerId(1));
-        let after = depart(&stolen);
-        assert!(after.battlefield.contains(&id) && after.objects[&id].controller == PlayerId(0));
-        assert_eq!(
-            scoped(&stolen, &after),
-            0,
-            "a reverted object stays on both sides"
-        );
-
-        let mut entered = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 7);
-        let id = survivor_object(&mut entered, "Entered Under P1");
-        crate::game::zones::apply_battlefield_entry_controller_override(
-            &mut entered,
-            &mut Vec::new(),
-            id,
-            PlayerId(1),
-        );
-        crate::game::layers::mark_layers_full(&mut entered);
-        crate::game::layers::evaluate_layers(&mut entered);
-        assert_eq!(entered.objects[&id].controller, PlayerId(1));
-        let after = depart(&entered);
-        assert!(after.exile.contains(&id));
-        assert_eq!(
-            plus_one_total(&ResourceVector::period(&entered, &after)),
-            -1
-        );
-        assert_eq!(
-            scoped(&entered, &after),
-            0,
-            "an exiled object leaves both sides"
-        );
+        assert!(gained.is_net_progress());
+        assert!(!ResourceVector::default().is_net_progress());
     }
 
     /// CR 122.1c: a CONSUMED non-monotone counter (shield, 2 -> 1)
@@ -21113,6 +21002,10 @@ mod tests {
             (
                 ResourceAxis::Poison(p0),
                 "CR 704.5c; unreachable at this producer today, classified for correctness",
+            ),
+            (
+                ResourceAxis::Energy(p0),
+                "CR 107.14 + CR 732.2c: the collapse delivers it",
             ),
         ] {
             assert_eq!(

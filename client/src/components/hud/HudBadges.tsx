@@ -605,6 +605,7 @@ export const UNBOUNDED_FAMILY_FOR_TEST: Record<ResourceAxisTag, UnboundedFamily>
   LtbTriggers: "triggers",
   SacTriggers: "triggers",
   Poison: "counters",
+  Energy: "counters",
 };
 
 /** Map an engine-provided `ResourceAxis` to its display family. No STATE surface uses this — the

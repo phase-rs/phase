@@ -333,7 +333,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
 
     assert_eq!(
         (production.len(), in_test.len()),
-        (28, 22),
+        (28, 23),
         "CR 732.2a OFFER-WRITER SURFACE CHANGED (not re-measured — this number is an \
          INVARIANCE pin over the whole 5d U-series).\n\
          The two CERTIFICATION-PATH writers are `reconcile_loop_shortcut` (the recorded road's \

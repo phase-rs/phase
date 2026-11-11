@@ -161,6 +161,8 @@ impl From<&ResourceAxis> for AxisKey {
             ResourceAxis::SacTriggers => AxisKey::Sac,
             // CR 704.5c: the per-victim poison axis has one aggregate key.
             ResourceAxis::Poison(_) => AxisKey::Counter(CounterClass::Poison, ObjectClass::Player),
+            // CR 107.14: likewise the per-seat energy axis.
+            ResourceAxis::Energy(_) => AxisKey::Counter(CounterClass::Energy, ObjectClass::Player),
         }
     }
 }
@@ -4153,6 +4155,19 @@ mod tests {
         assert_eq!(
             trigger_axis(&TriggerDefinition::new(TriggerMode::LifeLost)),
             Some(AxisKey::Life)
+        );
+    }
+
+    /// CR 107.14: Engine B's seat-free graph key reads every seat's energy axis as the one
+    /// player-energy counter key its own nets accumulate.
+    #[test]
+    fn a_seats_energy_axis_keys_as_the_player_energy_counter() {
+        assert_eq!(
+            AxisKey::from(&ResourceAxis::Energy(PlayerId(3))),
+            AxisKey::from(&ResourceAxis::Counter(
+                CounterClass::Energy,
+                ObjectClass::Player
+            ))
         );
     }
 }
