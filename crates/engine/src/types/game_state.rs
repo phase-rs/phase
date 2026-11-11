@@ -42121,20 +42121,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         lki_copiable_values: _,
         lki_by_incarnation: _,
         lki_copiable_values_by_incarnation: _,
-        // CR 111.1 + CR 104.4b: EXCLUDED from `impl PartialEq for GameState`, though
-        // the historical captures they twin are compared. The combo corpus cannot be
-        // certified with them compared: `HistoryMember::LastKnownRecords`
-        // (`analysis/resource.rs`) equalizes `lki_cache` and `lki_copiable_values`
-        // between two positions before comparing, and knows neither of these, so
-        // comparing them refuses every fodder loop
-        // (`analysis::corpus_tests::drive_combo_61_kitten_firesinger`). Registering
-        // both members in that enumeration is the follow-up that lets them be
-        // compared; this change does not own that file.
-        //
-        // Nothing rules-material is lost meanwhile: the bit is a projection of state
-        // that IS compared — the departing object's characteristics, its merged
-        // composition (CR 730.2d), and the zone change that wrote the snapshot it
-        // sits beside.
+        // CR 111.1 + CR 104.4b + CR 608.2h: COMPARED, like the historical captures
+        // they twin. Each bit is written by the same departure, under the same id and
+        // epoch keys, as the last-known record it shadows, so
+        // `HistoryMember::LastKnownRecords` (`analysis/resource.rs`) equalizes it with
+        // that record before comparing and judges what the period added; a bit either
+        // frame states differently refuses, because a token that left is not
+        // interchangeable with a non-token that left (CR 111.8).
         departure_token_cache: _,
         departure_token_by_incarnation: _,
         // CR 106.3 + CR 106.4 + CR 400.7: COMPARED, like the incarnation-keyed
@@ -42525,6 +42518,8 @@ impl PartialEq for GameState {
             && self.lki_by_incarnation == other.lki_by_incarnation
             && self.lki_copiable_values_by_incarnation
                 == other.lki_copiable_values_by_incarnation
+            && self.departure_token_cache == other.departure_token_cache
+            && self.departure_token_by_incarnation == other.departure_token_by_incarnation
             && self.pooled_mana_producer_snapshots == other.pooled_mana_producer_snapshots
             && self.departed_stack_spells == other.departed_stack_spells
             && self.departed_activated_abilities == other.departed_activated_abilities
@@ -53277,27 +53272,20 @@ mod tests {
         );
     }
 
-    /// CR 104.4b + CR 111.1 + CR 608.2h: the departure token captures are NOT part
-    /// of the loop comparand, and this pins both halves of that decision.
+    /// CR 104.4b + CR 111.1 + CR 608.2h: the departure token captures are part of the
+    /// loop comparand, and this pins both halves of that decision.
     ///
-    /// They have to be excluded while the combo corpus's history-member
-    /// equalization (`analysis/resource.rs`) knows nothing about them: a field it
-    /// cannot equalize refuses every fodder loop, measured as
-    /// `analysis::corpus_tests::drive_combo_61_kitten_firesinger`. The exclusion
-    /// costs nothing rules-material, because the bit is a projection of state that
-    /// IS compared — the departing object's characteristics, its merged composition
-    /// (CR 730.2d), and the zone change that wrote the snapshot beside it.
+    /// The captures CONVERGE across normalization: an unreferenced superseded epoch is
+    /// pruned from both tables, so positions one cycle apart stay equal. And a bit the
+    /// positions state differently DOES distinguish them: each bit is written by the
+    /// same departure as the last-known record it shadows and is the only evidence of
+    /// the epoch it was taken from (CR 111.8), so a token that left is not
+    /// interchangeable with a non-token that left.
     ///
-    /// The first half also checks the captures CONVERGE across normalization: an
-    /// unreferenced superseded epoch is pruned from both tables, so positions one
-    /// cycle apart stay equal. The second half shows the exclusion itself — a
-    /// flipped bit does not distinguish two positions, while each still carries its
-    /// own bit.
-    ///
-    /// Revert-probe: putting either field back into `impl PartialEq` makes the
-    /// second assertion fail.
+    /// Revert-probe: taking either field back out of `impl PartialEq` makes the second
+    /// assertion fail.
     #[test]
-    fn normalize_for_loop_keeps_token_departure_pairs_out_of_the_comparand() {
+    fn normalize_for_loop_compares_a_departure_token_bit_but_prunes_a_superseded_epoch() {
         fn departed_state(superseded: Option<u64>, bit: bool) -> (GameState, ObjectId) {
             let mut state = GameState::new_two_player(7);
             let member = create_object(
@@ -53373,16 +53361,16 @@ mod tests {
 
         let (flipped, _) = departed_state(None, false);
         let normalized_flipped = flipped.normalize_for_loop();
-        assert_eq!(
+        assert_ne!(
             normalized_flipped, na,
-            "the captures are outside the loop comparand (see the doc above)"
+            "a departure token bit either position states differently distinguishes them"
         );
         assert!(
             normalized_flipped
                 .departure_token_cache
                 .contains_key(&member)
                 && !normalized_flipped.departure_token_cache[&member],
-            "reach: the flipped bit is still state, just not comparand"
+            "reach: the flipped bit is still state, and now comparand"
         );
     }
 

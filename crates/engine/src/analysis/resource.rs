@@ -29647,6 +29647,118 @@ mod tests {
         );
     }
 
+    /// One departure both captures carry, at an epoch a tracked set names — so loop
+    /// normalization keeps it (a superseded unreferenced epoch would be pruned) and the
+    /// bit is live state. Both captures state `bit`.
+    fn referenced_departure(bit: bool) -> (GameState, ObjectId) {
+        use crate::game::zones::{create_object, move_to_zone};
+        use crate::types::identifiers::TrackedSetId;
+
+        let mut state = GameState::new_two_player(7);
+        let member = create_object(
+            &mut state,
+            CardId(961),
+            PlayerId(0),
+            "Loop Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&member).unwrap().is_token = true;
+        let mut events = Vec::new();
+        move_to_zone(&mut state, member, Zone::Graveyard, &mut events);
+        let minted = *state.departure_token_by_incarnation[&member]
+            .keys()
+            .next()
+            .expect("one departure, one incarnation");
+        let set_id = TrackedSetId(1);
+        state.chain_tracked_set_id = Some(set_id);
+        state.tracked_object_sets.insert(set_id, vec![member]);
+        state.tracked_set_member_origins.insert(
+            set_id,
+            [(
+                member,
+                TrackedMemberOrigin {
+                    departed_from: Zone::Battlefield,
+                    departure_incarnation: minted,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        *state.departure_token_cache.get_mut(&member).unwrap() = bit;
+        *state
+            .departure_token_by_incarnation
+            .get_mut(&member)
+            .unwrap()
+            .get_mut(&minted)
+            .unwrap() = bit;
+        (state, member)
+    }
+
+    /// CR 111.1 + CR 608.2h + CR 732.2a: with the storage-id capture compared, two
+    /// positions that differ ONLY in a departure token bit certify nothing — the strict
+    /// recurrence refuses them, the history cover cannot equalize the flip, and no cover
+    /// admits the pair. That is the point: a token that left is not interchangeable with
+    /// a non-token that left (CR 111.8).
+    ///
+    /// Revert-probe: taking the capture back out of `impl PartialEq` certifies the pair.
+    #[test]
+    fn a_flipped_departure_token_bit_certifies_no_loop() {
+        use crate::game::zones::create_object;
+
+        let mut prior = GameState::new_two_player(42);
+        let member = create_object(
+            &mut prior,
+            CardId(961),
+            PlayerId(0),
+            "Loop Token".to_string(),
+            Zone::Graveyard,
+        );
+        prior.departure_token_cache.insert(member, true);
+        let mut current = prior.clone();
+        current.departure_token_cache.insert(member, false);
+
+        assert_ne!(prior, current, "reach-guard: the captures are compared");
+        assert!(!loop_states_equal_modulo_resources(&prior, &current));
+        assert!(!history_covers(&prior, &current));
+        assert!(
+            certifying_cover(&prior, &current, PlayerId(0), None).is_none(),
+            "a flipped departure token bit admits no cover"
+        );
+    }
+
+    /// CR 111.1 + CR 608.2h + CR 732.2a: the epoch-keyed capture is compared too. Both
+    /// positions carry the SAME departure, at the epoch its tracked-set origin names, so
+    /// normalization keeps it; they differ only in its bit, and that certifies nothing.
+    ///
+    /// Revert-probe: taking the epoch capture back out of `impl PartialEq` certifies the
+    /// pair.
+    #[test]
+    fn a_flipped_referenced_epoch_token_bit_certifies_no_loop() {
+        let (prior, member) = referenced_departure(true);
+        let (current, current_member) = referenced_departure(false);
+        assert_eq!(
+            member, current_member,
+            "fixture precondition: both positions hold the same departure"
+        );
+        let (prior, current) = (prior.normalize_for_loop(), current.normalize_for_loop());
+        assert!(
+            prior.departure_token_by_incarnation.contains_key(&member),
+            "reach-guard: the referenced epoch survives normalization"
+        );
+        assert!(
+            prior.departure_token_cache[&member] && !current.departure_token_cache[&member],
+            "reach-guard: the two bits differ"
+        );
+
+        assert_ne!(prior, current, "reach-guard: the captures are compared");
+        assert!(!loop_states_equal_modulo_resources(&prior, &current));
+        assert!(!history_covers(&prior, &current));
+        assert!(
+            certifying_cover(&prior, &current, PlayerId(0), None).is_none(),
+            "a flipped referenced epoch token bit admits no cover"
+        );
+    }
+
     /// CR 608.2c: cover compares origins by what they select for member reads,
     /// not by incarnation identity. A re-stamp naming an identical snapshot
     /// (a blink with no characteristic change) stays covered; a changed
