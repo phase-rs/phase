@@ -7301,4 +7301,22 @@ fn one_legal_action_snapshot_bounds_the_window_witness_work() {
         "preflight's window-search work is bounded by the shared budget \
          ({preflight_spent} units for 60 abilities, each allowed 256 alone)"
     );
+
+    // CR 601.2g: the budget belongs to one enumeration. Closing its scope
+    // restores the unscoped state, so a later refresh of the same board is
+    // bounded by a fresh budget of its own — neither starved by the spent one
+    // nor left running unbounded searches.
+    perf_counters::reset();
+    legal_actions_full(runner.state());
+    let counters = perf_counters::window_witness_search_snapshot();
+    let refresh_spent = counters.boards + counters.probes;
+    assert!(
+        refresh_spent >= MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET as u64 / 2,
+        "reach-guard: the refresh ran its own search ({refresh_spent} units), \
+         so the spent budget did not leak into it"
+    );
+    assert!(
+        refresh_spent <= MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET as u64,
+        "the refresh is bounded by one budget too ({refresh_spent} units)"
+    );
 }
