@@ -80280,6 +80280,20 @@ fn bare_choose_controller_subject_chain_keeps_resolution_timing() {
     }
 }
 
+/// SHAPE: a sentence boundary ends the carried player's claim on the next choice
+/// (CR 608.2c): "Target opponent draws a card." does not make the opponent the
+/// chooser of the following sentence's imperative bare choice, which the controller
+/// makes (CR 608.2d). Synthetic chain of Final Showdown's "Choose a creature you
+/// control." The in-sentence comma-then row that does inherit is
+/// `bare_choose_inherited_non_controller_subject_keeps_stack_timing`.
+#[test]
+fn bare_choose_after_sentence_boundary_keeps_resolution_timing() {
+    let text = "Target opponent draws a card. Choose a creature you control.";
+    let (declared, chain) = head_then_choice_timings(text, &target_opponent_head());
+    assert_eq!(declared, Some(TargetChoiceTiming::Resolution), "{text}");
+    assert_eq!(chain, vec![TargetChoiceTiming::Resolution], "{text}");
+}
+
 /// SHAPE: an inherited non-controller subject's object-and-player choice. Unlike the
 /// bare choice above, the base declared Resolution here unconditionally; the
 /// `clause_subject_chooser` gate on this producer applies to printed subjects. This
