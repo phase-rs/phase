@@ -551,37 +551,59 @@ fn drain_copy_token_resolution(
         // Reset before replacements run so prevention publishes nothing, while
         // a substitute creation may still publish the ids this owner adopts.
         state.last_created_token_ids.clear();
-        match crate::game::replacement::replace_event(state, proposed, events) {
-            crate::game::replacement::ReplacementResult::Execute(event) => {
-                // CR 614.1a + CR 608.2c: the frame is taken, so the delivery
-                // authority leaves the ledger as this batch's whole created
-                // referent, appended batches included: own batch first on
-                // completion, `[]` after a batch paused with more of the event
-                // still to deliver (the event publishes to this frame when it
-                // finishes), and the ids so far after its last batch, a copy
-                // batch, paused. `Suppress`: this frame's drain emits the
-                // effect's terminal `EffectResolved{CopyTokenOf}`, so no pause
-                // of the event owes one.
-                let completed = super::token::apply_create_token_after_replacement_with_created_ids(
-                    state,
-                    event,
-                    Vec::new(),
-                    crate::types::game_state::PendingEffectResolutionEvent::Suppress,
-                    events,
-                );
-                if !completed {
-                    pending
-                        .created_ids
-                        .extend(state.last_created_token_ids.clone());
-                    park_copy_token_after_current_batch(state, pending, stack_depth_before_batch);
-                    return;
+        // CR 111.1 + CR 614.12: this frame is off the resolution stack while the batch is
+        // scanned and delivered, so the tokens its earlier batches created (co-entrants of
+        // this one) are published for that window. Every park below runs after the window
+        // closes, so a parked frame is never shadowed by the publication.
+        let delivery = publish_committed_copy_tokens(state, pending.created_ids.clone(), |state| {
+            match crate::game::replacement::replace_event(state, proposed, events) {
+                crate::game::replacement::ReplacementResult::Execute(event) => {
+                    // CR 614.1a + CR 608.2c: the frame is taken, so the delivery
+                    // authority leaves the ledger as this batch's whole created
+                    // referent, appended batches included: own batch first on
+                    // completion, `[]` after a batch paused with more of the event
+                    // still to deliver (the event publishes to this frame when it
+                    // finishes), and the ids so far after its last batch, a copy
+                    // batch, paused. `Suppress`: this frame's drain emits the
+                    // effect's terminal `EffectResolved{CopyTokenOf}`, so no pause
+                    // of the event owes one.
+                    let completed =
+                        super::token::apply_create_token_after_replacement_with_created_ids(
+                            state,
+                            event,
+                            Vec::new(),
+                            crate::types::game_state::PendingEffectResolutionEvent::Suppress,
+                            events,
+                        );
+                    if completed {
+                        CopyBatchDelivery::Completed
+                    } else {
+                        CopyBatchDelivery::Paused
+                    }
                 }
+                crate::game::replacement::ReplacementResult::Prevented => {
+                    CopyBatchDelivery::Prevented
+                }
+                crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+                    CopyBatchDelivery::NeedsChoice(player)
+                }
+            }
+        });
+        match delivery {
+            CopyBatchDelivery::Completed => {
                 pending
                     .created_ids
                     .extend(state.last_created_token_ids.clone());
             }
-            crate::game::replacement::ReplacementResult::Prevented => {}
-            crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+            CopyBatchDelivery::Paused => {
+                pending
+                    .created_ids
+                    .extend(state.last_created_token_ids.clone());
+                park_copy_token_after_current_batch(state, pending, stack_depth_before_batch);
+                return;
+            }
+            CopyBatchDelivery::Prevented => {}
+            CopyBatchDelivery::NeedsChoice(player) => {
                 // CR 614.6 + CR 608.2c: this batch's creation event waits on a replacement
                 // answer. Its tokens are owed to this owner: handed over by the delivery that
                 // creates them, or, when the answer replaces the event with a different
@@ -619,6 +641,69 @@ fn drain_copy_token_resolution(
         source_id: pending.source_id,
         subject: None,
     });
+}
+
+/// What one copy batch's CreateToken event did inside its publication window; the owner is
+/// parked, if at all, after the window closes.
+enum CopyBatchDelivery {
+    Completed,
+    /// A batch member paused; the owner parks below the child stack it raised.
+    Paused,
+    Prevented,
+    /// CR 616.1: the event itself needs a replacement-order choice by this player.
+    NeedsChoice(crate::types::player::PlayerId),
+}
+
+/// CR 111.1 + CR 614.12: run `deliver` with `committed` published as the tokens a copy-token
+/// resolution whose owner frame is off the resolution stack has already created, then restore
+/// the previous publication (a nested resolution can't clobber an outer one). The single
+/// writer of `GameState::active_copy_token_resolution_tokens`; its two windows are the inline
+/// drain (`drain_copy_token_resolution`) and a compound token event's delivery while it
+/// holds the owner (`token::drive_token_event_delivery`).
+pub(crate) fn publish_committed_copy_tokens<R>(
+    state: &mut GameState,
+    committed: Vec<ObjectId>,
+    deliver: impl FnOnce(&mut GameState) -> R,
+) -> R {
+    let outer = state.active_copy_token_resolution_tokens.replace(committed);
+    let delivered = deliver(state);
+    state.active_copy_token_resolution_tokens = outer;
+    delivered
+}
+
+/// CR 614.12 + CR 111.1 (Clone Legion ruling 2015-02-25): the tokens entering in the same
+/// event as `entrant`, which don't yet exist as it enters: the ones its copy-token
+/// resolution already created, plus `batch_prefix`, the ones its own batch (or its compound
+/// event's earlier positions) already created. The resolution's tokens are the published
+/// ones while its owner frame is off the resolution stack, otherwise the innermost parked
+/// `CopyToken` frame's (an outer resolution's frame is never read while one is published).
+/// Deduplicated, in order, without `entrant`.
+pub(crate) fn copy_token_co_entrants(
+    state: &GameState,
+    entrant: ObjectId,
+    batch_prefix: &[ObjectId],
+) -> Vec<ObjectId> {
+    let resolution: &[ObjectId] = match &state.active_copy_token_resolution_tokens {
+        Some(published) => published,
+        None => state
+            .resolution_stack
+            .iter()
+            .filter_map(|frame| match frame {
+                crate::types::resolution::ResolutionFrame::CopyToken(owner) => {
+                    Some(owner.created_ids.as_slice())
+                }
+                _ => None,
+            })
+            .last()
+            .unwrap_or_default(),
+    };
+    let mut co_entrants: Vec<ObjectId> = Vec::new();
+    for id in resolution.iter().chain(batch_prefix) {
+        if *id != entrant && !co_entrants.contains(id) {
+            co_entrants.push(*id);
+        }
+    }
+    co_entrants
 }
 
 /// Park a copy-token owner as the direct paused frame, or below the complete
@@ -810,14 +895,36 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     // path bypasses the ZoneChange replacement pass, so the copied card's
     // intrinsic "enters with counters" replacement is seeded here from its
     // copiable replacement set rather than firing during entry.
-    let etb_counters: Vec<(crate::types::counter::CounterType, u32)> =
-        crate::game::printed_cards::intrinsic_face_counters(copied_loyalty, None)
-            .into_iter()
-            .chain(crate::game::printed_cards::self_etb_counter_replacements(
-                &values.replacement_definitions,
-            ))
-            .chain(enter_with_counters.iter().cloned())
-            .collect();
+    //
+    // The three parts are held apart because only the copied "enters with" abilities are
+    // gated per token (CR 614.12, below): `intrinsic` is the CR 306.5b loyalty ability. It
+    // is an ability and is removable, but it has no `ReplacementDefinition` for
+    // `retains_replacement` to compare, so this seam leaves it ungated. Residual (stated,
+    // red): a token copy that would exist as a creature planeswalker under a creature
+    // remover (Gideon Blackblade copied on its controller's turn; Applied Geometry of a
+    // planeswalker) should enter with no loyalty counters and then go to the graveyard
+    // (CR 704.5i). `enter_with_counters` are the creating effect's own, not an ability of
+    // the token, so they are never gated.
+    let intrinsic = crate::game::printed_cards::intrinsic_face_counters(copied_loyalty, None);
+    let own_entries: Vec<(
+        crate::types::ability::ReplacementDefinition,
+        crate::types::counter::CounterType,
+        u32,
+    )> = crate::game::printed_cards::self_etb_counter_replacement_entries(
+        &values.replacement_definitions,
+    )
+    .map(|(def, counter_type, count)| (def.clone(), counter_type, count))
+    .collect();
+    let etb_counters: Vec<(crate::types::counter::CounterType, u32)> = intrinsic
+        .iter()
+        .cloned()
+        .chain(
+            own_entries
+                .iter()
+                .map(|(_, counter_type, count)| (counter_type.clone(), *count)),
+        )
+        .chain(enter_with_counters.iter().cloned())
+        .collect();
 
     // Liminal choice is loop-invariant; compute once so the terminal drain below
     // can mirror the former continue_liminal_copy_token_batch tail for this path.
@@ -1010,6 +1117,81 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             ObjectIncarnationRef::from_object(token)
         });
 
+        // CR 614.12 + CR 613.1f: realize continuous effects for this entrant
+        // BEFORE discovering its copied payment or its copied counters — an
+        // ability-removing effect (Humility) must suppress a payment the entrant
+        // must not have. Mirrors `finish_copy_target_choice_entry`
+        // (`engine_replacement.rs:2927`).
+        crate::game::layers::mark_layers_full(state);
+        crate::game::layers::flush_layers(state);
+
+        // CR 707.9b/9c + CR 614.12: the entrant as it will exist AFTER the copy
+        // exceptions, not the bare copied body. Both CR 614.12 readings below —
+        // which copied "enters with" counters it keeps, and its CR 303.4f/g host —
+        // read this one body.
+        //
+        // `materialize_token_copy_body` is a documented no-op for
+        // `DeferredToUnjournaledSeam` — on this path the exceptions land later, at
+        // `apply_token_modifications` — so at this point the stored object still
+        // carries the UNMODIFIED copiable values. The liminal seam folds its
+        // exceptions before its own consult, so without this projection the two
+        // copy seams disagree about what the entrant is, and an exception that
+        // adds or removes `Creature` (CR 303.4d), adds or removes the `Aura`
+        // subtype, or changes color (CR 702.16c) flips the CR 303.4f/g verdict.
+        // The failure mode is silent: a token that is never created.
+        //
+        // A PROJECTION rather than an early mutation of the stored object: the
+        // exceptions must still be applied exactly once, by the seam that owns
+        // them and can pause (`AddCounterOnEnter` reaches
+        // `add_counter_with_replacement`), and several arms — `AddPower`,
+        // `GrantAbility`, `GrantTrigger` — are not idempotent under a second pass.
+        let entrant_body = state.objects.get(&token_id).map(|token| {
+            let mut body = token.clone();
+            apply_immediate_copy_token_modifications_to_object(
+                &mut body,
+                &additional_modifications,
+                &all_creature_types,
+            );
+            body
+        });
+
+        // CR 614.12 + CR 613.1f + CR 614.1c + CR 707.9b: a copied "enters with"
+        // ability applies only if the token, as it would exist on the battlefield
+        // (its exceptions folded in, the continuous effects that already exist
+        // applied, the tokens entering with it absent), still has it. An ability
+        // remover that would apply to it (Humility, Overwhelming Splendor on its
+        // controller) leaves the copied counters off; the loyalty and the creating
+        // effect's own counters are not gated (see their split above). Same order
+        // as the routing list, so counter replacements see the same sequence.
+        let token_etb_counters: Vec<(crate::types::counter::CounterType, u32)> = {
+            let projection = entrant_body
+                .as_ref()
+                .filter(|_| !own_entries.is_empty())
+                .and_then(|body| {
+                    crate::game::filter::BattlefieldEntrantProjection::for_placed_token(
+                        state,
+                        token_id,
+                        body,
+                        &copy_token_co_entrants(state, token_id, &created_ids),
+                    )
+                });
+            intrinsic
+                .iter()
+                .cloned()
+                .chain(
+                    own_entries
+                        .iter()
+                        .filter(|(def, _, _)| {
+                            projection
+                                .as_ref()
+                                .is_none_or(|projection| projection.retains_replacement(def))
+                        })
+                        .map(|(_, counter_type, count)| (counter_type.clone(), *count)),
+                )
+                .chain(enter_with_counters.iter().cloned())
+                .collect()
+        };
+
         // CR 508.4: the tail resumes the rest of the batch counting its own
         // tokens from zero, so its request starts past the tokens created so
         // far, this one included.
@@ -1021,7 +1203,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             copy: resume_copy,
             enter_tapped,
             enter_with_counters: enter_with_counters.clone(),
-            etb_counters: etb_counters.clone(),
+            etb_counters: token_etb_counters,
             remaining_count: final_count.saturating_sub(index + 1),
             attack_destination: attack_destination.clone(),
         };
@@ -1036,13 +1218,8 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         // birth, aura attach, copy exceptions, entry counters, entry events,
         // and the rest of the batch — behind the player's answer. The prompt
         // is the funnel's own (`PayAmountChoice` raised by the surface call);
-        // nothing here hand-raises a second one.
-        // CR 614.12 + CR 613.1f: realize continuous effects for this entrant
-        // BEFORE discovering its copied payment — an ability-removing effect
-        // (Humility) must suppress a payment the entrant must not have.
-        // Mirrors `finish_copy_target_choice_entry` (`engine_replacement.rs:2927`).
-        crate::game::layers::mark_layers_full(state);
-        crate::game::layers::flush_layers(state);
+        // nothing here hand-raises a second one. The layers were flushed for this
+        // entrant above.
         if crate::game::replacement::surface_copied_entry_payment(state, token_id, events).is_some()
         {
             state.last_created_token_ids = created_ids.clone();
@@ -1063,41 +1240,16 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             };
         }
 
-        // CR 707.9b/9c + CR 614.12: the consult below must see the entrant as it
-        // will exist AFTER the copy exceptions, not the bare copied body.
-        //
-        // `materialize_token_copy_body` is a documented no-op for
-        // `DeferredToUnjournaledSeam` — on this path the exceptions land later, at
-        // `apply_token_modifications` — so at this point the stored object still
-        // carries the UNMODIFIED copiable values. The liminal seam folds its
-        // exceptions before its own consult, so without this projection the two
-        // copy seams disagree about what the entrant is, and an exception that
-        // adds or removes `Creature` (CR 303.4d), adds or removes the `Aura`
-        // subtype, or changes color (CR 702.16c) flips the CR 303.4f/g verdict.
-        // The failure mode is silent: a token that is never created.
-        //
-        // A PROJECTION rather than an early mutation of the stored object: the
-        // exceptions must still be applied exactly once, by the seam that owns
-        // them and can pause (`AddCounterOnEnter` reaches
-        // `add_counter_with_replacement`), and several arms — `AddPower`,
-        // `GrantAbility`, `GrantTrigger` — are not idempotent under a second pass.
-        let entrant_projection = state.objects.get(&token_id).map(|token| {
-            let mut projection = token.clone();
-            apply_immediate_copy_token_modifications_to_object(
-                &mut projection,
-                &additional_modifications,
-                &all_creature_types,
-            );
-            projection
-        });
-
         // CR 303.4f + CR 303.4g: decide the entering Aura's host BEFORE the CR 733
         // birth is journaled (append-only, no retraction) and BEFORE the attach is
         // applied, so the CR 303.4g "if the Aura is a token, it isn't created" arm
         // can withhold the birth and the attach can never take a lower journal
         // ordinal than the birth it depends on. Same decide/act split the liminal
         // seam uses in `token::commit_liminal_token_entry_with_post_actions`.
-        let hosts = match entrant_projection.as_ref() {
+        // It reads `entrant_body`, built above, which predates an inline
+        // determined-0 payment latch; that latch writes only a
+        // `ChosenAttribute::Number`, which host legality doesn't read.
+        let hosts = match entrant_body.as_ref() {
             Some(entrant) => {
                 crate::game::zone_pipeline::entering_aura_hosts_projected(state, token_id, entrant)
             }

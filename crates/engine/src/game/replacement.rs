@@ -8481,7 +8481,46 @@ fn object_replacement_candidate_applies(
         }
     }
 
+    // CR 614.12 + CR 613.1f: last, so the projection is built only for an own entry
+    // candidate every cheaper check kept — the liminal token must still have it as it
+    // would exist on the battlefield.
+    if is_liminal_source
+        && is_entering
+        && matches!(event, ProposedEvent::TokenEntry { .. })
+        && !entrant_retains_own_entry_replacement(state, event, repl_def)
+    {
+        return false;
+    }
+
     true
+}
+
+/// CR 614.12 + CR 613.1f: whether the entrant `event` puts onto the battlefield still has
+/// its own entry replacement `def` as it would exist there: with the continuous effects
+/// that already exist applied, and the tokens entering in the same event absent
+/// (`token_copy::copy_token_co_entrants`). An ability-removing effect that would apply to
+/// it (Humility, Overwhelming Splendor on its controller) leaves its "as enters" and
+/// "enters with" abilities unapplied (Overwhelming Splendor ruling 2017-09-29).
+/// Token entries only; every other event keeps today's answer (`true`).
+pub(crate) fn entrant_retains_own_entry_replacement(
+    state: &GameState,
+    event: &ProposedEvent,
+    def: &ReplacementDefinition,
+) -> bool {
+    let ProposedEvent::TokenEntry { entry_ref, .. } = event else {
+        return true;
+    };
+    let Some(entry) = state.liminal_entries.get(entry_ref) else {
+        return true;
+    };
+    let co_entrants =
+        super::effects::token_copy::copy_token_co_entrants(state, *entry_ref, &entry.created_ids);
+    crate::game::filter::BattlefieldEntrantProjection::for_liminal_token(
+        state,
+        *entry_ref,
+        &co_entrants,
+    )
+    .is_none_or(|projection| projection.retains_replacement(def))
 }
 
 /// CR 614.12: identify a not-yet-committed battlefield entry whose projected
