@@ -406,6 +406,8 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
 mod r2_exile_modifier_tests {
     use super::*;
 
+    /// CR 406.3: printed control. Pull from Eternity: "Put target face-up
+    /// exiled card into its owner's graveyard."
     #[test]
     fn face_up_exiled_card_consumes_complete_target_and_retains_remainder() {
         let (target, rest) = parse_target("target face-up exiled card");
@@ -422,6 +424,73 @@ mod r2_exile_modifier_tests {
         }));
         let (_, rest) = parse_target("target face-up exiled card frobnicate");
         assert_eq!(rest.trim(), "frobnicate");
+    }
+
+    fn face_up_exiled(filter: &TypedFilter) -> bool {
+        filter
+            .properties
+            .contains(&FilterProp::InZone { zone: Zone::Exile })
+            && filter.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::FaceDown),
+            })
+    }
+
+    /// CR 406.3: synthetic grammar case (no printed card combines these
+    /// words; Pull from Eternity's "target face-up exiled card" above is the
+    /// printed control). The visibility adjectives lead a `non-` negation, and
+    /// both restrictions stay on the one noun; the reverse order matches too.
+    #[test]
+    fn face_up_exiled_adjectives_keep_an_adjacent_negation() {
+        for text in [
+            "target face-up exiled nonland card",
+            "target nonland face-up exiled card",
+        ] {
+            let (target, rest) = parse_target(text);
+            assert!(rest.is_empty(), "{text}: {rest:?}");
+            let TargetFilter::Typed(filter) = target else {
+                panic!("{text}: expected one typed card filter, got {target:?}")
+            };
+            assert!(filter.type_filters.contains(&TypeFilter::Card), "{text}");
+            assert!(
+                filter
+                    .type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))),
+                "{text}: the negation survives: {filter:?}"
+            );
+            assert!(face_up_exiled(&filter), "{text}: {filter:?}");
+        }
+    }
+
+    /// CR 406.3: synthetic grammar case (no printed card has this union). Each
+    /// leg repeats its head noun, so "face-up exiled" qualifies only the
+    /// creature card; the artifact card leg gains no exile or visibility
+    /// restriction.
+    #[test]
+    fn face_up_exiled_adjectives_stay_on_their_own_union_leg() {
+        let (target, rest) = parse_target("target face-up exiled creature card or artifact card");
+        assert!(rest.is_empty(), "{rest:?}");
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected a two-leg union, got {target:?}")
+        };
+        assert_eq!(filters.len(), 2, "{filters:?}");
+        let legs: Vec<&TypedFilter> = filters
+            .iter()
+            .map(|leg| match leg {
+                TargetFilter::Typed(filter) => filter,
+                other => panic!("expected typed legs, got {other:?}"),
+            })
+            .collect();
+        assert!(legs[0].type_filters.contains(&TypeFilter::Creature));
+        assert!(face_up_exiled(legs[0]), "left leg: {:?}", legs[0]);
+        assert!(legs[1].type_filters.contains(&TypeFilter::Artifact));
+        assert!(
+            !legs[1].properties.iter().any(|prop| matches!(
+                prop,
+                FilterProp::InZone { .. } | FilterProp::FaceDown | FilterProp::Not { .. }
+            )),
+            "the artifact card leg is not restricted to face-up exiled cards: {:?}",
+            legs[1]
+        );
     }
 }
 
@@ -3557,6 +3626,10 @@ fn parse_type_phrase_folding_unbound<'a>(
     // parse_non_prefix uses whitespace as word boundary, but in stacked negation the
     // separator is ", " (comma-space). We must strip the trailing comma from the negated
     // word when the ", non" continuation pattern follows.
+    // CR 406.3: the exile visibility adjectives may lead a `non-` negation
+    // ("face-up exiled nonland card"); read them first so the negation that
+    // follows is still parsed.
+    consume_exile_visibility_adjectives(&lower, &mut pos, &mut properties);
     let mut neg_type_filters: Vec<TypeFilter> = Vec::new();
     loop {
         let remaining = &lower[pos..];
@@ -3684,23 +3757,9 @@ fn parse_type_phrase_folding_unbound<'a>(
         }
     }
 
-    // CR 406.3: face-up exiled cards retain both their zone and visibility
-    // restrictions. Compose these adjectives before the ordinary type reader.
-    while let Ok((rest, property)) = alt((
-        value(
-            FilterProp::Not {
-                prop: Box::new(FilterProp::FaceDown),
-            },
-            tag::<_, _, OracleError<'_>>("face-up "),
-        ),
-        value(FilterProp::FaceDown, tag("face-down ")),
-        value(FilterProp::InZone { zone: Zone::Exile }, tag("exiled ")),
-    ))
-    .parse(&lower[pos..])
-    {
-        properties.push(property);
-        pos = lower.len() - rest.len();
-    }
+    // CR 406.3: the exile visibility adjectives may also follow a `non-`
+    // negation ("nonland face-up exiled card").
+    consume_exile_visibility_adjectives(&lower, &mut pos, &mut properties);
 
     // Parse the core type, falling back to subtype recognition
     let (card_type, subtype, type_len) = parse_core_type(&lower[pos..]);
@@ -5877,6 +5936,32 @@ fn leading_leg_type_filters(filter: &TargetFilter) -> &[TypeFilter] {
 /// only in filtering. Folding a type-conditional test in here would silently
 /// change which leg is harvested for unrelated cards. See that function's doc
 /// comment for the full argument.
+/// CR 406.3: read a run of exile visibility adjectives ("face-up", "face-down",
+/// "exiled") at `pos`. Face-up exiled cards retain both their zone and
+/// visibility restrictions; these properties are leg-local (see
+/// [`is_adjective_prefix_prop`]).
+fn consume_exile_visibility_adjectives(
+    lower: &str,
+    pos: &mut usize,
+    properties: &mut Vec<FilterProp>,
+) {
+    while let Ok((rest, property)) = alt((
+        value(
+            FilterProp::Not {
+                prop: Box::new(FilterProp::FaceDown),
+            },
+            tag::<_, _, OracleError<'_>>("face-up "),
+        ),
+        value(FilterProp::FaceDown, tag("face-down ")),
+        value(FilterProp::InZone { zone: Zone::Exile }, tag("exiled ")),
+    ))
+    .parse(&lower[*pos..])
+    {
+        properties.push(property);
+        *pos = lower.len() - rest.len();
+    }
+}
+
 pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
     matches!(
         prop,
@@ -5934,7 +6019,17 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // reaches this distributor, or carry `Named` on every leg and are
             // deduped by `same_kind`), but excluding it future-proofs the guard.
             | FilterProp::Named { .. }
-    )
+            // CR 406.3: the exile visibility adjectives ("face-down",
+            // "exiled") qualify only the noun they precede.
+            | FilterProp::FaceDown
+            | FilterProp::InZone { zone: Zone::Exile }
+    ) || is_face_up_adjective_prop(prop)
+}
+
+/// CR 406.3: "face-up" is read as "not face down"; like its "face-down"
+/// sibling it qualifies only the noun it precedes.
+fn is_face_up_adjective_prop(prop: &FilterProp) -> bool {
+    matches!(prop, FilterProp::Not { prop } if **prop == FilterProp::FaceDown)
 }
 
 /// Returns true when `prop` reads a creature's power and/or toughness.
