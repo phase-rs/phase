@@ -81,10 +81,10 @@ impl PersistedSession {
     /// this rather than pairing two `serde_json` decodes themselves.
     ///
     /// The pools are lifted out of `state` before the payload is written, so
-    /// the payload's own decode never walks them. They pass the fight-operand
-    /// migration the payload's own decode applies
-    /// (`migrate_detached_fight_operand_carrier`) first. They pass the engine's
-    /// onset admission here instead (CR 611.2e,
+    /// the payload's own decode never walks them. Here they first pass the same
+    /// fight-operand migration the payload's decode applies to its state
+    /// (`migrate_detached_fight_operand_carrier`), then the engine's onset
+    /// admission (CR 611.2e,
     /// `PersistedEntryOnsetRecord::admit_detached_carrier`), against the record
     /// read from the payload before its decode stamps an admitted unrecorded
     /// state `Recorded`. The payload decodes first, so its own refusals keep

@@ -1400,7 +1400,8 @@ const PRIMAL_MIGHT: &str = "Target creature you control gets +X/+X until end of 
 /// on the fighter, then a `ParentTarget` fight declaring one up-to-one slot):
 /// a saved prompt holding a fixed-direction pump slot ("+2/+2") does not
 /// restore at all, because `TargetEffectDetail` and `PtDirection` both use the
-/// serde tag `type` and collide; that defect is tracked separately. Primal
+/// serde tag `type` and collide; that pre-existing defect is outside this
+/// test's scope. Primal
 /// Might's "+X/+X" pump slot carries no direction, so its prompt round-trips.
 #[test]
 fn restored_pre_operand_primal_might_prompt_frees_only_the_fight_slot() {
