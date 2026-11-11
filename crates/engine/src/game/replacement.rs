@@ -14150,6 +14150,45 @@ pub fn continue_replacement(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 614.1 + CR 616.1: an optional replacement's accept and decline both
+    /// name its candidate, so a pending optional replacement with no candidate
+    /// offers no option at all (the restored-prompt shape review 19 cites);
+    /// with its candidate it offers accept and decline.
+    #[test]
+    fn an_optional_replacement_without_a_candidate_offers_no_option() {
+        let state = GameState::new_two_player(7);
+        let mut pending = PendingReplacement {
+            proposed: ProposedEvent::Draw {
+                player_id: PlayerId(0),
+                count: 1,
+                stage: DrawEventStage::Individual,
+                applied: std::collections::HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: vec![ReplacementId {
+                source: ObjectId(1),
+                index: 0,
+            }],
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: true,
+            choice_player: None,
+            library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+            delivery_boundary: None,
+            unrepresentable_life_change: state.ingress_life_policy(),
+        };
+        assert_eq!(pending_replacement_option_count(&state, &pending), 2);
+        pending.candidates.clear();
+        assert_eq!(pending_replacement_option_count(&state, &pending), 0);
+    }
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::game::scenario::{GameScenario, P0, P1};
