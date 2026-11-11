@@ -80,6 +80,7 @@ pub(crate) fn supports_simultaneous_delivery(ability: &ResolvedAbility) -> bool 
             conditional_enter_with_counters,
             face_down_profile: None,
             enters_modified_if: None,
+            library_shuffle: _,
         } if *reveal
             && enter_with_counters.is_empty()
             && conditional_enter_with_counters.is_empty() =>
@@ -940,6 +941,7 @@ mod tests {
             .collect();
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::ParentTarget,
@@ -1243,6 +1245,7 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -1327,6 +1330,7 @@ mod tests {
             .collect();
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -1642,6 +1646,7 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -1746,6 +1751,7 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -1853,6 +1859,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Graveyard,
                             target: TargetFilter::Any,
@@ -1959,6 +1966,7 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::ParentTarget,

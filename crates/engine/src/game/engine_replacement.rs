@@ -5614,6 +5614,7 @@ mod tests {
                         conditional_enter_with_counters: vec![],
                         face_down_profile: None,
                         enters_modified_if: None,
+                        library_shuffle: Default::default(),
                     },
                 ))]
             .into();
@@ -5923,6 +5924,7 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         destination: Zone::Exile,
                         origin: None,
                         target: TargetFilter::Any,

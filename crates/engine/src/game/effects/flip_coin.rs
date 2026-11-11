@@ -296,9 +296,8 @@ impl FlipRun<'_> {
     ///
     /// Fresh coin-keep, pre-roll replacement-ordering, and post-roll die suspensions
     /// retain their owning scope, including explicit emptiness; legacy missing scope
-    /// is not reconstructed. A die roll started by a coin's continuation drain still
-    /// loses its published per-survivor result at the drain's whole-snapshot restore
-    /// (pre-existing, unchanged).
+    /// is not reconstructed. Continuation die-result handoff follows
+    /// [`crate::game::effects::drain_pending_continuation`].
     ///
     /// CR 705.3: the frame does not carry the run's `set`. A set with an indicated
     /// result settles every flip inline (`flip_through_replacement`), so only an
@@ -1100,6 +1099,7 @@ mod tests {
             let mut def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::SelfRef,
@@ -1131,6 +1131,7 @@ mod tests {
             let mut def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Battlefield,
                     target: TargetFilter::ParentTarget,

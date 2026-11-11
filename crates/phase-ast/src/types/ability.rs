@@ -10854,6 +10854,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
             destination: _,
             target,
             owner_library: _,
+            library_shuffle: _,
             enter_transformed: _,
             enters_under: _,
             enter_tapped: _,
@@ -20633,21 +20634,21 @@ impl LibraryPosition {
     }
 }
 
-/// CR 701.24a + CR 701.24d: Whether a mass move into a library is the move
+/// CR 701.24a + CR 701.24d: Whether a move into a library is the move
 /// component of one parser-emitted “shuffle this set into that library” action.
-/// Ordinary mass moves retain the zone pipeline's per-object library behavior;
+/// Ordinary moves retain the zone pipeline's per-object library behavior;
 /// `TerminalShuffle` reserves the single shuffle for the chained `Shuffle`
 /// instruction after every member has moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "type")]
-pub enum MassLibraryShuffleMode {
+pub enum LibraryShuffleMode {
     #[default]
     PerObject,
     TerminalShuffle,
 }
 
-fn is_default_mass_library_shuffle_mode(mode: &MassLibraryShuffleMode) -> bool {
-    matches!(mode, MassLibraryShuffleMode::PerObject)
+fn is_default_library_shuffle_mode(mode: &LibraryShuffleMode) -> bool {
+    matches!(mode, LibraryShuffleMode::PerObject)
 }
 
 /// CR 701.20a + CR 608.2c: How the *set* of matching cards found by an
@@ -22509,6 +22510,11 @@ pub enum Effect {
         /// (not controller's). Used for "shuffle into its owner's library".
         #[serde(default)]
         owner_library: bool,
+        /// CR 701.24a + CR 701.24d: `TerminalShuffle` marks the move component
+        /// of a parser-emitted "shuffle [set] into [library]" operation. Its
+        /// chained `Shuffle` owns the one library randomization.
+        #[serde(default, skip_serializing_if = "is_default_library_shuffle_mode")]
+        library_shuffle: LibraryShuffleMode,
         /// CR 712.2: When true, the object enters the battlefield showing its back face.
         #[serde(default)]
         enter_transformed: bool,
@@ -22604,8 +22610,8 @@ pub enum Effect {
         /// CR 701.24a + CR 701.24d: `TerminalShuffle` marks the mass-move
         /// component of a parser-emitted "shuffle [set] into [library]"
         /// operation. Its chained `Shuffle` owns the one library randomization.
-        #[serde(default, skip_serializing_if = "is_default_mass_library_shuffle_mode")]
-        library_shuffle: MassLibraryShuffleMode,
+        #[serde(default, skip_serializing_if = "is_default_library_shuffle_mode")]
+        library_shuffle: LibraryShuffleMode,
         /// CR 401.4: When `true`, the objects are placed in a random order
         /// (e.g. Endurance). When `false`, the owner chooses the order per
         /// CR 401.4's default rule. Independent of `library_position`.
@@ -48254,6 +48260,7 @@ mod tests {
     #[test]
     fn change_zone_owner_library_serde_roundtrip() {
         let effect = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Library,
             target: TargetFilter::Any,
@@ -48710,6 +48717,7 @@ mod tests {
     /// Helper: build a minimal `Effect::ChangeZone` with `enters_under` set.
     fn change_zone_with_enters_under(enters_under: Option<ControllerRef>) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -50358,7 +50366,7 @@ mod static_condition_traversal_tests {
         else {
             panic!("expected ChangeZoneAll");
         };
-        assert_eq!(library_shuffle, MassLibraryShuffleMode::PerObject);
+        assert_eq!(library_shuffle, LibraryShuffleMode::PerObject);
         let legacy_json = serde_json::to_value(Effect::ChangeZoneAll {
             origin: None,
             destination: Zone::Library,
@@ -50369,7 +50377,7 @@ mod static_condition_traversal_tests {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: MassLibraryShuffleMode::PerObject,
+            library_shuffle: LibraryShuffleMode::PerObject,
             random_order: false,
         })
         .expect("default mode serializes");
@@ -50388,7 +50396,7 @@ mod static_condition_traversal_tests {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             random_order: false,
         };
         let terminal_json = serde_json::to_value(&terminal).expect("terminal mode serializes");
