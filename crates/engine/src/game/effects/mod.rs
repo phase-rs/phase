@@ -25841,15 +25841,27 @@ fn resolve_chain_body(
             // displaced by this look's ledger.
             let mut payment = sub.as_ref().clone();
             let mut occurrences = inherited_parent_occurrences(ability, sub);
-            occurrences.extend(state.last_revealed_ids.iter().map(|&id| {
-                (
-                    TargetRef::Object(id),
-                    state
-                        .objects
-                        .get(&id)
-                        .map(crate::types::identifiers::ObjectIncarnationRef::from_object),
-                )
-            }));
+            // An inherited object target already names its occurrence; bind
+            // only looked-at objects not yet present so none appears twice.
+            let revealed_occurrences: Vec<_> = state
+                .last_revealed_ids
+                .iter()
+                .filter(|&&id| {
+                    !occurrences
+                        .iter()
+                        .any(|(target, _)| *target == TargetRef::Object(id))
+                })
+                .map(|&id| {
+                    (
+                        TargetRef::Object(id),
+                        state
+                            .objects
+                            .get(&id)
+                            .map(crate::types::identifiers::ObjectIncarnationRef::from_object),
+                    )
+                })
+                .collect();
+            occurrences.extend(revealed_occurrences);
             payment.replace_target_occurrences(occurrences);
             apply_parent_chain_context(
                 &mut payment,

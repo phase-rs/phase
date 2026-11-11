@@ -19,6 +19,7 @@ use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -33,8 +34,8 @@ struct WandBoard {
     runner: GameRunner,
     /// The staged top card of P1's library (`None` when the library is empty).
     top: Option<ObjectId>,
-    /// Whether the optional 2-life payment was offered (to the controller).
-    offered: bool,
+    /// The player the optional 2-life payment was offered to, if it was.
+    offered: Option<PlayerId>,
 }
 
 /// P0 controls Wand of Denial and activates it targeting P1, answering the
@@ -70,9 +71,9 @@ fn activate_wand(top: Option<&str>, accept: bool) -> Option<WandBoard> {
             runner
                 .act(GameAction::DecideOptionalEffect { accept })
                 .expect("answer the optional 2-life payment");
-            true
+            Some(player)
         } else {
-            false
+            None
         };
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
@@ -91,7 +92,11 @@ fn wand_of_denial_paid_life_moves_the_looked_at_card_to_the_graveyard() {
     let Some(board) = activate_wand(Some("Bonesplitter"), true) else {
         return;
     };
-    assert!(board.offered, "a nonland top card offers the payment");
+    assert_eq!(
+        board.offered,
+        Some(P0),
+        "a nonland top card offers the payment to the controller"
+    );
     let top = board.top.expect("staged top card");
     let state = board.runner.state();
     assert_eq!(
@@ -121,7 +126,11 @@ fn wand_of_denial_declining_the_payment_leaves_the_card_in_place() {
     let Some(board) = activate_wand(Some("Bonesplitter"), false) else {
         return;
     };
-    assert!(board.offered, "a nonland top card offers the payment");
+    assert_eq!(
+        board.offered,
+        Some(P0),
+        "a nonland top card offers the payment to the controller"
+    );
     let top = board.top.expect("staged top card");
     let state = board.runner.state();
     assert_eq!(
@@ -144,7 +153,7 @@ fn wand_of_denial_land_on_top_offers_no_payment() {
     let Some(board) = activate_wand(Some("Forest"), true) else {
         return;
     };
-    assert!(!board.offered, "a land top card offers no payment");
+    assert_eq!(board.offered, None, "a land top card offers no payment");
     let top = board.top.expect("staged top card");
     let state = board.runner.state();
     assert_eq!(
@@ -162,7 +171,7 @@ fn wand_of_denial_empty_library_pays_nothing_and_moves_nothing() {
     let Some(board) = activate_wand(None, true) else {
         return;
     };
-    assert!(!board.offered, "an empty library offers no payment");
+    assert_eq!(board.offered, None, "an empty library offers no payment");
     let state = board.runner.state();
     assert_eq!(state.players[P0.0 as usize].life, 20, "no payment offered");
     assert!(
