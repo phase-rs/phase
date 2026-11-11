@@ -142,6 +142,13 @@ pub fn validated_candidate_actions_with_probe(
     state: &GameState,
     probe: Option<&crate::game::casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
+    // CR 601.2g: one legal-action snapshot's generation AND its re-validation
+    // share ONE window-search budget. Generation's offer loop and the
+    // validation pass re-judge the same board's manual activations, so a board
+    // with many offers must not spend a fresh budget per candidate, per pass,
+    // or per refresh. Exhausting it only defers a candidate to the
+    // authoritative simulation, never to a wrong verdict.
+    let _window_witness_scope = crate::game::casting::window_witness_snapshot_scope();
     let pipeline = FilterPipeline::default_pipeline();
     let candidates = {
         let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(

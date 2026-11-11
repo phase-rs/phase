@@ -7,7 +7,9 @@
 //! https://github.com/phase-rs/phase/issues/6016
 
 use crate::support::shared_card_db;
-use engine::ai_support::legal_actions_full;
+use engine::ai_support::{
+    legal_actions_full, ActionMetadata, CandidateAction, FilterPipeline, TacticalClass,
+};
 use engine::game::casting::{activated_ability_definitions, MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET};
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::perf_counters;
@@ -7318,5 +7320,55 @@ fn one_legal_action_snapshot_bounds_the_window_witness_work() {
     assert!(
         refresh_spent <= MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET as u64,
         "the refresh is bounded by one budget too ({refresh_spent} units)"
+    );
+}
+
+/// CR 601.2g (#10190 security review): the legal-action validation pass
+/// re-judges every generated candidate, so each `Manual` activation candidate
+/// runs the mana-ability-window witness a second time on the same board. One
+/// candidate batch shares ONE window-search budget, so re-judging sixty
+/// candidates cannot multiply the snapshot's witness work (60 × 256 = 15,360
+/// units alone).
+#[test]
+fn one_candidate_batch_bounds_the_window_witness_work() {
+    let mut scenario = scenario_at_main();
+    let idols: Vec<ObjectId> = (0..60)
+        .map(|i| {
+            scenario
+                .add_artifact_from_oracle(P0, &format!("Thirsting Idol {i}"), "{U}: Draw a card.")
+                .with_mana_cost(ManaCost::generic(2))
+                .id()
+        })
+        .collect();
+    add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+    // Distinct bodies: the Altar's sacrifice prompt then offers distinct
+    // answers, so each verdict branches instead of collapsing them into one.
+    for i in 0..10 {
+        scenario.add_vanilla(P0, 1 + i, 1);
+    }
+    let runner = build(scenario);
+    let candidates = idols.iter().map(|&source_id| CandidateAction {
+        action: GameAction::ActivateAbility {
+            source_id,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Manual,
+        },
+        metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Ability),
+    });
+
+    perf_counters::reset();
+    let _accepted = FilterPipeline::default_pipeline().apply(runner.state(), candidates);
+    let counters = perf_counters::window_witness_search_snapshot();
+    let spent = counters.boards + counters.probes;
+
+    assert!(
+        spent >= MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET as u64 / 2,
+        "reach-guard: the batch's manual verdicts ran the witness search across \
+         the board ({spent} units), so the cap below is not vacuous"
+    );
+    assert!(
+        spent <= MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET as u64,
+        "one candidate batch's window-search work is bounded by the shared \
+         budget ({spent} units for 60 candidates, each allowed 256 alone)"
     );
 }

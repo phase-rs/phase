@@ -572,6 +572,17 @@ impl FilterPipeline {
         let mut memo: HashMap<LegalityKey, bool> = HashMap::new();
         let mut interner = FingerprintInterner::default();
         let _offer_witness_pool = OfferWitnessPoolGuard::enter();
+        // CR 601.2g: the expensive verdict of a `Manual` activation candidate
+        // re-runs the mana-ability-window witness (`casting::
+        // can_activate_ability_now_with_payment_mode`). One batch of candidates
+        // for one board therefore shares ONE window-search budget, exactly as
+        // the offer enumerations bound their generation loops: otherwise a
+        // board with many manual offers spends one 256-clone search per
+        // candidate (and again in every candidate list, preflight and legal
+        // action refresh). An exhausted budget only costs the authoritative
+        // simulation below, which returns the same verdict, so no candidate's
+        // legality changes — only the witness's bounded work does.
+        let _window_witness_scope = casting::window_witness_snapshot_scope();
         candidates
             .into_iter()
             .filter(|c| {
