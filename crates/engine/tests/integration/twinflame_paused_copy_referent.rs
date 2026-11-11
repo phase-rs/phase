@@ -704,15 +704,14 @@ enum PauseCarry {
 
 /// R7 (PS3): an entry ordering, then Painter's Servant's as-enters color
 /// choice, whose post-replacement chain resolves at depth 0 and resets the
-/// chain scope. The delayed exile must still bind the producer's set. Also run
-/// through the engine's save/restore pipeline at every pause while the parked
-/// owner holds its referent set (CR 608.2c + CR 603.7a).
+/// chain scope. The delayed exile must still bind the producer's set.
 #[test]
 fn r7_as_enters_choice_keeps_the_producer_set() {
     r7_as_enters_choice(PauseCarry::Live);
 }
 
-/// R7 with the game saved and restored before every answer.
+/// R7 run through the engine's save/restore pipeline at every pause while the
+/// parked owner holds its referent set (CR 608.2c + CR 603.7a).
 #[test]
 fn r7_as_enters_choice_keeps_the_producer_set_across_save_and_restore() {
     r7_as_enters_choice(PauseCarry::SavedAndRestored);
