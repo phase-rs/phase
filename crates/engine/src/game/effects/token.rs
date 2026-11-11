@@ -1172,15 +1172,16 @@ pub(crate) fn continue_token_event_delivery(
 ) -> bool {
     if let Some(position) = delivery.resumed.take() {
         let published = std::mem::take(&mut state.last_created_token_ids);
+        // One membership set for the ids the event already holds.
+        let held: HashSet<ObjectId> = delivery
+            .prefix
+            .iter()
+            .chain(delivery.delivered.iter().flat_map(|entry| entry.ids.iter()))
+            .copied()
+            .collect();
         let resumed_ids: Vec<ObjectId> = published
             .into_iter()
-            .filter(|id| {
-                !delivery.prefix.contains(id)
-                    && !delivery
-                        .delivered
-                        .iter()
-                        .any(|entry| entry.ids.contains(id))
-            })
+            .filter(|id| !held.contains(id))
             .collect();
         match delivery
             .delivered
@@ -1240,13 +1241,8 @@ fn drive_token_event_delivery(
         .remaining
         .iter()
         .any(|positioned| positioned.batch.copy.is_some())
-        && state.active_copy_token().is_some()
     {
-        let frame = state
-            .take_active_copy_token()
-            .expect("the active CopyToken frame can be consumed")
-            .expect("the active CopyToken frame exists");
-        Some((frame, state.resolution_stack.capture_child_boundary()))
+        detach_active_copy_token_frame(state)
     } else {
         None
     };
@@ -1327,10 +1323,11 @@ fn drive_token_event_delivery(
                     initial.clone(),
                     events,
                 );
+                let held: HashSet<ObjectId> = initial.iter().copied().collect();
                 let ids = status
                     .created_ids
                     .into_iter()
-                    .filter(|id| !initial.contains(id))
+                    .filter(|id| !held.contains(id))
                     .collect();
                 cursor.delivered.push(PositionedTokenIds { position, ids });
                 match status.completion {
@@ -1394,10 +1391,29 @@ fn drive_token_event_delivery(
     CreateTokenDelivery::Completed { primary_ids }
 }
 
-/// CR 608.2c: hand the CopyToken owner that a compound token event detached
-/// the ids that event owes it, and re-park it — on top, or below the
-/// child stack a pause raised (`token_copy::park_copy_token_after_current_batch`).
-/// The owner's drain later assigns its ids to `last_created_token_ids`.
+/// CR 608.2c: detach the active CopyToken owner while a token event that carries
+/// a copy batch is delivered, so the copy apply runs in the copy drive's
+/// environment (its liminal terminal neither merges into nor drains the owner)
+/// and the delivery hands the event's ids to the owner exactly once, through
+/// [`repark_event_copy_frame`]. `None` when the top frame is not a CopyToken
+/// owner.
+fn detach_active_copy_token_frame(
+    state: &mut GameState,
+) -> Option<(PendingCopyTokenResolution, ChildStackDepth)> {
+    state.active_copy_token()?;
+    let frame = state
+        .take_active_copy_token()
+        .expect("the active CopyToken frame can be consumed")
+        .expect("the active CopyToken frame exists");
+    Some((frame, state.resolution_stack.capture_child_boundary()))
+}
+
+/// CR 608.2c: hand the CopyToken owner that a token event's delivery detached
+/// (a compound event, or a single-batch copy event) the ids that event owes it,
+/// and re-park it — on top, or below the child stack a pause raised
+/// (`token_copy::park_copy_token_after_current_batch`). The frame was detached
+/// for the whole delivery, so no other writer reached it and `ids` are not yet
+/// listed. The owner's drain later assigns its ids to `last_created_token_ids`.
 fn repark_event_copy_frame(
     state: &mut GameState,
     held: Option<(PendingCopyTokenResolution, ChildStackDepth)>,
@@ -1466,6 +1482,14 @@ fn apply_create_token_batch(
     };
 
     if let Some(copy) = copy {
+        // CR 608.2c + CR 614.6: a single-batch copy event delivered under its
+        // CopyToken owner (the frame a replacement-choice answer left parked)
+        // gets the compound event's custody: the owner is detached for the
+        // batch and handed the batch's ids once, then re-parked for the
+        // caller's drain to continue. Every drain the replacement-choice
+        // handler runs before its copy drain reads a different top frame or a
+        // dedicated slot, so none of them acts on the re-parked owner.
+        let held = detach_active_copy_token_frame(state);
         let status = super::token_copy::apply_copy_token_after_replacement(
             state,
             owner,
@@ -1476,11 +1500,8 @@ fn apply_create_token_batch(
             events,
         );
         let primary_ids = status.created_ids.clone();
-        if let Some(pending) = state.active_copy_token_mut() {
-            pending.created_ids.extend(status.created_ids);
-        } else {
-            state.last_created_token_ids = status.created_ids;
-        }
+        state.last_created_token_ids = status.created_ids;
+        repark_event_copy_frame(state, held, primary_ids.clone());
         return match status.completion {
             super::token_copy::CopyTokenApplyCompletion::Completed => {
                 CreateTokenDelivery::Completed { primary_ids }
@@ -11385,6 +11406,7 @@ mod tests {
         assert_eq!(live_entry_counters(&mut state, &ability), vec![0, 0]);
     }
 
+    /// Test shorthand: the [`ObjectId`]s for `raw`, in order.
     fn ids(raw: &[u64]) -> Vec<ObjectId> {
         raw.iter().copied().map(ObjectId).collect()
     }
@@ -11425,6 +11447,9 @@ mod tests {
         assert_eq!(owner_ids(&state), ids(&[1, 2, 3, 4]));
     }
 
+    /// CR 608.2c: with no CopyToken owner on the resolution stack the ledger
+    /// merge has nothing to merge into, so the ledger and the resolution stack
+    /// are left exactly as they were.
     #[test]
     fn copy_batch_ledger_merge_without_copy_token_owner_changes_nothing() {
         let mut state = GameState::new_two_player(43);

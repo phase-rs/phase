@@ -1213,8 +1213,15 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         super::token::record_copy_batch_ledger_on_active_copy_token(state);
         if state.active_copy_token().is_some() {
             drain_pending_copy_token_resolution(state, events);
+            // The drain assigned the owner's referent to the ledger (or
+            // re-parked it on a later batch).
+            created_ids = state.last_created_token_ids.clone();
         }
-        created_ids = state.last_created_token_ids.clone();
+        // CR 614.6 + CR 609.3: otherwise `created_ids` is already this batch's
+        // list — the prefix plus each committed copy, re-read from the ledger
+        // after every commit. A batch that committed nothing (a replacement
+        // made it zero tokens, or every entry was prevented) created nothing,
+        // so it must not republish the ledger an earlier creation left.
 
         // C1: do NOT hardcode Completed. Reproduce the replaced
         // continue_liminal_copy_token_batch tail (old ~1196-1197): the whole

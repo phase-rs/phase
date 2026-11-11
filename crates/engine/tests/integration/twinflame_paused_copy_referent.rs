@@ -10,8 +10,12 @@
 //! - Pauses reached: a counter-replacement ordering on a copy's "enters with"
 //!   counters (CR 614.1c + CR 122.6 + CR 616.1e / CR 616.1f), an entry
 //!   replacement ordering (Archelos + Imposing Sovereign, CR 616.1e), an
-//!   as-enters choice (Painter's Servant, CR 614.12a), and an "enter as a copy"
-//!   choice (Quicksilver Gargantuan, CR 614.1c + CR 707.5).
+//!   as-enters choice (Painter's Servant, CR 614.12a), an "enter as a copy"
+//!   choice (Quicksilver Gargantuan, CR 614.1c + CR 707.5), an optional token
+//!   replacement declined (Jinnie Fay, CR 614.6) and an ordering between token
+//!   replacements (Parallel Lives + Halving Season, CR 616.1e).
+//! - A batch a replacement makes zero creates nothing, so it republishes nothing
+//!   (Kiki-Jiki's "Sacrifice it").
 //! - Token multipliers are in the class (rulings, verbatim):
 //!   - Twinflame: "if Twinflame creates multiple tokens copying a single creature
 //!     due to a replacement effect (like the one Doubling Season creates),
@@ -63,6 +67,11 @@ const PAINTERS_SERVANT: &str = "Painter's Servant";
 const MEMNITE: &str = "Memnite";
 const ARCBOUND_WORKER: &str = "Arcbound Worker";
 const QUICKSILVER_GARGANTUAN: &str = "Quicksilver Gargantuan";
+const JINNIE: &str = "Jinnie Fay, Jetmir's Second";
+const CLONE_LEGION: &str = "Clone Legion";
+const HALVING_SEASON: &str = "Halving Season";
+const KIKI_JIKI: &str = "Kiki-Jiki, Mirror Breaker";
+const RAISE_THE_ALARM: &str = "Raise the Alarm";
 
 /// Targets set up before every other permanent: a creature that "may enter as
 /// a copy of any creature on the battlefield" would otherwise prompt its own
@@ -449,6 +458,45 @@ fn activate_saheeli(artifacts: &[&str], board: &[(PlayerId, &str)]) -> Option<Dr
         named_choices: 0,
         producer_set_at_pause: None,
     }))
+}
+
+/// Cast Clone Legion targeting P0 over `board` (P0's creatures are two Grizzly
+/// Bears), answering each prompt with `answer`, and settle it.
+fn cast_clone_legion_with(
+    board: &[(PlayerId, &str)],
+    answer: impl FnMut(&WaitingFor, &mut Driven) -> Option<GameAction>,
+) -> Option<Driven> {
+    let db = shared_card_db()?;
+    let (mut scenario, sources) = build_board(&[BEARS, BEARS], board)?;
+    let legion = scenario.add_real_card(P0, CLONE_LEGION, Zone::Hand, db);
+    // Clone Legion {7}{U}{U}.
+    let mut pool = vec![
+        ManaUnit::new(ManaType::Blue, legion, false, vec![]),
+        ManaUnit::new(ManaType::Blue, legion, false, vec![]),
+    ];
+    pool.extend((0..7).map(|_| ManaUnit::new(ManaType::Colorless, legion, false, vec![])));
+    scenario.with_mana_pool(P0, pool);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    let pre = runner.state().battlefield.iter().copied().collect();
+    let cast = runner
+        .cast(legion)
+        .target_player(P0)
+        .try_resolve()
+        .expect("Clone Legion must be castable");
+    let actions = vec![cast.events().to_vec()];
+    Some(settle_with(
+        Driven {
+            runner,
+            sources,
+            pre,
+            actions,
+            orderings: Vec::new(),
+            named_choices: 0,
+            producer_set_at_pause: None,
+        },
+        answer,
+    ))
 }
 
 /// The tokens now on the battlefield that the resolution created.
@@ -1236,4 +1284,378 @@ fn r10_saheeli_unpaused_control() {
     assert_every_token_has_haste(&driven);
     assert_referent_is_every_token(&driven);
     assert_end_step_exiles_every_token(driven);
+}
+
+/// R15: Twinflame on two Grizzly Bears under Jinnie Fay, Jetmir's Second, whose
+/// "you may instead" is declined at both copies' token prompts. CR 614.6: nothing
+/// is replaced, so each target's original copy is created, and each copy batch
+/// is handed to the CopyToken owner once (CR 608.2c).
+#[test]
+fn r15_declined_optional_token_replacements_hand_each_copy_over_once() {
+    // At each Jinnie prompt: the owner's list and the tokens created so far.
+    let mut at_prompt: Vec<(Option<Vec<ObjectId>>, Vec<ObjectId>)> = Vec::new();
+    let driven = cast_twinflame_with(&[BEARS, BEARS], &[(P0, JINNIE)], |waiting, driven| {
+        let WaitingFor::ReplacementChoice { candidates, .. } = waiting else {
+            return None;
+        };
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.source_name == JINNIE),
+            "REACH-GUARD: every prompt is Jinnie Fay's optional token replacement, got \
+             {candidates:?}"
+        );
+        let decline = candidates
+            .iter()
+            .position(|candidate| candidate.description == "Decline")
+            .expect("REACH-GUARD: Jinnie Fay's prompt offers a Decline answer");
+        driven.orderings.push(
+            candidates
+                .iter()
+                .map(|candidate| candidate.source_name.clone())
+                .collect(),
+        );
+        at_prompt.push((
+            copy_token_owner_ids(&driven.runner),
+            driven.created_tokens(),
+        ));
+        Some(GameAction::ChooseReplacement { index: decline })
+    });
+    let Some(driven) = driven else {
+        return;
+    };
+    assert_eq!(
+        at_prompt.len(),
+        2,
+        "REACH-GUARD: one Jinnie Fay prompt per copy batch, saw {:?}",
+        driven.orderings
+    );
+    let tokens = driven.created_tokens();
+    assert_eq!(
+        tokens.iter().collect::<HashSet<_>>().len(),
+        2,
+        "declining both prompts creates both original copies, got {tokens:?}"
+    );
+    assert_eq!(
+        tokens.len(),
+        2,
+        "REACH-GUARD: no substitute Cat or Dog is created on decline"
+    );
+    let state = driven.runner.state();
+    for id in &tokens {
+        assert_eq!(
+            state.objects[id].name, BEARS,
+            "REACH-GUARD: each token is the original Bears copy"
+        );
+        assert!(
+            state.objects[id].has_keyword(&Keyword::Haste),
+            "REACH-GUARD: Twinflame's copy has haste"
+        );
+    }
+    let (owner_at_second, created_at_second) = at_prompt[1].clone();
+    assert_eq!(
+        created_at_second.len(),
+        1,
+        "REACH-GUARD: the second prompt follows the first batch's copy"
+    );
+    assert_eq!(
+        owner_at_second,
+        Some(created_at_second),
+        "at the second prompt the owner lists the first copy once, in TokenCreated order"
+    );
+    assert_eq!(
+        driven.runner.state().last_created_token_ids,
+        tokens,
+        "LastCreated lists each copy once, in TokenCreated order"
+    );
+    let members = assert_referent_is_every_token(&driven);
+    assert_eq!(
+        members, tokens,
+        "the referent lists the copies in TokenCreated order"
+    );
+    assert_end_step_exiles_every_token(driven);
+}
+
+/// R16: Clone Legion copies P0's two Grizzly Bears under P0's Parallel Lives
+/// and P1's Halving Season. CR 616.1e: P0 orders the two at each copy's event.
+/// Parallel Lives first gives 1 × 2 ÷ 2 = one copy; Halving Season first gives
+/// ⌊1 ÷ 2⌋ = 0, and twice nothing is nothing. "LastCreated" lists the one copy
+/// once: the zero-token batch republishes nothing.
+#[test]
+fn r16_ordered_token_replacements_one_copy_then_none() {
+    // The owner's list at each ordering prompt.
+    let mut owner_at_prompt: Vec<Option<Vec<ObjectId>>> = Vec::new();
+    let board = [(P0, PARALLEL_LIVES), (P1, HALVING_SEASON)];
+    let driven = cast_clone_legion_with(&board, |waiting, driven| {
+        let WaitingFor::ReplacementChoice { candidates, .. } = waiting else {
+            return None;
+        };
+        let mut names: Vec<String> = candidates
+            .iter()
+            .map(|candidate| candidate.source_name.clone())
+            .collect();
+        let first = match owner_at_prompt.len() {
+            0 => PARALLEL_LIVES,
+            1 => HALVING_SEASON,
+            _ => return None,
+        };
+        let index = names
+            .iter()
+            .position(|name| name == first)
+            .expect("REACH-GUARD: both token replacements are candidates");
+        names.sort();
+        driven.orderings.push(names);
+        owner_at_prompt.push(copy_token_owner_ids(&driven.runner));
+        Some(GameAction::ChooseReplacement { index })
+    });
+    let Some(driven) = driven else {
+        return;
+    };
+    let want: Vec<String> = [HALVING_SEASON, PARALLEL_LIVES]
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    assert_eq!(
+        driven.orderings,
+        vec![want.clone(), want],
+        "REACH-GUARD: each copy's event is ordered between Parallel Lives and Halving Season"
+    );
+    let tokens = driven.created_tokens();
+    assert_eq!(
+        tokens.len(),
+        1,
+        "REACH-GUARD: the first ordering yields one copy and the second none"
+    );
+    assert_eq!(
+        driven.runner.state().objects[&tokens[0]].name,
+        BEARS,
+        "REACH-GUARD: the one token is a Bears copy"
+    );
+    assert_eq!(
+        owner_at_prompt[1],
+        Some(tokens.clone()),
+        "at the second ordering the owner lists the first copy once"
+    );
+    assert_eq!(
+        driven.runner.state().last_created_token_ids,
+        tokens,
+        "LastCreated lists the one copy once; the zero-token batch republishes nothing"
+    );
+}
+
+/// R17's board: P0 controls Kiki-Jiki, Mirror Breaker and a Grizzly Bears, with
+/// Raise the Alarm in hand and {1}{W}; `halving` adds P1's Halving Season.
+fn kiki_jiki_board(halving: bool) -> Option<(GameRunner, ObjectId, ObjectId, ObjectId)> {
+    let db = shared_card_db()?;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let kiki = scenario.add_real_card(P0, KIKI_JIKI, Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P0, BEARS, Zone::Battlefield, db);
+    let alarm = scenario.add_real_card(P0, RAISE_THE_ALARM, Zone::Hand, db);
+    if halving {
+        scenario.add_real_card(P1, HALVING_SEASON, Zone::Battlefield, db);
+    }
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::White, alarm, false, vec![]),
+            ManaUnit::new(ManaType::Colorless, alarm, false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    Some((runner, kiki, bears, alarm))
+}
+
+/// What R17's board shows: the Soldiers, the activation's events, LastCreated
+/// once the activation resolved, and the end step's resolution events.
+struct KikiJikiRun {
+    runner: GameRunner,
+    soldiers: Vec<ObjectId>,
+    activation: Vec<GameEvent>,
+    last_created_after_activation: Vec<ObjectId>,
+    end_step: Vec<GameEvent>,
+}
+
+/// Cast Raise the Alarm, activate Kiki-Jiki on the Bears, and resolve the next
+/// end step's triggers.
+fn run_kiki_jiki(halving: bool) -> Option<KikiJikiRun> {
+    let (mut runner, kiki, bears, alarm) = kiki_jiki_board(halving)?;
+    let pre: HashSet<ObjectId> = runner.state().battlefield.iter().copied().collect();
+    runner
+        .cast(alarm)
+        .try_resolve()
+        .expect("Raise the Alarm must be castable");
+    let soldiers: Vec<ObjectId> = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| !pre.contains(id))
+        .collect();
+    assert_eq!(
+        soldiers.len(),
+        if halving { 1 } else { 2 },
+        "REACH-GUARD: Raise the Alarm creates its Soldiers (halved by Halving Season)"
+    );
+    assert_eq!(
+        runner.state().last_created_token_ids,
+        soldiers,
+        "REACH-GUARD: before the activation LastCreated names the Soldiers"
+    );
+    let activation = runner
+        .activate(kiki, 0)
+        .target_object(bears)
+        .try_resolve()
+        .expect("Kiki-Jiki's ability must be activatable")
+        .events()
+        .to_vec();
+    assert!(
+        activation.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::CopyTokenOf,
+                ..
+            }
+        )),
+        "REACH-GUARD: the copy instruction resolved"
+    );
+    assert!(
+        runner
+            .state()
+            .delayed_triggers
+            .iter()
+            .any(|trigger| matches!(trigger.ability.effect, Effect::Sacrifice { .. })),
+        "REACH-GUARD: \"Sacrifice it at the beginning of the next end step\" is installed"
+    );
+    let last_created_after_activation = runner.state().last_created_token_ids.clone();
+    runner.advance_to_combat();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![],
+            bands: vec![],
+        })
+        .expect("declare no attackers to cross combat");
+    runner.advance_to_end_step();
+    let mut end_step = Vec::new();
+    for _ in 0..8 {
+        if runner.state().stack.is_empty()
+            || !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        end_step.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority to resolve the end step's triggers")
+                .events,
+        );
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "REACH-GUARD: the end step's triggers resolved, stack {:?}",
+        runner.state().stack
+    );
+    Some(KikiJikiRun {
+        runner,
+        soldiers,
+        activation,
+        last_created_after_activation,
+        end_step,
+    })
+}
+
+fn sacrificed(events: &[GameEvent]) -> Vec<ObjectId> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// R17: Halving Season makes Kiki-Jiki's one copy zero (⌊1 ÷ 2⌋), so no token
+/// is created and "Sacrifice it at the beginning of the next end step" names
+/// nothing (CR 609.3). The Soldier Raise the Alarm created earlier is not "it".
+#[test]
+fn r17_zero_token_copy_batch_republishes_nothing() {
+    let Some(run) = run_kiki_jiki(true) else {
+        return;
+    };
+    assert!(
+        !run.activation
+            .iter()
+            .any(|event| matches!(event, GameEvent::TokenCreated { .. })),
+        "REACH-GUARD: Halving Season makes the copy zero tokens"
+    );
+    assert_eq!(
+        run.last_created_after_activation,
+        Vec::<ObjectId>::new(),
+        "a copy batch that created nothing publishes nothing to LastCreated"
+    );
+    let state = run.runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the end step raises no prompt, got {:?}",
+        state.waiting_for
+    );
+    let mut p0: Vec<String> = state
+        .battlefield
+        .iter()
+        .filter(|id| state.objects[id].controller == P0)
+        .map(|id| state.objects[id].name.clone())
+        .collect();
+    p0.sort();
+    let soldier = state.objects[&run.soldiers[0]].name.clone();
+    let mut want = vec![BEARS.to_string(), KIKI_JIKI.to_string(), soldier];
+    want.sort();
+    assert_eq!(
+        p0, want,
+        "P0 keeps Kiki-Jiki, the Bears and the Soldier through the end step"
+    );
+    assert!(
+        state.battlefield.contains(&run.soldiers[0]),
+        "the Soldier is not \"it\""
+    );
+    assert_eq!(
+        sacrificed(&run.end_step),
+        Vec::<ObjectId>::new(),
+        "nothing is sacrificed at the end step"
+    );
+}
+
+/// R17 control: without Halving Season Kiki-Jiki creates its copy, LastCreated
+/// names it, and the end step sacrifices it while the Soldiers survive.
+#[test]
+fn r17_control_copy_is_sacrificed_at_the_end_step() {
+    let Some(run) = run_kiki_jiki(false) else {
+        return;
+    };
+    let created: Vec<ObjectId> = run
+        .activation
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(created.len(), 1, "REACH-GUARD: Kiki-Jiki creates one copy");
+    assert_eq!(
+        run.last_created_after_activation, created,
+        "LastCreated names the copy"
+    );
+    let state = run.runner.state();
+    assert_eq!(
+        sacrificed(&run.end_step),
+        created,
+        "the end step sacrifices the copy"
+    );
+    assert!(!state.battlefield.contains(&created[0]), "the copy is gone");
+    for soldier in &run.soldiers {
+        assert!(
+            state.battlefield.contains(soldier),
+            "the Soldiers survive the end step"
+        );
+    }
 }

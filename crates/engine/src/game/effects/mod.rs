@@ -15570,14 +15570,15 @@ pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<Objec
     // in order), so the sibling publisher's `sort_unstable_by_key` + `dedup`
     // shape is deliberately NOT used here — it would reorder every existing
     // chain set. Retaining the earliest occurrence keeps the producer order each
-    // consumer already observes.
+    // consumer already observes. The membership check is one set per publish
+    // (`union_in_first_publish_order`), so a complete referent — a CopyToken
+    // owner's whole list at its completion — is published in time linear in its
+    // size.
     if let Some(chain_id) = state.chain_tracked_set_id {
-        let members = state.tracked_object_sets.entry(chain_id).or_default();
-        for id in affected_ids {
-            if !members.contains(&id) {
-                members.push(id);
-            }
-        }
+        union_in_first_publish_order(
+            state.tracked_object_sets.entry(chain_id).or_default(),
+            affected_ids,
+        );
     } else {
         let set_id = TrackedSetId(state.next_tracked_set_id);
         state.next_tracked_set_id += 1;
@@ -15585,14 +15586,22 @@ pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<Objec
         // same object under two events); the invariant is the set's, not the
         // caller's, so it is enforced on this path too.
         let mut members: Vec<ObjectId> = Vec::with_capacity(affected_ids.len());
-        for id in affected_ids {
-            if !members.contains(&id) {
-                members.push(id);
-            }
-        }
+        union_in_first_publish_order(&mut members, affected_ids);
         state.tracked_object_sets.insert(set_id, members);
         state.chain_tracked_set_id = Some(set_id);
     }
+}
+
+/// Append `affected` to `members`, skipping any id already there or earlier in
+/// `affected`, in first-publish order. One membership set per call, so a union
+/// is linear in the set plus the publish rather than a scan of the growing
+/// member list per id. An empty publish changes nothing and builds no set.
+fn union_in_first_publish_order(members: &mut Vec<ObjectId>, affected: Vec<ObjectId>) {
+    if affected.is_empty() {
+        return;
+    }
+    let mut listed: HashSet<ObjectId> = members.iter().copied().collect();
+    members.extend(affected.into_iter().filter(|id| listed.insert(*id)));
 }
 
 /// CR 608.2c + CR 614.6: Publish the chain tracked set together with the
@@ -34289,6 +34298,65 @@ mod tests {
                 .is_none_or(|origins| !origins.contains_key(&wolf)),
             "the Tapped cause leaves no stale Returned origin behind"
         );
+    }
+
+    /// CR 608.2c: a chain set is the union of its publishes — each object once,
+    /// in first-publish order, across and within publishes — and each published
+    /// member's cause is stamped as before, the latest cause winning.
+    #[test]
+    fn publish_tracked_set_unions_once_in_first_publish_order_and_stamps_causes() {
+        let mut state = GameState::new_two_player(42);
+        state.chain_tracked_set_id = None;
+        let (a, b, c) = (ObjectId(1), ObjectId(2), ObjectId(3));
+        let tapped = Some(ThisWayCause::Tapped);
+        let members = |state: &GameState, set: TrackedSetId| {
+            state
+                .tracked_object_sets
+                .get(&set)
+                .cloned()
+                .expect("the chain set is published")
+        };
+        let causes = |state: &GameState, set: TrackedSetId| {
+            let mut causes: Vec<(ObjectId, ThisWayCause)> = state
+                .tracked_set_member_causes
+                .get(&set)
+                .map(|causes| causes.iter().map(|(id, cause)| (*id, *cause)).collect())
+                .unwrap_or_default();
+            causes.sort_by_key(|(id, _)| *id);
+            causes
+        };
+
+        // (1) A fresh set: an id repeated within one publish is listed once.
+        publish_tracked_set_with_causes(&mut state, vec![(a, tapped), (b, None), (a, tapped)]);
+        let set = state
+            .chain_tracked_set_id
+            .expect("the first publish opens a chain set");
+        assert_eq!(members(&state, set), vec![a, b]);
+        assert_eq!(causes(&state, set), vec![(a, ThisWayCause::Tapped)]);
+
+        // (2) The same chain: listed ids keep their place, a new one follows.
+        publish_tracked_set_with_causes(&mut state, vec![(c, tapped), (b, tapped), (a, None)]);
+        assert_eq!(state.chain_tracked_set_id, Some(set), "same chain set");
+        assert_eq!(members(&state, set), vec![a, b, c]);
+        assert_eq!(
+            causes(&state, set),
+            vec![
+                (a, ThisWayCause::Tapped),
+                (b, ThisWayCause::Tapped),
+                (c, ThisWayCause::Tapped)
+            ]
+        );
+
+        // (3) Two overlapping bulk publishes: X0..X63, then X32..X95.
+        let x = |range: std::ops::Range<u64>| -> Vec<ObjectId> {
+            range.map(|n| ObjectId(100 + n)).collect()
+        };
+        publish_tracked_set(&mut state, x(0..64));
+        publish_tracked_set(&mut state, x(32..96));
+        assert_eq!(state.chain_tracked_set_id, Some(set), "same chain set");
+        let want: Vec<ObjectId> = [a, b, c].into_iter().chain(x(0..96)).collect();
+        assert_eq!(members(&state, set), want);
+        assert_eq!(members(&state, set).len(), 99);
     }
 
     /// CR 601.2c + CR 120.1: the prepended fight subject is the parent's
