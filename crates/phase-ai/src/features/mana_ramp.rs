@@ -605,46 +605,50 @@ mod tests {
 
     #[test]
     fn opponent_scoped_land_search_not_fixing() {
-        // Eternal Dominion: "Search target opponent's library for an artifact,
-        // creature, enchantment, or land card. Put that card onto the
-        // battlefield under your control." The land filter alone must not make
-        // an opponent's library count as the controller's fixing.
-        let mut ability = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::SearchLibrary {
-                filter: TargetFilter::Typed(TypedFilter::land()),
-                count: QuantityExpr::Fixed { value: 1 },
-                reveal: false,
-                target_player: Some(TargetFilter::Opponent),
-                selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
-                split: None,
-                source_zones: vec![engine::types::zones::Zone::Library],
-            },
+        // Eternal Dominion, built through the production MTGJSON → parser →
+        // synthesis path from its verbatim Oracle text. Its search names an
+        // opponent's library, so its land alternative is not the controller's
+        // fixing.
+        let atomic: engine::database::mtgjson::AtomicCard =
+            serde_json::from_value(serde_json::json!({
+                "name": "Eternal Dominion",
+                "manaCost": "{7}{U}{U}{U}",
+                "manaValue": 10.0,
+                "colors": ["U"],
+                "colorIdentity": ["U"],
+                "layout": "normal",
+                "type": "Sorcery",
+                "types": ["Sorcery"],
+                "keywords": ["Epic"],
+                "identifiers": {},
+                "text": "Search target opponent's library for an artifact, creature, enchantment, or land card. Put that card onto the battlefield under your control. Then that player shuffles.\nEpic (For the rest of the game, you can't cast spells. At the beginning of each of your upkeeps, copy this spell except for its epic ability. You may choose a new target for the copy.)",
+            }))
+            .expect("valid AtomicCard fixture");
+        let face = engine::database::synthesis::build_oracle_face(&atomic, None);
+        let search = face
+            .abilities
+            .iter()
+            .flat_map(collect_chain_effects)
+            .find_map(|e| match e {
+                Effect::SearchLibrary {
+                    filter,
+                    target_player,
+                    ..
+                } => Some((filter, target_player)),
+                _ => None,
+            })
+            .expect("positive guard: the spell exports a library search");
+        assert!(
+            target_filter_references_land(search.0),
+            "positive guard: the search filter admits a land card"
         );
-        ability.sub_ability = Some(Box::new(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::ChangeZone {
-                library_shuffle: Default::default(),
-                origin: Some(Zone::Library),
-                destination: Zone::Battlefield,
-                target: TargetFilter::Typed(TypedFilter::land()),
-                owner_library: false,
-                enter_transformed: false,
-                enters_under: Some(ControllerRef::You),
-                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
-                enters_attacking: false,
-                up_to: false,
-                enter_with_counters: vec![],
-                conditional_enter_with_counters: vec![],
-                face_down_profile: None,
-                enters_modified_if: None,
-            },
-        )));
-        let mut face = card_face_with_types("Eternal Dominion", vec![CoreType::Sorcery]);
-        face.abilities.push(ability);
-        let deck = vec![entry(face, 1)];
+        assert!(
+            search.1.is_some(),
+            "positive guard: the search names another player's library"
+        );
+        assert!(!face.abilities.iter().any(chain_searches_for_land));
 
-        let feature = detect(&deck);
+        let feature = detect(&[entry(face, 1)]);
         assert_eq!(feature.land_fetch_count, 0);
     }
 

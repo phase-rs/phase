@@ -13,7 +13,7 @@
         "combat_trick": 0.15,
         "mana_fixing": 0.25
       },
-      "shrink_removal": "include",
+      "role_reading": "full",
       "threat_need": {
         "target": 4,
         "bonus": 1.25,
@@ -32,7 +32,7 @@
         "soulshift": 0.35,
         "splice": 0.35
       },
-      "shrink_removal": "include",
+      "role_reading": "full",
       "threat_need": {
         "target": 4,
         "bonus": 1.25,
@@ -50,7 +50,7 @@
         "soulshift": 0.35,
         "splice": 0.3
       },
-      "shrink_removal": "include",
+      "role_reading": "full",
       "threat_need": {
         "target": 4,
         "bonus": 1.25,
