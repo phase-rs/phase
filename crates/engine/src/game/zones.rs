@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::StaticDefinition;
 use crate::types::card_type::CoreType;
@@ -2834,21 +2836,62 @@ pub(crate) fn reorder_within_library(
     // CR 701.20d: An effect that reveals multiple cards may state that the cards
     // are to be reordered; any revealed cards that are reordered stop being
     // revealed and become new objects.
-    // A singleton card that remains in the same position (e.g. Calibrated Blast
-    // bottoming the only card in a 1-card library) is not reordered.
+    //
+    // An insertion shifts every card below it to a new library position, so the
+    // reorder covers each card whose index changed — including cards this
+    // instruction did not name. Leaving a shifted card revealed would publish
+    // the new index the placement gave it (a random bottom placement delivered
+    // one card at a time keeps moving cards already placed by earlier
+    // deliveries).
+    //
+    // A card that keeps its position was not reordered and stays revealed:
+    // Calibrated Blast bottoming the only card of a 1-card library leaves it
+    // exactly where it already was.
     if !ordered.is_empty() && old_order != new_order {
-        let reordered_cards: Vec<ObjectId> = if ordered.len() == 1 {
-            let card = ordered[0];
-            let old_pos = old_order.iter().position(|&id| id == card);
-            let new_pos = new_order.iter().position(|&id| id == card);
-            if old_pos != new_pos {
-                vec![card]
-            } else {
-                vec![]
-            }
-        } else {
+        let old_positions: HashMap<ObjectId, usize> = old_order
+            .iter()
+            .enumerate()
+            .map(|(position, &id)| (id, position))
+            .collect();
+        // The cards this instruction placed. A multi-card placement reorders the
+        // whole named set as one instruction, even when the chosen arrangement
+        // leaves one of them in place; a lone card is reordered only when it
+        // actually moved (Calibrated Blast bottoming the only card of a 1-card
+        // library leaves it exactly where it already was).
+        let mut reordered_cards: Vec<ObjectId> = if ordered.len() > 1 {
             ordered.to_vec()
+        } else {
+            ordered
+                .first()
+                .copied()
+                .filter(|id| {
+                    old_positions.get(id).copied()
+                        != new_order.iter().position(|candidate| candidate == id)
+                })
+                .into_iter()
+                .collect()
         };
+        let mut reordered_seen: HashSet<ObjectId> = reordered_cards.iter().copied().collect();
+        // An insertion shifts every card below it to a new position. A card whose
+        // library position is public (`revealed_cards` / `public_revealed_cards`)
+        // would publish that new position, so it is reordered too and stops being
+        // revealed. A stack-bound reveal lease (CR 701.20a) publishes only the
+        // card's identity, never its library position, and lasts until its
+        // trigger leaves the stack — an unrelated insertion does not end it.
+        for (position, &object_id) in new_order.iter().enumerate() {
+            let Some(old_position) = old_positions.get(&object_id).copied() else {
+                continue;
+            };
+            if old_position == position
+                || !(state.revealed_cards.contains(&object_id)
+                    || state.public_revealed_cards.contains(&object_id))
+            {
+                continue;
+            }
+            if reordered_seen.insert(object_id) {
+                reordered_cards.push(object_id);
+            }
+        }
         if !reordered_cards.is_empty() {
             retire_reordered_library_reveals(state, &reordered_cards);
         }
@@ -5418,6 +5461,96 @@ mod tests {
         assert_eq!(
             state.players[0].library.iter().copied().collect::<Vec<_>>(),
             [second, third, first]
+        );
+    }
+
+    /// CR 701.20d: an insertion shifts every card below it to a new library
+    /// position, so a revealed card the instruction did not name is reordered
+    /// too and stops being revealed (it becomes a new object). A card that keeps
+    /// its position was not reordered and keeps its reveal.
+    #[test]
+    fn reorder_within_library_retires_every_revealed_card_whose_position_changed() {
+        let mut state = setup();
+        let first = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "First".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Second".to_string(),
+            Zone::Library,
+        );
+        let third = create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(0),
+            "Third".to_string(),
+            Zone::Library,
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [first, second, third],
+            "top-to-bottom staging"
+        );
+
+        // A fully revealed library: every card's position is public.
+        state.revealed_cards.extend([first, second, third]);
+        let incarnations: Vec<u64> = [first, second, third]
+            .iter()
+            .map(|id| state.objects[id].incarnation)
+            .collect();
+
+        // The bottom card is inserted on top. `second` is not named by the
+        // instruction but shifts from index 1 to index 2.
+        reorder_within_library(&mut state, PlayerId(0), &[third], Some(0));
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [third, first, second]
+        );
+        for ((id, label), incarnation_before) in [first, second, third]
+            .into_iter()
+            .zip(["First", "Second", "Third"])
+            .zip(incarnations)
+        {
+            assert!(
+                !state.revealed_cards.contains(&id),
+                "{label} changed position and must stop being revealed"
+            );
+            assert!(
+                state.objects[&id].incarnation > incarnation_before,
+                "{label} changed position and must become a new object"
+            );
+        }
+
+        // A singleton that keeps its position is not reordered: Calibrated Blast
+        // bottoming the only card of a 1-card library leaves it where it is.
+        let mut state = setup();
+        let only = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Only".to_string(),
+            Zone::Library,
+        );
+        state.revealed_cards.insert(only);
+        let incarnation_before = state.objects[&only].incarnation;
+        reorder_within_library(&mut state, PlayerId(0), &[only], None);
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [only]
+        );
+        assert!(
+            state.revealed_cards.contains(&only),
+            "a card that keeps its position is not reordered"
+        );
+        assert_eq!(
+            state.objects[&only].incarnation, incarnation_before,
+            "a card that keeps its position does not become a new object"
         );
     }
 
