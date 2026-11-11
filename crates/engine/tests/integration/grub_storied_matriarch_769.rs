@@ -58,7 +58,7 @@ use engine::types::card::LayoutKind;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{
-    CastPaymentMode, DayNight, GameState, ReplacementChoiceKind, WaitingFor,
+    CastPaymentMode, DayNight, GameState, ReplacementChoiceKind, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -4230,6 +4230,26 @@ fn activate_celestus(runner: &mut GameRunner, celestus: ObjectId) {
         })
         .expect("The Celestus's day/night ability must be legal");
     both_pass(runner);
+    assert!(
+        !runner.state().stack.iter().any(|entry| matches!(
+            entry.kind,
+            StackEntryKind::ActivatedAbility { source_id, .. } if source_id == celestus
+        )),
+        "the day/night ability must have resolved; stack: {:?}",
+        runner.state().stack
+    );
+    // The Celestus's own "Whenever day becomes night or night becomes day, you gain
+    // 1 life. You may draw a card. If you do, discard a card." not resolving after
+    // this activation is a filed follow-up. These rows don't depend on it either
+    // way: the permanents turn over inside `resolve_set_day_night`, before any
+    // trigger. If it fires, it resolves here and its draw is declined.
+    for _ in 0..4 {
+        match runner.state().waiting_for {
+            WaitingFor::OptionalEffectChoice { .. } => decide(runner, false),
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => both_pass(runner),
+            _ => break,
+        }
+    }
     assert_settled(runner);
     settle(runner);
     assert_eq!(runner.state().day_night, Some(DayNight::Day));

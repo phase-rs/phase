@@ -3998,9 +3998,9 @@ impl GameObject {
     /// | `face_down` (CR 708.9) | `from == Battlefield \|\| (from == Stack && to != Battlefield)` | reverts |
     ///
     /// **Each flag INDEPENDENTLY reverts for `Battlefield -> Graveyard`** (CR
-    /// 701.21a's transition), which is what the disjunction below relies on. The
-    /// claim is deliberately per-flag: the disjunction also admits flag
-    /// COMBINATIONS, and one is real and handled in-tree — see the next section.
+    /// 701.21a's transition), which is what the read below relies on. The
+    /// claim is deliberately per-flag: the read also admits flag COMBINATIONS,
+    /// and two are real and handled in-tree — see the next section.
     /// None of the three is exact for a battlefield-to-STACK move, where the
     /// `modal_back_face` gate does not fire. A destination parameter is not added:
     /// only the battlefield-exit value is proven, and a parameter with one proven
@@ -4008,7 +4008,15 @@ impl GameObject {
     /// own per-flag proof. The two orientation flags are read through
     /// `transform::face_up`, so a front-face-up permanent with both set reads its base.
     ///
-    /// # The one flag combination that occurs, and why it is still correct
+    /// # The flag combinations that occur, and why each is correct
+    ///
+    /// A modal card cast back face up and then transformed (Valentin, Dean of the
+    /// Vein cast as Lisette, Dean of the Root, then Moonmist: "Transform all
+    /// Humans.") sets `transformed` AND `modal_back_face`. `transform::face_up`
+    /// reads that pair as front face up, so the base is read: CR 712.8a + CR 712.8d,
+    /// the card leaves as Valentin ({B}).
+    ///
+    /// The other combination:
     ///
     /// A **flipped permanent that is then turned face down** (Ixidron, Cyber
     /// Conversion — CR 712.16 does not cover flip cards, so this is legal) sets
