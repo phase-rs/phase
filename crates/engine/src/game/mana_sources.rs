@@ -3036,6 +3036,41 @@ fn mana_amount_reads_board(
         && mana_abilities::largest_announceable_x(state, controller, object_id, ability).is_none()
 }
 
+/// CR 601.2g + CR 605.3b: the choice-free mana abilities of `controller`'s
+/// permanents whose amount is read from the board. The automatic payer can
+/// activate them, but their amount is only provisional until they resolve
+/// (CR 605.3b), so the window must schedule them before the board they count
+/// changes: Gaea's Cradle's "Add {G} for each creature you control" adds one
+/// mana for a creature Ashnod's Altar later sacrifices only if it is tapped
+/// first, although the Cradle itself stays on the battlefield.
+pub(crate) fn window_board_sized_mana_abilities(
+    state: &GameState,
+    controller: PlayerId,
+) -> Vec<(ObjectId, usize)> {
+    state
+        .battlefield
+        .iter()
+        .filter_map(|&object_id| {
+            let obj = state
+                .objects
+                .get(&object_id)
+                .filter(|obj| obj.zone == Zone::Battlefield && obj.controller == controller)?;
+            Some(
+                obj.abilities
+                    .iter()
+                    .enumerate()
+                    .filter(move |(_, ability)| {
+                        is_payment_mana_ability(ability)
+                            && !player_choice_mana_ability_shape(ability)
+                            && mana_amount_reads_board(state, controller, object_id, ability)
+                    })
+                    .map(move |(idx, _)| (object_id, idx)),
+            )
+        })
+        .flatten()
+        .collect()
+}
+
 /// CR 117.1d + CR 601.2g: One activation's producible mana shape for the
 /// castability gate's colored-shard coverage check (issue #583 / #1234).
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -6934,3 +6934,296 @@ fn llanowar_elves_tapped_before_the_altar_sacrifices_it_funds_staff_of_dominatio
     resolve_stack(&mut runner);
     assert_eq!(hand_size(&runner, P0), hand_before + 1, "the draw resolved");
 }
+
+// ---------------------------------------------------------------------------
+// #10190 seventh review: the window announces every legal X, schedules
+// board-sized producers before the board they count is spent, collapses
+// interchangeable choices, locks the half-life total before the window, and
+// shares one bounded search budget per legal-action snapshot.
+// ---------------------------------------------------------------------------
+
+const HAZEL_MANA_ABILITY: &str =
+    "{T}, Pay 2 life, Tap X untapped tokens you control: Add X mana in any combination of colors.";
+const SELESNYA_EVANGEL: &str =
+    "{1}, {T}, Tap an untapped creature you control: Create a 1/1 green Saproling creature token.";
+const MURDEROUS_BETRAYAL: &str = "{B}{B}, Pay half your life, rounded up: Destroy target nonblack creature. It can't be regenerated.";
+const GAEA_S_CRADLE: &str = "{T}: Add {G} for each creature you control.";
+
+/// Crature `ids` into untapped, non-sick creature tokens (the scenario builder
+/// creates ordinary creatures; "tokens you control" reads `is_token`).
+fn as_untapped_tokens(runner: &mut GameRunner, ids: &[ObjectId]) {
+    for &id in ids {
+        let obj = runner.state_mut().objects.get_mut(&id).expect("a token");
+        obj.is_token = true;
+        obj.tapped = false;
+        obj.summoning_sick = false;
+    }
+}
+
+fn untap_and_settle(runner: &mut GameRunner, ids: &[ObjectId]) {
+    for &id in ids {
+        let obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&id)
+            .expect("a permanent");
+        obj.tapped = false;
+        obj.summoning_sick = false;
+    }
+}
+
+/// CR 107.3a + CR 605.3a + CR 601.2g (#10190 seventh review): a mana ability
+/// with an announced X accepts every legal cardinality, and the window's search
+/// must try them. Hazel of the Rootbloom ("{T}, Pay 2 life, Tap X untapped
+/// tokens you control: Add X mana ...") can make one mana by tapping one of two
+/// tokens, leaving the other for Selesnya Evangel's "Tap an untapped creature
+/// you control"; tapping both leaves none. Evangel's "{1}" is offered for a
+/// manual payment and the activation completes with X = 1.
+#[test]
+fn hazels_tap_x_announces_the_cardinality_the_rest_of_the_cost_needs() {
+    let mut scenario = scenario_at_main();
+    scenario.with_life(P0, 5);
+    let evangel = scenario
+        .add_creature_from_oracle(P0, "Selesnya Evangel", 1, 1, SELESNYA_EVANGEL)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let hazel = scenario
+        .add_creature_from_oracle(P0, "Hazel of the Rootbloom", 3, 5, HAZEL_MANA_ABILITY)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let tokens: Vec<ObjectId> = (0..2)
+        .map(|i| {
+            scenario
+                .add_creature(P0, &format!("Squirrel {i}"), 1, 1)
+                .id()
+        })
+        .collect();
+    let mut runner = build(scenario);
+    as_untapped_tokens(&mut runner, &tokens);
+    untap_and_settle(&mut runner, &[hazel, evangel]);
+    let index = ability_index_of(&runner, evangel, "Saproling");
+    let tokens_before = runner.state().battlefield.len();
+
+    assert_eq!(
+        offered_payment_modes(&runner, evangel, index),
+        vec![CastPaymentMode::Manual],
+        "Hazel can make the {{1}} while leaving a creature for the tap cost"
+    );
+
+    // The tap-creature cost may be surfaced before the window on this route;
+    // answer it so the window opens and X stays the window's decision.
+    let mut waiting_for = activate_index(&mut runner, evangel, index, CastPaymentMode::Manual);
+    for _ in 0..4 {
+        if is_mana_payment(&waiting_for) || is_priority(&waiting_for) {
+            break;
+        }
+        waiting_for = if is_cost_prompt(&waiting_for, |kind| {
+            matches!(kind, PayCostKind::TapCreatures { .. })
+        }) {
+            select_cards(&mut runner, &[tokens[0]])
+        } else {
+            panic!("unexpected prompt before the window: {waiting_for:?}");
+        };
+    }
+    if is_mana_payment(&waiting_for) {
+        activate_in_window(
+            &mut runner,
+            hazel,
+            &[tokens[1]],
+            Some(engine::types::game_state::ManaChoice::Combination(vec![
+                engine::types::mana::ManaType::Green,
+            ])),
+        );
+        assert_eq!(life(&runner, P0), 3, "Hazel's 2 life was paid");
+        assert_eq!(pool_total(&runner), 1, "Hazel made one green");
+        waiting_for = pass(&mut runner);
+    }
+    if let WaitingFor::PayCost {
+        kind: PayCostKind::TapCreatures { .. },
+        choices,
+        min_count,
+        ..
+    } = &waiting_for
+    {
+        assert!(
+            !choices.is_empty() && *min_count <= 1,
+            "a creature is left for the tap cost: {waiting_for:?}"
+        );
+        let chosen = choices[0];
+        waiting_for = select_cards(&mut runner, &[chosen]);
+    }
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, evangel), "the {{T}} was paid");
+
+    resolve_stack(&mut runner);
+    let saprolings = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| runner.state().objects[*id].name == "Saproling")
+        .count();
+    assert_eq!(saprolings, 1, "the Saproling token was created");
+    assert!(runner.state().battlefield.len() >= tokens_before);
+}
+
+/// CR 601.2g + CR 605.3b (#10190 seventh review): a producer whose amount is
+/// read from the board must be scheduled before the board is spent, even
+/// though its source stays. Gaea's Cradle ("{T}: Add {G} for each creature you
+/// control") tapped with one Grizzly Bears, then the Bears sacrificed to
+/// Ashnod's Altar, makes the {3} for Arcane Encyclopedia's "{3}, {T}: Draw a
+/// card." The activation is offered for a manual payment and the draw resolves.
+#[test]
+fn gaeas_cradle_adds_its_creature_mana_before_the_altar_sacrifices_the_creature() {
+    let mut scenario = scenario_at_main();
+    let encyclopedia = scenario
+        .add_artifact_from_oracle(P0, "Arcane Encyclopedia", ARCANE_ENCYCLOPEDIA)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let cradle = scenario
+        .add_land_from_oracle(P0, "Gaea's Cradle", GAEA_S_CRADLE)
+        .id();
+    let altar = add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+    let bears = add(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+    scenario.add_card_to_library_top(P0, "Drawn card");
+    let mut runner = build(scenario);
+    let index = non_mana_ability_index(&runner, encyclopedia);
+    let hand_before = hand_size(&runner, P0);
+
+    assert_eq!(
+        offered_payment_modes(&runner, encyclopedia, index),
+        vec![CastPaymentMode::Manual],
+        "the Cradle's one mana plus the Altar's two make the {{3}}"
+    );
+    let waiting_for = activate_index(&mut runner, encyclopedia, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(&mut runner, cradle, &[], None);
+    assert_eq!(pool_total(&runner), 1, "the Cradle added one green");
+    activate_in_window(&mut runner, altar, &[bears], None);
+    assert_eq!(pool_total(&runner), 3, "the Altar added {{C}}{{C}}");
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, encyclopedia));
+    assert!(tapped(&runner, cradle));
+    assert_eq!(pool_total(&runner), 0, "the {{3}} was paid");
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), hand_before + 1, "the draw resolved");
+}
+
+/// CR 601.2h + CR 605.3b (#10190 seventh review): interchangeable choices are
+/// one answer. One Ashnod's Altar with 300 identical creature tokens funds
+/// Jayemdae Tome's "{4}, {T}: Draw a card." in two sacrifices; trying every
+/// first sacrifice separately would spend the whole search budget before the
+/// second one, so the offer would never be found. It is offered for a manual
+/// payment and completes.
+#[test]
+fn crowded_identical_fodder_funds_jayemdae_tome_with_one_altar() {
+    let mut scenario = scenario_at_main();
+    let tome = scenario
+        .add_artifact_from_oracle(P0, "Jayemdae Tome", JAYEMDAE_TOME)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let altar = add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+    let fodder: Vec<ObjectId> = (0..300).map(|_| scenario.add_vanilla(P0, 2, 2)).collect();
+    scenario.add_card_to_library_top(P0, "Drawn card");
+    let mut runner = build(scenario);
+    let index = non_mana_ability_index(&runner, tome);
+    let hand_before = hand_size(&runner, P0);
+
+    assert_eq!(
+        offered_payment_modes(&runner, tome, index),
+        vec![CastPaymentMode::Manual],
+        "two of the 300 identical sacrifices pay the {{4}}"
+    );
+    let waiting_for = activate_index(&mut runner, tome, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(&mut runner, altar, &[fodder[0]], None);
+    activate_in_window(&mut runner, altar, &[fodder[1]], None);
+    assert_eq!(pool_total(&runner), 4, "the Altar resolved twice");
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, tome));
+    assert_eq!(pool_total(&runner), 0, "the {{4}} was paid");
+    assert!(in_zone(&runner, fodder[0], Zone::Graveyard));
+    assert!(in_zone(&runner, fodder[1], Zone::Graveyard));
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), hand_before + 1, "the draw resolved");
+}
+
+/// CR 601.2f + CR 602.2b + CR 601.2g (#10190 seventh review): a half-life cost
+/// is locked before the mana-ability window, so life the window pays is not
+/// part of it. At three life, Hazel of the Rootbloom can make the {B}{B} by
+/// paying 2 life, but Murderous Betrayal's "Pay half your life, rounded up"
+/// was locked at two, and only one life is left — so the activation is offered
+/// in no mode. At seven life the lock is four, the window leaves five, and the
+/// activation is offered and completes (destroying the target at one life).
+#[test]
+fn a_manual_offer_locks_the_half_life_total_before_the_window() {
+    let board = |life_total: i32| {
+        let mut scenario = scenario_at_main();
+        scenario.with_life(P0, life_total);
+        let betrayal = scenario
+            .add_enchantment_from_oracle(P0, "Murderous Betrayal", MURDEROUS_BETRAYAL)
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        let hazel = scenario
+            .add_creature_from_oracle(P0, "Hazel of the Rootbloom", 3, 5, HAZEL_MANA_ABILITY)
+            .with_mana_cost(ManaCost::generic(4))
+            .id();
+        let tokens: Vec<ObjectId> = (0..2)
+            .map(|i| {
+                scenario
+                    .add_creature(P0, &format!("Squirrel {i}"), 1, 1)
+                    .id()
+            })
+            .collect();
+        let victim = add(&mut scenario, P1, "Grizzly Bears", Zone::Battlefield);
+        let mut runner = build(scenario);
+        as_untapped_tokens(&mut runner, &tokens);
+        untap_and_settle(&mut runner, &[hazel]);
+        let index = ability_index_of(&runner, betrayal, "Pay half your life");
+        (runner, betrayal, index, hazel, tokens, victim)
+    };
+
+    let (runner, betrayal, index, ..) = board(3);
+    assert!(
+        offered_payment_modes(&runner, betrayal, index).is_empty(),
+        "the window's 2 life would leave only 1 for the locked half-life cost"
+    );
+
+    let (mut runner, betrayal, index, hazel, tokens, victim) = board(7);
+    assert_eq!(
+        offered_payment_modes(&runner, betrayal, index),
+        vec![CastPaymentMode::Manual],
+        "the window's 2 life leaves 5 for the locked 4"
+    );
+    activate_index(&mut runner, betrayal, index, CastPaymentMode::Manual);
+    let waiting_for = choose_targets(&mut runner, &[victim]);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(
+        &mut runner,
+        hazel,
+        &tokens,
+        Some(engine::types::game_state::ManaChoice::Combination(vec![
+            engine::types::mana::ManaType::Black;
+            2
+        ])),
+    );
+    assert_eq!(life(&runner, P0), 5, "Hazel's 2 life was paid");
+    let waiting_for = pass(&mut runner);
+    if matches!(
+        waiting_for,
+        WaitingFor::ChooseManaColor { .. } | WaitingFor::PayCost { .. }
+    ) {
+        panic!("the window should have paid in full: {waiting_for:?}");
+    }
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert_eq!(life(&runner, P0), 1, "the locked 4 life was paid");
+    assert_eq!(pool_total(&runner), 0, "the {{B}}{{B}} was paid");
+    resolve_stack(&mut runner);
+    assert!(
+        in_zone(&runner, victim, Zone::Graveyard),
+        "the target was destroyed"
+    );
+}
