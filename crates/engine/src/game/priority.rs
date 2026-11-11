@@ -359,8 +359,9 @@ pub(crate) enum StandingPriorityPass {
     /// the player's own object is on top, and resolving it moves a permanent
     /// whose mana ability they can activate now off the battlefield (CR 400.7),
     /// so that activation is lost; or the object is their own activated ability
-    /// that untaps its own source while they can tap that source for mana now,
-    /// so the untap is wasted unless they tap it first (CR 701.26b).
+    /// that untaps its own source while that source is untapped with a {T} mana
+    /// ability an untap would give again, so the untap is wasted unless they
+    /// tap it first (CR 701.26b).
     ///
     /// The departure reason is kept unconditionally: the mana stays until the
     /// step ends (CR 106.4), and what it can pay for once the object resolves
@@ -468,14 +469,13 @@ fn resolution_can_remove_activatable_mana_source(
 }
 
 /// CR 701.26b + CR 605.3a: whether resolving `top`, `player`'s own activated
-/// ability, untaps its own source while `player` can tap that source for mana
-/// now, and untapping it would give that mana again, read from public facts
-/// (`mana_sources::untap_would_repeat_mana`). Only tapped permanents can be
-/// untapped, so the untap does nothing unless they tap it first, and this is
-/// the window to do it. Basalt Monolith: "{3}: Untap this artifact." under
-/// Rings of Brighthearth, with the copy resolved and the original still on the
-/// stack. Only public facts are read: the entry, and its source's mana
-/// abilities through their readiness gates.
+/// ability, untaps its own source while that source is untapped with a {T}
+/// mana ability an untap would give again, judged from the source alone
+/// (`mana_sources::untap_would_repeat_mana`, which holds when in doubt). Only
+/// tapped permanents can be untapped, so the untap does nothing unless they tap
+/// it first, and this is the window to do it. Basalt Monolith: "{3}: Untap this
+/// artifact." under Rings of Brighthearth, with the copy resolved and the
+/// original still on the stack. Only the entry and its source are read.
 fn resolution_untaps_ready_mana_source(
     state: &GameState,
     player: PlayerId,
@@ -496,7 +496,8 @@ fn resolution_untaps_ready_mana_source(
         | StackEntryKind::CombatDamage { .. } => return false,
     };
     untapped_source(state, ability)
-        .is_some_and(|source| mana_sources::untap_would_repeat_mana(state, player, source))
+        .and_then(|source| state.objects.get(&source))
+        .is_some_and(|source| mana_sources::untap_would_repeat_mana(source, player))
 }
 
 /// The object `ability` untaps when it is a plain "Untap this artifact." /
@@ -1514,8 +1515,8 @@ mod tests {
         }
 
         /// Basalt Monolith: "{3}: Untap this artifact." The fixture's Forest stands in for Monolith:
-        /// the rung reads the entry's kind, its binding and the object's {T} mana ability, not the
-        /// object's type.
+        /// the rung reads the entry's kind, its binding and the object's own mana (here a Forest's
+        /// intrinsic {T}: Add {G}).
         fn untap_itself(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
             ResolvedAbility::new(
                 Effect::SetTapState {

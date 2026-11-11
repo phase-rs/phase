@@ -2102,8 +2102,7 @@ fn beneficial_mana_tap_trigger_hold(
 /// - Player's own spell/ability is on top of the stack (MTGA-style: let your
 ///   own spells resolve without pausing), unless resolving it can remove a
 ///   mana source the player can activate now, or it is their own activated
-///   ability and would waste an untap on its own source, which they can tap
-///   for mana now
+///   ability and would waste an untap on its own untapped mana source
 ///
 /// This centralizes the "meaningful action" classification in the engine so
 /// frontends don't need to inspect game objects or card types.

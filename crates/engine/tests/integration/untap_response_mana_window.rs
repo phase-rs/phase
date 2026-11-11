@@ -1,7 +1,6 @@
 //! CR 701.26b + CR 605.3a: a player's own activated ability that will untap
-//! its own source while they can tap that source for mana now holds their
-//! priority, because only tapped permanents can be untapped and this is the
-//! window to tap it.
+//! its own untapped mana source holds their priority, because only tapped
+//! permanents can be untapped and this is the window to tap it.
 //!
 //! The defining line, with Basalt Monolith ("{T}: Add {C}{C}{C}." and "{3}: Untap
 //! this artifact.") and Rings of Brighthearth ("Whenever you activate an ability,
@@ -786,9 +785,8 @@ fn costed_source_untap(db: &CardDatabase, prism: bool) -> GameRunner {
 
 /// The hold reads a costed source without running its mana ability or a
 /// payment: the recommendation P0's client receives holds for the Staff's "Pay
-/// 2 life" and for the Prism's {2}, whose mana part reads as payable without
-/// running the payment, taking no legality, readiness or auto-payment copy of
-/// the game.
+/// 2 life" and for the Prism's {2}, neither of which it settles, taking no
+/// legality, readiness or auto-payment copy of the game.
 #[test]
 fn a_costed_source_is_read_without_running_it() {
     let Some(db) = shared_card_db() else { return };
@@ -817,7 +815,7 @@ fn a_costed_source_is_read_without_running_it() {
             "Prism: {prism}: no copy of the game"
         );
         assert_eq!(
-            perf_counters::priority_hold_probe_snapshot().state_clones,
+            perf_counters::ability_mana_auto_tap_probe_snapshot().state_clones,
             0,
             "Prism: {prism}: no auto-payment run"
         );
@@ -840,7 +838,7 @@ fn welder_drum_hold_work(
 ) -> (
     bool,
     usize,
-    perf_counters::PriorityHoldProbeCounters,
+    perf_counters::AbilityManaAutoTapProbeCounters,
     perf_counters::PerfCounterSnapshot,
 ) {
     let mut scenario = main_phase_scenario();
@@ -874,17 +872,17 @@ fn welder_drum_hold_work(
     (
         holds,
         abilities,
-        perf_counters::priority_hold_probe_snapshot(),
+        perf_counters::ability_mana_auto_tap_probe_snapshot(),
         perf_counters::snapshot(),
     )
 }
 
-/// The hold reads only its source. Through the recommendation P0's client
-/// receives, Myr Welder borrowing Springleaf Drum's "Tap an untapped creature
-/// you control" holds, with The Immortal Sun's loyalty prohibition and thirty
-/// creatures on the battlefield or without them. Either way the hold reads the
-/// Welder's own abilities and nothing else, takes no auto-payment copy, and
-/// every engine counter for the read matches the bare board's.
+/// The hold reads only its source: `untap_would_repeat_mana` takes the source
+/// object, not the game. Through the recommendation P0's client receives, Myr
+/// Welder borrowing Springleaf Drum's "Tap an untapped creature you control"
+/// holds, with The Immortal Sun's loyalty prohibition and thirty creatures on
+/// the battlefield or without them, takes no auto-payment copy, and every
+/// engine counter for the read matches the bare board's.
 #[test]
 fn the_hold_reads_only_its_source_on_a_crowded_board() {
     let Some(db) = shared_card_db() else { return };
@@ -893,9 +891,11 @@ fn the_hold_reads_only_its_source_on_a_crowded_board() {
         welder_drum_hold_work(db, true);
     assert!(bare_holds && crowded_holds, "the window holds");
     assert_eq!(bare_abilities, crowded_abilities);
-    assert!(crowded_probe.untap_hold_ability_reads as usize <= crowded_abilities);
-    assert_eq!(crowded_probe, bare_probe, "the hold's own reads");
-    assert_eq!(crowded_probe.state_clones, 0, "no auto-payment run");
+    assert_eq!(
+        (bare_probe.state_clones, crowded_probe.state_clones),
+        (0, 0),
+        "no auto-payment run"
+    );
     assert_eq!(crowded, bare, "the board adds no work to the read");
 }
 

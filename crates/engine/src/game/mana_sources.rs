@@ -447,11 +447,11 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
     actions
 }
 
-/// CR 605.3a + CR 701.26b + CR 122.1d: whether untapping `object` gives `player`
-/// its mana a second time, a priority hint read from `object` alone: its zone,
-/// controller, tap state, counters, types and own ability definitions, with no
-/// other object, static or cost leg consulted and nothing activated, paid or
-/// copied. `object` must be untapped with no stun counter (an untap would
+/// CR 605.3a + CR 701.26b + CR 122.1d: whether untapping `source` gives `player`
+/// its mana a second time, a priority hint read from `source` alone (it takes
+/// no game state): its zone, controller, tap state, counters, types and own
+/// ability definitions, with no other object, static or cost leg consulted and
+/// nothing activated, paid or copied. `source` must be untapped with no stun counter (an untap would
 /// remove the counter instead), and have a {T} mana ability whose cost doesn't
 /// move it off the battlefield (Treasure, Lotus Petal, Mirrored Lotus), or be a
 /// land with a basic land type's intrinsic "{T}: Add" (CR 305.6). Whatever that
@@ -461,13 +461,9 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
 /// use turns out impossible, and never passes a real one. The live activation
 /// stays the authority on what can actually be activated.
 pub(crate) fn untap_would_repeat_mana(
-    state: &GameState,
+    source: &crate::game::game_object::GameObject,
     player: PlayerId,
-    object: ObjectId,
 ) -> bool {
-    let Some(source) = state.objects.get(&object) else {
-        return false;
-    };
     if source.zone != Zone::Battlefield
         || source.controller != player
         || source.tapped
@@ -486,8 +482,6 @@ pub(crate) fn untap_would_repeat_mana(
             .any(|subtype| super::mana_payment::land_subtype_to_mana_type(subtype).is_some());
     intrinsic_land_mana
         || source.abilities.iter().any(|ability| {
-            #[cfg(feature = "test-support")]
-            crate::game::perf_counters::record_untap_hold_ability_read();
             ability.kind == AbilityKind::Activated
                 && mana_abilities::is_mana_ability(ability)
                 && has_tap_component(&ability.cost)

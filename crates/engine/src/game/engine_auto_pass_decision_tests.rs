@@ -2771,7 +2771,7 @@ fn own_basalt_untap(monolith_tapped: bool) -> GameState {
 }
 
 /// CR 701.26b + CR 605.3a: an own activated ability that would waste an untap
-/// on its source while that source can tap for mana now is `Held`, so a
+/// on its untapped mana source is `Held`, so a
 /// rechecking session pauses an unverified representative's live window. No
 /// skipped window is authorized over it, as over any activated ability, which
 /// resolves alone.

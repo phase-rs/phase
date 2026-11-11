@@ -122,20 +122,15 @@ pub struct DeclaredLifeChargeCounters {
     pub reads: u64,
 }
 
-/// Test-only counters for the untap priority hold's work: the game copies the
-/// CR 601.2g + CR 605.3a ability-mana affordability probe
-/// (`casting::can_pay_ability_mana_cost_after_auto_tap_excluding`) takes to run
-/// an auto-payment, which the hold must never reach, and the ability
-/// definitions the hold reads. Kept out of [`PerfCounterSnapshot`] for the same
-/// reason as the counter sets above.
+/// Test-only counter for the ability-mana affordability probe
+/// (`casting::can_pay_ability_mana_cost_after_auto_tap_excluding`): the game
+/// copies it takes to run an auto-payment. It pins readers that must not run a
+/// payment, such as the untap priority hold. Kept out of [`PerfCounterSnapshot`]
+/// for the same reason as the counter sets above.
 #[cfg(feature = "test-support")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PriorityHoldProbeCounters {
+pub struct AbilityManaAutoTapProbeCounters {
     pub state_clones: u64,
-    /// CR 701.26b + CR 605.3a: ability definitions the untap priority hold
-    /// (`mana_sources::untap_would_repeat_mana`) reads, all of them the
-    /// source's own.
-    pub untap_hold_ability_reads: u64,
 }
 
 /// Test-only counters for the CR 601.2f + CR 602.2b activation cost-determination
@@ -564,11 +559,8 @@ thread_local! {
         Cell::new(DeclaredLifeChargeCounters { reads: 0 })
     };
     #[cfg(feature = "test-support")]
-    static PRIORITY_HOLD_PROBE_COUNTERS: Cell<PriorityHoldProbeCounters> = const {
-        Cell::new(PriorityHoldProbeCounters {
-            state_clones: 0,
-            untap_hold_ability_reads: 0,
-        })
+    static ABILITY_MANA_AUTO_TAP_PROBE_COUNTERS: Cell<AbilityManaAutoTapProbeCounters> = const {
+        Cell::new(AbilityManaAutoTapProbeCounters { state_clones: 0 })
     };
     #[cfg(feature = "test-support")]
     static ATTACK_DECLARATION_SOLVER_COUNTERS: Cell<AttackDeclarationSolverCounters> = const {
@@ -770,23 +762,12 @@ pub fn record_declared_life_charge_read() {
     });
 }
 
-/// CR 601.2g: recorded once per game copy the ability-mana affordability probe
-/// takes.
+/// Recorded once per game copy the ability-mana affordability probe takes.
 #[cfg(feature = "test-support")]
 pub fn record_ability_mana_auto_tap_probe_clone() {
-    PRIORITY_HOLD_PROBE_COUNTERS.with(|cell| {
+    ABILITY_MANA_AUTO_TAP_PROBE_COUNTERS.with(|cell| {
         let mut counters = cell.get();
         counters.state_clones += 1;
-        cell.set(counters);
-    });
-}
-
-/// CR 701.26b: recorded once per ability definition the untap priority hold reads.
-#[cfg(feature = "test-support")]
-pub fn record_untap_hold_ability_read() {
-    PRIORITY_HOLD_PROBE_COUNTERS.with(|cell| {
-        let mut counters = cell.get();
-        counters.untap_hold_ability_reads += 1;
         cell.set(counters);
     });
 }
@@ -1062,8 +1043,8 @@ pub fn declared_life_charge_snapshot() -> DeclaredLifeChargeCounters {
 }
 
 #[cfg(feature = "test-support")]
-pub fn priority_hold_probe_snapshot() -> PriorityHoldProbeCounters {
-    PRIORITY_HOLD_PROBE_COUNTERS.with(Cell::get)
+pub fn ability_mana_auto_tap_probe_snapshot() -> AbilityManaAutoTapProbeCounters {
+    ABILITY_MANA_AUTO_TAP_PROBE_COUNTERS.with(Cell::get)
 }
 
 /// One targeted-cast offer witness run: its spend, and whether it certified.
@@ -1407,8 +1388,8 @@ pub fn reset() {
     #[cfg(feature = "test-support")]
     reset_declared_life_charge_counters();
     #[cfg(feature = "test-support")]
-    PRIORITY_HOLD_PROBE_COUNTERS
-        .with(|counters| counters.set(PriorityHoldProbeCounters::default()));
+    ABILITY_MANA_AUTO_TAP_PROBE_COUNTERS
+        .with(|counters| counters.set(AbilityManaAutoTapProbeCounters::default()));
     #[cfg(feature = "test-support")]
     ATTACK_DECLARATION_SOLVER_COUNTERS
         .with(|counters| counters.set(AttackDeclarationSolverCounters::default()));
