@@ -982,7 +982,10 @@ mod feldon_tokens {
     const JACE: &str = "+2: Each player draws a card.\n−1: Target player draws a card.\n−10: Target player mills twenty cards.";
 
     fn setup() -> (GameScenario, ObjectId) {
-        let mut scenario = GameScenario::new();
+        setup_in(GameScenario::new())
+    }
+
+    fn setup_in(mut scenario: GameScenario) -> (GameScenario, ObjectId) {
         scenario.at_phase(Phase::PostCombatMain);
         scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
         scenario.with_library_top(P1, &["Forest", "Island", "Swamp", "Mountain"]);
@@ -1541,7 +1544,11 @@ mod feldon_tokens {
     }
 
     fn body_double_board() -> BodyDoubleBoard {
-        let (mut scenario, feldon) = setup();
+        body_double_board_in(GameScenario::new())
+    }
+
+    fn body_double_board_in(scenario: GameScenario) -> BodyDoubleBoard {
+        let (mut scenario, feldon) = setup_in(scenario);
         let body_double = scenario
             .add_creature_to_graveyard(P0, "Body Double", 0, 0)
             .with_subtypes(vec!["Shapeshifter"])
@@ -2436,6 +2443,96 @@ mod feldon_tokens {
             runner.state().players[0].library.len(),
             library,
             "the Army entered as a 0/0: Elemental Bond does not draw"
+        );
+    }
+
+    /// Life each Soul Warden controller gains in a three-player game when Feldon
+    /// makes two Body Double tokens, the first a Triskelion copy and the second
+    /// a copy of `second`, and `conceder` concedes at the pause between the two
+    /// entrants. The first player and the second player each control a Soul
+    /// Warden. Returns the first and second player's gains.
+    fn warden_life_with_concession_at_the_pause(
+        conceder: PlayerId,
+        second: SecondCopy,
+    ) -> (i32, i32) {
+        let BodyDoubleBoard {
+            mut scenario,
+            feldon,
+            body_double,
+            scales,
+            season,
+        } = body_double_board_in(GameScenario::new_n_player(3, 42));
+        let triskelion = graveyard_triskelion(&mut scenario);
+        let hushbringer = graveyard_hushbringer(&mut scenario);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        scenario.add_creature_from_oracle(P1, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let mut runner = scenario.build();
+        let (life_0, life_1) = (runner.life(P0), runner.life(P1));
+        enter_first_copy_before_second_offer(&mut runner, feldon, body_double, triskelion, scales);
+        runner
+            .act(GameAction::Concede {
+                player_id: conceder,
+            })
+            .expect("a player may concede at any time");
+        if conceder != P0 {
+            let (token, _) = choose_copy(
+                &mut runner,
+                match second {
+                    SecondCopy::Hushbringer => hushbringer,
+                    SecondCopy::Triskelion => triskelion,
+                },
+            );
+            if matches!(second, SecondCopy::Triskelion) {
+                choose_token_counter_order(&mut runner, token, season);
+            }
+        }
+        for _ in 0..8 {
+            runner.advance_until_stack_empty();
+            let WaitingFor::OrderTriggers { triggers, .. } = &runner.state().waiting_for else {
+                break;
+            };
+            let order = (0..triggers.len()).collect();
+            runner.act(GameAction::OrderTriggers { order }).unwrap();
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "the game continues at priority: {:?}",
+            runner.state().waiting_for
+        );
+        assert!(runner.state().stack.is_empty());
+        (runner.life(P0) - life_0, runner.life(P1) - life_1)
+    }
+
+    /// CR 800.4a + CR 603.6a: another player leaving the game at the pause
+    /// does not complete or discard the entry event still being made. The
+    /// first player's Soul Warden still sees the event as a whole: nothing when
+    /// the second token is a Hushbringer copy, both entrants otherwise. The
+    /// second player's Soul Warden is under the same Hushbringer.
+    #[test]
+    fn another_players_concession_at_the_pause_leaves_the_entry_event_whole() {
+        let p2 = PlayerId(2);
+        assert_eq!(
+            warden_life_with_concession_at_the_pause(p2, SecondCopy::Triskelion),
+            (2, 2),
+            "positive control: both Soul Wardens see both entrants"
+        );
+        assert_eq!(
+            warden_life_with_concession_at_the_pause(p2, SecondCopy::Hushbringer),
+            (0, 0),
+            "the completed entry event includes Hushbringer"
+        );
+    }
+
+    /// CR 800.4a + CR 603.2: when the player whose instruction is putting the
+    /// tokens onto the battlefield leaves the game at the pause, the rest of the
+    /// instruction never happens, but the first token's entry did. The second
+    /// player's Soul Warden triggers for it once; the first player's abilities
+    /// left the game with them.
+    #[test]
+    fn the_choosers_concession_at_the_pause_still_checks_the_entry_that_happened() {
+        assert_eq!(
+            warden_life_with_concession_at_the_pause(P0, SecondCopy::Hushbringer),
+            (0, 1)
         );
     }
 

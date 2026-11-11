@@ -9667,11 +9667,12 @@ pub(crate) fn battlefield_entry_in_progress(state: &GameState) -> bool {
 
 /// CR 614.12a + CR 614.1c + CR 616.1: does a parked replacement modify a
 /// battlefield entry still being made? The entry itself (a zone change to the
-/// battlefield, a token's creation or entry), or an event on an object whose
-/// entry has not been recorded yet (a token's counters it enters with, placed
-/// before its entry record). An event on a permanent that has already entered
-/// (counters put on it afterwards, as Amass does to the Army it has just
-/// created) is not part of any entry. A card's enters-with counters are placed
+/// battlefield, a token's creation or entry), or an event on an object that is
+/// on the battlefield with its entry not recorded yet (a token's counters it
+/// enters with, placed before its entry record). An event on a permanent that
+/// has already entered (counters put on it afterwards, as Amass does to the
+/// Army it has just created) or on an object elsewhere (a discarded or found
+/// card) is not part of any entry. A card's enters-with counters are placed
 /// after its zone-change record, so they do not count here; a card entering
 /// with co-entrants is delivered by a logical zone-change group, whose entries
 /// this gate passes through unheld (see [`settle_entry_batch_scan`]).
@@ -9685,14 +9686,14 @@ fn parked_replacement_modifies_an_entry(
         ProposedEvent::TokenEntry { .. } | ProposedEvent::CreateToken { .. } => true,
         other => other
             .affected_object_id()
-            .is_some_and(|object_id| !battlefield_entry_recorded(state, object_id)),
+            .is_some_and(|object_id| battlefield_entrant_unrecorded(state, object_id)),
     }
 }
 
-/// CR 400.7 + CR 603.6a: has this object's current battlefield entry been
-/// recorded? It is on the battlefield and entered on an earlier turn, or this
+/// CR 400.7 + CR 603.6a: is this object on the battlefield with its current
+/// entry not yet recorded? Not when it entered on an earlier turn, or when this
 /// turn's zone-change ledger holds the entry of its current incarnation.
-fn battlefield_entry_recorded(state: &GameState, object_id: ObjectId) -> bool {
+fn battlefield_entrant_unrecorded(state: &GameState, object_id: ObjectId) -> bool {
     let Some(object) = state
         .objects
         .get(&object_id)
@@ -9700,7 +9701,7 @@ fn battlefield_entry_recorded(state: &GameState, object_id: ObjectId) -> bool {
     else {
         return false;
     };
-    object
+    !(object
         .entered_battlefield_turn
         .is_some_and(|turn| turn < state.turn_number)
         || state.zone_changes_this_turn.iter().any(|record| {
@@ -9709,7 +9710,7 @@ fn battlefield_entry_recorded(state: &GameState, object_id: ObjectId) -> bool {
                 && record
                     .entered_incarnation
                     .is_none_or(|incarnation| incarnation == object.incarnation)
-        })
+        }))
 }
 
 /// CR 608.2c + CR 603.6a: has the instruction that put this permanent onto the
@@ -46332,6 +46333,57 @@ pub mod tests {
         );
     }
 
+    /// CR 614.12a + CR 614.1c: a parked replacement belongs to an entry still
+    /// being made only when it modifies the entry itself or an event on a
+    /// battlefield object whose entry has not been recorded (its entering
+    /// counters). Counters on a permanent whose entry is recorded (Amass's
+    /// Army) and a discard of a card in hand belong to later events.
+    #[test]
+    fn a_parked_replacement_belongs_to_an_entry_only_through_an_unrecorded_entrant() {
+        let mut state = setup();
+        let add_counter = |object_id| crate::types::proposed_event::ProposedEvent::AddCounter {
+            placement: crate::types::proposed_event::CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id,
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let entering = make_creature(&mut state, PlayerId(0), "Entering", 0, 0);
+        assert!(
+            parked_replacement_modifies_an_entry(&state, &add_counter(entering)),
+            "positive reach guard: counters on an entrant with no entry record yet"
+        );
+        let entered = make_creature(&mut state, PlayerId(0), "Entered", 0, 0);
+        crate::game::zones::record_and_emit_entry_from_no_zone(
+            &mut state,
+            entered,
+            &mut Vec::new(),
+        )
+        .expect("entrant exists");
+        assert!(!parked_replacement_modifies_an_entry(
+            &state,
+            &add_counter(entered)
+        ));
+        let in_hand = crate::game::zones::create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Discarded".to_string(),
+            Zone::Hand,
+        );
+        let discard = crate::types::proposed_event::ProposedEvent::Discard {
+            player_id: PlayerId(0),
+            object_id: in_hand,
+            source_id: None,
+            caused_by_effect: true,
+            discard_frame: None,
+            applied: HashSet::new(),
+        };
+        assert!(!parked_replacement_modifies_an_entry(&state, &discard));
+    }
+
     /// CR 608.2c + CR 603.6a + CR 611.3c: an entrant published in an earlier
     /// answer is observed at the instruction boundary a later answer reaches,
     /// with its co-entrants, and from then on its entry is a completed event: the
@@ -46370,6 +46422,10 @@ pub mod tests {
             state.deferred_triggers.len(),
             1,
             "only the completed instruction's entry is matched at this pause"
+        );
+        assert_eq!(
+            state.unsettled_entry_batch_events, later_events,
+            "the later instruction's own entry is the one still held"
         );
     }
 
