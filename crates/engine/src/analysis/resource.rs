@@ -3542,11 +3542,6 @@ pub(crate) trait CurrentSide<'a>: Copy {
     /// Coherent stack-cleared and retained-stack forms of one resource projection.
     /// Stack normalization stays deferred until the board gate accepts.
     fn cover(self) -> CoverProjection<'a>;
-    /// Whether this side, compared against `prior`, holds a captured relation the reduced
-    /// comparison cannot represent. A sharing walk caches the current side once.
-    fn pins_unrepresentable_relation_against(self, prior: &GameState) -> bool {
-        any_carrier_pins_unrepresentable(prior, self.state())
-    }
 }
 
 impl<'a> CurrentSide<'a> for &'a GameState {
@@ -3573,7 +3568,6 @@ pub(crate) struct SharedCurrentFrames<'a> {
     projected: ResourceProjectedFrame,
     cover: ResourceProjectedFrame,
     cover_stack: Vec<(StackEntry, Option<TriggerFiring>)>,
-    stale_consulted_pin: bool,
 }
 
 impl<'a> SharedCurrentFrames<'a> {
@@ -3592,7 +3586,6 @@ impl<'a> SharedCurrentFrames<'a> {
             projected,
             cover,
             cover_stack,
-            stale_consulted_pin: has_stale_consulted_pin(current),
         }
     }
 
@@ -3615,9 +3608,6 @@ impl<'a> CurrentSide<'a> for &'a SharedCurrentFrames<'a> {
             projected: Cow::Borrowed(&self.cover),
             stack: CoverStackSource::Cached(&self.cover_stack),
         }
-    }
-    fn pins_unrepresentable_relation_against(self, prior: &GameState) -> bool {
-        self.stale_consulted_pin || has_stale_consulted_pin(prior)
     }
 }
 
@@ -3687,12 +3677,6 @@ pub(crate) fn loop_states_equal_modulo_resources_side<'a, C: CurrentSide<'a>>(
     // (e.g., a spell on the stack) may only be live in the current state at the priority
     // window sample point, not in the prior state.
     if cost_modifier_reads_changed_projected_resource(a, b.state()) {
-        return false;
-    }
-    // CR 400.7 + CR 608.2k: a prevention reader's captured pin is erased by loop
-    // normalization, so no reduced comparand can distinguish a shield pinned to the old
-    // recipient from one pinned to the current recipient. Leave that shape out.
-    if b.pins_unrepresentable_relation_against(a) {
         return false;
     }
     let pa = project_out_resources(a);
@@ -4780,11 +4764,6 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a, C: CurrentSide<'a>>(
     verdicts: &mut PeriodVerdicts<'a>,
 ) -> bool {
     bump_loop_detect_cost(|cost| cost.compares_cover_modulo_growth_scoped += 1);
-    // CR 400.7 + CR 608.2k: a prevention reader's captured pin is erased by loop
-    // normalization; leave that shape out of the reduced comparison.
-    if any_carrier_pins_unrepresentable(prior, current.state()) {
-        return false;
-    }
     // (1) Board equal modulo the NARROWED projection AND modulo the stack, with the
     // object resource axes STRICT-COMPARED. Both sides are [`cover_projection`]'s comparand —
     // the stack and its entry-indexed firing sidecar are compared separately in (2) — then
@@ -4992,11 +4971,6 @@ pub(crate) fn loop_states_cover_modulo_object_growth(
     current: &GameState,
 ) -> bool {
     bump_loop_detect_cost(|cost| cost.compares_cover_modulo_object_growth += 1);
-    // CR 400.7 + CR 608.2k: a prevention reader's captured pin is erased by loop
-    // normalization; leave that shape out of the reduced comparison.
-    if any_carrier_pins_unrepresentable(prior, current) {
-        return false;
-    }
     // Flush BOTH clones once, up front, then project out the monotone
     // resources for the board/GameState equality axes.
     let pf = flush_clone(prior);
@@ -5468,10 +5442,6 @@ pub enum FodderCoverRefusal {
     StackEntryRead,
     NonObjectRemainder,
     LoyaltyActivationCount,
-    /// CR 400.7 + CR 608.2k: a retained carrier's prevention reader consults the CAPTURED
-    /// event-recipient pin, which loop normalization erases; the reduced comparison cannot
-    /// represent it, so this cover refuses instead of certifying.
-    RecipientPinRelation,
 }
 
 /// CR 732.2a: the object-growth producer's verdict on its three settle frames, by the recurrence
@@ -5530,11 +5500,6 @@ pub(crate) fn fodder_growth_cover_refusals(
 
     bump_loop_detect_cost(|cost| cost.compares_cover_modulo_fodder_growth += 1);
     let mut refusals = Vec::new();
-    // CR 400.7 + CR 608.2k: a prevention reader's captured pin is erased by loop
-    // normalization; this cover cannot certify that shape either.
-    if any_carrier_pins_unrepresentable(prior, current) {
-        refusals.push(FodderCoverRefusal::RecipientPinRelation);
-    }
     let pf = flush_clone(prior);
     let cf = flush_clone(current);
     let mut pa = project_out_resources(&pf);
@@ -7788,8 +7753,11 @@ pub(crate) fn unmeasured_resource_axes_match(prior: &GameState, current: &GameSt
 /// Normalize a stack into behavioral-identity clones for coverability counting:
 /// zero the volatile top-level `id`/`source_id` and the per-kind inner `source_id`,
 /// strip nested `source_id`s from the embedded ability, and retain the associated
-/// trigger-firing class
-/// ([`crate::game::triggers::normalize_ability_identity`]). KEEP `controller` (an
+/// trigger-firing class. The entries come from an already ranked projection, so the
+/// ability keeps its ranked pins
+/// (`ResolvedAbility::clear_source_provenance_for_loop_recursive`): a cover must not
+/// count an entry pinned to the live object with one pinned to a stale one.
+/// KEEP `controller` (an
 /// opponent's otherwise-identical trigger must never merge with the controller's)
 /// and the entire `kind` payload (`condition`, `trigger_event`,
 /// `subject_match_count`, `die_result`, `description`, `source_name`) — a residual
@@ -7817,16 +7785,16 @@ fn normalized_stack_entries(
                     source_id, ability, ..
                 } => {
                     *source_id = ObjectId(0);
-                    crate::game::triggers::normalize_ability_identity(ability);
+                    ability.clear_source_provenance_for_loop_recursive();
                 }
                 StackEntryKind::ActivatedAbility { source_id, ability } => {
                     *source_id = ObjectId(0);
-                    crate::game::triggers::normalize_ability_identity(ability);
+                    ability.clear_source_provenance_for_loop_recursive();
                 }
                 StackEntryKind::Spell {
                     ability: Some(ability),
                     ..
-                } => crate::game::triggers::normalize_ability_identity(ability),
+                } => ability.clear_source_provenance_for_loop_recursive(),
                 StackEntryKind::Spell { ability: None, .. }
                 | StackEntryKind::KeywordAction { .. } => {}
                 // The payload keeps its `ObjectIncarnationRef`s: `norm.id` /
@@ -8945,19 +8913,32 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
-/// CR 608.2k + CR 400.7: whether the retained carriers can observe a damage recipient
-/// at all. `Some(false)` means every carrier event was paired with its ability and none of
-/// those abilities can evaluate an exact `EventTarget`; `None` means some carrier has no
-/// paired ability here, so the caller must keep the full-journal scan. Fail closed: eliding
-/// a stale-versus-live relation from the comparand could manufacture a false loop win.
-fn loop_carriers_read_event_target(state: &GameState, carrier_events: usize) -> Option<bool> {
+/// CR 608.2k + CR 400.7: the damage events through which a retained carrier can observe
+/// a recipient, selected by the OWNING ability. `Some(keys)` means every carrier event was
+/// paired with its ability, and `keys` holds only the events of abilities that can evaluate
+/// an exact `EventTarget`: Matsu-Tribe Sniper's "tap that creature" keeps its own event's
+/// key and not the key of a Stuffy Doll trigger beside it, whose "it deals that much damage
+/// to the chosen player" reads no recipient. `None` means some carrier has no paired
+/// ability here, so the caller must keep every key. Fail closed: eliding a stale-versus-live
+/// relation from the comparand could manufacture a false loop win.
+fn loop_reader_owned_recipient_keys(
+    state: &GameState,
+    carrier_events: usize,
+) -> Option<HashSet<DamageEventKey>> {
     use crate::game::ability_scan::ability_reads_event_target;
+    use crate::types::ability::ResolvedAbility;
+    use crate::types::events::GameEvent;
     let mut paired = 0usize;
-    let mut reads = false;
-    let mut add = |reads_ability: bool, events: usize| {
-        if events > 0 {
-            paired += events;
-            reads |= reads_ability;
+    let mut keys = HashSet::new();
+    // Classify the owning ability ONCE, then account its own event and every sidecar
+    // batch event (one trigger, several simultaneous events) against that answer.
+    let mut own = |ability: &ResolvedAbility, events: &mut dyn Iterator<Item = &GameEvent>| {
+        let mut reads = None;
+        for event in events {
+            paired += 1;
+            if *reads.get_or_insert_with(|| ability_reads_event_target(ability)) {
+                keys.extend(DamageEventKey::from_event(event));
+            }
         }
     };
     for entry in state.stack.iter().chain(state.resolving_stack_entry.iter()) {
@@ -8967,21 +8948,15 @@ fn loop_carriers_read_event_target(state: &GameState, carrier_events: usize) -> 
             ..
         } = &entry.kind
         {
-            // Classify the owning ability ONCE, then account its own event and every sidecar
-            // batch event (one trigger, several simultaneous events) against that answer.
-            let reads_ability = ability_reads_event_target(ability);
-            let batch = state
-                .stack_trigger_event_batches
-                .get(&entry.id)
-                .map_or(0, |batch| batch.len());
-            add(reads_ability, usize::from(trigger_event.is_some()) + batch);
+            let batch = state.stack_trigger_event_batches.get(&entry.id);
+            own(
+                ability,
+                &mut trigger_event.iter().chain(batch.into_iter().flatten()),
+            );
         }
     }
     if let Some(pending) = state.pending_trigger.as_deref() {
-        add(
-            ability_reads_event_target(&pending.ability),
-            usize::from(pending.trigger_event.is_some()),
-        );
+        own(&pending.ability, &mut pending.trigger_event.iter());
     }
     let order_contexts = state
         .pending_trigger_order
@@ -8990,71 +8965,15 @@ fn loop_carriers_read_event_target(state: &GameState, carrier_events: usize) -> 
         .flat_map(|group| group.triggers.iter());
     for context in state.deferred_triggers.iter().chain(order_contexts) {
         let pending = &context.pending;
-        add(
-            ability_reads_event_target(&pending.ability),
-            usize::from(pending.trigger_event.is_some()) + context.trigger_events.len(),
+        own(
+            &pending.ability,
+            &mut pending
+                .trigger_event
+                .iter()
+                .chain(context.trigger_events.iter()),
         );
     }
-    (paired == carrier_events).then_some(reads)
-}
-
-/// CR 400.7 + CR 603.7c + CR 608.2k: relations loop normalization ERASES but the runtime
-/// still filters by them. Two carriers consult a captured pin:
-///
-/// - a prevention / sacrifice reader (`target_pin_is_current`);
-/// - any captured object target (`target_incarnations` beside non-empty `targets`), the pair
-///   `live_object_targets` filters.
-///
-/// A pin whose target is absent or re-incarnated is STALE: the runtime drops it, while the
-/// erased comparand reads it as an ordinary live reference — the one difference a reduced
-/// comparison cannot represent, so the comparison refuses. A LIVE pin names the target the
-/// runtime would still act on, so it is representable and does not veto.
-fn has_stale_consulted_pin(state: &GameState) -> bool {
-    use crate::game::ability_scan::{ability_event_target_read, EventTargetRead};
-    fn scans(state: &GameState, ability: &crate::types::ability::ResolvedAbility) -> bool {
-        let consults_pins = !ability.targets.is_empty()
-            || ability_event_target_read(ability) == EventTargetRead::Pinned;
-        (consults_pins
-            && ability.target_incarnations.iter().any(|pin| {
-                !state
-                    .objects
-                    .get(&pin.object_id)
-                    .is_some_and(|object| object.incarnation == pin.incarnation)
-            }))
-            || ability.child_links().any(|(_, child)| scans(state, child))
-    }
-    let order_contexts = state
-        .pending_trigger_order
-        .iter()
-        .flat_map(|order| order.groups.iter())
-        .flat_map(|group| group.triggers.iter());
-    state
-        .stack
-        .iter()
-        .chain(state.resolving_stack_entry.iter())
-        .any(|entry| match &entry.kind {
-            StackEntryKind::TriggeredAbility { ability, .. } => scans(state, ability),
-            _ => false,
-        })
-        || state
-            .pending_trigger
-            .as_deref()
-            .is_some_and(|pending| scans(state, &pending.ability))
-        || state
-            .deferred_triggers
-            .iter()
-            .chain(order_contexts)
-            .any(|context| scans(state, &context.pending.ability))
-        || state
-            .delayed_triggers
-            .iter()
-            .any(|trigger| scans(state, &trigger.ability))
-}
-
-/// Both sides of a relaxed comparison: the prior is scanned once, the current side may be
-/// cached by the caller ([`CurrentSide::pins_unrepresentable_relation_against`]).
-fn any_carrier_pins_unrepresentable(prior: &GameState, current: &GameState) -> bool {
-    has_stale_consulted_pin(prior) || has_stale_consulted_pin(current)
+    (paired == carrier_events).then_some(keys)
 }
 
 /// CR 400.7 + CR 608.2k + CR 732.2a: reduce full damage history to the one
@@ -9101,14 +9020,14 @@ fn project_damage_recipient_relations_for_loop(
         });
     });
     drop(objects);
-    if requested.is_empty() {
-        return smallvec::SmallVec::new();
-    }
     // CR 608.2k: a recipient answer is observable only through an exact top-level
-    // `EventTarget`. When every retained carrier is paired with an ability and none of
-    // those abilities can evaluate it, no witness can affect the comparand — skip the
-    // H-row scan the maintainer's cost blocker names.
-    if loop_carriers_read_event_target(state, carrier_events) == Some(false) {
+    // `EventTarget` on the ability that owns the event. When every retained carrier is
+    // paired, keep only the keys a reader owns; with none left no witness can affect the
+    // comparand, and the H-row scan is skipped.
+    if let Some(owned) = loop_reader_owned_recipient_keys(state, carrier_events) {
+        requested.retain(|key, _| owned.contains(key));
+    }
+    if requested.is_empty() {
         return smallvec::SmallVec::new();
     }
     for record in &journal {
@@ -10447,12 +10366,29 @@ mod tests {
         );
     }
 
-    /// CR 400.7 + CR 608.2k: the prevention reader consults the CAPTURED recipient pin, which
-    /// loop normalization erases. With both an old and a current row under the same event key,
-    /// two shields that differ only in that pin must not compare equal through the relaxed
-    /// comparator; the shape is left out instead.
+    /// The relaxed comparator in each shape production hands it a frame pair: both raw (the
+    /// deriving callers), both sample forms (fixed settlement and mandatory replay hand it a
+    /// `take_boundary` and a sampled settle frame), and a stored sample-form prior against
+    /// the raw current state through the shared frames (the two ring walks).
+    fn relaxed_in_every_shape(prior: &GameState, current: &GameState) -> [bool; 3] {
+        let sample = GameState::normalize_for_loop_sample;
+        [
+            loop_states_equal_modulo_resources(prior, current),
+            loop_states_equal_modulo_resources(&sample(prior), &sample(current)),
+            loop_states_equal_modulo_resources_side(
+                &sample(prior),
+                &SharedCurrentFrames::new(current),
+            ),
+        ]
+    }
+
+    /// CR 400.7 + CR 608.2k: the prevention reader consults the CAPTURED recipient pin
+    /// (`prevent_damage.rs`, `target_pin_is_current`). The pin stays on the loop comparand
+    /// and is ranked against the live recipient, so with both an old and a current row under
+    /// the same event key, a shield pinned to the current recipient never compares equal to
+    /// one pinned to the old recipient — in any shape the comparator is handed.
     #[test]
-    fn loop_relational_prevention_captured_pin_refuses_relaxed_equality() {
+    fn loop_relational_prevention_captured_pin_keeps_its_relation() {
         use crate::types::ability::{
             Effect, EffectScope, PreventionAmount, PreventionScope, ResolvedAbility, TargetFilter,
         };
@@ -10497,79 +10433,250 @@ mod tests {
             state
         }
 
-        let current_pin = frame(true, 7);
-        let old_pin = frame(true, 3);
-        assert!(
-            !loop_states_equal_modulo_resources(&current_pin, &old_pin),
-            "the erased captured pin must leave the shape out of the reduced comparison"
-        );
-        // Positive control: the same pin difference on a plain referent reader is
-        // allocator identity and deliberately compares equal.
-        assert!(
-            loop_states_equal_modulo_resources(&frame(false, 7), &frame(false, 3)),
-            "a plain referent reader keeps the relaxed comparison"
-        );
+        // The recipient is live at 7 in this fixture: a pin at 7 is live, 3 and 4 are stale.
+        for reader in [true, false] {
+            assert_eq!(
+                relaxed_in_every_shape(&frame(reader, 7), &frame(reader, 3)),
+                [false; 3],
+                "reader {reader}: a live pin must not compare equal to a stale one"
+            );
+            assert_eq!(
+                relaxed_in_every_shape(&frame(reader, 3), &frame(reader, 7)),
+                [false; 3],
+                "reader {reader}: nor a stale one to a live one"
+            );
+            // Positive control: WHICH superseded incarnation a stale pin names is allocator
+            // history, so the comparison is still reachable and still answers equal.
+            assert_eq!(
+                relaxed_in_every_shape(&frame(reader, 3), &frame(reader, 4)),
+                [true; 3],
+                "reader {reader}: two stale pins are the same position"
+            );
+        }
     }
 
-    /// CR 603.7c: a delayed "destroy that creature at end of combat" stores the recipient as
-    /// a captured target plus its incarnation pin, and `live_object_targets` drops a STALE pin
-    /// at resolution. Loop normalization erases the pin, so the reduced comparison is only
-    /// sound while both frames answer the same live/stale class for the same recipient.
-    #[test]
-    fn loop_relational_delayed_captured_target_compares_its_class() {
+    /// The carriers a captured recipient passes through, for both resolver shapes.
+    #[derive(Clone, Copy, Debug)]
+    enum PinCarrier {
+        /// Ohran Viper's delayed trigger as registered: "destroy that creature at end of
+        /// combat" holds the recipient as a captured target plus its keyed pin.
+        RegisteredDestroy,
+        /// The same ability after it fired onto the stack.
+        FiredDestroy,
+        /// Footsteps of the Goryo's "Sacrifice that creature at the beginning of the next
+        /// end step": the Sacrifice-shaped sibling, registered and fired.
+        RegisteredSacrifice,
+        FiredSacrifice,
+        /// A spell on the stack whose announced target carries its positional pin
+        /// (CR 601.2c), the form the old refusal never read.
+        AnnouncedSpellTarget,
+    }
+
+    const PIN_CARRIERS: [PinCarrier; 5] = [
+        PinCarrier::RegisteredDestroy,
+        PinCarrier::FiredDestroy,
+        PinCarrier::RegisteredSacrifice,
+        PinCarrier::FiredSacrifice,
+        PinCarrier::AnnouncedSpellTarget,
+    ];
+
+    /// A priority frame whose one carrier pins the recipient at `pin` while the recipient is
+    /// live at `live`. Controlled identity fixture: everything else is the same for every
+    /// `(live, pin)`, so two frames differ in the pin relation alone.
+    fn pinned_frame(carrier: PinCarrier, live: u64, pin: u64) -> GameState {
         use crate::types::ability::{
-            DelayedTriggerCondition, Effect, ResolvedAbility, TargetFilter, TargetRef,
+            DelayedTriggerCondition, Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
         };
-        use crate::types::game_state::DelayedTrigger;
+        use crate::types::game_state::{DelayedTrigger, StackEntry};
         use crate::types::identifiers::ObjectIncarnationRef;
 
-        let mut base = GameState::new_two_player(7);
-        let recipient = battlefield_creature(&mut base, 21, 1);
-        let source = battlefield_creature(&mut base, 20, 0);
-        base.objects.get_mut(&recipient).unwrap().incarnation = 4;
-        let frame = |pin: Option<u64>| {
-            let mut state = base.clone();
-            let mut ability = ResolvedAbility::new(
-                Effect::Destroy {
-                    target: TargetFilter::EventTarget,
-                    cant_regenerate: false,
-                },
-                vec![],
-                source,
-                PlayerId(0),
-            );
-            if let Some(epoch) = pin {
-                ability.targets = vec![TargetRef::Object(recipient)];
-                ability.target_incarnations = vec![ObjectIncarnationRef::of(recipient, epoch)];
-            }
-            state.delayed_triggers.push(DelayedTrigger::new(
-                DelayedTriggerCondition::WhenDies {
-                    filter: TargetFilter::EventTarget,
-                },
-                Box::new(ability),
-                PlayerId(0),
-                source,
-                true,
-            ));
-            state
+        let mut state = GameState::new_two_player(7);
+        let recipient = battlefield_creature(&mut state, 21, 1);
+        let source = battlefield_creature(&mut state, 20, 0);
+        state.objects.get_mut(&recipient).unwrap().incarnation = live;
+        state.waiting_for = crate::types::WaitingFor::Priority {
+            player: state.active_player,
         };
+        let reference = ObjectIncarnationRef::of(recipient, pin);
+        let effect = match carrier {
+            PinCarrier::RegisteredDestroy | PinCarrier::FiredDestroy => Effect::Destroy {
+                target: TargetFilter::EventTarget,
+                cant_regenerate: false,
+            },
+            PinCarrier::RegisteredSacrifice | PinCarrier::FiredSacrifice => Effect::Sacrifice {
+                target: TargetFilter::EventTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            PinCarrier::AnnouncedSpellTarget => Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+        };
+        let mut ability = ResolvedAbility::new(
+            effect,
+            vec![TargetRef::Object(recipient)],
+            source,
+            PlayerId(0),
+        );
+        match carrier {
+            PinCarrier::AnnouncedSpellTarget => ability.target_pins = vec![Some(reference)],
+            _ => ability.target_incarnations = vec![reference],
+        }
+        let entry = |kind: StackEntryKind| StackEntry {
+            id: ObjectId(100),
+            source_id: source,
+            controller: PlayerId(0),
+            kind,
+        };
+        match carrier {
+            PinCarrier::RegisteredDestroy | PinCarrier::RegisteredSacrifice => {
+                state.delayed_triggers.push(DelayedTrigger::new(
+                    DelayedTriggerCondition::AtNextPhase {
+                        phase: Phase::EndCombat,
+                    },
+                    Box::new(ability),
+                    PlayerId(0),
+                    source,
+                    true,
+                ));
+            }
+            PinCarrier::FiredDestroy | PinCarrier::FiredSacrifice => {
+                state
+                    .stack
+                    .push_back(entry(StackEntryKind::TriggeredAbility {
+                        source_id: source,
+                        ability: Box::new(ability),
+                        condition: None,
+                        trigger_event: None,
+                        description: None,
+                        source_name: String::new(),
+                        subject_match_count: None,
+                        die_result: None,
+                        provenance: None,
+                    }));
+            }
+            PinCarrier::AnnouncedSpellTarget => {
+                state.stack.push_back(entry(StackEntryKind::Spell {
+                    card_id: CardId(1),
+                    ability: Some(Box::new(ability)),
+                    casting_variant: Default::default(),
+                    actual_mana_spent: 0,
+                }));
+            }
+        }
+        state
+    }
 
-        assert!(
-            loop_states_equal_modulo_resources(&frame(Some(4)), &frame(Some(4))),
-            "both frames pin the recipient LIVE, so the loop relation is representable"
-        );
-        assert!(
-            loop_states_equal_modulo_resources(&frame(None), &frame(None)),
-            "an unpinned delayed trigger stays comparable"
-        );
-        assert!(
-            !loop_states_equal_modulo_resources(&frame(Some(4)), &frame(Some(3))),
-            "live versus stale is exactly the class the runtime distinguishes; refuse it"
-        );
-        assert!(
-            !loop_states_equal_modulo_resources(&frame(Some(4)), &frame(None)),
-            "the captured target list is structural; presence already differs"
-        );
+    /// CR 603.7c: "if that object left that zone and then returned, it's a new object and
+    /// thus won't be affected." The resolver drops a STALE pin (`live_object_targets`), so a
+    /// frame whose carrier still names the live recipient is a different position from one
+    /// whose carrier names a recipient that is gone. Each comparator entry point must see
+    /// that through PRODUCTION normalization: the strict comparator on two sample forms, the
+    /// ring walks on a stored sample against the raw current state, and fixed settlement and
+    /// mandatory replay on `take_boundary` against a sampled settle frame. The same relation
+    /// minted later (the recipient re-entered, and the ability was created after that) is
+    /// the same position.
+    #[test]
+    fn loop_captured_pin_relation_reaches_every_comparator_entry_point() {
+        use crate::game::engine::{settle_recurs, take_boundary};
+        let sample = GameState::normalize_for_loop_sample;
+        for carrier in PIN_CARRIERS {
+            let live = pinned_frame(carrier, 5, 5);
+            let later = pinned_frame(carrier, 8, 8);
+            let stale = pinned_frame(carrier, 8, 5);
+            let older = pinned_frame(carrier, 8, 3);
+            assert_ne!(
+                live, later,
+                "{carrier:?}: reach guard, the raw frames differ"
+            );
+
+            // Strict comparator (CR 104.4b, the auto-pass window): two sample forms.
+            assert!(
+                loop_states_equal(&sample(&live), &sample(&later)),
+                "{carrier:?}: strict, live pin across a later mint"
+            );
+            assert!(
+                loop_states_equal(&sample(&stale), &sample(&older)),
+                "{carrier:?}: strict, two stale pins"
+            );
+            assert!(
+                !loop_states_equal(&sample(&later), &sample(&stale)),
+                "{carrier:?}: strict, live against stale"
+            );
+
+            // Relaxed comparator (CR 732.2a): raw, sampled, and the ring-walk shape.
+            assert_eq!(
+                relaxed_in_every_shape(&live, &later),
+                [true; 3],
+                "{carrier:?}: live pin across a later mint"
+            );
+            assert_eq!(
+                relaxed_in_every_shape(&stale, &older),
+                [true; 3],
+                "{carrier:?}: two stale pins"
+            );
+            assert_eq!(
+                relaxed_in_every_shape(&later, &stale),
+                [false; 3],
+                "{carrier:?}: live prior against stale current"
+            );
+            assert_eq!(
+                relaxed_in_every_shape(&stale, &later),
+                [false; 3],
+                "{carrier:?}: stale prior against live current"
+            );
+
+            // Fixed settlement (`drive_one_shortcut_cycle`) and mandatory replay
+            // (`mandatory_period_holds`) both ask exactly this of a boundary and a settle
+            // frame, which also consults the growth cover.
+            assert!(
+                settle_recurs(&take_boundary(&live), &sample(&later)),
+                "{carrier:?}: settlement, live pin across a later mint"
+            );
+            assert!(
+                settle_recurs(&take_boundary(&stale), &sample(&older)),
+                "{carrier:?}: settlement, two stale pins"
+            );
+            assert!(
+                !settle_recurs(&take_boundary(&later), &sample(&stale)),
+                "{carrier:?}: settlement, live boundary against a stale settle frame"
+            );
+            assert!(
+                !settle_recurs(&take_boundary(&stale), &sample(&later)),
+                "{carrier:?}: settlement, stale boundary against a live settle frame"
+            );
+        }
+    }
+
+    /// The growth covers compare the stack apart from the board, through
+    /// `normalized_stack_entries`. That comparand is cut from the ranked projection and must
+    /// keep the ranked pin: it used to strip every pin after the fact.
+    #[test]
+    fn loop_cover_stack_comparand_keeps_the_ranked_pin() {
+        let entries = |state: &GameState| {
+            let projected = project_out_resources(state);
+            normalized_stack_entries(&projected.0.stack, &projected.0.stack_trigger_firings)
+        };
+        for carrier in [
+            PinCarrier::FiredDestroy,
+            PinCarrier::FiredSacrifice,
+            PinCarrier::AnnouncedSpellTarget,
+        ] {
+            let live = entries(&pinned_frame(carrier, 5, 5));
+            let later = entries(&pinned_frame(carrier, 8, 8));
+            let stale = entries(&pinned_frame(carrier, 8, 5));
+            assert_eq!(
+                live.len(),
+                1,
+                "{carrier:?}: reach guard, the carrier is on the stack"
+            );
+            assert!(live == later, "{carrier:?}: the same relation minted later");
+            assert!(
+                later != stale,
+                "{carrier:?}: a live pin against a stale one"
+            );
+        }
     }
 
     #[test]
@@ -10594,48 +10701,257 @@ mod tests {
         );
     }
 
-    /// CR 608.2k: above and below the replay floor, a published Bystander batch is owned by
-    /// one non-reader ability and forces no journal scan. Pre-fix the below-floor frame kept
-    /// the orphan batch, so the pairing failed closed and scanned.
-    #[test]
-    fn loop_bystander_batch_is_unread_above_and_below_the_floor() {
-        use crate::types::ability::{Effect, ResolvedAbility};
+    /// Innocent Bystander ("Whenever this creature is dealt 3 or more damage, investigate.")
+    /// dealt 2 and 1 damage by two creatures at once: ONE trigger for two simultaneous damage
+    /// events, published as the entry's own event plus its sidecar batch. Investigate reads no
+    /// recipient. `buried_bystanders` such triggers and `buried_fillers` event-less triggers
+    /// sit at the bottom of the stack; the working entry above them is either one more
+    /// Bystander trigger or the fixture's recipient reader ("tap that creature").
+    fn bystander_floor_frame(
+        buried_bystanders: u64,
+        buried_fillers: u64,
+        working_bystander: bool,
+    ) -> GameState {
+        use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{DamageRecord, StackEntry};
 
-        fn bystander_frame() -> GameState {
-            let mut state = relational_recipient_frame(Some(7), false, false);
-            let entry_id = state.stack[0].id;
-            let source = state.stack[0].source_id;
-            let event = match &state.stack[0].kind {
-                StackEntryKind::TriggeredAbility {
-                    trigger_event: Some(event),
-                    ..
-                } => event.clone(),
-                _ => unreachable!("fixture retains a damage event"),
-            };
-            let StackEntryKind::TriggeredAbility { ability, .. } = &mut state.stack[0].kind else {
-                unreachable!("fixture keeps only trigger carriers");
-            };
-            **ability = ResolvedAbility::new(Effect::Investigate, vec![], source, PlayerId(0));
+        let mut state = relational_recipient_frame(Some(7), false, false);
+        if working_bystander {
+            state.stack.clear();
+        }
+        let first = ObjectId(20);
+        let bystander = battlefield_creature(&mut state, 22, 1);
+        let second = battlefield_creature(&mut state, 23, 0);
+        let recipient_epoch = state.objects[&bystander].incarnation;
+        let mut events = Vec::new();
+        for (source, amount) in [(first, 2), (second, 1)] {
+            let source_incarnation = Some(state.objects[&source].incarnation);
+            events.push(GameEvent::DamageDealt {
+                source_id: source,
+                source_incarnation,
+                target: TargetRef::Object(bystander),
+                amount,
+                is_combat: true,
+                excess: 0,
+            });
+            state.damage_dealt_this_turn.push_back(DamageRecord {
+                source_id: source,
+                source_incarnation,
+                target: TargetRef::Object(bystander),
+                target_incarnation: Some(recipient_epoch),
+                amount,
+                is_combat: true,
+                ..Default::default()
+            });
+        }
+        let trigger = |id: u64, event: Option<GameEvent>| StackEntry {
+            id: ObjectId(id),
+            source_id: bystander,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: bystander,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Investigate,
+                    vec![],
+                    bystander,
+                    PlayerId(1),
+                )),
+                condition: None,
+                trigger_event: event,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        };
+        for index in 0..buried_bystanders {
+            state
+                .stack
+                .push_front(trigger(200 + index, Some(events[0].clone())));
             state
                 .stack_trigger_event_batches
-                .insert(entry_id, vec![event.clone(), event]);
+                .insert(ObjectId(200 + index), events.clone());
+        }
+        for index in 0..buried_fillers {
+            state.stack.push_front(trigger(300 + index, None));
+        }
+        if working_bystander {
+            state.stack.push_back(trigger(400, Some(events[0].clone())));
+            state
+                .stack_trigger_event_batches
+                .insert(ObjectId(400), events);
+        }
+        state
+    }
+
+    /// CR 405.5 + CR 603.3b: a Bystander batch BELOW the replay floor is buried with its
+    /// entry. The two frames differ by one more buried Bystander trigger, so no earlier arm
+    /// answers and the pair is covered only by buried `StackGrowth`, which compares the
+    /// frames with the buried entries set aside. An orphaned sidecar would survive that
+    /// (one batch against two) and refuse the cover.
+    #[test]
+    fn loop_bystander_batch_below_the_floor_is_buried_with_its_sidecar() {
+        let prior = bystander_floor_frame(1, 0, false);
+        let current = bystander_floor_frame(2, 0, false);
+        assert!(
+            !loop_states_equal_modulo_resources(&prior, &current),
+            "reach guard: the frames differ, so the equality arm cannot answer first"
+        );
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, PlayerId(0), Some((1, 2))),
+            Some(PairCover::Certified(
+                CoveredGrowth::PerformedOnly,
+                RecurrenceCover::StackGrowth
+            )),
+            "one more buried Bystander trigger is buried stack growth"
+        );
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
+            None,
+            "control: without a floor nothing covers the pair, so the floor did the work"
+        );
+    }
+
+    /// CR 608.2k: a Bystander batch ABOVE the floor is owned by its one non-reader ability,
+    /// so the buried-growth comparison it takes part in walks no damage history.
+    #[test]
+    fn loop_bystander_batch_above_the_floor_is_owned_and_unread() {
+        let prior = bystander_floor_frame(0, 1, true);
+        let current = bystander_floor_frame(0, 2, true);
+        assert!(
+            !loop_states_equal_modulo_resources(&prior, &current),
+            "reach guard: the frames differ, so the equality arm cannot answer first"
+        );
+        crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, PlayerId(0), Some((1, 2))),
+            Some(PairCover::Certified(
+                CoveredGrowth::PerformedOnly,
+                RecurrenceCover::StackGrowth
+            )),
+            "growth buried under a working Bystander batch is buried stack growth"
+        );
+        assert_eq!(
+            DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get),
+            0,
+            "a non-reader Bystander batch requests no recipient key, so no row is read"
+        );
+    }
+
+    /// CR 608.2k: recipient keys follow the ability that OWNS the event. Matsu-Tribe Sniper
+    /// ("Whenever this creature deals damage to a creature, tap that creature and it doesn't
+    /// untap during its controller's next untap step.") reads the recipient of its own event.
+    /// An Innocent Bystander trigger beside it ("Whenever this creature is dealt 3 or more
+    /// damage, investigate.") reads none, like Stuffy Doll's "it deals that much damage to
+    /// the chosen player". The Sniper must not keep the Bystander's key: two frames that
+    /// differ only in whether the Bystander's recorded recipient epoch is still live are the
+    /// same position for every ability that can read anything.
+    #[test]
+    fn loop_recipient_keys_follow_the_owning_reader() {
+        use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{DamageRecord, StackEntry};
+
+        /// `sniper` / `bystander`: the recipient epoch each damage row recorded. Both
+        /// recipients are live at 7. `unowned` adds a carrier with no paired ability.
+        fn mixed(sniper: u64, bystander: u64, unowned: bool) -> GameState {
+            // stack[0]: the fixture's reader, dealer 20 -> recipient 21.
+            let mut state = relational_recipient_frame(Some(sniper), false, false);
+            let dealer = ObjectId(20);
+            let doll = battlefield_creature(&mut state, 22, 1);
+            state.objects.get_mut(&doll).unwrap().incarnation = 7;
+            let event = GameEvent::DamageDealt {
+                source_id: dealer,
+                source_incarnation: Some(3),
+                target: TargetRef::Object(doll),
+                amount: 3,
+                is_combat: false,
+                excess: 0,
+            };
+            state.stack.push_back(StackEntry {
+                id: ObjectId(101),
+                source_id: doll,
+                controller: PlayerId(1),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: doll,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::Investigate,
+                        vec![],
+                        doll,
+                        PlayerId(1),
+                    )),
+                    condition: None,
+                    trigger_event: Some(event.clone()),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            state.damage_dealt_this_turn.push_back(DamageRecord {
+                source_id: dealer,
+                source_incarnation: Some(3),
+                target: TargetRef::Object(doll),
+                target_incarnation: Some(bystander),
+                amount: 3,
+                ..Default::default()
+            });
+            state.current_trigger_event = unowned.then_some(event);
             state
         }
 
-        let bystander = bystander_frame();
-        for floors in [None, Some((1, 1))] {
-            crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
-            let cover = resource_recurrence_covers(&bystander, &bystander, PlayerId(0), floors);
-            assert!(
-                cover.is_some(),
-                "the Bystander batch must still cover at floors {floors:?}"
-            );
+        let both_live = mixed(7, 7, false);
+        assert_eq!(
+            relaxed_in_every_shape(&both_live, &mixed(7, 3, false)),
+            [true; 3],
+            "only the unread key's recipient epoch changed"
+        );
+        assert_eq!(
+            relaxed_in_every_shape(&both_live, &mixed(3, 7, false)),
+            [false; 3],
+            "the reader's own recipient went stale"
+        );
+        // Conservative fallback: a carrier with no paired ability may read anything, so
+        // every key is kept and the unread epoch counts again.
+        assert_eq!(
+            relaxed_in_every_shape(&mixed(7, 7, true), &mixed(7, 3, true)),
+            [false; 3],
+            "an unowned carrier keeps the full key set"
+        );
+        // One pass over the damage history, whoever owns the keys.
+        for frame in [&both_live, &mixed(7, 7, true)] {
+            DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+            let projected = project_out_resources(frame);
             assert_eq!(
-                crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get),
-                0,
-                "a non-reader Bystander batch needs no scan at floors {floors:?}"
+                DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get),
+                frame.damage_dealt_this_turn.len(),
+                "the journal is read once"
+            );
+            assert!(
+                !projected.0.damage_dealt_this_turn.is_empty(),
+                "reach guard: the reader's witness survives"
             );
         }
+        assert_eq!(
+            project_out_resources(&both_live)
+                .0
+                .damage_dealt_this_turn
+                .len(),
+            1,
+            "owned: only the Sniper's key keeps a witness"
+        );
+        assert_eq!(
+            project_out_resources(&mixed(7, 7, true))
+                .0
+                .damage_dealt_this_turn
+                .len(),
+            2,
+            "unowned: both keys keep a witness"
+        );
     }
 
     #[test]

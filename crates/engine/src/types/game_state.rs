@@ -23241,7 +23241,7 @@ impl<'de> Deserialize<'de> for PendingLiminalEntryResume {
 ///
 /// `live` is the **CR 732.2a evaluable** — the same beat un-normalized, and the only
 /// half the period-touch consumers may read. Normalization zeroes `next_object_id` and
-/// runs `clear_trigger_identity_recursive`, so evaluating a resolution against a
+/// runs `clear_source_provenance_for_loop_recursive`, so evaluating a resolution against a
 /// normalized frame allocates `ObjectId(0)` over a live object and loses the trigger
 /// source identity; those are inputs to a mint and to a resolution probe, never to an
 /// equality comparand.
@@ -35623,13 +35623,13 @@ impl GameState {
         }
         // CR 104.4b + CR 608.2h: prune both departed stack tables (spells and
         // activated abilities) BEFORE the stack-carrier loop below clears each
-        // trigger's pin (`clear_trigger_identity_recursive`), which the prune reads.
+        // trigger's spell pin (`clear_source_provenance_for_loop_recursive`), which the prune reads.
         clone.retain_trigger_referenced_departed_stack_records();
 
         // CR 104.4b + CR 608.2h: which `lki_copiable_values_by_incarnation`
         // entries an ability can still read as its own copy source. Read BEFORE
         // the carrier loops below erase each ability's captured source identity
-        // (`clear_trigger_identity_recursive`), the only key to those entries,
+        // (`clear_source_provenance_for_loop_recursive`), the only key to those entries,
         // over every carrier that erase touches.
         let mut retained_copy_sources: HashSet<ObjectIncarnationRef> = HashSet::new();
         {
@@ -35684,7 +35684,11 @@ impl GameState {
         // zones would otherwise carry a growing `TriggerSourceContext` into loop
         // equality and never confirm a draw. Canonicalize source provenance away
         // across EVERY eq-compared carrier that transitively holds a
-        // `ResolvedAbility`. (`pending_trigger_entry` is an `Option<ObjectId>`, not
+        // `ResolvedAbility`. The pins those abilities captured are NOT erased
+        // here: the resolver reads whether each still names the live object
+        // (CR 603.7c), so they stay on the comparand and
+        // `canonicalize_lki_incarnations_for_loop` ranks them over these same
+        // carriers. (`pending_trigger_entry` is an `Option<ObjectId>`, not
         // an ability carrier, so it needs no normalization; `waiting_for` is
         // `Priority` at the post-pipeline loop-sample point and `priority_yields`
         // latches its `YieldTarget::ThisObject { incarnation }` once at
@@ -35720,14 +35724,14 @@ impl GameState {
         };
         for entry in clone.stack.iter_mut() {
             if let Some(ability) = entry.ability_mut() {
-                ability.clear_trigger_identity_recursive();
+                ability.clear_source_provenance_for_loop_recursive();
                 ability.normalize_cast_occurrence_for_loop_recursive();
                 ability.rename_epic_effect_handles_recursive(&rename_stack_epic_handle);
             }
         }
         if let Some(entry) = clone.resolving_stack_entry.as_mut() {
             if let Some(ability) = entry.ability_mut() {
-                ability.clear_trigger_identity_recursive();
+                ability.clear_source_provenance_for_loop_recursive();
                 ability.normalize_cast_occurrence_for_loop_recursive();
                 ability.rename_epic_effect_handles_recursive(&rename_stack_epic_handle);
             }
@@ -35739,7 +35743,7 @@ impl GameState {
         // `game::triggers`.
         let normalize_pending_trigger = |pending: &mut crate::game::triggers::PendingTrigger| {
             pending.timestamp = 0;
-            pending.ability.clear_trigger_identity_recursive();
+            pending.ability.clear_source_provenance_for_loop_recursive();
         };
         if let Some(pt) = clone.pending_trigger.as_mut() {
             normalize_pending_trigger(pt);
@@ -35755,7 +35759,7 @@ impl GameState {
             }
         }
         for dt in clone.delayed_triggers.iter_mut() {
-            dt.ability.clear_trigger_identity_recursive();
+            dt.ability.clear_source_provenance_for_loop_recursive();
             dt.provenance = DelayedInstallIdentity::LegacyDelayed;
         }
         // The triggered-mana sidecar is eq-compared like its sibling carriers
@@ -36036,7 +36040,10 @@ impl GameState {
     /// `PermanentTapped` taps, the CR 400.7 damage-source stamps of
     /// `DamageDealt` / `CombatDamageDealtToPlayer` and the CR 702.110b
     /// exploiter stamp of `CreatureExploited`), the may-trigger
-    /// origins and stored answers, the turn and combat block-history pairs
+    /// origins and stored answers, the pins every ability that can still
+    /// resolve captured (`ResolvedAbility::for_each_loop_pin_mut`: keyed and
+    /// positional target pins, CR 603.7c + CR 601.2c, and the announced
+    /// source epoch), the turn and combat block-history pairs
     /// (CR 509.1g), the live incarnation of every object those or a tracked-set
     /// origin (CR 608.2c) name, and the attachment incarnation pins the
     /// retained `lki_by_incarnation` snapshots carry. Ranks count down from the
@@ -36970,6 +36977,61 @@ impl GameState {
                 }
             }
         }
+        // CR 400.7 + CR 603.7c + CR 601.2c: the pins captured by every ability that
+        // can still resolve — exactly the carriers `normalize_for_loop` erases source
+        // provenance on. Each carrier's own `source_id` keys its ability's announced
+        // source epoch (CR 602.2a); normalization zeroes only the ability's copy.
+        fn ability_pins(state: &mut GameState, f: &mut impl FnMut(ObjectId, &mut u64)) {
+            for entry in state
+                .stack
+                .iter_mut()
+                .chain(state.resolving_stack_entry.iter_mut())
+            {
+                let source_id = entry.source_id;
+                if let Some(ability) = entry.ability_mut() {
+                    ability.for_each_loop_pin_mut(source_id, f);
+                }
+            }
+            let ordering = state
+                .pending_trigger_order
+                .iter_mut()
+                .flat_map(|order| order.groups.iter_mut())
+                .flat_map(|group| group.triggers.iter_mut())
+                .map(|context| &mut context.pending);
+            let mana_resume = state
+                .pending_triggered_mana_resume
+                .as_deref_mut()
+                .into_iter()
+                .flat_map(|resume| {
+                    std::iter::once(&mut *resume.current)
+                        .chain(resume.accepted_tail.iter_mut())
+                        .chain(
+                            resume
+                                .collected_batches
+                                .iter_mut()
+                                .flat_map(|batch| batch.contexts.iter_mut()),
+                        )
+                })
+                .map(|context| &mut context.pending);
+            for pending in state
+                .pending_trigger
+                .as_deref_mut()
+                .into_iter()
+                .chain(
+                    state
+                        .deferred_triggers
+                        .iter_mut()
+                        .map(|deferred| &mut deferred.pending),
+                )
+                .chain(ordering)
+                .chain(mana_resume)
+            {
+                pending.ability.for_each_loop_pin_mut(pending.source_id, f);
+            }
+            for trigger in state.delayed_triggers.iter_mut() {
+                trigger.ability.for_each_loop_pin_mut(trigger.source_id, f);
+            }
+        }
         fn above(members: &HashMap<ObjectId, Vec<u64>>, object_id: ObjectId, value: u64) -> u64 {
             let members = &members[&object_id];
             let rank = members
@@ -37029,6 +37091,9 @@ impl GameState {
                     grants.entry(object_id).or_default().push(*generation);
                 },
             );
+        });
+        ability_pins(self, &mut |object_id, incarnation| {
+            present.entry(object_id).or_default().push(*incarnation);
         });
         may_trigger_origins(self, &mut |definition_ref| {
             definition_ref.for_each_incarnation_mut(&mut |object_id, incarnation| {
@@ -37473,6 +37538,11 @@ impl GameState {
                 }
             }
         }
+        // CR 603.7c + CR 104.4b: a pin at the live rank still names the object the
+        // resolver would affect; one below it names an object that is gone.
+        ability_pins(self, &mut |object_id, incarnation| {
+            *incarnation = canonical(object_id, *incarnation);
+        });
         // CR 613.1f + CR 104.4b: a grant generation, relative to the recipient's current grants, is position too.
         may_trigger_origins(self, &mut |definition_ref| {
             definition_ref.for_each_incarnation_mut(&mut |object_id, incarnation| {
@@ -37551,7 +37621,12 @@ impl GameState {
             return_result_frames: _,
             tracked_set_member_origins: _,
             // RANKED THROUGH A CARRIER — these hold the events, abilities and records
-            // whose own pins sections 1 and 3 classify:
+            // whose own pins sections 1 and 3 classify. The abilities are the ones on the
+            // stack, the resolving entry, the pending / deferred / ordering triggers, the
+            // delayed triggers and a paused triggered mana ability: their captured pins
+            // rank through `ResolvedAbility::for_each_loop_pin_mut`. Of a parked
+            // `resolution_stack` frame only the trigger EVENTS are walked; an ability
+            // inside one is compared raw.
             stack: _,
             resolving_stack_entry: _,
             pending_trigger: _,
@@ -37629,7 +37704,6 @@ impl GameState {
             next_resolve_all_consent_epoch: _,
             viewer_projection: _,
             resolve_all_consent_run: _,
-            stack_resolution_session: _,
             interaction_session_id: _,
             interaction_generation: _,
             next_interaction_serial: _,
@@ -37918,6 +37992,11 @@ impl GameState {
             // hideaway source incarnations and cached LKI attachment pins remain raw.
             exile_links: _,
             lki_cache: _,
+            // A stack-resolution session fences each entry with a copy of its ids, its
+            // provenance and its target pins (CR 601.2c + CR 603.7c); the fences are
+            // compared raw, so two frames minted at different times stay apart while a
+            // session is open. The pins a resolver reads are the entry's own, ranked above.
+            stack_resolution_session: _,
             // CR 104.4b: append-only and immutable, compared raw on purpose. Clearing their
             // trigger identity would let a twice-normalized state (a ring prior the resource
             // projection normalizes again) build the stack rename's table from cleared
@@ -52738,6 +52817,128 @@ mod tests {
         ExploitedRecord,
         /// CR 714.2b: the source context a `SagaChapterAbilityResolved` event carries.
         SagaContext,
+        /// CR 400.7 + CR 603.7c + CR 601.2c: a pin a `ResolvedAbility` captured, on one of
+        /// the ability carriers `normalize_for_loop` erases source provenance on.
+        AbilityPin(AbilityPinSlot, AbilityCarrier),
+    }
+
+    /// Which pin of the ability names the incarnation.
+    #[derive(Debug, Clone, Copy)]
+    enum AbilityPinSlot {
+        /// CR 603.7c: the keyed delayed-referent pin, on the root node.
+        Keyed,
+        /// The same pin on a `sub_ability` child link.
+        KeyedOnSubAbility,
+        /// CR 601.2c: the positional announcement pin.
+        Positional,
+        /// CR 602.2a: the announcement epoch of the carrier's source.
+        AnnouncedSource,
+        /// CR 509.1c: the bound force-block attacker.
+        ForceBlockAttacker,
+        GrantingObject,
+        BoonBatch,
+        ExileUntilBatch,
+    }
+
+    /// Which ability carrier holds the ability.
+    #[derive(Debug, Clone, Copy)]
+    enum AbilityCarrier {
+        StackTrigger,
+        StackSpell,
+        StackActivated,
+        Pending,
+        Deferred,
+        Ordering,
+        Delayed,
+    }
+
+    /// An ability whose `slot` pin names `x` at `named`. Every other field is the same for
+    /// every `named`, so two such abilities differ in the pin alone.
+    fn ability_pinning(slot: AbilityPinSlot, x: ObjectId, named: u64) -> ResolvedAbility {
+        let reference = ObjectIncarnationRef::of(x, named);
+        let target = crate::types::ability::TargetRef::Object(x);
+        let mut ability = draw_one(x);
+        match slot {
+            AbilityPinSlot::Keyed => {
+                ability.targets = vec![target];
+                ability.target_incarnations = vec![reference];
+            }
+            AbilityPinSlot::KeyedOnSubAbility => {
+                let mut child = draw_one(x);
+                child.targets = vec![target];
+                child.target_incarnations = vec![reference];
+                ability.sub_ability = Some(Box::new(child));
+            }
+            AbilityPinSlot::Positional => {
+                ability.targets = vec![target];
+                ability.target_pins = vec![Some(reference)];
+            }
+            AbilityPinSlot::AnnouncedSource => ability.announced_source_incarnation = Some(named),
+            AbilityPinSlot::ForceBlockAttacker => ability.force_block_attacker = Some(reference),
+            AbilityPinSlot::GrantingObject => ability.context.granting_object = Some(reference),
+            AbilityPinSlot::BoonBatch => {
+                ability.context.boon_trigger_batch_objects = vec![reference]
+            }
+            AbilityPinSlot::ExileUntilBatch => ability.context.exile_until_batch = vec![reference],
+        }
+        ability
+    }
+
+    fn carry_ability(
+        state: &mut GameState,
+        carrier: AbilityCarrier,
+        x: ObjectId,
+        ability: ResolvedAbility,
+    ) {
+        let pending = |ability: ResolvedAbility| {
+            let mut pending = ordinary_pending_trigger(x, 1);
+            pending.ability = Box::new(ability);
+            pending
+        };
+        let entry = |kind: StackEntryKind| StackEntry {
+            id: ObjectId(100),
+            source_id: x,
+            controller: PlayerId(0),
+            kind,
+        };
+        match carrier {
+            AbilityCarrier::StackTrigger => push_trigger(state, x, ability, None),
+            AbilityCarrier::StackSpell => state.stack.push_back(entry(StackEntryKind::Spell {
+                card_id: CardId(60),
+                ability: Some(Box::new(ability)),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            })),
+            AbilityCarrier::StackActivated => {
+                state
+                    .stack
+                    .push_back(entry(StackEntryKind::ActivatedAbility {
+                        source_id: x,
+                        ability: Box::new(ability),
+                    }))
+            }
+            AbilityCarrier::Pending => state.pending_trigger = Some(Box::new(pending(ability))),
+            AbilityCarrier::Deferred => state
+                .deferred_triggers
+                .push(PendingTriggerContext::single(pending(ability))),
+            AbilityCarrier::Ordering => {
+                state.pending_trigger_order = Some(PendingTriggerOrder {
+                    groups: vec![TriggerOrderGroup {
+                        controller: PlayerId(0),
+                        triggers: vec![PendingTriggerContext::single(pending(ability))],
+                        ordered: false,
+                    }],
+                    resume_after_ordering: None,
+                })
+            }
+            AbilityCarrier::Delayed => state.delayed_triggers.push(DelayedTrigger::new(
+                DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                Box::new(ability),
+                PlayerId(0),
+                x,
+                true,
+            )),
+        }
     }
 
     fn carrier_naming(kind: CarrierKind, live: u64, named: u64) -> GameState {
@@ -52933,6 +53134,10 @@ mod tests {
                     }),
                 );
             }
+            CarrierKind::AbilityPin(slot, carrier) => {
+                let ability = ability_pinning(slot, x, named);
+                carry_ability(&mut state, carrier, x, ability);
+            }
         }
         state
     }
@@ -52945,6 +53150,29 @@ mod tests {
         name: &'static str,
         split: fn(u64) -> GameState,
         merge: fn(u64, u64) -> GameState,
+    }
+
+    /// One `AbilityPin` row: `$slot` on `$carrier`, in both directions.
+    macro_rules! ability_pin_case {
+        ($name:literal, $slot:ident, $carrier:ident) => {
+            CarrierCase {
+                name: $name,
+                split: |incarnation| {
+                    carrier_naming(
+                        CarrierKind::AbilityPin(AbilityPinSlot::$slot, AbilityCarrier::$carrier),
+                        incarnation,
+                        incarnation,
+                    )
+                },
+                merge: |carrier, live| {
+                    carrier_naming(
+                        CarrierKind::AbilityPin(AbilityPinSlot::$slot, AbilityCarrier::$carrier),
+                        live,
+                        carrier,
+                    )
+                },
+            }
+        };
     }
 
     const RANKED_CARRIERS: &[CarrierCase] = &[
@@ -53102,6 +53330,62 @@ mod tests {
             split: |incarnation| carrier_naming(CarrierKind::SagaContext, incarnation, incarnation),
             merge: |carrier, live| carrier_naming(CarrierKind::SagaContext, live, carrier),
         },
+        // CR 400.7 + CR 603.7c + CR 601.2c: the pins an ability captured, on every ability
+        // carrier loop equality compares. Loop normalization used to erase the target pins,
+        // so a pin naming the live object compared equal to one left behind at a superseded
+        // incarnation. (`resolving_stack_entry` is walked too, but `PartialEq` does not
+        // compare it, so it has no row.)
+        ability_pin_case!("stack trigger target_incarnations", Keyed, StackTrigger),
+        ability_pin_case!(
+            "stack trigger sub_ability target_incarnations",
+            KeyedOnSubAbility,
+            StackTrigger
+        ),
+        ability_pin_case!("stack spell target_pins", Positional, StackSpell),
+        ability_pin_case!(
+            "stack activated ability target_pins",
+            Positional,
+            StackActivated
+        ),
+        ability_pin_case!(
+            "stack activated ability announced_source_incarnation",
+            AnnouncedSource,
+            StackActivated
+        ),
+        ability_pin_case!("pending_trigger target_incarnations", Keyed, Pending),
+        ability_pin_case!("deferred_triggers target_incarnations", Keyed, Deferred),
+        ability_pin_case!("pending_trigger_order target_incarnations", Keyed, Ordering),
+        ability_pin_case!("delayed_triggers target_incarnations", Keyed, Delayed),
+        ability_pin_case!(
+            "delayed_triggers sub_ability target_incarnations",
+            KeyedOnSubAbility,
+            Delayed
+        ),
+        ability_pin_case!(
+            "delayed_triggers announced_source_incarnation",
+            AnnouncedSource,
+            Delayed
+        ),
+        ability_pin_case!(
+            "stack trigger force_block_attacker",
+            ForceBlockAttacker,
+            StackTrigger
+        ),
+        ability_pin_case!(
+            "stack trigger context.granting_object",
+            GrantingObject,
+            StackTrigger
+        ),
+        ability_pin_case!(
+            "stack trigger context.boon_trigger_batch_objects",
+            BoonBatch,
+            StackTrigger
+        ),
+        ability_pin_case!(
+            "stack trigger context.exile_until_batch",
+            ExileUntilBatch,
+            StackTrigger
+        ),
     ];
 
     /// Row 14 — ring frames are normalized again on every compare, so normalization must
@@ -53133,6 +53417,45 @@ mod tests {
                     anchors(&once),
                     anchors(&twice),
                     "normalizing twice moved a live incarnation anchor for {}",
+                    case.name
+                );
+            }
+        }
+    }
+
+    /// CR 104.4b: the strict comparator's production shape. The auto-pass window
+    /// (`game::engine`) hands `loop_states_equal` two SAMPLE forms, and a ring prior is a
+    /// sample form normalized again by the projection, so every carrier must keep both
+    /// directions when ranking is deferred to the pair and when one side was already ranked.
+    #[test]
+    fn strict_comparator_keeps_every_ranked_carrier_on_sample_forms() {
+        for case in RANKED_CARRIERS {
+            let live = (case.merge)(5, 5);
+            let later = (case.merge)(8, 8);
+            let stale = (case.merge)(5, 8);
+            let sample = GameState::normalize_for_loop_sample;
+            let ranked_again =
+                |state: &GameState| state.normalize_for_loop().normalize_for_loop_sample();
+            for (left, right) in [
+                (sample(&live), sample(&later)),
+                (ranked_again(&live), sample(&later)),
+                (sample(&live), ranked_again(&later)),
+            ] {
+                assert!(
+                    loop_states_equal(&left, &right),
+                    "{}: the same pin relation minted later must compare equal",
+                    case.name
+                );
+            }
+            for (left, right) in [
+                (sample(&live), sample(&stale)),
+                (ranked_again(&live), sample(&stale)),
+                (sample(&live), ranked_again(&stale)),
+                (sample(&later), sample(&stale)),
+            ] {
+                assert!(
+                    !loop_states_equal(&left, &right),
+                    "{}: a live pin must not compare equal to a stale one",
                     case.name
                 );
             }

@@ -4750,36 +4750,87 @@ impl ResolvedAbility {
     /// complete owned authorities together; retaining either a source context
     /// or a definition occurrence would reintroduce object-identity drift.
     pub fn clear_trigger_identity_recursive(&mut self) {
-        self.source_id = ObjectId(0);
-        self.source_incarnation = None;
-        self.trigger_source = None;
-        self.trigger_definition_ref = None;
-        self.force_block_attacker = None;
-        // CR 104.4b: the pin names an advancing incarnation of the triggering
-        // spell (CR 400.7), so it is cleared alongside the other per-instance
-        // identity fields above for the same loop-equality reason.
-        self.context.triggering_spell = None;
-        // CR 104.4b + CR 400.7: `normalize_for_loop` compares canonicalized
-        // clones for repeated-position equality, and the all-zone incarnation
-        // bump advances a pinned referent's epoch on every zone change. A
-        // pinned delayed trigger riding on a zone-cycling loop would otherwise
-        // carry a growing epoch into loop equality and never confirm a draw.
-        //
-        // CR 603.3b: the same stripping is correct for the other caller,
-        // `normalize_ability_identity`, which decides whether two triggered
+        self.clear_source_provenance();
+        // CR 603.3b: `normalize_ability_identity` decides whether two triggered
         // abilities are genuinely indistinguishable for auto-ordering — a
         // per-instance referent epoch is exactly the object identity that
-        // comparison must ignore. Both callers operate on clones, so no
-        // production pin is ever cleared. This is deliberately the opposite of
+        // comparison must ignore. It operates on clones, so no production pin
+        // is ever cleared. This is deliberately the opposite of
         // `inert_trigger_abilities_eq_ignoring_provenance` (`game/stack.rs`),
         // which DOES compare `target_incarnations`: there the question is
         // whether two abilities would resolve identically, and two pins at
-        // different epochs would not. Same field, different questions.
+        // different epochs would not. Same field, different questions. Loop
+        // equality asks a third one and keeps the pins: see
+        // `clear_source_provenance_for_loop_recursive`.
+        self.force_block_attacker = None;
         self.target_incarnations.clear();
         self.target_pins.clear();
         self.legacy_selected_target_incarnations.clear();
         for (_, child) in self.child_links_mut() {
             child.clear_trigger_identity_recursive();
+        }
+    }
+
+    /// The source provenance both structural comparisons erase from one node:
+    /// which object an otherwise identical ability came from, with the object
+    /// id itself.
+    fn clear_source_provenance(&mut self) {
+        self.source_id = ObjectId(0);
+        self.source_incarnation = None;
+        self.trigger_source = None;
+        self.trigger_definition_ref = None;
+        // CR 104.4b: the pin names an advancing incarnation of the triggering
+        // spell (CR 400.7), so it is cleared alongside the other per-instance
+        // identity fields above for the same loop-equality reason.
+        self.context.triggering_spell = None;
+    }
+
+    /// CR 104.4b + CR 400.7: the loop-equality form of
+    /// [`Self::clear_trigger_identity_recursive`]. It erases the same source
+    /// provenance and KEEPS every captured pin, because the resolver reads
+    /// whether a pin still names the live object (CR 603.7c: "if that object
+    /// left that zone and then returned, it's a new object and thus won't be
+    /// affected"). The pins' advancing epochs are ranked against the live
+    /// object by `GameState::canonicalize_lki_incarnations_for_loop`
+    /// ([`Self::for_each_loop_pin_mut`]), so a zone-cycling loop still
+    /// confirms while a live pin never compares equal to a stale one.
+    pub(crate) fn clear_source_provenance_for_loop_recursive(&mut self) {
+        self.clear_source_provenance();
+        for (_, child) in self.child_links_mut() {
+            child.clear_source_provenance_for_loop_recursive();
+        }
+    }
+
+    /// CR 400.7: every incarnation pin this chain captured, as
+    /// `(object, incarnation)`, for loop normalization to rank with the other
+    /// carriers: the keyed delayed-referent pins (CR 603.7c), the positional
+    /// announcement pins (CR 601.2c), the bound force-block attacker
+    /// (CR 509.1c), the granting object, the boon and exile-until batches, and
+    /// the announcement epoch of the source (CR 602.2a). That last one is a
+    /// bare epoch, so the caller supplies the object it belongs to:
+    /// `source_id` is the CARRIER's source, which normalization leaves in
+    /// place while it zeroes the ability's own.
+    pub(crate) fn for_each_loop_pin_mut(
+        &mut self,
+        source_id: ObjectId,
+        f: &mut impl FnMut(ObjectId, &mut u64),
+    ) {
+        if let Some(incarnation) = self.announced_source_incarnation.as_mut() {
+            f(source_id, incarnation);
+        }
+        for pin in self
+            .target_incarnations
+            .iter_mut()
+            .chain(self.target_pins.iter_mut().flatten())
+            .chain(self.force_block_attacker.iter_mut())
+            .chain(self.context.granting_object.iter_mut())
+            .chain(self.context.boon_trigger_batch_objects.iter_mut())
+            .chain(self.context.exile_until_batch.iter_mut())
+        {
+            f(pin.object_id, &mut pin.incarnation);
+        }
+        for (_, child) in self.child_links_mut() {
+            child.for_each_loop_pin_mut(source_id, f);
         }
     }
 

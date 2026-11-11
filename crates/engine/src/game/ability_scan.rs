@@ -5714,15 +5714,14 @@ pub(crate) fn ability_reads_sibling_mutable(ability: &ResolvedAbility) -> bool {
 /// the generic matcher and read no journal row, so only the four effect positions that
 /// read it exactly are consulted — their RAW fields, not `Effect::target_filter()`, which
 /// answers `None` for the `All` scope those same effects still read.
-/// CR 608.2k + CR 400.7: which reader class this ability chain can use for the event
-/// recipient — Referent for the four plain referent readers, Pinned when the prevention
-/// reader additionally consults the CAPTURED pin (prevent_damage.rs:601, target_pin_is_current),
-/// which loop normalization erases and therefore cannot represent in a reduced comparand.
+/// CR 608.2k + CR 400.7: whether this ability chain can read the event recipient at all.
+/// The prevention and sacrifice readers additionally consult the CAPTURED pin
+/// (`target_pin_is_current`); that pin stays on the loop comparand and is ranked there, so
+/// it needs no class of its own here.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum EventTargetRead {
     None,
     Referent,
-    Pinned,
 }
 
 pub(crate) fn ability_event_target_read(ability: &ResolvedAbility) -> EventTargetRead {
@@ -5730,19 +5729,11 @@ pub(crate) fn ability_event_target_read(ability: &ResolvedAbility) -> EventTarge
         match node {
             Effect::SetTapState { target, .. }
             | Effect::BecomePrepared { target, .. }
-            | Effect::BecomeUnprepared { target, .. } => {
+            | Effect::BecomeUnprepared { target, .. }
+            | Effect::PreventDamage { target, .. }
+            | Effect::Sacrifice { target, .. } => {
                 if *target == TargetFilter::EventTarget {
                     EventTargetRead::Referent
-                } else {
-                    EventTargetRead::None
-                }
-            }
-            // CR 400.7 + CR 608.2k: both resolvers consult the captured pin
-            // (`prevent_damage.rs::target_pin_is_current`, `sacrifice.rs` retaining only
-            // `target_pin_is_current` targets), which loop normalization erases.
-            Effect::PreventDamage { target, .. } | Effect::Sacrifice { target, .. } => {
-                if *target == TargetFilter::EventTarget {
-                    EventTargetRead::Pinned
                 } else {
                     EventTargetRead::None
                 }
@@ -8262,8 +8253,8 @@ mod tests {
                 scope: PreventionScope::AllDamage,
                 damage_source_filter: None,
                 prevention_duration: None,
-            }) == EventTargetRead::Pinned,
-            "the prevention reader consults the captured pin"
+            }) == EventTargetRead::Referent,
+            "the prevention reader reads the recipient"
         );
         assert!(
             classify(Effect::GenericEffect {
