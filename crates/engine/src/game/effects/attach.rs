@@ -5839,61 +5839,45 @@ mod tests {
             .collect()
     }
 
-    /// CR 702.16n + CR 113.7: "this effect doesn't remove this Aura" in a
-    /// quoted granted static names the object that has that static (the
-    /// recipient), not the permanent that granted it. Flickering Ward prints the
-    /// rider: "Enchanted creature has protection from the chosen color. This
-    /// effect doesn't remove this Aura." The synthesized child is the only
-    /// producer of the protection here.
-    #[test]
-    fn synthesized_granted_source_rider_names_the_recipient() {
-        use crate::types::ability::ProtectionDoesNotRemove;
+    /// How a quoted ridered static reaches its recipient.
+    #[derive(Clone, Copy, Debug)]
+    enum GrantPath {
+        /// The granter's own static grants it at gather time.
+        Static,
+        /// A resolution-created effect grants it (CR 611.2c); the parent has no
+        /// static-definition index.
+        Transient,
+        /// The recipient joins the granter's affected set only after layer 4
+        /// (an Aura creature), so its child comes from the late-grant path.
+        Late,
+    }
+
+    /// The objects of [`granted_rider_board`].
+    struct RiderBoard {
+        host: ObjectId,
+        recipient: ObjectId,
+        granter: ObjectId,
+        equipment: ObjectId,
+        opposing_aura: ObjectId,
+    }
+
+    /// A creature with four white attachments, all attached before the grant
+    /// starts: the recipient Aura and the granting Aura and an Equipment (P0),
+    /// and an opposing Aura (P1). The recipient carries its own static first,
+    /// so the granted copy installs at its index 1 while the granter's static
+    /// is at its index 0. `path` grants the recipient "the creature has
+    /// protection from white" with `rider`.
+    fn granted_rider_board(
+        path: GrantPath,
+        rider: crate::types::ability::ProtectionDoesNotRemove,
+    ) -> (GameState, RiderBoard) {
+        use crate::types::ability::{ContinuousModification, Duration};
+        use crate::types::mana::ManaColor;
 
         let mut state = setup();
         let host = spawn_creature(&mut state, "Black Knight");
         let recipient = spawn_white_aura(&mut state, "Recipient Ward", 86, PlayerId(0));
         let granter = spawn_white_aura(&mut state, "Granting Aura", 87, PlayerId(0));
-        attach_to(&mut state, recipient, host);
-        attach_to(&mut state, granter, host);
-        grant_static_to(
-            &mut state,
-            granter,
-            TargetFilter::SpecificObject { id: recipient },
-            quoted_white_protection(host, ProtectionDoesNotRemove::Source),
-        );
-        evaluate_protection_layers(&mut state);
-
-        let riders = white_riders(&state, host);
-        assert_eq!(riders.len(), 1, "reach guard: one synthesized instance");
-        assert_eq!(
-            riders[0].as_ref().map(|rider| rider.source),
-            Some(recipient),
-            "the granted static's source is its recipient"
-        );
-        assert_eq!(
-            attachment_illegality(&state, recipient, host),
-            None,
-            "the rider exempts the Aura that has the granted static"
-        );
-        assert_eq!(
-            attachment_illegality(&state, granter, host),
-            Some(AttachIllegality::Protection),
-            "the granting Aura is not 'this Aura' of the granted static"
-        );
-    }
-
-    /// CR 702.16p + CR 113.7: Benevolent Blessing's "This effect doesn't remove
-    /// Auras and Equipment you control that are already attached to it" as a
-    /// quoted granted static. The start snapshot is written for the static the
-    /// recipient has (its installed copy, after the recipient's own static), so
-    /// the synthesized child must read that snapshot, not the granter's.
-    #[test]
-    fn synthesized_granted_controlled_attachments_rider_reads_the_recipient_snapshot() {
-        use crate::types::ability::{ContinuousModification, ProtectionDoesNotRemove};
-        use crate::types::mana::ManaColor;
-
-        let mut state = setup();
-        let host = spawn_creature(&mut state, "Bear");
         let equipment = spawn_equipment(&mut state, "Sword", 88);
         state
             .objects
@@ -5901,11 +5885,10 @@ mod tests {
             .unwrap()
             .color
             .push(ManaColor::White);
-        attach_to(&mut state, equipment, host);
-
-        // The recipient's own static sits at index 0, so the granted copy is
-        // installed at index 1 while the granter's static is at index 0.
-        let recipient = spawn_grant_source(&mut state, "Recipient", 89);
+        let opposing_aura = spawn_white_aura(&mut state, "Pacifism", 89, PlayerId(1));
+        for attachment in [recipient, granter, equipment, opposing_aura] {
+            attach_to(&mut state, attachment, host);
+        }
         state
             .objects
             .get_mut(&recipient)
@@ -5917,129 +5900,193 @@ mod tests {
                     .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
             );
         persist_last_static(&mut state, recipient);
-        let granter = spawn_grant_source(&mut state, "Granter", 90);
-        grant_static_to(
-            &mut state,
-            granter,
-            TargetFilter::SpecificObject { id: recipient },
-            quoted_white_protection(
-                host,
-                ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached,
-            ),
-        );
-        evaluate_protection_layers(&mut state);
 
-        assert_eq!(
-            protection_snapshot_ids(&state, recipient, 1, 0, host),
-            vec![equipment],
-            "reach guard: the start snapshot is the recipient's installed copy's"
-        );
-        assert_eq!(
-            attachment_illegality(&state, equipment, host),
-            None,
-            "the snapshotted Equipment stays legal"
-        );
-
-        // A matching Equipment attached after the effect started is not exempt.
-        let late = spawn_equipment(&mut state, "Late Sword", 91);
-        state
-            .objects
-            .get_mut(&late)
-            .unwrap()
-            .color
-            .push(ManaColor::White);
-        state.objects.get_mut(&late).unwrap().attached_to = Some(host.into());
-        state.objects.get_mut(&host).unwrap().attachments.push(late);
-        assert_eq!(
-            attachment_illegality(&state, late, host),
-            Some(AttachIllegality::Protection)
-        );
-    }
-
-    /// CR 702.16n + CR 611.2c: a resolution-created effect that grants a quoted
-    /// ridered static (Spectra Ward's "This effect doesn't remove Auras") keeps
-    /// the rider, although its parent has no static-definition index.
-    #[test]
-    fn transient_granted_static_keeps_its_rider() {
-        use crate::types::ability::{ContinuousModification, Duration, ProtectionDoesNotRemove};
-
-        let mut state = setup();
-        let host = spawn_creature(&mut state, "Black Knight");
-        let aura = spawn_white_aura(&mut state, "Pacifism", 92, PlayerId(1));
-        attach_to(&mut state, aura, host);
-        let granter = spawn_grant_source(&mut state, "Spell source", 93);
-        state
-            .add_transient_continuous_effect(
+        let inner = quoted_white_protection(host, rider);
+        match path {
+            GrantPath::Static => grant_static_to(
+                &mut state,
                 granter,
-                PlayerId(0),
-                Duration::UntilEndOfTurn,
-                TargetFilter::SpecificObject { id: host },
-                vec![ContinuousModification::GrantStaticAbility {
-                    definition: Box::new(quoted_white_protection(
-                        host,
-                        ProtectionDoesNotRemove::Auras,
-                    )),
-                }],
-                None,
-            )
-            .expect("transient grant must register");
-        evaluate_protection_layers(&mut state);
-
-        let riders = white_riders(&state, host);
-        assert_eq!(riders.len(), 1, "reach guard: one synthesized instance");
-        assert!(matches!(
-            riders[0].as_ref().map(|rider| &rider.does_not_remove),
-            Some(ProtectionDoesNotRemove::Auras)
-        ));
-        assert_eq!(attachment_illegality(&state, aura, host), None);
-    }
-
-    /// CR 702.16n + CR 613.1f: a recipient that joins the grant's affected set
-    /// only after layer 4 gets its child from the late-grant path; its rider
-    /// still names that recipient.
-    #[test]
-    fn late_granted_static_keeps_its_rider_identity() {
-        use crate::types::ability::{ContinuousModification, Duration, ProtectionDoesNotRemove};
-
-        let mut state = setup();
-        let host = spawn_creature(&mut state, "Black Knight");
-        let recipient = spawn_white_aura(&mut state, "Recipient Ward", 94, PlayerId(0));
-        let granter = spawn_white_aura(&mut state, "Granting Aura", 95, PlayerId(0));
-        attach_to(&mut state, recipient, host);
-        attach_to(&mut state, granter, host);
-        // Only an Aura creature receives the grant; the recipient becomes one
-        // in layer 4, after gather.
-        grant_static_to(
-            &mut state,
-            granter,
-            TargetFilter::Typed(TypedFilter::creature().subtype("Aura".to_string())),
-            quoted_white_protection(host, ProtectionDoesNotRemove::Source),
-        );
-        state
-            .add_transient_continuous_effect(
-                granter,
-                PlayerId(0),
-                Duration::UntilEndOfTurn,
                 TargetFilter::SpecificObject { id: recipient },
-                vec![ContinuousModification::AddType {
-                    core_type: CoreType::Creature,
-                }],
-                None,
-            )
-            .expect("animation must register");
+                inner,
+            ),
+            GrantPath::Transient => {
+                state
+                    .add_transient_continuous_effect(
+                        granter,
+                        PlayerId(0),
+                        Duration::UntilEndOfTurn,
+                        TargetFilter::SpecificObject { id: recipient },
+                        vec![ContinuousModification::GrantStaticAbility {
+                            definition: Box::new(inner),
+                        }],
+                        None,
+                    )
+                    .expect("transient grant must register");
+            }
+            GrantPath::Late => {
+                grant_static_to(
+                    &mut state,
+                    granter,
+                    TargetFilter::Typed(TypedFilter::creature().subtype("Aura".to_string())),
+                    inner,
+                );
+                state
+                    .add_transient_continuous_effect(
+                        granter,
+                        PlayerId(0),
+                        Duration::UntilEndOfTurn,
+                        TargetFilter::SpecificObject { id: recipient },
+                        vec![ContinuousModification::AddType {
+                            core_type: CoreType::Creature,
+                        }],
+                        None,
+                    )
+                    .expect("animation must register");
+            }
+        }
         evaluate_protection_layers(&mut state);
+        (
+            state,
+            RiderBoard {
+                host,
+                recipient,
+                granter,
+                equipment,
+                opposing_aura,
+            },
+        )
+    }
 
-        let riders = white_riders(&state, host);
-        assert_eq!(riders.len(), 1, "reach guard: one late-granted instance");
-        assert_eq!(
-            riders[0].as_ref().map(|rider| rider.source),
-            Some(recipient)
-        );
-        assert_eq!(attachment_illegality(&state, recipient, host), None);
-        assert_eq!(
-            attachment_illegality(&state, granter, host),
-            Some(AttachIllegality::Protection)
-        );
+    /// CR 702.16n + CR 702.16p + CR 113.7: a quoted granted static's rider
+    /// belongs to the object that has the static (the recipient), not to the
+    /// permanent that granted it, on every grant path. Printed analogues:
+    /// Flickering Ward ("This effect doesn't remove this Aura."), Spectra Ward
+    /// ("This effect doesn't remove Auras.") and Benevolent Blessing ("This
+    /// effect doesn't remove Auras and Equipment you control that are already
+    /// attached to it."). The synthesized child is the only producer of the
+    /// protection in each board.
+    fn assert_granted_rider_identity(path: GrantPath) {
+        use crate::types::ability::ProtectionDoesNotRemove;
+
+        let protection = Some(AttachIllegality::Protection);
+        for rider in [
+            ProtectionDoesNotRemove::Source,
+            ProtectionDoesNotRemove::Auras,
+            ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached,
+        ] {
+            let (state, board) = granted_rider_board(path, rider.clone());
+            let riders = white_riders(&state, board.host);
+            assert_eq!(riders.len(), 1, "{path:?} {rider:?}: one granted instance");
+            let grant = riders[0].as_ref().expect("the granted rider survives");
+            assert_eq!(grant.does_not_remove, rider);
+            assert_eq!(
+                grant.source, board.recipient,
+                "{path:?} {rider:?}: the granted static's source is its recipient"
+            );
+            let legality = |attachment| attachment_illegality(&state, attachment, board.host);
+            let expected = match &rider {
+                // Only "this Aura": the recipient, never the granting Aura.
+                ProtectionDoesNotRemove::Source => [None, protection, protection, protection],
+                // Every Aura, no Equipment.
+                ProtectionDoesNotRemove::Auras => [None, None, protection, None],
+                // The start snapshot written for the recipient's installed copy:
+                // what its controller (P0) had attached, not the P1 Aura.
+                ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached => {
+                    assert_eq!(
+                        protection_snapshot_ids(&state, board.recipient, 1, 0, board.host),
+                        vec![board.recipient, board.granter, board.equipment],
+                        "{path:?}: the snapshot is the recipient's installed copy's"
+                    );
+                    [None, None, None, protection]
+                }
+            };
+            assert_eq!(
+                [
+                    legality(board.recipient),
+                    legality(board.granter),
+                    legality(board.equipment),
+                    legality(board.opposing_aura),
+                ],
+                expected,
+                "{path:?} {rider:?}: [recipient, granter, equipment, opposing Aura]"
+            );
+        }
+    }
+
+    #[test]
+    fn statically_granted_rider_names_its_recipient() {
+        assert_granted_rider_identity(GrantPath::Static);
+    }
+
+    #[test]
+    fn transiently_granted_rider_names_its_recipient() {
+        assert_granted_rider_identity(GrantPath::Transient);
+    }
+
+    #[test]
+    fn late_granted_rider_names_its_recipient() {
+        assert_granted_rider_identity(GrantPath::Late);
+    }
+
+    /// CR 702.16n + CR 702.16p: a ridered static on the protected permanent
+    /// itself keys its rider to that permanent's own definition. "This Aura"
+    /// then names the creature, which no attachment can be, so a white Aura is
+    /// still blocked; the other riders exempt as they do from an Aura.
+    #[test]
+    fn own_static_rider_uses_its_own_identity() {
+        use crate::types::ability::ProtectionDoesNotRemove;
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::layers::ProtectionRiderDefinition;
+        use crate::types::mana::ManaColor;
+
+        let protection = Some(AttachIllegality::Protection);
+        for rider in [
+            ProtectionDoesNotRemove::Source,
+            ProtectionDoesNotRemove::Auras,
+            ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached,
+        ] {
+            let mut state = setup();
+            let host = spawn_creature(&mut state, "Black Knight");
+            let aura = spawn_white_aura(&mut state, "Pacifism", 102, PlayerId(1));
+            let equipment = spawn_equipment(&mut state, "Sword", 103);
+            state
+                .objects
+                .get_mut(&equipment)
+                .unwrap()
+                .color
+                .push(ManaColor::White);
+            attach_to(&mut state, aura, host);
+            attach_to(&mut state, equipment, host);
+            apply_protection_grant(
+                &mut state,
+                host,
+                host,
+                ProtectionTarget::Color(ManaColor::White),
+                Some(rider.clone()),
+            );
+            persist_last_static(&mut state, host);
+            evaluate_protection_layers(&mut state);
+
+            let riders = white_riders(&state, host);
+            assert_eq!(riders.len(), 1, "{rider:?}: one instance");
+            let grant = riders[0].as_ref().expect("the rider survives");
+            assert_eq!(grant.source, host);
+            assert_eq!(grant.definition, ProtectionRiderDefinition::Live(0));
+            let expected = match &rider {
+                ProtectionDoesNotRemove::Source => [protection, protection],
+                ProtectionDoesNotRemove::Auras => [None, protection],
+                // P1's Aura is not controlled by the static's controller (P0).
+                ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached => [protection, None],
+            };
+            assert_eq!(
+                [
+                    attachment_illegality(&state, aura, host),
+                    attachment_illegality(&state, equipment, host),
+                ],
+                expected,
+                "{rider:?}: [opposing Aura, Equipment]"
+            );
+        }
     }
 
     /// CR 707.2 + CR 702.16n: a copy of Flickering Ward acquires its ridered
