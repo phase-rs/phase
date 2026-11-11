@@ -40,151 +40,42 @@ use crate::types::player::{Player, PlayerId};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
-/// CR 732.2a: the metered spend the resolution probe charges against.
+/// The shipped probe cap, per classification run.
 ///
-/// A NESTED module, not a new file, and that nesting is the enforcement: Rust
-/// privacy is module-scoped, so a budget defined beside its consumers could be
-/// re-constructed by any same-module code and its spend would be invisible to
-/// the meter. Defining it one module down lets the constructor be narrowed
-/// without also narrowing it away from this module's own wrappers.
-mod verdict_memo {
-    use std::collections::BTreeMap;
+/// Twice the measured per-beat key demand, so an offering beat carrying double the observed key
+/// population still certifies. It stays far below the demand of an unexempted full-stack
+/// classification, which therefore still exhausts the budget and refuses fail-closed.
+pub(crate) const PROBE_BUDGET: u32 = 26;
 
-    use crate::game::resolution_prompt::ResolutionChoiceFreedom;
-    use crate::types::game_state::{GameState, StackEntry};
-    use crate::types::identifiers::ObjectId;
-
-    /// The shipped probe cap, per classification run.
-    ///
-    /// Twice the measured per-beat key demand of the metered mint, so an offering
-    /// beat carrying double the observed key population still certifies. It stays
-    /// far below the demand of an unexempted full-stack classification, which
-    /// therefore still exhausts the budget and refuses fail-closed.
-    pub(crate) const PROBE_BUDGET: u32 = 26;
-
-    /// A denied charge makes `probe_resolution` answer `Prompted`, the answer a real prompt gets.
-    ///
-    /// **Derive list pinned to exactly `#[derive(Debug)]`** — no `Default`, no
-    /// `Clone`/`Copy`. A derived constructor recompiles the construction escape
-    /// with `new` untouched: the derived value is a zero-cap always-denying
-    /// budget, which is fail-closed but meter-invisible and relief-disabling.
-    #[derive(Debug)]
-    pub(crate) struct ProbeBudget {
-        remaining: u32,
-    }
-
-    impl ProbeBudget {
-        /// MODULE-PRIVATE. Every budget is born inside this module, so the
-        /// container that owns the meter is the only thing that can start a
-        /// spend — a fresh budget compiled beside a consumer would be a spend
-        /// the mint's meter never sees. Re-adding a
-        /// `ProbeBudget::new(PROBE_BUDGET)` call in `analysis::resource` is
-        /// E0624, which is the closure stated as a compile fact.
-        fn new(cap: u32) -> Self {
-            Self { remaining: cap }
-        }
-
-        /// `false` ⇒ exhausted.
-        pub(crate) fn try_charge_one(&mut self) -> bool {
-            if self.remaining == 0 {
-                return false;
-            }
-            self.remaining -= 1;
-            true
-        }
-
-        /// TEST-ONLY constructor. `new` is module-private so no site outside
-        /// this module can mint a budget whose spend would be invisible to a
-        /// meter; a `cfg(test)` door cannot widen that, because it does not
-        /// exist in a production build.
-        #[cfg(test)]
-        pub(crate) fn for_test(cap: u32) -> Self {
-            Self::new(cap)
-        }
-    }
-
-    /// A frame's position in ONE container's OWN `frames` table.
-    ///
-    /// The field is private and there is no public constructor and no
-    /// `From<usize>`: a `FrameIx` can only be minted by
-    /// [`PeriodVerdicts::frame_ix`], which resolves a `&GameState` by POINTER
-    /// IDENTITY against the very table [`PeriodVerdicts::verdict`] indexes. No
-    /// index arithmetic exists anywhere on the mint path, so the
-    /// window-relative off-by-`idx` class is unconstructible rather than merely
-    /// unobserved — forging `FrameIx(3)` one module out is E0603.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-    pub(crate) struct FrameIx(usize);
-
-    /// CR 732.2a: the ONE per-mint verdict door — a TOTAL, `(FrameIx,
-    /// ObjectId)`-keyed, compute-on-miss memo that OWNS the probe budget.
-    ///
-    /// Totality is scoped honestly: [`PeriodVerdicts::verdict`] is total over
-    /// every `FrameIx` this container minted, and MINTING
-    /// ([`PeriodVerdicts::frame_ix`]) is the membership question — it returns
-    /// `Option` and every consumer treats `None` as a refusal, so a frame
-    /// outside the period costs a certificate, never a wrong one.
-    pub(crate) struct PeriodVerdicts<'a> {
-        /// `[current]` — PRIVATE and not indexable, so a `FrameIx`
-        /// cannot be turned back into a board by the parent module.
-        frames: Vec<&'a GameState>,
-        memo: BTreeMap<(FrameIx, ObjectId), ResolutionChoiceFreedom>,
-        /// PRIVATE: the field route to a fresh spend is E0616 from the parent
-        /// module, and the construction route is shut by `new`'s module
-        /// privacy above.
-        budget: ProbeBudget,
-    }
-
-    impl<'a> PeriodVerdicts<'a> {
-        /// The default-cap container over `[current]`.
-        pub(super) fn unproven(current: &'a GameState) -> Self {
-            Self {
-                frames: vec![current],
-                memo: BTreeMap::new(),
-                budget: ProbeBudget::new(PROBE_BUDGET),
-            }
-        }
-
-        /// THE ONLY `FrameIx` MINT. Resolves a frame to its position in
-        /// `self.frames` by `std::ptr::eq` — the same table `verdict` reads, so
-        /// the returned index is correct BY IDENTITY, not by arithmetic.
-        /// `rposition`, so the only conceivable duplicate (one pointer appearing
-        /// twice) resolves newest; a duplicate pointer is the same state, hence
-        /// the same verdict.
-        ///
-        /// `None` ⇒ the frame is not in this period ⇒ the CALLER refuses. That
-        /// is what makes "the memo's last frame IS the caller's current"
-        /// structural rather than a `debug_assert` compiled out of release.
-        pub(crate) fn frame_ix(&self, frame: &GameState) -> Option<FrameIx> {
-            self.frames
-                .iter()
-                .rposition(|f| std::ptr::eq(*f, frame))
-                .map(FrameIx)
-        }
-
-        /// THE ONE DOOR. Computes on miss against `self.frames[f.0]` — the memo,
-        /// never the caller, converts `FrameIx` back to a board — charges the
-        /// OWNED budget, and memoizes. Total over minted keys: it returns a
-        /// value, never an `Option`, so there is no miss contract to get wrong.
-        pub(crate) fn verdict(
-            &mut self,
-            f: FrameIx,
-            entry: &StackEntry,
-        ) -> &ResolutionChoiceFreedom {
-            let key = (f, entry.id);
-            if !self.memo.contains_key(&key) {
-                let frame = self.frames[f.0];
-                let primary =
-                    super::stack_entry_resolution_choice_freedom(frame, entry, &mut self.budget);
-                self.memo.insert(key, primary);
-            }
-            &self.memo[&key]
-        }
-    }
+/// CR 732.2a: the spend the resolution probe charges against. A denied charge makes
+/// `probe_resolution` answer `Prompted`, the answer a real prompt gets.
+///
+/// **Derive list pinned to exactly `#[derive(Debug)]`**: a derived `Default` would be a zero-cap
+/// budget that denies every probe.
+#[derive(Debug)]
+pub(crate) struct ProbeBudget {
+    remaining: u32,
 }
 
-#[cfg(test)]
-pub(crate) use verdict_memo::PROBE_BUDGET;
-pub(crate) use verdict_memo::{PeriodVerdicts, ProbeBudget};
+impl ProbeBudget {
+    fn new(cap: u32) -> Self {
+        Self { remaining: cap }
+    }
+
+    /// `false` ⇒ exhausted.
+    pub(crate) fn try_charge_one(&mut self) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+        self.remaining -= 1;
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(cap: u32) -> Self {
+        Self::new(cap)
+    }
+}
 
 /// CR 732.2a: what the shortcut detector cost this drive, one field per **tick site**.
 ///
@@ -210,8 +101,8 @@ pub struct LoopDetectCost {
     /// The `normalize_for_loop()` that opens `project_out_resources` — the compare side's
     /// clone budget, minted twice per comparison.
     pub projected_clones: u32,
-    /// One field per production function that calls `project_out_resources`, never one
-    /// aggregate: an aggregate cannot tell four live sites from one live and three dead.
+    /// One field per production function that ticks a compare; `cover_projection`,
+    /// `certifying_cover` and `library_departures_cover` project without one.
     pub compares_equal_modulo_resources: u32,
     pub compares_cover_modulo_growth_scoped: u32,
     pub compares_cover_modulo_object_growth: u32,
@@ -285,9 +176,7 @@ impl LoopDetectCost {
         self.classify().1
     }
 
-    /// Every comparison the four production callers of `project_out_resources` performed.
-    /// Each of them projects both sides as a pair, which is what makes
-    /// `projected_clones <= 2 * resource_compares()` a bound over this closed population.
+    /// Every comparison the four ticking callers of `project_out_resources` performed.
     pub fn resource_compares(&self) -> u32 {
         self.compares_equal_modulo_resources
             + self.compares_cover_modulo_growth_scoped
@@ -329,8 +218,8 @@ type CostSlot = fn(&mut LoopDetectCost) -> (&mut u64, &mut u32);
 /// Records a scanned block's elapsed time on EVERY exit, so an early `return` out of the
 /// branch a remedy targets cannot silently under-report exactly that branch.
 ///
-/// `web_time::Instant`, not `std::time::Instant`: both the sampler and the reconcile seam
-/// are on the WASM-reachable `apply()` path, where the std clock panics
+/// `web_time::Instant`, not `std::time::Instant`: the reconcile seam is on the
+/// WASM-reachable `apply()` path, where the std clock panics
 /// (`crate::util::deadline`'s module doc is the in-tree authority).
 #[must_use]
 pub(crate) struct CostTimer {
@@ -2766,17 +2655,14 @@ impl ResourceVector {
     }
 
     /// CR 732.2a: one repetition's resource change, measured the one way every producer of a
-    /// per-period signature and the drive's per-cycle conformance check read it — so the
-    /// magnitude the offer publishes and the magnitude a committed cycle is checked against
-    /// cannot be measured differently.
+    /// per-period signature reads it.
     ///
     /// CR 111.1: `tokens_created` counts the battlefield objects `after` MINTED that are
     /// tokens. A snapshot reads levels and a token creation is an event, so a snapshot pair
     /// alone reports zero on an axis the preview publishes and the drive really moves. The
-    /// board-pair term is used because it is the only one expressible at all three call sites:
-    /// both mints compare two `LoopDetectSample` frames and hold no event stream. A token
-    /// created and destroyed inside the period is not counted — an under-report, which
-    /// understates the preview and leaves the conformance comparison symmetric.
+    /// board-pair term is used because the producers compare two frames and hold no event
+    /// stream. A token created and destroyed inside the period is not counted — an
+    /// under-report, which understates the preview.
     pub(crate) fn period(before: &GameState, after: &GameState) -> ResourceVector {
         let mut v = Self::delta(&Self::snapshot(before), &Self::snapshot(after));
         v.tokens_created = crate::game::engine::minted_battlefield_ids(before, after)
@@ -4191,7 +4077,6 @@ fn window_cast_card_ids(state: &GameState) -> Option<Vec<CardId>> {
 /// theorem here.
 pub(crate) fn loop_states_cover_modulo_growth(prior: &GameState, current: &GameState) -> bool {
     bump_loop_detect_cost(|cost| cost.compares_cover_modulo_growth_scoped += 1);
-    let mut verdicts = PeriodVerdicts::unproven(current);
     // (1) Board equal modulo the NARROWED projection AND modulo the stack, with the
     // object resource axes STRICT-COMPARED. Both sides are [`cover_projection`]'s comparand —
     // the stack and its entry-indexed firing sidecar are compared separately in (2) — then
@@ -4224,10 +4109,6 @@ pub(crate) fn loop_states_cover_modulo_growth(prior: &GameState, current: &GameS
     // (3) Every grown place is a mandatory, no-ordering-input triggered ability.
     // Iterate the ORIGINAL current-stack entries (so the mid-construction firewall
     // sees real stack-entry ids) and check each whose normalized kind strictly grew.
-    // Fail-closed: this predicate only answers about a `current` the container holds.
-    let Some(f_current) = verdicts.frame_ix(current) else {
-        return false;
-    };
     for (orig, norm) in current.stack.iter().zip(cur_stack.iter()) {
         let cn = cur_stack.iter().filter(|e| *e == norm).count();
         let pn = prior_stack.iter().filter(|e| *e == norm).count();
@@ -4267,8 +4148,9 @@ pub(crate) fn loop_states_cover_modulo_growth(prior: &GameState, current: &GameS
     // `FreeUnlessReplacements` additionally requires the CR 616.1 environmental guard below.
     // THIS block is the single gate seam for resolution-choice rejection; grown places gate a
     // different fact (announcement-time ordering input).
+    let mut budget = ProbeBudget::new(PROBE_BUDGET);
     for entry in &current.stack {
-        let verdict = verdicts.verdict(f_current, entry).clone();
+        let verdict = stack_entry_resolution_choice_freedom(current, entry, &mut budget);
         if !resolution_events_are_discharged(current, verdict) {
             return false;
         }
@@ -15992,10 +15874,10 @@ mod tests {
     /// rather than as a failure.
     ///
     /// WHY IT NEEDS ITS OWN ROW. `victim_slot` is NOT empty on the trajectories that offer:
-    /// the answer-beat sampling site in `apply_action` announces the entries a FORCED
-    /// pre-priority window puts on the stack, so a CR 608.2b `Targets` declaration is
-    /// announced like any other and on the F4 boards `points` carries Torch's `Targets`
-    /// point. That value reaches the bound through `seat_life_charges` in production;
+    /// the recorded period (the play trace's `period_confirm::confirm` replay) announces the
+    /// entries a FORCED pre-priority window puts on the stack, so a CR 608.2b `Targets`
+    /// declaration is announced like any other and on the F4 boards `points` carries Torch's
+    /// `Targets` point. That value reaches the bound through `seat_life_charges` in production;
     /// `r1_the_bounded_offer_fires_on_the_real_f4_dump` re-derives the published bound with a
     /// non-zero declared term.
     ///
