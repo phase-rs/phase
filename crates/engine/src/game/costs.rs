@@ -3753,6 +3753,15 @@ fn draw_legs_are_drawable(state: &GameState, legs: &[AbilityCost], frame: DrawLe
     })
 }
 
+/// CR 121.1: whether `cost` includes a draw leg (nested `Composite`s flattened).
+pub(crate) fn cost_includes_draw(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Composite { costs } => costs.iter().any(cost_includes_draw),
+        AbilityCost::EffectCost { effect } => matches!(effect.as_ref(), Effect::Draw { .. }),
+        _ => false,
+    }
+}
+
 /// Adds each context-ref draw leaf under `cost` (nested `Composite`s
 /// flattened) to its drawer's running total.
 fn accumulate_draw_leg_totals(

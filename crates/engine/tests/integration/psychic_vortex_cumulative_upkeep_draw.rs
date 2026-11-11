@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+use engine::game::ledger::apply_resolved_ledger_edit;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityCost, Effect, EffectKind, ManaContribution, ManaProduction, QuantityExpr, TargetFilter,
@@ -23,12 +24,16 @@ use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, PendingCostMoveResume, UnpaidCostSuffix, WaitingFor,
+    CastPaymentMode, PendingCostMoveResume, PersistedGameState, UnpaidCostRemainder,
+    UnpaidCostSuffix, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::resolved_commands::{
+    ResolvedLedgerEdit, ResolvedLedgerEditCommand, ResolvedRulesCommand,
+};
 use engine::types::zones::Zone;
 
 const PSYCHIC_VORTEX_ORACLE: &str = "Cumulative upkeep\u{2014}Draw a card. (At the beginning of \
@@ -237,6 +242,14 @@ fn parked_unpaid_suffix(runner: &GameRunner) -> Option<UnpaidCostSuffix> {
         }
         other => panic!("expected a parked unless-payment, got {other:?}"),
     }
+}
+
+/// CR 702.24a: a park that still owes `instructions` printed draw instructions.
+fn owed_instructions(instructions: u32) -> Option<UnpaidCostSuffix> {
+    std::num::NonZeroU32::new(instructions).map(|owed| UnpaidCostSuffix {
+        payer: P0,
+        remainder: UnpaidCostRemainder::Repeated(owed),
+    })
 }
 
 fn assert_replacement_choice(runner: &GameRunner, context: &str) {
@@ -473,10 +486,7 @@ fn a_dredge_pause_carries_the_unissued_draw_and_parks_it_again() {
     assert_replacement_choice(&runner, "Dredge must pause the first draw instruction");
     assert_eq!(
         parked_unpaid_suffix(&runner),
-        Some(UnpaidCostSuffix {
-            payer: P0,
-            cost: draw_cost(1),
-        }),
+        owed_instructions(1),
         "the second instruction is owed, not issued"
     );
 
@@ -705,10 +715,7 @@ fn a_skip_inside_an_instruction_finishes_it_before_the_next_instruction() {
     );
     assert_eq!(
         parked_unpaid_suffix(&runner),
-        Some(UnpaidCostSuffix {
-            payer: P0,
-            cost: draw_cost(1),
-        }),
+        owed_instructions(1),
         "the second instruction must not be issued before the first completes"
     );
     assert_eq!(ZoneSizes::of(&runner, P0).library, before.library);
@@ -822,13 +829,7 @@ fn a_cant_draw_effect_arriving_mid_payment_does_not_unpay_the_chosen_upkeep() {
         .events;
     assert_replacement_choice(&runner, "Dredge must pause the first draw instruction");
     // Reach guard: the second instruction is parked as the latched suffix.
-    assert_eq!(
-        parked_unpaid_suffix(&runner),
-        Some(UnpaidCostSuffix {
-            payer: P0,
-            cost: draw_cost(1),
-        })
-    );
+    assert_eq!(parked_unpaid_suffix(&runner), owed_instructions(1));
 
     // Maralen arrives after the choice to pay was made.
     engine::game::zones::move_to_zone(runner.state_mut(), maralen, Zone::Battlefield, &mut events);
@@ -1058,19 +1059,13 @@ fn a_dredge_pause_on_each_of_three_legs_parks_only_later_legs() {
     runner
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("paying is legal");
-    let expected_suffixes = [
-        Some(AbilityCost::Composite {
-            costs: vec![draw_cost(1), draw_cost(1)],
-        }),
-        Some(draw_cost(1)),
-        None,
-    ];
+    let expected_suffixes = [owed_instructions(2), owed_instructions(1), None];
     let mut events = Vec::new();
     for (leg, expected_suffix) in expected_suffixes.into_iter().enumerate() {
         assert_replacement_choice(&runner, &format!("Dredge pauses leg {}", leg + 1));
         assert_eq!(
             parked_unpaid_suffix(&runner),
-            expected_suffix.map(|cost| UnpaidCostSuffix { payer: P0, cost }),
+            expected_suffix,
             "the park after leg {} carries only the later legs",
             leg + 1
         );
@@ -1124,13 +1119,13 @@ fn a_dredge_pause_inside_a_two_card_leg_parks_the_later_leg_whole() {
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("paying is legal");
     // One Dredge pause per card: two in the first leg, two in the second.
-    let expected_suffixes = [Some(draw_cost(2)), Some(draw_cost(2)), None, None];
+    let expected_suffixes = [owed_instructions(1), owed_instructions(1), None, None];
     let mut events = Vec::new();
     for (pause, expected_suffix) in expected_suffixes.into_iter().enumerate() {
         assert_replacement_choice(&runner, &format!("Dredge pauses draw {}", pause + 1));
         assert_eq!(
             parked_unpaid_suffix(&runner),
-            expected_suffix.map(|cost| UnpaidCostSuffix { payer: P0, cost }),
+            expected_suffix,
             "the park at draw {} owes only the later leg, at its printed size",
             pause + 1
         );
@@ -1195,13 +1190,13 @@ fn a_two_card_leg_resumed_from_a_dredge_park_keeps_its_instruction_size() {
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("paying is legal");
     // One Dredge pause per leg: Alms Collector leaves P0 one card per leg.
-    let expected_suffixes = [Some(draw_cost(2)), None];
+    let expected_suffixes = [owed_instructions(1), None];
     let mut events = Vec::new();
     for (leg, expected_suffix) in expected_suffixes.into_iter().enumerate() {
         assert_replacement_choice(&runner, &format!("Dredge pauses leg {}", leg + 1));
         assert_eq!(
             parked_unpaid_suffix(&runner),
-            expected_suffix.map(|cost| UnpaidCostSuffix { payer: P0, cost }),
+            expected_suffix,
             "the park at leg {} owes only the later leg, at its printed size",
             leg + 1
         );
@@ -1384,9 +1379,9 @@ fn a_counter_prohibition_arriving_mid_payment_still_pays_the_later_legs() {
             parked_unpaid_suffix(&runner),
             Some(UnpaidCostSuffix {
                 payer: P0,
-                cost: AbilityCost::Composite {
+                remainder: UnpaidCostRemainder::Legs(AbilityCost::Composite {
                     costs: costs[1..].to_vec(),
-                },
+                }),
             })
         );
 
@@ -1513,21 +1508,91 @@ fn a_large_age_count_declines_without_expanding_every_leg() {
     assert_eq!(ZoneSizes::of(&runner, P0).hand, before.hand);
 }
 
-/// CR 702.24a: accepting a large repeated draw cost pays through the counted
-/// cursor in bounded chunks; the whole leg vector is never materialized.
+/// Psychosis Crawler, verbatim Oracle text: one trigger per card drawn.
+const PSYCHOSIS_CRAWLER_ORACLE: &str = "Psychosis Crawler's power and toughness are each equal \
+to the number of cards in your hand.\nWhenever you draw a card, each opponent loses 1 life.";
+
+/// Desecrated Tomb, verbatim Oracle text: a zone observer of the graveyard a
+/// Dredge return leaves.
+const DESECRATED_TOMB_ORACLE: &str = "Whenever one or more creature cards leave your graveyard, \
+create a 1/1 black Bat creature token with flying.";
+
+/// Psychosis Crawler's power and toughness equal its controller's hand size
+/// (CR 604.3); two cards in hand keep it on the battlefield through upkeep.
+fn keep_psychosis_crawler_alive(scenario: &mut GameScenario) {
+    scenario.add_card_to_hand(P0, "Hand A");
+    scenario.add_card_to_hand(P0, "Hand B");
+}
+
+/// A library of `size` distinct cards.
+fn library_names(size: usize) -> Vec<String> {
+    (0..size).map(|index| format!("Library {index}")).collect()
+}
+
+/// Triggered abilities from `source` waiting on the stack or in the deferred
+/// queue: each occurrence of its trigger event is counted exactly once.
+fn queued_triggers_from(runner: &GameRunner, source: ObjectId) -> usize {
+    let state = runner.state();
+    state
+        .stack
+        .iter()
+        .filter(|entry| entry.source_id == source)
+        .count()
+        + state
+            .deferred_triggers
+            .iter()
+            .filter(|context| context.pending.source_id == source)
+            .count()
+}
+
+/// The cumulative-upkeep payment is parked on a replacement choice with the
+/// remaining instructions owed, and no player has priority.
+fn assert_parked_with_owed(runner: &GameRunner, owed: u32, context: &str) {
+    assert_replacement_choice(runner, context);
+    let remainder = parked_unpaid_suffix(runner).map(|suffix| suffix.remainder);
+    let expected = std::num::NonZeroU32::new(owed).map(UnpaidCostRemainder::Repeated);
+    assert_eq!(remainder, expected, "{context}: instructions still owed");
+}
+
+/// CR 121.4 empty-library edits journaled for `player` after `journal_start`.
+fn empty_library_draw_edits(runner: &GameRunner, player: PlayerId, journal_start: usize) -> usize {
+    runner
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(journal_start)
+        .filter(|entry| {
+            matches!(
+                &entry.command,
+                Some(ResolvedRulesCommand::LedgerEdit(ResolvedLedgerEditCommand {
+                    edit: ResolvedLedgerEdit::CardsDrawn {
+                        player: drawer,
+                        attempted_empty_library: true,
+                        ..
+                    },
+                    ..
+                })) if *drawer == player
+            )
+        })
+        .count()
+}
+
+/// Index of the first event matching `predicate`, for order assertions.
+fn event_index(events: &[GameEvent], predicate: impl Fn(&GameEvent) -> bool) -> Option<usize> {
+    events.iter().position(predicate)
+}
+
+/// CR 702.24a: accepting a large repeated draw cost pays every printed
+/// instruction and parks nothing once the last one is paid.
 #[test]
-fn a_large_age_count_accepts_through_the_counted_cursor() {
+fn a_large_age_count_pays_every_instruction() {
     const AGE: u32 = 100;
-    let names: Vec<String> = (0..(AGE as usize + 50))
-        .map(|index| format!("Library {index}"))
-        .collect();
+    let names = library_names(AGE as usize + 50);
     let library: Vec<&str> = names.iter().map(String::as_str).collect();
     let (mut runner, vortex, ()) = vortex_board(AGE - 1, &library, |_| ());
     advance_through_upkeep(&mut runner);
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::UnlessPayment { .. }
-    ));
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
     let before = ZoneSizes::of(&runner, P0);
     runner
         .act(GameAction::PayUnlessCost { pay: true })
@@ -1537,20 +1602,18 @@ fn a_large_age_count_accepts_through_the_counted_cursor() {
     assert_eq!(after.library, before.library - AGE as usize);
     assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
     assert!(
-        runner.state().pending_unless_draw_repeat.is_none(),
-        "the counted cursor retires after the last chunk"
+        runner.state().pending_cost_move_resume.is_none(),
+        "nothing stays parked after the last instruction"
     );
 }
 
-/// CR 702.24a + CR 118.12: a counted chunk that pauses on the first draw's
-/// replacement keeps the exact unpaid instruction count; every one of the
-/// printed draws is still issued after the pause settles.
+/// CR 702.24a + CR 117.2e: every printed draw pauses on its own Dredge choice,
+/// and no player receives priority between two of them; each pause owes
+/// exactly the instructions after it.
 #[test]
-fn a_counted_chunk_pause_retains_the_unpaid_draws() {
+fn each_paused_instruction_keeps_the_rest_owed_without_priority() {
     const AGE: u32 = 100;
-    let names: Vec<String> = (0..(AGE as usize + 50))
-        .map(|index| format!("Library {index}"))
-        .collect();
+    let names = library_names(AGE as usize + 50);
     let library: Vec<&str> = names.iter().map(String::as_str).collect();
     let (mut runner, vortex, ()) = vortex_board(AGE - 1, &library, |scenario| {
         scenario
@@ -1563,76 +1626,75 @@ fn a_counted_chunk_pause_retains_the_unpaid_draws() {
     runner
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("paying a large cumulative upkeep is legal");
-    let mut declines = 0u32;
-    while runner.state().pending_unless_draw_repeat.is_some() {
-        match &runner.state().waiting_for {
-            WaitingFor::ReplacementChoice { .. } => {
-                declines += 1;
-                assert_replacement_choice(&runner, &format!("Dredge pauses draw {declines}"));
-                runner
-                    .act(GameAction::ChooseReplacement {
-                        index: DECLINE_REPLACEMENT,
-                    })
-                    .expect("declining Dredge is legal");
-            }
-            WaitingFor::Priority { .. } => {
-                runner
-                    .act(GameAction::PassPriority)
-                    .expect("passing between counted chunks is legal");
-            }
-            other => panic!("unexpected counted-draw prompt: {other:?}"),
-        }
+    for instruction in 1..=AGE {
+        assert_parked_with_owed(
+            &runner,
+            AGE - instruction,
+            &format!("instruction {instruction} pauses on Dredge"),
+        );
+        runner
+            .act(GameAction::ChooseReplacement {
+                index: DECLINE_REPLACEMENT,
+            })
+            .expect("declining Dredge is legal");
     }
-    assert_eq!(declines, AGE, "every printed draw paused on its own Dredge");
-    let after = ZoneSizes::of(&runner, P0);
-    assert_eq!(
-        after.hand,
-        before.hand + AGE as usize,
-        "the paused chunk keeps its unpaid draws"
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the payment completes after its last instruction: {:?}",
+        runner.state().waiting_for
     );
+    let after = ZoneSizes::of(&runner, P0);
+    assert_eq!(after.hand, before.hand + AGE as usize);
     assert_eq!(after.library, before.library - AGE as usize);
     assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
-    assert!(
-        runner.state().pending_unless_draw_repeat.is_none(),
-        "the counted cursor retires after the last paused draw"
-    );
 }
 
-/// CR 117.2e + CR 121.4 + CR 702.24a: a counted payment that can't be paid is
-/// resolved atomically inside the ability's resolution; it never parks a
-/// partially paid cursor and returns priority with one instruction owed.
+/// CR 121.3 + CR 118.11 + CR 121.4 (2008-04-01 ruling: "Psychic Vortex will
+/// remain on the battlefield", and the player loses after upkeep finishes): a
+/// draw cost chosen on an empty library is paid. The upkeep's paid epilogue
+/// resolves, Vortex is not sacrificed, and the player loses only after it. One
+/// empty-library attempt is journaled; the remaining 64 attempts change
+/// nothing and are not.
 #[test]
-fn a_counted_payment_with_an_empty_library_fails_atomically() {
+fn a_repeated_draw_cost_on_an_empty_library_is_paid_then_loses() {
     const AGE: u32 = 65;
     let (mut runner, vortex, ()) = vortex_board(AGE - 1, &[], |_| ());
     advance_through_upkeep(&mut runner);
     assert_draw_cost_prompt(&runner, AGE as usize, 1);
-    let before = ZoneSizes::of(&runner, P0);
-    runner
+    let journal_start = runner.state().resolved_rules_journal.entries().len();
+    let result = runner
         .act(GameAction::PayUnlessCost { pay: true })
-        .expect("the choice is admitted or refused, but never parks a cursor");
-    let state = runner.state();
+        .expect("choosing to draw from an empty library is legal (CR 121.3)");
+    let paid = event_index(&result.events, |event| {
+        matches!(event, GameEvent::EffectResolved { kind: EffectKind::Sacrifice, source_id, .. }
+            if *source_id == vortex)
+    })
+    .expect("the paid epilogue resolved the upkeep ability");
     assert!(
-        state.pending_unless_draw_repeat.is_none(),
-        "no partially paid counted cursor survives the resolution"
+        !result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::PermanentSacrificed { object_id, .. } if *object_id == vortex
+        )),
+        "a paid upkeep does not sacrifice Vortex"
     );
-    assert_ne!(
-        zone_of(&runner, vortex),
-        Zone::Battlefield,
-        "the unpaid permanent leaves the battlefield"
-    );
+    let lost = event_index(
+        &result.events,
+        |event| matches!(event, GameEvent::PlayerLost { player_id } if *player_id == P0),
+    )
+    .expect("CR 121.4: the player who drew from an empty library loses");
+    assert!(paid < lost, "the payment completes before the loss");
     assert_eq!(
-        ZoneSizes::of(&runner, P0).hand,
-        before.hand,
-        "no partial draws were kept"
+        empty_library_draw_edits(&runner, P0, journal_start),
+        1,
+        "only the first empty-library attempt changes the game"
     );
 }
 
-/// CR 117.2e + CR 121.4 + CR 702.24a: with 65 counters, an empty library and
-/// Obstinate Familiar, the first draw's replacement is offered; declining it
-/// fails the payment atomically without parking a cursor or a priority.
+/// CR 121.6a + CR 118.11: Obstinate Familiar's skip is offered for every one of
+/// the 65 draws on an empty library. Skipping all of them still pays the
+/// upkeep; no draw was attempted, so nobody loses.
 #[test]
-fn a_counted_payment_with_obstinate_familiar_fails_atomically() {
+fn skipping_every_draw_on_an_empty_library_pays_without_a_loss() {
     const AGE: u32 = 65;
     let (mut runner, vortex, ()) = vortex_board(AGE - 1, &[], |scenario| {
         scenario
@@ -1641,136 +1703,323 @@ fn a_counted_payment_with_obstinate_familiar_fails_atomically() {
     });
     advance_through_upkeep(&mut runner);
     assert_draw_cost_prompt(&runner, AGE as usize, 1);
-    let before = ZoneSizes::of(&runner, P0);
-    runner
+    let mut result = runner
         .act(GameAction::PayUnlessCost { pay: true })
-        .expect("the choice is admitted or refused");
-    while matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ) {
-        runner
+        .expect("choosing the draw cost is legal");
+    for instruction in 1..=AGE {
+        assert_parked_with_owed(
+            &runner,
+            AGE - instruction,
+            &format!("draw {instruction} offers the skip"),
+        );
+        result = runner
+            .act(GameAction::ChooseReplacement {
+                index: APPLY_REPLACEMENT,
+            })
+            .expect("skipping the draw is legal");
+    }
+    assert!(
+        upkeep_ability_resolved(&result.events, vortex),
+        "the upkeep is paid"
+    );
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "no draw was attempted, so P0 keeps playing: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(!runner.state().players[P0.0 as usize].is_eliminated);
+}
+
+/// CR 121.6a + CR 117.2e + CR 121.4: declining the skip attempts a draw from the
+/// empty library, but the loss waits for the next priority. The second skip
+/// prompt still arrives, every one of the 65 is offered, the upkeep's paid
+/// epilogue resolves, and only then does P0 lose.
+#[test]
+fn declining_every_skip_offers_each_prompt_pays_then_loses() {
+    const AGE: u32 = 65;
+    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &[], |scenario| {
+        scenario
+            .add_creature(P0, "Obstinate Familiar", 1, 1)
+            .from_oracle_text(OBSTINATE_FAMILIAR_ORACLE);
+    });
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    let mut result = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    for instruction in 1..=AGE {
+        assert_parked_with_owed(
+            &runner,
+            AGE - instruction,
+            &format!("draw {instruction} offers the skip"),
+        );
+        assert!(
+            !runner.state().players[P0.0 as usize].is_eliminated,
+            "draw {instruction}: the empty-library loss waits for priority"
+        );
+        result = runner
             .act(GameAction::ChooseReplacement {
                 index: DECLINE_REPLACEMENT,
             })
             .expect("declining the skip is legal");
     }
-    let state = runner.state();
+    let paid = event_index(&result.events, |event| {
+        matches!(event, GameEvent::EffectResolved { kind: EffectKind::Sacrifice, source_id, .. }
+            if *source_id == vortex)
+    })
+    .expect("the paid epilogue resolved the upkeep ability");
+    let lost = event_index(
+        &result.events,
+        |event| matches!(event, GameEvent::PlayerLost { player_id } if *player_id == P0),
+    )
+    .expect("CR 121.4: P0 drew from an empty library and loses");
+    assert!(paid < lost, "the payment completes before the loss");
     assert!(
-        state.pending_unless_draw_repeat.is_none(),
-        "no partially paid counted cursor survives the resolution"
-    );
-    assert_ne!(zone_of(&runner, vortex), Zone::Battlefield);
-    assert_eq!(
-        ZoneSizes::of(&runner, P0).hand,
-        before.hand,
-        "no partial draws were kept"
+        !result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::PermanentSacrificed { object_id, .. } if *object_id == vortex
+        )),
+        "a paid upkeep does not sacrifice Vortex"
     );
 }
 
-/// CR 117.5 + CR 603.2: the draw events of a successful counted payment queue
-/// their triggers before the next priority.
+/// CR 702.24a + CR 121.4: a 2^31 age count on a three-card library draws three
+/// cards, attempts one empty draw, and settles the remaining identical attempts
+/// at once. The journal grows by the four draws, not by 2^31 entries, and the
+/// empty-library edit it keeps replays as the identity on the final state.
 #[test]
-fn a_counted_payment_queues_its_draw_triggers() {
-    const AGE: u32 = 65;
-    const PSYCHOSIS_CRAWLER_ORACLE: &str = "Whenever you draw a card, each opponent loses 1 life.";
-    let names: Vec<String> = (0..(AGE as usize + 50))
-        .map(|index| format!("Library {index}"))
-        .collect();
-    let library: Vec<&str> = names.iter().map(String::as_str).collect();
-    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &library, |scenario| {
-        scenario
-            .add_creature(P0, "Psychosis Crawler", 1, 1)
-            .from_oracle_text(PSYCHOSIS_CRAWLER_ORACLE);
-    });
+fn a_huge_age_count_on_a_short_library_is_bounded_and_replayable() {
+    const AGE: u32 = 1 << 31;
+    let (mut runner, vortex, ()) =
+        vortex_board(AGE - 1, &["Library 1", "Library 2", "Library 3"], |_| ());
     advance_through_upkeep(&mut runner);
-    assert_draw_cost_prompt(&runner, AGE as usize, 1);
-    runner
+    let WaitingFor::UnlessPayment { repeat, .. } = &runner.state().waiting_for else {
+        panic!(
+            "expected the upkeep prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*repeat, Some(AGE));
+    let journal_start = runner.state().resolved_rules_journal.entries().len();
+    let result = runner
         .act(GameAction::PayUnlessCost { pay: true })
-        .expect("the counted payment is legal");
-    let state = runner.state();
-    assert_eq!(
-        state.stack.len(),
-        AGE as usize,
-        "each drawn card queued its Psychosis Crawler trigger: {:?}",
-        state.waiting_for
+        .expect("choosing the draw cost is legal");
+    let journal_growth = runner.state().resolved_rules_journal.entries().len() - journal_start;
+    assert!(
+        journal_growth < 200,
+        "the journal records the draws that changed the game, not 2^31 attempts: {journal_growth}"
     );
+    assert_eq!(empty_library_draw_edits(&runner, P0, journal_start), 1);
     assert_eq!(
-        zone_of(&runner, vortex),
-        Zone::Battlefield,
-        "the paid Vortex stays"
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == P0))
+            .count(),
+        3,
+        "the three library cards are drawn"
+    );
+    assert!(
+        upkeep_ability_resolved(&result.events, vortex),
+        "the upkeep is paid"
+    );
+    // The journal replay contract: the kept empty-library edit, replayed on the
+    // final state, is the identity, so the attempts it stands for are too.
+    let edit = runner
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(journal_start)
+        .find_map(|entry| match &entry.command {
+            Some(ResolvedRulesCommand::LedgerEdit(command))
+                if matches!(
+                    command.edit,
+                    ResolvedLedgerEdit::CardsDrawn {
+                        attempted_empty_library: true,
+                        ..
+                    }
+                ) =>
+            {
+                Some(command.clone())
+            }
+            _ => None,
+        })
+        .expect("the empty-library edit is journaled");
+    let mut replayed = runner.state().clone();
+    apply_resolved_ledger_edit(&mut replayed, &edit)
+        .expect("a repeated empty-library attempt replays on the settled ledger");
+    assert_eq!(
+        replayed.players[P0.0 as usize],
+        runner.state().players[P0.0 as usize],
+        "a further empty-library attempt changes nothing"
     );
 }
 
-/// CR 603.2: the small (uncounted) payment also queues every draw trigger.
+/// CR 702.24a + CR 118.12: a payment parked between instructions survives a
+/// checked save and restore with its remaining count, and the restored game
+/// answers the open choice and continues.
 #[test]
-fn a_small_payment_queues_its_draw_triggers() {
-    const AGE: u32 = 3;
-    const PSYCHOSIS_CRAWLER_ORACLE: &str = "Whenever you draw a card, each opponent loses 1 life.";
-    let names: Vec<String> = (0..(AGE as usize + 5))
-        .map(|index| format!("Library {index}"))
-        .collect();
-    let library: Vec<&str> = names.iter().map(String::as_str).collect();
-    let (mut runner, _vortex, ()) = vortex_board(AGE - 1, &library, |scenario| {
-        scenario
-            .add_creature(P0, "Psychosis Crawler", 1, 1)
-            .from_oracle_text(PSYCHOSIS_CRAWLER_ORACLE);
-    });
-    advance_through_upkeep(&mut runner);
-    runner
-        .act(GameAction::PayUnlessCost { pay: true })
-        .expect("the small payment is legal");
-    assert_eq!(
-        runner.state().stack.len(),
-        AGE as usize,
-        "each drawn card queued its trigger once"
-    );
-}
-
-/// CR 603.2: a Dredge-paused counted payment queues each draw trigger once
-/// across consecutive replacement choices.
-#[test]
-fn a_resumed_counted_payment_queues_its_draw_triggers_once() {
-    const AGE: u32 = 65;
-    const PSYCHOSIS_CRAWLER_ORACLE: &str = "Whenever you draw a card, each opponent loses 1 life.";
-    let names: Vec<String> = (0..(AGE as usize + 20))
-        .map(|index| format!("Library {index}"))
-        .collect();
+fn a_parked_repeated_payment_survives_a_checked_restore() {
+    const AGE: u32 = 5;
+    let names = library_names(20);
     let library: Vec<&str> = names.iter().map(String::as_str).collect();
     let (mut runner, vortex, ()) = vortex_board(AGE - 1, &library, |scenario| {
         scenario
             .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
             .from_oracle_text(STINKWEED_IMP_ORACLE);
-        scenario
-            .add_creature(P0, "Psychosis Crawler", 1, 1)
-            .from_oracle_text(PSYCHOSIS_CRAWLER_ORACLE);
     });
     advance_through_upkeep(&mut runner);
     runner
         .act(GameAction::PayUnlessCost { pay: true })
-        .expect("the counted payment is legal");
-    let mut prompts = 0u32;
-    while matches!(
+        .expect("choosing the draw cost is legal");
+    assert_parked_with_owed(&runner, AGE - 1, "the first instruction pauses");
+    let saved = serde_json::to_string(&PersistedGameState::Raw(Box::new(runner.state().clone())))
+        .expect("the parked payment serializes");
+    *runner.state_mut() = serde_json::from_str::<PersistedGameState>(&saved)
+        .expect("the save decodes")
+        .into_game_state()
+        .expect("the parked payment passes checked restore");
+    assert_parked_with_owed(&runner, AGE - 1, "the restored payment owes the rest");
+    for instruction in 1..=AGE {
+        assert_parked_with_owed(
+            &runner,
+            AGE - instruction,
+            "each restored instruction pauses",
+        );
+        runner
+            .act(GameAction::ChooseReplacement {
+                index: DECLINE_REPLACEMENT,
+            })
+            .expect("the restored choice is answerable");
+    }
+    assert!(matches!(
         runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ) {
-        prompts += 1;
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+}
+
+/// CR 603.2 + CR 603.2c: the draws of an uninterrupted repeated payment queue
+/// one Psychosis Crawler trigger each.
+#[test]
+fn a_repeated_payment_queues_each_draw_trigger_once() {
+    const AGE: u32 = 65;
+    let names = library_names(AGE as usize + 50);
+    let library: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (mut runner, vortex, crawler) = vortex_board(AGE - 1, &library, |scenario| {
+        let crawler = scenario
+            .add_creature(P0, "Psychosis Crawler", 1, 1)
+            .from_oracle_text(PSYCHOSIS_CRAWLER_ORACLE)
+            .id();
+        keep_psychosis_crawler_alive(scenario);
+        crawler
+    });
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the payment is legal");
+    assert_eq!(queued_triggers_from(&runner, crawler), AGE as usize);
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+}
+
+/// CR 603.2c: a small payment that declines Dredge draws and reopens its next
+/// choice under the counter-addition owner. Each declined draw queues exactly
+/// one Psychosis Crawler trigger; the graveyard observer sees nothing leave.
+#[test]
+fn declining_dredge_in_a_small_payment_counts_each_trigger_once() {
+    const AGE: u32 = 3;
+    let names = library_names(20);
+    let library: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (mut runner, vortex, (crawler, tomb)) = vortex_board(AGE - 1, &library, |scenario| {
+        scenario
+            .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text(STINKWEED_IMP_ORACLE);
+        let crawler = scenario
+            .add_creature(P0, "Psychosis Crawler", 1, 1)
+            .from_oracle_text(PSYCHOSIS_CRAWLER_ORACLE)
+            .id();
+        keep_psychosis_crawler_alive(scenario);
+        let tomb = scenario
+            .add_enchantment_from_oracle(P0, "Desecrated Tomb", DESECRATED_TOMB_ORACLE)
+            .id();
+        (crawler, tomb)
+    });
+    advance_through_upkeep(&mut runner);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the payment is legal");
+    for instruction in 1..=AGE {
+        assert_parked_with_owed(&runner, AGE - instruction, "each draw offers Dredge");
+        assert_eq!(
+            queued_triggers_from(&runner, crawler),
+            (instruction - 1) as usize,
+            "draw {instruction}: each earlier declined draw queued one trigger"
+        );
         runner
             .act(GameAction::ChooseReplacement {
                 index: DECLINE_REPLACEMENT,
             })
             .expect("declining Dredge is legal");
     }
-    assert_eq!(prompts, AGE, "each draw paused on its own Dredge choice");
+    assert_eq!(queued_triggers_from(&runner, crawler), AGE as usize);
     assert_eq!(
-        runner.state().stack.len(),
-        AGE as usize,
-        "each drawn card queued exactly one Psychosis Crawler trigger"
+        queued_triggers_from(&runner, tomb),
+        0,
+        "no card left the graveyard"
+    );
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+}
+
+/// CR 603.2c + CR 702.52a: accepting Dredge on the first draw mills five and
+/// returns Stinkweed Imp, so the other 64 draws pay synchronously inside the
+/// same answer. Desecrated Tomb triggers once for the Imp leaving the
+/// graveyard, and Psychosis Crawler once per card actually drawn.
+#[test]
+fn accepting_dredge_then_a_synchronous_suffix_counts_each_trigger_once() {
+    const AGE: u32 = 65;
+    let names = library_names(AGE as usize + 50);
+    let library: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (mut runner, vortex, (crawler, tomb)) = vortex_board(AGE - 1, &library, |scenario| {
+        scenario
+            .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+            .from_oracle_text(STINKWEED_IMP_ORACLE);
+        let crawler = scenario
+            .add_creature(P0, "Psychosis Crawler", 1, 1)
+            .from_oracle_text(PSYCHOSIS_CRAWLER_ORACLE)
+            .id();
+        keep_psychosis_crawler_alive(scenario);
+        let tomb = scenario
+            .add_enchantment_from_oracle(P0, "Desecrated Tomb", DESECRATED_TOMB_ORACLE)
+            .id();
+        (crawler, tomb)
+    });
+    advance_through_upkeep(&mut runner);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the payment is legal");
+    assert_parked_with_owed(&runner, AGE - 1, "the first draw offers Dredge");
+    runner
+        .act(GameAction::ChooseReplacement {
+            index: APPLY_REPLACEMENT,
+        })
+        .expect("accepting Dredge is legal");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the rest of the payment is synchronous: {:?}",
+        runner.state().waiting_for
     );
     assert_eq!(
-        runner.state().deferred_triggers.len(),
-        0,
-        "no trigger is left behind in the deferred queue"
+        queued_triggers_from(&runner, crawler),
+        (AGE - 1) as usize,
+        "one trigger per card drawn after the dredged instruction"
+    );
+    assert_eq!(
+        queued_triggers_from(&runner, tomb),
+        1,
+        "the Imp left the graveyard once"
     );
     assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
 }

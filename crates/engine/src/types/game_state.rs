@@ -5703,30 +5703,6 @@ pub struct PendingPlayerScopeSacrificeChoice {
 /// creation after every payer has answered. Kept independently of the current
 /// `UnlessPayment`/`WardSacrificeChoice`, which represent only one seat's
 /// decision and may be replaced mid-payment.
-/// CR 702.24a + CR 118.12: a compact repeated draw unless-cost being paid.
-/// `base` is the printed instruction; `remaining` is the number of legs still
-/// owed. The payment authority pays bounded chunks, never one box per leg.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PendingUnlessDrawRepeat {
-    pub player: PlayerId,
-    pub base: Box<AbilityCost>,
-    /// Draws still owed, including the one whose replacement prompt is open.
-    pub remaining: u32,
-    pub pending_effect: Box<ResolvedAbility>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trigger_event: Option<GameEvent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effect_description: Option<String>,
-    /// CR 118.12: the unfinished suffix of the chunk that paused. It owns the
-    /// exact remaining draw instructions and is paid before the next chunk.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resume_cost: Option<Box<AbilityCost>>,
-    /// The draw instruction that opened the open replacement prompt has been
-    /// committed by that prompt; `remaining` still counts it until resumed.
-    #[serde(default)]
-    pub paused_draw_pending: bool,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PendingPlayerScopeUnlessPayment {
     /// The unscoped token instruction to resolve exactly once at the terminal
@@ -9671,10 +9647,10 @@ pub enum PendingCostMoveResume {
         effect_description: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining: Vec<PlayerId>,
-        /// CR 702.24a + CR 118.12: the legs of the cost not yet paid when the payment paused — a `Composite`
-        /// tail, or its single last leg. `None` when the pause came on the last leg, which is every pause of a
-        /// cost performed as a single event. A leg's own unfinished instruction is owned by the active draw frame
-        /// (CR 614.11a), never by this suffix.
+        /// CR 702.24a + CR 118.12: what the cost still owes when the payment paused — the legs not yet paid,
+        /// or a repeated draw cost's remaining instructions. `None` when the pause came on the last leg, which
+        /// is every pause of a cost performed as a single event. A leg's own unfinished instruction is owned by
+        /// the active draw frame (CR 614.11a), never by this suffix.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unpaid_suffix: Option<Box<UnpaidCostSuffix>>,
     },
@@ -9814,6 +9790,11 @@ impl PendingCostMoveResume {
             // CR 116.2h: foretelling is a special action; its {2} is paid before
             // its exile move, which can then pause on a replacement.
             PendingCostMoveResume::Foretell { .. } => true,
+            // CR 117.2e + CR 121.4: an unless payment of draws or counters is
+            // part of a resolution, during which no player has priority, so a
+            // draw from an empty library loses at the next priority — after the
+            // payment's later replacement prompts, not before them.
+            PendingCostMoveResume::CounterAdditionUnlessPayment { .. } => true,
             // Cast and activation payments keep their announcement; an
             // optional payment made during a resolution does not.
             PendingCostMoveResume::SacrificeForCost { pending, .. } => pending.is_some(),
@@ -9829,7 +9810,6 @@ impl PendingCostMoveResume {
             | PendingCostMoveResume::ReplacementMayCost { .. }
             | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
-            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => false,
         }
     }
@@ -9896,16 +9876,35 @@ pub struct RandomDiscardUnlessPaymentResume {
     pub remaining_count: u32,
 }
 
-/// CR 118.12 + CR 702.24a + CR 616.1: the unpaid legs of an unless
-/// effect-cost whose payment paused on a replacement choice, and the payer who
-/// owes it. A remainder is not resumable without its payer, which the parked
+/// CR 118.12 + CR 702.24a + CR 616.1: what an unless effect-cost whose payment
+/// paused on a replacement choice still owes, and the payer who owes it. A
+/// remainder is not resumable without its payer, which the parked
 /// unless-payment does not otherwise record. Boxed for the
 /// `game_state_size.rs` stack budget.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnpaidCostSuffix {
     pub payer: PlayerId,
-    #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat")]
-    pub cost: AbilityCost,
+    pub remainder: UnpaidCostRemainder,
+}
+
+/// CR 118.12 + CR 702.24a: the shape of an unless-payment's unpaid remainder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum UnpaidCostRemainder {
+    /// The legs of the cost not yet paid — a `Composite` tail, or its single
+    /// last leg.
+    Legs(AbilityCost),
+    /// CR 702.24a: printed draw instructions still owed by a repeated draw
+    /// cost, each a copy of the parked payment's `cost`, paid one at a time.
+    Repeated(std::num::NonZeroU32),
+}
+
+impl UnpaidCostSuffix {
+    pub(crate) fn legs(payer: PlayerId, cost: AbilityCost) -> Box<Self> {
+        Box::new(Self {
+            payer,
+            remainder: UnpaidCostRemainder::Legs(cost),
+        })
+    }
 }
 
 /// CR 601.2h + CR 616.1: Resume paying a sequential cost after a replacement
@@ -16634,99 +16633,7 @@ impl GameState {
 
         validate_ability(&transaction.root, &valid)?;
         if let Some(checkpoint) = transaction.recovered.as_deref() {
-            if checkpoint.consumed != transaction.transcript.len() {
-                return Err(format!(
-                    "recovery checkpoint cursor {} does not match the {} accepted transcript entries",
-                    checkpoint.consumed,
-                    transaction.transcript.len()
-                ));
-            }
-            if checkpoint.state.payment_transaction.is_some()
-                || checkpoint.state.payment_transaction_replay
-                || checkpoint.state.payment_transaction_just_handled
-            {
-                return Err("recovery checkpoint carries a live transaction".to_string());
-            }
-            if checkpoint.state.players.len() != self.players.len() {
-                return Err("recovery checkpoint seat count differs".to_string());
-            }
-            if checkpoint
-                .state
-                .players
-                .iter()
-                .zip(self.players.iter())
-                .any(|(checkpoint_player, live_player)| checkpoint_player.id != live_player.id)
-            {
-                return Err("recovery checkpoint seats differ".to_string());
-            }
-            // CR 800.4a: the same seats under the same prompt but a different
-            // departed set are not the accepted executable state.
-            if checkpoint
-                .state
-                .players
-                .iter()
-                .zip(self.players.iter())
-                .any(|(checkpoint_player, live_player)| {
-                    checkpoint_player.is_eliminated != live_player.is_eliminated
-                })
-            {
-                return Err("recovery checkpoint departure set differs".to_string());
-            }
-            if checkpoint.state.waiting_for != self.waiting_for {
-                return Err(
-                    "recovery checkpoint prompt does not match the canonical prompt".to_string(),
-                );
-            }
-            // CR 616.1: a replacement prompt without its nested owner cannot be
-            // answered; the restored checkpoint must carry the executable frame.
-            if matches!(
-                checkpoint.state.waiting_for,
-                WaitingFor::ReplacementChoice { .. }
-            ) {
-                let Some(pending) = checkpoint.state.pending_replacement.as_ref() else {
-                    return Err(
-                        "recovery checkpoint prompt lacks its replacement owner".to_string()
-                    );
-                };
-                if pending.candidates.is_empty()
-                    && pending.search_found_candidates.is_empty()
-                    && !pending.is_optional
-                {
-                    return Err(
-                        "recovery checkpoint replacement has no executable candidate".to_string(),
-                    );
-                }
-            }
-            // The outer structural checks cannot see this nested state; apply
-            // the same non-resolvable stack refusal to it.
-            if checkpoint
-                .state
-                .stack
-                .iter()
-                .chain(checkpoint.state.resolving_stack_entry.iter())
-                .any(|entry| matches!(entry.kind, StackEntryKind::CombatDamage { .. }))
-            {
-                return Err("recovery checkpoint carries combat damage on the stack".to_string());
-            }
-            // The outer executable-ownership refusal applies to the nested
-            // checkpoint too: a Dispatching replacement drain has no
-            // synchronous dispatch handle at the persistence boundary there.
-            if checkpoint
-                .state
-                .resolution_stack
-                .iter()
-                .any(|frame| match frame {
-                    ResolutionFrame::PostReplacement(drains) => drains
-                        .drains
-                        .iter()
-                        .any(|drain| matches!(drain.status, DrainStatus::Dispatching)),
-                    _ => false,
-                })
-            {
-                return Err(
-                    "recovery checkpoint carries a dispatching replacement frame".to_string(),
-                );
-            }
+            self.validate_recovery_checkpoint(transaction, checkpoint)?;
         }
         for (index, entry) in transaction.transcript.iter().enumerate() {
             if crate::game::payment_transaction::is_outside_transaction(&entry.action) {
@@ -16746,6 +16653,123 @@ impl GameState {
                     entry.semantic_owner
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// CR 614.17a + CR 118.12: a recovery checkpoint is a second persisted
+    /// executable state. It describes this game at this transcript cursor (the
+    /// same seats, departures and prompt, and no descriptor of its own), passes
+    /// the same structural refusals as the outer state, and its prompt has an
+    /// answer the admission authority accepts on the hydrated checkpoint
+    /// (`payment_transaction::admits`, which also admits live answers).
+    fn validate_recovery_checkpoint(
+        &self,
+        transaction: &ResolutionPaymentTransaction,
+        checkpoint: &PaymentRecoveryCheckpoint,
+    ) -> Result<(), String> {
+        let nested = checkpoint.state.as_ref();
+        if checkpoint.consumed != transaction.transcript.len() {
+            return Err(format!(
+                "recovery checkpoint cursor {} does not match the {} accepted transcript entries",
+                checkpoint.consumed,
+                transaction.transcript.len()
+            ));
+        }
+        if nested.payment_transaction.is_some()
+            || nested.payment_transaction_replay
+            || nested.payment_transaction_just_handled
+        {
+            return Err("recovery checkpoint carries a live transaction".to_string());
+        }
+        // CR 800.4a: the same seats with the same departed set, under the
+        // canonical prompt.
+        let seats = |state: &GameState| -> Vec<(PlayerId, bool)> {
+            state
+                .players
+                .iter()
+                .map(|player| (player.id, player.is_eliminated))
+                .collect()
+        };
+        if seats(nested) != seats(self) {
+            return Err("recovery checkpoint seats or departures differ".to_string());
+        }
+        if nested.waiting_for != self.waiting_for {
+            return Err(
+                "recovery checkpoint prompt does not match the canonical prompt".to_string(),
+            );
+        }
+        nested
+            .refuse_unresolvable_persisted_stack()
+            .and_then(|()| nested.refuse_ownerless_post_replacement_dispatch())
+            .map_err(|error| format!("recovery checkpoint: {error}"))?;
+        let probe = crate::game::payment_transaction::hydrated_checkpoint(self, checkpoint);
+        let Some(owner) = probe.waiting_for.acting_players().first().copied() else {
+            return Err("recovery checkpoint prompt has no acting player".to_string());
+        };
+        let actor = crate::game::turn_control::authorized_submitter_for_player(&probe, owner);
+        let answerable = crate::ai_support::legal_actions(&probe)
+            .iter()
+            .any(|answer| crate::game::payment_transaction::admits(probe.clone(), actor, answer));
+        if !answerable {
+            return Err("recovery checkpoint prompt has no admissible answer".to_string());
+        }
+        Ok(())
+    }
+
+    /// Combat damage on the stack is serde-decodable but not resolvable in this
+    /// build; a persisted state carrying it is refused.
+    fn refuse_unresolvable_persisted_stack(&self) -> Result<(), PersistedRestoreError> {
+        if self
+            .stack
+            .iter()
+            .chain(self.resolving_stack_entry.iter())
+            .any(|entry| matches!(entry.kind, StackEntryKind::CombatDamage { .. }))
+        {
+            return Err(PersistedRestoreError::UnsupportedStackObject(
+                "combat damage on the stack is not resolvable in this build",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A `Dispatching` replacement drain has no synchronous dispatch handle at
+    /// the persistence boundary, wherever it sits in the typed frame stack.
+    fn refuse_ownerless_post_replacement_dispatch(&self) -> Result<(), PersistedRestoreError> {
+        if self.resolution_stack.iter().any(|frame| match frame {
+            ResolutionFrame::PostReplacement(drains) => drains
+                .drains
+                .iter()
+                .any(|drain| matches!(drain.status, DrainStatus::Dispatching)),
+            ResolutionFrame::AbilityContinuation(_)
+            | ResolutionFrame::RepeatFor(_)
+            | ResolutionFrame::RepeatUntil(_)
+            | ResolutionFrame::RepeatedOptionalPayment(_)
+            | ResolutionFrame::ChangeZone(_)
+            | ResolutionFrame::BatchDelivery(_)
+            | ResolutionFrame::CounterMoves(_)
+            | ResolutionFrame::CounterRemovals(_)
+            | ResolutionFrame::CounterAdditions(_)
+            | ResolutionFrame::CopyToken(_)
+            | ResolutionFrame::DebugCardEntries(_)
+            | ResolutionFrame::EachPlayerCopyChosen(_)
+            | ResolutionFrame::ChooseOneOf(_)
+            | ResolutionFrame::VoteBallot(_)
+            | ResolutionFrame::PerPlayerZoneChoice(_)
+            | ResolutionFrame::PerCategoryZoneChoice(_)
+            | ResolutionFrame::OptionalEffect(_)
+            | ResolutionFrame::CoinFlip(_)
+            | ResolutionFrame::DieRoll(_)
+            | ResolutionFrame::Proliferate(_)
+            | ResolutionFrame::MultiDraw(_)
+            | ResolutionFrame::Discard(_)
+            | ResolutionFrame::ConniveReentry(_)
+            | ResolutionFrame::LifeTotalAssignment(_)
+            | ResolutionFrame::SpellResolution(_)
+            | ResolutionFrame::MutateMerge(_)
+            | ResolutionFrame::CipherEncode(_) => false,
+        }) {
+            return Err(PersistedRestoreError::OwnerlessPostReplacementDispatch);
         }
         Ok(())
     }
@@ -17084,16 +17108,7 @@ impl PersistedGameState {
             .format_config
             .reject_unimplemented_range_of_influence()
             .map_err(PersistedRestoreError::UnsupportedFormat)?;
-        if state
-            .stack
-            .iter()
-            .chain(state.resolving_stack_entry.iter())
-            .any(|entry| matches!(entry.kind, StackEntryKind::CombatDamage { .. }))
-        {
-            return Err(PersistedRestoreError::UnsupportedStackObject(
-                "combat damage on the stack is not resolvable in this build",
-            ));
-        }
+        state.refuse_unresolvable_persisted_stack()?;
         // Decoding a type and admitting it as a PLAYABLE persisted game are
         // separate contracts. `StackEntryKind::CombatDamage` is serde-decodable
         // so later phases can round-trip it, but no phase before the pushing
@@ -17110,41 +17125,7 @@ impl PersistedGameState {
         // rest it owns. A Dispatching marker left afterward has no synchronous
         // dispatch handle at the persistence boundary, wherever it sits in the
         // typed frame stack or within one PostReplacement frame's drain stack.
-        if state.resolution_stack.iter().any(|frame| match frame {
-            ResolutionFrame::PostReplacement(drains) => drains
-                .drains
-                .iter()
-                .any(|drain| matches!(drain.status, DrainStatus::Dispatching)),
-            ResolutionFrame::AbilityContinuation(_)
-            | ResolutionFrame::RepeatFor(_)
-            | ResolutionFrame::RepeatUntil(_)
-            | ResolutionFrame::RepeatedOptionalPayment(_)
-            | ResolutionFrame::ChangeZone(_)
-            | ResolutionFrame::BatchDelivery(_)
-            | ResolutionFrame::CounterMoves(_)
-            | ResolutionFrame::CounterRemovals(_)
-            | ResolutionFrame::CounterAdditions(_)
-            | ResolutionFrame::CopyToken(_)
-            | ResolutionFrame::DebugCardEntries(_)
-            | ResolutionFrame::EachPlayerCopyChosen(_)
-            | ResolutionFrame::ChooseOneOf(_)
-            | ResolutionFrame::VoteBallot(_)
-            | ResolutionFrame::PerPlayerZoneChoice(_)
-            | ResolutionFrame::PerCategoryZoneChoice(_)
-            | ResolutionFrame::OptionalEffect(_)
-            | ResolutionFrame::CoinFlip(_)
-            | ResolutionFrame::DieRoll(_)
-            | ResolutionFrame::Proliferate(_)
-            | ResolutionFrame::MultiDraw(_)
-            | ResolutionFrame::Discard(_)
-            | ResolutionFrame::ConniveReentry(_)
-            | ResolutionFrame::LifeTotalAssignment(_)
-            | ResolutionFrame::SpellResolution(_)
-            | ResolutionFrame::MutateMerge(_)
-            | ResolutionFrame::CipherEncode(_) => false,
-        }) {
-            return Err(PersistedRestoreError::OwnerlessPostReplacementDispatch);
-        }
+        state.refuse_ownerless_post_replacement_dispatch()?;
         Ok(PreparedPersistedGameState {
             state,
             finalization,
@@ -25847,11 +25828,6 @@ declare_game_state! {
     /// pause; the serde guard is belt-and-suspenders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaving_game_departure: Option<LeavingGameDeparture>,
-    /// CR 104.3a: the seat that conceded in this public action. Runtime-only;
-    /// distinguishes a concession from an ordinary elimination the boundary
-    /// must still roll back on failure.
-    #[serde(skip)]
-    pub conceded_this_action: Option<PlayerId>,
 
     /// CR 705.2: Result of the most recent coin flip in the current resolution,
     /// carrying the flipper so `AbilityCondition::CoinFlipOutcome` is
@@ -25893,11 +25869,6 @@ declare_game_state! {
     /// across one-seat sacrifice choices and replacement pauses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_player_scope_unless_payment: Option<Box<PendingPlayerScopeUnlessPayment>>,
-    /// CR 702.24a: a compact repeated draw unless-payment being paid in bounded
-    /// chunks. The count and the printed instruction are carried; no leg vector
-    /// is allocated.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_unless_draw_repeat: Option<Box<PendingUnlessDrawRepeat>>,
     /// CR 608.2c + CR 701.9a: a discard instruction parked by a
     /// replacement-application choice. See [`PendingDiscardBatch`], whose doc
     /// records why CR 616.1 does not govern this path.
@@ -30525,10 +30496,13 @@ impl GameState {
     ///   paying a cost;
     /// - **a triggered mana ability** (CR 605.4a), which "resolves immediately
     ///   after the mana ability that triggered it, without waiting for
-    ///   priority".
+    ///   priority";
+    /// - **an unless payment of draws or counters paused between its legs**
+    ///   (CR 117.2e + CR 121.4): its payer loses at the next priority, after
+    ///   the payment's later replacement prompts.
     ///
-    /// Prompts owned by a resolution are deliberately not counted, so the
-    /// #962 safety net still ends a game stuck waiting on a player who has
+    /// Other prompts owned by a resolution are deliberately not counted, so
+    /// the #962 safety net still ends a game stuck waiting on a player who has
     /// already lost. Wider than [`WaitingFor::has_pending_cast`], the display
     /// and `CancelCast` predicate.
     pub fn withholds_priority(&self) -> bool {
@@ -30546,10 +30520,6 @@ impl GameState {
             || self.pending_discard_for_cost.is_some()
             || self.waiting_for.is_mana_ability_continuation()
             || self.pending_triggered_mana_resume.is_some()
-            // CR 702.24a: the counted repeated-payment owner is a resolving
-            // instruction sequence; the loss/priority safety net must not run
-            // before its next replacement opportunity.
-            || self.pending_unless_draw_repeat.is_some()
     }
 
     /// CR 601.2: The cast or activation announcement currently in flight, if
@@ -34407,12 +34377,10 @@ impl GameState {
             resolving_created_token_seats: None,
             merged_card_component_route: None,
             leaving_game_departure: None,
-            conceded_this_action: None,
             resolution_coin_flip: None,
             repeat_process_requested: None,
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_unless_payment: None,
-            pending_unless_draw_repeat: None,
             pending_discard_batch: None,
             pending_hero_event: None,
             pending_horde_reveal: None,
@@ -38371,7 +38339,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_created_token_seats: _,
         merged_card_component_route: _,
         leaving_game_departure: _,
-        conceded_this_action: _,
         resolution_coin_flip: _,
         repeat_process_requested: _,
         may_trigger_auto_choices: _,
@@ -38546,7 +38513,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     COMPARING it can never suppress a legitimate loop's detection.
         pending_player_scope_sacrifice_choice: _,
         pending_player_scope_unless_payment: _,
-        pending_unless_draw_repeat: _,
         pending_discard_batch: _,
         pending_hero_event: _,
         pending_horde_reveal: _,

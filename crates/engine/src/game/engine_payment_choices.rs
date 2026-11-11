@@ -1,22 +1,22 @@
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, ResolvedAbility,
-    SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, QuantityExpr,
+    ResolvedAbility, SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AutoMayChoice, GameState, MayTriggerAutoChoiceScope,
     MayTriggerAutoChoiceSelector, PendingContinuation, PendingCostMoveResume,
-    PendingPlayerScopeUnlessPayment, ResolutionOptionalPaymentOption, UnpaidCostSuffix, WaitingFor,
-    WardSacrificePaymentResume,
+    PendingPlayerScopeUnlessPayment, ResolutionOptionalPaymentOption, UnpaidCostRemainder,
+    UnpaidCostSuffix, WaitingFor, WardSacrificePaymentResume,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::mana::ManaSourceSelection;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{DrawEventStage, ProposedEvent};
 use crate::types::resolution::OptionalEffectFrame;
 use crate::types::zones::Zone;
 use crate::types::ResolutionOptionalPaymentChoice;
@@ -1195,29 +1195,26 @@ pub(super) fn handle_unless_payment(
     let post_action_event_start = None;
     let payment_event_start = events.len();
     if pay {
-        // CR 702.24a: a large compact repeated draw is paid in bounded chunks
-        // through one counted cursor; a small cost keeps the ordinary concrete
-        // legs so its prompt/pause lifecycle is unchanged.
-        if let Some(count) = repeat.filter(|count| *count > REPEATED_DRAW_CHUNK) {
-            state.pending_unless_draw_repeat = Some(Box::new(
-                crate::types::game_state::PendingUnlessDrawRepeat {
-                    player,
-                    base: Box::new(cost),
-                    remaining: count,
+        // CR 702.24a: a repeated draw cost is one printed instruction per age
+        // counter, paid one instruction at a time through the counter-addition
+        // payment owner, whatever the count.
+        if let Some(owed) = repeat.and_then(std::num::NonZeroU32::new) {
+            let waiting_for = pay_repeated_draw_unless_cost(
+                state,
+                RepeatedDrawUnlessPayment {
+                    payer: player,
+                    cost,
                     pending_effect,
                     trigger_event,
                     effect_description,
-                    resume_cost: None,
-                    paused_draw_pending: false,
+                    remaining,
                 },
-            ));
-            let waiting_for = drive_pending_unless_draw_repeat(state, events)?;
+                owed,
+                Some(payment_event_start),
+                events,
+            )?;
             return Ok(action_result(events, waiting_for));
         }
-        let cost = match repeat {
-            Some(count) if count > 0 => crate::game::effects::expand_per_counter(&cost, count),
-            _ => cost,
-        };
         match cost {
             // CR 118.12: Pay the static mana component of the unless cost
             // through the single payment authority (cost-payment unification,
@@ -1366,12 +1363,8 @@ pub(super) fn handle_unless_payment(
                                 trigger_event: trigger_event.clone(),
                                 effect_description: effect_description.clone(),
                                 remaining: remaining.clone(),
-                                unpaid_suffix: remaining_cost.map(|cost| {
-                                    Box::new(UnpaidCostSuffix {
-                                        payer: player,
-                                        cost,
-                                    })
-                                }),
+                                unpaid_suffix: remaining_cost
+                                    .map(|cost| UnpaidCostSuffix::legs(player, cost)),
                             });
                         return Ok(action_result(events, state.waiting_for.clone()));
                     }
@@ -1745,12 +1738,8 @@ pub(super) fn handle_unless_payment(
                                 trigger_event: trigger_event.clone(),
                                 effect_description: effect_description.clone(),
                                 remaining: remaining.clone(),
-                                unpaid_suffix: remaining_cost.map(|cost| {
-                                    Box::new(UnpaidCostSuffix {
-                                        payer: player,
-                                        cost,
-                                    })
-                                }),
+                                unpaid_suffix: remaining_cost
+                                    .map(|cost| UnpaidCostSuffix::legs(player, cost)),
                             });
                         return Ok(action_result(events, state.waiting_for.clone()));
                     }
@@ -2100,167 +2089,172 @@ fn finish_unless_payment(
     Ok(action_result(events, state.waiting_for.clone()))
 }
 
+/// CR 702.24a + CR 118.12: a repeated draw unless-cost being paid — the
+/// printed instruction (`cost`) and the unless-payment it settles.
+struct RepeatedDrawUnlessPayment {
+    payer: PlayerId,
+    cost: AbilityCost,
+    pending_effect: Box<ResolvedAbility>,
+    trigger_event: Option<GameEvent>,
+    effect_description: Option<String>,
+    remaining: Vec<PlayerId>,
+}
+
+/// CR 702.24a + CR 118.12: pay `owed` copies of a repeated draw unless-cost
+/// ("Cumulative upkeep—Draw a card") one printed instruction at a time. An
+/// instruction that pauses on a draw replacement parks the payment as
+/// [`PendingCostMoveResume::CounterAdditionUnlessPayment`] with the
+/// instructions still owed, and its resume re-enters here; no player receives
+/// priority in between (CR 117.2e).
+///
+/// CR 121.4 + CR 121.6a: the work is bounded by the game, not by the count.
+/// Once the payer's library is empty, the empty-library attempt is already
+/// recorded, and no replacement can apply to the next draw, every further
+/// instruction emits no event and its ledger edit changes nothing, so no
+/// observer can tell the attempts apart. The rest of the count is then paid at
+/// once: the journal keeps every instruction that changed the game, and
+/// replaying it reproduces the same state.
+fn pay_repeated_draw_unless_cost(
+    state: &mut GameState,
+    payment: RepeatedDrawUnlessPayment,
+    owed: std::num::NonZeroU32,
+    payment_event_start: Option<usize>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let mut owed = owed.get();
+    while owed > 0 && !repeated_draw_tail_is_fixed_point(state, &payment) {
+        owed -= 1;
+        match costs::resume_ability_cost_for_resolution(
+            state,
+            payment.payer,
+            &payment.cost,
+            &payment.pending_effect,
+            events,
+        )? {
+            PaymentOutcome::Paid => {}
+            PaymentOutcome::Paused { remaining_cost } => {
+                debug_assert!(
+                    remaining_cost.is_none(),
+                    "a printed draw instruction pauses as one event"
+                );
+                // CR 603.2c: the reducer returns this answer without a later
+                // scan, so the draws paid before the pause are collected here.
+                if let Some(start) = payment_event_start {
+                    super::triggers::collect_paused_exit_triggers(state, events, start);
+                }
+                let RepeatedDrawUnlessPayment {
+                    payer,
+                    cost,
+                    pending_effect,
+                    trigger_event,
+                    effect_description,
+                    remaining,
+                } = payment;
+                state.pending_cost_move_resume =
+                    Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+                        cost,
+                        pending_effect,
+                        trigger_event,
+                        effect_description,
+                        remaining,
+                        unpaid_suffix: std::num::NonZeroU32::new(owed).map(|owed| {
+                            Box::new(UnpaidCostSuffix {
+                                payer,
+                                remainder: UnpaidCostRemainder::Repeated(owed),
+                            })
+                        }),
+                    });
+                return Ok(state.waiting_for.clone());
+            }
+            // CR 118.12: the payer chose to pay, and a latched draw is clamped
+            // as it happens (CR 118.11 + CR 614.17a), never refused.
+            PaymentOutcome::Failed { reason } => {
+                debug_assert!(false, "a latched draw instruction failed: {reason:?}");
+                tracing::warn!(?reason, "a latched draw instruction failed; settling PAID");
+            }
+        }
+    }
+    finish_successful_unless_payment(
+        state,
+        &payment.pending_effect,
+        &payment.trigger_event,
+        events,
+        payment_event_start,
+    )
+}
+
+/// CR 603.2c: whether the action ended at a prompt inside an unless payment of
+/// draws — a parked counter-addition payment whose cost draws (small or
+/// repeated), or the prompt of a draw cost itself. These are the draw paths
+/// whose resumed events the paused-exit collector queues; other unless
+/// payments are not.
+pub(crate) fn paused_in_draw_payment(state: &GameState) -> bool {
+    let parked = matches!(
+        &state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::CounterAdditionUnlessPayment { cost, .. })
+            if costs::cost_includes_draw(cost)
+    );
+    let prompted = matches!(
+        &state.waiting_for,
+        WaitingFor::UnlessPayment { cost, .. } if costs::cost_includes_draw(cost)
+    );
+    parked || prompted
+}
+
+/// CR 121.4 + CR 121.6a + CR 614.17c: whether every further instruction of a
+/// repeated "draw a card" payment is the identity: the drawer can't draw, or
+/// has an empty library and has already attempted to draw from it, and no
+/// replacement applies to a one-card draw at either proposal stage
+/// (CR 121.2a). Obstinate Familiar's skip or Laboratory Maniac's win still
+/// apply on an empty library, so the attempts stay individual while one can.
+fn repeated_draw_tail_is_fixed_point(
+    state: &GameState,
+    payment: &RepeatedDrawUnlessPayment,
+) -> bool {
+    let AbilityCost::EffectCost { effect } = &payment.cost else {
+        return false;
+    };
+    let Effect::Draw {
+        count: QuantityExpr::Fixed { value: 1 },
+        target,
+    } = effect.as_ref()
+    else {
+        return false;
+    };
+    let Some(drawer) =
+        effects::resolve_player_for_context_ref(state, &payment.pending_effect, target)
+    else {
+        return false;
+    };
+    let Some(player) = state.players.iter().find(|player| player.id == drawer) else {
+        return false;
+    };
+    // CR 121.3 + CR 614.17c: a draw the drawer can't make is clamped to
+    // nothing, and no replacement can apply to it.
+    let clamped = effects::draw::allowed_draw_count(state, drawer, 1) == 0;
+    let exhausted = player.library.is_empty() && player.drew_from_empty_library;
+    (clamped || exhausted)
+        && [DrawEventStage::Instruction, DrawEventStage::Individual]
+            .into_iter()
+            .all(|stage| {
+                replacement::find_applicable_replacements(
+                    state,
+                    &ProposedEvent::Draw {
+                        player_id: drawer,
+                        count: 1,
+                        stage,
+                        applied: Default::default(),
+                    },
+                    replacement::replacement_registry(),
+                )
+                .is_empty()
+            })
+}
+
 /// CR 118.12 + CR 616.1: Complete an already-paid unless cost without entering
 /// the cost authority again. Deferred life-payment substitutions use this
 /// after their replacement post-effects finish, because the mana and life
 /// components were committed before the replacement choice opened.
-const REPEATED_DRAW_CHUNK: u32 = 64;
-
-/// CR 702.24a + CR 118.12: pay a compact repeated draw unless-cost through a
-/// counted cursor. Each chunk materializes at most `REPEATED_DRAW_CHUNK`
-/// printed instructions; the remaining count survives a pause.
-pub(crate) fn drive_pending_unless_draw_repeat(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    let payment_event_start = events.len();
-    loop {
-        let Some(mut pending) = state.pending_unless_draw_repeat.take() else {
-            return Ok(state.waiting_for.clone());
-        };
-        if pending.paused_draw_pending {
-            // The open replacement prompt has settled, so its draw committed.
-            pending.paused_draw_pending = false;
-            pending.remaining = pending.remaining.saturating_sub(1);
-        }
-        if let Some(suffix) = pending.resume_cost.take() {
-            let suffix_count = repeated_draw_instructions(&suffix);
-            match costs::resume_ability_cost_for_resolution(
-                state,
-                pending.player,
-                &suffix,
-                pending.pending_effect.as_ref(),
-                events,
-            )? {
-                PaymentOutcome::Paid => {
-                    pending.remaining = pending.remaining.saturating_sub(suffix_count);
-                    if pending.remaining == 0 {
-                        return finish_successful_counted_payment(
-                            state,
-                            pending.pending_effect.as_ref(),
-                            &pending.trigger_event,
-                            events,
-                            payment_event_start,
-                        );
-                    }
-                    state.pending_unless_draw_repeat = Some(pending);
-                    continue;
-                }
-                PaymentOutcome::Paused { remaining_cost } => {
-                    // CR 118.12: retain the exact unpaid suffix of this chunk;
-                    // the open prompt owns one instruction, the remainder is
-                    // carried by `resume_cost`. Only instructions actually
-                    // completed leave `remaining`.
-                    let after = remaining_cost
-                        .as_ref()
-                        .map(repeated_draw_instructions)
-                        .unwrap_or(0);
-                    let unpaid = 1 + after;
-                    pending.remaining = pending
-                        .remaining
-                        .saturating_sub(suffix_count.saturating_sub(unpaid));
-                    pending.resume_cost = remaining_cost.map(Box::new);
-                    pending.paused_draw_pending = true;
-                    state.pending_unless_draw_repeat = Some(pending);
-                    return Ok(state.waiting_for.clone());
-                }
-                PaymentOutcome::Failed { .. } => {
-                    return finish_unless_payment(
-                        state,
-                        true,
-                        true,
-                        *pending.base,
-                        pending.pending_effect,
-                        pending.trigger_event,
-                        pending.effect_description,
-                        Vec::new(),
-                        None,
-                        events,
-                    )
-                    .map(|result| result.waiting_for);
-                }
-            }
-        }
-        if pending.remaining == 0 {
-            return finish_successful_counted_payment(
-                state,
-                pending.pending_effect.as_ref(),
-                &pending.trigger_event,
-                events,
-                payment_event_start,
-            );
-        }
-        let chunk = pending.remaining.min(REPEATED_DRAW_CHUNK);
-        let cost = crate::game::effects::expand_per_counter(&pending.base, chunk);
-        match costs::resume_ability_cost_for_resolution(
-            state,
-            pending.player,
-            &cost,
-            pending.pending_effect.as_ref(),
-            events,
-        )? {
-            PaymentOutcome::Paid => {
-                pending.remaining -= chunk;
-                if pending.remaining == 0 {
-                    return finish_successful_counted_payment(
-                        state,
-                        pending.pending_effect.as_ref(),
-                        &pending.trigger_event,
-                        events,
-                        payment_event_start,
-                    );
-                }
-                state.pending_unless_draw_repeat = Some(pending);
-            }
-            PaymentOutcome::Paused { remaining_cost } => {
-                // CR 118.12 + CR 702.24a: the pause is one draw instruction;
-                // its suffix holds the rest of this chunk. Subtracting the
-                // whole chunk here lost up to 63 draws.
-                let after = remaining_cost
-                    .as_ref()
-                    .map(repeated_draw_instructions)
-                    .unwrap_or(0);
-                let unpaid = 1 + after;
-                pending.remaining = pending
-                    .remaining
-                    .saturating_sub(chunk.saturating_sub(unpaid));
-                pending.resume_cost = remaining_cost.map(Box::new);
-                pending.paused_draw_pending = true;
-                state.pending_unless_draw_repeat = Some(pending);
-                return Ok(state.waiting_for.clone());
-            }
-            PaymentOutcome::Failed { .. } => {
-                return finish_unless_payment(
-                    state,
-                    true,
-                    true,
-                    *pending.base,
-                    pending.pending_effect,
-                    pending.trigger_event,
-                    pending.effect_description,
-                    Vec::new(),
-                    None,
-                    events,
-                )
-                .map(|result| result.waiting_for);
-            }
-        }
-    }
-}
-
-/// The number of printed draw instructions in a cost-shaped chunk.
-/// The number of printed draw instructions in a cost-shaped chunk. A single
-/// instruction that draws several cards still counts once (CR 702.24a).
-fn repeated_draw_instructions(cost: &AbilityCost) -> u32 {
-    match cost {
-        AbilityCost::EffectCost { effect } => {
-            u32::from(matches!(effect.as_ref(), Effect::Draw { .. }))
-        }
-        AbilityCost::Composite { costs } => costs.iter().map(repeated_draw_instructions).sum(),
-        _ => 0,
-    }
-}
-
 pub(crate) fn finish_successful_unless_payment(
     state: &mut GameState,
     pending_effect: &ResolvedAbility,
@@ -3009,10 +3003,26 @@ pub(super) fn resume_counter_addition_unless_payment(
         | CostMoveDrainBoundary::PriorityBoundary => {}
     }
     if let Some(suffix) = unpaid_suffix {
-        let UnpaidCostSuffix {
-            payer,
-            cost: suffix_cost,
-        } = *suffix;
+        let UnpaidCostSuffix { payer, remainder } = *suffix;
+        let suffix_cost = match remainder {
+            UnpaidCostRemainder::Legs(suffix_cost) => suffix_cost,
+            UnpaidCostRemainder::Repeated(owed) => {
+                return pay_repeated_draw_unless_cost(
+                    state,
+                    RepeatedDrawUnlessPayment {
+                        payer,
+                        cost,
+                        pending_effect,
+                        trigger_event,
+                        effect_description,
+                        remaining,
+                    },
+                    owed,
+                    None,
+                    events,
+                );
+            }
+        };
         match costs::resume_ability_cost_for_resolution(
             state,
             payer,
@@ -3032,7 +3042,7 @@ pub(super) fn resume_counter_addition_unless_payment(
                         effect_description,
                         remaining,
                         unpaid_suffix: remaining_cost
-                            .map(|cost| Box::new(UnpaidCostSuffix { payer, cost })),
+                            .map(|cost| UnpaidCostSuffix::legs(payer, cost)),
                     });
                 return Ok(state.waiting_for.clone());
             }
@@ -7380,42 +7390,4 @@ mod dandan_read_sweep_tests {
             "the payment suppressed the effect"
         );
     }
-}
-
-#[cfg(test)]
-mod counted_draw_instruction_tests {
-    use super::repeated_draw_instructions;
-    use crate::types::ability::{AbilityCost, Effect, QuantityExpr, TargetFilter};
-
-    /// CR 702.24a: repetition is per printed instruction, not per card drawn.
-    #[test]
-    fn a_multi_card_draw_instruction_counts_once() {
-        let draw = || AbilityCost::EffectCost {
-            effect: Box::new(Effect::Draw {
-                count: QuantityExpr::Fixed { value: 2 },
-                target: TargetFilter::Controller,
-            }),
-        };
-        let expanded = crate::game::effects::expand_per_counter(&draw(), 3);
-        assert_eq!(repeated_draw_instructions(&expanded), 3);
-    }
-}
-
-/// CR 117.5 + CR 603.2: a successful counted payment must route its draw
-/// events through the canonical post-action trigger collector before the next
-/// priority; the payment's own epilogue does not scan them.
-fn finish_successful_counted_payment(
-    state: &mut GameState,
-    pending_effect: &ResolvedAbility,
-    trigger_event: &Option<GameEvent>,
-    events: &mut Vec<GameEvent>,
-    event_start: usize,
-) -> Result<WaitingFor, EngineError> {
-    finish_successful_unless_payment(
-        state,
-        pending_effect,
-        trigger_event,
-        events,
-        Some(event_start),
-    )
 }

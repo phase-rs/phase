@@ -192,28 +192,8 @@ fn replay(
                     "recovery checkpoint consumed beyond its transcript".to_string(),
                 ));
             }
-            let mut shadow = (*checkpoint.state).clone();
-            shadow.payment_transaction = None;
+            let mut shadow = hydrated_checkpoint(state, checkpoint);
             shadow.payment_transaction_replay = true;
-            shadow.payment_transaction_just_handled = false;
-            shadow.cost_payment_failed_flag = false;
-            // Runtime registries are `#[serde(skip)]` on the persisted
-            // checkpoint; rehydrate them from the live session so the
-            // executable replay has the card database and log names.
-            shadow.card_db = state.card_db.clone();
-            shadow.card_face_registry = state.card_face_registry.clone();
-            shadow.meld_pair_registry = state.meld_pair_registry.clone();
-            shadow.booster_shelf = state.booster_shelf.clone();
-            shadow.all_card_names = state.all_card_names.clone();
-            shadow.log_player_names = state.log_player_names.clone();
-            // CR 706.1a: newly accepted entries run on the host's fresh stream
-            // and interaction binding; the checkpoint keeps only the accepted
-            // prefix's outcomes, including any stream advancement it holds.
-            adopt_host_stream(&mut shadow, state);
-            shadow.interaction_session_id = state.interaction_session_id.clone();
-            shadow.interaction_generation = state.interaction_generation;
-            shadow.next_interaction_serial = state.next_interaction_serial.clone();
-            shadow.active_interaction_slots = state.active_interaction_slots.clone();
             restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
             (
                 shadow,
@@ -254,7 +234,9 @@ fn replay(
             }
 
             if !transaction.transcript.is_empty() {
-                collect_initial_payment_events(&mut shadow, &buffered);
+                // CR 603.2c + CR 603.3b: initial direct emissions have no ActionResult
+                // scan; collect them once while their claims and owners are live.
+                triggers::collect_paused_exit_triggers(&mut shadow, &buffered, 0);
                 // CR 603.2c: these coordinates name only the initial buffer.
                 // Recorded actions own distinct inner buffers, so the closed
                 // claims end here.
@@ -296,32 +278,6 @@ fn replay(
             log_entries: buffered_log_entries,
         })
     }
-}
-
-/// CR 603.2c + CR 603.3b: initial direct emissions have no ActionResult scan.
-/// Collect them once while their claims and typed retention owners are live.
-fn collect_initial_payment_events(state: &mut GameState, events: &[GameEvent]) {
-    let mut retained = engine_priority::retained_logical_zone_events(state);
-    retained.extend(state.deferred_entry_events.iter().cloned());
-    retained.extend(engine_priority::retained_cost_events(state));
-    let claims = &state.consumed_before_priority_trigger_events;
-    let ordinary = triggers::filter_already_collected_trigger_events_from(state, events, 0, claims);
-    let delayed = triggers::filter_consumed_trigger_events_from(
-        events,
-        0,
-        triggers::TriggerCollectionRequester::Delayed,
-        claims,
-    );
-    let ordinary: Vec<_> = ordinary
-        .into_iter()
-        .filter(|event| !retained.contains(event))
-        .collect();
-    let delayed: Vec<_> = delayed
-        .into_iter()
-        .filter(|event| !retained.contains(event))
-        .collect();
-    triggers::collect_triggers_into_deferred(state, &ordinary);
-    triggers::collect_delayed_trigger_contexts_into_deferred(state, &delayed);
 }
 
 /// CR 608.2c + CR 117.3b + CR 603.3b: the canonical tail and all outer
@@ -493,37 +449,22 @@ fn settle_replay_outcome(
             shadow.payment_transaction_just_handled = false;
             let carrier = shadow.resolving_stack_entry.as_ref().map(|entry| entry.id);
             let continuation_event_start = events.len();
-            // CR 104.3a + CR 118.12: the accepted payment (and any departure
-            // already mirrored into it) commits BEFORE the fallible rider and
-            // canonical tail run, so an error in either cannot erase the paid
-            // work or restore a player who left the game. The restored runtime
-            // authorities (card DB, names, RNG) are carried from the live state,
-            // which the nested checkpoint could not serialize.
-            carry_runtime_authorities(&mut shadow, state);
-            *state = shadow;
+            // The runtime-only authorities (card DB, names, host stream,
+            // interaction binding, session) belong to the live state.
+            hydrate_runtime_authorities(&mut shadow, state);
             // The payment is committed. Continue the printed rider through the
             // ordinary chain walker, now outside the transaction, so a later
-            // pause/failure cannot restore the pre-payment base. CR 104.3a:
-            // when the rider or the canonical tail fails, the committed
-            // payment, its events and the departure must still leave this
-            // boundary together.
-            let rider = resolve_root_continuation(
-                state,
+            // pause/failure cannot restore the pre-payment base.
+            resolve_root_continuation(
+                &mut shadow,
                 &transaction.root,
                 true,
                 transaction.resolving_trigger_context.as_ref(),
                 &mut events,
-            )
-            .and_then(|()| {
-                settle_canonical_tail(state, &mut events, continuation_event_start, carrier)
-            });
-            if let Err(error) = rider {
-                tracing::debug!(
-                    ?error,
-                    "the committed payment's rider failed; publishing the accepted payment"
-                );
-            }
-            let waiting_for = state.waiting_for.clone();
+            )?;
+            settle_canonical_tail(&mut shadow, &mut events, continuation_event_start, carrier)?;
+            let waiting_for = shadow.waiting_for.clone();
+            *state = shadow;
             Ok(ActionResult::applied(events, waiting_for).with_log_entries(log_entries))
         }
     }
@@ -559,22 +500,8 @@ pub(crate) fn settle_after_outside_action(
             .recovered
             .as_deref()
             .expect("the checkpoint was matched");
-        let mut shadow = (*checkpoint.state).clone();
-        shadow.payment_transaction = None;
+        let mut shadow = hydrated_checkpoint(state, checkpoint);
         shadow.payment_transaction_replay = true;
-        shadow.payment_transaction_just_handled = false;
-        // Use the replay preparation on this second-concession path too.
-        shadow.card_db = state.card_db.clone();
-        shadow.card_face_registry = state.card_face_registry.clone();
-        shadow.meld_pair_registry = state.meld_pair_registry.clone();
-        shadow.booster_shelf = state.booster_shelf.clone();
-        shadow.all_card_names = state.all_card_names.clone();
-        shadow.log_player_names = state.log_player_names.clone();
-        adopt_host_stream(&mut shadow, state);
-        shadow.interaction_session_id = state.interaction_session_id.clone();
-        shadow.interaction_generation = state.interaction_generation;
-        shadow.next_interaction_serial = state.next_interaction_serial.clone();
-        shadow.active_interaction_slots = state.active_interaction_slots.clone();
         let mut events = checkpoint.events.clone();
         let mut log_entries = checkpoint.log_entries.clone();
         let mut mirrored = Vec::new();
@@ -648,7 +575,7 @@ fn settle_accepted_prefix_after_departure(
     if transaction.transcript.is_empty() {
         // CR 603.2: a synchronously paid prefix has no ActionResult scan, so its
         // draw/other events must be collected here before the checkpoint parks.
-        collect_initial_payment_events(&mut shadow, &events);
+        triggers::collect_paused_exit_triggers(&mut shadow, &events, 0);
         shadow.consumed_before_priority_trigger_events.clear();
     }
     let mut mirrored = Vec::new();
@@ -737,64 +664,6 @@ fn adopt_host_stream(shadow: &mut GameState, live: &GameState) {
     }
 }
 
-/// CR 118.12: apply a sandbox/debug action to the hidden checkpoint board only.
-/// Its events are buffered with the accepted prefix and publish once when the
-/// payment settles; the canonical base is left untouched.
-pub(crate) fn mirror_checkpoint_action(
-    state: &mut GameState,
-    actor: PlayerId,
-    action: GameAction,
-) -> Result<(), EngineError> {
-    let Some(transaction) = state.payment_transaction.as_deref() else {
-        return Ok(());
-    };
-    let Some(checkpoint) = transaction.recovered.as_deref() else {
-        return Ok(());
-    };
-    let mut shadow = (*checkpoint.state).clone();
-    shadow.payment_transaction = None;
-    shadow.payment_transaction_replay = true;
-    shadow.payment_transaction_just_handled = false;
-    // Runtime registries are `#[serde(skip)]` on the persisted checkpoint;
-    // rehydrate them from the live session before the sandbox action runs.
-    shadow.card_db = state.card_db.clone();
-    shadow.card_face_registry = state.card_face_registry.clone();
-    shadow.meld_pair_registry = state.meld_pair_registry.clone();
-    shadow.booster_shelf = state.booster_shelf.clone();
-    shadow.all_card_names = state.all_card_names.clone();
-    shadow.log_player_names = state.log_player_names.clone();
-    // CR 706.1a: the sandbox action's new entropy is the host's fresh stream,
-    // preserving any advancement already accepted in the checkpoint.
-    adopt_host_stream(&mut shadow, state);
-    shadow.interaction_session_id = state.interaction_session_id.clone();
-    shadow.interaction_generation = state.interaction_generation;
-    shadow.next_interaction_serial = state.next_interaction_serial.clone();
-    shadow.active_interaction_slots = state.active_interaction_slots.clone();
-    // The sandbox authority is the live session's, not the checkpoint's older
-    // bytes; mirror it before the action's own preflight reads it.
-    shadow.debug_mode = state.debug_mode;
-    shadow.debug_permitted = state.debug_permitted.clone();
-    shadow.format_config = state.format_config.clone();
-    let result = engine::apply_admitted_recorded_action(&mut shadow, actor, actor, action)?;
-    shadow.payment_transaction_replay = false;
-    let mut events = checkpoint.events.clone();
-    events.extend(result.events);
-    let mut log_entries = checkpoint.log_entries.clone();
-    log_entries.extend(result.log_entries);
-    let mut updated = transaction.clone();
-    updated.recovered = Some(Box::new(PaymentRecoveryCheckpoint {
-        state: Box::new(checkpoint_state(&shadow)),
-        events,
-        log_entries,
-        consumed: updated.transcript.len(),
-    }));
-    **state
-        .payment_transaction
-        .as_mut()
-        .expect("the descriptor is live") = updated;
-    Ok(())
-}
-
 /// CR 104.3a + CR 118.12: mirror an outside, submitter-scoped action onto the
 /// recovery checkpoint. The canonical state already carries it; without this,
 /// settling the checkpoint would roll the action back (a revoked debug
@@ -807,10 +676,8 @@ pub(crate) fn mirror_outside_action(state: &mut GameState, actor: PlayerId, acti
     let Some(checkpoint) = transaction.recovered.as_deref() else {
         return;
     };
-    let mut shadow = (*checkpoint.state).clone();
-    shadow.payment_transaction = None;
+    let mut shadow = hydrated_checkpoint(state, checkpoint);
     shadow.payment_transaction_replay = true;
-    shadow.payment_transaction_just_handled = false;
     // CR 402.3 + CR 118.12: a hand reorder names only the live canonical hand;
     // the checkpoint also holds the accepted prefix's drawn cards. Preserve the
     // player's canonical order and keep the extra cards in the hand.
@@ -879,16 +746,32 @@ pub(crate) fn retire_terminal_transaction(state: &mut GameState) {
         state.payment_transaction = None;
         state.payment_transaction_replay = false;
         state.payment_transaction_just_handled = false;
-        // CR 104.1: a finished game has no resolving payment owner; a counted
-        // repeated-payment cursor must not survive into the results view.
-        state.pending_unless_draw_repeat = None;
     }
 }
 
-/// Runtime-only fields are `#[serde(skip)]` on the live state and cannot be
-/// carried inside the nested checkpoint; reattach them when a checkpoint
-/// settlement replaces the outer state.
-fn carry_runtime_authorities(shadow: &mut GameState, live: &GameState) {
+/// The one preparation of a recovery checkpoint for execution: its persisted
+/// nested state without the descriptor or transient guards, with the live
+/// state's runtime authorities. Replay, the second-concession settlement, the
+/// outside-action mirror, the admission probe and checked restore all start
+/// from it.
+pub(crate) fn hydrated_checkpoint(
+    live: &GameState,
+    checkpoint: &PaymentRecoveryCheckpoint,
+) -> GameState {
+    let mut shadow = (*checkpoint.state).clone();
+    shadow.payment_transaction = None;
+    shadow.payment_transaction_replay = false;
+    shadow.payment_transaction_just_handled = false;
+    shadow.cost_payment_failed_flag = false;
+    hydrate_runtime_authorities(&mut shadow, live);
+    shadow
+}
+
+/// The one field list of runtime authorities a payment shadow takes from the
+/// live state, whether it starts from a recovery checkpoint or replaces the
+/// live state on settlement. These fields are `#[serde(skip)]` or session
+/// state, never part of the accepted payment.
+fn hydrate_runtime_authorities(shadow: &mut GameState, live: &GameState) {
     shadow.card_db = live.card_db.clone();
     shadow.card_face_registry = live.card_face_registry.clone();
     shadow.meld_pair_registry = live.meld_pair_registry.clone();
@@ -1135,28 +1018,19 @@ pub(crate) fn owns_action(state: &GameState, action: &GameAction) -> bool {
     // A recovery checkpoint is the materialized authority for actions already
     // admitted outside the payment; probing the canonical base would reject an
     // action whose cards were drawn into the hidden checkpoint.
-    let mut probe = if let Some(checkpoint) = transaction.recovered.as_deref() {
-        let mut probe = (*checkpoint.state).clone();
-        // The admission probe uses the same runtime preparation as replay:
-        // card registries and the host's current interaction binding.
-        probe.card_db = state.card_db.clone();
-        probe.card_face_registry = state.card_face_registry.clone();
-        probe.meld_pair_registry = state.meld_pair_registry.clone();
-        probe.booster_shelf = state.booster_shelf.clone();
-        probe.all_card_names = state.all_card_names.clone();
-        probe.log_player_names = state.log_player_names.clone();
-        probe.interaction_session_id = state.interaction_session_id.clone();
-        probe.interaction_generation = state.interaction_generation;
-        probe.next_interaction_serial = state.next_interaction_serial.clone();
-        probe.active_interaction_slots = state.active_interaction_slots.clone();
-        probe
-    } else {
-        project(state)
+    let probe = match transaction.recovered.as_deref() {
+        Some(checkpoint) => hydrated_checkpoint(state, checkpoint),
+        None => project(state),
     };
-    // The probe must exercise the ordinary WaitingFor/action authority on the
-    // materialized shadow, not recursively re-enter this transaction or create
-    // a nested descriptor. `project` has already cleared the transaction and
-    // transient guards while preserving the prompt's continuation payload.
+    admits(probe, actor, action)
+}
+
+/// The admission authority for an answer to a materialized payment prompt: the
+/// ordinary `WaitingFor`/action reducer, run on a copy that cannot recursively
+/// re-enter this transaction or create a nested descriptor. Shared by
+/// [`owns_action`] and by checked restore of a recovery checkpoint, so a
+/// restored prompt is admitted exactly when its answer would be.
+pub(crate) fn admits(mut probe: GameState, actor: PlayerId, action: &GameAction) -> bool {
     probe.payment_transaction = None;
     probe.payment_transaction_replay = true;
     probe.payment_transaction_just_handled = false;

@@ -1131,6 +1131,11 @@ pub(crate) fn pending_replacement_option_count(
             .search_found_candidates
             .iter()
             .all(|candidate| candidate.is_optional);
+    // An optional replacement's accept and decline both name its candidate
+    // (CR 614.1 + CR 616.1): with no candidate there is no option to offer.
+    if pending.is_optional && pending.candidates.is_empty() {
+        return 0;
+    }
     if pending.is_optional || all_search_found_candidates_optional {
         pending.candidates.len() + 1
     } else {

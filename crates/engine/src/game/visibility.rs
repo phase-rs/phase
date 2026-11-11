@@ -1571,11 +1571,6 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // the exact remaining library order and current-resolution incarnation
     // pins. The ReplacementChoice prompt is its complete public surface.
     filtered.pending_exile_from_top_until = None;
-    // CR 400.2 + CR 702.24a: the compact repeated-draw cursor carries a
-    // private ResolvedAbility and trigger cursor for the unpaid chunks. The
-    // projected UnlessPayment prompt is the complete surface; no viewer copy
-    // needs the continuation authority.
-    filtered.pending_unless_draw_repeat = None;
     // CR 510.2 + CR 616.1: the parked combat-damage batch is server authority.
     // Its `batch_events` can carry rider-created `ZoneChanged` records and other
     // effect events that `filter_events_for_viewer` would redact in the live

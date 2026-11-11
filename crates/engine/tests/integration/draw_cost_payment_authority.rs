@@ -21,7 +21,11 @@ use engine::types::ability::{
 };
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+use engine::types::game_state::{
+    AutoPassMode, CastPaymentMode, GameState, PersistedGameState, PersistedRestoreError,
+    StackEntry, StackEntryKind, WaitingFor,
+};
+use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -1008,7 +1012,7 @@ fn a_failed_payment_recovery_still_commits_the_concession() {
     apply(state, P0, GameAction::ChooseReplacement { index: 1 })
         .expect("declining leg 1's Dredge accepts the draw");
 
-    apply(
+    let published = apply(
         state,
         PlayerId(2),
         GameAction::Concede {
@@ -1041,6 +1045,16 @@ fn a_failed_payment_recovery_still_commits_the_concession() {
         1,
         "the accepted prefix draw survives the fallible rider"
     );
+    assert!(
+        published.events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerEliminated { player_id } if *player_id == PlayerId(2)
+        )),
+        "the departure's events are published with the action"
+    );
+    let state = runner.state_mut();
+    apply(state, P0, GameAction::PassPriority)
+        .expect("the next ordinary action starts from the committed departure");
 }
 
 /// Obstinate Familiar, verbatim Oracle text: an optional skip of a single draw.
@@ -1376,120 +1390,6 @@ fn a_draw_cost_activation_resumes_after_abundance_bottom_order() {
     );
 }
 
-/// CR 118.12: a sandbox mutation admitted while a recovered payment is parked
-/// runs on the hidden checkpoint board only, so its outcome publishes once
-/// when the payment settles; the canonical base is untouched in the meantime.
-#[test]
-fn a_sandbox_mutation_between_recovery_and_completion_publishes_once() {
-    let (mut runner, source) = concession_board_with_hand();
-    let mut root = ResolvedAbility::new(
-        pay_cost(AbilityCost::Composite {
-            costs: vec![draw_cost(1), discard_cost()],
-        }),
-        vec![],
-        source,
-        P0,
-    );
-    root.sub_ability = None;
-    let state = runner.state_mut();
-    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
-    assert!(is_dredge_prompt_for_p0(state));
-    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
-        .expect("declining leg 1's Dredge accepts the draw");
-    let WaitingFor::DiscardChoice { .. } = &state.waiting_for else {
-        panic!("the discard leg owns the cursor: {:?}", state.waiting_for);
-    };
-    apply(
-        state,
-        PlayerId(2),
-        GameAction::Concede {
-            player_id: PlayerId(2),
-        },
-    )
-    .expect("a player can concede at any time");
-    state.debug_mode = true;
-    state.format_config.allow_debug_actions = true;
-    let canonical_life = state.players[P1.0 as usize].life;
-
-    apply(
-        state,
-        P0,
-        GameAction::Debug(DebugAction::SetLife {
-            player_id: P1,
-            life: 5,
-        }),
-    )
-    .expect("the sandbox mutation applies to the hidden checkpoint");
-    assert_eq!(
-        state.players[P1.0 as usize].life, canonical_life,
-        "the canonical base was not mutated by the hidden sandbox action"
-    );
-    let checkpoint_life = state
-        .payment_transaction
-        .as_ref()
-        .and_then(|transaction| transaction.recovered.as_ref())
-        .expect("the checkpoint is live")
-        .state
-        .players[P1.0 as usize]
-        .life;
-    assert_eq!(
-        checkpoint_life, 5,
-        "the hidden checkpoint carries the sandbox outcome"
-    );
-    assert_eq!(
-        state
-            .payment_transaction
-            .as_ref()
-            .and_then(|transaction| transaction.recovered.as_ref())
-            .expect("the checkpoint is live")
-            .events
-            .iter()
-            .filter(|event| matches!(event, GameEvent::DebugActionUsed { .. }))
-            .count(),
-        1,
-        "the sandbox action is buffered once with the payment"
-    );
-
-    let drawn = state
-        .payment_transaction
-        .as_ref()
-        .and_then(|transaction| transaction.recovered.as_ref())
-        .expect("the checkpoint is live")
-        .events
-        .iter()
-        .find_map(|event| match event {
-            GameEvent::CardDrawn {
-                player_id,
-                object_id,
-                ..
-            } if *player_id == P0 => Some(*object_id),
-            _ => None,
-        })
-        .expect("the prefix draw");
-    let answer = apply(
-        runner.state_mut(),
-        P0,
-        GameAction::SelectCards { cards: vec![drawn] },
-    )
-    .expect("discard the prefix-drawn card");
-
-    let state = runner.state();
-    assert!(state.payment_transaction.is_none());
-    assert_eq!(
-        state.players[P1.0 as usize].life, 5,
-        "the accepted checkpoint outcome is the final state"
-    );
-    assert_eq!(
-        answer
-            .events
-            .iter()
-            .filter(|event| matches!(event, GameEvent::DebugActionUsed { .. }))
-            .count(),
-        1,
-        "the buffered sandbox action publishes once"
-    );
-}
-
 /// CR 402.3 + CR 118.12: the order names the canonical hand; a card the
 /// accepted prefix discarded is absent from the checkpoint, so the surviving
 /// IDs are reordered and the hidden extras keep their own slots.
@@ -1606,83 +1506,6 @@ fn a_reorder_that_names_a_prefix_discarded_card_keeps_the_survivors() {
     );
 }
 
-/// CR 118.12: a sandbox draw for another seat that would open its own
-/// replacement prompt is refused while a recovered payment is parked, so the
-/// payment's single executable cursor is never replaced by an un-restorable
-/// sandbox prompt.
-#[test]
-fn a_sandbox_draw_that_would_open_dredge_is_refused() {
-    let mut scenario = GameScenario::new_n_player(3, 42);
-    scenario.at_phase(Phase::PreCombatMain);
-    for player in 0..3 {
-        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
-    }
-    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
-    scenario
-        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
-        .from_oracle_text(STINKWEED_IMP_ORACLE);
-    scenario
-        .add_creature_to_graveyard(P1, "Stinkweed Imp", 1, 2)
-        .from_oracle_text(STINKWEED_IMP_ORACLE);
-    scenario.add_card_to_hand(P0, "Hand A");
-    scenario.add_card_to_hand(P0, "Hand B");
-    let mut runner = scenario.build();
-    evaluate_layers(runner.state_mut());
-    let mut root = ResolvedAbility::new(
-        pay_cost(AbilityCost::Composite {
-            costs: vec![draw_cost(1), discard_cost()],
-        }),
-        vec![],
-        source,
-        P0,
-    );
-    root.sub_ability = None;
-    let state = runner.state_mut();
-    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
-    assert!(is_dredge_prompt_for_p0(state));
-    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
-        .expect("declining leg 1's Dredge accepts the draw");
-    let WaitingFor::DiscardChoice { .. } = &state.waiting_for else {
-        panic!("the discard leg owns the cursor: {:?}", state.waiting_for);
-    };
-    apply(
-        state,
-        PlayerId(2),
-        GameAction::Concede {
-            player_id: PlayerId(2),
-        },
-    )
-    .expect("a player can concede at any time");
-    state.debug_mode = true;
-    state.format_config.allow_debug_actions = true;
-    let waiting_before = state.waiting_for.clone();
-
-    let error = apply(
-        state,
-        P0,
-        GameAction::Debug(DebugAction::DrawCards {
-            player_id: P1,
-            count: 1,
-        }),
-    )
-    .expect_err("a prompt-opening sandbox draw is refused while the payment is parked");
-    assert!(
-        matches!(error, EngineError::InvalidAction(_)),
-        "the refusal is a typed invalid action: {error:?}"
-    );
-    assert_eq!(
-        state.waiting_for, waiting_before,
-        "the payment's executable cursor is unchanged"
-    );
-    assert!(
-        state
-            .payment_transaction
-            .as_ref()
-            .is_some_and(|transaction| transaction.recovered.is_some()),
-        "the checkpoint is retained atomically"
-    );
-}
-
 /// CR 118.12 + CR 614.11a: an activation whose retained composite cost parks
 /// a draw and still owes a suffix resumes from that suffix after the
 /// replacement subtree retires, then reaches the stack.
@@ -1786,106 +1609,6 @@ fn a_composite_draw_cost_activation_resumes_its_retained_suffix() {
         1,
         "the activation reaches the stack after the retained suffix settles: {:?}",
         state.waiting_for
-    );
-}
-
-/// CR 118.12: a non-idempotent sandbox action (a draw) is applied exactly
-/// once to the hidden checkpoint while the payment is parked.
-#[test]
-fn a_sandbox_gain_is_applied_once_while_the_payment_is_parked() {
-    let mut scenario = GameScenario::new_n_player(3, 42);
-    scenario.at_phase(Phase::PreCombatMain);
-    for player in 0..3 {
-        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
-    }
-    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
-    scenario.add_card_to_hand(P0, "Hand A");
-    scenario.add_card_to_hand(P0, "Hand B");
-    let mut runner = scenario.build();
-    evaluate_layers(runner.state_mut());
-    let mut root = ResolvedAbility::new(
-        pay_cost(AbilityCost::Composite {
-            costs: vec![draw_cost(1), discard_cost()],
-        }),
-        vec![],
-        source,
-        P0,
-    );
-    root.sub_ability = None;
-    let state = runner.state_mut();
-    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
-    let WaitingFor::DiscardChoice { .. } = &state.waiting_for else {
-        panic!("the discard leg owns the cursor: {:?}", state.waiting_for);
-    };
-    apply(
-        state,
-        PlayerId(2),
-        GameAction::Concede {
-            player_id: PlayerId(2),
-        },
-    )
-    .expect("a player can concede at any time");
-    state.debug_mode = true;
-    state.format_config.allow_debug_actions = true;
-    let canonical_hand = state.players[P0.0 as usize].hand.len();
-
-    apply(
-        state,
-        P0,
-        GameAction::Debug(DebugAction::DrawCards {
-            player_id: P0,
-            count: 1,
-        }),
-    )
-    .expect("the sandbox draw applies to the hidden checkpoint");
-    assert_eq!(
-        state.players[P0.0 as usize].hand.len(),
-        canonical_hand,
-        "the canonical base was not mutated"
-    );
-    let checkpoint_hand = state
-        .payment_transaction
-        .as_ref()
-        .and_then(|transaction| transaction.recovered.as_ref())
-        .expect("the checkpoint is live")
-        .state
-        .players[P0.0 as usize]
-        .hand
-        .len();
-    assert_eq!(
-        checkpoint_hand,
-        canonical_hand + 2,
-        "the prefix draw and the sandbox draw each ran exactly once"
-    );
-
-    let drawn = state
-        .payment_transaction
-        .as_ref()
-        .and_then(|transaction| transaction.recovered.as_ref())
-        .expect("the checkpoint is live")
-        .events
-        .iter()
-        .find_map(|event| match event {
-            GameEvent::CardDrawn {
-                player_id,
-                object_id,
-                ..
-            } if *player_id == P0 => Some(*object_id),
-            _ => None,
-        })
-        .expect("the prefix draw");
-    apply(
-        runner.state_mut(),
-        P0,
-        GameAction::SelectCards { cards: vec![drawn] },
-    )
-    .expect("discard the prefix-drawn card");
-    let state = runner.state();
-    assert!(state.payment_transaction.is_none());
-    assert_eq!(
-        state.players[P0.0 as usize].hand.len(),
-        canonical_hand + 1,
-        "two draws and one discard leave one extra card; nothing was doubled"
     );
 }
 
@@ -1997,95 +1720,6 @@ fn a_composite_draw_cost_activation_resumes_after_the_source_leaves() {
     );
 }
 
-/// CR 118.12: a sandbox action that would leave the parked discard prompt with
-/// no legal answer is refused atomically.
-#[test]
-fn a_sandbox_action_cannot_leave_the_discard_prompt_unanswerable() {
-    let (mut runner, source) = concession_board_with_hand();
-    let mut root = ResolvedAbility::new(
-        pay_cost(AbilityCost::Composite {
-            costs: vec![draw_cost(1), discard_cost()],
-        }),
-        vec![],
-        source,
-        P0,
-    );
-    root.sub_ability = None;
-    let state = runner.state_mut();
-    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
-    assert!(is_dredge_prompt_for_p0(state));
-    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
-        .expect("declining leg 1's Dredge accepts the draw");
-    let WaitingFor::DiscardChoice { .. } = &state.waiting_for else {
-        panic!("the discard leg owns the cursor: {:?}", state.waiting_for);
-    };
-    apply(
-        state,
-        PlayerId(2),
-        GameAction::Concede {
-            player_id: PlayerId(2),
-        },
-    )
-    .expect("a player can concede at any time");
-    state.debug_mode = true;
-    state.format_config.allow_debug_actions = true;
-    let canonical: Vec<_> = state.players[P0.0 as usize].hand.iter().copied().collect();
-    let prompt_cards: Vec<_> = {
-        let checkpoint = state
-            .payment_transaction
-            .as_ref()
-            .and_then(|transaction| transaction.recovered.as_ref())
-            .expect("the checkpoint is live");
-        match &checkpoint.state.waiting_for {
-            WaitingFor::DiscardChoice { cards, .. } => cards.clone(),
-            other => panic!("expected the discard prompt: {other:?}"),
-        }
-    };
-    for id in &canonical {
-        apply(
-            state,
-            P0,
-            GameAction::Debug(DebugAction::MoveToZone {
-                object_id: *id,
-                to_zone: Zone::Exile,
-                library_position: None,
-                simulate: false,
-            }),
-        )
-        .expect("removing a visible card keeps the prompt answerable");
-    }
-    let hidden = prompt_cards
-        .iter()
-        .copied()
-        .find(|id| !canonical.contains(id))
-        .expect("the prefix-drawn card");
-    let error = apply(
-        state,
-        P0,
-        GameAction::Debug(DebugAction::MoveToZone {
-            object_id: hidden,
-            to_zone: Zone::Exile,
-            library_position: None,
-            simulate: false,
-        }),
-    )
-    .expect_err("removing the last eligible card must be refused");
-    assert!(matches!(error, EngineError::InvalidAction(_)));
-    let checkpoint_hand_has_hidden = state
-        .payment_transaction
-        .as_ref()
-        .and_then(|transaction| transaction.recovered.as_ref())
-        .expect("the checkpoint is live")
-        .state
-        .players[P0.0 as usize]
-        .hand
-        .contains(&hidden);
-    assert!(
-        checkpoint_hand_has_hidden,
-        "the refused action left the eligible card in place"
-    );
-}
-
 /// CR 113.8 + CR 118.12: a nonactive activator keeps its draw ownership and
 /// payer through the replacement and the source's removal.
 #[test]
@@ -2191,4 +1825,326 @@ fn a_nonactive_composite_draw_cost_activation_resumes_its_retained_suffix() {
         "the nonactive activation reaches the stack: {:?}",
         state.waiting_for
     );
+}
+
+/// A three-player board at P0's main phase with `stack` on the stack, P0 at
+/// `life`, and P0 and P1 auto-passing until the stack is empty.
+fn auto_pass_board(life: i32, stack: Vec<StackEntry>) -> GameRunner {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.players[P0.0 as usize].life = life;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    state.stack = stack.into();
+    for player in [P0, P1] {
+        state.auto_pass.insert(
+            player,
+            AutoPassMode::UntilStackEmpty {
+                initial_stack_len: state.stack.len(),
+                policy: Default::default(),
+            },
+        );
+    }
+    runner
+}
+
+/// An activated ability of `controller` on the stack.
+fn ability_on_stack(id: u64, controller: PlayerId, effect: Effect) -> StackEntry {
+    StackEntry {
+        id: ObjectId(id),
+        source_id: ObjectId(id),
+        controller,
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: ObjectId(id),
+            ability: Box::new(ResolvedAbility::new(
+                effect,
+                vec![],
+                ObjectId(id),
+                controller,
+            )),
+        },
+    }
+}
+
+/// CR 104.3a: "A player who concedes leaves the game immediately." The
+/// concession commits at its action boundary. Its follow-up auto-pass then
+/// resolves an unrepresentable life gain; that follow-up is discarded whole and
+/// the departure is published with its events. The next ordinary action starts
+/// without any concession state: the same failing tail rejects it and restores
+/// it exactly.
+#[test]
+fn a_concession_is_published_when_its_auto_pass_tail_overflows() {
+    let gain = Effect::GainLife {
+        amount: QuantityExpr::Fixed { value: 2 },
+        player: TargetFilter::Controller,
+    };
+    let mut runner = auto_pass_board(
+        i32::MAX - 1,
+        vec![
+            ability_on_stack(101, P0, gain),
+            ability_on_stack(102, P0, Effect::NoOp),
+        ],
+    );
+    let stack_before = runner.state().stack.clone();
+
+    let published = apply(
+        runner.state_mut(),
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("CR 104.3a: the concession stands");
+    assert!(
+        published.events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerEliminated { player_id } if *player_id == PlayerId(2)
+        )),
+        "the departure is published with the action"
+    );
+    let state = runner.state();
+    assert!(state.players[2].is_eliminated, "P2 left the game");
+    assert_eq!(
+        state.stack, stack_before,
+        "the failed auto-pass tail is discarded whole, not kept half-run"
+    );
+    assert_eq!(state.players[P0.0 as usize].life, i32::MAX - 1);
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+
+    // The next ordinary action carries no concession: its own failing tail
+    // rejects it and restores the state exactly.
+    let committed = runner.state().clone();
+    let error = apply(runner.state_mut(), P0, GameAction::PassPriority)
+        .expect_err("an ordinary action with an unrepresentable tail is rejected");
+    assert!(
+        matches!(error, EngineError::LifeChangeUnrepresentable { player } if player == P0),
+        "expected the unrepresentable life rejection, got {error:?}"
+    );
+    assert_eq!(runner.state().stack, committed.stack);
+    assert_eq!(runner.state().players, committed.players);
+    assert_eq!(runner.state().waiting_for, committed.waiting_for);
+}
+
+/// The concession board, P0 paying `Composite[draw, discard]`: leg 1's Dredge
+/// is declined (the draw is the accepted prefix), the discard prompt is open,
+/// and P2 has conceded, so the payment is parked on a recovery checkpoint.
+/// Returns the runner and the card the prefix drew.
+fn recovered_discard_checkpoint() -> (GameRunner, engine::types::identifiers::ObjectId) {
+    let (mut runner, source) = concession_board_with_hand();
+    let root = ResolvedAbility::new(
+        pay_cost(AbilityCost::Composite {
+            costs: vec![draw_cost(1), discard_cost()],
+        }),
+        vec![],
+        source,
+        P0,
+    );
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    assert!(is_dredge_prompt_for_p0(state));
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining leg 1's Dredge accepts the draw");
+    apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("a player can concede at any time");
+    let checkpoint = state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .expect("the concession parks the accepted prefix on a recovery checkpoint");
+    assert!(matches!(
+        checkpoint.state.waiting_for,
+        WaitingFor::DiscardChoice { .. }
+    ));
+    let drawn = checkpoint
+        .events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::CardDrawn {
+                player_id,
+                object_id,
+                ..
+            } if *player_id == P0 => Some(*object_id),
+            _ => None,
+        })
+        .expect("the accepted prefix drew a card");
+    (runner, drawn)
+}
+
+/// Save `state` and load it back through the checked production restore.
+fn checked_round_trip(state: &GameState) -> Result<GameState, PersistedRestoreError> {
+    let saved = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
+        .expect("the state serializes");
+    serde_json::from_str::<PersistedGameState>(&saved)
+        .expect("the save decodes")
+        .into_game_state()
+}
+
+/// CR 118.12 + CR 614.17a: a payment parked on a recovery checkpoint survives a
+/// checked save and restore. The restored discard prompt is answered through
+/// the authenticated entry with the card the accepted prefix drew, the payment
+/// settles, and the game goes on.
+#[test]
+fn a_recovered_payment_reopens_through_checked_restore_and_settles() {
+    let (runner, drawn) = recovered_discard_checkpoint();
+    let mut state = checked_round_trip(runner.state()).expect("the recovered payment restores");
+    apply(
+        &mut state,
+        P0,
+        GameAction::SelectCards { cards: vec![drawn] },
+    )
+    .expect("the restored prompt is answered with the prefix-drawn card");
+    assert!(state.payment_transaction.is_none(), "the payment settled");
+    assert!(
+        state.players[P0.0 as usize].graveyard.contains(&drawn),
+        "the drawn card was discarded"
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    let priority = match state.waiting_for {
+        WaitingFor::Priority { player } => player,
+        _ => unreachable!(),
+    };
+    apply(&mut state, priority, GameAction::PassPriority).expect("the game goes on");
+}
+
+/// CR 118.12 + CR 701.9a: a mandatory discard asks for more cards than the
+/// player has in hand on the checkpoint. The admission authority accepts no
+/// answer, so checked restore refuses the save; the same save uncorrupted
+/// restores (reach guard).
+#[test]
+fn checked_restore_refuses_a_mandatory_discard_larger_than_the_hand() {
+    let (runner, _) = recovered_discard_checkpoint();
+    checked_round_trip(runner.state()).expect("reach guard: the valid checkpoint restores");
+    let mut state = runner.state().clone();
+    let checkpoint = state
+        .payment_transaction
+        .as_mut()
+        .and_then(|transaction| transaction.recovered.as_mut())
+        .expect("the checkpoint is live");
+    let hand = checkpoint.state.players[P0.0 as usize].hand.len();
+    let WaitingFor::DiscardChoice { count, .. } = &mut checkpoint.state.waiting_for else {
+        unreachable!("the checkpoint holds the discard prompt");
+    };
+    *count = hand + 1;
+    let corrupted = checkpoint.state.waiting_for.clone();
+    state.waiting_for = corrupted;
+    assert!(
+        matches!(
+            checked_round_trip(&state),
+            Err(PersistedRestoreError::InvalidPaymentTransaction(_))
+        ),
+        "a discard prompt no answer can satisfy is refused"
+    );
+}
+
+/// The concession board without the can't-draw pair: a 2-leg draw cost whose
+/// leg 2 Dredge prompt is open on a recovery checkpoint after P2 concedes.
+fn recovered_dredge_checkpoint() -> GameRunner {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in 0..3 {
+        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
+    }
+    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+    scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE);
+    let mut runner = scenario.build();
+    let root = ResolvedAbility::new(pay_cost(draw_legs(2)), vec![], source, P0);
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining leg 1's Dredge accepts the draw");
+    assert!(is_dredge_prompt_for_p0(state), "leg 2 offers Dredge");
+    apply(
+        state,
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("a player can concede at any time");
+    let checkpoint = state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .expect("the concession parks the prefix on a recovery checkpoint");
+    assert!(matches!(
+        checkpoint.state.waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    runner
+}
+
+/// CR 616.1 + CR 614.1: an optional replacement prompt whose pending
+/// replacement lost its only candidate offers no executable accept or
+/// decline. The admission authority accepts no answer, so checked restore
+/// refuses the save; the uncorrupted save restores and its prompt is answered.
+#[test]
+fn checked_restore_refuses_an_optional_replacement_without_a_candidate() {
+    let runner = recovered_dredge_checkpoint();
+    let mut valid =
+        checked_round_trip(runner.state()).expect("reach guard: the checkpoint restores");
+    apply(&mut valid, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("reach guard: the restored Dredge prompt is answered");
+    let mut state = runner.state().clone();
+    let pending = state
+        .payment_transaction
+        .as_mut()
+        .and_then(|transaction| transaction.recovered.as_mut())
+        .and_then(|checkpoint| checkpoint.state.pending_replacement.as_mut())
+        .expect("the checkpoint holds the Dredge choice");
+    assert!(pending.is_optional, "Dredge is an optional replacement");
+    pending.candidates.clear();
+    assert!(
+        matches!(
+            checked_round_trip(&state),
+            Err(PersistedRestoreError::InvalidPaymentTransaction(_))
+        ),
+        "a replacement prompt with no candidate is refused"
+    );
+}
+
+/// CR 118.12: while a recovered payment is parked, the shared debug preflight
+/// refuses every state-mutating sandbox action, leaving the payment and the
+/// board untouched; a zero-count create stays the no-op projection and the
+/// read-only permission check still answers.
+#[test]
+fn sandbox_mutations_are_refused_while_a_recovered_payment_is_parked() {
+    let (mut runner, _) = recovered_discard_checkpoint();
+    let state = runner.state_mut();
+    state.debug_mode = true;
+    state.format_config.allow_debug_actions = true;
+    let before = state.clone();
+    for action in [
+        DebugAction::SetLife {
+            player_id: P1,
+            life: 5,
+        },
+        DebugAction::DrawCards {
+            player_id: P0,
+            count: 1,
+        },
+        DebugAction::GainLife {
+            player_id: P0,
+            amount: 1,
+        },
+    ] {
+        let error = apply(state, P0, GameAction::Debug(action.clone()))
+            .expect_err("a sandbox mutation is refused while the payment is parked");
+        assert!(
+            matches!(error, EngineError::InvalidAction(_)),
+            "{action:?}: {error:?}"
+        );
+        assert_eq!(state.payment_transaction, before.payment_transaction);
+        assert_eq!(state.players, before.players);
+    }
+    engine::game::engine::require_explicit_debug_permission(state, P0)
+        .expect("read-only diagnostics keep their access check");
 }

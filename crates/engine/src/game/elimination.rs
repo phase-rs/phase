@@ -173,9 +173,6 @@ pub fn eliminate_players_simultaneously(
 /// a leaves-the-battlefield observer sees the conceding player's permanents leave
 /// the game (CR 603.6c).
 pub fn concede(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
-    // CR 104.3a: record the authenticated concession explicitly; the action
-    // boundary keeps it (and its settlement) even if later finalization fails.
-    state.conceded_this_action = Some(player);
     eliminate_players(
         state,
         &[player],
@@ -251,15 +248,6 @@ pub(crate) fn eliminate_players(
     } else {
         None
     };
-    // CR 702.24a + CR 800.4a: the counted repeated-payment owner is also a
-    // resolving continuation; a departing payer cannot keep owing draws.
-    if state
-        .pending_unless_draw_repeat
-        .as_ref()
-        .is_some_and(|pending| leaving_set.contains(&pending.player))
-    {
-        state.pending_unless_draw_repeat = None;
-    }
 
     // CR 800.4a: elimination can remove frozen stack entries and a session's
     // canonical representative. Restore the pre-overlay preferences before

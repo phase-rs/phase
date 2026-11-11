@@ -13444,13 +13444,11 @@ fn resolution_back_land_face_play_is_legal_requires_a_modal_land_back_turn_and_a
     );
 }
 
-/// CR 104.1 + CR 118.12: a finished game retires the staged payment and the
-/// counted-payment cursor before the match transition moves to sideboarding.
+/// CR 104.1 + CR 118.12: a finished game retires the staged payment before the
+/// match transition moves to sideboarding.
 #[test]
 fn a_finished_match_retires_the_payment_before_the_transition() {
-    use crate::types::game_state::{
-        GameEnd, PendingUnlessDrawRepeat, ResolutionPaymentTransaction,
-    };
+    use crate::types::game_state::{GameEnd, ResolutionPaymentTransaction};
     use crate::types::match_config::MatchType;
 
     let mut state = GameState::new_two_player(7);
@@ -13466,26 +13464,10 @@ fn a_finished_match_retires_the_payment_before_the_transition() {
         resolving_trigger_context: None,
         recovered: None,
     }));
-    state.pending_unless_draw_repeat = Some(Box::new(PendingUnlessDrawRepeat {
-        player: P0,
-        base: Box::new(AbilityCost::PayLife {
-            amount: QuantityExpr::Fixed { value: 1 },
-        }),
-        remaining: 65,
-        pending_effect: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), P0)),
-        trigger_event: None,
-        effect_description: None,
-        resume_cost: None,
-        paused_draw_pending: false,
-    }));
     let mut result = ActionResult::applied(vec![], state.waiting_for.clone());
     super::settle_finished_game(&mut state, &mut result);
     assert!(
         state.payment_transaction.is_none(),
         "the terminal transition sees no live payment descriptor"
-    );
-    assert!(
-        state.pending_unless_draw_repeat.is_none(),
-        "no counted cursor survives into sideboarding"
     );
 }
