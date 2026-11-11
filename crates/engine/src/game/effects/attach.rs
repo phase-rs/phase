@@ -2316,11 +2316,17 @@ pub(crate) fn refresh_protection_start_attachment_snapshots(state: &mut GameStat
     use crate::game::game_object::{ProtectionStartGrant, ProtectionStartKey};
     use std::collections::{HashMap, HashSet};
 
-    migrate_legacy_protection_start_snapshots(state);
-
+    // CR 702.26b + CR 702.26c: a phased-out host is treated as though it does
+    // not exist, and the layer pass leaves its recorded grants frozen. Only
+    // phased-in hosts count, so an effect that stops applying while its host is
+    // phased out starts again, with a new snapshot, when the host phases in.
     let mut active_by_source: HashMap<ObjectId, Vec<ProtectionStartGrant>> = HashMap::new();
     for host_id in &state.battlefield {
-        let Some(host) = state.objects.get(host_id) else {
+        let Some(host) = state
+            .objects
+            .get(host_id)
+            .filter(|host| host.is_phased_in_permanent())
+        else {
             continue;
         };
         for grant in &host.protection_start_grants {
@@ -2396,8 +2402,9 @@ pub(crate) fn refresh_protection_start_attachment_snapshots(state: &mut GameStat
 /// key at a slot layer 6 filled with a granted static cannot be mapped to its
 /// grant occurrence: it migrates to a key no grant claims, the refresh prunes
 /// it, and that grant takes a new snapshot (no printed card grants a ridered
-/// static). Entries whose host is gone are dropped.
-fn migrate_legacy_protection_start_snapshots(state: &mut GameState) {
+/// static). Entries whose host is gone are dropped. Run once at the persisted
+/// restore boundary, before its layer flush.
+pub(crate) fn migrate_legacy_protection_start_snapshots(state: &mut GameState) {
     use crate::game::game_object::ProtectionStartKey;
     use crate::types::layers::ProtectionGrantOccurrence;
 
@@ -5690,7 +5697,7 @@ mod tests {
         evaluate_protection_layers(&mut state);
         assert!(
             !printed_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
-            "white rider must not inherit the prior blue snapshot at the same def_index"
+            "white rider must not inherit the prior blue snapshot of the same static"
         );
 
         state

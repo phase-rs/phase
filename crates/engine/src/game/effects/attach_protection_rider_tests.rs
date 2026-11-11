@@ -23,7 +23,7 @@ use crate::types::ability::{
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
-use crate::types::game_state::WaitingFor;
+use crate::types::game_state::{PersistedGameState, PersistedRestoreFinalization, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::layers::ProtectionGrantOccurrence;
@@ -333,6 +333,62 @@ fn stolen_benevolent_blessing_snapshots_its_new_controllers_attachments() {
         attachment_illegality(state, p0_pacifism, second_host),
         Some(AttachIllegality::Protection),
         "the former controller's Aura is not exempt"
+    );
+}
+
+/// CR 702.26b + CR 702.26c + CR 702.16p: a phased-out permanent is treated as
+/// though it does not exist, so Benevolent Blessing's effect stops applying
+/// while it and its creature are phased out, and starts again (with a new
+/// snapshot) when they phase in. Printed cards: Benevolent Blessing (white
+/// chosen) and Bonesplitter (colorless, so not snapshotted) on Grizzly Bears;
+/// Reality Ripple ("Target artifact, creature, or land phases out.") phases them
+/// out; Painter's Servant ("…permanents are the chosen color…", white) makes
+/// Bonesplitter white. When they phase in, Bonesplitter is white and already
+/// attached, so the new snapshot keeps it. Synthetic: the phase-in is called
+/// directly, standing in for P0's next untap step.
+#[test]
+fn phasing_in_starts_a_new_start_snapshot() {
+    let mut s = scenario();
+    let host = grizzly_bears(&mut s, P0);
+    let bonesplitter = s.add_real_card(P0, "Bonesplitter", Zone::Battlefield, db());
+    let blessing = s.add_real_card(P0, "Benevolent Blessing", Zone::Hand, db());
+    let ripple = s.add_real_card(P0, "Reality Ripple", Zone::Hand, db());
+    let painter = s.add_real_card(P0, "Painter's Servant", Zone::Hand, db());
+    let mut runner = s.build();
+    prepare(&mut runner, P0);
+    runner
+        .activate(bonesplitter, 0)
+        .target_object(host)
+        .resolve();
+    runner.advance_until_stack_empty();
+    attached(&runner, bonesplitter, host);
+    cast(&mut runner, P0, blessing, Some(host), Some("white"));
+    attached(&runner, blessing, host);
+
+    cast(&mut runner, P0, ripple, Some(host), None);
+    assert!(
+        !runner.state().objects[&host].is_phased_in_permanent(),
+        "reach guard: Reality Ripple phased the Bears out"
+    );
+    cast(&mut runner, P0, painter, None, Some("white"));
+
+    let mut events = Vec::new();
+    crate::game::phasing::phase_in_object(runner.state_mut(), host, &mut events);
+    crate::game::layers::mark_layers_full(runner.state_mut());
+    crate::game::layers::flush_layers(runner.state_mut());
+    let state = runner.state();
+    assert!(state.objects[&host].is_phased_in_permanent());
+    attached(&runner, bonesplitter, host);
+    assert!(
+        state.objects[&bonesplitter]
+            .color
+            .contains(&ManaColor::White),
+        "reach guard: Painter's Servant made Bonesplitter white"
+    );
+    assert_eq!(
+        attachment_illegality(state, bonesplitter, host),
+        None,
+        "Blessing's effect started again with Bonesplitter already attached"
     );
 }
 
@@ -767,8 +823,6 @@ fn copy_of_ridered_aura_carries_its_own_rider() {
 /// alone keeps the white Aura attached.
 #[test]
 fn persisted_restore_rebuilds_the_rider_before_any_action() {
-    use crate::types::game_state::{PersistedGameState, PersistedRestoreFinalization};
-
     let mut s = scenario();
     let host = grizzly_bears(&mut s, P0);
     let ward = s.add_real_card(P0, "White Ward", Zone::Hand, db());
@@ -1320,8 +1374,6 @@ fn host_reentering_starts_a_new_snapshot() {
 /// migrates its entry.
 #[test]
 fn persisted_restore_keeps_the_start_snapshot_identity() {
-    use crate::types::game_state::{PersistedGameState, PersistedRestoreFinalization};
-
     let mut s = scenario();
     let host = grizzly_bears(&mut s, P0);
     let pacifism = s.add_real_card(P0, "Pacifism", Zone::Hand, db());
@@ -1524,7 +1576,7 @@ fn chosen_protection_grant_carries_its_statics_rider() {
     );
 }
 
-/// CR 613.6 + CR 702.16p: a creature entering where a granted ridered static
+/// CR 611.3a + CR 702.16p: a creature entering where a granted ridered static
 /// reaches it takes the full layer pass (`prepare_incremental_flush` escalates
 /// when a granted-static child of an outside carrier can reach an entrant), so
 /// the entrant's rider and start grant name the grant occurrence, never the

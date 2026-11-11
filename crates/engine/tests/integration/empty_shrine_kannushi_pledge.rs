@@ -771,6 +771,11 @@ fn kannushi_pledge_raw_oracle_and_nonbattlefield_colors() {
     let kannushi = s
         .add_creature_to_hand_from_oracle(P0, "Empty-Shrine Kannushi", 1, 1, KANNUSHI)
         .with_color(vec![ManaColor::White])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White],
+        })
+        .with_subtypes(vec!["Human", "Cleric"])
         .id();
     for zone in [Zone::Hand, Zone::Graveyard, Zone::Library, Zone::Exile] {
         s.add_real_card(P0, "Fervor", zone, db());

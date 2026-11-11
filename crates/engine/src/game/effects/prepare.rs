@@ -543,6 +543,7 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     // instead of the prepare-face characteristics installed afterwards.
     copy.granted_abilities_from = None;
     copy.protection_provenance.clear();
+    copy.protection_start_grants.clear();
     copy.layer1_copy_effect = None;
     copy.layer1_name_origin = None;
     copy.copied_room_halves = None;

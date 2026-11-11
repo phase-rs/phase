@@ -18,6 +18,7 @@
 //! and on the battlefield. A revert (no rider / no exemption check) sends it
 //! to the graveyard.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::layers::evaluate_layers;
 use engine::game::sba::check_state_based_actions;
 use engine::game::zones::create_object;
@@ -28,6 +29,8 @@ use engine::types::game_state::GameState;
 use engine::types::identifiers::CardId;
 use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::ManaColor;
+use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 
 /// CR 702.16p: the start-snapshot key of the grant source's printed static 0,
 /// modification `mod_index`, for `host`'s current incarnation.
@@ -36,7 +39,6 @@ fn printed_start_key(
     mod_index: usize,
     host: engine::types::identifiers::ObjectId,
 ) -> engine::game::game_object::ProtectionStartKey {
-    use engine::game::game_object::ObjectIncarnationRefExt;
     engine::game::game_object::ProtectionStartKey {
         occurrence: engine::types::layers::ProtectionGrantOccurrence::Static {
             definition_index: 0,
@@ -45,8 +47,6 @@ fn printed_start_key(
         host: engine::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&host]),
     }
 }
-use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
 
 const FLICKERING_WARD: &str = "Enchant creature\n\
 As this Aura enters, choose a color.\n\

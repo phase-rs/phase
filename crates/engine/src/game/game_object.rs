@@ -824,8 +824,9 @@ pub struct GameObject {
     )]
     pub protection_start_snapshots: HashMap<ProtectionStartKey, ProtectionStartSnapshot>,
     /// CR 702.16p: snapshots an older save stored under slot keys. Read, never
-    /// written; the next layer flush migrates each one whose host is still
-    /// present to [`Self::protection_start_snapshots`] and empties this map.
+    /// written; the persisted restore boundary (`finalize_persisted_restore`)
+    /// migrates each one whose host is still present to
+    /// [`Self::protection_start_snapshots`] and empties this map.
     #[serde(
         default,
         rename = "protection_start_exempt_attachments",
@@ -834,9 +835,12 @@ pub struct GameObject {
     )]
     pub legacy_protection_start_exempt_attachments:
         HashMap<LegacyProtectionStartKey, ProtectionStartSnapshot>,
-    /// CR 702.16p: the ridered protection effects the last layer pass applied
-    /// to this object. Layer-derived (reset with `keywords` at the start of a
-    /// pass, but not by later removal of the keyword) and not serialized.
+    /// CR 702.16p: the protection effects with the "already attached" rider that
+    /// the last layer pass applied to this object. Layer-derived (reset with
+    /// `keywords` when a pass derives this object, but not by later removal of
+    /// the keyword) and not serialized. A phased-out object is not derived, so
+    /// its list is frozen; the start-snapshot refresh reads phased-in hosts
+    /// only.
     #[serde(skip)]
     pub protection_start_grants: Vec<ProtectionStartGrant>,
     /// CR 702.16 + CR 613.1f: provenance of the protection abilities in
