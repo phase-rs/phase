@@ -469,12 +469,6 @@ impl CardDatabase {
             .filter_map(|key| self.face_index.get(key))
     }
 
-    /// CR 205.3m: Returns the full creature subtype vocabulary derived from
-    /// every loaded creature face. Sorted and deduplicated. Consumers seed
-    /// `GameState::all_creature_types` from this so token-only types
-    /// (Saproling, Golem, etc.) that no creature card in the loaded decks
-    /// shares are still recognized by `SharesQuality::CreatureType`,
-    /// `ChoiceType::CreatureType`, and the Changeling expansion.
     /// Coverage subtype lexicon: every subtype printed on a loaded face, the same
     /// set `analyze_coverage` uses. Computed once per database and cached.
     pub fn valid_subtypes(&self) -> &HashSet<String> {
@@ -482,6 +476,12 @@ impl CardDatabase {
             .get_or_init(|| crate::game::coverage::collect_valid_subtypes(self))
     }
 
+    /// CR 205.3m: Returns the full creature subtype vocabulary derived from
+    /// every loaded creature face. Sorted and deduplicated. Consumers seed
+    /// `GameState::all_creature_types` from this so token-only types
+    /// (Saproling, Golem, etc.) that no creature card in the loaded decks
+    /// shares are still recognized by `SharesQuality::CreatureType`,
+    /// `ChoiceType::CreatureType`, and the Changeling expansion.
     pub fn creature_type_vocabulary(&self) -> &[String] {
         &self.creature_type_vocabulary
     }
