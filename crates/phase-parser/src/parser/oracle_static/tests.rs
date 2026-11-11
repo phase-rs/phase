@@ -35336,6 +35336,68 @@ fn static_nonlegendary_creatures_enchanted_player_controls_base_pt_and_lose_type
     );
 }
 
+/// CR 613.1f: "has/have no abilities" (Xu-Ifit, Osteoharmonist's rider) is the
+/// "has" form of ability removal and yields `LossMember::Abilities`; the
+/// existing "loses all ..." arm and the empty scan are unchanged.
+#[test]
+fn loss_enumeration_reads_has_no_abilities() {
+    assert_eq!(
+        parse_loss_enumeration("has no abilities").expect("has form"),
+        ("", vec![LossMember::Abilities])
+    );
+    assert_eq!(
+        parse_loss_enumeration("have no abilities").expect("have form"),
+        ("", vec![LossMember::Abilities])
+    );
+    assert_eq!(
+        scan_loss_enumeration("is a skeleton in addition to its other types and has no abilities"),
+        vec![LossMember::Abilities]
+    );
+    assert!(parse_continuous_modifications("and has no abilities")
+        .contains(&ContinuousModification::RemoveAllAbilities));
+    // Positive: the "loses all" arm still reads.
+    assert_eq!(
+        scan_loss_enumeration("loses all land types and abilities"),
+        vec![LossMember::LandTypes, LossMember::Abilities]
+    );
+    // Hostile: empty input and the filter phrase yield nothing.
+    assert!(scan_loss_enumeration("").is_empty());
+    assert!(scan_loss_enumeration("creatures with no abilities get +2/+2").is_empty());
+}
+
+/// CR 613.1f: the filter phrase "with no abilities" (Muraganda Petroglyphs,
+/// Ruxa) selects objects; it is not ability removal.
+#[test]
+fn no_abilities_filter_is_not_ability_removal() {
+    for (text, power) in [
+        ("Creatures with no abilities get +2/+2.", 2),
+        ("Creatures you control with no abilities get +1/+1.", 1),
+    ] {
+        let def = parse_static_line(text).expect("static def");
+        // Reach guard: the filter and the pump parsed.
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => assert!(
+                tf.properties.contains(&FilterProp::HasNoAbilities),
+                "{text}: {:?}",
+                tf.properties
+            ),
+            other => panic!("{text}: expected Typed filter, got {other:?}"),
+        }
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::AddPower { value: power }),
+            "{text}: {:?}",
+            def.modifications
+        );
+        assert!(
+            !def.modifications
+                .contains(&ContinuousModification::RemoveAllAbilities),
+            "{text}: {:?}",
+            def.modifications
+        );
+    }
+}
+
 /// CR 205.3i: "land types" is a fourth loss-enumeration member alongside
 /// abilities/card types/creature types — Alpine Moon, Lithoform Blight, and
 /// Ultima, Origin of Oblivion all use "loses all land types and abilities".

@@ -1420,7 +1420,8 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // Oblivion — "loses all land types and abilities") reuses the same
     // `RemoveAllSubtypes` runtime the `CreatureTypes` arm already exercises;
     // `game/layers.rs` already has a working `SubtypeSet::Land` arm, so this is
-    // pure parser wiring, no engine change.
+    // pure parser wiring, no engine change. "has/have no abilities" (Xu-Ifit)
+    // yields the same Abilities member (CR 613.1f).
     for member in scan_loss_enumeration(unquoted_tp.lower) {
         match member {
             LossMember::Abilities => {

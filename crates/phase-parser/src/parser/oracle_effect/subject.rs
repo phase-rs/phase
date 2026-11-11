@@ -13955,6 +13955,68 @@ mod entry_onset_tests {
         assert_eq!(found[0].entry_onset, WithEntry, "animation");
     }
 
+    /// CR 611.2e + CR 613.1f: Xu-Ifit's "It's a Skeleton in addition to its other types and has
+    /// no abilities" rider removes all abilities of the returned object, with the entry. The
+    /// "loses all other abilities" arm (Hellcat) keeps its `WhenFollowed` onset.
+    #[test]
+    fn xu_ifit_has_no_abilities_rider_removes_all_abilities_with_entry() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::zones::Zone;
+        let strings = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let remove_all =
+            |m: &ContinuousModification| matches!(m, ContinuousModification::RemoveAllAbilities);
+
+        let xu = parse_oracle_text(
+            "{T}: Return target creature card from your graveyard to the battlefield. It's a Skeleton in addition to its other types and has no abilities. Activate only as a sorcery.",
+            "Xu-Ifit, Osteoharmonist",
+            &[],
+            &strings(&["Legendary", "Creature"]),
+            &strings(&["Human", "Wizard"]),
+        );
+        let def = xu.abilities.first().expect("the activated ability");
+        // Reach guard: the root is the graveyard return, and the Skeleton rider node exists.
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            ),
+            "root effect: {def:#?}"
+        );
+        let skeleton = become_nodes(
+            def,
+            &TargetFilter::ParentTarget,
+            |m| matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Skeleton"),
+        );
+        assert_eq!(skeleton.len(), 1, "Skeleton rider node: {def:#?}");
+        let removal = become_nodes(def, &TargetFilter::ParentTarget, remove_all);
+        assert_eq!(removal.len(), 1, "RemoveAllAbilities node: {def:#?}");
+        assert!(
+            std::ptr::eq(removal[0], skeleton[0]),
+            "the Skeleton and the removal share the rider node: {def:#?}"
+        );
+        assert_eq!(removal[0].entry_onset, WithEntry, "ability removal onset");
+
+        let hellcat = parse_oracle_text(
+            "Haste\nWhen Hellcat dies, return her to the battlefield under her owner's control with a +1/+1 counter on her. She loses all abilities and gains haste.",
+            "Hellcat, Undying Vigilante",
+            &strings(&["Haste"]),
+            &strings(&["Legendary", "Creature"]),
+            &strings(&["Human", "Hero"]),
+        );
+        let execute = hellcat
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_deref())
+            .expect("the dies trigger's execute chain");
+        let removal = become_nodes(execute, &TargetFilter::SelfRef, remove_all);
+        assert_eq!(removal.len(), 1, "Hellcat removal node: {execute:#?}");
+        assert_eq!(removal[0].entry_onset, WhenFollowed, "Hellcat onset");
+    }
+
     /// CR 205.1b: "It's still a land" qualifies the governing "becomes"; neither it nor the
     /// "becomes" applies with the entry.
     #[test]

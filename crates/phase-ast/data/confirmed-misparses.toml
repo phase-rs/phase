@@ -2964,7 +2964,6 @@ face = [
   { key = "xanathar, guild kingpin", class = "missing_effect", clauses = ["you may look at the top card of their library any time,", "you may play the top card of their library,"] },
   { key = "xathrid gorgon", class = "missing_effect", clauses = ["and becomes a colorless artifact in addition to its other types."] },
   { key = "xira, the golden sting", class = "trigger_wrong", clauses = ["When that creature dies, if it has an egg counter on it, draw a card", "and create a 1/1 black Insect creature token with flying."] },
-  { key = "xu-ifit, osteoharmonist", class = "missing_effect", clauses = ["and has no abilities."] },
   { key = "yamabushi's flame", class = "dropped_qualifier", clauses = ["If a creature dealt damage this way would die this turn, exile it instead."] },
   { key = "yamabushi's storm", class = "wrong_object", clauses = ["If a creature dealt damage this way would die this turn, exile it instead."] },
   { key = "yanling's harbinger", class = "extra_effect", clauses = ["When this creature enters, you may search your library and/or graveyard for a card named Mu Yanling, Celestial Wind, reveal it, and put it into your hand.", "If you search your library this way, shuffle."] },

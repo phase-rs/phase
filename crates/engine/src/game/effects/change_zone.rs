@@ -1692,10 +1692,15 @@ pub fn resolve(
     // drain, which owns the trailing `EffectResolved`.)
     state.last_effect_count = Some(moved_count);
 
-    crate::game::triggers::complete_logical_zone_trigger_collection(
+    // CR 603.10 + CR 611.2e: a later "is/has" instruction of this resolution applies with this
+    // entry; its triggers are checked once that effect exists.
+    let collector =
+        crate::game::effects::entry_occurrence_collector(state, ability.sub_ability.as_deref());
+    crate::game::triggers::complete_logical_zone_trigger_collection_for(
         state,
         &mut logical_zone_change_group,
         &mut events[logical_group_event_start..],
+        collector,
     )
     .expect("completed ChangeZone owns every terminal member outcome");
 
@@ -3321,10 +3326,15 @@ pub fn resolve_all(
     // then draw that many cards."
     state.last_effect_count = Some(moved_count);
 
-    crate::game::triggers::complete_logical_zone_trigger_collection(
+    // CR 603.10 + CR 611.2e: a later "is/has" instruction of this resolution applies with this
+    // entry; its triggers are checked once that effect exists.
+    let collector =
+        crate::game::effects::entry_occurrence_collector(state, ability.sub_ability.as_deref());
+    crate::game::triggers::complete_logical_zone_trigger_collection_for(
         state,
         &mut logical_zone_change_group,
         &mut events[logical_group_event_start..],
+        collector,
     )
     .expect("completed ChangeZoneAll owns every terminal member outcome");
 

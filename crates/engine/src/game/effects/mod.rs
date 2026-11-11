@@ -5796,7 +5796,18 @@ fn entry_observation_deferred(
         return true;
     }
     // D1 — CR 611.2e.
-    resolved_chain_may_apply_with_entry(next)
+    resolution_may_still_apply_with_entry(state, Some(next))
+}
+
+/// CR 611.2e: may an instruction this resolution has yet to follow still apply a continuous
+/// effect simultaneously with an entry the current instruction completed? `continuation` is
+/// the completing instruction's own remaining chain when the caller holds it; frame-held later
+/// instructions and a parked library-search resume are always read.
+pub(crate) fn resolution_may_still_apply_with_entry(
+    state: &GameState,
+    continuation: Option<&ResolvedAbility>,
+) -> bool {
+    continuation.is_some_and(resolved_chain_may_apply_with_entry)
         || state
             .resolution_stack
             .iter()
@@ -5805,6 +5816,20 @@ fn entry_observation_deferred(
             .pending_library_search_delivery
             .as_ref()
             .is_some_and(library_search_resume_may_apply_with_entry)
+}
+
+/// CR 603.10 + CR 603.6a + CR 611.2e: an entry is checked "immediately after" it with the
+/// resolution's simultaneous "is/has" effects applied, so while one may still be applied the
+/// owner hands its entries to the post-action collector.
+pub(crate) fn entry_occurrence_collector(
+    state: &GameState,
+    continuation: Option<&ResolvedAbility>,
+) -> crate::game::triggers::EntryOccurrenceCollector {
+    if resolution_may_still_apply_with_entry(state, continuation) {
+        crate::game::triggers::EntryOccurrenceCollector::AfterSimultaneousEntryEffects
+    } else {
+        crate::game::triggers::EntryOccurrenceCollector::Owner
+    }
 }
 
 pub(super) fn resolve_optional_effect_decision(
