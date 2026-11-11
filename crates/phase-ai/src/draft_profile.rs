@@ -53,9 +53,7 @@ use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 use crate::ability_chain::collect_chain_effects;
-use crate::cast_facts::{
-    collect_face_effects, is_direct_removal, is_mass_damage_or_shrink, EffectProfile,
-};
+use crate::cast_facts::{collect_face_effects, is_direct_removal, EffectProfile};
 use crate::draft_eval::{dominant_colors, produced_color_count};
 use crate::features::mana_ramp::{chain_has_mana_effect, chain_searches_for_land};
 use crate::policies::effect_classify::pt_value_is_non_negative;
@@ -263,12 +261,23 @@ pub struct ThreatNeed {
     pub definition: String,
 }
 
+/// Whether a single-target toughness reduction is removal in a set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShrinkRemovalPolicy {
+    /// Single-target shrink stays out of the Removal class.
+    #[default]
+    Exclude,
+    /// Single-target shrink is part of the set's removal identity.
+    Include,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetProfile {
     pub class_bonus: BTreeMap<CardClass, f64>,
     #[serde(default)]
     pub threat_need: Option<ThreatNeed>,
-    /// Whether a negative toughness `Pump` is removal in this set.
+    /// Whether a single-target negative toughness `Pump` is removal in this set.
     ///
     /// CR 704.5f: a creature with toughness 0 or less is put into its owner's
     /// graveyard, so "target creature gets -N/-N" is removal-shaped. Whether
@@ -277,7 +286,7 @@ pub struct SetProfile {
     /// incidentally keeps the class out of its existing scoring. Off by
     /// default so a profile that does not opt in is never silently re-scored.
     #[serde(default)]
-    pub toughness_reduction_removal: bool,
+    pub shrink_removal: ShrinkRemovalPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -530,7 +539,7 @@ impl DraftProfile {
 
         let classes = card
             .face
-            .map(|f| classify_with(f, set.toughness_reduction_removal))
+            .map(|f| classify_with(f, set.shrink_removal))
             .unwrap_or_default();
         let card_bonus = self.bonus_for_name(card.name);
         let award = ClassAward::new(set, &classes);
@@ -786,10 +795,11 @@ impl DraftProfile {
             || (is_evasive(face) && power >= EVASIVE_THREAT_POWER)
     }
 
-    /// Whether `set_code` treats a toughness reduction as removal.
-    fn shrink_counts_as_removal(&self, set_code: &str) -> bool {
+    /// The shrink-removal policy of `set_code`; an unknown set uses the
+    /// rules-level reading that shrink is removal.
+    fn shrink_policy(&self, set_code: &str) -> ShrinkRemovalPolicy {
         self.set_profile(set_code)
-            .is_none_or(|set| set.toughness_reduction_removal)
+            .map_or(ShrinkRemovalPolicy::Include, |set| set.shrink_removal)
     }
 
     /// Classify a card under its own set's removal policy.
@@ -797,7 +807,7 @@ impl DraftProfile {
         let Some(face) = card.face else {
             return BTreeSet::new();
         };
-        classify_with(face, self.shrink_counts_as_removal(card.set_code))
+        classify_with(face, self.shrink_policy(card.set_code))
     }
 
     /// The deck roles a card fills under its own set's removal policy.
@@ -805,7 +815,7 @@ impl DraftProfile {
         let Some(face) = card.face else {
             return Vec::new();
         };
-        roles_with(face, self.shrink_counts_as_removal(card.set_code))
+        roles_with(face, self.shrink_policy(card.set_code))
     }
 
     /// Diminishing-returns need: the best role the card fills, linearly spent
@@ -1023,13 +1033,13 @@ fn is_shrink_removal(effect: &Effect) -> bool {
 /// Removal-shaped effect anywhere on the face: a direct removal effect, mass
 /// damage, or — when the set prints shrink removal — a toughness reduction
 /// (see [`is_shrink_removal`]).
-fn is_removal(face: &CardFace, shrink_is_removal: bool) -> bool {
+fn is_removal(face: &CardFace, shrink: ShrinkRemovalPolicy) -> bool {
     collect_face_effects(face)
         .into_iter()
-        .any(|effect| is_removal_effect(effect, shrink_is_removal))
+        .any(|effect| is_removal_effect(effect, shrink))
 }
 
-fn is_removal_effect(effect: &Effect, shrink_is_removal: bool) -> bool {
+fn is_removal_effect(effect: &Effect, shrink: ShrinkRemovalPolicy) -> bool {
     match effect {
         // CR 701.24: a bounce that returns the source itself ("you may return
         // this creature to its owner's hand") does not remove an opposing
@@ -1042,9 +1052,8 @@ fn is_removal_effect(effect: &Effect, shrink_is_removal: bool) -> bool {
         // graveyard. Mass shrink keeps counting for every profile (it is mass
         // removal on its face); single-target shrink only in a set that
         // declares it part of its removal identity.
-        Effect::Pump { .. } | Effect::PumpAll { .. } => {
-            (shrink_is_removal && is_shrink_removal(effect)) || is_mass_damage_or_shrink(effect)
-        }
+        Effect::Pump { .. } => shrink == ShrinkRemovalPolicy::Include && is_shrink_removal(effect),
+        Effect::PumpAll { .. } => is_shrink_removal(effect),
         other => is_direct_removal(other),
     }
 }
@@ -1067,13 +1076,13 @@ fn has_mana_ability(face: &CardFace) -> bool {
 /// Classify a face into the roles the profile's class bonuses key on, with
 /// the rules-level reading that a toughness reduction is removal (CR 704.5f).
 pub fn classify(face: &CardFace) -> BTreeSet<CardClass> {
-    classify_with(face, true)
+    classify_with(face, ShrinkRemovalPolicy::Include)
 }
 
 /// Classify a face under a set's removal policy: a set that does not treat
-/// shrink as removal (see [`SetProfile::toughness_reduction_removal`]) omits
+/// shrink as removal (see [`SetProfile::shrink_removal`]) omits
 /// that class so its existing scores are unchanged.
-fn classify_with(face: &CardFace, shrink_is_removal: bool) -> BTreeSet<CardClass> {
+fn classify_with(face: &CardFace, shrink: ShrinkRemovalPolicy) -> BTreeSet<CardClass> {
     let core = &face.card_type.core_types;
     let mut classes = BTreeSet::new();
     let creature = is_creature(face);
@@ -1092,7 +1101,7 @@ fn classify_with(face: &CardFace, shrink_is_removal: bool) -> BTreeSet<CardClass
     if is_equipment(face) {
         classes.insert(CardClass::Equipment);
     }
-    if is_removal(face, shrink_is_removal) {
+    if is_removal(face, shrink) {
         classes.insert(CardClass::Removal);
     }
     if face
@@ -1217,12 +1226,12 @@ fn has_buff_effect(face: &CardFace) -> bool {
 /// [`DraftProfile::roles_for`].
 #[cfg(test)]
 fn roles(face: &CardFace) -> Vec<DeckRole> {
-    roles_with(face, true)
+    roles_with(face, ShrinkRemovalPolicy::Include)
 }
 
-fn roles_with(face: &CardFace, shrink_is_removal: bool) -> Vec<DeckRole> {
+fn roles_with(face: &CardFace, shrink: ShrinkRemovalPolicy) -> Vec<DeckRole> {
     let mut roles = Vec::new();
-    if is_removal(face, shrink_is_removal) {
+    if is_removal(face, shrink) {
         roles.push(DeckRole::Removal);
     }
     let creature = is_creature(face);
@@ -2098,7 +2107,7 @@ mod tests {
             classify(&nim).contains(&CardClass::Removal),
             "positive guard: the shrink is removal-shaped"
         );
-        assert!(!classify_with(&nim, false).contains(&CardClass::Removal));
+        assert!(!classify_with(&nim, ShrinkRemovalPolicy::Exclude).contains(&CardClass::Removal));
         assert_eq!(
             p.artifact_weight(&card("Nim Replica", "MRD", &[], &nim)),
             FILLER_ARTIFACT_WEIGHT
