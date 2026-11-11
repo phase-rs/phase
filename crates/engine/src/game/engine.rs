@@ -3344,9 +3344,9 @@ fn truncate_to_declared_seats(
 /// and, where the offer publishes no suggested declaration, hands this very template to
 /// `handle_declare_shortcut`, which validates it. So the
 /// publisher must not be able to emit anything that handler would refuse: step (5) runs the
-/// SHARED [`crate::analysis::decision_template::declaration_conforms`] — the same coverage +
-/// value-legality predicate that handler and the human ingress run — rather than a third
-/// derivation of `required` alongside theirs.
+/// SHARED [`crate::analysis::decision_template::declaration_pins_conform`] — the coverage,
+/// value-legality and recorded-answer half of `declaration_conforms`, whose aim walk a performed
+/// period makes redundant — rather than a third derivation of `required` alongside theirs.
 ///
 /// The range is `shortcut_validated_range(own_count, ..)`, i.e. this declaration's OWN count,
 /// which bounds every count it drives; `iteration_count` belongs to the suggestion (see
@@ -3369,11 +3369,10 @@ fn truncate_to_declared_seats(
 ///   exposed-nothing schema is refused on any slot-addressing pin it carries and states nothing
 ///   without one; either way `declaration.is_some()` would stop meaning "the handler takes this";
 /// * a point with neither an observed aim nor a recorded answer names nothing to pin;
-/// * the `(kind, value)` match is WILDCARD-FREE, so a future `DecisionPointKind` or
-///   `LoopAnswerValue` variant gets a compile-time visit here instead of a silent pin. The
-///   two kind/value MISMATCH groups return `None` rather than `unreachable!` because what
-///   makes them unreachable is a key-shape agreement between publisher and writer, not a type
-///   guarantee.
+/// * the kind match at a charged slot is WILDCARD-FREE, so a future `DecisionPointKind` variant
+///   gets a compile-time visit here instead of a silent pin; every non-`Targets` kind returns
+///   `None` rather than `unreachable!` because what keeps an aim off those slots is a key-shape
+///   agreement between publisher and observation, not a type guarantee.
 fn build_bounded_declaration(
     state: &GameState,
     proposer: PlayerId,
@@ -3435,8 +3434,8 @@ fn pin_observed_declaration(
     recorded: &[crate::analysis::decision_template::PinnedDecision],
 ) -> Option<crate::analysis::decision_template::DecisionTemplate> {
     use crate::analysis::decision_template::{
-        DecisionGroupKey, DecisionKind, DecisionPointKind, DecisionTemplate, LoopAnswerValue,
-        PinnedDecision, ReplayMode,
+        DecisionGroupKey, DecisionKind, DecisionPointKind, DecisionTemplate, PinnedDecision,
+        ReplayMode,
     };
     // (1) D4's grounds: an empty point set publishes no declaration.
     if points.is_empty() {
@@ -3449,13 +3448,12 @@ fn pin_observed_declaration(
             .iter()
             .find(|charge| charge.slot == point.slot)
             .map(|charge| {
-                charge.aimed_at.and_then(|seat| {
-                    announced_target_pins(state, &[TargetRef::Player(seat)])
-                        .map(LoopAnswerValue::Targets)
-                })
+                charge
+                    .aimed_at
+                    .and_then(|seat| announced_target_pins(state, &[TargetRef::Player(seat)]))
             });
-        let value = match observed {
-            Some(value) => value?,
+        let targets = match observed {
+            Some(targets) => targets?,
             None => {
                 decisions.push(
                     crate::analysis::decision_template::recorded_answer(recorded, &point.slot)?
@@ -3464,41 +3462,23 @@ fn pin_observed_declaration(
                 continue;
             }
         };
-        // (3) The wildcard-free (kind, value) match.
-        decisions.push(match (&point.kind, value) {
-            // CR 603.5: the "may" gate, answered Take or Decline.
-            (DecisionPointKind::MayChoice, LoopAnswerValue::May(take)) => {
-                PinnedDecision::MayChoice {
-                    slot: point.slot.clone(),
-                    take,
-                }
-            }
+        // (3) The wildcard-free kind match: an observed aim answers only a targets point.
+        decisions.push(match &point.kind {
             // CR 601.2c + CR 608.2b: the announced targets for this slot, in announcement
             // order, re-checked for legality at every resolution.
-            (DecisionPointKind::Targets { .. }, LoopAnswerValue::Targets(targets)) => {
-                PinnedDecision::Targets {
-                    slot: point.slot.clone(),
-                    targets,
-                }
-            }
-            // Kind/value MISMATCH — the publisher and the observation disagree about what
-            // this slot is. Fail closed.
-            (DecisionPointKind::MayChoice, LoopAnswerValue::Targets(_))
-            | (DecisionPointKind::Targets { .. }, LoopAnswerValue::May(_)) => return None,
-            // CR 700.2 modal / CR 732.6 "[A] unless [B]" / CR 601.2h + CR 702.51a convoke /
-            // CR 608.2d + CR 605.3b mana color: kinds this offer's publisher
-            // (`bounded_cycle_pin_slots_for_window`, which mints only `Targets` and
-            // `MayChoice`) cannot produce today. `LoopAnswerValue` carries no answer shape for
-            // any of them, so there is nothing to pin even when the slot IS charged; a CR 616.1
-            // replacement `Order` point is pinned only from `recorded` above.
-            (
-                DecisionPointKind::Mode { .. }
-                | DecisionPointKind::UnlessBreak
-                | DecisionPointKind::ConvokeTaps { .. }
-                | DecisionPointKind::ManaColor { .. }
-                | DecisionPointKind::Order { .. },
-                LoopAnswerValue::May(_) | LoopAnswerValue::Targets(_),
-            ) => return None,
+            DecisionPointKind::Targets { .. } => PinnedDecision::Targets {
+                slot: point.slot.clone(),
+                targets,
+            },
+            // CR 603.5 "may" / CR 700.2 modal / CR 732.6 "[A] unless [B]" / CR 601.2h +
+            // CR 702.51a convoke / CR 608.2d + CR 605.3b mana color / CR 616.1 replacement
+            // order: an aim is no answer to these, so a charged slot of these kinds fails closed.
+            DecisionPointKind::MayChoice
+            | DecisionPointKind::Mode { .. }
+            | DecisionPointKind::UnlessBreak
+            | DecisionPointKind::ConvokeTaps { .. }
+            | DecisionPointKind::ManaColor { .. }
+            | DecisionPointKind::Order { .. } => return None,
         });
     }
     // (4) The template. `ReplayMode::Static` is the UNSTAMPED shape: the driving count comes off
@@ -7753,20 +7733,19 @@ fn apply_as_current_with_mode(
     action: GameAction,
     mode: PublicFinalizeMode,
 ) -> Result<ActionResult, EngineError> {
-    // CR 723.6: the controller of another player can't make that player
-    // concede, so a concession is its own submitter and its own owner.
-    if let GameAction::Concede { player_id } = action {
-        return apply_action_boundary_for_semantic_owner(state, player_id, player_id, action, mode);
-    }
-    // CR 103.5: For simultaneous-decision states, pick the first
-    // pending player as the simulation representative. `acting_players`
-    // returns the full set; `first()` is deterministic (seat-ordered).
-    let acting = state.waiting_for.acting_players();
-    let owner = *acting.first().ok_or_else(|| {
-        EngineError::InvalidAction(
-            "apply_as_current: no authorized submitter (game over?)".to_string(),
-        )
-    })?;
+    let owner = match action {
+        // CR 723.6 + CR 104.3a: a player may concede at any time, so the seat is the conceding
+        // player even where the prompt waits on nobody.
+        GameAction::Concede { player_id } => player_id,
+        // CR 103.5: For simultaneous-decision states, pick the first
+        // pending player as the simulation representative. `acting_players`
+        // returns the full set; `first()` is deterministic (seat-ordered).
+        _ => *state.waiting_for.acting_players().first().ok_or_else(|| {
+            EngineError::InvalidAction(
+                "apply_as_current: no authorized submitter (game over?)".to_string(),
+            )
+        })?,
+    };
     apply_for_seat_with_mode(state, owner, action, mode)
 }
 
@@ -7777,6 +7756,11 @@ pub(super) fn apply_for_seat_with_mode(
     action: GameAction,
     mode: PublicFinalizeMode,
 ) -> Result<ActionResult, EngineError> {
+    // CR 723.6: the controller of another player can't make that player
+    // concede, so a concession is its own submitter and its own owner.
+    if let GameAction::Concede { player_id } = action {
+        return apply_action_boundary_for_semantic_owner(state, player_id, player_id, action, mode);
+    }
     // CR 723.3 + CR 723.5: the controller makes the controlled player's
     // choices, but only control of the player changes — the decision
     // seat the reducer keys stays the controlled player.
@@ -20435,9 +20419,9 @@ mod bounded_declaration_tests {
     /// bounded producer cannot mint.**
     ///
     /// CR 700.2 (`Mode`), CR 732.6 (`UnlessBreak`), CR 601.2h + CR 702.51a (`ConvokeTaps`) and
-    /// CR 608.2d + CR 605.3b (`ManaColor`) are real choice kinds with no observation-side answer
-    /// shape in `LoopAnswerValue`, so there is nothing to pin for them and the declaration must
-    /// refuse rather than guess.
+    /// CR 608.2d + CR 605.3b (`ManaColor`) are real choice kinds that an observed aim does not
+    /// answer, so there is nothing to pin for them and the declaration must refuse rather than
+    /// guess.
     ///
     /// # ⚠ THE CHARGE ON THE FOUR-KIND POINT IS LOAD-BEARING, NOT DECORATION
     ///
@@ -20540,7 +20524,7 @@ mod bounded_declaration_tests {
                     &[take(&schema.points[0].slot)],
                 )
                 .is_none(),
-                "CR 732.2a: {kind:?} has no `LoopAnswerValue` shape, so the declaration must \
+                "CR 732.2a: an observed aim does not answer {kind:?}, so the declaration must \
                  refuse rather than pin a guess or silently drop the point"
             );
         }

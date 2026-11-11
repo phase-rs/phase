@@ -38254,6 +38254,109 @@ fn default_pile_source_battlefield() -> PileSource {
 }
 
 #[cfg(test)]
+mod option_point_tests {
+    use super::*;
+
+    fn reveal_choice(cards: Vec<ObjectId>, optional: bool) -> WaitingFor {
+        WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards,
+            filter: crate::types::ability::default_target_filter_any(),
+            optional,
+            decline_runs_continuation: false,
+        }
+    }
+
+    /// CR 603.3b + CR 601.2c + CR 608.2d: a trigger order, a required target with several legal
+    /// targets and a card choice among several that cannot be declined are decision points; a
+    /// choice with one option, or one that may be declined, is not.
+    #[test]
+    fn option_point_names_only_a_choice_among_several_options() {
+        use crate::analysis::decision_template::ChoicePoint;
+        let targets = |legal: u64, optional: bool| {
+            let legal: Vec<TargetRef> = (20..20 + legal)
+                .map(|id| TargetRef::Object(ObjectId(id)))
+                .collect();
+            WaitingFor::TriggerTargetSelection {
+                player: PlayerId(0),
+                trigger_controller: None,
+                trigger_event: None,
+                trigger_events: Vec::new(),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: legal.clone(),
+                    optional,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                }],
+                mode_labels: Vec::new(),
+                target_constraints: Vec::new(),
+                selection: TargetSelectionProgress {
+                    current_slot: 0,
+                    selected_slots: Vec::new(),
+                    current_legal_targets: legal,
+                },
+                source_id: None,
+                description: None,
+            }
+        };
+        let order = WaitingFor::OrderTriggers {
+            player: PlayerId(0),
+            triggers: Vec::new(),
+        };
+        assert_eq!(order.option_point(), Some(ChoicePoint::TriggerOrder));
+        assert_eq!(
+            targets(2, false).option_point(),
+            Some(ChoicePoint::AnnouncedTarget)
+        );
+        assert_eq!(targets(1, false).option_point(), None);
+        assert_eq!(targets(2, true).option_point(), None);
+        assert_eq!(
+            reveal_choice(vec![ObjectId(13), ObjectId(14)], false).option_point(),
+            Some(ChoicePoint::ResolutionSet)
+        );
+        assert_eq!(
+            reveal_choice(vec![ObjectId(13)], false).option_point(),
+            None
+        );
+        assert_eq!(
+            reveal_choice(vec![ObjectId(13), ObjectId(14)], true).option_point(),
+            None
+        );
+        let replacement = |kind: ReplacementChoiceKind, count: u64| WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: count as usize,
+            candidates: (0..count)
+                .map(|id| ReplacementCandidateSummary {
+                    source_id: ObjectId(30 + id),
+                    source_name: format!("Source {id}"),
+                    description: format!("Replacement {id}"),
+                })
+                .collect(),
+            kind,
+            last_applied_decides: false,
+            remember_identity: None,
+        };
+        assert_eq!(
+            replacement(ReplacementChoiceKind::Order, 2).option_point(),
+            Some(ChoicePoint::ReplacementOrder)
+        );
+        assert_eq!(
+            replacement(ReplacementChoiceKind::Order, 1).option_point(),
+            None
+        );
+        assert_eq!(
+            replacement(ReplacementChoiceKind::OptionalBranch, 2).option_point(),
+            None
+        );
+        assert_eq!(
+            replacement(ReplacementChoiceKind::SearchFoundDestination, 2).option_point(),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
 mod loop_decision_profile_tests {
     use super::*;
     use LoopDecision::{Decision, Optional, Outs, Random};

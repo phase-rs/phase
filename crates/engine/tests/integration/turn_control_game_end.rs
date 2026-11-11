@@ -12,7 +12,7 @@ use engine::analysis::resource::ResourceAxis;
 use engine::database::card_db::CardDatabase;
 use engine::game::casting::can_cast_object_now;
 use engine::game::deck_loading::DeckEntry;
-use engine::game::engine::apply;
+use engine::game::engine::{apply, apply_as_current};
 use engine::game::interaction::{bind_interaction_authority, derive_viewer_interaction};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -665,6 +665,19 @@ fn a_filter_land_cast_is_listed_on_an_uncontrolled_turn() {
     let runner = scenario.build();
     assert_eq!(authorized_submitters(runner.state()), vec![P0]);
     assert_bedevil_listed(runner.state(), P0, bedevil);
+}
+
+/// CR 723.6: on P0's turn under P1's Worst Fears, P0's concession routed through the seat's
+/// submitter is submitted by P0, not by its controller.
+#[test]
+fn a_controlled_player_concedes_as_itself() {
+    let (scenario, worst_fears) = worst_fears_board(2);
+    let mut runner = scenario.build();
+    into_worst_fears_turn(&mut runner, worst_fears);
+    apply_as_current(runner.state_mut(), GameAction::Concede { player_id: P0 })
+        .expect("CR 723.6: the controlled player's concession is its own");
+    assert!(runner.state().eliminated_players.contains(&P0));
+    assert!(!runner.state().eliminated_players.contains(&P1));
 }
 
 fn add_bedevil_board(scenario: &mut GameScenario) -> ObjectId {

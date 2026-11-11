@@ -295,21 +295,6 @@ pub enum UnlessPaymentOption {
     Decline,
 }
 
-/// The VALUE of one observed answer. Variants are distinct CR choice KINDS — the same axis
-/// [`PinnedDecision`] and [`DecisionPointKind`] already partition, and under the same
-/// CR 732.2a umbrella ("a sequence of game choices, for all players") that makes each of
-/// those ONE type rather than one type per rule section. It is therefore a PARTIAL
-/// observation-side projection of that kind space (2 of the 6 [`DecisionPointKind`]
-/// variants), TOTALIZED at the consumer's wildcard-free `(DecisionPointKind,
-/// LoopAnswerValue)` match — not an exhaustive peer of either.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LoopAnswerValue {
-    /// CR 603.5: take the optional action, or decline it.
-    May(MayChoiceOption),
-    /// CR 608.2b + CR 601.2c: the announced targets for one slot, in announcement order.
-    Targets(Vec<TargetPin>),
-}
-
 /// One pinned decision. Variants are distinct CR choice KINDS (ordering / targeting /
 /// modal / optional-"may" / "[A] unless [B]" break), not a parameterization axis.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
