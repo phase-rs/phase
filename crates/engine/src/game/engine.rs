@@ -711,6 +711,13 @@ fn priority_preflight_candidates(
 /// boundary on an isolated clone. A reducer rejection is not interpreted as a
 /// pass: it remains an indeterminate mandatory-transition block.
 pub(in crate::game) fn preflight_priority_window(state: &GameState) -> PriorityPreflight {
+    // CR 601.2g: the activation offers this preflight enumerates draw on ONE
+    // bounded window-search budget, exactly as `priority_actions_with_probe`'s
+    // offers do. Preflight runs for a priority state, so without the scope a
+    // board carrying many activatable abilities would multiply the per-offer
+    // witness search without bound. A nested scope keeps the outermost budget
+    // when a caller (such as a legal-action snapshot) already opened one.
+    let _window_witness_scope = casting::window_witness_snapshot_scope();
     debug_assert_eq!(PriorityReducerFamily::ALL.len(), 23);
     let principal = match priority_principal_for_preflight(state) {
         Ok(principal) => principal,
@@ -755,6 +762,23 @@ pub(in crate::game) fn preflight_priority_window(state: &GameState) -> PriorityP
     PriorityPreflight::Actionless
 }
 
+/// CR 616.1: the answer `index` to a pending replacement-ordering prompt —
+/// the one authority shared by `GameAction::ChooseReplacement` and the manual
+/// activation offer's mana-window witness, which follows a mana ability's
+/// paused cost move exactly as the live window would.
+pub(super) fn answer_replacement_choice(
+    state: &mut GameState,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if let Some(waiting_for) =
+        casting_costs::abandon_stale_resolution_sacrifice_cursor(state, events)
+    {
+        return Ok(waiting_for);
+    }
+    engine_replacement::handle_replacement_choice(state, index, events)
+}
+
 /// The narrow admission gate for engine-owned prospective progress. It keeps
 /// the detailed preflight result private to `game` while ensuring a caller can
 /// advance only an already-proven actionless Priority window.
@@ -763,6 +787,14 @@ pub(crate) fn priority_window_is_actionless_for_mandatory_progress(state: &GameS
         preflight_priority_window(state),
         PriorityPreflight::Actionless
     )
+}
+
+/// Test-support view of [`priority_window_is_actionless_for_mandatory_progress`],
+/// so the integration suite can drive the preflight enumeration and pin the
+/// CR 601.2g window-search budget it shares, without exposing `PriorityPreflight`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn priority_window_is_actionless_for_tests(state: &GameState) -> bool {
+    priority_window_is_actionless_for_mandatory_progress(state)
 }
 
 /// Submit the sole ordinary pass for an already-proven actionless Priority
@@ -14276,73 +14308,16 @@ fn apply_non_priority_pass_action(
             }
             CostResume::ManaAbility {
                 mana_ability: pending_mana_ability,
-            } => match kind {
-                // CR 605.1a: the aggregate form never resumes a mana ability;
-                // fixed-count and X-sentinel forms both do.
-                PayCostKind::TapCreatures { mode } => {
-                    engine_casting::handle_tap_creatures_for_mana_ability(
-                        state,
-                        *min_count,
-                        *count,
-                        *mode,
-                        choices,
-                        pending_mana_ability,
-                        &chosen,
-                        &mut events,
-                    )?
-                }
-                PayCostKind::Discard => engine_casting::handle_discard_for_mana_ability(
-                    state,
-                    *count,
-                    choices,
-                    pending_mana_ability,
-                    &chosen,
-                    &mut events,
-                )?,
-                PayCostKind::ExileFromManaZone { .. } => {
-                    super::mana_abilities::handle_exile_for_mana_ability(
-                        state,
-                        *count,
-                        choices,
-                        pending_mana_ability,
-                        &chosen,
-                        &mut events,
-                    )?
-                }
-                PayCostKind::Sacrifice => super::mana_abilities::handle_sacrifice_for_mana_ability(
-                    state,
-                    *count,
-                    choices,
-                    pending_mana_ability,
-                    &chosen,
-                    &mut events,
-                )?,
-                // ReturnToHand, Reveal, ExileFromZone, RemoveCounter, and Behold
-                // do not have mana-ability cost handlers wired today. If a
-                // future mana ability uses one of these CR-valid cost shapes,
-                // add the corresponding mana-ability handler instead of
-                // routing it through the spell pipeline.
-                PayCostKind::ReturnToHand
-                | PayCostKind::Reveal { shared_quality: _ }
-                | PayCostKind::ExileFromZone { .. }
-                | PayCostKind::ExileMaterials { .. }
-                | PayCostKind::ExilePermanent { .. }
-                | PayCostKind::ExileAggregate { .. }
-                | PayCostKind::RemoveCounter { .. }
-                // CR 701.3d: an unattach-from cost is only ever surfaced via
-                // `CostResume::Spell` (targeted activation), never as a mana
-                // ability — unreachable here.
-                | PayCostKind::UnattachFrom { .. }
-                | PayCostKind::Behold { .. } => {
-                    debug_assert!(
-                        !matches!(kind, PayCostKind::UnattachFrom { .. }),
-                        "UnattachFrom cost cannot resume a mana ability",
-                    );
-                    return Err(EngineError::InvalidAction(
-                        "Cost kind cannot resume a mana ability".into(),
-                    ));
-                }
-            },
+            } => super::mana_abilities::handle_mana_ability_cost_selection(
+                state,
+                kind,
+                *min_count,
+                *count,
+                choices,
+                pending_mana_ability,
+                &chosen,
+                &mut events,
+            )?,
             CostResume::Resolution => match kind {
                 PayCostKind::Sacrifice => {
                     casting_costs::handle_resolution_optional_sacrifice_for_cost(
@@ -16179,13 +16154,7 @@ fn apply_non_priority_pass_action(
             }
         }
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
-            if let Some(waiting_for) =
-                casting_costs::abandon_stale_resolution_sacrifice_cursor(state, &mut events)
-            {
-                waiting_for
-            } else {
-                engine_replacement::handle_replacement_choice(state, index, &mut events)?
-            }
+            answer_replacement_choice(state, index, &mut events)?
         }
         (
             WaitingFor::EntryControllerChoice { .. },

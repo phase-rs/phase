@@ -63169,3 +63169,128 @@ fn void_winnower_runtime_does_not_block_its_own_controller() {
         "\"Your opponents can't cast\" never restricts the controller (CR 109.5)"
     );
 }
+
+#[test]
+fn index_combinations_enumerates_each_selection_once() {
+    let distinct: Vec<Vec<usize>> = index_combinations(4, 2, Repetition::Distinct).collect();
+    assert_eq!(
+        distinct,
+        vec![
+            vec![0, 1],
+            vec![0, 2],
+            vec![0, 3],
+            vec![1, 2],
+            vec![1, 3],
+            vec![2, 3]
+        ]
+    );
+    let multisets: Vec<Vec<usize>> = index_combinations(3, 2, Repetition::Allowed).collect();
+    assert_eq!(
+        multisets,
+        vec![
+            vec![0, 0],
+            vec![0, 1],
+            vec![0, 2],
+            vec![1, 1],
+            vec![1, 2],
+            vec![2, 2]
+        ]
+    );
+    assert_eq!(
+        index_combinations(2, 3, Repetition::Distinct).count(),
+        0,
+        "more picks than distinct indices"
+    );
+    assert_eq!(index_combinations(0, 1, Repetition::Allowed).count(), 0);
+    assert_eq!(
+        index_combinations(0, 0, Repetition::Distinct).collect::<Vec<_>>(),
+        vec![Vec::<usize>::new()],
+        "the empty selection"
+    );
+}
+
+/// CR 701.59a: each minimal collect-evidence answer is offered once, the
+/// greedy one first; a card worth nothing is in none, and an answer with a
+/// member it could do without is not minimal.
+#[test]
+fn minimal_evidence_answers_lists_each_minimal_set_greedy_first() {
+    // Mana values: a 4, a 3, a 0, a 1 and a 2.
+    let values = [4, 3, 0, 1, 2];
+    let (answers, complete) = minimal_evidence_answers(&values, 3, 64);
+    assert!(complete);
+    assert_eq!(
+        answers,
+        vec![vec![0], vec![1], vec![4, 3]],
+        "the 4 alone (greedy), the 3 alone, then the 1 and the 2 together"
+    );
+    assert!(
+        !answers.iter().any(|answer| answer.contains(&2)),
+        "the zero-value card is in no minimal answer"
+    );
+
+    let (answers, complete) = minimal_evidence_answers(&[1, 1], 3, 64);
+    assert!(complete);
+    assert!(answers.is_empty(), "a total of 2 can't reach 3");
+
+    let (answers, complete) = minimal_evidence_answers(&values, 3, 2);
+    assert_eq!(answers, vec![vec![0], vec![1]]);
+    assert!(!complete, "a capped enumeration says it is incomplete");
+
+    assert_eq!(
+        minimal_evidence_answers(&values, 0, 64),
+        (vec![Vec::new()], true),
+        "evidence 0 is collected with no cards"
+    );
+}
+
+#[test]
+fn mana_choice_answers_produces_choices_lazily() {
+    let single = ManaChoicePrompt::SingleColor {
+        options: vec![ManaType::Red, ManaType::Green],
+    };
+    let answers: Vec<_> = mana_choice_answers(&single).collect();
+    assert_eq!(
+        answers,
+        vec![
+            ManaChoice::SingleColor(ManaType::Red),
+            ManaChoice::SingleColor(ManaType::Green)
+        ]
+    );
+
+    let comb = ManaChoicePrompt::Combination {
+        options: vec![
+            vec![ManaType::White, ManaType::Blue],
+            vec![ManaType::Red, ManaType::Black],
+        ],
+    };
+    let answers: Vec<_> = mana_choice_answers(&comb).collect();
+    assert_eq!(
+        answers,
+        vec![
+            ManaChoice::Combination(vec![ManaType::White, ManaType::Blue]),
+            ManaChoice::Combination(vec![ManaType::Red, ManaType::Black]),
+        ]
+    );
+
+    // AnyCombination with count = 60 and 5 options would produce millions of
+    // multisets if eagerly materialized. The iterator yields the first ones lazily.
+    let any = ManaChoicePrompt::AnyCombination {
+        count: 60,
+        options: vec![
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+        ],
+    };
+    let first_two: Vec<_> = mana_choice_answers(&any).take(2).collect();
+    assert_eq!(first_two.len(), 2);
+    assert_eq!(
+        first_two[0],
+        ManaChoice::Combination(vec![ManaType::White; 60])
+    );
+    let mut second_expected = vec![ManaType::White; 59];
+    second_expected.push(ManaType::Blue);
+    assert_eq!(first_two[1], ManaChoice::Combination(second_expected));
+}

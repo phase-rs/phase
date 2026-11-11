@@ -2238,7 +2238,6 @@ fn m_d3_manual_window_funded_by_a_costed_mana_ability_triggers_each_observer_onc
     let card = add_card(&mut scenario, P0, "Grizzly Bears", Zone::Hand);
     let fodder = add_card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
     let altar = add_card(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
-    let wastes = add_card(&mut scenario, P0, "Wastes", Zone::Battlefield);
     let haven = add_card(&mut scenario, P0, "Drake Haven", Zone::Battlefield);
     let construct = add_card(&mut scenario, P0, "Crackdown Construct", Zone::Battlefield);
     let zulaport = add_card(&mut scenario, P0, "Zulaport Cutthroat", Zone::Battlefield);
@@ -2247,20 +2246,29 @@ fn m_d3_manual_window_funded_by_a_costed_mana_ability_triggers_each_observer_onc
     // Mindless Automaton's abilities in printed order: 0 is "{1}, Discard a
     // card: Put a +1/+1 counter on this creature.", 1 is "Remove two +1/+1
     // counters from this creature: Draw a card."
+    //
+    // CR 601.2g + CR 602.2b + CR 605.3a (#10190): the Altar is P0's only mana
+    // source. The automatic payer never sacrifices for mana, so the {1} is
+    // payable only by activating the Altar in the mana-ability window: the
+    // ability is offered for a manual payment, and only for one.
     let (_, _, grouped) = engine::ai_support::legal_actions_full(r.state());
-    assert!(
-        grouped
-            .get(&automaton)
-            .into_iter()
-            .flatten()
-            .any(|action| matches!(
-                action,
-                GameAction::ActivateAbility {
-                    ability_index: 0,
-                    ..
-                }
-            )),
-        "the {{1}}, Discard a card ability is offered with the Wastes untapped"
+    let offered_modes: Vec<CastPaymentMode> = grouped
+        .get(&automaton)
+        .into_iter()
+        .flatten()
+        .filter_map(|action| match action {
+            GameAction::ActivateAbility {
+                ability_index: 0,
+                payment_mode,
+                ..
+            } => Some(*payment_mode),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        offered_modes,
+        vec![CastPaymentMode::Manual],
+        "the {{1}}, Discard a card ability is offered for a manual payment funded by the Altar"
     );
     let window = act(
         &mut r,
@@ -2332,11 +2340,40 @@ fn m_d3_manual_window_funded_by_a_costed_mana_ability_triggers_each_observer_onc
         "the Altar's second {{C}} floats"
     );
     assert!(
-        !is_tapped(&r, wastes),
-        "the Altar's mana paid the {{1}}, not the Wastes"
-    );
-    assert!(
         in_zone(&r, fodder, Zone::Graveyard),
         "the Altar's sacrifice happened"
+    );
+}
+
+/// #10190 control: the mana-ability window funds only the mana leg. With the
+/// Altar able to pay the {1} but no card in hand for the discard, the rest of
+/// the cost is unpayable, so "{1}, Discard a card" is offered in no mode, while
+/// the Automaton's other ability still is.
+#[test]
+fn m_d3_manual_window_mana_route_still_requires_the_rest_of_the_cost() {
+    let mut scenario = board(2);
+    let automaton = add_card(&mut scenario, P0, "Mindless Automaton", Zone::Battlefield);
+    add_card(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+    add_card(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+    let r = build(scenario);
+    assert!(r.state().players[0].hand.is_empty());
+
+    let (_, _, grouped) = engine::ai_support::legal_actions_full(r.state());
+    let offered: Vec<usize> = grouped
+        .get(&automaton)
+        .into_iter()
+        .flatten()
+        .filter_map(|action| match action {
+            GameAction::ActivateAbility { ability_index, .. } => Some(*ability_index),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        offered.contains(&1),
+        "the remove-counters ability is offered: {offered:?}"
+    );
+    assert!(
+        !offered.contains(&0),
+        "no discard is payable, so {{1}}, Discard a card is not offered: {offered:?}"
     );
 }

@@ -1799,47 +1799,6 @@ pub(super) fn handle_behold_for_cost(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn handle_tap_creatures_for_mana_ability(
-    state: &mut GameState,
-    min_count: usize,
-    count: usize,
-    mode: TapCreaturesSelectionMode,
-    creatures: &[ObjectId],
-    pending_mana_ability: &PendingManaAbility,
-    chosen: &[ObjectId],
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    mana_abilities::handle_tap_creatures_for_mana_ability(
-        state,
-        min_count,
-        count,
-        mode,
-        creatures,
-        pending_mana_ability,
-        chosen,
-        events,
-    )
-}
-
-pub(super) fn handle_discard_for_mana_ability(
-    state: &mut GameState,
-    count: usize,
-    legal_cards: &[ObjectId],
-    pending_mana_ability: &PendingManaAbility,
-    chosen: &[ObjectId],
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    mana_abilities::handle_discard_for_mana_ability(
-        state,
-        count,
-        legal_cards,
-        pending_mana_ability,
-        chosen,
-        events,
-    )
-}
-
 pub(super) fn handle_choose_mana_color(
     state: &mut GameState,
     pending_mana_ability: &PendingManaAbility,

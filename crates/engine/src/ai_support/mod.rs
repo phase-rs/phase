@@ -142,6 +142,13 @@ pub fn validated_candidate_actions_with_probe(
     state: &GameState,
     probe: Option<&crate::game::casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
+    // CR 601.2g: one legal-action snapshot's generation AND its re-validation
+    // share ONE window-search budget. Generation's offer loop and the
+    // validation pass re-judge the same board's manual activations, so a board
+    // with many offers must not spend a fresh budget per candidate, per pass,
+    // or per refresh. Exhausting it only defers a candidate to the
+    // authoritative simulation, never to a wrong verdict.
+    let _window_witness_scope = crate::game::casting::window_witness_snapshot_scope();
     let pipeline = FilterPipeline::default_pipeline();
     let candidates = {
         let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
@@ -2541,6 +2548,10 @@ pub fn flat_priority_actions_with_probe(
 /// flat `actions` list; auto-pass consumes the flat list, while board
 /// interaction consumes the grouped map.
 pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
+    // CR 601.2g: the manual-activation offers this snapshot enumerates share one
+    // bounded window-search budget. The scope is opened by the one offer
+    // authority (`candidates::priority_actions_with_probe`), not here, so the
+    // flat priority list and the per-seat candidate lists get the same bound.
     // CR 601.2h + CR 608.2c: enumerate against the replayed payment shadow so
     // the live choice remains actionable while canonical resources stay staged.
     let payment_projected;
@@ -5893,9 +5904,12 @@ mod tests {
 
     /// V4 (#544 case 2): a sac-for-mana source PLUS a mana-costed non-mana
     /// activated ability holds — the produced mana could feed the ability
-    /// (CR 605.3a + CR 603.6). The ability is present but unaffordable-now (no
-    /// floating mana), so it is absent from the flat list — proving the hold
+    /// (CR 605.3a + CR 603.6). The ability is present but unaffordable-now: its
+    /// {2} exceeds the single {C} the sacrifice makes, even in a manual payment's
+    /// CR 601.2g window, so it is absent from the flat list — proving the hold
     /// flows through the case-2 followup gate, not the flat meaningful-action path.
+    /// The engine is an enchantment: an artifact engine could itself be
+    /// sacrificed for one {C} and the altar for another (CR 113.7a), making {2}.
     #[test]
     fn sac_for_mana_holds_with_downstream_mana_costed_activated_ability() {
         let mut state = GameState::new_two_player(42);
@@ -5908,7 +5922,7 @@ mod tests {
 
         add_sac_for_mana_source(&mut state, PlayerId(0));
 
-        // Separate permanent with "{1}: Draw a card" — a non-mana activated
+        // Separate permanent with "{2}: Draw a card" — a non-mana activated
         // ability with a mana component in its cost.
         let engine = create_object(
             &mut state,
@@ -5919,7 +5933,7 @@ mod tests {
         );
         {
             let obj = state.objects.get_mut(&engine).unwrap();
-            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Enchantment);
             Arc::make_mut(&mut obj.abilities).push(
                 AbilityDefinition::new(
                     AbilityKind::Activated,
@@ -5929,13 +5943,13 @@ mod tests {
                     },
                 )
                 .cost(AbilityCost::Mana {
-                    cost: ManaCost::generic(1),
+                    cost: ManaCost::generic(2),
                 }),
             );
         }
 
         let flat = super::flat_priority_actions(&state);
-        // Reach-guard: the flat list carries no meaningful action (the {1} ability
+        // Reach-guard: the flat list carries no meaningful action (the {2} ability
         // is unaffordable now), so the hold MUST come from the case-2 gate.
         assert!(
             !super::flat_actions_have_meaningful_priority(&state, &flat),

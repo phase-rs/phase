@@ -44,7 +44,7 @@ pub(crate) fn evidence_candidates(
         .unwrap_or_default()
 }
 
-fn total_mana_value(state: &GameState, cards: &[ObjectId]) -> u32 {
+pub(crate) fn total_mana_value(state: &GameState, cards: &[ObjectId]) -> u32 {
     cards
         .iter()
         .filter_map(|id| state.objects.get(id))

@@ -14,6 +14,7 @@
 //! life loss, sacrifice) disqualifies a source from UI-level undo.
 
 use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::types::ability::CounterCostSelection;
 use crate::types::ability::{cost_has_component, ManaSpendRestriction};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ControllerRef,
@@ -24,6 +25,7 @@ use crate::types::ability::{
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::card_type::Supertype;
+use crate::types::counter::CounterMatch;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{GameState, ManaAbilityResume, ProductionOverride, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -883,7 +885,7 @@ fn resolved_mana_ability_for_live_output(
 ) -> ResolvedAbility {
     let ability = match &*ability_def.effect {
         Effect::Mana { produced, .. } => {
-            largest_sizing_resolution(state, produced, ability_def, source_id, player)
+            largest_sizing_resolution(state, produced, ability_def, source_id, player, None)
                 .map(|(resolved, _)| resolved)
         }
         _ => None,
@@ -926,17 +928,23 @@ fn sizing_resolutions(
 
 /// The sizing resolution that adds the most mana, with that amount. An
 /// any-one-color amount that reads the color chosen for it is sized by its
-/// best color (`planned_gross_mana`).
+/// best color (`planned_gross_mana`). `announced_x`, when given, is bound as
+/// the activation's X (CR 107.3a), so an amount that reads it ("Add X mana")
+/// is sized at that X rather than at an unannounced X of 0.
 fn largest_sizing_resolution(
     state: &GameState,
     produced: &ManaProduction,
     ability: &AbilityDefinition,
     object_id: ObjectId,
     controller: PlayerId,
+    announced_x: Option<u32>,
 ) -> Option<(ResolvedAbility, u32)> {
     sizing_resolutions(state, ability, object_id, controller)
         .into_iter()
-        .map(|resolved| {
+        .map(|mut resolved| {
+            if let Some(x) = announced_x {
+                resolved.set_chosen_x_recursive(x);
+            }
             let gross = planned_gross_mana(produced, state, &resolved);
             (resolved, gross)
         })
@@ -2261,9 +2269,10 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
         })
         .filter_map(|(_, ability)| match &*ability.effect {
             Effect::Mana { produced, .. } => {
-                let gross =
-                    largest_sizing_resolution(state, produced, ability, object_id, controller)
-                        .map_or(0, |(_, gross)| gross);
+                let gross = largest_sizing_resolution(
+                    state, produced, ability, object_id, controller, None,
+                )
+                .map_or(0, |(_, gross)| gross);
                 // CR 605.3b: Net the mana paid to activate this ability —
                 // gross output overstates what a filter land actually adds.
                 let activation_cost = mana_abilities::mana_sub_cost_of(&ability.cost)
@@ -2385,10 +2394,17 @@ fn mana_ability_allowed_for_payment(
 
 /// Which payment estimate a mana capacity serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CapacityUse {
+pub(crate) enum CapacityUse {
     /// Castability: colored shards are assigned first, and a color chosen on
-    /// activation is charged for what that color adds.
+    /// activation is charged for what that color adds. Each permanent is
+    /// credited one activation (#1234).
     Castability,
+    /// An activation's manual window, which the exact witness
+    /// (`casting::mana_ability_window_mana_witness`) then confirms: as
+    /// an upper bound, not a plan: a mana ability with no tap is credited
+    /// every activation its cost's supply allows (CR 605.3c), and each of a
+    /// permanent's mana abilities is credited.
+    ActivationWindow,
     /// The {X} ceiling sums capacities with no per-color accounting, so a
     /// source whose amount depends on the color it is activated for (Nyx Lotus
     /// with unequal devotion) is left out: the ceiling fails closed.
@@ -2427,12 +2443,35 @@ pub(crate) fn feasible_mana_capacity(
     )
 }
 
-fn mana_capacity(
+pub(crate) fn mana_capacity(
     state: &GameState,
     object_id: ObjectId,
     controller: PlayerId,
     payment_context: Option<&PaymentContext<'_>>,
     capacity_use: CapacityUse,
+) -> u32 {
+    mana_capacity_matching(
+        state,
+        object_id,
+        controller,
+        payment_context,
+        capacity_use,
+        |_| true,
+    )
+}
+
+/// CR 601.2g + CR 605.3c: [`mana_capacity`] for the mana abilities `gate`
+/// admits. An activation whose own cost needs its source untapped still leaves
+/// that source's tapless mana abilities able to fund it, so a caller that
+/// excludes the source must exclude it per ability, not per object (Cryptic
+/// Trilobite's "Remove a +1/+1 counter from this creature: Add {C}{C}").
+pub(crate) fn mana_capacity_matching(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    payment_context: Option<&PaymentContext<'_>>,
+    capacity_use: CapacityUse,
+    gate: impl Fn(&AbilityDefinition) -> bool,
 ) -> u32 {
     let Some(obj) = state.objects.get(&object_id) else {
         return 0;
@@ -2441,25 +2480,167 @@ fn mana_capacity(
         return 0;
     }
 
-    obj.abilities
+    let gates = (capacity_use == CapacityUse::ActivationWindow)
+        .then(|| mana_abilities::ManaActivationGates::compute(state));
+    let nets = obj
+        .abilities
         .iter()
         .enumerate()
         .filter(|(idx, ability)| {
-            is_payment_mana_ability(ability)
-                && mana_ability_usable_for_payment(
-                    state,
-                    controller,
-                    object_id,
-                    *idx,
-                    ability,
-                    payment_context,
-                )
+            gate(ability)
+                && is_payment_mana_ability(ability)
+                && match &gates {
+                    // CR 601.2g + CR 605.3a: an upper bound on the window can't
+                    // judge a producer's own mana cost on the board it opens
+                    // on — an earlier activation of the window can pay it
+                    // (Calciform Pools' "{1}, Remove X storage counters" after
+                    // Ashnod's Altar's {C}{C}). Every other cost is still judged
+                    // now, and the producer's net output already charges its
+                    // mana cost.
+                    Some(gates) => mana_ability_plannable_for_payment(
+                        state,
+                        controller,
+                        object_id,
+                        *idx,
+                        ability,
+                        payment_context,
+                        gates,
+                    ),
+                    None => mana_ability_usable_for_payment(
+                        state,
+                        controller,
+                        object_id,
+                        *idx,
+                        ability,
+                        payment_context,
+                    ),
+                }
         })
         .filter_map(|(_, ability)| {
-            usable_mana_ability_net(state, object_id, controller, ability, capacity_use)
+            let net = usable_mana_ability_net(state, object_id, controller, ability, capacity_use)?;
+            Some(match capacity_use {
+                // An unbounded ability makes the bound no bound at all.
+                CapacityUse::ActivationWindow => net.saturating_mul(
+                    repeatable_mana_ability_multiplier(state, object_id, controller, ability)
+                        .unwrap_or(u32::MAX),
+                ),
+                CapacityUse::Castability | CapacityUse::XCeiling => net,
+            })
+        });
+    match capacity_use {
+        // An upper bound: a permanent may have each of its mana abilities
+        // activated in one window (a tap ability, then a sacrifice of itself).
+        CapacityUse::ActivationWindow => nets.fold(0, u32::saturating_add),
+        CapacityUse::Castability | CapacityUse::XCeiling => nets.max().unwrap_or(0),
+    }
+}
+
+/// CR 605.3c: How many times one mana ability could be activated in the
+/// payment window, or `None` when nothing on the board bounds it. A tap cost or
+/// an explicit activation restriction limits the permanent to one activation.
+/// A non-tap repeatable ability (Ashnod's Altar's creature sacrifice,
+/// Krark-Clan Ironworks's artifact sacrifice, discard, or pay-life) can be
+/// activated as many times as its resource supply allows. An untap-symbol
+/// cost (CR 107.6: Pili-Pala's "{2}, {Q}") is paid again each time another
+/// ability taps its source, and a cost whose supply is not counted here (Grand
+/// Architect's "Tap an untapped blue creature you control") has no bound.
+fn repeatable_mana_ability_multiplier(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    ability: &AbilityDefinition,
+) -> Option<u32> {
+    if cost_has_component(&ability.cost, |c| matches!(c, AbilityCost::Untap)) {
+        return None;
+    }
+    if has_tap_component(&ability.cost)
+        || ability
+            .activation_restrictions
+            .iter()
+            .any(|r| matches!(r, ActivationRestriction::OnlyOnceEachTurn))
+    {
+        return Some(1);
+    }
+
+    // Each activation chooses its own objects (CR 118.10), so every supply-
+    // limited component bounds how many times the ability can resolve; a
+    // composite cost is limited by its scarcest resource.
+    let object_limits = [
+        mana_abilities::sacrifice_cost_choice(state, controller, object_id, ability),
+        mana_abilities::discard_cost_choice(state, controller, object_id, ability),
+        mana_abilities::exile_cost_choice(state, controller, object_id, ability)
+            .map(|(count, _, cards)| (count, cards)),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|(count, objects)| objects.len().checked_div(count));
+
+    // CR 119.4: each activation pays its life from the total that is left.
+    let life_limit = ability
+        .cost
+        .as_ref()
+        .and_then(|cost| {
+            super::casting::find_pay_life_cost(cost, state, controller, object_id)
+                .filter(|&needed| needed > 0)
         })
-        .max()
-        .unwrap_or(0)
+        .map(|life_needed| {
+            let life = state
+                .players
+                .iter()
+                .find(|p| p.id == controller)
+                .map_or(0, |p| p.life);
+            usize::try_from(life).unwrap_or(0) / usize::try_from(life_needed).unwrap_or(usize::MAX)
+        });
+
+    // CR 118.3 + CR 122.1: each activation removes its printed counters from
+    // the source itself, so the counters on it bound how many activations are
+    // possible (Workhorse's four +1/+1 counters fund four activations, and
+    // {C}{C}{C}{C} pays Jayemdae Tome's {4}).
+    let counter_limit = ability
+        .cost
+        .as_ref()
+        .and_then(|cost| self_counter_cost_supply(state, object_id, cost));
+
+    object_limits
+        .chain(life_limit)
+        .chain(counter_limit)
+        .min()
+        .map(|activations| u32::try_from(activations).unwrap_or(u32::MAX))
+}
+
+/// CR 118.3 + CR 122.1: how many activations a self counter-removal cost of
+/// `cost` allows from `object_id`'s counters, or `None` when the cost removes
+/// none. A chosen-count (`X`) cost is left to the payment authority.
+fn self_counter_cost_supply(
+    state: &GameState,
+    object_id: ObjectId,
+    cost: &AbilityCost,
+) -> Option<usize> {
+    let object = state.objects.get(&object_id)?;
+    let mut supply: Option<usize> = None;
+    cost.for_each_cost_node(&mut |node| {
+        let AbilityCost::RemoveCounter {
+            count,
+            counter_type,
+            target: None,
+            selection: CounterCostSelection::SingleObject,
+        } = node
+        else {
+            return;
+        };
+        if *count == 0 || *count == u32::MAX {
+            return;
+        }
+        let available: u32 = match counter_type {
+            CounterMatch::Any => object.counters.values().copied().sum(),
+            CounterMatch::OfType(counter_type) => {
+                object.counters.get(counter_type).copied().unwrap_or(0)
+            }
+        };
+        let activations = (available / *count) as usize;
+        supply = Some(supply.map_or(activations, |known| known.min(activations)));
+    });
+    supply
 }
 
 /// CR 605.1a: An activated mana ability.
@@ -2506,6 +2687,47 @@ fn mana_ability_usable_for_payment(
     }
 }
 
+/// CR 601.2g + CR 605.3a: [`mana_ability_usable_for_payment`] with the
+/// ability's own mana cost deferred to the payment it is activated in
+/// ([`ManaPayabilityMode::Planning`]), so a producer another producer funds is
+/// counted. Decided without a legality simulation.
+///
+/// For the activation window (CapacityUse::ActivationWindow), we do NOT check
+/// the mana ability's output restrictions (CR 106.6 spend restrictions) here.
+/// Those restrictions are evaluated later in the witness search when mana is
+/// actually spent (via pool_composition and mana_unit_permits_payment_context),
+/// using the correct intermediate payment context for each spend. This allows
+/// mana abilities like Grand Architect (restricted to artifact spells/abilities)
+/// to fund other mana abilities like Prismite ({2}: Add one mana of any color)
+/// even when the final activation is not an artifact ability.
+fn mana_ability_plannable_for_payment(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    idx: usize,
+    ability: &AbilityDefinition,
+    _payment_context: Option<&PaymentContext<'_>>,
+    gates: &mana_abilities::ManaActivationGates,
+) -> bool {
+    // CR 304.5 + CR 605.1: Mana classification does not override printed timing limits.
+    if ability
+        .activation_restrictions
+        .contains(&ActivationRestriction::AsInstant)
+    {
+        return false;
+    }
+    mana_abilities::mana_ability_ready_without_simulation_gated(
+        state,
+        controller,
+        object_id,
+        idx,
+        ability,
+        ManaPayabilityMode::Planning,
+        gates,
+    ) && activation_condition_satisfied(state, controller, object_id, idx, ability)
+        && matches!(&*ability.effect, Effect::Mana { .. })
+}
+
 /// CR 605.3b: Net mana one usable activation contributes to planned capacity.
 fn usable_mana_ability_net(
     state: &GameState,
@@ -2517,7 +2739,14 @@ fn usable_mana_ability_net(
     let Effect::Mana { produced, .. } = &*ability.effect else {
         return None;
     };
-    let sizing = largest_sizing_resolution(state, produced, ability, object_id, controller);
+    // CR 107.3a + CR 601.2g: the window's upper bound sizes an "Add X mana"
+    // ability at the largest X its cost lets the player announce (Calciform
+    // Pools' storage counters, Chicago Loop's speed).
+    let announced_x = (capacity_use == CapacityUse::ActivationWindow)
+        .then(|| mana_abilities::largest_announceable_x(state, controller, object_id, ability))
+        .flatten();
+    let sizing =
+        largest_sizing_resolution(state, produced, ability, object_id, controller, announced_x);
     if capacity_use == CapacityUse::XCeiling
         && sizing.as_ref().is_some_and(|(resolved, _)| {
             activation_amount_depends_on_color(state, produced, resolved)
@@ -2532,21 +2761,18 @@ fn usable_mana_ability_net(
     // net equals the gross (e.g., KCI activation cost is one
     // sacrificed artifact, no mana — full 2 colorless yield).
     //
-    // Caveat: collapsing mana sub-cost to a single `mana_value`
-    // assumes the sub-cost is paid from the SAME color domain as
-    // the produced mana (filter-land case: pay {1} or any color,
-    // produce {U/W}). For exotic abilities whose mana sub-cost is
-    // a different color than what they produce — e.g. a
-    // hypothetical `{T}, Pay {U}: Add {2}{R}` — this net of 2 is
-    // pessimistic-but-safe in one direction (we never claim
-    // capacity we can't produce) but over-states feasibility in
-    // the other (the {U} sub-cost has to come from another
-    // source, which this scan doesn't model). Such cards are
-    // vanishingly rare in real Magic; if one is added the
-    // sub-cost color domain should be threaded through here
-    // rather than collapsed to `mana_value`.
-    let activation_cost =
-        mana_abilities::mana_sub_cost_of(&ability.cost).map_or(0, |cost| cost.mana_value());
+    // For the activation window capacity check (CR 601.2g), we use a
+    // conservative upper bound that does NOT subtract mana sub-costs.
+    // Conversion abilities like Manaforge Cinder ("{1}: Add {B} or {R}")
+    // have a mana sub-cost but can pay it from the pool the window builds
+    // (e.g., Ashnod's Altar's {C}{C}). Subtracting the sub-cost here
+    // would give zero net capacity and incorrectly refuse the window.
+    // The witness search will correctly model the sub-cost payment.
+    let activation_cost = if capacity_use == CapacityUse::ActivationWindow {
+        0
+    } else {
+        mana_abilities::mana_sub_cost_of(&ability.cost).map_or(0, |cost| cost.mana_value())
+    };
     Some(gross.saturating_sub(activation_cost))
 }
 
@@ -2556,59 +2782,341 @@ fn usable_mana_ability_net(
 /// discard mana, pay-life mana abilities, etc.), or a `{T}` ability whose cost
 /// asks the player to choose an object (Phyrexian Tower's sacrifice, Holdout
 /// Settlement's tapped creature).
+/// If `payment_context` is provided, only mana abilities whose output
+/// restrictions permit spending in that context are counted (CR 106.6).
 pub(crate) fn has_activatable_player_choice_mana_ability_for_payment(
     state: &GameState,
     controller: PlayerId,
     exclude: Option<ObjectId>,
     payment_context: Option<&PaymentContext<'_>>,
 ) -> bool {
-    state.battlefield.iter().any(|&object_id| {
-        if Some(object_id) == exclude {
-            return false;
-        }
-        let Some(obj) = state.objects.get(&object_id) else {
-            return false;
-        };
-        if obj.zone != Zone::Battlefield || obj.controller != controller {
-            return false;
-        }
-        obj.abilities.iter().enumerate().any(|(idx, ability)| {
-            if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
-                return false;
-            }
-            // Choice-free tap-cost and unambiguous self-sacrifice abilities
-            // (Sol Ring, Gold, Treasure) are already covered by
-            // `is_active_tap_mana_ability` on the auto-tap path; a tap cost that
-            // chooses an object (CR 605.3a) belongs here with the ambiguous
-            // non-tap costs (KCI's "Sacrifice an artifact", discard, pay-life).
-            if (has_tap_component(&ability.cost)
-                && !mana_abilities::cost_requires_object_choice(
-                    state, controller, object_id, ability,
-                ))
-                || has_unambiguous_self_sacrifice_component(&ability.cost)
-            {
-                return false;
-            }
-            if !mana_abilities::can_activate_mana_ability_now(
-                state, controller, object_id, idx, ability,
-            ) {
-                return false;
-            }
-            if !activation_condition_satisfied(state, controller, object_id, idx, ability) {
-                return false;
-            }
-            match &*ability.effect {
-                Effect::Mana { restrictions, .. } => mana_ability_allowed_for_payment(
-                    ability,
-                    restrictions,
-                    state,
-                    object_id,
-                    payment_context,
-                ),
-                _ => false,
-            }
+    activatable_player_choice_mana_abilities_for_payment(
+        state,
+        controller,
+        exclude,
+        payment_context,
+    )
+    .next()
+    .is_some()
+}
+
+/// CR 117.1d + CR 601.2g: Each `(source, ability index)` that
+/// [`has_activatable_player_choice_mana_ability_for_payment`] reports: a
+/// currently activatable mana ability whose activation the automatic payer
+/// leaves to the player, in battlefield order.
+/// If `payment_context` is provided, only mana abilities whose output
+/// restrictions permit spending in that context are included (CR 106.6).
+pub(crate) fn activatable_player_choice_mana_abilities_for_payment<'a>(
+    state: &'a GameState,
+    controller: PlayerId,
+    exclude: Option<ObjectId>,
+    payment_context: Option<&'a PaymentContext<'a>>,
+) -> impl Iterator<Item = (ObjectId, usize)> + 'a {
+    let gates = mana_abilities::ManaActivationGates::compute(state);
+    player_choice_mana_abilities_for_payment(state, controller).filter(
+        move |&(object_id, index)| {
+            Some(object_id) != exclude
+                && state
+                    .objects
+                    .get(&object_id)
+                    .and_then(|obj| obj.abilities.get(index))
+                    .is_some_and(|ability| {
+                        player_choice_mana_ability_ready_for_payment(
+                            state,
+                            controller,
+                            object_id,
+                            index,
+                            ability,
+                            payment_context,
+                            &gates,
+                        )
+                    })
+        },
+    )
+}
+
+/// CR 117.1d + CR 601.2g: every mana ability the player could activate during a
+/// payment window's opportunity, whether or not its own cost is payable on
+/// `state` itself: an earlier activation of the window can pay for it (Manaforge
+/// Cinder's "{1}: Add {B} or {R}" after Ashnod's Altar's {C}{C}). Readiness is
+/// decided per board by [`player_choice_mana_ability_ready_for_payment`].
+pub(crate) fn player_choice_mana_abilities_for_payment<'a>(
+    state: &'a GameState,
+    controller: PlayerId,
+) -> impl Iterator<Item = (ObjectId, usize)> + 'a {
+    state.battlefield.iter().flat_map(move |&object_id| {
+        let obj = state
+            .objects
+            .get(&object_id)
+            .filter(|obj| obj.zone == Zone::Battlefield && obj.controller == controller);
+        obj.into_iter().flat_map(move |obj| {
+            obj.abilities
+                .iter()
+                .enumerate()
+                .filter(|(_, ability)| player_choice_mana_ability_shape(ability))
+                .map(move |(idx, _)| (object_id, idx))
         })
     })
+}
+
+/// CR 117.1d + CR 605.3a: the mana abilities a payment window can offer at all.
+/// Choice-free tap-cost and unambiguous self-sacrifice abilities (Sol Ring,
+/// Wastes, Gold, Treasure) are already covered by the tap path, so they are
+/// not window candidates. A tap ability whose cost has no object-choosing
+/// component is judged by its shape, so no board the window reaches makes it
+/// one, and a battlefield of such producers costs the window's search nothing.
+fn player_choice_mana_ability_shape(ability: &AbilityDefinition) -> bool {
+    ability.kind == AbilityKind::Activated
+        && mana_abilities::is_mana_ability(ability)
+        && !has_unambiguous_self_sacrifice_component(&ability.cost)
+        && !(has_tap_component(&ability.cost)
+            && !ability
+                .cost
+                .as_ref()
+                .is_some_and(mana_abilities::cost_may_require_object_choice))
+}
+
+/// CR 605.3a + CR 117.1d: whether one candidate mana ability of
+/// [`player_choice_mana_abilities_for_payment`] can be activated in the payment
+/// window `payment_context` is for. That window is judged, not the priority the
+/// player may still hold while it is being opened: CR 304.5 keeps Lion's Eye
+/// Diamond's "Activate only as an instant" out of it, and its mana must pass
+/// every CR 106.6 restriction of that payment, as settlement spends it
+/// ([`mana_ability_allowed_for_payment`]: Food Chain's "Spend this mana only to
+/// cast creature spells" can't pay Prismite's {2}).
+pub(crate) fn player_choice_mana_ability_ready_for_payment(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    idx: usize,
+    ability: &AbilityDefinition,
+    payment_context: Option<&PaymentContext<'_>>,
+    gates: &mana_abilities::ManaActivationGates,
+) -> bool {
+    let Effect::Mana { restrictions, .. } = &*ability.effect else {
+        return false;
+    };
+    mana_ability_allowed_for_payment(ability, restrictions, state, object_id, payment_context)
+        && player_choice_mana_ability_passes_screen(
+            state, controller, object_id, idx, ability, gates,
+        )
+        && mana_abilities::can_activate_mana_ability_now_gated(
+            state, controller, object_id, idx, ability, gates,
+        )
+}
+
+/// CR 605.3a + CR 117.1d: every check of
+/// [`player_choice_mana_ability_ready_for_payment`] that needs no legality
+/// simulation — the candidate's shape, its source's readiness (a tapped source
+/// can't pay a {T} cost, CR 107.5 + CR 118.3), its activation restrictions and
+/// condition, and its cost's non-mana legs. Its own mana cost is left to the
+/// activation (CR 601.2g), as no verdict here clones the board or auto-taps. A
+/// candidate that fails it is not ready, so a caller that bounds its
+/// simulations need not spend one on it; one that passes it may still fail
+/// when activated, which a bounded caller pays for as a simulation.
+///
+/// We do NOT check the mana ability's output restrictions (CR 106.6 spend
+/// restrictions) here. Those restrictions are evaluated later in the witness
+/// search when mana is actually spent (via pool_composition and
+/// mana_unit_permits_payment_context), using the correct intermediate payment
+/// context for each spend. This allows mana abilities like Grand Architect
+/// (restricted to artifact spells/abilities) to be activated in the window even
+/// when the final activation is not an artifact ability.
+pub(crate) fn player_choice_mana_ability_passes_screen(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    idx: usize,
+    ability: &AbilityDefinition,
+    gates: &mana_abilities::ManaActivationGates,
+) -> bool {
+    if !player_choice_mana_ability_shape(ability) {
+        return false;
+    }
+    // A tap cost that chooses an object (CR 605.3a) belongs here with the
+    // ambiguous non-tap costs (KCI's "Sacrifice an artifact", discard,
+    // pay-life); a choice-free tap ability pays through the tap path.
+    if has_tap_component(&ability.cost)
+        && !mana_abilities::cost_requires_object_choice(state, controller, object_id, ability)
+    {
+        return false;
+    }
+    window_mana_ability_passes_screen(state, controller, object_id, idx, ability, gates)
+}
+
+/// CR 605.3a + CR 107.5 + CR 118.3: the readiness checks of
+/// [`player_choice_mana_ability_passes_screen`] that hold for any mana ability
+/// a payment window activates, whatever its cost's shape: its source's
+/// readiness (a tapped source can't pay a {T} cost), its activation
+/// restrictions and condition, and its cost's non-mana legs, decided without a
+/// legality simulation.
+pub(crate) fn window_mana_ability_passes_screen(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    idx: usize,
+    ability: &AbilityDefinition,
+    gates: &mana_abilities::ManaActivationGates,
+) -> bool {
+    if !is_payment_mana_ability(ability) {
+        return false;
+    }
+    // CR 107.5 + CR 118.3: a tapped source can't pay a {T} cost, so it is
+    // refused before any of its cost's choices are gathered.
+    if has_tap_component(&ability.cost)
+        && state.objects.get(&object_id).is_none_or(|obj| obj.tapped)
+    {
+        return false;
+    }
+    if !mana_abilities::mana_ability_ready_without_simulation_gated(
+        state,
+        controller,
+        object_id,
+        idx,
+        ability,
+        ManaPayabilityMode::Planning,
+        gates,
+    ) {
+        return false;
+    }
+    if !activation_condition_satisfied(state, controller, object_id, idx, ability) {
+        return false;
+    }
+    matches!(&*ability.effect, Effect::Mana { .. })
+}
+
+/// CR 601.2g + CR 605.3a + CR 118.10: the choice-free mana abilities — those
+/// the automatic payer activates itself, which
+/// [`player_choice_mana_abilities_for_payment`] leaves out — whose source the
+/// cost of one of `candidates` can take off the battlefield (Ashnod's Altar's
+/// "Sacrifice a creature" can take Deathbloom Ritualist). The automatic payer
+/// runs after the window, when such a source may be gone, so its mana counts
+/// only when the window activates it before its source pays that cost.
+pub(crate) fn window_consumable_mana_abilities(
+    state: &GameState,
+    controller: PlayerId,
+    candidates: &[(ObjectId, usize)],
+) -> Vec<(ObjectId, usize)> {
+    let mut consumable: Vec<ObjectId> = Vec::new();
+    for &(object_id, index) in candidates {
+        let Some(ability) = state
+            .objects
+            .get(&object_id)
+            .and_then(|obj| obj.abilities.get(index))
+        else {
+            continue;
+        };
+        let sacrificed =
+            mana_abilities::sacrifice_cost_choice(state, controller, object_id, ability)
+                .map(|(_, objects)| objects);
+        let exiled = mana_abilities::exile_cost_choice(state, controller, object_id, ability)
+            .filter(|(_, zone, _)| *zone == Zone::Battlefield)
+            .map(|(_, _, objects)| objects);
+        for object in sacrificed.into_iter().chain(exiled).flatten() {
+            if !consumable.contains(&object) {
+                consumable.push(object);
+            }
+        }
+    }
+    state
+        .battlefield
+        .iter()
+        .filter(|id| consumable.contains(id))
+        .filter_map(|id| Some((*id, state.objects.get(id)?)))
+        .filter(|(_, obj)| obj.controller == controller)
+        .flat_map(|(object_id, obj)| {
+            obj.abilities
+                .iter()
+                .enumerate()
+                .filter(|(_, ability)| {
+                    is_payment_mana_ability(ability) && !player_choice_mana_ability_shape(ability)
+                })
+                .map(move |(idx, _)| (object_id, idx))
+        })
+        .collect()
+}
+
+/// CR 601.2g + CR 605.3b: whether a mana ability of `controller`'s permanents
+/// adds an amount read from the board, which the window's own activations can
+/// change: Deathbloom Ritualist's "{T}: Add X mana of any one color, where X is
+/// the number of creature cards in your graveyard" adds more once Ashnod's
+/// Altar has sacrificed a creature. A capacity read now is then no bound on
+/// the window. An amount the ability's cost announces (Calciform Pools'
+/// "Remove X storage counters") is sized by the largest announceable X.
+pub(crate) fn has_board_sized_mana_ability(state: &GameState, controller: PlayerId) -> bool {
+    state.battlefield.iter().any(|&object_id| {
+        state
+            .objects
+            .get(&object_id)
+            .filter(|obj| obj.zone == Zone::Battlefield && obj.controller == controller)
+            .is_some_and(|obj| {
+                obj.abilities.iter().any(|ability| {
+                    is_payment_mana_ability(ability)
+                        && mana_amount_reads_board(state, controller, object_id, ability)
+                })
+            })
+    })
+}
+
+/// Whether one mana ability's amount is read from the board
+/// ([`has_board_sized_mana_ability`]).
+fn mana_amount_reads_board(
+    state: &GameState,
+    controller: PlayerId,
+    object_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> bool {
+    let Effect::Mana { produced, .. } = &*ability.effect else {
+        return false;
+    };
+    // CR 106.1: one mana of each distinct color among some permanents.
+    if matches!(
+        produced,
+        ManaProduction::DistinctColorsAmongPermanents { .. }
+    ) {
+        return true;
+    }
+    let mut counted = false;
+    produced.for_each_quantity_expr(&mut |quantity| {
+        counted |= !matches!(quantity, QuantityExpr::Fixed { .. });
+    });
+    counted
+        && mana_abilities::largest_announceable_x(state, controller, object_id, ability).is_none()
+}
+
+/// CR 601.2g + CR 605.3b: the choice-free mana abilities of `controller`'s
+/// permanents whose amount is read from the board. The automatic payer can
+/// activate them, but their amount is only provisional until they resolve
+/// (CR 605.3b), so the window must schedule them before the board they count
+/// changes: Gaea's Cradle's "Add {G} for each creature you control" adds one
+/// mana for a creature Ashnod's Altar later sacrifices only if it is tapped
+/// first, although the Cradle itself stays on the battlefield.
+pub(crate) fn window_board_sized_mana_abilities(
+    state: &GameState,
+    controller: PlayerId,
+) -> Vec<(ObjectId, usize)> {
+    state
+        .battlefield
+        .iter()
+        .filter_map(|&object_id| {
+            let obj = state
+                .objects
+                .get(&object_id)
+                .filter(|obj| obj.zone == Zone::Battlefield && obj.controller == controller)?;
+            Some(
+                obj.abilities
+                    .iter()
+                    .enumerate()
+                    .filter(move |(_, ability)| {
+                        is_payment_mana_ability(ability)
+                            && !player_choice_mana_ability_shape(ability)
+                            && mana_amount_reads_board(state, controller, object_id, ability)
+                    })
+                    .map(move |(idx, _)| (object_id, idx)),
+            )
+        })
+        .flatten()
+        .collect()
 }
 
 /// CR 117.1d + CR 601.2g: One activation's producible mana shape for the
@@ -3396,6 +3904,13 @@ fn land_mana_options(
 /// Single authority shared by `scan_mana_abilities` (which builds per-color
 /// `ManaSourceOption` rows) and `max_mana_yield` so the two never diverge on
 /// which abilities count as mana sources.
+///
+/// A cost that collects evidence is not choice-free: CR 701.59a lets the
+/// player exile any cards whose mana values reach the total, and which cards
+/// go can decide the rest of the payment (CR 118.10: the creature card
+/// Molten-Tail Masticore's own cost exiles can't also be the evidence). The
+/// automatic payer has no such answer, so Cryptex is activated only through
+/// its own prompt, as every other object-choosing mana cost is.
 fn is_active_tap_mana_ability(
     state: &GameState,
     object_id: ObjectId,
@@ -3409,6 +3924,14 @@ fn is_active_tap_mana_ability(
         return false;
     }
     if !has_tap_component(&ability.cost) && !has_unambiguous_self_sacrifice_component(&ability.cost)
+    {
+        return false;
+    }
+    if ability
+        .cost
+        .as_ref()
+        .and_then(mana_abilities::collect_evidence_cost_amount)
+        .is_some()
     {
         return false;
     }

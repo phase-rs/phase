@@ -64,6 +64,19 @@ impl From<ManaColor> for ManaType {
     }
 }
 
+/// CR 107.4a: the colored mana symbol of a color.
+impl From<ManaColor> for ManaCostShard {
+    fn from(color: ManaColor) -> Self {
+        match color {
+            ManaColor::White => ManaCostShard::White,
+            ManaColor::Blue => ManaCostShard::Blue,
+            ManaColor::Black => ManaCostShard::Black,
+            ManaColor::Red => ManaCostShard::Red,
+            ManaColor::Green => ManaCostShard::Green,
+        }
+    }
+}
+
 /// CR 106.1b: a set over the six types of mana, as a bitmask.
 ///
 /// Used to describe which mana a single-mana cost symbol accepts

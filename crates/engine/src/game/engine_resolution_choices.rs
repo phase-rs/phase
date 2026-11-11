@@ -3727,55 +3727,17 @@ pub(super) fn handle_resolution_choice(
                 )));
             }
             if let Some(pending_mana_ability) = pending_mana_ability {
-                let mut pending = pending_mana_ability.as_ref().clone();
                 // CR 107.1c / CR 107.3a: bind the announced amount to the
                 // correct mana-ability cost axis — a removed-counter count
                 // (CR 122.1) or an announced X for `Pay X speed` (CR 702.179f)
                 // or an `{X}` mana leg.
-                match resource {
-                    // CR 107.3a + CR 107.3i: for a literal "Remove X counters"
-                    // mana-ability cost (Saltcrusted Steppe class), CR 107.3i
-                    // requires every instance of X on the object to share the
-                    // one announced value, so the announced amount must ALSO
-                    // bind the "Add X mana" quantity ref, or the mana
-                    // production resolves X to 0 despite the counters being
-                    // removed successfully. Only the answered leaf that is
-                    // ITSELF the literal-X sentinel binds `chosen_x` —
-                    // `next_chosen_counter_leaf_is_literal_x` checks the
-                    // specific leaf this answer completes (by its position in
-                    // `chosen_counter_counts`), not just "some Counters prompt
-                    // was answered", so a composite cost combining a literal-X
-                    // leaf with an unrelated literal "any number of" leaf
-                    // (CR 107.1c, e.g. Pentad Prism, which has no `X` in its
-                    // Oracle text) can't leak the wrong leaf's amount into X.
-                    // Each leaf's amount is appended independently rather than
-                    // overwriting a single scalar, so a composite cost with
-                    // more than one chosen-count leaf keeps them distinct.
-                    PayableResource::Counters => {
-                        if mana_abilities::next_chosen_counter_leaf_is_literal_x(state, &pending) {
-                            pending.chosen_x = Some(amount);
-                        }
-                        pending.chosen_counter_counts.push(amount);
-                    }
-                    // CR 107.3a + CR 601.2b via CR 602.2b: the announced X of a
-                    // mana ability's `Pay X speed` (CR 702.179f) or `{X}` mana
-                    // leg. The activation's own cost cursor pays the leg with X
-                    // concretized; nothing is deducted here. A mana ability's
-                    // `{X}` leg announcement is always `ConcretizeX` (its only
-                    // minter, `mana_abilities`, writes that composition).
-                    PayableResource::Speed | PayableResource::Mana { .. } => {
-                        pending.chosen_x = Some(amount)
-                    }
-                    other @ (PayableResource::Energy
-                    | PayableResource::Life
-                    | PayableResource::LoopCollapse { .. }) => {
-                        return Err(EngineError::InvalidAction(format!(
-                            "Unexpected pay-amount resource {other:?} for mana ability"
-                        )));
-                    }
-                }
-                let waiting_for =
-                    mana_abilities::continue_mana_ability_activation(state, pending, events)?;
+                let waiting_for = mana_abilities::handle_mana_ability_pay_amount(
+                    state,
+                    &pending_mana_ability,
+                    &resource,
+                    amount,
+                    events,
+                )?;
                 return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
             }
             // CR 614.12a: a pre-entry as-enters life payment answers the parked

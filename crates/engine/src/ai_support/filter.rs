@@ -572,6 +572,17 @@ impl FilterPipeline {
         let mut memo: HashMap<LegalityKey, bool> = HashMap::new();
         let mut interner = FingerprintInterner::default();
         let _offer_witness_pool = OfferWitnessPoolGuard::enter();
+        // CR 601.2g: the expensive verdict of a `Manual` activation candidate
+        // re-runs the mana-ability-window witness (`casting::
+        // can_activate_ability_now_with_payment_mode`). One batch of candidates
+        // for one board therefore shares ONE window-search budget, exactly as
+        // the offer enumerations bound their generation loops: otherwise a
+        // board with many manual offers spends one 256-clone search per
+        // candidate (and again in every candidate list, preflight and legal
+        // action refresh). An exhausted budget only costs the authoritative
+        // simulation below, which returns the same verdict, so no candidate's
+        // legality changes — only the witness's bounded work does.
+        let _window_witness_scope = casting::window_witness_snapshot_scope();
         candidates
             .into_iter()
             .filter(|c| {
@@ -631,9 +642,11 @@ impl FilterPipeline {
 ///
 /// CR 400.7: object identity (`id`/`incarnation`) is intentionally NOT part of
 /// the fingerprint — the whole point is to collapse distinct-id, content-identical
-/// objects into one equivalence class.
+/// objects into one equivalence class. A manual activation's mana-window witness
+/// (`game::casting`) reads it for the same reason: it activates one of several
+/// content-identical mana sources (a row of Ashnod's Altars) per board.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ObjectFingerprint {
+pub(crate) struct ObjectFingerprint {
     controller: PlayerId,
     owner: PlayerId,
     is_token: bool,
@@ -701,6 +714,18 @@ struct ObjectFingerprint {
     harnessed: bool,
     monstrous: bool,
     echo_due: bool,
+    /// CR 603.6a: the ability source that put the object onto the battlefield
+    /// (`TriggerCondition::PlacedByAbilitySource`), as a relation: two objects
+    /// each placed by itself, or both by one other source, are interchangeable.
+    entered_via: Option<EnteredVia>,
+}
+
+/// [`ObjectFingerprint::entered_via`]: whether an object's placing source is
+/// the object itself or another object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum EnteredVia {
+    Itself,
+    Other(ObjectId),
 }
 
 /// XOR-fold per-element hashes so an unordered collection hashes
@@ -737,6 +762,7 @@ impl Hash for ObjectFingerprint {
         self.damage_marked.hash(h);
         self.loyalty.hash(h);
         self.phase_status.hash(h);
+        self.entered_via.hash(h);
         h.write_u64(fold_unordered(self.counters.iter()));
         h.write_u64(fold_unordered(self.goaded_by.iter()));
         h.write_u64(fold_unordered(self.detained_by.iter()));
@@ -750,7 +776,7 @@ impl Hash for ObjectFingerprint {
 /// Compute the content fingerprint of an object, or `None` when the object
 /// carries any per-object relational state the fingerprint cannot represent —
 /// in which case the object must never be memoized (FORCES-None).
-fn object_fingerprint(state: &GameState, id: ObjectId) -> Option<ObjectFingerprint> {
+pub(crate) fn object_fingerprint(state: &GameState, id: ObjectId) -> Option<ObjectFingerprint> {
     let obj = state.objects.get(&id)?;
     // FORCES-None: relational / merge / attachment / cast-link state whose
     // legality depends on a SPECIFIC other object or pairing. None of these is
@@ -766,7 +792,6 @@ fn object_fingerprint(state: &GameState, id: ObjectId) -> Option<ObjectFingerpri
         || obj.split_from_merge_survivor.is_some()
         || obj.pre_merge_is_token.is_some()
         || !obj.saddled_by.is_empty()
-        || obj.entered_via_ability_source.is_some()
         || obj.exile_from_stack_linked_source.is_some()
         || obj.cast_cost_paid_object.is_some()
         || obj.signature_spell.is_some()
@@ -828,6 +853,13 @@ fn object_fingerprint(state: &GameState, id: ObjectId) -> Option<ObjectFingerpri
         harnessed: obj.harnessed,
         monstrous: obj.monstrous,
         echo_due: obj.echo_due,
+        entered_via: obj.entered_via_ability_source.map(|source| {
+            if source == id {
+                EnteredVia::Itself
+            } else {
+                EnteredVia::Other(source)
+            }
+        }),
     })
 }
 

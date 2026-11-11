@@ -2229,3 +2229,117 @@ fn an_identical_second_ability_is_activated_while_the_first_is_suspended() {
     assert_eq!(trace(state), [first]);
     assert_eq!(state.objects[&marvin].abilities.len(), 2);
 }
+
+/// Prismite ("{2}: Add one mana of any color.") with `other` as the only other mana source, and
+/// a Grizzly Bears beside it and in hand.
+fn prismite_board(other: &str) -> Option<(GameRunner, ObjectId)> {
+    let db = shared_card_db()?;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let prismite = scenario.add_real_card(P0, "Prismite", Zone::Battlefield, db);
+    scenario.add_real_card(P0, other, Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
+    Some((scenario.build(), prismite))
+}
+
+/// Activates Prismite's {2} ability and requires the engine to refuse it: no payment window, no
+/// mana, and every object where it stood.
+fn assert_no_window_for(runner: &mut GameRunner, prismite: ObjectId) {
+    let begun = mana_costed(runner.state(), prismite);
+    let zones = |state: &GameState| {
+        let mut zones: Vec<(ObjectId, Zone, bool)> = state
+            .objects
+            .values()
+            .map(|obj| (obj.id, obj.zone, obj.tapped))
+            .collect();
+        zones.sort_by_key(|(id, ..)| *id);
+        zones
+    };
+    let before = zones(runner.state());
+    assert!(
+        runner.act(begun.clone()).is_err(),
+        "{begun:?} is refused: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "no window stands: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(suspended(runner.state()).is_empty(), "nothing is suspended");
+    assert_eq!(pool_total(runner.state()), 0, "no mana was made");
+    assert_eq!(zones(runner.state()), before, "nothing moved or tapped");
+}
+
+/// CR 304.5 + CR 605.3a (#10190 sixth review): the window Prismite's {2} would open is not
+/// priority, so Lion's Eye Diamond ("Discard your hand, Sacrifice this artifact: Add three mana of
+/// any one color. Activate only as an instant.") can't be activated in it, even though P0 holds
+/// priority as Prismite is activated. With the Diamond as the only other source, no window opens
+/// and the activation is refused.
+#[test]
+fn lions_eye_diamond_opens_no_window_for_prismite() {
+    let Some((mut runner, prismite)) = prismite_board("Lion's Eye Diamond") else {
+        return;
+    };
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "reach: P0 holds priority"
+    );
+    assert_no_window_for(&mut runner, prismite);
+}
+
+/// CR 106.6 (#10190 sixth review): Food Chain's mana ("Spend this mana only to cast creature
+/// spells.") can't pay Prismite's {2}, so no window opens for it and the activation is refused.
+/// Grand Architect's artifact-only mana can, so its window opens
+/// (`a_suspended_mana_ability_cannot_be_activated_again`).
+#[test]
+fn food_chain_opens_no_window_for_prismite() {
+    let Some((mut runner, prismite)) = prismite_board("Food Chain") else {
+        return;
+    };
+    assert_no_window_for(&mut runner, prismite);
+}
+
+/// CR 605.3a (#10190 sixth review): the positive control of the two refusals above. Grand
+/// Architect ("Tap an untapped blue creature you control: Add {C}{C}. Spend this mana only to
+/// cast artifact spells or activate abilities of artifacts.") can pay Prismite's {2}, so the window
+/// opens and settles with Prismite's color.
+#[test]
+fn grand_architect_opens_prismites_window() {
+    let Some((mut runner, prismite)) = prismite_board("Grand Architect") else {
+        return;
+    };
+    let architect = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].name == "Grand Architect")
+        .expect("the Architect");
+    let begun = mana_costed(runner.state(), prismite);
+    act(&mut runner, begun.clone());
+    assert_eq!(
+        suspended(runner.state()),
+        std::slice::from_ref(&begun),
+        "Prismite's {{2}} opens its payment window"
+    );
+    tap_architect(&mut runner, architect);
+    act(
+        &mut runner,
+        GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Green),
+            count: 1,
+        },
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(
+        runner.state().players[0]
+            .mana_pool
+            .count_color(ManaType::Green),
+        1
+    );
+}

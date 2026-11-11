@@ -377,3 +377,65 @@ fn throne_draw_auto_tap_uses_only_chosen_color_sources() {
         "a rejected activation must not tap ineligible mana sources"
     );
 }
+
+const ASHNODS_ALTAR: &str = "Sacrifice a creature: Add {C}{C}.";
+const MINDLESS_AUTOMATON: &str = "This creature enters with two +1/+1 counters on it.\n\
+{1}, Discard a card: Put a +1/+1 counter on this creature.\n\
+Remove two +1/+1 counters from this creature: Draw a card.";
+
+/// CR 106.6 + CR 601.2g + CR 602.2b (#10190): a manual payment's mana-ability
+/// window counts mana the automatic payer never activates (Ashnod's Altar's
+/// sacrifice), but the draw rider still constrains every unit spent, generic
+/// included. Two Altars and their fodder can make the {3} for an unrestricted
+/// activation, so Mindless Automaton's "{1}, Discard a card" is offered for a
+/// manual payment on the same board, while Throne's red-only {3} draw, which
+/// colorless mana can't pay, is offered in no mode.
+#[test]
+fn throne_draw_is_not_offered_on_colorless_sacrifice_mana_in_the_manual_window() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let throne = add_throne(&mut scenario);
+    let automaton = scenario
+        .add_creature_from_oracle(P0, "Mindless Automaton", 2, 2, MINDLESS_AUTOMATON)
+        .as_artifact_creature()
+        .id();
+    scenario.add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR);
+    scenario.add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR);
+    scenario.add_vanilla(P0, 2, 2);
+    scenario.add_vanilla(P0, 2, 2);
+    scenario.add_card_to_hand(P0, "Discard fodder");
+    let mut runner = scenario.build();
+    choose_red(runner.state_mut(), throne);
+    let (_, draw) = throne_ability_indices(runner.state(), throne);
+    let discard_ability = activated_ability_definitions(runner.state(), automaton)
+        .iter()
+        .find(|(_, ability)| matches!(ability.effect.as_ref(), Effect::PutCounter { .. }))
+        .map(|(index, _)| *index)
+        .expect("Mindless Automaton's {1}, Discard a card ability");
+
+    let (_, _, grouped) = engine::ai_support::legal_actions_full(runner.state());
+    let offered = |source: ObjectId, index: usize| -> Vec<CastPaymentMode> {
+        grouped
+            .get(&source)
+            .into_iter()
+            .flatten()
+            .filter_map(|action| match action {
+                GameAction::ActivateAbility {
+                    ability_index,
+                    payment_mode,
+                    ..
+                } if *ability_index == index => Some(*payment_mode),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        offered(automaton, discard_ability),
+        vec![CastPaymentMode::Manual],
+        "the Altars' colorless mana funds an unrestricted activation manually"
+    );
+    assert!(
+        offered(throne, draw).is_empty(),
+        "colorless mana can't pay the red-only {{3}}, so the draw is not offered"
+    );
+}

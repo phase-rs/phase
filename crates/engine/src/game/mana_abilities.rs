@@ -1749,6 +1749,64 @@ pub fn handle_discard_for_mana_ability(
     continue_mana_ability_activation(state, updated, events)
 }
 
+/// CR 117.1 + CR 118.3 + CR 605.3b: Answer a mana ability's cost-choice prompt
+/// (`WaitingFor::PayCost` resumed by `CostResume::ManaAbility`) with `chosen`.
+/// The single dispatch for the player's answer and for a witness board that
+/// activates a mana ability on the player's behalf.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_mana_ability_cost_selection(
+    state: &mut GameState,
+    kind: &PayCostKind,
+    min_count: usize,
+    count: usize,
+    choices: &[ObjectId],
+    pending: &PendingManaAbility,
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match kind {
+        // CR 605.1a: the aggregate form never resumes a mana ability;
+        // fixed-count and X-sentinel forms both do.
+        PayCostKind::TapCreatures { mode } => handle_tap_creatures_for_mana_ability(
+            state, min_count, count, *mode, choices, pending, chosen, events,
+        ),
+        PayCostKind::Discard => {
+            handle_discard_for_mana_ability(state, count, choices, pending, chosen, events)
+        }
+        PayCostKind::ExileFromManaZone { .. } => {
+            handle_exile_for_mana_ability(state, count, choices, pending, chosen, events)
+        }
+        PayCostKind::Sacrifice => {
+            handle_sacrifice_for_mana_ability(state, count, choices, pending, chosen, events)
+        }
+        // ReturnToHand, Reveal, ExileFromZone, RemoveCounter, and Behold
+        // do not have mana-ability cost handlers wired today. If a
+        // future mana ability uses one of these CR-valid cost shapes,
+        // add the corresponding mana-ability handler instead of
+        // routing it through the spell pipeline.
+        PayCostKind::ReturnToHand
+        | PayCostKind::Reveal { shared_quality: _ }
+        | PayCostKind::ExileFromZone { .. }
+        | PayCostKind::ExileMaterials { .. }
+        | PayCostKind::ExilePermanent { .. }
+        | PayCostKind::ExileAggregate { .. }
+        | PayCostKind::RemoveCounter { .. }
+        // CR 701.3d: an unattach-from cost is only ever surfaced via
+        // `CostResume::Spell` (targeted activation), never as a mana
+        // ability — unreachable here.
+        | PayCostKind::UnattachFrom { .. }
+        | PayCostKind::Behold { .. } => {
+            debug_assert!(
+                !matches!(kind, PayCostKind::UnattachFrom { .. }),
+                "UnattachFrom cost cannot resume a mana ability",
+            );
+            Err(EngineError::InvalidAction(
+                "Cost kind cannot resume a mana ability".into(),
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2231,6 +2289,41 @@ fn mana_ability_announces_x(cost: &Option<AbilityCost>) -> bool {
         }
     }
     cost.as_ref().is_some_and(any_announced_x_leg)
+}
+
+/// CR 107.3a + CR 118.3: an upper bound on the X `player` could announce for
+/// `ability` of `source_id` now: its current speed for "Pay X speed" (CR
+/// 702.179f: Chicago Loop), and the source's counters of each type a literal
+/// "Remove X ... counters" leg removes (Calciform Pools' storage counters).
+/// `None` when no leg bounds X — no X at all, or only an `{X}` mana leg, which
+/// spends as much mana as the X it announces.
+pub(crate) fn largest_announceable_x(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability: &AbilityDefinition,
+) -> Option<u32> {
+    let cost = ability.cost.as_ref()?;
+    let mut legs = Vec::new();
+    append_mana_ability_cost_component_refs(cost, &mut legs);
+    legs.into_iter()
+        .filter_map(|leg| match leg {
+            AbilityCost::PaySpeed { .. } if announced_x_leg(leg).is_some() => {
+                Some(super::speed::effective_speed(state, player) as u32)
+            }
+            AbilityCost::RemoveCounter {
+                count: REMOVE_COUNTER_COST_X,
+                counter_type,
+                target: None,
+                ..
+            } => Some(removable_counter_count_for_mana_cost(
+                state,
+                source_id,
+                counter_type,
+            )),
+            _ => None,
+        })
+        .min()
 }
 
 /// CR 107.3a + CR 107.3i: the X-announcement prompt for a mana ability's cost —
@@ -3949,6 +4042,60 @@ pub(crate) fn resume_settled_mana_frame(
             ))
         }
     }
+}
+
+/// CR 107.1c + CR 107.3a: answers a begun mana ability's `PayAmountChoice`
+/// with `amount`, binding it to the cost axis `resource` names, and continues
+/// the activation. The single continuation authority for the live action
+/// handler and the manual window's witness search
+/// (`casting::mana_ability_window_mana_witness`), so both bind the announced
+/// amount the same way. `amount` must already lie in the prompt's range.
+pub(crate) fn handle_mana_ability_pay_amount(
+    state: &mut GameState,
+    pending: &PendingManaAbility,
+    resource: &PayableResource,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let mut pending = pending.clone();
+    match resource {
+        // CR 107.3a + CR 107.3i: for a literal "Remove X counters" mana-ability
+        // cost (Saltcrusted Steppe class), CR 107.3i requires every instance of
+        // X on the object to share the one announced value, so the announced
+        // amount must ALSO bind the "Add X mana" quantity ref, or the mana
+        // production resolves X to 0 despite the counters being removed
+        // successfully. Only the answered leaf that is ITSELF the literal-X
+        // sentinel binds `chosen_x` — `next_chosen_counter_leaf_is_literal_x`
+        // checks the specific leaf this answer completes (by its position in
+        // `chosen_counter_counts`), not just "some Counters prompt was
+        // answered", so a composite cost combining a literal-X leaf with an
+        // unrelated literal "any number of" leaf (CR 107.1c, e.g. Pentad Prism,
+        // which has no `X` in its Oracle text) can't leak the wrong leaf's
+        // amount into X. Each leaf's amount is appended independently rather
+        // than overwriting a single scalar, so a composite cost with more than
+        // one chosen-count leaf keeps them distinct.
+        PayableResource::Counters => {
+            if next_chosen_counter_leaf_is_literal_x(state, &pending) {
+                pending.chosen_x = Some(amount);
+            }
+            pending.chosen_counter_counts.push(amount);
+        }
+        // CR 107.3a + CR 601.2b via CR 602.2b: the announced X of a mana
+        // ability's `Pay X speed` (CR 702.179f) or `{X}` mana leg. The
+        // activation's own cost cursor pays the leg with X concretized; nothing
+        // is deducted here. A mana ability's `{X}` leg announcement is always
+        // `ConcretizeX` (its only minter, `mana_abilities`, writes that
+        // composition).
+        PayableResource::Speed | PayableResource::Mana { .. } => pending.chosen_x = Some(amount),
+        other @ (PayableResource::Energy
+        | PayableResource::Life
+        | PayableResource::LoopCollapse { .. }) => {
+            return Err(EngineError::InvalidAction(format!(
+                "Unexpected pay-amount resource {other:?} for mana ability"
+            )));
+        }
+    }
+    continue_mana_ability_activation(state, pending, events)
 }
 
 /// CR 602.2 + CR 733.1: continues a begun mana-ability activation none of whose costs is paid;
@@ -5689,7 +5836,7 @@ fn tap_creature_cost_choice(
     Some((min_count, max_count, creatures, mode))
 }
 
-fn discard_cost_choice(
+pub(crate) fn discard_cost_choice(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
@@ -5758,7 +5905,7 @@ fn find_exile_cost(cost: &AbilityCost) -> Option<(u32, Zone, Option<&TargetFilte
 /// CR 117.1 + CR 118.3 + CR 605.3b: Surface eligible objects for a non-self
 /// exile mana ability cost. Library costs are deterministic top-card payment,
 /// not a player choice, so they are prepared separately.
-fn exile_cost_choice(
+pub(crate) fn exile_cost_choice(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
@@ -5822,7 +5969,7 @@ fn prepare_deterministic_exile_cost_selection(
 /// for an `AbilityCost::Sacrifice(SacrificeCost::count(!SelfRef, 1))` mana ability cost.
 /// Delegates eligibility to the casting cost helper so mana and non-mana
 /// activation costs share the same battlefield/controller/filter semantics.
-fn sacrifice_cost_choice(
+pub(crate) fn sacrifice_cost_choice(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
@@ -5863,6 +6010,18 @@ pub(crate) fn cost_requires_object_choice(
             .as_ref()
             .and_then(collect_evidence_cost_amount)
             .is_some()
+}
+
+/// CR 601.2g + CR 605.3a: Whether `cost` has any component that
+/// [`cost_requires_object_choice`] could ask the player to choose objects for,
+/// on any board. Judged on the cost's shape alone, so a mana ability for which
+/// it is `false` asks for no object on any board the payment window reaches.
+pub(crate) fn cost_may_require_object_choice(cost: &AbilityCost) -> bool {
+    super::casting::find_non_self_discard(cost).is_some()
+        || super::casting::find_tap_creatures_cost(cost).is_some()
+        || find_exile_cost(cost).is_some()
+        || super::casting::find_non_self_sacrifice_cost(cost).is_some()
+        || collect_evidence_cost_amount(cost).is_some()
 }
 
 /// CR 118.3 + CR 608.2h: The objects a mana ability's exile or sacrifice cost
