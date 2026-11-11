@@ -98413,6 +98413,47 @@ fn if_you_do_look_body_with_two_selections_is_not_folded() {
     );
 }
 
+/// CR 110.2a: a Dig cannot carry "under your control", so that selection keeps
+/// the gated distribution. No printed card has this shape; the nearest printed
+/// card is Call to the Kindred.
+#[test]
+fn if_you_do_look_body_with_a_controller_override_is_not_folded() {
+    let root = upkeep_look_trigger_root(
+        "At the beginning of your upkeep, you may look at the top five cards of target \
+         opponent's library. If you do, you may put a creature card from among them onto the \
+         battlefield under your control, then put the rest into that player's graveyard.",
+    );
+    assert!(matches!(
+        &*root.effect,
+        Effect::Dig {
+            keep_count: Some(0),
+            ..
+        }
+    ));
+    let mut node = root.sub_ability.as_deref();
+    let mut gated_control = false;
+    while let Some(def) = node {
+        gated_control |= matches!(
+            &*def.effect,
+            Effect::ChangeZone {
+                enters_under: Some(ControllerRef::You),
+                ..
+            } | Effect::ChangeZoneAll {
+                enters_under: Some(ControllerRef::You),
+                ..
+            }
+        ) && def
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed);
+        node = def.sub_ability.as_deref();
+    }
+    assert!(
+        gated_control,
+        "the put keeps \"under your control\" and its gate: {root:#?}"
+    );
+}
+
 /// CR 701.20e + CR 701.20b: a bare look leaves its cards in the library, so a
 /// following "put those cards into your graveyard" must lower to a whole-set
 /// move that reads the looked-at set out of the LIBRARY. The tracked-set mass

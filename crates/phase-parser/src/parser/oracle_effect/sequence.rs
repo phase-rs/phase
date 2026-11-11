@@ -5317,6 +5317,15 @@ fn dig_intervening_cost_host(
     })
 }
 
+/// Whether the `Dig` patch arm can carry a `DigFromAmong` continuation's kept-card
+/// entry faithfully: `Effect::Dig` has no controller or face-down field.
+pub(super) fn dig_patch_represents_from_among(
+    enters_under: &Option<ControllerRef>,
+    face_down_profile: &Option<FaceDownProfile>,
+) -> bool {
+    enters_under.is_none() && face_down_profile.is_none()
+}
+
 pub(super) fn apply_clause_continuation(
     defs: &mut Vec<AbilityDefinition>,
     continuation: ContinuationAst,
@@ -6051,7 +6060,7 @@ pub(super) fn apply_clause_continuation(
                     if let Some(sac_pos) = sac_pos {
                         // CR 608.2c + CR 701.20e: Birthing Ritual pattern.
                         debug_assert!(
-                            face_down_profile.is_none() && enters_under.is_none(),
+                            dig_patch_represents_from_among(&enters_under, &face_down_profile),
                             "Dig-source face-down from-among with intervening sacrifice \
                              is not yet supported"
                         );
@@ -6206,7 +6215,7 @@ pub(super) fn apply_clause_continuation(
                 // `ChangeZoneAll`/`ChangeZone { face_down_profile, enters_under }`
                 // reading `TrackedSetFiltered`, rather than patching the `Dig`.
                 debug_assert!(
-                    face_down_profile.is_none() && enters_under.is_none(),
+                    dig_patch_represents_from_among(&enters_under, &face_down_profile),
                     "Dig-source face-down/under-control from-among form is not yet \
                      supported; route via the tracked-set push (see Mill branch)"
                 );

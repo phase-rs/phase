@@ -187,8 +187,8 @@ use self::search::{
 };
 use self::sequence::{
     apply_clause_continuation, clause_is_dig_lookback_transparent, continuation_absorbs_current,
-    parse_followup_continuation_ast, parse_intrinsic_continuation_ast,
-    parse_revealed_this_way_card_filter, split_clause_sequence,
+    dig_patch_represents_from_among, parse_followup_continuation_ast,
+    parse_intrinsic_continuation_ast, parse_revealed_this_way_card_filter, split_clause_sequence,
     try_parse_repeat_process_for_keywords, try_parse_same_is_true_continuation,
 };
 use self::subject::{
@@ -991,7 +991,7 @@ fn if_you_do_object_anchor(
         })
 }
 
-/// CR 118.12: the optional look a "you may look …. If you do, …" gate names,
+/// CR 118.12: the optional look a "you may look … If you do, …" gate names,
 /// when that look is a `Dig` the body's instructions can continue.
 fn if_you_do_look_anchor(clauses: &[ClauseIr], condition: &AbilityCondition) -> Option<Effect> {
     if !condition.is_optional_effect_performed() {
@@ -47892,9 +47892,13 @@ fn parse_effect_chain_ir_body(
                             matches!(
                                 continuations.as_slice(),
                                 [
-                                    ContinuationAst::DigFromAmong { .. },
+                                    ContinuationAst::DigFromAmong {
+                                        enters_under,
+                                        face_down_profile,
+                                        ..
+                                    },
                                     ContinuationAst::PutRest { .. }
-                                ]
+                                ] if dig_patch_represents_from_among(enters_under, face_down_profile)
                             )
                         });
                     if let Some(continuations) = continuations {
