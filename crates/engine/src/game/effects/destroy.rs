@@ -14,33 +14,37 @@ use crate::types::identifiers::ObjectId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
-/// CR 616.1 + CR 701.8a: whether consulting this destruction population as one
-/// staged batch would ask two players' replacement choices out of APNAP order.
+/// CR 616.1 + CR 701.8a: the consultation (and delivery) order of a staged
+/// destruction population.
 ///
 /// Staging consults every member before any is delivered, in announcement
-/// order. The per-member loop it replaces delivers each member before
-/// consulting the next and stops at the first choice, so it never asks a
-/// second choice: a choice that staging reaches only because an earlier member
-/// is still on the battlefield (Dauthi Voidwalker competing with Rest in Peace
-/// for both opponents' creatures) is newly reachable. CR 616.1 orders
-/// simultaneous choices of different players APNAP; the staged cursor cannot
-/// yet reorder them, so a population whose live choosers would be asked out of
-/// that order keeps the per-member loop instead.
+/// order. The per-member loop it replaces delivered each member before
+/// consulting the next and stopped at the first choice, so a choice that
+/// staging reaches only because an earlier member is still on the battlefield
+/// (Dauthi Voidwalker competing with Rest in Peace for both opponents'
+/// creatures) is newly reachable. CR 616.1 makes simultaneous choices of
+/// different players in APNAP order, so the members whose consultation asks a
+/// player are reordered among their own slots: their choosers come in APNAP
+/// order, announcement order is kept within one chooser, and every member that
+/// asks nobody keeps its position. A population already in that order is
+/// returned unchanged.
 ///
-/// The probe runs the real replacement pipeline, member by member in
-/// announcement order, on a scratch copy of the board staging would consult
-/// (outer Destroy, then the inner Battlefield-to-Graveyard move for an
-/// executed Destroy). A parked choice is recorded and left unanswered, as the
-/// staged batch would leave it while later members wait.
-fn staged_destroy_choices_break_apnap(
+/// The choosers are discovered by the real replacement pipeline, member by
+/// member in announcement order, on a scratch copy of the board staging would
+/// consult (outer Destroy, then the inner Battlefield-to-Graveyard move for an
+/// executed Destroy); a parked choice is recorded and left unanswered, as the
+/// staged batch leaves it while later members wait. A choice that only an
+/// answer exposes (CR 101.4d) and the order of one player's own choices
+/// (CR 101.4c) are left to the replacement-boundary scheduler.
+fn apnap_consultation_order(
     state: &GameState,
     members: &[ObjectId],
     source: ObjectId,
     cant_regenerate: bool,
-) -> bool {
+) -> Vec<ObjectId> {
     let mut probe = state.clone();
     let mut scratch = Vec::new();
-    let mut choosers = Vec::new();
+    let mut choosers = Vec::with_capacity(members.len());
     for &member in members {
         let outer = ProposedEvent::Destroy {
             object_id: member,
@@ -65,14 +69,22 @@ fn staged_destroy_choices_break_apnap(
             }
         };
         probe.pending_replacement = None;
-        choosers.extend(chooser);
+        choosers.push(chooser);
     }
     let apnap = crate::game::players::apnap_order(state);
-    let rank = |player| apnap.iter().position(|candidate| *candidate == player);
-    choosers
-        .iter()
-        .zip(choosers.iter().skip(1))
-        .any(|(earlier, later)| rank(*later) < rank(*earlier))
+    let rank = |index: usize| {
+        choosers[index].and_then(|player| apnap.iter().position(|seat| *seat == player))
+    };
+    let choosing: Vec<usize> = (0..members.len())
+        .filter(|&index| choosers[index].is_some())
+        .collect();
+    let mut apnap_choosing = choosing.clone();
+    apnap_choosing.sort_by_key(|&index| rank(index));
+    let mut ordered = members.to_vec();
+    for (&slot, &from) in choosing.iter().zip(&apnap_choosing) {
+        ordered[slot] = members[from];
+    }
+    ordered
 }
 
 /// CR 701.8a + CR 614: Apply an accepted Destroy proposed event.
@@ -268,14 +280,9 @@ pub fn resolve(
             }
         }
     }
-    if unique_targets.len() >= 2
-        && !staged_destroy_choices_break_apnap(
-            state,
-            &unique_targets,
-            ability.source_id,
-            cant_regenerate,
-        )
-    {
+    if unique_targets.len() >= 2 {
+        let unique_targets =
+            apnap_consultation_order(state, &unique_targets, ability.source_id, cant_regenerate);
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(state, &unique_targets);
         let requests = unique_targets
@@ -473,11 +480,11 @@ pub fn resolve_all(
 
     // CR 701.8a: the whole guarded mass population is one announced
     // simultaneous destruction. A pause must not lose the unprocessed suffix.
-    // CR 616.1: a population whose staged choices would be asked out of APNAP
-    // order keeps the per-member loop below (`staged_destroy_choices_break_apnap`).
-    if matching.len() >= 2
-        && !staged_destroy_choices_break_apnap(state, &matching, ability.source_id, cant_regenerate)
-    {
+    // CR 616.1: the choosing members are consulted with their choosers in APNAP
+    // order (`apnap_consultation_order`).
+    if matching.len() >= 2 {
+        let matching =
+            apnap_consultation_order(state, &matching, ability.source_id, cant_regenerate);
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(state, &matching);
         let requests = matching

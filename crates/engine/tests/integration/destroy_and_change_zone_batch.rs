@@ -3459,18 +3459,32 @@ const DAUTHI_VOIDWALKER: &str = "Shadow (This creature can block or be blocked b
 const REST_IN_PEACE_ORACLE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
 
 /// Cast Akroma's Vengeance on a three-player board where P0 controls Dauthi
-/// Voidwalker and Rest in Peace (first on the battlefield) and each opponent
-/// controls one creature, in the given seat order. Answer every replacement
-/// choice with its first option; return who was asked, in order.
+/// Voidwalker and Rest in Peace and each opponent controls one creature, in
+/// the given seat order, before or after P0's permanents. Answer every
+/// replacement choice with its first option; return who was asked, in order.
 fn vengeance_over_dauthi_and_rest_in_peace(
     opponents_in_battlefield_order: [PlayerId; 2],
-) -> (Vec<PlayerId>, GameRunner, [ObjectId; 2]) {
+    creatures_first: bool,
+) -> (Vec<PlayerId>, GameRunner, [ObjectId; 2], [ObjectId; 2]) {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.add_creature_from_oracle(P0, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER);
-    scenario.add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE_ORACLE);
+    let add_permanents = |scenario: &mut GameScenario| {
+        [
+            scenario
+                .add_creature_from_oracle(P0, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER)
+                .id(),
+            scenario
+                .add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE_ORACLE)
+                .id(),
+        ]
+    };
+    let mut permanents = None;
+    if !creatures_first {
+        permanents = Some(add_permanents(&mut scenario));
+    }
     let creatures = opponents_in_battlefield_order
         .map(|owner| scenario.add_creature(owner, "Grizzly Bears", 2, 2).id());
+    let permanents = permanents.unwrap_or_else(|| add_permanents(&mut scenario));
     let vengeance = zero_cost_spell(&mut scenario, "Akroma's Vengeance", AKROMAS_VENGEANCE);
     let mut runner = scenario.build();
     runner.cast(vengeance).commit();
@@ -3492,38 +3506,42 @@ fn vengeance_over_dauthi_and_rest_in_peace(
             other => panic!("unexpected prompt: {other:?}"),
         }
     }
-    (asked, runner, creatures)
+    (asked, runner, creatures, permanents)
 }
 
 /// CR 616.1: "If two or more players have to make these choices at the same
 /// time, choices are made in APNAP order." Dauthi Voidwalker ("If a card would
 /// be put into an opponent's graveyard from anywhere, instead exile it with a
 /// void counter on it") and Rest in Peace both apply to each opponent's
-/// creature only while the whole Vengeance population is consulted before
-/// delivery. With the two opponents' creatures in reversed seat order (P2's
-/// before P1's), staging would ask P2 before P1, so the population keeps the
-/// per-member loop the merge base used: Dauthi is destroyed first and no
-/// choice is asked. With the seats in APNAP order, staging asks P1 then P2.
+/// creature while the whole Vengeance population is consulted before delivery
+/// (CR 701.8a: one simultaneous destruction), so P1 and P2 each choose. With
+/// P0 active, P1 is asked before P2 whatever the battlefield order of their
+/// creatures or of P0's permanents, and every member is destroyed.
 #[test]
 fn vengeance_never_asks_two_players_out_of_apnap_order() {
     let p2 = PlayerId(2);
-    let (asked, runner, creatures) = vengeance_over_dauthi_and_rest_in_peace([p2, P1]);
-    assert_eq!(
-        asked,
-        Vec::<PlayerId>::new(),
-        "reversed seats: no choice is asked out of APNAP order"
-    );
-    for creature in creatures {
-        // The merge base, on this board: no choice asked, both creatures in
-        // their owners' graveyards (Dauthi is destroyed before them).
-        assert_eq!(runner.state().objects[&creature].zone, Zone::Graveyard);
+    for (seats, creatures_first) in [([p2, P1], false), ([P1, p2], false), ([p2, P1], true)] {
+        let case = format!("seats={seats:?} creatures_first={creatures_first}");
+        let (asked, runner, creatures, permanents) =
+            vengeance_over_dauthi_and_rest_in_peace(seats, creatures_first);
+        assert_eq!(asked, vec![P1, p2], "{case}: choices are asked APNAP");
+        for creature in creatures {
+            assert_eq!(
+                runner.state().objects[&creature].zone,
+                Zone::Exile,
+                "{case}: both replacements apply to the simultaneous destruction"
+            );
+        }
+        for permanent in permanents {
+            assert!(
+                !runner.state().battlefield.contains(&permanent),
+                "{case}: Dauthi and Rest in Peace are destroyed too"
+            );
+        }
+        assert!(runner.state().resolution_stack.is_empty(), "{case}");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
     }
-    assert!(runner.state().resolution_stack.is_empty());
-
-    let (asked, runner, creatures) = vengeance_over_dauthi_and_rest_in_peace([P1, p2]);
-    assert_eq!(asked, vec![P1, p2], "seats in APNAP order are staged");
-    for creature in creatures {
-        assert_eq!(runner.state().objects[&creature].zone, Zone::Exile);
-    }
-    assert!(runner.state().resolution_stack.is_empty());
 }
