@@ -972,6 +972,7 @@ fn spark_double_counter_completion_replays_copied_targeted_trigger() {
 mod feldon_tokens {
     use super::*;
     use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::ability::ChosenAttribute;
     use engine::types::events::GameEvent;
     use engine::types::keywords::Keyword;
     use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -1618,8 +1619,17 @@ mod feldon_tokens {
             .resolve();
         let (first, _) = choose_copy(runner, donor);
         choose_token_counter_order(runner, first, first_counter_replacement);
-        // Reach guard: the first entrant has entered and the entry event is not
-        // finished. Every row below depends on this exact pause.
+        assert_first_entered_with_second_offer_open(runner, first, donor);
+        first
+    }
+
+    /// Reach guard: the first entrant has entered and the entry event is not
+    /// finished. Every later-co-entrant row depends on this exact pause.
+    fn assert_first_entered_with_second_offer_open(
+        runner: &GameRunner,
+        first: ObjectId,
+        donor: ObjectId,
+    ) {
         let entered = &runner.state().objects[&first];
         assert_eq!(entered.zone, Zone::Battlefield);
         assert!(entered.is_token);
@@ -1632,13 +1642,25 @@ mod feldon_tokens {
             "second entrant's copy offer is open: {:?}",
             runner.state().waiting_for
         );
-        first
     }
 
-    /// Soul Warden's life gain for one activation whose first token copies
-    /// Triskelion and whose second copies `second`. `persist` round-trips the
-    /// game through the persisted wire at the pause between the two entrants.
-    fn warden_life_for_second_copy(second: SecondCopy, persist: bool) -> i32 {
+    fn graveyard_hill_giant(scenario: &mut GameScenario) -> ObjectId {
+        // Hill Giant is a vanilla 3/3 red Giant with no entry counters.
+        scenario
+            .add_creature_to_graveyard(P0, "Hill Giant", 3, 3)
+            .with_subtypes(vec!["Giant"])
+            .with_color(vec![ManaColor::Red])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 3,
+            })
+            .id()
+    }
+
+    /// Soul Warden's life gain for one activation whose tokens copy `first`
+    /// and then `second`. `persist` round-trips the game through the persisted
+    /// wire at the pause between the two entrants.
+    fn warden_life_for_copies(first: FirstCopy, second: SecondCopy, persist: bool) -> i32 {
         let BodyDoubleBoard {
             mut scenario,
             feldon,
@@ -1648,16 +1670,30 @@ mod feldon_tokens {
         } = body_double_board();
         let triskelion = graveyard_triskelion(&mut scenario);
         let hushbringer = graveyard_hushbringer(&mut scenario);
+        let hill_giant = graveyard_hill_giant(&mut scenario);
         scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
         let mut runner = scenario.build();
         let life = runner.life(P0);
-        let first = enter_first_copy_before_second_offer(
-            &mut runner,
-            feldon,
-            body_double,
-            triskelion,
-            scales,
-        );
+        let first = match first {
+            // The counter-ordering answer publishes this entrant.
+            FirstCopy::Triskelion => enter_first_copy_before_second_offer(
+                &mut runner,
+                feldon,
+                body_double,
+                triskelion,
+                scales,
+            ),
+            // No entry counters: the copy-choice answer publishes this entrant.
+            FirstCopy::HillGiant => {
+                runner
+                    .activate(feldon, 0)
+                    .target_object(body_double)
+                    .resolve();
+                let (token, _) = choose_copy(&mut runner, hill_giant);
+                assert_first_entered_with_second_offer_open(&runner, token, hill_giant);
+                token
+            }
+        };
         assert_eq!(runner.life(P0), life, "nothing has resolved at the pause");
         if persist {
             runner = restore(runner);
@@ -1688,6 +1724,12 @@ mod feldon_tokens {
     }
 
     #[derive(Clone, Copy)]
+    enum FirstCopy {
+        Triskelion,
+        HillGiant,
+    }
+
+    #[derive(Clone, Copy)]
     enum SecondCopy {
         Hushbringer,
         Triskelion,
@@ -1703,12 +1745,12 @@ mod feldon_tokens {
     #[test]
     fn later_co_entrant_suppressor_governs_the_whole_token_entry_event() {
         assert_eq!(
-            warden_life_for_second_copy(SecondCopy::Triskelion, false),
+            warden_life_for_copies(FirstCopy::Triskelion, SecondCopy::Triskelion, false),
             2,
             "positive control: without a suppressor Soul Warden sees both entrants"
         );
         assert_eq!(
-            warden_life_for_second_copy(SecondCopy::Hushbringer, false),
+            warden_life_for_copies(FirstCopy::Triskelion, SecondCopy::Hushbringer, false),
             0,
             "the completed entry event includes Hushbringer, so no entrant triggers Soul Warden"
         );
@@ -1720,12 +1762,12 @@ mod feldon_tokens {
     #[test]
     fn later_co_entrant_suppressor_survives_persisted_restore_at_the_pause() {
         assert_eq!(
-            warden_life_for_second_copy(SecondCopy::Triskelion, true),
+            warden_life_for_copies(FirstCopy::Triskelion, SecondCopy::Triskelion, true),
             2,
             "positive control: the first entrant's entry is not lost across restore"
         );
         assert_eq!(
-            warden_life_for_second_copy(SecondCopy::Hushbringer, true),
+            warden_life_for_copies(FirstCopy::Triskelion, SecondCopy::Hushbringer, true),
             0,
             "the restored game still checks the first entrant against the completed event"
         );
@@ -1777,13 +1819,7 @@ mod feldon_tokens {
     /// Evincar.
     #[test]
     fn later_co_entrant_characteristic_modifier_governs_the_earlier_entrant() {
-        let (draws, first_power) = bond_draws_for_second_copy(|scenario| {
-            scenario
-                .add_creature_to_graveyard(P0, "Hill Giant", 3, 3)
-                .with_subtypes(vec!["Giant"])
-                .with_color(vec![ManaColor::Red])
-                .id()
-        });
+        let (draws, first_power) = bond_draws_for_second_copy(graveyard_hill_giant);
         assert_eq!(first_power, 3);
         assert_eq!(
             draws, 2,
@@ -1928,6 +1964,147 @@ mod feldon_tokens {
             runner.state().players[0].library.len(),
             library - 1,
             "the limit was spent by the completed entry event"
+        );
+    }
+
+    /// A first copy with no entry counters is published by the copy-choice
+    /// answer itself, which then stops on the second token's copy offer. That
+    /// entry is still part of the one event (CR 603.6a): Soul Warden sees it
+    /// when nothing suppresses the event, and does not when the second copy is
+    /// Hushbringer.
+    #[test]
+    fn copy_choice_answer_keeps_its_entrant_for_the_completed_event() {
+        assert_eq!(
+            warden_life_for_copies(FirstCopy::HillGiant, SecondCopy::Triskelion, false),
+            2,
+            "the entrant published by the copy-choice answer is not lost"
+        );
+        assert_eq!(
+            warden_life_for_copies(FirstCopy::HillGiant, SecondCopy::Hushbringer, false),
+            0,
+            "and it is checked against the completed event, which Hushbringer suppresses"
+        );
+    }
+
+    const BESTIAL_MENACE: &str = "Create a 1/1 green Snake creature token, a 2/2 green Wolf creature token, and a 3/3 green Elephant creature token.";
+    const METALLIC_MIMIC: &str = "As this creature enters, choose a creature type.\nThis creature is the chosen type in addition to its other types.\nEach other creature you control of the chosen type enters with an additional +1/+1 counter on it.";
+    const BRANCHING_EVOLUTION: &str = "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on that creature instead.";
+
+    /// CR 603.2c + CR 603.6a: Bestial Menace's three tokens are one entry event,
+    /// so Mister Fantastic ("Whenever one or more tokens you control enter, you
+    /// may draw a card.") triggers once for it. Metallic Mimic naming Elephant
+    /// gives only the Elephant an entry counter; Hardened Scales and Branching
+    /// Evolution make that a CR 616.1f ordering choice, so the resolving spell
+    /// itself puts the Snake and the Wolf onto the battlefield and then stops.
+    #[test]
+    fn resolving_spell_that_stops_on_its_last_token_matches_the_event_once() {
+        let (mut scenario, _feldon) = setup();
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION);
+        let mimic = scenario
+            .add_creature_from_oracle(P0, "Metallic Mimic", 2, 1, METALLIC_MIMIC)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Shapeshifter"])
+            .id();
+        let fantastic = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Mister Fantastic, Reed Richards",
+                2,
+                4,
+                "Reach\nWhenever one or more tokens you control enter, you may draw a card.",
+            )
+            .as_legendary()
+            .id();
+        let menace = scenario
+            .add_spell_to_hand_from_oracle(P0, "Bestial Menace", false, BESTIAL_MENACE)
+            .id();
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&mimic)
+            .unwrap()
+            .chosen_attributes = vec![ChosenAttribute::CreatureType("Elephant".to_string())];
+        let hand = runner.state().players[0].hand.len();
+        let tokens_named = |runner: &GameRunner, name: &str| {
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| {
+                    object.is_token && object.zone == Zone::Battlefield && object.name == name
+                })
+                .count()
+        };
+        runner.cast(menace).resolve();
+        // Reach guard: two entrants have entered and the third is still
+        // entering, stopped on the order of its entry counter's replacements.
+        assert_eq!(tokens_named(&runner, "Snake"), 1);
+        assert_eq!(tokens_named(&runner, "Wolf"), 1);
+        let elephant = runner
+            .state()
+            .objects
+            .values()
+            .find(|object| object.is_token && object.name == "Elephant")
+            .map(|object| object.id)
+            .expect("the Elephant token is being created");
+        assert_eq!(
+            runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .expect("a replacement is parked")
+                .proposed
+                .affected_object_id(),
+            Some(elephant)
+        );
+        assert_eq!(
+            runner.state().objects[&elephant]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            None,
+            "the Elephant's entry counter has not been placed"
+        );
+        let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+            panic!(
+                "required the Elephant's counter order, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == scales)
+            .expect("Hardened Scales is offered");
+        runner.act(GameAction::ChooseReplacement { index }).unwrap();
+        let mut offers = 0;
+        for _ in 0..4 {
+            runner.advance_until_stack_empty();
+            let WaitingFor::OptionalEffectChoice { source_id, .. } = &runner.state().waiting_for
+            else {
+                break;
+            };
+            assert_eq!(*source_id, fantastic, "only Mister Fantastic offers a draw");
+            offers += 1;
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+        }
+        assert_token_entry_complete(&mut runner);
+        // Scales first, then Branching Evolution: (1 + 1) doubled.
+        assert_eq!(
+            runner.state().objects[&elephant]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&4)
+        );
+        assert_eq!(offers, 1, "one entry event offers one draw");
+        assert_eq!(
+            runner.state().players[0].hand.len(),
+            hand,
+            "the one accepted draw replaces the cast card"
         );
     }
 

@@ -46147,6 +46147,106 @@ pub mod tests {
         }
     }
 
+    /// A "whenever a creature enters" observer and one battlefield entry it
+    /// matches, paused the way `observer_helper_fixture` pauses.
+    fn entry_observer_fixture() -> (GameState, Vec<GameEvent>) {
+        let (mut state, _) = observer_helper_fixture(false);
+        let observer = make_creature(&mut state, PlayerId(0), "Entry observer", 1, 1);
+        let mut enters = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        enters.destination = Some(Zone::Battlefield);
+        let object = state.objects.get_mut(&observer).expect("observer exists");
+        object.trigger_definitions.push(enters.clone());
+        std::sync::Arc::make_mut(&mut object.base_trigger_definitions).push(enters);
+        object.materialize_base_trigger_definitions();
+        let entrant = make_creature(&mut state, PlayerId(0), "Entrant", 2, 2);
+        let mut events = Vec::new();
+        crate::game::zones::record_and_emit_entry_from_no_zone(&mut state, entrant, &mut events)
+            .expect("entrant exists");
+        (state, events)
+    }
+
+    /// CR 603.6a: the paused-resolution helper is handed a battlefield entry
+    /// whose entering instruction has not completed. It must not match it there
+    /// (a co-entrant may still be entering), and the entry must still be checked
+    /// once the action settles, even though the settling action's own buffer no
+    /// longer holds it.
+    #[test]
+    fn observer_helpers_leave_an_unsettled_battlefield_entry_for_the_settled_scan() {
+        // Positive reach guard: at a settled action the same entry is collected.
+        let (mut settled, mut settled_events) = entry_observer_fixture();
+        settled.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        collect_and_drain_observer_triggers_if_settled(&mut settled, &mut settled_events, 0);
+        assert_eq!(
+            settled.stack.len() + settled.deferred_triggers.len(),
+            1,
+            "positive reach guard: the observer matches this entry"
+        );
+
+        let (mut state, mut events) = entry_observer_fixture();
+        park_observer_triggers_if_paused(&mut state, &mut events, 0);
+        // Reading the same buffer again must not match it either.
+        park_observer_triggers_if_paused(&mut state, &mut events, 0);
+        assert!(
+            state.deferred_triggers.is_empty() && state.stack.is_empty(),
+            "the entering instruction has not completed: nothing is matched at the pause"
+        );
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let mut settling_events = Vec::new();
+        collect_and_drain_observer_triggers_if_settled(&mut state, &mut settling_events, 0);
+        assert_eq!(
+            state.stack.len() + state.deferred_triggers.len(),
+            1,
+            "the earlier entry is checked once when the action settles"
+        );
+    }
+
+    /// CR 608.2c + CR 603.6a + CR 611.3c: an entrant published in an earlier
+    /// answer is observed at the instruction boundary a later answer reaches,
+    /// with its co-entrants, and from then on its entry is a completed event: the
+    /// next pause matches it while a later instruction's own unsettled entry
+    /// still waits.
+    #[test]
+    fn instruction_boundary_observes_an_entrant_published_in_an_earlier_answer() {
+        let (mut state, mut events) = entry_observer_fixture();
+        let GameEvent::ZoneChanged { record, .. } = events[0].clone() else {
+            panic!("the fixture emits a battlefield entry");
+        };
+        park_observer_triggers_if_paused(&mut state, &mut events, 0);
+        assert!(state.battlefield_entry_observation(&record).is_none());
+        // The boundary runs in a later answer, whose buffer does not hold the entry.
+        crate::game::zones::settle_battlefield_entry_observations(&mut state, &[]);
+        assert!(
+            state.battlefield_entry_observation(&record).is_some(),
+            "the earlier entrant is observed at the instruction boundary"
+        );
+        let later = make_creature(&mut state, PlayerId(0), "Later entrant", 2, 2);
+        let mut later_events = Vec::new();
+        crate::game::zones::record_and_emit_entry_from_no_zone(
+            &mut state,
+            later,
+            &mut later_events,
+        )
+        .expect("later entrant exists");
+        park_observer_triggers_if_paused(&mut state, &mut later_events, 0);
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "only the completed instruction's entry is matched at this pause"
+        );
+    }
+
     /// Round-18 closure: the ordinary (no-sidecar) branch of both helpers now
     /// derives its suffix through `filter_consumed_trigger_events_from`, so an
     /// exact occurrence already claimed by `ConsumeBeforePriority` cannot be
