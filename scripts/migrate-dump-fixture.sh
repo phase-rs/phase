@@ -212,7 +212,7 @@ if [ -n "$DECK_SIZE" ]; then
 fi
 
 # The two legacy shapes no current decoder reads, as jq predicates on one value.
-LEGACY_ORDER='type == "object" and has("Order") and (.Order | type == "object" and (has("slot") | not))'
+LEGACY_ORDER='type == "object" and has("Order") and (.Order | type == "object" and has("source") and (has("slot") | not))'
 LEGACY_PHASE='type == "object" and .type == "AdditionalPhase" and has("phase")'
 # Shared tail, unconditional: a template holding a legacy order is deleted.
 TEMPLATE_STAGE="reduce (paths(type == \"array\") | select(.[-1] == \"decision_templates\")) as \$p
@@ -615,6 +615,14 @@ selftests() {
     echo "SELFTEST LEGACY_TEMPLATE_DELETED=vacuous — a current-shape template changed: $out" >&2
     rm -rf "$tmp"; return 1
   fi
+  # (d″) a current replacement-order decision point `{pos, positions}` is not the legacy shape.
+  local order_point='{"gameState":{"waiting_for":{"data":{"schema":{"points":[{"kind":{"Order":{"pos":0,"positions":2}}}]}}}}}'
+  printf '%s' "$order_point" | transform patched | gzip -9 -n > "$tmp/order.json.gz"
+  if ! legacy_shape_gate "$tmp/order.json.gz" "$tmp/never" \
+     || [ "$(gzip -dc "$tmp/order.json.gz" | jq -S -c .gameState.waiting_for)" != "$(printf '%s' "$order_point" | jq -S -c .gameState.waiting_for)" ]; then
+    echo "SELFTEST ORDER_POINT_PASSES=false — a current {pos, positions} Order point was refused or changed" >&2
+    rm -rf "$tmp"; return 1
+  fi
 
   # (e) a legacy AdditionalPhase without `--additional-phase` is refused by the gate, the
   # stage reaped and the destination untouched; (e′) POSITIVE control: with the value the
@@ -647,7 +655,7 @@ selftests() {
     rm -rf "$tmp"; return 1
   fi
 
-  echo "SELFTEST ATOMIC_ON_FAILURE=true ENVELOPE_PRESERVED=true DECK_SIZE_REFUSED=true LEGACY_TEMPLATE_DELETED=true LEGACY_PHASE_REFUSED=true (each with a positive control)"
+  echo "SELFTEST ATOMIC_ON_FAILURE=true ENVELOPE_PRESERVED=true DECK_SIZE_REFUSED=true LEGACY_TEMPLATE_DELETED=true ORDER_POINT_PASSES=true LEGACY_PHASE_REFUSED=true (each with a positive control)"
   rm -rf "$tmp"
 }
 

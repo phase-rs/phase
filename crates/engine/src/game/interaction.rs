@@ -4098,7 +4098,7 @@ fn loop_shortcut_projection(
     };
     // CR 732.2a: carry the measured per-period signature forward so the picker's numbers can
     // state their consequence instead of standing alone. It is published by
-    // `bounded_offer_tail`, for a ring period and a recorded loss period alike, and by
+    // `bounded_offer_tail`, for a recorded loss period, and by
     // `counted_offer`, whose signature states one repetition and so no count's magnitude; every
     // other mint carries `None`, as does every save written before the field existed. The other
     // authority the magnitudes need — a FINITE count — is `count` above, and the two coincide by

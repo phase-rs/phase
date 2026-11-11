@@ -2006,8 +2006,8 @@ pub(crate) fn apply_combat_damage(
     );
 
     // CR 616.1 + CR 702.15e: each surviving source's lifelink gain is its own
-    // event. The whole tail — gains, the per-player aggregate, Phase D's
-    // prevention riders, and the CR 732.2a ring guard — lives in the drain, in
+    // event. The whole tail — gains, the per-player aggregate, and Phase D's
+    // prevention riders — lives in the drain, in
     // the order it has always been emitted, so a CR 616.1 pause can suspend it
     // without reordering it.
     drain_combat_lifelink(

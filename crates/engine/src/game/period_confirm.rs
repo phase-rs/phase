@@ -3654,11 +3654,7 @@ fn measure_seat_takes(
     let charges = |frames: &[GameState]| {
         let refs: Vec<&GameState> = frames.iter().collect();
         let (&last, window) = refs.split_last()?;
-        let touch = crate::analysis::resource::certified_period_touch(
-            window,
-            last,
-            crate::analysis::resource::PeriodCertification::BoardCovered,
-        );
+        let touch = crate::analysis::resource::certified_period_touch(window, last);
         Some(
             crate::game::engine::bounded_cycle_charged_targets_for_window(&touch, holder, i64::MAX),
         )

@@ -557,7 +557,7 @@ fn printed_refunding_energy_period_replays_the_journal_at_the_accepted_take() {
 /// A seed lifegain fans out a GROWING cascade of TARGETED drains — the ω-cover path that
 /// reaches item-3 (forced-unique in 2p) + item-4 (opponent `Typed` target). The two
 /// identical drainers make each gain fire two simultaneous triggers ⇒ the CR 603.3b
-/// OrderTriggers beat the loop-detect ring must survive.
+/// OrderTriggers beat loop detection must survive.
 fn setup_2p_vito(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new_n_player(2, 7);
     scenario.at_phase(Phase::PreCombatMain);
@@ -752,7 +752,7 @@ fn off_natural_death_no_shortcut() {
 /// `Typed`-target projected refinement). The two per-conjunct revert-probes are measured
 /// in the impl report: reverting EITHER conjunct loses detection ⇒ P1 grinds to natural
 /// death (life <= 0) rather than an early crown. The two identical drainers exercise the
-/// CR 603.3b OrderTriggers cascade beat the loop-detect ring must survive (G2).
+/// CR 603.3b OrderTriggers cascade beat loop detection must survive (G2).
 #[test]
 fn vito_bond_conqueror_2p_determinate_win() {
     let (mut runner, kickoff) = setup_2p_vito(LoopDetectionMode::Interactive);
@@ -1172,11 +1172,7 @@ fn interactive_shorten_hands_priority_and_breaks_loop() {
 /// then resolves and the declined loop is NOT immediately re-offered by the post-return
 /// reconcile.
 ///
-/// Non-vacuous revert-probe (measured): the interactive Seam-1 re-offer is suppressed by the
-/// `apply_action` deliberate-action ring invalidation (fires for `DeclineShortcut` before the
-/// handler runs). The handler therefore does NOT clear the ring itself — a per-action re-clear
-/// would distrust that engine-wide invariant — so there is no handler ring-clear to serve as a
-/// discriminator here. The load-bearing line for THIS test is the offer dismissal
+/// Non-vacuous revert-probe (measured): the load-bearing line for THIS test is the offer dismissal
 /// (`state.waiting_for = WaitingFor::Priority { .. }`): deleting it leaves `waiting_for ==
 /// LoopShortcut { P0 }` (the reconcile's Priority-gated seams skip a non-Priority state) ⇒ the
 /// `Priority { P0 }` assertion (a) flips to fail. Seam-2 independence is proven by the
@@ -1217,9 +1213,8 @@ fn interactive_optional_drain_decline_restores_priority_no_reoffer() {
         .act(GameAction::PassPriority)
         .expect("an ordinary PassPriority resolves after the decline handback");
 
-    // (c) the SAME loop is not instantly re-offered on the immediate next beat (the ring is
-    // empty, so it takes several samples to re-detect; a genuine later re-recurrence would then
-    // legitimately re-arm the offer — CR 732.2a event-driven re-arm).
+    // (c) the SAME loop is not instantly re-offered on the immediate next beat (a genuine later
+    // re-recurrence would legitimately re-arm the offer — CR 732.2a event-driven re-arm).
     assert!(
         !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
         "the declined loop must not be re-offered on the immediate next beat, got {:?}",
@@ -4683,7 +4678,7 @@ fn foreign_object_second_surface_still_vetoes_after_x1() {
 }
 
 // ===========================================================================
-// PR-7 Phase 1b — CR 732.2a loop-detect ring retention across a FORCED
+// PR-7 Phase 1b — CR 732.2a loop detection across a FORCED
 // pre-priority window and the action that answers it.
 //
 // Both rows LOAD a committed real 4-player dump through the production restore
@@ -5417,8 +5412,7 @@ fn dump_beat_actor(state: &GameState) -> Option<(PlayerId, Vec<GameAction>)> {
 /// `witherbloom_sprout_lumaret` and `witherbloom_sprout_lumaret_simple` reach NO
 /// `TriggerTargetSelection` window in 60 beats. This is the same trap
 /// `fantastic_four_bounded_loop.rs` already records for the F4 dump, and it means NO TRACKED
-/// FIXTURE CAN EXERCISE THE `SelectTargets` REDUCER ARM at the wire tier — see
-/// [`c2a_row_t1b_both_trigger_target_selection_arms_route_through_the_single_writer`].
+/// FIXTURE CAN EXERCISE THE `SelectTargets` REDUCER ARM at the wire tier.
 fn dump_drive_one_beat(
     state: &mut GameState,
     pin: Option<PlayerId>,
@@ -7656,7 +7650,7 @@ fn dina_untargeted_drain_4p_offers_at_three_live_opponents() {
     assert_eq!(
         proposer, state.active_player,
         "CR 732.2a: the proposer is the priority holder, and step (2) requires that to be the \
-         active player the ring sampler gates on"
+         active player"
     );
     assert!(
         matches!(&state.waiting_for, WaitingFor::LoopShortcut { period, .. } if !period.is_empty()),
@@ -9705,10 +9699,6 @@ fn every_live_bounded_offer_publishes_a_suggestion_its_own_declaration_drives() 
 /// crossing seat alive at exactly one period's worth of life. So the elimination below is the
 /// crossing cycle committing, not a drive that eliminates whatever it reaches; and the survivors'
 /// life deltas prove both accepts really drove their full counts.
-///
-/// REVERT-PROBE: take the per-cycle conformance check over the whole population — the unscoped
-/// `conforms` — and the crossing cycle is dropped whole: nobody is eliminated and the crossing
-/// seat ends at one period's worth of life, which is the sub-cascade leg's own expectation.
 #[test]
 fn the_accept_at_a_cascade_crossing_commits_that_cycle_and_eliminates_its_seat() {
     let at_offer = {
@@ -11097,7 +11087,7 @@ fn r5_probe_delta() -> i32 {
 /// 2. **no retarget** — neither surviving legal seat is drained;
 /// 3. **no silent skip** — the aborting cycle is not skipped-and-continued: no seat moves at
 ///    all, and the drain's mirror gain on P0 does not move either;
-/// 4. **state coherent post-abort** — ring cleared, priority handed to a living seat, nobody
+/// 4. **state coherent post-abort** — priority handed to a living seat, nobody
 ///    eliminated, the board still carries the refuser.
 ///
 /// # Reach-guards (without these every assertion above is vacuous)

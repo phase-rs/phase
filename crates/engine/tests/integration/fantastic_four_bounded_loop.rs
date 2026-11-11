@@ -2439,7 +2439,7 @@ fn m1_the_users_stored_auto_choice_board_offers_and_the_grant_commits_on_every_a
 /// CR 732.2a. This is the capture the user took after clearing the stored auto-choice as a
 /// workaround: the offer fired, the declaration was accepted, and the drive then rolled the
 /// whole cycle back and re-offered — because Reed's `may` resolves across a forced
-/// pre-priority window that the ring sampler could not see, so the offer published a pin set
+/// pre-priority window that the sampler then could not see, so the offer published a pin set
 /// that did not cover every per-iteration choice and cycle 0 aborted on the first uncovered
 /// one.
 ///
@@ -3160,15 +3160,12 @@ fn a_slot_addressing_pin_naming_a_slot_the_offer_never_published_is_refused() {
 /// | **extra** | the conformant set PLUS an `Order` pin on that source | `Priority` |
 ///
 /// SWAPPED is the whole-defect member: before the repair the ordering pin COVERED the published
-/// `Targets` point — `pin_slot` synthesized `{source, index 0}` for it and the gate compared
-/// slots without kinds — while `validate_pins` checked nothing, so a declaration answering none
+/// `Targets` point while `validate_pins` checked nothing, so a declaration answering none
 /// of the offer's published choices was accepted. EXTRA is the VALUE half alone, and the
 /// multi-authority member coverage cannot reach: the conformant pins beside it already satisfy
 /// coverage, so only `validate_pins`' refusal can reject it.
 ///
-/// REVERT-PROBE, MEASURED per half rather than assumed. SWAPPED opens APNAP only under the FULL
-/// pre-repair — `pin_slot` fabricating the `Order` slot AND `validate_pins`' `Order { .. } => {}`
-/// arm — because either half alone still refuses it. EXTRA opens APNAP under the value half
+/// REVERT-PROBE, MEASURED per half rather than assumed. EXTRA opens APNAP under the value half
 /// alone. The coverage half alone is isolated in-crate, by
 /// `analysis::decision_template::tests::gate_coverage_is_kind_aware`.
 #[test]
@@ -3371,8 +3368,7 @@ fn u2_the_recorded_take_performs_its_re_aim_whatever_the_published_victim_domain
     assert!(
         live_re_aimed_loss > 0,
         "REACH-GUARD: the re-aim must actually MOVE the charge off the published seat, else \
-         every observed cycle stays byte-identical to the published period and `conforms` \
-         decides on its leading equality without ever consulting the domain. published seat \
+         every observed cycle stays byte-identical to the published period. published seat \
          lost {live_published_loss}, re-aimed seat lost {live_re_aimed_loss}"
     );
     assert_eq!(
@@ -3469,14 +3465,9 @@ fn counter_class_total(
 /// slot at a different seat in different iterations. At BASE the drive compared each committed
 /// cycle against the published signature by exact equality, so the first cycle whose life
 /// landed on a different seat than the certified period's diverged and the drive truncated
-/// there. `PeriodicDelta::conforms` lifts the pinned slot's charge off both sides before
-/// comparing, so the re-aim conforms and the declared count commits in full.
+/// there.
 ///
 /// # Discrimination
-///
-/// Revert `conforms` to `self.delta == *observed`: the drive truncates at the first segment
-/// boundary, so (a) fails, (b) fails on the two later seats, and (e) fails because the counter
-/// growth is the published rate times the TRUNCATED count.
 ///
 /// Both magnitude relations are `rate * count` with the rate READ OFF the certificate, never
 /// pinned. The counter leg is the non-degenerate one and its guard demands a published rate

@@ -8,8 +8,8 @@
 //! (`live_mandatory_loop_winner`) confirm the covering pair LIVE and shortcut to the
 //! controller's win — BEFORE the opponents reach 0 life naturally (the discriminator).
 //!
-//! ON arm: `loop_detection == On` ⇒ the C2 gate auto-resolves the fan-out, the ring
-//! accumulates, and the reconcile seam declares `GameOver { winner: Some(P0) }` with
+//! INTERACTIVE arm: `loop_detection == Interactive` ⇒ the C2 gate auto-resolves the fan-out,
+//! and the reconcile seam declares `GameOver { winner: Some(P0) }` with
 //! both opponents still at POSITIVE life and P0's unbounded axes marked.
 //!
 //! OFF arm (default gameplay byte-preserved): `loop_detection == Off` ⇒ no shortcut;

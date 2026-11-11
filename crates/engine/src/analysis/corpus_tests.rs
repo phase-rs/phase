@@ -740,8 +740,9 @@ fn drive_kilo_freed_relic_ballista_certificate() {
 }
 
 /// CR 704.5a + CR 704.5c + CR 702.90b: a loop's win kind is the loss axis its damage reaches,
-/// and only an opponent's loss is a win. Walking Ballista wearing Grafted Exoskeleton has infect,
-/// so its pings give poison instead of life loss.
+/// and only an opponent's loss is a win. Walking Ballista ("Remove a +1/+1 counter from this
+/// creature: It deals 1 damage to any target.") wearing Grafted Exoskeleton ("Equipped creature
+/// gets +2/+2 and has infect.") has infect, so its pings give poison instead of life loss.
 #[test]
 fn kilo_freed_relic_ballista_win_kind_follows_the_loss_axis() {
     for (equipment, victim, expected, loss) in [
@@ -778,6 +779,36 @@ fn kilo_freed_relic_ballista_win_kind_follows_the_loss_axis() {
         if let Some(loss) = loss {
             assert!(cert.covers(&[loss]), "{leg} {:?}", cert.unbounded);
         }
+        assert_eq!(cert.win_kind, Some(expected), "{leg}");
+    }
+}
+
+/// CR 704.3 + CR 704.5a + CR 704.5c: Scheming Aspirant drains 2 life per proliferate while the
+/// proliferate adds a poison counter, so the win kind is the threshold crossed first. From 20
+/// life and 1 poison, poison reaches ten a repetition before life reaches zero; from 18 the two
+/// cross together (one SBA batch); from 12 life crosses first; with no poison only life moves.
+#[test]
+fn kilo_freed_relic_aspirant_win_kind_is_the_first_threshold_crossed() {
+    for (life, poison, expected) in [
+        (20, 1, WinKind::PoisonLoss),
+        (18, 1, WinKind::LethalDamage),
+        (12, 1, WinKind::LethalDamage),
+        (12, 0, WinKind::LethalDamage),
+    ] {
+        let leg = format!("[life {life}, poison {poison}]");
+        let cert = corpus::drive_offline_kilo_freed_relic_aspirant(card_db(), life, poison)
+            .unwrap_or_else(|| panic!("{leg} the drain loop certifies"));
+        assert!(
+            cert.covers(&[ResourceAxis::Life(P1)]),
+            "{leg} reach: the drain reached P1 (got {:?})",
+            cert.unbounded
+        );
+        assert_eq!(
+            cert.covers(&[ResourceAxis::Poison(P1)]),
+            poison > 0,
+            "{leg} proliferate grows poison only once P1 has some (got {:?})",
+            cert.unbounded
+        );
         assert_eq!(cert.win_kind, Some(expected), "{leg}");
     }
 }
@@ -1171,8 +1202,7 @@ fn drive_drain_idx18_wins_live() {
 /// opponent loses that much life" trigger to the sole legal target (opponent P1)
 /// with NO target-selection stop, so this targeted shape also wins live.
 ///
-/// REVERT-FAIL: same as C-L1 — removing the §3 block or the §2 sample drops the
-/// early `GameOver`.
+/// REVERT-FAIL: same as C-L1 — removing the §3 block drops the early `GameOver`.
 #[test]
 fn drive_drain_idx17_targeted_wins_live() {
     let Some(mut board) = corpus::build_drain_board(card_db(), corpus::row(17).cards, 200) else {
@@ -1193,7 +1223,7 @@ fn drive_drain_idx17_targeted_wins_live() {
     assert_eq!(winner, P0);
     assert!(
         beat <= 12,
-        "live win from the ring, not the 704.5a death; got beat {beat}"
+        "live win from the detector, not the 704.5a death; got beat {beat}"
     );
     // P1 (the targeted opponent) is the faller — the auto-resolved target is correct.
     assert!(
@@ -1225,7 +1255,7 @@ fn drive_bloodthirsty_conqueror_enduring_tenacity_wins_live() {
         "Enduring Tenacity's targeted trigger must auto-resolve to the sole opponent"
     );
     let (beat, winner) = corpus::first_gameover_beat(&trace)
-        .expect("Bloodthirsty Conqueror + Enduring Tenacity must win LIVE via the persisted ring");
+        .expect("Bloodthirsty Conqueror + Enduring Tenacity must win LIVE via the reconcile seam");
     assert_eq!(
         winner, P0,
         "the single non-falling player (P0) must be the winner"

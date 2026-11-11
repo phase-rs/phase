@@ -266,9 +266,7 @@ impl DecisionSlot {
     ///
     /// `pub`, not `pub(crate)`: `crates/engine/tests/integration/` is a SEPARATE CRATE, and
     /// a `pub(crate)` constructor is unnameable there, so the integration rows would
-    /// hand-roll the very literal this constructor exists to delete (the shape
-    /// `object_decision_source`'s `pub(crate)` already forces on `may_source_key` in
-    /// `fantastic_four_bounded_loop.rs` and on `decision_source` in `natural_balance.rs`).
+    /// hand-roll the very literal this constructor exists to delete.
     /// Every field of this `pub` struct in this `pub` module is already `pub`, so this adds
     /// no reachability the type does not already have — it only removes the literal.
     pub fn first(source: DecisionSource, point: ChoicePoint) -> Self {

@@ -17183,6 +17183,7 @@ pub(crate) fn upfront_optional_gate(
 ///
 /// Passes [`OptionalFeasibility::Probe`]: a caller asking "is this already answered?" has by
 /// definition not run the feasibility probe itself.
+#[cfg(test)]
 pub(crate) fn stored_may_answer(
     state: &GameState,
     ability: &ResolvedAbility,

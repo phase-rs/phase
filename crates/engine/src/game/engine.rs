@@ -2505,8 +2505,8 @@ fn finish_action_boundary_with_lifecycle(
 thread_local! {
     /// PR-3 (Option C): set while inside a legality/search simulation probe
     /// (`ai_support::SimulationFilter`'s clone-and-apply). Loop-shortcut detection
-    /// (`reconcile_terminal_result`) and ring accumulation
-    /// (`pass_priority_once_with_pipeline`) are TOP-LEVEL-ONLY — a hypothetical
+    /// (`reconcile_terminal_result`) and play-trace recording
+    /// (`play_trace`) are TOP-LEVEL-ONLY — a hypothetical
     /// single-action probe is NOT a real CR 732.2a play sequence, so it must neither
     /// shortcut nor accumulate. Engine game logic is single-threaded (no rayon /
     /// par_iter / std::thread::spawn in the apply or legal_actions path), `apply()` is
@@ -2518,7 +2518,7 @@ thread_local! {
         const { std::cell::Cell::new(false) };
 }
 
-/// True while inside a `SimulationFilter` legality probe. Read by the ring-accumulation and
+/// True while inside a `SimulationFilter` legality probe. Read by the play-trace recording and
 /// loop-shortcut-detection sites above.
 pub(crate) fn in_simulation_probe() -> bool {
     IN_SIMULATION_PROBE.with(|f| f.get())
@@ -2918,11 +2918,7 @@ fn bounded_offer_tail(
     } = frames;
     // CR 608.1 + CR 732.2a: the replayed frames are the period's window, whose announcements and
     // resolutions carry the charges.
-    let touch = crate::analysis::resource::certified_period_touch(
-        window,
-        current,
-        crate::analysis::resource::PeriodCertification::BoardCovered,
-    );
+    let touch = crate::analysis::resource::certified_period_touch(window, current);
     let recorded = Some(answers);
 
     // (7) THE BOUND, derived from the ANNOUNCEMENT authority — never from `points`.
@@ -2961,8 +2957,8 @@ fn bounded_offer_tail(
     // magnitude is read off the FRAME-WISE accumulation, not off `periodic.delta`: the delta is
     // a state DIFFERENCE, so a loss an offsetting gain cancels inside the period is invisible to
     // it, and CR 704.3 checks CR 704.5a at every frame boundary. `periodic.delta` stays the
-    // published endpoint pair all the same, because `conforms` and `game::interaction`'s reader
-    // compare against it. The max-vs-sum reasoning and the fail-closed direction live on
+    // published endpoint pair all the same, because `game::interaction`'s reader
+    // compares against it. The max-vs-sum reasoning and the fail-closed direction live on
     // `worst_seat_life_loss`, the gain clamp and the aim subtraction on `seat_life_charges`,
     // which charges each seat every slot that REACHES it and subtracts what the window saw a
     // slot aim AT it.
@@ -3802,40 +3798,25 @@ struct EntryAnnouncement {
 /// ([`bounded_cycle_charged_targets_for_window`]) reads the SAME announcement, so the two
 /// cannot disagree about which entries are in the cycle.
 ///
-/// SINGLE AUTHORITY, and that is the whole point of its existence: the MINT
-/// ([`bounded_cycle_pin_slots_for_window`]) maps it over the certified period's announced
-/// pairs, of which `state.stack` is the zero-window degenerate case, and the RELIEF
-/// (`analysis::resource`'s CR 732.2a gate-(3)/(6) pin skip) calls it for one entry. Because
-/// both sides ask the same function, the relief predicate cannot be COARSER than the mint
-/// predicate — relieving a verdict the published pin does not specify is impossible by
-/// construction rather than by convention.
+/// The MINT ([`bounded_cycle_pin_slots_for_window`]) maps it over the certified period's
+/// announced pairs, of which `state.stack` is the zero-window degenerate case.
 ///
-/// The acceptance conjuncts, in the order the EXTENSION POINT's preconditions name them:
-/// (c) `entry.controller == proposer` — CR 732.2a leaves every OTHER player owning their own
-/// choices, so an opponent-controlled entry is never pinnable; the entry is a triggered
-/// ability (a spell / activated ability re-announces from scratch); ANNOUNCING it requires
-/// either exactly one mandatory choice over players whose head effect declares the
+/// The acceptance conjuncts: `entry.controller == proposer` — CR 732.2a leaves every OTHER player
+/// owning their own choices, so an opponent-controlled entry is never pinnable; the entry is a
+/// triggered ability (a spell / activated ability re-announces from scratch); ANNOUNCING it
+/// requires either exactly one mandatory choice over players whose head effect declares the
 /// player-target shape (shape (A): asked of the announcement authority itself,
-/// `ability_utils::build_target_slots` — the function the relief's own
-/// `forced_unique_targeting` rebuilds slots with — rather than of a proxy, plus
-/// [`declares_opponent_player_target`]; or any entry that announced exactly one player target,
-/// whatever its head filter), or NO announcement choice at all (shape (B):
-/// `targets.is_empty()` and zero built slots); and its source object still exists, so the
-/// slot can re-bind (CR 400.7 incarnation, fail-closed on absence).
+/// `ability_utils::build_target_slots` — the function `forced_unique_targeting` rebuilds slots with
+/// — rather than of a proxy, plus [`declares_opponent_player_target`]; or any entry that announced
+/// exactly one player target, whatever its head filter), or NO announcement choice at all (shape
+/// (B): `targets.is_empty()` and zero built slots); and its source object still exists, so the slot
+/// can re-bind (CR 400.7 incarnation, fail-closed on absence).
 ///
 /// Shape (A) carries one further conjunct that is a property of the BOARD rather than of the
 /// ability: the announcement must actually be a CHOICE. A slot with exactly one legal
 /// assignment is FORCED (shape (A′)) — `triggers::prepare_trigger_targets` announces it
 /// without asking anyone — so it publishes its CR 603.5 gate alone, or nothing. See the
 /// `forced_unique_targeting` call in the body for why publishing it is the undeclarable case.
-///
-/// SCOPE OF THE ANSWER: because the relief is a `continue` at gate (3), the relief
-/// predicate must be no coarser than EVERY fact `stack_entry_has_no_ordering_input`
-/// rejects on — not just the target one. Correspondence, in that function's own order:
-/// entry kind (the destructure below), `pending_trigger_entry` (the ONE state-dependent
-/// fact, enforced at the relief so this enumerator stays pure — see the block below),
-/// `multi_target` / `distribution` / `target_constraints` (the block below), and the
-/// target choice itself, which is the one fact the published slot actually answers.
 pub(crate) fn entry_publishes_pin_slots(
     state: &GameState,
     entry: &StackEntry,
@@ -3972,9 +3953,7 @@ fn entry_announces(
     // cross-target constraint (CR 601.2c "the same target can't be chosen multiple times" /
     // "must be chosen") — all reached for a triggered ability via CR 603.3d — is
     // announcement-time ordering input NO published slot specifies. These are the ABILITY's
-    // own facts, so they live here, where mint and relief share them: the gate-(3) relief
-    // is a `continue` that discharges the whole of `stack_entry_has_no_ordering_input`,
-    // which rejects on each of them independently of its target check.
+    // own facts, so they live here.
     //
     // The fourth fact that function rejects on — `pending_trigger_entry == entry.id`,
     // CR 603.3c mid-construction — is deliberately NOT here: it is a property of the
@@ -3994,8 +3973,6 @@ fn entry_announces(
     // It is set exactly
     // while a `TriggerTargetSelection` prompt is up, so a mint that read it would publish
     // nothing on a prompted board.
-    // It is enforced at the relief instead (`analysis::resource::entry_target_choice_is_pinned`),
-    // which makes the relief strictly NARROWER than the mint — never coarser.
     if ability.multi_target.is_some()
         || ability.distribution.is_some()
         || !ability.target_constraints.is_empty()
@@ -4012,7 +3989,7 @@ fn entry_announces(
     // via CR 603.3d — makes a CHAINED sub-ability's own target a SECOND independent choice,
     // with its OWN legal set. `build_target_slots` is the function
     // `stack_entry_has_no_ordering_input` itself rebuilds slots with (via
-    // `forced_unique_targeting`), so mint and relief now measure the same quantities.
+    // `forced_unique_targeting`), so mint and gate (3) measure the same quantities.
     //
     // Exactly one MANDATORY slot over PLAYERS, and each of the three parts is load-bearing:
     // * `len() == 1` — a chained second "target" (2 slots) or an effect whose filter the
@@ -4157,11 +4134,10 @@ fn entry_announces(
     // offer with no declaration the engine can publish. Pinning the auto-selection instead
     // would model a decision the player never made.
     //
-    // THE SAME AUTHORITY AS THE RELIEF, exported rather than re-derived: gate (3)'s
+    // THE SAME AUTHORITY AS GATE (3), exported rather than re-derived: gate (3)'s
     // `stack_entry_has_no_ordering_input` asks `forced_unique_targeting` about this same
-    // fact, so withholding the point loses no relief — the entry passes gate (3) on the
-    // ordering-input arm instead of the pin arm. Evaluated on `state`, which for a window
-    // mint IS the pair's own carrying frame (`bounded_cycle_pin_slots_for_window` passes
+    // fact, so withholding the point costs gate (3) nothing. Evaluated on `state`, which for a
+    // window mint IS the pair's own carrying frame (`bounded_cycle_pin_slots_for_window` passes
     // `frame`), the same board `build_target_slots` above enumerated the legal set from; that
     // function's doc records why the live board would be fail-open here.
     //
@@ -4241,11 +4217,6 @@ fn entry_announces(
 /// frame and never a `normalize_for_loop` product: a normalized frame would key the stored-auto-choice refusal on `ObjectId(0)` and
 /// would make `build_target_slots` take its `trigger_source: None` fall-through and publish a
 /// WIDER legal set than the live board admits.
-///
-/// It calls the RAW mint rather than the verdict door on purpose: routing it through the door
-/// would eagerly classify (and charge for) every announced pair at slot-enumeration time,
-/// which is exactly the pre-population pass this design removes. The relief side reads the
-/// CACHED mint through the door instead.
 ///
 /// A function of the BOARD, never of the PROMPT. NOT a purity claim over a three-field
 /// `(state.stack, state.objects, proposer)` surface — that would be false: the CR 603.5
@@ -4963,7 +4934,7 @@ pub(super) fn living_priority_seat(state: &GameState) -> PlayerId {
 ///
 /// Both blocks that can arrive at a NAMED place call this, so the two cannot answer the rule
 /// differently. A `Fixed` count reaches a third ending-point block, the elision's tail in
-/// `materialize_object_growth_shortcut`, which inlines the ring clear and `living_priority_seat`
+/// `materialize_object_growth_shortcut`, which inlines the trace clear and `living_priority_seat`
 /// instead of calling this. That tail is reached only under
 /// `n != 0 && proposal.shortened_by.is_none()`, where this function returns `living_priority_seat`
 /// anyway, so the inline answer and this one cannot disagree.
@@ -4984,9 +4955,9 @@ fn shortcut_ending_point_seat(
 /// can reach a place a responder named ends here, so the window clear and the seat rule cannot
 /// drift apart between them. The elision's tail in `materialize_object_growth_shortcut` is a
 /// co-equal ending-point block that does not call this: it is reached only where no place was
-/// named, and it inlines the ring clear and `living_priority_seat`.
+/// named, and it inlines the trace clear and `living_priority_seat`.
 ///
-/// The ring clear is load-bearing rather than a backstop: without it this same `apply()` re-emits
+/// The trace clear is load-bearing rather than a backstop: without it this same `apply()` re-emits
 /// an offer for the loop it just took, and a later beat is where a genuine re-detection belongs.
 fn end_shortcut_at_priority(
     state: &mut GameState,
@@ -5010,7 +4981,7 @@ fn end_shortcut_at_priority(
 /// CR 732.2c + CR 704.5a: apply a confirmed loop shortcut, once the last player has either
 /// accepted or shortened it. The loop is not re-scanned here: between the offer and the last
 /// answer the dispatch admits only `DeclareShortcut`/`RespondToShortcut`, neither of which
-/// touches the board, and a ring re-scan would compare against frames that finalize/SBA/layer
+/// touches the board, and a re-scan would compare against frames that finalize/SBA/layer
 /// steps have drifted the paused state away from. A shortening reaches here on the rewritten
 /// count its responder named (CR 732.2b), carrying that seat in `shortened_by`; the count
 /// decides the materializer, and the seat decides the ending point. `Fixed(N)` ⇒ Phase-4b finite
@@ -5241,9 +5212,9 @@ pub(crate) enum DepartureVerdict {
 ///
 /// * The SEAT SET, by equality — never a length check plus a membership test, which admits a
 ///   swap.
-/// * The REPETITION. `PeriodicDelta::conforms` compares TOTALS under the CR 601.2c re-aim licence
-///   its own doc states, so a conforming cycle may concentrate the period's whole charge onto a
-///   named seat and cross it EARLIER than the entry that named it, with the set still matching.
+/// * The REPETITION. A declared re-aim (CR 601.2c) may move the period's charge, so a
+///   conforming cycle may concentrate the period's whole charge onto a named seat and cross it
+///   EARLIER than the entry that named it, with the set still matching.
 ///
 /// Read off the two boards rather than off the cycle's events, so a departure with no
 /// `PlayerEliminated` emitted is still seen.
@@ -10460,7 +10431,7 @@ fn apply_action(
     // CR 117.3d: SetPriorityYield propagates the actor's standing priority-yield
     // preference — a pre-committed decision to pass priority while a class of
     // triggered ability resolves. Pure preference state, routed by `actor`, and
-    // handled BEFORE the loop-ring clear and auto-pass session clearing below so
+    // handled BEFORE the auto-pass session clearing below so
     // yields are exempt from that per-session teardown (CR 400.7: an `Add`
     // snapshots the source's latched identity from the on-stack trigger).
     if let GameAction::SetPriorityYield { op } = &action {
@@ -10492,7 +10463,7 @@ fn apply_action(
     // CR 603.5: SetMayTriggerAutoChoice propagates the actor's stored "don't ask
     // again" auto-choices for optional ("may") triggers. Pure preference state,
     // routed by `actor`, and — like SetPriorityYield — handled before the
-    // loop-ring / auto-pass teardown so it is a legal any-state mutation. Actor
+    // auto-pass teardown so it is a legal any-state mutation. Actor
     // scoping is enforced by overriding the key's player with `actor`, so a
     // player can only mutate their own preferences regardless of the payload.
     if let GameAction::SetMayTriggerAutoChoice { op } = &action {
@@ -20691,11 +20662,7 @@ mod stage2_injector_tests {
         proposer: PlayerId,
     ) -> Vec<crate::analysis::decision_template::DecisionPoint> {
         bounded_cycle_pin_slots_for_window(
-            &crate::analysis::resource::certified_period_touch(
-                &[],
-                state,
-                crate::analysis::resource::PeriodCertification::ResourceSignatureOnly,
-            ),
+            &crate::analysis::resource::certified_period_touch(&[], state),
             proposer,
         )
     }
@@ -20746,7 +20713,7 @@ mod stage2_injector_tests {
     /// CR 114.4 + CR 608.2b: a pinned SLOT whose source is a command-zone emblem must match
     /// the prompt that emblem raised; a graveyard or exile source must NOT.
     ///
-    /// The shipped BATTLEFIELD arm is exercised end-to-end by `injector_routes_pinned_targets_per_source` above and by the
+    /// The shipped BATTLEFIELD arm is exercised end-to-end by the
     /// `kilo_live_offer_from_real_dump` rows, and this row asserts that arm is unchanged.
     ///
     /// The zone disjuncts this row pins now live one call down, in
@@ -21143,11 +21110,10 @@ mod stage2_injector_tests {
         );
 
         // ORDERING-INPUT CONJUNCTS. The published point declares `min/max_targets: 1`, and
-        // the gate-(3) relief is a bare `continue` that discharges the WHOLE of
-        // `stack_entry_has_no_ordering_input` (analysis/resource.rs) — which rejects on
-        // four facts, only one of which a slot answers. The three ABILITY facts must block
-        // publication outright (the state-dependent fourth, `pending_trigger_entry`, is the
-        // relief's). Shares the positive control above.
+        // `stack_entry_has_no_ordering_input` (analysis/resource.rs) rejects on four facts,
+        // only one of which a slot answers. The three ABILITY facts must block publication
+        // outright (the fourth, `pending_trigger_entry`, is state-dependent). Shares the
+        // positive control above.
         {
             use crate::types::ability::MultiTargetSpec;
             use crate::types::game_state::TargetSelectionConstraint;

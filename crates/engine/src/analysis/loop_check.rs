@@ -659,6 +659,8 @@ pub(crate) fn fallers_lives_pairwise_equal(frames: &[&GameState], fallers: &[Pla
 /// 704.5c, decking → CR 104.3c/121.4, extra turns → CR 500.7) outranks a pure
 /// advantage engine (mana/tokens/draw/…). A loop that pumps several axes is named
 /// by the first loss condition it satisfies; if none, it is [`WinKind::Advantage`].
+/// With a `state`, a loop that moves an opponent's life and poison together is named by
+/// the axis whose threshold it crosses in fewer repetitions.
 ///
 /// `controller` distinguishes "an opponent" from the loop's controller: life loss from
 /// / poison on / mill on a player who is *not* the loop's controller is an
@@ -681,7 +683,29 @@ pub(crate) fn classify_win_kind(
         .iter()
         .any(|(pid, &n)| n < 0 && *pid != controller)
     {
-        return WinKind::LethalDamage;
+        // CR 704.3 + CR 704.5a + CR 704.5c: the first threshold crossed decides; a tie is one
+        // SBA batch and stays `LethalDamage`.
+        let poison_first = state.is_some_and(|state| {
+            let fewest = |axis: &std::collections::BTreeMap<PlayerId, i64>,
+                          headroom: fn(&crate::types::player::Player) -> i64,
+                          sign: i64| {
+                axis.iter()
+                    .filter(|(pid, _)| **pid != controller)
+                    .filter_map(|(pid, &n)| {
+                        let player = state.players.iter().find(|p| p.id == *pid)?;
+                        ResourceVector::narrowed_repetitions(&[(headroom(player), sign * n)])
+                    })
+                    .min()
+            };
+            let life = fewest(&delta.life, |p| i64::from(p.life) - 1, -1);
+            let poison = fewest(&delta.poison, |p| 9 - i64::from(p.poison_counters), 1);
+            matches!((life, poison), (Some(life), Some(poison)) if poison < life)
+        });
+        return if poison_first {
+            WinKind::PoisonLoss
+        } else {
+            WinKind::LethalDamage
+        };
     }
     // CR 704.5c: unbounded poison counters on an opponent.
     if delta
@@ -810,13 +834,6 @@ mod tests {
         }
         assert!(named > 0, "reach: some member set names a choice");
     }
-
-    // The CR 704.3 partition `winner_life_never_dips` rests on — `Priority` DISJOINT from
-    // the retained class, over both priority seats — is asserted by
-    // `types::game_state::forced_cascade_window_tests::forced_cascade_window_class`, which
-    // covers it strictly more completely (thirteen members and eight non-members, including both
-    // `Priority` seats). A second weaker row here would only be a place for the two to
-    // drift apart.
 
     fn battlefield_creature(state: &mut GameState, id: u64, controller: u8) -> ObjectId {
         let oid = ObjectId(id);

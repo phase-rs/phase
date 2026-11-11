@@ -1913,10 +1913,15 @@ pub(crate) fn drive_offline_selvala_staff(db: &CardDatabase) -> Option<LoopCerti
 /// zero; +1 proliferate trigger/cycle, board identical.
 pub(crate) fn drive_offline_kilo_freed_relic(db: &CardDatabase) -> Option<LoopCertificate> {
     let mut board = build_board(db, CORPUS[1].cards)?;
+    attach_aura(board.runner.state_mut(), board.ids[1], board.ids[0]);
+    run_kilo_freed_relic(board)
+}
+
+/// The Kilo/Freed/Relic cycle over the CORPUS[1] board once Freed enchants Kilo.
+fn run_kilo_freed_relic(board: ComboBoard) -> Option<LoopCertificate> {
     let kilo = board.ids[0];
     let freed = board.ids[1];
     let relic = board.ids[2];
-    attach_aura(board.runner.state_mut(), freed, kilo);
     // Relic's "tap a creature: add mana" ability (the one that taps Kilo) — found
     // by its `TapCreatures` cost (Relic has two mana abilities; the tap-self one
     // would not fire Kilo's trigger).
@@ -1941,6 +1946,25 @@ pub(crate) fn drive_offline_kilo_freed_relic(db: &CardDatabase) -> Option<LoopCe
         );
         activate_and_resolve(probe, freed, freed_untap, Some(TargetRef::Object(kilo)));
     })
+}
+
+/// The Kilo/Freed/Relic engine with Scheming Aspirant ("Whenever you proliferate, each opponent
+/// loses 2 life and you gain 2 life.") for P0, P1 starting at `life` with `poison` counters:
+/// each cycle costs P1 2 life and, from one poison counter on, adds one (CR 701.34a).
+pub(crate) fn drive_offline_kilo_freed_relic_aspirant(
+    db: &CardDatabase,
+    life: i32,
+    poison: u32,
+) -> Option<LoopCertificate> {
+    let mut board = build_board(db, CORPUS[1].cards)?;
+    attach_aura(board.runner.state_mut(), board.ids[1], board.ids[0]);
+    let state = board.runner.state_mut();
+    install_on_battlefield(state, db, "Scheming Aspirant", P0)?;
+    let victim = state.players.iter_mut().find(|p| p.id == P1)?;
+    victim.life = life;
+    victim.poison_counters = poison;
+    settle_layers(state);
+    run_kilo_freed_relic(board)
 }
 
 /// PR-7 acceptance — PENTAD PRISM under the KILO + FREED + RELIC proliferate engine.
@@ -2255,9 +2279,8 @@ pub(crate) fn build_drain_board_n(
         state.active_player = P0;
         state.priority_player = P0;
         // CR 732.2a: this harness exercises the live combo-detector, so it opts the
-        // (default-OFF) detector ON. Without this the reconcile-seam shortcut and the
-        // loop-detection ring sampler are both gated off and no drain cascade would be
-        // shortcut to its GameOver — see `GameState::loop_detection`.
+        // (default-OFF) detector ON. Without this the reconcile-seam shortcut is gated off
+        // and no drain cascade would be shortcut to its GameOver — see `GameState::loop_detection`.
         state.loop_detection = crate::types::game_state::LoopDetectionMode::Interactive;
     }
     let mut ids = Vec::new();
@@ -2930,7 +2953,7 @@ pub(crate) fn drive_kitten_firesinger_offer(db: &CardDatabase) -> Option<LoopCer
 
 /// Drive one live drain cascade (idx 17 / idx 18) to its first `GameOver`. The two
 /// rows differ only by `CORPUS[idx].cards` (targeted vs untargeted drain) and share
-/// this body. P1 starts at 200 life so the win is the §3 ring shortcut, not the
+/// this body. P1 starts at 200 life so the win is the detector's shortcut, not the
 /// ~400-beat natural CR 704.5a death.
 fn drive_live_drain(db: &CardDatabase, idx: usize) -> Option<(usize, PlayerId)> {
     let mut board = build_drain_board(db, CORPUS[idx].cards, 200)?;

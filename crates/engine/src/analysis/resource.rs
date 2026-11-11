@@ -50,11 +50,9 @@ use crate::types::zones::Zone;
 mod verdict_memo {
     use std::collections::BTreeMap;
 
-    use crate::game::engine::EntryPinSlots;
     use crate::game::resolution_prompt::ResolutionChoiceFreedom;
     use crate::types::game_state::{GameState, StackEntry};
     use crate::types::identifiers::ObjectId;
-    use crate::types::player::PlayerId;
 
     /// The shipped probe cap, per classification run.
     ///
@@ -117,29 +115,6 @@ mod verdict_memo {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     pub(crate) struct FrameIx(usize);
 
-    /// Everything ONE `(frame, entry)` pair answers, computed on first demand by
-    /// [`PeriodVerdicts::verdict`] and memoized for the rest of the mint.
-    ///
-    /// Every field is produced by a function whose signature takes NO published
-    /// slots, which is what removes the key-completeness obligation: a slot list
-    /// is a *window* fact and would make the memo key incomplete, so a fourth
-    /// field that reads one is a design error rather than an addition.
-    pub(crate) struct EntryVerdict {
-        /// THE MINT, CACHED — `entry_publishes_pin_slots(frame, entry,
-        /// proposer)` with the CONTAINER's bound proposer. A proposer-less
-        /// (`unproven`) container computes `None` for every key: nothing is
-        /// published when no offer binds a proposer, which is the mint's own
-        /// answer rather than an invented one.
-        pub(crate) published: Option<EntryPinSlots>,
-        /// `stack_entry_resolution_choice_freedom(frame, entry, budget)` on the
-        /// ability AS IT STANDS.
-        pub(crate) primary: ResolutionChoiceFreedom,
-        /// CR 603.5: the optional-cleared re-classification the relief consumes.
-        /// `None` for an entry whose mint publishes no `may` slot, and for one
-        /// whose resolution scope cannot bind (CR 603.4).
-        pub(crate) residual: Option<ResolutionChoiceFreedom>,
-    }
-
     /// CR 732.2a: the ONE per-mint verdict door — a TOTAL, `(FrameIx,
     /// ObjectId)`-keyed, compute-on-miss memo that OWNS the probe budget.
     ///
@@ -149,60 +124,24 @@ mod verdict_memo {
     /// `Option` and every consumer treats `None` as a refusal, so a frame
     /// outside the period costs a certificate, never a wrong one.
     pub(crate) struct PeriodVerdicts<'a> {
-        /// `ring ++ [current]` — PRIVATE and not indexable, so a `FrameIx`
+        /// `[current]` — PRIVATE and not indexable, so a `FrameIx`
         /// cannot be turned back into a board by the parent module.
         frames: Vec<&'a GameState>,
-        memo: BTreeMap<(FrameIx, ObjectId), EntryVerdict>,
+        memo: BTreeMap<(FrameIx, ObjectId), ResolutionChoiceFreedom>,
         /// PRIVATE: the field route to a fresh spend is E0616 from the parent
         /// module, and the construction route is shut by `new`'s module
         /// privacy above.
         budget: ProbeBudget,
-        /// The THIRD argument of the memoized mint, fixed at construction, so
-        /// the EFFECTIVE key is `(proposer, FrameIx, ObjectId)` with the first
-        /// component constant per container.
-        proposer: Option<PlayerId>,
     }
 
     impl<'a> PeriodVerdicts<'a> {
-        fn build(
-            ring: &[&'a GameState],
-            current: &'a GameState,
-            proposer: Option<PlayerId>,
-            cap: u32,
-        ) -> Self {
-            let mut frames: Vec<&'a GameState> = ring.to_vec();
-            frames.push(current);
-            Self {
-                frames,
-                memo: BTreeMap::new(),
-                budget: ProbeBudget::new(cap),
-                proposer,
-            }
-        }
-
-        /// The default-cap constructor, bound to the mint's own proposer.
-        ///
-        /// `pub(super)` and not `pub(crate)`: every in-scope construction site
-        /// lives in `analysis::resource` or a descendant, while an out-of-file
-        /// fresh container — whose spend the mint's meter would never see — is
-        /// E0624.
-        ///
-        /// Every caller is a `#[cfg(test)]` site, so a plain lib build sees this as
-        /// dead. The gate is `not(test)`-scoped so a production reader can land with
-        /// no annotation churn.
-        #[cfg_attr(not(test), allow(dead_code))]
-        pub(super) fn for_period(
-            ring: &[&'a GameState],
-            current: &'a GameState,
-            proposer: PlayerId,
-        ) -> Self {
-            Self::build(ring, current, Some(proposer), PROBE_BUDGET)
-        }
-
-        /// Every other path (including the unscoped sibling): frames =
-        /// `[current]`, NO proposer ⇒ nothing published ⇒ no relief.
+        /// The default-cap container over `[current]`.
         pub(super) fn unproven(current: &'a GameState) -> Self {
-            Self::build(&[], current, None, PROBE_BUDGET)
+            Self {
+                frames: vec![current],
+                memo: BTreeMap::new(),
+                budget: ProbeBudget::new(PROBE_BUDGET),
+            }
         }
 
         /// THE ONLY `FrameIx` MINT. Resolves a frame to its position in
@@ -226,52 +165,26 @@ mod verdict_memo {
         /// never the caller, converts `FrameIx` back to a board — charges the
         /// OWNED budget, and memoizes. Total over minted keys: it returns a
         /// value, never an `Option`, so there is no miss contract to get wrong.
-        pub(crate) fn verdict(&mut self, f: FrameIx, entry: &StackEntry) -> &EntryVerdict {
+        pub(crate) fn verdict(
+            &mut self,
+            f: FrameIx,
+            entry: &StackEntry,
+        ) -> &ResolutionChoiceFreedom {
             let key = (f, entry.id);
             if !self.memo.contains_key(&key) {
                 let frame = self.frames[f.0];
-                let published = self
-                    .proposer
-                    .and_then(|p| crate::game::engine::entry_publishes_pin_slots(frame, entry, p));
                 let primary =
                     super::stack_entry_resolution_choice_freedom(frame, entry, &mut self.budget);
-                // TWO bases need the optional-cleared re-classification, and they are
-                // MUTUALLY EXCLUSIVE by construction: `entry_publishes_pin_slots` guard (b)
-                // withholds the `may` slot exactly when a stored auto-choice already answers
-                // the CR 603.5 gate, so an auto-answered entry publishes NOTHING and would
-                // otherwise carry `residual: None` — the structural reason gate (6) could not
-                // relieve it.
-                let residual = if published.as_ref().and_then(|p| p.may.as_ref()).is_some()
-                    || matches!(
-                        super::auto_may_answer_for(frame, entry),
-                        Some(crate::types::game_state::AutoMayChoice::Accept)
-                    ) {
-                    super::optional_cleared_classification(frame, entry, &mut self.budget)
-                } else {
-                    None
-                };
-                self.memo.insert(
-                    key,
-                    EntryVerdict {
-                        published,
-                        primary,
-                        residual,
-                    },
-                );
+                self.memo.insert(key, primary);
             }
             &self.memo[&key]
-        }
-
-        /// Read-only: the bound proposer, for the relief-side agreement guard.
-        pub(crate) fn proposer(&self) -> Option<PlayerId> {
-            self.proposer
         }
     }
 }
 
 #[cfg(test)]
 pub(crate) use verdict_memo::PROBE_BUDGET;
-pub(crate) use verdict_memo::{FrameIx, PeriodVerdicts, ProbeBudget};
+pub(crate) use verdict_memo::{PeriodVerdicts, ProbeBudget};
 
 /// CR 732.2a: what the shortcut detector cost this drive, one field per **tick site**.
 ///
@@ -3301,7 +3214,7 @@ impl ResourceVector {
     /// negative parts, maxed over seats ([`ResourceVector::with_frame_wise_life_loss`] then
     /// [`ResourceVector::worst_seat_life_loss`]): at least the net term it replaces, at most
     /// true gross. It under-states gross for a loss an offsetting gain cancels INSIDE one
-    /// frame, and for a CR 704.3 sweep the ring never recorded; both under-state in the same
+    /// frame, and for a CR 704.3 sweep no frame recorded; both under-state in the same
     /// direction as the net term did, so a published bound can only shrink. The one direction
     /// the producer's aim subtraction is not fail-closed is stated on it.
     ///
@@ -3382,7 +3295,7 @@ impl ResourceVector {
     /// ONE STATEMENT OF THE ARITHMETIC, over explicit pairs rather than over a seat, because the
     /// headroom a caller divides is not always the seat's full one — a walk that has already
     /// spent repetitions divides what is LEFT through the same division.
-    fn narrowed_repetitions(axes: &[(i64, i64)]) -> Option<i64> {
+    pub(crate) fn narrowed_repetitions(axes: &[(i64, i64)]) -> Option<i64> {
         axes.iter()
             .filter(|(_, magnitude)| *magnitude > 0)
             .map(|&(headroom, magnitude)| headroom.max(0) / magnitude)
@@ -3407,7 +3320,7 @@ impl ResourceVector {
         // UNIFORM over EVERY living player, including the proposer: `net_progress_for`
         // reads only the proposer's mana and life, so a proposer who drains themselves is
         // bounded here like anyone else. What this operator can still miss is a loss an
-        // offsetting gain cancels INSIDE one frame, and a CR 704.3 sweep no ring frame
+        // offsetting gain cancels INSIDE one frame, and a CR 704.3 sweep no frame
         // recorded — a property of the DIVISOR it is handed, which the mint derives frame by
         // frame ([`ResourceVector::with_frame_wise_life_loss`]) rather than from the period's
         // endpoint pair; the remaining backstop is the live elimination guard during the
@@ -3719,7 +3632,7 @@ fn map_delta<K: Ord + Copy>(
 
 /// [`project_out_resources`] with the stack and its stack-entry-indexed firing sidecar
 /// cleared — the single authority for the comparand
-/// [`loop_states_cover_modulo_growth_scoped`]'s gate (1) needs, whose gate (2) compares the
+/// [`loop_states_cover_modulo_growth`]'s gate (1) needs, whose gate (2) compares the
 /// stack separately.
 fn cover_projection(state: &GameState) -> GameState {
     let mut projected = project_out_resources(state);
@@ -4109,50 +4022,16 @@ pub fn board_delta(before: &GameState, after: &GameState) -> BoardDelta {
     BoardDelta { added, removed }
 }
 
-/// CR 732.2a: WHICH certificate a window's touch is derived under.
+/// CR 732.2a + CR 608.1: what ONE certified period actually announced and resolved.
 ///
-/// The frozen exemption's extrapolation limb needs BOTH a board-level premise that the
-/// certified period cannot SHRINK the stack (P2) AND the Karp–Miller read-surface guard that
-/// makes the fast-forward the repetition of the observed period (P4). Exactly one certifying
-/// disjunct supplies both, so the exemption is keyed to the DISJUNCT rather than to the
-/// basis — as a type rather than a call-site convention, which an executor can drop.
-///
-/// Two of the three variants behave identically today, deliberately: collapsing the equality
-/// disjunct onto [`PeriodCertification::ResourceSignatureOnly`] would make the type lie about
-/// provenance (equality DOES consult a board predicate), and a mislabel is the fail-open
-/// re-entry path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PeriodCertification {
-    /// Basis A, COVER disjunct. P2: item (2)'s `stack_covers`
-    /// ⇒ strictly growing depth. P4: items (4)/(5) ⇒ no current-stack entry and
-    /// no live fire-time condition reads a still-projected axis. This is the
-    /// ONLY value under which `frozen_ids` is non-empty.
-    BoardCovered,
-    /// Basis A, EQUALITY disjunct. P2 holds (the stack is
-    /// compared exactly but for the published answers ⇒ constant depth) but P4
-    /// does NOT: [`loop_states_equal_modulo_resources`] has no items
-    /// (4)/(5), as its own inherited-assumption section says. A replacement that
-    /// arms mid-extrapolation is exactly the route P4 forecloses, so `frozen_ids`
-    /// is forced EMPTY here.
-    BoardEqualOnly,
-    /// Basis B, which consults no board predicate. Neither P2 nor P4 ⇒ `frozen_ids` is forced
-    /// EMPTY and the resolution gate scans every current-stack entry.
-    ResourceSignatureOnly,
-}
-
-/// CR 732.2a + CR 608.1: what ONE certified period actually announced, and which
-/// current-stack entries the window proves it never touched.
-///
-/// Derived from the retained ring window `[cert_prior .. current]` — never from
-/// the offer-beat stack snapshot. Its frames and entries are the ring sample's
-/// **LIVE** halves, never `normalize_for_loop()` products: normalization zeroes
+/// Derived from the replayed period's window `[cert_prior .. current]` — never from
+/// the offer-beat stack snapshot. Its frames and entries are the replay's
+/// **LIVE** frames, never `normalize_for_loop()` products: normalization zeroes
 /// `next_object_id` and strips trigger identity, so a normalized frame is a
 /// CR 104.4b comparand and not an evaluation board.
 ///
-/// Fail-closed both ways: an id the window cannot prove frozen is TOUCHED
-/// (scanned/refused as before), and an entry the window never shows announcing
-/// is not enumerable for pins (the offer under-publishes ⇒ the choice gate
-/// refuses ⇒ no offer).
+/// Fail-closed: an entry the window never shows announcing is not enumerable for
+/// pins (the offer under-publishes ⇒ the choice gate refuses ⇒ no offer).
 #[derive(Debug)]
 pub(crate) struct PeriodTouch<'a> {
     /// `(carrying_frame, entry)` for every entry that ANNOUNCED inside the
@@ -4167,38 +4046,24 @@ pub(crate) struct PeriodTouch<'a> {
     /// CR 119.3), so the aim a charge OBSERVED, and what it took, are read here, never off
     /// `announced`.
     pub(crate) resolved: Vec<(&'a GameState, &'a GameState, &'a StackEntry)>,
-    /// Entry ids of `current.stack` that the window proves FROZEN: the same id
-    /// at the same index in EVERY window frame AND in `current`. CR 608.1: only
-    /// the top of the stack resolves, so an entry that held its `(index, id)`
-    /// through the whole window neither announced nor resolved in it.
-    ///
-    /// NON-EMPTY ONLY UNDER [`PeriodCertification::BoardCovered`]: the
-    /// subtraction is the one fail-open half of this type, and the other two
-    /// certificates do not supply the premises it rests on.
-    pub(crate) frozen_ids: BTreeSet<ObjectId>,
 }
 
-/// CR 732.2a: derive one window's [`PeriodTouch`] under the certificate its
-/// caller actually holds.
+/// CR 732.2a: derive one window's [`PeriodTouch`].
 ///
-/// `window` is `ring_live[cert_idx..]`, oldest first; the observed frame
-/// sequence is `window ++ [current]`. `announced` is IDENTICAL on all three
-/// certificate values — widening the announced set is the fail-CLOSED direction
-/// — and only the frozen subtraction is keyed.
+/// `window` is the replayed period's frames, oldest first; the observed frame
+/// sequence is `window ++ [current]`.
 pub(crate) fn certified_period_touch<'a>(
     window: &[&'a GameState],
     current: &'a GameState,
-    cert: PeriodCertification,
 ) -> PeriodTouch<'a> {
     if window.is_empty() {
         // CR 608.1 + CR 732.2a: with NO window frame there is no transition to
-        // observe, so there is no frozen proof and no observed period; the
+        // observe, so there is no observed period; the
         // honest degenerate reading is "every current entry may announce",
         // which is exactly the snapshot mint this function's alias replaces.
         return PeriodTouch {
             announced: current.stack.iter().map(|e| (current, e)).collect(),
             resolved: Vec::new(),
-            frozen_ids: BTreeSet::new(),
         };
     }
 
@@ -4226,78 +4091,10 @@ pub(crate) fn certified_period_touch<'a>(
         prev_ids = ids;
         prev_frame = frame;
     }
-
-    // The fail-open subtraction, and the ONLY thing the certificate keys. Taken
-    // BEFORE the frozen walk, so a non-cover certificate never pays it either.
-    if !matches!(cert, PeriodCertification::BoardCovered) {
-        return PeriodTouch {
-            announced,
-            resolved,
-            frozen_ids: BTreeSet::new(),
-        };
-    }
-
-    let frozen_ids = current
-        .stack
-        .iter()
-        .enumerate()
-        .filter(|(index, entry)| {
-            window
-                .iter()
-                .all(|frame| frame.stack.get(*index).map(|e| e.id) == Some(entry.id))
-        })
-        .map(|(_, entry)| entry.id)
-        .collect();
     PeriodTouch {
         announced,
         resolved,
-        frozen_ids,
     }
-}
-
-/// CR 603.5 + CR 603.4 + CR 608.2k: re-classify ONE entry's ability with its published "may"
-/// gate discharged, on the board `resolve_top` would hand the resolver — this entry off the
-/// stack, resolution scope bound.
-///
-/// The ONE classifier answers the counterfactual; this module never re-implements the reasons
-/// the classifier returns `MayPrompt` for. `None` ⇒ not a triggered ability, or the resolution
-/// scope cannot bind — both refusals rather than relief.
-fn optional_cleared_classification(
-    frame: &GameState,
-    entry: &StackEntry,
-    budget: &mut ProbeBudget,
-) -> Option<crate::game::resolution_prompt::ResolutionChoiceFreedom> {
-    let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
-        return None;
-    };
-    let mut without_may_gate = (**ability).clone();
-    without_may_gate.optional = false;
-    // CR 732.2a: the same cheap-precondition-before-the-clone rule the primary classifier
-    // follows. `frame.clone()` is a whole `GameState` copy, and a `may` trigger whose ability
-    // is rejected on a pure AST gate (a non-allow-listed effect, an `UpTo` count, a modal
-    // header) would otherwise buy that copy plus a scope binding to reach a verdict that never
-    // looks at the board — once per ring frame.
-    //
-    // EQUIVALENCE: this ordering differs from the unhoisted one in exactly one case — an entry
-    // whose scope would FAIL to bind AND whose chain is gated yields `Some(MayPrompt)` here
-    // where the unhoisted order yields `None`. `residual`'s one reader (`optional_relief_for`)
-    // opens `match cached.residual.as_ref()?` with a `MayPrompt => None` arm, so the two
-    // produce the identical downstream result.
-    if crate::game::resolution_prompt::chain_offers_choice(&without_may_gate) {
-        return Some(crate::game::resolution_prompt::ResolutionChoiceFreedom::MayPrompt);
-    }
-    let mut board = frame.clone();
-    board.stack.retain(|e| e.id != entry.id);
-    if !crate::game::stack::bind_resolution_scope(&mut board, entry, None) {
-        return None;
-    }
-    Some(
-        crate::game::resolution_prompt::ability_resolution_choice_freedom(
-            &board,
-            &without_may_gate,
-            budget,
-        ),
-    )
 }
 
 /// CR 732.2a: the facts a CALLER has PROVED about the loop window it is asking a
@@ -4310,40 +4107,10 @@ fn optional_cleared_classification(
 /// every guard that reads a field sits inside an `if let Some(..)` / `is_some_and`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LoopWindowScope<'a> {
-    /// `Some(pins)` iff the caller proved an OFFER published exactly these per-iteration
-    /// choice slots. READ by [`loop_states_cover_modulo_growth_scoped`]'s gates (3)/(6).
-    pinned: Option<PinnedChoices<'a>>,
     /// CR 601.2f (cost determination reads static cost modifiers): `Some(ids)` iff the
     /// caller proved the EXACT set of card ids this window casts — `Some(&[])` for a
     /// window that provably casts nothing. `None` means NO PROOF, i.e. scan everything.
     cast_card_ids: Option<&'a [CardId]>,
-    /// CR 732.2a + CR 608.1: `Some(touch)` iff the caller proved WHICH pairs the
-    /// certified period announced and which current-stack entries it left
-    /// frozen. A Copy HANDLE, never the owned value — [`PeriodTouch`] owns a
-    /// `Vec` and a `BTreeSet`, so an owned field would be E0204 against this
-    /// struct's shipped `Copy` derive, while `Option<&T>` is `Copy` regardless
-    /// of `T`. `None` means NO PROOF: nothing is exempt and nothing is
-    /// enumerable, i.e. the pre-change width.
-    period: Option<&'a PeriodTouch<'a>>,
-}
-
-/// CR 732.2a: the per-iteration choice slots ONE offer published, carried together with the
-/// seat whose offer minted them.
-///
-/// The proposer travels WITH the slots because the relief side re-runs the MINT's own
-/// per-entry acceptance test (`game::engine::entry_publishes_pin_slots`), whose first
-/// conjunct is `entry.controller == proposer` — the EXTENSION POINT's precondition (c),
-/// "only the acting player's own choices are pinnable". A bare slot list cannot express
-/// that conjunct, and a SECOND scope field could disagree with the first; one field
-/// carrying both makes the pair unable to drift.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct PinnedChoices<'a> {
-    /// The offer's proposer. Every slot in `slots` was minted for this seat.
-    pub(crate) proposer: PlayerId,
-    /// The published slots, which `decision_template::predictability_gate` then forces the
-    /// declaration to ADDRESS. A slot listed here is a *specified* choice in CR 732.2a's sense
-    /// once a SLOT-ADDRESSING pin answers it, not a free one.
-    pub(crate) slots: &'a [DecisionSlot],
 }
 
 impl LoopWindowScope<'static> {
@@ -4351,159 +4118,9 @@ impl LoopWindowScope<'static> {
     /// wrappers structurally identity rather than conditionally so.
     pub(crate) const fn unproven() -> Self {
         Self {
-            pinned: None,
             cast_card_ids: None,
-            // No period proof. `Option<&PeriodTouch>` is const-constructible as
-            // `None`, so this stays a `const fn` on `LoopWindowScope<'static>`.
-            period: None,
         }
     }
-}
-
-/// CR 732.2a: is this stack entry's ANNOUNCEMENT-time target choice (gate (3)) already
-/// SPECIFIED by a slot the offer published?
-///
-/// The acceptance test is NOT re-derived here — it is the mint's own,
-/// [`crate::game::engine::entry_publishes_pin_slots`], asked for this one entry with the
-/// pins' own proposer, so a slot can never be *matched* here on terms it was not *minted* on.
-/// The caller's relief is a bare `continue`, so a `true` skips ALL FOUR facts
-/// [`stack_entry_has_no_ordering_input`] rejects on while the pin answers one; the mint
-/// refuses to publish on three of the rest, and the fourth — `pending_trigger_entry`,
-/// CR 603.3c mid-construction — is a property of THIS state rather than of the schema and is
-/// enforced HERE. That makes this predicate strictly NARROWER than the mint's, the safe
-/// direction. `frame` must be the pair's CARRYING frame (the board that minted `f`), never a
-/// second one; it is a parameter because `PeriodVerdicts.frames` is private, and dropping it
-/// would COMPILE and be fail-OPEN.
-fn entry_target_choice_is_pinned(
-    board: &GameState,
-    f: FrameIx,
-    entry: &StackEntry,
-    verdicts: &mut PeriodVerdicts<'_>,
-    scope: LoopWindowScope<'_>,
-) -> bool {
-    let Some(pins) = scope.pinned else {
-        return false;
-    };
-    // A container bound to one proposer can never relieve pins minted for
-    // another seat: the cached `published` IS the mint's answer for the
-    // container's own proposer, so consuming it under different pins would be
-    // reading a verdict minted for someone else.
-    if verdicts.proposer() != Some(pins.proposer) {
-        return false;
-    }
-    if board.pending_trigger_entry == Some(entry.id) {
-        return false;
-    }
-    // CR 601.2c: a may-only entry (shape (B)) publishes NO target slot, so it is not
-    // target-relieved here — its announcement freedom comes from
-    // `stack_entry_has_no_ordering_input`'s own `targets.is_empty()` arm instead. Requiring
-    // `Some` keeps this predicate strictly narrower than the mint, never coarser.
-    verdicts
-        .verdict(f, entry)
-        .published
-        .as_ref()
-        .and_then(|e| e.target.as_ref())
-        .is_some_and(|target| pins.slots.contains(target))
-}
-
-/// CR 732.2a + CR 603.5: is this entry's RESOLUTION-time `MayPrompt` (gate (6)) fully
-/// explained by an optional gate the offer published — and if so, what verdict does the
-/// entry carry once that one axis is discharged?
-///
-/// `Some(residual)` ⇒ relieved, and `residual` is the classification the entry would have had
-/// WITHOUT its CR 603.5 gate, which the caller must go on to gate exactly like any unpinned
-/// entry's (a pinned "may" says nothing about the CR 616.1 replacement surface for whichever
-/// event classes the residual names). `None` ⇒ no relief.
-///
-/// ATTRIBUTION is the load-bearing part. `ability_resolution_choice_freedom` reaches
-/// `MayPrompt` from any guard in `game::resolution_prompt::chain_offers_choice` (that function
-/// IS the guard enumeration; no count is restated) and from `resolution_probe_verdict`'s
-/// `ResolutionProbe::Prompted`. The offer publishes a `MayChoice` point for exactly ONE of
-/// them: `ability.optional`, the single field [`optional_cleared_classification`] clears. So
-/// relief requires both published slots pinned AND the same ability, re-classified with
-/// `optional` cleared, to come back choice-free; every other cause keeps returning `MayPrompt`,
-/// including the two that most invite the opposite reading — `optional_targeting` /
-/// `optional_for`, which SHARE a `return true` with `optional` yet are not what the pin
-/// publishes, and a CR 608.2d `repeat_for` "up to N" repeat COUNT, which prompts with no
-/// optional flag at all. It performs NO classification of its own and calls the mint not at
-/// all: both the published slots and the residual are read through the ONE door.
-fn pinned_may_choice_relief(
-    f: FrameIx,
-    entry: &StackEntry,
-    verdicts: &mut PeriodVerdicts<'_>,
-    scope: LoopWindowScope<'_>,
-) -> Option<crate::game::resolution_prompt::ResolutionChoiceFreedom> {
-    use crate::game::resolution_prompt::ResolutionChoiceFreedom;
-    let pins = scope.pinned?;
-    // Fail-closed agreement guard: relief may only consume a verdict minted for
-    // the seat whose offer published these pins.
-    if verdicts.proposer() != Some(pins.proposer) {
-        return None;
-    }
-    let cached = verdicts.verdict(f, entry);
-    let published = cached.published.as_ref()?;
-    let may = published.may.as_ref()?;
-    // Strictly the mint's own facts, never coarser (CR 603.5): the `may` slot must be
-    // pinned, and the target slot must be pinned WHEN THERE IS ONE. Shape (B) publishes
-    // `target: None` — an entry that announces no choice has none for a pin to leave
-    // unspecified — so demanding a pinned target there would refuse relief the mint's own
-    // schema fully describes.
-    if !pins.slots.contains(may)
-        || published
-            .target
-            .as_ref()
-            .is_some_and(|target| !pins.slots.contains(target))
-    {
-        return None;
-    }
-    match cached.residual.as_ref()? {
-        ResolutionChoiceFreedom::MayPrompt => None,
-        residual @ ResolutionChoiceFreedom::FreeUnlessReplacements(_) => Some(residual.clone()),
-    }
-}
-
-/// CR 603.5: is this entry's optional trigger ALREADY ANSWERED by a stored "don't ask again"
-/// auto-choice — and with which answer?
-///
-/// The whole question is delegated to `effects::stored_may_answer`, the consumer half of the
-/// one authority `resolve_chain_body`'s own branch and the mint's guard (b) both take. Do not
-/// re-derive the CR 603.5 gate's conjunct set here: a local copy omitted `optional_for` and
-/// the feasibility probe and called a may "answered" on ability shapes where the gate never
-/// reads the store at all.
-///
-/// NOT keyed to the proposer: the gate asks whoever `optional_prompt_player` names, and a
-/// stored answer specifies that choice regardless of whose it is — a per-iteration window that
-/// never opens is specified for every seat at once (CR 732.2a). `None` ⇒ no up-front gate
-/// opens, or it will PROMPT, or the ability carries no `may_trigger_origin` for a preference
-/// to key on. All are unspecified windows.
-fn auto_may_answer_for(
-    frame: &GameState,
-    entry: &StackEntry,
-) -> Option<crate::types::game_state::AutoMayChoice> {
-    let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
-        return None;
-    };
-    crate::game::effects::stored_may_answer(frame, ability)
-}
-
-/// Karp–Miller-style ω-acceleration (Karp–Miller 1969; Finkel et al. 2021): `current` covers
-/// `prior` only when the object/board axes compare strictly ([`object_resource_axes_match`]) and
-/// no current-stack entry or fire-time condition reads a still-projected resource
-/// ([`stack_entry_reads_projected_resource`], [`fire_time_conditions_read_projected_resource`]).
-/// Depth-independence of top-of-stack resolution: CR 608.1 / CR 405.5. NOTE that the shipped
-/// constant-depth 2p path ([`loop_states_equal_modulo_resources`]) makes the SAME
-/// extrapolation with NONE of these — that assumption is documented there, not claimed as a
-/// theorem here.
-pub(crate) fn loop_states_cover_modulo_growth(prior: &GameState, current: &GameState) -> bool {
-    // The zero-proof container: frames = `[current]`, no proposer ⇒ nothing published ⇒ no
-    // relief.
-    let mut verdicts = PeriodVerdicts::unproven(current);
-    loop_states_cover_modulo_growth_scoped(
-        prior,
-        current,
-        LoopWindowScope::unproven(),
-        &mut verdicts,
-    )
 }
 
 /// CR 614.1 + CR 616.1: discharge one entry's resolution verdict against the
@@ -4548,18 +4165,14 @@ fn resolution_events_are_discharged(
 
 /// CR 601.2a + CR 602.2a: the cards of the plays the window's trace records — what the window
 /// casts or activates, a superset of what it casts, which over-states the set and so relieves
-/// less. `None` when there is no proof: no play recorded, a play whose object is gone, or, for a
-/// proposer, a play another seat made, since a play is evidence only about the seat making it.
-fn window_cast_card_ids(state: &GameState, proposer: Option<PlayerId>) -> Option<Vec<CardId>> {
+/// less. `None` when there is no proof: no play recorded, or a play whose object is gone.
+fn window_cast_card_ids(state: &GameState) -> Option<Vec<CardId>> {
     use crate::game::play_trace::{EntryKind, PlayLocus};
     let mut ids = Vec::new();
     for entry in crate::game::play_trace::current_entries(state)? {
         let EntryKind::Play { locus, .. } = &entry.kind else {
             continue;
         };
-        if proposer.is_some_and(|proposer| entry.seat != proposer) {
-            return None;
-        }
         let object = match locus {
             PlayLocus::Cast(id) | PlayLocus::Activate(id, _) | PlayLocus::Mana(id, _) => id,
             PlayLocus::Unread => return None,
@@ -4569,23 +4182,17 @@ fn window_cast_card_ids(state: &GameState, proposer: Option<PlayerId>) -> Option
     (!ids.is_empty()).then_some(ids)
 }
 
-/// Scoped sibling of [`loop_states_cover_modulo_growth`] — see [`LoopWindowScope`]. The
-/// `scope` parameter carries CR 732.2a pin proofs INTO this body: gate (3) skips an entry
-/// whose published target [`DecisionSlot`] the offer pinned ([`entry_target_choice_is_pinned`])
-/// and gate (6) discharges a `MayPrompt` wholly attributable to a published CR 603.5 gate
-/// ([`pinned_may_choice_relief`]), per the EXTENSION POINT's three preconditions.
-///
-/// Not carried by the parameter: the PROJECTED conjunct (5) this body passes downstream is
-/// derived LOCALLY from `current`'s own driving sequence ([`window_cast_card_ids`]), and the
-/// `projected_scope` built for that call deliberately holds `pinned: None` — the projected
-/// firewall is a different axis and must not inherit the caller's pins.
-pub(crate) fn loop_states_cover_modulo_growth_scoped<'a>(
-    prior: &GameState,
-    current: &'a GameState,
-    scope: LoopWindowScope<'_>,
-    verdicts: &mut PeriodVerdicts<'a>,
-) -> bool {
+/// Karp–Miller-style ω-acceleration (Karp–Miller 1969; Finkel et al. 2021): `current` covers
+/// `prior` only when the object/board axes compare strictly ([`object_resource_axes_match`]) and
+/// no current-stack entry or fire-time condition reads a still-projected resource
+/// ([`stack_entry_reads_projected_resource`], [`fire_time_conditions_read_projected_resource`]).
+/// Depth-independence of top-of-stack resolution: CR 608.1 / CR 405.5. NOTE that the shipped
+/// constant-depth 2p path ([`loop_states_equal_modulo_resources`]) makes the SAME
+/// extrapolation with NONE of these — that assumption is documented there, not claimed as a
+/// theorem here.
+pub(crate) fn loop_states_cover_modulo_growth(prior: &GameState, current: &GameState) -> bool {
     bump_loop_detect_cost(|cost| cost.compares_cover_modulo_growth_scoped += 1);
+    let mut verdicts = PeriodVerdicts::unproven(current);
     // (1) Board equal modulo the NARROWED projection AND modulo the stack, with the
     // object resource axes STRICT-COMPARED. Both sides are [`cover_projection`]'s comparand —
     // the stack and its entry-indexed firing sidecar are compared separately in (2) — then
@@ -4623,14 +4230,6 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a>(
         return false;
     };
     for (orig, norm) in current.stack.iter().zip(cur_stack.iter()) {
-        // CR 732.2a EXTENSION POINT (see item 6's block): a slot the OFFER publishes is
-        // a SPECIFIED choice, not a free one, so its announcement-time target input is
-        // no longer player ordering input. Deliberately NOT frozen-filtered: the frozen
-        // skip lives in item (6) alone, because items (4)/(5) establish the premise that
-        // skip consumes.
-        if entry_target_choice_is_pinned(current, f_current, orig, verdicts, scope) {
-            continue;
-        }
         let cn = cur_stack.iter().filter(|e| *e == norm).count();
         let pn = prior_stack.iter().filter(|e| *e == norm).count();
         if cn > pn && !stack_entry_has_no_ordering_input(current, orig) {
@@ -4640,9 +4239,7 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a>(
 
     // (4) On-stack fail-closed resource-read guard: NO entry on `current`'s stack may carry
     // an AST that reads a still-projected axis (player monotone resources + journals).
-    // Object-axis readers pass — their drift breaks gate (1) instead. The closure counts the
-    // scans so the placement rule ("the frozen skip lives in item (6) and nowhere earlier")
-    // has an assertable surface. The population is the UNEXEMPTED current stack.
+    // Object-axis readers pass — their drift breaks gate (1) instead.
     if current
         .stack
         .iter()
@@ -4654,27 +4251,9 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a>(
     // (5) Off-stack fail-closed fire-time condition guard (the second read surface).
     // CR 601.2f: `cast_ids` is bound BEFORE `projected_scope` so NLL keeps the borrow
     // live across the call (`LoopWindowScope::cast_card_ids` is `Option<&'a [CardId]>`).
-    //
-    // SITE E (CR 732.2a): the window's cast-set proof is scoped to the seat this container is
-    // bound to, so a period recorded by ANOTHER seat cannot select which relief applies here.
-    // `verdicts.proposer()` is `None` for the proposer-less 2-arg entry, where this stays
-    // byte-identical to the unscoped read.
-    let cast_ids = window_cast_card_ids(current, verdicts.proposer());
-    // All six fields written explicitly — no functional-update base, so there is no
-    // `LoopWindowScope<'static>` -> `LoopWindowScope<'_>` variance question to reason
-    // about, and a future SEVENTH field is a compile error that forces a decision rather
-    // than a silent default. The other five stay at their `unproven()` values: 2b's
-    // axis is `projected`, and the sibling proofs belong to the sibling covers.
+    let cast_ids = window_cast_card_ids(current);
     let projected_scope = LoopWindowScope {
-        pinned: None,
         cast_card_ids: cast_ids.as_deref(),
-        // DELIBERATE, same rationale as the `pinned: None` above: the projected firewall is
-        // a different axis and must not inherit the caller's period proof.
-        period: None,
-        // DELIBERATE: the PROJECTED-resource firewall (CR 106.1 / CR 119 / CR 122.1 axes)
-        // consults no CR 400.7 identity axis at all — it reads player- and object-level
-        // resource counters, not replacement applicability — so this proof has no consumer
-        // on that path and must not be carried as though it did.
     };
     if fire_time_conditions_read_projected_resource_scoped(current, projected_scope) {
         return false;
@@ -4689,39 +4268,8 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a>(
     // `FreeUnlessReplacements` additionally requires the CR 616.1 environmental guard below.
     // THIS block is the single gate seam for resolution-choice rejection; grown places gate a
     // different fact (announcement-time ordering input).
-    //
-    // EXTENSION POINT — pinned fixed choices (CR 732.2a): a proposal MAY pre-specify choices in
-    // advance ("always choose permanent P"); only CONDITIONAL actions are forbidden. A
-    // `MayPrompt` entry may be treated as choice-free when a pin covers it, PROVIDED (a) the pin
-    // is a STATE-INDEPENDENT designation whose option stays legal at every iteration (never "the
-    // newest copy"); (b) cover-modulo-growth still holds under the pinned outcomes; (c) only the
-    // acting player's own choices are pinnable. (a) holds by construction for both spellings of
-    // a seat designation; (c) is not taken on trust — [`pinned_may_choice_relief`] re-runs the
-    // mint's own per-entry acceptance test, controller conjunct included; (b) is why relief is
-    // not a `continue`: the RESIDUAL verdict re-enters the same gating an unpinned entry gets.
-    // Plug future pins in at THIS seam; do not rewire the classifiers or spread the decision.
     for entry in &current.stack {
-        // CR 608.1 + CR 732.2a: an entry the certified window proves FROZEN — same id at the
-        // same index in every window frame and in `current` — neither announced nor resolved
-        // in the described sequence, so it makes no choice there. THE FROZEN SKIP LIVES HERE
-        // AND NOWHERE EARLIER: items (2)/(4)/(5) are what establish the premises it consumes,
-        // and each returns on failure strictly above this loop.
-        if scope
-            .period
-            .is_some_and(|t| t.frozen_ids.contains(&entry.id))
-        {
-            continue;
-        }
-        let primary = verdicts.verdict(f_current, entry).primary.clone();
-        let verdict = match primary {
-            crate::game::resolution_prompt::ResolutionChoiceFreedom::MayPrompt => {
-                match pinned_may_choice_relief(f_current, entry, verdicts, scope) {
-                    Some(residual) => residual,
-                    None => return false,
-                }
-            }
-            free => free,
-        };
+        let verdict = verdicts.verdict(f_current, entry).clone();
         if !resolution_events_are_discharged(current, verdict) {
             return false;
         }
@@ -8393,9 +7941,7 @@ fn stack_entry_has_no_ordering_input(state: &GameState, entry: &StackEntry) -> b
     // ordering input when exactly one legal assignment exists — the choice is
     // FORCED, so the shortcut stays deterministic. Re-derived per call against the
     // board the CALLER passes, and that board is load-bearing rather than incidental:
-    // there are THREE call sites and none of them is "the live state" by construction
-    // — the announced loop passes the pair's own CARRYING FRAME (a retained ring
-    // sample), the current-stack loops pass `current`. The verdict is a function of
+    // its one production call site passes `current`. The verdict is a function of
     // the board's legal-target population, so handing a retained pair the live board
     // is fail-OPEN: a target legal on the frame but gone from `current` collapses the
     // assignment to "forced" and relieves a choice that is not forced.
@@ -9947,11 +9493,7 @@ mod tests {
         proposer: super::PlayerId,
     ) -> Vec<crate::analysis::decision_template::DecisionPoint> {
         crate::game::engine::bounded_cycle_pin_slots_for_window(
-            &super::certified_period_touch(
-                &[],
-                state,
-                super::PeriodCertification::ResourceSignatureOnly,
-            ),
+            &super::certified_period_touch(&[], state),
             proposer,
         )
     }
@@ -12764,11 +12306,7 @@ mod tests {
             for p in earlier.players.iter_mut().filter(|p| p.id == PlayerId(1)) {
                 p.life += 1;
             }
-            let touch = certified_period_touch(
-                &[&earlier],
-                state,
-                PeriodCertification::ResourceSignatureOnly,
-            );
+            let touch = certified_period_touch(&[&earlier], state);
             bounded_cycle_charged_targets_for_window(
                 &touch,
                 PlayerId(0),
@@ -12968,7 +12506,7 @@ mod tests {
     /// be the target of spells or abilities your opponents control" — so the announcement
     /// authority enumerates ONE opponent there and the announcement is forced. On the live
     /// board that permanent has LEFT, so both opponents are legal and the announcement is the
-    /// proposer's choice. A permanent leaving the battlefield between two retained ring frames
+    /// proposer's choice. A permanent leaving the battlefield between two retained frames
     /// is an ordinary event; nothing here rewinds an irreversible fact (contrast
     /// `is_eliminated`, which is why this row does not use the elimination lever the sibling
     /// rows use).
@@ -13081,11 +12619,7 @@ mod tests {
              the WIDER one"
         );
 
-        let touch = certified_period_touch(
-            &[&head, &narrow, &wide],
-            &current,
-            PeriodCertification::ResourceSignatureOnly,
-        );
+        let touch = certified_period_touch(&[&head, &narrow, &wide], &current);
         assert_eq!(
             touch
                 .announced
@@ -13190,11 +12724,7 @@ mod tests {
             hexproof_window_frame(false, 20, PlayerId(2)),
             &[(PlayerId(1), 1), (PlayerId(2), 1)],
         );
-        let divergent_touch = certified_period_touch(
-            &[&head, &narrow, &divergent_wide],
-            &current,
-            PeriodCertification::ResourceSignatureOnly,
-        );
+        let divergent_touch = certified_period_touch(&[&head, &narrow, &divergent_wide], &current);
         let divergent = bounded_cycle_charged_targets_for_window(
             &divergent_touch,
             PlayerId(0),
@@ -13248,11 +12778,7 @@ mod tests {
         let charges = |aim: PlayerId| {
             let frame = hexproof_window_frame(true, 10, aim);
             let current = hexproof_window_frame(true, 20, aim);
-            let touch = certified_period_touch(
-                &[&head, &frame],
-                &current,
-                PeriodCertification::ResourceSignatureOnly,
-            );
+            let touch = certified_period_touch(&[&head, &frame], &current);
             bounded_cycle_charged_targets_for_window(&touch, PlayerId(0), 1)
                 .into_iter()
                 .map(|charge| (charge.reaches, charge.aimed_at))
@@ -13287,11 +12813,7 @@ mod tests {
         let resolved_at_p2 = hexproof_window_frame(false, 10, PlayerId(2));
         let current = hexproof_window_frame(false, 20, PlayerId(1));
         let charges = |window: &[&GameState]| {
-            let touch = certified_period_touch(
-                window,
-                &current,
-                PeriodCertification::ResourceSignatureOnly,
-            );
+            let touch = certified_period_touch(window, &current);
             bounded_cycle_charged_targets_for_window(&touch, PlayerId(0), 1)
                 .into_iter()
                 .map(|charge| (charge.reaches, charge.aimed_at))
@@ -13376,8 +12898,7 @@ mod tests {
         // The magnitude is immaterial here — every assertion below reads a charge's REACH —
         // so it is stated as `1` rather than derived from a delta this row does not build.
         let charged_victims = |state: &GameState| {
-            let touch =
-                certified_period_touch(&[], state, PeriodCertification::ResourceSignatureOnly);
+            let touch = certified_period_touch(&[], state);
             bounded_cycle_charged_targets_for_window(&touch, PlayerId(0), 1)
         };
         let announcement_slot = |state: &GameState| {
@@ -18317,7 +17838,7 @@ mod tests {
 
     /// THE `cast_card_ids` BINDING EXPRESSION, pinned through the PRODUCTION entry
     /// point: `cast_card_ids: cast_ids.as_deref()`, fed by
-    /// `let cast_ids = window_cast_card_ids(current, verdicts.proposer());`.
+    /// `let cast_ids = window_cast_card_ids(current);`.
     ///
     /// Calling [`window_cast_card_ids`] directly, or driving a hand-built scope, does not
     /// pin the premise *"conjunct (5) derives `cast_card_ids` from
@@ -18448,70 +17969,22 @@ mod tests {
         let driver = inert_token(&mut state, 640, 0, "Driver");
         let card = state.objects[&driver].card_id;
         assert_eq!(
-            window_cast_card_ids(&state, None),
+            window_cast_card_ids(&state),
             None,
             "(1) no trace is no proof"
         );
         install_plays_for_tests(&mut state, &[]);
         assert_eq!(
-            window_cast_card_ids(&state, None),
+            window_cast_card_ids(&state),
             None,
             "(2) an empty trace is no proof"
         );
 
         install_plays_for_tests(&mut state, &[(PlayerId(0), PlayLocus::Cast(driver))]);
         assert_eq!(
-            window_cast_card_ids(&state, None),
+            window_cast_card_ids(&state),
             Some(vec![card]),
             "(3) paired positive: one recorded cast yields exactly that card"
-        );
-    }
-
-    /// [`window_cast_card_ids`]'s PROPOSER SCOPING (CR 732.2a): a play is evidence only about the
-    /// seat making it, so an opponent's play must not decide which conditioned self-cost static is
-    /// relieved for this proposer.
-    #[test]
-    fn a_foreign_driving_period_proves_nothing_about_this_proposers_casting() {
-        use crate::game::play_trace::{install_plays_for_tests, PlayLocus};
-
-        let owner = PlayerId(0);
-        let other = PlayerId(1);
-        let mut state = GameState::new_two_player(7);
-        let mine = inert_token(&mut state, 640, 0, "Mine");
-        let theirs = inert_token(&mut state, 641, 1, "Theirs");
-        let card = state.objects[&mine].card_id;
-
-        install_plays_for_tests(&mut state, &[(owner, PlayLocus::Activate(mine, 0))]);
-        assert_eq!(
-            window_cast_card_ids(&state, None),
-            Some(vec![card]),
-            "(1) the proposer-less entry reads the trace unscoped"
-        );
-        assert_eq!(
-            window_cast_card_ids(&state, Some(owner)),
-            Some(vec![card]),
-            "(2) the seat that made the play is proved by it"
-        );
-        assert_eq!(
-            window_cast_card_ids(&state, Some(other)),
-            None,
-            "(3) another seat's play is no proof about this proposer's casting"
-        );
-
-        install_plays_for_tests(
-            &mut state,
-            &[
-                (owner, PlayLocus::Activate(mine, 0)),
-                (other, PlayLocus::Activate(theirs, 0)),
-            ],
-        );
-        assert_eq!(
-            (
-                window_cast_card_ids(&state, Some(owner)),
-                window_cast_card_ids(&state, Some(other)),
-            ),
-            (None, None),
-            "(4) a window with both seats' plays proves nothing for either"
         );
     }
 
@@ -18527,21 +18000,13 @@ mod tests {
         let card = state.objects[&driver].card_id;
 
         install_plays_for_tests(&mut state, &[(owner, PlayLocus::Unread)]);
-        assert_eq!(
-            window_cast_card_ids(&state, Some(owner)),
-            None,
-            "an unread locus"
-        );
+        assert_eq!(window_cast_card_ids(&state), None, "an unread locus");
         install_plays_for_tests(&mut state, &[(owner, PlayLocus::Cast(ObjectId(9999)))]);
-        assert_eq!(
-            window_cast_card_ids(&state, Some(owner)),
-            None,
-            "a vanished object"
-        );
+        assert_eq!(window_cast_card_ids(&state), None, "a vanished object");
 
         install_plays_for_tests(&mut state, &[(owner, PlayLocus::Mana(driver, Some(0)))]);
         assert_eq!(
-            window_cast_card_ids(&state, Some(owner)),
+            window_cast_card_ids(&state),
             Some(vec![card]),
             "paired positive: a live object's play is proof"
         );
@@ -20157,9 +19622,9 @@ mod tests {
         );
     }
 
-    // ───────────────── The shape-(B) mint's relief-side rows ─────────────────
+    // ───────────────── The shape-(B) mint's rows ─────────────────
 
-    /// A 3-seat board with one battlefield source, shared by the two U2 relief rows.
+    /// A 3-seat board with one battlefield source, shared by the U2 rows.
     fn u2_relief_board() -> (GameState, ObjectId) {
         use crate::game::scenario::GameScenario;
         let mut state = GameScenario::new_n_player(3, 7).build().state().clone();
@@ -20177,15 +19642,6 @@ mod tests {
     }
 
     /// Shape (B): a proposer-controlled OPTIONAL, NO-TARGET triggered ability.
-    ///
-    /// Shape (B) is reached whenever `build_target_slots` yields ZERO slots. There are two
-    /// routes to that, and the difference matters HERE and not at the mint: an effect whose
-    /// head filter announces nothing (`Draw { target: Controller }`) leaves the residual
-    /// classification choice-FREE, while `TargetChoiceTiming::Resolution` (the Braids
-    /// per-player-upkeep shape the mint rows use) is itself one of the six `MayPrompt`
-    /// reasons — such an entry mints but can never be RELIEVED, so its offer is refused at
-    /// conjunct (6). That is the fail-closed direction, and it is why the relief rows below
-    /// take the announce-nothing route rather than the resolution-timing one.
     fn u2_shape_b_entry(
         src: ObjectId,
         id: u64,
@@ -20224,15 +19680,8 @@ mod tests {
     /// R17 — ID FRESHNESS ON THE DRIVEN DUMPS, AND `normalize_for_loop` PRESERVES EVERY
     /// `StackEntry.id`.
     ///
-    /// CR 608.1 + CR 104.4b. The frozen-prefix exemption is the ONE place that makes the
-    /// resolution gate strictly NARROWER, and its soundness rests on a fixture that
-    /// is structurally unconstructible: *a window whose prefix is identity-stable across every
-    /// sampled frame while an exempted entry DOES announce or resolve in the driven period*.
-    /// Both disjuncts die on one fact — an entry that RESOLVED inside the window has RETIRED
-    /// its `StackEntry.id` (ids come from the monotone `next_object_id`), and an entry that
-    /// ANNOUNCED inside the window was absent from the oldest window frame, which the
-    /// exemption requires presence in. The second is definitional; the first is the invariant
-    /// this row asserts, since a fixture cannot.
+    /// CR 608.1 + CR 104.4b: `certified_period_touch` reads announcements and resolutions off
+    /// `StackEntry.id` differences between frames, so a retired id must never return.
     ///
     /// ARM 3 is the cross-frame comparison's unstated dependency, stated: `certified_period_touch`
     /// compares `StackEntry.id` across frames, and `normalize_for_loop`'s products still feed
@@ -20337,98 +19786,6 @@ mod tests {
     // U3 ROWS — R14 / R19 / R29 / R31(completeness) / R32
     // ───────────────────────────────────────────────────────────────────────────────────
 
-    /// R7 — THE FROZEN PREFIX IS AN `(index, id)` IDENTITY, NOT A PRESENCE COUNT.
-    ///
-    /// CR 732.2a: `certified_period_touch` may exempt a `current.stack` entry from conjunct (6)
-    /// only when that entry sits at the SAME INDEX carrying the SAME `ObjectId` in every window
-    /// frame — i.e. it demonstrably did not participate in the observed period. A weaker test
-    /// ("something is at that index") would exempt an entry the period shifted underneath, and
-    /// a shifted entry is exactly one that DID move.
-    ///
-    /// This is the constructed unit R33/R21 do not cover: those rows measure the exemption on
-    /// the real dellian window, where every frame's prefix happens to be identity-stable, so
-    /// neither of them can separate the identity conjunct from a presence check.
-    ///
-    /// Arms, on ONE constructed 3-frame window (`[f0, f1, f2]` + `current`):
-    /// * **(a)** a stable `(index, id)` prefix of length 2 ⇒ `frozen_ids` contains exactly it;
-    /// * **(a′)** the reach-guard that makes (a) non-trivial: the stack's TAIL entry differs
-    ///   across the frames, so `frozen_ids` is a PROPER subset and "freeze everything" fails;
-    /// * **(b)** one frame's stack shifted by a single index (an extra entry pushed at the
-    ///   front) ⇒ the prefix ids are no longer at their own indices ⇒ NOTHING is frozen, even
-    ///   though every id is still PRESENT in that frame.
-    ///
-    /// REVERT-PROBE: weaken the identity conjunct to a presence check
-    /// (`frame.stack.get(*index).is_some()`) ⇒ (b)'s frozen set becomes the whole prefix again
-    /// ⇒ (b) FAILS. (a)/(a′) stay green under that probe, which is what makes (b) the arm the
-    /// identity conjunct is answerable to.
-    #[test]
-    fn r7_the_frozen_prefix_is_an_index_id_identity_never_a_presence_count() {
-        let entry = |id: u64| churn_entry(id, 0, lose_ability(1), None);
-        // ids 7001/7002 are the STABLE prefix; the tail differs per frame so the frozen set is
-        // a proper subset and this row cannot be satisfied by "freeze the whole stack".
-        let frame_with_tail = |tail: u64| {
-            let mut s = GameState::new_two_player(20);
-            s.stack.push_back(entry(7001));
-            s.stack.push_back(entry(7002));
-            s.stack.push_back(entry(tail));
-            s
-        };
-        let (f0, f1, f2) = (
-            frame_with_tail(7010),
-            frame_with_tail(7011),
-            frame_with_tail(7012),
-        );
-        let current = frame_with_tail(7013);
-
-        // ── (a) + (a′) ──
-        let touch = certified_period_touch(
-            &[&f0, &f1, &f2],
-            &current,
-            PeriodCertification::BoardCovered,
-        );
-        let frozen: Vec<ObjectId> = touch.frozen_ids.iter().copied().collect();
-        assert_eq!(
-            frozen,
-            vec![ObjectId(7001), ObjectId(7002)],
-            "(a) CR 732.2a: exactly the entries holding the SAME id at the SAME index in every \
-             window frame are provably outside the observed period"
-        );
-        assert!(
-            frozen.len() < current.stack.len(),
-            "(a′) reach-guard: the frozen set must be a PROPER subset — a fixture whose whole \
-             stack froze could not tell the identity conjunct from `freeze everything`; \
-             stack {} vs frozen {}",
-            current.stack.len(),
-            frozen.len()
-        );
-
-        // ── (b) one frame shifted by a single index; every id is still PRESENT in it ──
-        let shifted = {
-            let mut s = f1.clone();
-            s.stack.push_front(entry(7099));
-            s
-        };
-        let shifted_ids: std::collections::BTreeSet<ObjectId> =
-            shifted.stack.iter().map(|e| e.id).collect();
-        assert!(
-            shifted_ids.contains(&ObjectId(7001)) && shifted_ids.contains(&ObjectId(7002)),
-            "(b) reach-guard: the shift must PRESERVE both prefix ids in that frame, otherwise \
-             a presence check would reject them too and the arms would not separate"
-        );
-        let shifted_touch = certified_period_touch(
-            &[&f0, &shifted, &f2],
-            &current,
-            PeriodCertification::BoardCovered,
-        );
-        assert!(
-            shifted_touch.frozen_ids.is_empty(),
-            "(b) CR 732.2a: a single index shift means the entry moved WITHIN the observed \
-             period, so no exemption is provable — presence at some index is not the property. \
-             got {:?}",
-            shifted_touch.frozen_ids
-        );
-    }
-
     /// R14 — THE DEGENERATE WINDOW ANNOUNCES `current.stack`, ELEMENT FOR ELEMENT.
     ///
     /// CR 732.2a + CR 608.1. With NO window frame there is no transition to observe, so the
@@ -20474,41 +19831,29 @@ mod tests {
             .map(|(i, e)| (i, e.id))
             .collect();
 
-        for cert in [
-            PeriodCertification::BoardCovered,
-            PeriodCertification::BoardEqualOnly,
-            PeriodCertification::ResourceSignatureOnly,
-        ] {
-            let touch = certified_period_touch(&[], &state, cert);
-            let observed: Vec<(usize, ObjectId)> = touch
+        let touch = certified_period_touch(&[], &state);
+        let observed: Vec<(usize, ObjectId)> = touch
+            .announced
+            .iter()
+            .enumerate()
+            .map(|(i, (_, e))| (i, e.id))
+            .collect();
+        assert_eq!(
+            observed, expected,
+            "the degenerate window's announced pairs are `current.stack` element for element, \
+             IN ORDER"
+        );
+        assert!(
+            touch
                 .announced
                 .iter()
-                .enumerate()
-                .map(|(i, (_, e))| (i, e.id))
-                .collect();
-            assert_eq!(
-                observed, expected,
-                "{cert:?}: the degenerate window's announced pairs are `current.stack` \
-                 element for element, IN ORDER"
-            );
-            assert!(
-                touch
-                    .announced
-                    .iter()
-                    .all(|(frame, _)| std::ptr::eq(*frame, &state)),
-                "{cert:?}: every degenerate pair's carrying frame IS `current` — there is no \
-                 other frame for it to be"
-            );
-            assert!(
-                touch.frozen_ids.is_empty(),
-                "{cert:?}: with no window frame nothing is PROVEN frozen, on ANY certificate \
-                 value — the empty-window branch returns before the frozen walk"
-            );
-        }
+                .all(|(frame, _)| std::ptr::eq(*frame, &state)),
+            "every degenerate pair's carrying frame IS `current` — there is no other frame for \
+             it to be"
+        );
 
         // PAIRED POSITIVE REACH-GUARD, and it is what stops the property collapsing into a
         // vacuous truth about a stack nothing publishes on.
-        let touch = certified_period_touch(&[], &state, PeriodCertification::ResourceSignatureOnly);
         let points = bounded_cycle_pin_slots_for_window(&touch, PlayerId(0));
         assert!(
             !points.is_empty(),
@@ -20520,48 +19865,6 @@ mod tests {
             "reach-guard, other direction: the P1-controlled entry is REFUSED by the mint yet \
              still appears in `announced` — proof the touch is the period's enumeration and \
              not the mint's accepted set"
-        );
-    }
-
-    /// R22's own NEGATIVE CONTROL — the VACUITY BOUNDARY, never coverage.
-    ///
-    /// At window offset zero the window-relative position EQUALS the absolute one
-    /// (`w_pos == abs ⟺ idx == 0`) and an id-only memo key serves the same frame it would
-    /// have computed anyway, so the shipped mint and BOTH reverts AGREE. Re-keying from two
-    /// ring frames to three does not escape it: a "three-frame period" taken as the WHOLE
-    /// ring plus `current` is still `idx == 0`.
-    ///
-    /// This test is GREEN under every probe R22 runs, and that agreement is the whole point:
-    /// it is what a fixture at this offset can prove, which is nothing.
-    #[test]
-    fn r22_control_at_window_offset_zero_the_two_key_arithmetics_agree() {
-        let (base, src) = u2_relief_board();
-        let entry = u2_shape_b_entry(src, 9221, u2_draw_effect(), |_| {});
-        let f1 = base.clone();
-        let mut f2 = base.clone();
-        f2.stack.push_back(entry.clone());
-        let mut current = base.clone();
-        current.stack.push_back(entry.clone());
-
-        let ring = [&f1, &f2];
-        let mut flat = PeriodVerdicts::for_period(&ring, &current, PlayerId(0));
-        let f = flat
-            .frame_ix(&f1)
-            .expect("the control's carrying frame is the FIRST — that is the whole defect");
-        // `FrameIx`'s field is private outside its module — deliberately, it is a token and not
-        // a number — so offset zero is asserted by ORDER: nothing in the table precedes it.
-        let ix2 = flat.frame_ix(&f2).expect("f2 is in the period");
-        let ixc = flat.frame_ix(&current).expect("current is in the period");
-        assert!(
-            f < ix2 && ix2 < ixc,
-            "the control is only a control AT offset zero: if the carrying frame stopped being \
-             the FIRST, the fixture drifted into the discriminating shape and this test would \
-             start claiming coverage it cannot support"
-        );
-        assert!(
-            flat.verdict(f, &entry).published.is_some(),
-            "at idx == 0 every key arithmetic agrees — measured, and reported as a boundary \
-             rather than as evidence"
         );
     }
 
@@ -20586,9 +19889,9 @@ mod tests {
 
     /// F2a — **ONE AUTHORITY, AND THE TWO ABILITY SHAPES THE THIRD COPY GOT WRONG.**
     ///
-    /// CR 603.5 + CR 608.2d + CR 101.4. Three places answer *"does this ability open one
-    /// up-front optional gate?"*: production's own branch in `resolve_chain_body`, the mint's
-    /// guard (b), and this module's `auto_may_answer_for`. A copy that asks only the four
+    /// CR 603.5 + CR 608.2d + CR 101.4. Two places answer *"does this ability open one
+    /// up-front optional gate?"*: production's own branch in `resolve_chain_body` and the
+    /// mint's guard (b). A copy that asks only the four
     /// shared predicates and OMITS `optional_for` and the CR 608.2d feasibility probe calls a
     /// may "already answered" on two ability shapes where production never reads the store.
     ///

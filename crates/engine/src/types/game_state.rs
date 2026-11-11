@@ -22874,9 +22874,7 @@ impl<'de> Deserialize<'de> for PendingLiminalEntryResume {
 /// source identity; those are inputs to a mint and to a resolution probe, never to an
 /// equality comparand.
 ///
-/// `Clone` is load-bearing, not decoration: ring elements are written through
-/// `Arc::make_mut` (two sites in `analysis/resource.rs`), which is bounded
-/// `T: CloneToUninit` ⇐ `T: Clone`. `PartialEq`/`Serialize`/`Default` are deliberately
+/// `PartialEq`/`Serialize`/`Default` are deliberately
 /// absent — the field is `#[serde(skip, default)]` and excluded from `impl PartialEq for
 /// GameState`, so no site needs them.
 #[derive(Debug, Clone)]
@@ -24356,7 +24354,7 @@ declare_game_state! {
     /// state for equality. CR 104.4b/CR 732.2a loop detection (`loop_states_equal`)
     /// and AI-search position dedup compare two states reached at different times;
     /// a populated live state must still compare equal to the empty-`unbounded_resources`
-    /// ring snapshots, or loop detection yields false negatives. The sibling
+    /// loop-detection snapshots, or loop detection yields false negatives. The sibling
     /// `debug_infinite_mana` set (the CR 500.5 debug carve-out) is excluded from
     /// equality for the same reason.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -24382,7 +24380,7 @@ declare_game_state! {
     /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
     /// `loop_fingerprint` (same family as `unbounded_resources`): display state, not rules
     /// state for equality —
-    /// a populated live state must still compare equal to the empty-pile ring
+    /// a populated live state must still compare equal to the empty-pile loop-detection
     /// snapshots, or CR 104.4b/CR 732.2a loop detection yields false negatives.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unbounded_loop_pile: BTreeMap<PlayerId, BTreeSet<ObjectId>>,
@@ -24419,7 +24417,7 @@ declare_game_state! {
     /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
     /// `loop_fingerprint` (same family as `unbounded_resources` /
     /// `unbounded_loop_pile`): display state, not rules state for equality — a
-    /// populated live state must still compare equal to the empty-target ring
+    /// populated live state must still compare equal to the empty-target loop-detection
     /// snapshots, or CR 104.4b / CR 732.2a loop detection yields false negatives.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unbounded_counter_targets: BTreeMap<PlayerId, BTreeSet<(ObjectId, CounterType)>>,
@@ -24441,7 +24439,7 @@ declare_game_state! {
     /// `loop_fingerprint` (same unbounded family as `unbounded_resources` /
     /// `unbounded_loop_pile`): deferred-materialization
     /// annotation, not rules state for equality — a populated live state must still
-    /// compare equal to the empty ring snapshots, or CR 104.4b loop detection
+    /// compare equal to the empty loop-detection snapshots, or CR 104.4b loop detection
     /// yields false negatives.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pending_unbounded_materialization: BTreeMap<PlayerId, Vec<PersistentAxisMaterialization>>,
@@ -24460,7 +24458,7 @@ declare_game_state! {
     /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
     /// `loop_fingerprint` (same unbounded family as `pending_unbounded_materialization`):
     /// shortcut annotation, not rules state for equality — a populated live state must
-    /// still compare equal to the empty ring snapshots or CR 104.4b loop detection yields
+    /// still compare equal to the empty loop-detection snapshots or CR 104.4b loop detection yields
     /// false negatives.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pending_materialization_count: BTreeMap<PlayerId, u32>,
@@ -49938,7 +49936,7 @@ mod tests {
     /// identical except one has a populated `unbounded_resources` (the
     /// infinite-mana toggle's six `Mana(_)` axes via `mark_unbounded_loop`) MUST
     /// compare EQUAL through every loop-detection comparator. Otherwise a populated
-    /// live state would stop matching the empty-`unbounded_resources` ring
+    /// live state would stop matching the empty-`unbounded_resources` loop-detection
     /// snapshots and CR 104.4b / CR 732.2a loop detection would yield false
     /// negatives (and AI-search position dedup would break).
     ///
@@ -50175,7 +50173,7 @@ mod tests {
     /// `pending_unbounded_materialization_excluded_from_loop_equality` — the accepted-count
     /// bound follows the identical exclusion-by-omission discipline, and for the same
     /// reason: it is written at accept, so including it would make a live post-accept state
-    /// unequal to the pre-accept ring snapshots and yield CR 104.4b false negatives.
+    /// unequal to the pre-accept loop-detection snapshots and yield CR 104.4b false negatives.
     ///
     /// It also pins the CR 732.2c LOCKSTEP: every seam that drops the stash drops the bound
     /// with it, so a stale bound can never outlive the collapse it bounded.
@@ -50632,7 +50630,7 @@ mod tests {
     /// is diagnostics/annotation state, NOT rules state for equality. Two states
     /// identical except one has recorded an unimplemented-effect hit MUST compare
     /// EQUAL through the loop comparators. Otherwise a populated live state would
-    /// stop matching the pre-hit ring snapshots and CR 104.4b / CR 732.2a loop
+    /// stop matching the pre-hit loop-detection snapshots and CR 104.4b / CR 732.2a loop
     /// detection would yield false negatives.
     ///
     /// REVERT-PROBE: add `&& self.unimplemented_oracle_ids == other.unimplemented_oracle_ids`
@@ -50664,7 +50662,7 @@ mod tests {
     /// NOT rules state for equality. Two states identical except one has recorded a
     /// push-first construction abandon MUST compare EQUAL through the loop
     /// comparators, or a populated live state would stop matching the pre-abandon
-    /// ring snapshots and CR 104.4b / CR 732.2a loop detection would yield false
+    /// loop-detection snapshots and CR 104.4b / CR 732.2a loop detection would yield false
     /// negatives.
     ///
     /// REVERT-PROBE: add `&& self.pending_trigger_abandons == other.pending_trigger_abandons`

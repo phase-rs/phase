@@ -426,8 +426,8 @@ fn the_responder_holds_the_ending_point_its_place_names_and_cuts_the_loop() {
 /// CREATURE, so the obvious removal destroys it and its own dies-trigger returns it to the
 /// battlefield as an enchantment, still carrying the trigger the loop turns on.
 ///
-/// Without this leg the arc row's "nothing re-offers it" is satisfied by the deliberate-action
-/// ring clear alone, which any cast would produce. Here the same cast on the same board DOES
+/// Without this leg the arc row's "nothing re-offers it" could be satisfied by the cast alone.
+/// Here the same cast on the same board DOES
 /// re-offer, so the arc row's halt is attributable to the edge that was cut.
 #[test]
 fn the_loop_edge_that_looks_like_the_answer_leaves_the_loop_standing() {
