@@ -6323,7 +6323,9 @@ macro_rules! history_members {
             /// The tracked object set store (CR 608.2c), with its id counter,
             /// member causes, and member departure origins.
             TrackedObjectSets,
-            /// The id-keyed last-known records of objects that left their zone (CR 608.2h).
+            /// The id-keyed last-known records of objects that left their zone (CR 608.2h),
+            /// and the departure token captures the same departure writes beside them
+            /// (CR 111.1).
             LastKnownRecords,
         }
 
@@ -6356,8 +6358,22 @@ macro_rules! history_members {
                     }
                     HistoryMember::LastKnownRecords => {
                         let records = equalize_field(&mut into.lki_cache, &from.lki_cache);
-                        equalize_field(&mut into.lki_copiable_values, &from.lki_copiable_values)
-                            || records
+                        let copiable = equalize_field(
+                            &mut into.lki_copiable_values,
+                            &from.lki_copiable_values,
+                        );
+                        // CR 111.1 + CR 608.2h: the departure token captures are written by
+                        // the same departure, under the same id and epoch keys, as the records
+                        // above, so the member that equalizes the records equalizes them too.
+                        let bits = equalize_field(
+                            &mut into.departure_token_cache,
+                            &from.departure_token_cache,
+                        );
+                        let epochs = equalize_field(
+                            &mut into.departure_token_by_incarnation,
+                            &from.departure_token_by_incarnation,
+                        );
+                        records || copiable || bits || epochs
                     }
                 }
             }
@@ -6525,11 +6541,12 @@ fn history_covers_reading(prior: &GameState, current: &GameState, reads: History
     covers_modulo_resources(prior, &copy)
 }
 
-/// CR 608.2h + CR 111.7: the period only added last-known records, each of an object that exists
-/// in neither frame, and the floating replacements not yet used up (CR 614.3, CR 615.3) that can
-/// name an object, which no comparison compares and which read a record by the id they hold, are
-/// the same in both frames. A caller whose comparison also drops the stack asks only while both
-/// stacks are empty.
+/// CR 608.2h + CR 111.7 + CR 111.1: the period only added last-known records, each of an
+/// object that exists in neither frame, the departure token captures written with those
+/// records grew in their shape, and the floating replacements not yet used up (CR 614.3,
+/// CR 615.3) that can name an object, which no comparison compares and which read a record by
+/// the id they hold, are the same in both frames. A caller whose comparison also drops the
+/// stack asks only while both stacks are empty.
 fn last_known_records_grow_unread(prior: &GameState, current: &GameState) -> bool {
     let gone = |id: &ObjectId| !prior.objects.contains_key(id) && !current.objects.contains_key(id);
     // CR 615.5: each frame's definitions are compared as their by-value views, so two frames
@@ -6557,7 +6574,51 @@ fn last_known_records_grow_unread(prior: &GameState, current: &GameState) -> boo
             .lki_copiable_values
             .keys()
             .all(|id| prior.lki_copiable_values.contains_key(id) || gone(id))
+        && departure_token_captures_grow_unread(prior, current, gone)
         && naming(prior) == naming(current)
+}
+
+/// CR 111.1 + CR 608.2h + CR 111.8: the two departure token captures are written by the same
+/// departure, under the same storage id ([`GameState::departure_token_cache`]) and epoch
+/// ([`GameState::departure_token_by_incarnation`]) keys, as the last-known records they
+/// shadow, so they grow in the records' shape and are judged with them.
+///
+/// The flat capture is judged exactly as its `lki_cache` twin: a period may ADD a capture for
+/// an object that exists in neither frame, and may never re-state or drop one either frame
+/// still holds.
+///
+/// The epoch capture carries only the first half. An epoch entry `prior` states must still be
+/// stated identically by `current` — that bit is the last evidence of the epoch it was taken
+/// from (CR 111.8), and a live surface that names the epoch reads it — but ADDITIONAL epochs
+/// are admitted, in the shape of its `lki_by_incarnation` twin, which no gate limits: on the
+/// normalized frames the cover compares, every epoch no live surface names is already pruned
+/// from both, so a surviving ADDITION arrives with the tracked-set origin that names it and is
+/// judged by `HistoryMember::TrackedObjectSets`. On the raw frames the fodder gate compares,
+/// a permanent that leaves and returns once per cycle (a blink engine) appends one epoch per
+/// cycle under an id both frames still hold, and that accumulation is history, not position —
+/// refusing it would refuse every blink loop.
+fn departure_token_captures_grow_unread(
+    prior: &GameState,
+    current: &GameState,
+    gone: impl Fn(&ObjectId) -> bool,
+) -> bool {
+    prior
+        .departure_token_cache
+        .iter()
+        .all(|(id, bit)| current.departure_token_cache.get(id) == Some(bit))
+        && current
+            .departure_token_cache
+            .keys()
+            .all(|id| prior.departure_token_cache.contains_key(id) || gone(id))
+        && prior
+            .departure_token_by_incarnation
+            .iter()
+            .all(|(id, history)| {
+                let current_history = current.departure_token_by_incarnation.get(id);
+                history.iter().all(|(incarnation, bit)| {
+                    current_history.and_then(|stated| stated.get(incarnation)) == Some(bit)
+                })
+            })
 }
 
 /// Whether a floating replacement holds anything that can name an object by id, and so ask for
@@ -29414,6 +29475,176 @@ mod tests {
             &prior,
             &with_sets(&[(1, &[901]), (2, &[])])
         ));
+    }
+
+    /// The board both departure-capture witnesses probe: a period that added exactly one
+    /// last-known record, for an object that exists in neither frame — the growth
+    /// [`last_known_records_grow_unread`] admits — over frames that otherwise hold the same
+    /// object. Returns that object's id, which BOTH frames still hold, so no new capture for
+    /// it may be written off as unread.
+    fn unread_record_period() -> (GameState, GameState, ObjectId) {
+        use crate::game::zones::create_object;
+
+        fn record(name: &str) -> LKISnapshot {
+            LKISnapshot {
+                name: name.to_string(),
+                token_image_ref: None,
+                power: Some(1),
+                toughness: Some(1),
+                base_power: Some(1),
+                base_toughness: Some(1),
+                mana_value: 1,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: Vec::new(),
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
+                was_prepared: false,
+                attachments: Vec::new(),
+                intensity: 0,
+            }
+        }
+
+        let mut prior = GameState::new_two_player(42);
+        let member = create_object(
+            &mut prior,
+            CardId(961),
+            PlayerId(0),
+            "Loop Token".to_string(),
+            Zone::Graveyard,
+        );
+        let departed = ObjectId(990);
+        assert!(
+            !prior.objects.contains_key(&departed),
+            "fixture precondition: the added record names an object neither frame holds"
+        );
+        assert!(
+            prior.departure_token_cache.is_empty()
+                && prior.departure_token_by_incarnation.is_empty(),
+            "fixture precondition: the captures start empty"
+        );
+        let mut current = prior.clone();
+        current.lki_cache.insert(departed, record("Departed"));
+        (prior, current, member)
+    }
+
+    /// CR 111.1 + CR 608.2h: both departure token captures are written by the same departure,
+    /// under the same id and epoch keys, as the last-known record they shadow, so the member
+    /// that equalizes the records equalizes them with it. The fixture differs in the captures
+    /// alone, so a capture left out of the member is growth nothing reports.
+    ///
+    /// Revert-probe: dropping either capture from `HistoryMember::LastKnownRecords`' arm makes
+    /// `equalize` report no growth and leaves the copy carrying the other position's bit.
+    #[test]
+    fn the_last_known_records_member_equalizes_both_departure_token_captures() {
+        let member = ObjectId(900);
+        let prior = GameState::new_two_player(42);
+        let mut current = prior.clone();
+        current.departure_token_cache.insert(member, true);
+        current
+            .departure_token_by_incarnation
+            .entry(member)
+            .or_default()
+            .insert(3, true);
+        assert_eq!(
+            prior.lki_cache, current.lki_cache,
+            "fixture precondition: the records the captures shadow do not differ"
+        );
+        assert_eq!(
+            prior.lki_copiable_values, current.lki_copiable_values,
+            "fixture precondition: the copiable records do not differ"
+        );
+
+        let mut copy = current.clone();
+        assert!(
+            HistoryMember::LastKnownRecords.equalize(&mut copy, &prior),
+            "the captures are the only difference, so the member must report growth"
+        );
+        assert_eq!(copy.departure_token_cache, prior.departure_token_cache);
+        assert_eq!(
+            copy.departure_token_by_incarnation,
+            prior.departure_token_by_incarnation
+        );
+    }
+
+    /// CR 111.1 + CR 608.2h + CR 732.2a: the history cover judges the storage-id-keyed
+    /// departure token capture with the last-known record it was written beside. A period that
+    /// only ADDS a record for an object that exists in neither frame grows unread; it may not
+    /// flip the bit of a capture an object BOTH frames hold, because that bit is the last
+    /// evidence of the epoch it was taken from (CR 111.8) and a live surface holding the id
+    /// reads it.
+    ///
+    /// Revert-probe: dropping the captures from the growth gate certifies the flipped-bit
+    /// pair. (Equalization alone cannot refuse it: it ERASES the bit, which is why the gate
+    /// judges the growth before the copy is compared.)
+    #[test]
+    fn a_flipped_departure_token_bit_refuses_the_history_cover() {
+        let (mut prior, mut current, member) = unread_record_period();
+        prior.departure_token_cache.insert(member, true);
+        current.departure_token_cache.insert(member, false);
+
+        assert!(
+            !history_covers(&prior, &current),
+            "a flipped bit of an object either frame still holds is not history the period \
+             may grow"
+        );
+    }
+
+    /// CR 111.1 + CR 608.2h + CR 732.2a: the epoch-keyed capture is judged with the
+    /// storage-id-keyed one. The same period that grows an unread record may not re-state an
+    /// epoch a live object still holds.
+    ///
+    /// Revert-probe: dropping the epoch capture from the growth gate certifies the
+    /// flipped-epoch pair.
+    #[test]
+    fn a_flipped_epoch_departure_token_bit_refuses_the_history_cover() {
+        let (mut prior, mut current, member) = unread_record_period();
+        prior
+            .departure_token_by_incarnation
+            .entry(member)
+            .or_default()
+            .insert(3, true);
+        current
+            .departure_token_by_incarnation
+            .entry(member)
+            .or_default()
+            .insert(3, false);
+
+        assert!(
+            !history_covers(&prior, &current),
+            "a flipped epoch capture of an object either frame still holds is not history the \
+             period may grow"
+        );
+    }
+
+    /// CR 111.1 + CR 608.2h: positive control for the two witnesses above — a capture the
+    /// period ADDS for an object that exists in neither frame is history no live surface reads,
+    /// which is the shape a fodder loop's departures take, so the cover still certifies.
+    #[test]
+    fn an_unread_departure_token_capture_still_certifies() {
+        let (prior, mut current, _member) = unread_record_period();
+        let departed = ObjectId(991);
+        assert!(
+            !prior.objects.contains_key(&departed) && !current.objects.contains_key(&departed),
+            "fixture precondition: the capture names an object neither frame holds"
+        );
+        current.departure_token_cache.insert(departed, true);
+        current
+            .departure_token_by_incarnation
+            .entry(departed)
+            .or_default()
+            .insert(4, true);
+
+        assert!(
+            history_covers(&prior, &current),
+            "a capture added for an object neither frame holds is unread history"
+        );
     }
 
     /// CR 608.2c: cover compares origins by what they select for member reads,
