@@ -2765,12 +2765,7 @@ pub(crate) fn activatable_player_choice_mana_abilities_for_payment<'a>(
                     .and_then(|obj| obj.abilities.get(index))
                     .is_some_and(|ability| {
                         player_choice_mana_ability_ready_for_payment(
-                            state,
-                            controller,
-                            object_id,
-                            index,
-                            ability,
-                            None,
+                            state, controller, object_id, index, ability, None,
                         )
                     })
         },
@@ -2833,13 +2828,7 @@ pub(crate) fn player_choice_mana_ability_ready_for_payment(
 ) -> bool {
     let gates = mana_abilities::ManaActivationGates::compute(state);
     player_choice_mana_ability_passes_screen(
-        state,
-        controller,
-        object_id,
-        idx,
-        ability,
-        None,
-        &gates,
+        state, controller, object_id, idx, ability, None, &gates,
     ) && mana_abilities::can_activate_mana_ability_now_gated(
         state, controller, object_id, idx, ability, &gates,
     )
