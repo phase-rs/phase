@@ -1,7 +1,10 @@
 //! Phase 1 TRK production-path regressions. Full Oracle from the pinned Scryfall appendix.
 
+use engine::game::ability_utils::{build_resolved_from_def, build_target_slots};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{
+    ControllerRef, Effect, MultiTargetSpec, TargetFilter, TargetRef, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
@@ -1000,11 +1003,6 @@ fn defiant_animated_source_deduplicates_self_selection() {
 // SHAPE / slot seam supplement to the full-card runtime regressions above.
 #[test]
 fn defiant_full_oracle_has_one_optional_slot_and_no_phase_out_slot() {
-    use engine::game::ability_utils::{build_resolved_from_def, build_target_slots};
-    use engine::types::ability::{
-        ControllerRef, Effect, MultiTargetSpec, TargetFilter, TypedFilter,
-    };
-
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_creature_from_oracle(P0, "Fountain Watch", 2, 4, "Artifacts and enchantments you control have shroud. (They can't be the targets of spells or abilities.)");
