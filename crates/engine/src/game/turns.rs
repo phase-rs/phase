@@ -474,7 +474,8 @@ pub(super) fn resume_phase_begin_choice(
 
 /// CR 800.4a + CR 800.4j: the affected player left with their choice unanswered
 /// and the turn continues, so the step the held transition reached is proposed
-/// again to the players still in the game and begins as an answered choice's does.
+/// again to the players still in the game and, unless one of them must choose, begins
+/// as an answered choice's does.
 pub(super) fn resume_abandoned_phase_begin_choice(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,

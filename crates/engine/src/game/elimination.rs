@@ -564,8 +564,8 @@ pub(crate) fn eliminate_players(
                 .expect("departed optional sacrifice payer must follow the canonical decline path");
         }
 
-        // CR 800.4j: a step transition held on a departed player's choice is
-        // completed before the triggers below are put on the stack in that step.
+        // CR 800.4j: a step transition held on a departed player's choice is resumed for
+        // the players still in the game before the triggers below are put on the stack.
         super::turns::resume_abandoned_phase_begin_choice(state, events);
 
         // CR 603.3b: If prune collapsed an ordering pass into
