@@ -150,7 +150,7 @@ pub(crate) fn door_text_functions(
     obj.room_unlocks.unwrap_or_default().is_unlocked(door)
 }
 
-/// CR 709.4 + CR 709.5 + CR 709.5h: a Room object's own text with each half's
+/// CR 709.4 + CR 709.5 + CR 709.5b + CR 709.5h: a Room object's own text with each half's
 /// definitions assigned to its door.
 pub(crate) struct DoorAssignedText {
     pub(crate) triggers: Arc<Vec<TriggerDefinition>>,
@@ -160,7 +160,7 @@ pub(crate) struct DoorAssignedText {
     pub(crate) statics: Arc<Vec<StaticDefinition>>,
 }
 
-/// CR 709.4 + CR 709.5 + CR 709.5h: the object's own Room text with each half's
+/// CR 709.4 + CR 709.5 + CR 709.5b + CR 709.5h: the object's own Room text with each half's
 /// definitions assigned to its door: the live face's unassigned text to
 /// `live_face_door`, the other half's (`stored_alternative_face`) to the other door,
 /// merged only while that door has none of the kind. Single authority for entry

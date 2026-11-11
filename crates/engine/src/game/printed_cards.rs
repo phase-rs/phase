@@ -611,10 +611,11 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
     if let Some(values) = crate::game::flip::flipped_normal_copiable_values(obj) {
         return values;
     }
-    // CR 709.4 + CR 709.5: a Room off the battlefield has both halves combined, and
-    // which half each characteristic is in is a copiable value. On the battlefield
-    // entry has already assigned the doors (`reset_for_battlefield_entry`); elsewhere
-    // the snapshot assigns them the same way.
+    // CR 709.4 + CR 709.5 + CR 709.5b: a Room off the battlefield has both halves'
+    // characteristics (combined outside the stack, CR 709.4; on the stack each half
+    // still exists as a copiable value, CR 709.5b), and which half each characteristic
+    // is in is a copiable value. On the battlefield entry has already assigned the doors
+    // (`reset_for_battlefield_entry`); elsewhere the snapshot assigns them the same way.
     let room_text = (crate::game::room::has_shared_type_line(&obj.base_card_types)
         && obj.zone != Zone::Battlefield)
         .then(|| crate::game::room::door_assigned_text(obj));
