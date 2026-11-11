@@ -45,6 +45,7 @@ fn spell(effect: Effect) -> AbilityDefinition {
 /// A reanimation effect: graveyard → battlefield, for the given target body.
 fn reanimation_effect(target: TargetFilter) -> Effect {
     Effect::ChangeZone {
+        library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Battlefield,
         target,
@@ -193,6 +194,7 @@ fn non_graveyard_changezone_is_not_payoff() {
     // a cheat-into-play effect but NOT reanimation — origin must be the graveyard.
     let mut face = card_face("Sneak Attack", vec![CoreType::Sorcery]);
     face.abilities.push(spell(Effect::ChangeZone {
+        library_shuffle: Default::default(),
         origin: Some(Zone::Hand),
         destination: Zone::Battlefield,
         target: creature_target(),

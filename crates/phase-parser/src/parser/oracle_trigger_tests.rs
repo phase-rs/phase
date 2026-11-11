@@ -7782,6 +7782,7 @@ fn stamp_self_return_origin_skips_nested_parent_target_return() {
     let mut head = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::SelfRef,
@@ -7800,6 +7801,7 @@ fn stamp_self_return_origin_skips_nested_parent_target_return() {
     head.sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Hand,
             target: TargetFilter::ParentTarget,
@@ -33404,6 +33406,66 @@ fn gornog_one_or_more_warriors_attack_uses_defending_player_controller() {
             other => panic!("expected Some(Typed) target filter, got {other:?}"),
         },
         other => panic!("expected GenericEffect, got {other:?}"),
+    }
+}
+
+/// CR 603.2c + CR 608.2h + CR 106.4: Fangorn's batched attack trigger filters
+/// on Treefolk you control and multiplies the event-context amount by two.
+/// Revert probe: with the mana arm reverted the body is `Unimplemented`, so
+/// the `Effect::Mana` match fails.
+#[test]
+fn fangorn_tree_shepherd_attack_trigger_adds_multiplied_event_context_green() {
+    let def = parse_trigger_line(
+        "Whenever one or more Treefolk you control attack, add twice that much {G}.",
+        "Fangorn, Tree Shepherd",
+    );
+    assert_eq!(def.mode, TriggerMode::YouAttack);
+    assert!(
+        def.batched,
+        "CR 603.2c: one-or-more attack trigger is batched"
+    );
+
+    let filter = def.valid_card.as_ref().expect("valid_card set");
+    match filter {
+        TargetFilter::Typed(tf) => {
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype("Treefolk".to_string())),
+                "expected Treefolk subtype filter; got {:?}",
+                tf.type_filters
+            );
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "expected 'you control' controller filter"
+            );
+        }
+        other => panic!("expected Typed filter, got {other:?}"),
+    }
+
+    let execute = def.execute.as_deref().expect("execute ability");
+    match execute.effect.as_ref() {
+        Effect::Mana {
+            produced:
+                ManaProduction::AnyOneColor {
+                    count,
+                    color_options,
+                    ..
+                },
+            ..
+        } => {
+            assert_eq!(*color_options, vec![ManaColor::Green]);
+            assert_eq!(
+                *count,
+                QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }),
+                }
+            );
+        }
+        other => panic!("expected green AnyOneColor Mana, got {other:?}"),
     }
 }
 

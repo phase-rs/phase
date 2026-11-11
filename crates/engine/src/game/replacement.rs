@@ -6006,6 +6006,7 @@ fn bind_search_found_definition(
         conditional_enter_with_counters,
         face_down_profile,
         enters_modified_if,
+        library_shuffle: _,
     } = execute.effect.as_ref()
     else {
         return None;
@@ -14433,6 +14434,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination,
                 target: TargetFilter::ParentTarget,
@@ -14686,6 +14688,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination,
                     target: TargetFilter::SelfRef,
@@ -15913,6 +15916,7 @@ mod tests {
         ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination,
                 target: TargetFilter::SelfRef,
@@ -18186,6 +18190,7 @@ mod tests {
         let return_to_hand = AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Hand,
                 target: TargetFilter::SelfRef,
@@ -20262,6 +20267,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::Any,
@@ -26918,6 +26924,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,
@@ -26950,6 +26957,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,

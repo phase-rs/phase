@@ -2319,6 +2319,7 @@ mod tranche4_draw_pipeline_tests {
         let redirect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,
                 target: TargetFilter::SelfRef,
@@ -2394,6 +2395,7 @@ mod tranche4_draw_pipeline_tests {
         let redirect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,
                 target: TargetFilter::SelfRef,
