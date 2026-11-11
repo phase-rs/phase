@@ -16708,17 +16708,17 @@ impl GameState {
             return Ok(());
         };
         let probe = crate::game::payment_transaction::hydrated_checkpoint(self, checkpoint);
-        // CR 616.1: a saved replacement prompt is the one the replacement
-        // authority builds from its stored candidates, resolving each the way
-        // it executes them; a stale candidate, a forged count or a missing
-        // owner changes that prompt.
+        // CR 616.1 + CR 616.1f: a saved replacement prompt is the one the
+        // replacement authority builds from its stored candidates, each of
+        // which must still apply; a stale candidate, a forged count or a
+        // missing owner changes that prompt.
         if matches!(probe.waiting_for, WaitingFor::ReplacementChoice { .. }) {
             let Some(pending) = probe.pending_replacement.as_ref() else {
                 return Err("recovery checkpoint prompt lacks its replacement owner".to_string());
             };
             if !crate::game::replacement::pending_candidates_are_current(&probe, pending) {
                 return Err(
-                    "recovery checkpoint replacement candidate no longer executes".to_string(),
+                    "recovery checkpoint replacement candidate no longer applies".to_string(),
                 );
             }
             let chooser = crate::game::replacement::pending_replacement_chooser(&probe, pending);

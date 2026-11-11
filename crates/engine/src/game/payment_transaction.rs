@@ -511,7 +511,7 @@ pub(crate) fn settle_after_outside_action(
         // A parked draw that no longer settles on the departed shadow is a
         // failed recovery; the caller's failed-recovery boundary retires the
         // checkpoint instead of keeping one from before the departure.
-        settle_impossible_parked_draw(&mut shadow, &mut events, &mut log_entries)?;
+        resettle_parked_replacement_after_departure(&mut shadow, &mut events, &mut log_entries)?;
         shadow.payment_transaction_replay = false;
         return settle_recovered_outcome(state, transaction, shadow, events, log_entries).map(Some);
     }
@@ -577,7 +577,9 @@ fn settle_accepted_prefix_after_departure(
     let mut mirrored = Vec::new();
     crate::game::elimination::concede(&mut shadow, departing, &mut mirrored);
     restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
-    if let Err(error) = settle_impossible_parked_draw(&mut shadow, &mut events, &mut log_entries) {
+    if let Err(error) =
+        resettle_parked_replacement_after_departure(&mut shadow, &mut events, &mut log_entries)
+    {
         tracing::debug!(
             ?error,
             "a staged payment's parked draw no longer settles after an outside action"
@@ -815,10 +817,14 @@ fn hydrate_runtime_authorities(shadow: &mut GameState, live: &GameState) {
     shadow.format_config = live.format_config.clone();
 }
 
-/// CR 614.17c: a parked replacement for a draw that can no longer happen
-/// settles as the no-replacement outcome — the draw is clamped and its payment
-/// resumes. This applies to optional and mandatory ordering prompts alike.
-fn settle_impossible_parked_draw(
+/// CR 614.17c + CR 616.1f + CR 800.4a: settle a parked replacement prompt the
+/// departure just changed, so the checkpoint never stores a prompt the game
+/// would no longer offer. A draw that can no longer happen settles as the
+/// no-replacement outcome — the draw is clamped and its payment resumes — for
+/// optional and mandatory ordering prompts alike. A prompt with a candidate the
+/// departure removed (its source left the game) is answered by re-proposing the
+/// event, which offers only the replacements that still apply.
+fn resettle_parked_replacement_after_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     log_entries: &mut Vec<GameLogEntry>,
@@ -829,7 +835,9 @@ fn settle_impossible_parked_draw(
     let Some(pending) = state.pending_replacement.as_ref() else {
         return Ok(());
     };
-    if !crate::game::replacement::proposed_draw_cannot_happen(state, &pending.proposed) {
+    if !crate::game::replacement::proposed_draw_cannot_happen(state, &pending.proposed)
+        && crate::game::replacement::pending_candidates_are_current(state, pending)
+    {
         return Ok(());
     }
     let Some(actor) = state.waiting_for.acting_players().first().copied() else {

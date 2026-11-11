@@ -2131,9 +2131,11 @@ struct RepeatedDrawUnlessPayment {
 ///   refused before any instruction runs
 ///   ([`repeated_draw_exceeds_one_resolution`]) and the player may still
 ///   decline. The ceiling inside the loop is the backstop for a dispatch that
-///   reaches it anyway (a library of more than the ceiling's cards): that
-///   action is refused and rolled back whole, as an unrepresentable life
-///   change is.
+///   reaches it anyway, which needs more game-changing instructions than the
+///   ceiling with no work-performing replacement at the choice (a library of
+///   more cards than the ceiling): that action, a replacement answer on a
+///   resumed payment included, is refused and rolled back whole, as an
+///   unrepresentable life change is.
 fn pay_repeated_draw_unless_cost(
     state: &mut GameState,
     payment: RepeatedDrawUnlessPayment,

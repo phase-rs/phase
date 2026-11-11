@@ -2306,3 +2306,150 @@ fn checked_restore_refuses_a_stale_replacement_candidate() {
         "a candidate whose definition is gone is not admitted"
     );
 }
+
+/// Notion Thief, verbatim Oracle text.
+const NOTION_THIEF_ORACLE: &str = "Flash\nIf an opponent would draw a card except the first one \
+they draw in each of their draw steps, instead that player skips that draw and you draw a card.";
+
+/// CR 616.1f + CR 800.4a + CR 104.3a: P0's draw leg parks a choice between
+/// P0's Dredge and P3's Notion Thief. P3 concedes, so Notion Thief leaves the
+/// game. The departure re-settles the parked prompt on the checkpoint: only
+/// Dredge would now apply, so the checkpoint stores that prompt, the save
+/// passes checked restore, and the restored payment is answered to the end.
+#[test]
+fn a_departure_that_removes_a_parked_candidate_keeps_a_restorable_checkpoint() {
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in 0..4 {
+        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
+    }
+    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+    scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE);
+    scenario.add_creature_from_oracle(PlayerId(3), "Notion Thief", 3, 1, NOTION_THIEF_ORACLE);
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+    let root = ResolvedAbility::new(pay_cost(draw_legs(2)), vec![], source, P0);
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidate_count,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "leg 1 asks for a replacement choice: {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(
+        (*player, *candidate_count),
+        (P0, 2),
+        "reach guard: Dredge and Notion Thief both apply to leg 1"
+    );
+
+    apply(
+        state,
+        PlayerId(3),
+        GameAction::Concede {
+            player_id: PlayerId(3),
+        },
+    )
+    .expect("a player can concede at any time");
+    let checkpoint = state
+        .payment_transaction
+        .as_ref()
+        .and_then(|transaction| transaction.recovered.as_ref())
+        .expect("the departure keeps the accepted prefix on a checkpoint");
+    let pending = checkpoint
+        .state
+        .pending_replacement
+        .as_ref()
+        .expect("the checkpoint parks a replacement choice");
+    assert!(
+        pending.is_optional,
+        "only Dredge, an optional replacement, still applies"
+    );
+    assert_eq!(pending.candidates.len(), 1);
+
+    let mut restored =
+        checked_round_trip(runner.state()).expect("the checkpoint passes checked restore");
+    for leg in 1..=2 {
+        assert!(
+            is_dredge_prompt_for_p0(&restored),
+            "leg {leg} offers Dredge"
+        );
+        apply(
+            &mut restored,
+            P0,
+            GameAction::ChooseReplacement { index: 1 },
+        )
+        .unwrap_or_else(|error| panic!("declining Dredge on leg {leg}: {error:?}"));
+    }
+    assert!(
+        restored.payment_transaction.is_none(),
+        "the payment settled"
+    );
+    assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
+}
+
+/// CR 616.1f + CR 800.4a: outside any payment, P0's draw parks a choice
+/// between P0's Dredge and P3's Notion Thief, and P3 concedes. Notion Thief has
+/// left the game with its owner, so it is no longer an effect that would apply:
+/// P0's answer re-proposes the draw, which offers Dredge alone, and declining it
+/// draws the card instead of skipping it for a player who is gone.
+#[test]
+fn an_answer_after_a_candidate_left_the_game_reproposes_the_draw() {
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in 0..4 {
+        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
+    }
+    let source = scenario.add_creature(P0, "Draw Source", 1, 1).id();
+    scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE);
+    scenario.add_creature_from_oracle(PlayerId(3), "Notion Thief", 3, 1, NOTION_THIEF_ORACLE);
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+    let state = runner.state_mut();
+    let hand_before = state.players[0].hand.len();
+    let root = ResolvedAbility::new(draw_effect(1), vec![], source, P0);
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the draw resolves");
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { player, candidate_count: 2, .. } if player == P0
+        ),
+        "reach guard: Dredge and Notion Thief both apply: {:?}",
+        state.waiting_for
+    );
+    assert!(state.payment_transaction.is_none(), "no payment is staged");
+
+    apply(
+        state,
+        PlayerId(3),
+        GameAction::Concede {
+            player_id: PlayerId(3),
+        },
+    )
+    .expect("a player can concede at any time");
+    apply(state, P0, GameAction::ChooseReplacement { index: 0 })
+        .expect("an answer to the parked prompt is accepted");
+    let pending = state
+        .pending_replacement
+        .as_ref()
+        .expect("the re-proposed draw offers Dredge");
+    assert!(
+        pending.is_optional && pending.candidates.len() == 1,
+        "only Dredge still applies: {pending:?}"
+    );
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 }).expect("Dredge is declined");
+    assert_eq!(
+        state.players[0].hand.len(),
+        hand_before + 1,
+        "P0 draws the card"
+    );
+}

@@ -1134,11 +1134,12 @@ pub(crate) fn pending_replacement_option_count(
     }
 }
 
-/// CR 616.1f: whether a parked prompt still offers exactly the replacements
-/// that apply. When a stored candidate no longer names anything the authority
-/// executes (its source left the game, its grant ended), the answer re-proposes
-/// the event, so only the effects that would now be applicable are considered.
-/// A found-card or step-end prompt carries its own candidate binding.
+/// CR 616.1f: whether a parked prompt still offers only replacements that
+/// apply. When a stored candidate no longer would ([`stored_candidate_applies`]:
+/// its source left the battlefield or the game, its grant ended), the answer
+/// re-proposes the event, so only the effects that would now be applicable are
+/// considered. A found-card or step-end prompt carries its own candidate
+/// binding.
 pub(crate) fn pending_candidates_are_current(
     state: &GameState,
     pending: &PendingReplacement,
@@ -1146,7 +1147,10 @@ pub(crate) fn pending_candidates_are_current(
     matches!(
         pending.proposed,
         ProposedEvent::SearchFound { .. } | ProposedEvent::EmptyManaPool { .. }
-    ) || executable_candidate_positions(state, pending).len() == pending.candidates.len()
+    ) || pending
+        .candidates
+        .iter()
+        .all(|rid| stored_candidate_applies(state, &pending.proposed, *rid))
 }
 
 /// Build a `WaitingFor::ReplacementChoice` from the current `pending_replacement` state.
@@ -10235,36 +10239,73 @@ pub(crate) fn stored_candidate_executes(
     proposed: &ProposedEvent,
     rid: ReplacementId,
 ) -> bool {
+    rule_derived_candidate_executes(state, proposed, rid)
+        .unwrap_or_else(|| stored_replacement_definition(state, rid).is_some())
+}
+
+/// CR 616.1f: whether a stored candidate is still one of the replacements that
+/// would now be applicable to the parked event. A rule-derived candidate is
+/// judged by its own applier's live input, as [`stored_candidate_executes`]
+/// does. An object's definition must still be found by the discovery that
+/// offered it, [`object_replacement_candidate_applies`]: its source still
+/// functions from its zone (CR 113.6) and the definition still matches the
+/// event. A source that changed zones, or left the game with its owner
+/// (CR 800.4a), keeps its stored definition but no longer applies.
+fn stored_candidate_applies(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+) -> bool {
+    rule_derived_candidate_executes(state, proposed, rid).unwrap_or_else(|| {
+        if rid.source == ObjectId(0) {
+            stored_replacement_definition(state, rid).is_some()
+        } else {
+            object_replacement_candidate_applies(state, proposed, replacement_registry(), rid)
+        }
+    })
+}
+
+/// The live input a rule-derived candidate's applier needs, in
+/// [`apply_single_replacement`]'s dispatch order; `None` for a candidate that
+/// names a stored definition.
+fn rule_derived_candidate_executes(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+) -> Option<bool> {
     if matches!(proposed, ProposedEvent::EmptyManaPool { .. }) {
-        return state
-            .pending_step_end_mana_handlers
-            .get(rid.index)
-            .is_some();
+        return Some(
+            state
+                .pending_step_end_mana_handlers
+                .get(rid.index)
+                .is_some(),
+        );
     }
     if is_granted_dredge_replacement(rid) {
-        return granted_dredge_value(state, rid.source).is_some();
+        return Some(granted_dredge_value(state, rid.source).is_some());
     }
     if is_pending_combat_phase_skip_replacement(rid) {
-        return pending_combat_phase_skip_position(rid) < state.pending_combat_phase_skips.len();
+        return Some(
+            pending_combat_phase_skip_position(rid) < state.pending_combat_phase_skips.len(),
+        );
     }
-    if is_compleated_replacement(rid)
+    (is_compleated_replacement(rid)
         || is_granted_etb_keyword_replacement(rid)
         || shield_counter_replacement_kind(rid).is_some()
         || is_commander_hand_or_library_return_replacement(rid)
         || is_finality_counter_replacement(rid)
         || is_umbra_armor_replacement(rid)
-        || is_turn_scoped_combat_skip_replacement(rid)
-    {
-        return true;
-    }
-    stored_replacement_definition(state, rid).is_some()
+        || is_turn_scoped_combat_skip_replacement(rid))
+    .then_some(true)
 }
 
-/// CR 614.1 + CR 121.2a: whether a draw replacement that applies to
-/// `player`'s next one-card draw, at either proposal stage, performs work of
-/// its own (an execute ability: Hullbreacher's Treasure, Notion Thief's draw)
-/// rather than only modifying or skipping the draw. Each such draw can change
-/// the game without ever reaching a fixed point.
+/// CR 614.1 + CR 121.2a: whether a mandatory draw replacement that applies
+/// to `player`'s next one-card draw, at either proposal stage, performs work
+/// of its own (an execute ability: Hullbreacher's Treasure, Notion Thief's
+/// draw) rather than only modifying or skipping the draw. Each such draw can
+/// change the game without ever reaching a fixed point. An optional one asks
+/// its player every time, so it is bounded by their answers. Conservative: a
+/// bounded mandatory execute (Notion Thief, Laboratory Maniac) counts too.
 pub(crate) fn draw_replacement_performs_work(state: &GameState, player: PlayerId) -> bool {
     [DrawEventStage::Instruction, DrawEventStage::Individual]
         .into_iter()
@@ -10281,7 +10322,9 @@ pub(crate) fn draw_replacement_performs_work(state: &GameState, player: PlayerId
             )
             .into_iter()
             .any(|rid| {
-                stored_replacement_definition(state, rid).is_some_and(|def| def.execute.is_some())
+                stored_replacement_definition(state, rid).is_some_and(|def| {
+                    !replacement_mode_is_optional(&def.mode) && def.execute.is_some()
+                })
             })
         })
 }
@@ -13650,7 +13693,7 @@ fn continue_replacement_impl(
     let registry = replacement_registry();
     prepare_replacement_index_for_pipeline(state);
 
-    // CR 616.1f: a stored candidate that no longer executes is not an effect
+    // CR 616.1f: a stored candidate that no longer applies is not an effect
     // that would now be applicable. Re-propose the event so the prompt, if any
     // remains, offers only the replacements that still apply.
     if !pending_candidates_are_current(state, &pending) {
