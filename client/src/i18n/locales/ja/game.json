@@ -346,7 +346,6 @@
     "pickNone": "なし",
     "underAttack_one": "{{count}}体のクリーチャーから攻撃されています",
     "underAttack_other": "{{count}}体のクリーチャーから攻撃されています",
-    "target": "対象",
     "sacrifice": "生け贄",
     "token": "トークン",
     "tokenTooltip": "実在カードのトークンコピー",

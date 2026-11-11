@@ -346,7 +346,6 @@
     "pickNone": "Nic",
     "underAttack_one": "Atakowany przez {{count}} stwora",
     "underAttack_other": "Atakowany przez {{count}} stworów",
-    "target": "Cel",
     "token": "Żeton",
     "tokenTooltip": "Żeton będący kopią prawdziwej karty",
     "copy": "Kopia",

@@ -346,7 +346,6 @@
     "pickNone": "Nenhuma",
     "underAttack_one": "Atacado por {{count}} criatura",
     "underAttack_other": "Atacado por {{count}} criaturas",
-    "target": "Alvo",
     "token": "Ficha",
     "tokenTooltip": "Ficha que é uma cópia de uma carta real",
     "copy": "Cópia",

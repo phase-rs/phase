@@ -346,7 +346,6 @@
     "pickNone": "Keine",
     "underAttack_one": "Von {{count}} Kreatur angegriffen",
     "underAttack_other": "Von {{count}} Kreaturen angegriffen",
-    "target": "Ziel",
     "token": "Spielstein",
     "tokenTooltip": "Spielstein-Kopie einer echten Karte",
     "copy": "Kopie",

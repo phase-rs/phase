@@ -346,7 +346,6 @@
     "pickNone": "Aucun",
     "underAttack_one": "Attaqué par {{count}} créature",
     "underAttack_other": "Attaqué par {{count}} créatures",
-    "target": "Cible",
     "token": "Jeton",
     "tokenTooltip": "Jeton qui est une copie d'une vraie carte",
     "copy": "Copie",

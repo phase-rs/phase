@@ -346,7 +346,6 @@
     "pickNone": "Nessuno",
     "underAttack_one": "Attaccato da {{count}} creatura",
     "underAttack_other": "Attaccato da {{count}} creature",
-    "target": "Bersaglio",
     "token": "Pedina",
     "tokenTooltip": "Pedina che è una copia di una carta reale",
     "copy": "Copia",
