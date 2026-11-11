@@ -2684,6 +2684,9 @@ export class WebSocketAdapter implements EngineAdapter {
           } else if (first === "confirmed") {
             written = await write;
           } else {
+            // The receipt is still pending, so the frame's fate is unknown.
+            // The server may already have it and have moved the seat's sender,
+            // so it counts as written: the incumbent is not kept as if current.
             written = true;
             unconfirmed = first;
           }
@@ -2707,11 +2710,14 @@ export class WebSocketAdapter implements EngineAdapter {
         if (this.reconnectInFlight) this.attemptReconnect();
         return;
       }
-      // The candidate's setup is on the wire, and the server replaces the
-      // seat's sender on `Reconnect` without closing the predecessor
-      // (`install_full_sender_while_state_locked`). The incumbent can never
-      // receive the seat again, so from here cancellation or failure retires
-      // BOTH sockets instead of preserving a deaf one.
+      // The candidate's setup is on the wire (or its fate is unknown, above),
+      // and the server replaces the seat's sender on `Reconnect` without
+      // closing the predecessor (`install_full_sender_while_state_locked`).
+      // The incumbent may no longer receive the seat, so from here
+      // cancellation or failure retires BOTH sockets instead of preserving a
+      // possibly deaf one. An `Error` refusal installed nothing, but it ends the
+      // episode terminally, as the base `Error` handler does after its write-time
+      // cutover had already retired the incumbent.
       //
       // `detachIncumbent` is the single place that takes the incumbent down,
       // whether the candidate is adopted or abandoned: detach it, settle its

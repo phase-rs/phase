@@ -14,8 +14,8 @@ import { frameType } from "./stateCodecSocket";
  * `SetupConfirmation` is the single owner of that interval for both server
  * adapters. It settles exactly once, with whichever of these happens first:
  *
- *  - `confirmed`: the candidate delivered a frame of the positive bootstrap set
- *    (see {@link classifySetupFrame});
+ *  - `confirmed`: the candidate delivered a frame of the positive bootstrap set,
+ *    or a draft candidate the server's answer (see {@link classifySetupFrame});
  *  - `refused`: the candidate delivered the server's `Error` answer to the
  *    setup (the server installed nothing, but the incumbent's standing is no
  *    longer known either, so it is treated like a close that carries a reason);
@@ -26,8 +26,8 @@ import { frameType } from "./stateCodecSocket";
  *    armed, because before the frame is written an abort is delivered to the
  *    transport through the write's own signal).
  *
- * A draft `DraftActionRejected` does not settle the interval (see
- * {@link classifySetupFrame}); it is only noted, so a timeout can report it.
+ * A draft `DraftActionRejected` also confirms: it is the server's answer on a
+ * candidate that may already hold the seat (see {@link classifySetupFrame}).
  */
 /**
  * The bound on the interval. It runs from the setup write until the decoded
@@ -56,11 +56,12 @@ export type SetupFrameClass =
   /** `Error`: the server refused the setup and installed nothing. Settles the interval. */
   | { readonly kind: "refusal"; readonly refusal: SetupRefusal }
   /**
-   * Draft `DraftActionRejected`: the server sends it both as its refusal of a
-   * `ReconnectDraft` and ahead of the `DraftStateUpdate` of a reattach that
-   * succeeded, so it cannot settle the interval on its own.
+   * Draft `DraftActionRejected`: the server's answer on the candidate, which may
+   * already hold the draft seat (see {@link classifySetupFrame}). It adopts the
+   * candidate exactly as the merge base did, and the rejection then replays to
+   * reject the reattach.
    */
-  | { readonly kind: "rejection"; readonly refusal: SetupRefusal }
+  | { readonly kind: "answered" }
   /** Anything else: neither adopts nor refuses; kept in order for the adopted socket. */
   | { readonly kind: "other" };
 
@@ -80,12 +81,18 @@ export type SetupFrameClass =
  *
  * Positive bootstrap, draft: `DraftStateUpdate` (`attach_current_draft_match`
  * :2644, :2678, :2753, :2767, :2785, :2815) and `DraftMatchStart` (:2795).
- * Refusal, draft: `Error` from the mode and wire gates (:10062-10076). The
- * admission gate (:10093-10098) and the draft handler (:13037, :13049, :13091,
- * :13100) answer with `DraftActionRejected`, but `attach_current_draft_match`
- * also sends one right before the `DraftStateUpdate` of a reattach that
- * succeeded (:2750-2753, :2764-2767, :2782-2785), so it is a `rejection`,
- * never a settling refusal.
+ * Refusal, draft: `Error` from the mode and wire gates (:10062-10076), which
+ * run before dispatch, so nothing was installed.
+ * Answered, draft: `DraftActionRejected`. It cannot tell the client who owns
+ * the seat: the handler sends it for refusals before anything is installed
+ * (:13037, :13049, and `reconnect_draft_seat` errors before :2584, answered at
+ * :13100), for failures of `attach_current_draft_match` AFTER
+ * `reconnect_draft_seat` installed the candidate as the seat's sender (:2584)
+ * and bound its identity (:2597-2599), answered alone at :13089-13093, and right
+ * before the `DraftStateUpdate` of a reattach that succeeded (:2750-2753,
+ * :2764-2767, :2782-2785). Retiring the candidate would drop a seat the server
+ * gave it, and nothing retries a reattach, so the candidate is adopted as the
+ * merge base adopted it, and the replayed rejection rejects the reattach.
  *
  * Any other frame (pings, slot updates, lobby fan-out) is neither: it is kept
  * in order for the adopted socket and does not settle the interval.
@@ -103,11 +110,10 @@ export function classifySetupFrame(surface: "game" | "draft", text: unknown): Se
   // decision needs are parsed here.
   const type = frameType(text);
   if (POSITIVE_FRAMES[surface].has(type)) return { kind: "positive" };
-  const needsData = type === "Error"
-    || (surface === "game" && type === "StateWithheld")
-    || (surface === "draft" && type === "DraftActionRejected");
+  if (surface === "draft" && type === "DraftActionRejected") return { kind: "answered" };
+  const needsData = type === "Error" || (surface === "game" && type === "StateWithheld");
   if (!needsData) return { kind: "other" };
-  let data: { message?: unknown; reason?: unknown; code?: unknown; withheld?: unknown };
+  let data: { message?: unknown; code?: unknown; withheld?: unknown };
   try {
     data = ((JSON.parse(text) as { data?: unknown }).data ?? {}) as typeof data;
   } catch {
@@ -117,18 +123,12 @@ export function classifySetupFrame(surface: "game" | "draft", text: unknown): Se
     const withheld = data.withheld as { type?: unknown } | null | undefined;
     return withheld?.type === "GameStarted" ? { kind: "positive" } : { kind: "other" };
   }
-  if (type === "Error") {
-    return {
-      kind: "refusal",
-      refusal: {
-        message: typeof data.message === "string" ? data.message : "The server refused the setup.",
-        ...(typeof data.code === "string" ? { code: data.code } : {}),
-      },
-    };
-  }
   return {
-    kind: "rejection",
-    refusal: { message: typeof data.reason === "string" ? data.reason : "The server rejected the setup." },
+    kind: "refusal",
+    refusal: {
+      message: typeof data.message === "string" ? data.message : "The server refused the setup.",
+      ...(typeof data.code === "string" ? { code: data.code } : {}),
+    },
   };
 }
 
@@ -140,7 +140,6 @@ export class SetupConfirmation {
   private timer: ReturnType<typeof setTimeout> | null;
   private abortSignal: AbortSignal | null = null;
   private refusalValue: SetupRefusal | null = null;
-  private rejectionValue: SetupRefusal | null = null;
   private readonly onAbort = () => this.finish("aborted");
 
   constructor(timeoutMs: number = SETUP_CONFIRMATION_TIMEOUT_MS) {
@@ -156,13 +155,11 @@ export class SetupConfirmation {
     const frame = classifySetupFrame(surface, data);
     switch (frame.kind) {
       case "positive":
+      case "answered":
         this.confirm();
         return;
       case "refusal":
         this.refuse(frame.refusal);
-        return;
-      case "rejection":
-        this.noteRejection(frame.refusal);
         return;
       case "other":
         return;
@@ -184,20 +181,6 @@ export class SetupConfirmation {
   /** The refusal that settled this confirmation, when it was refused. */
   get refusal(): SetupRefusal | null {
     return this.refusalValue;
-  }
-
-  /**
-   * The candidate delivered a rejection that its bootstrap may still follow.
-   * Records it without settling; the latest one is kept.
-   */
-  noteRejection(rejection: SetupRefusal): void {
-    if (this.outcome !== null) return;
-    this.rejectionValue = rejection;
-  }
-
-  /** The last rejection noted before this confirmation settled, if any. */
-  get rejection(): SetupRefusal | null {
-    return this.rejectionValue;
   }
 
   /** The candidate closed. */

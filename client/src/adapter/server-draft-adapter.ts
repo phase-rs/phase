@@ -208,11 +208,12 @@ export interface ServerDraftAdapterOptions {
  * whose setup has not been sent; setup-sent draft actions retain their replies.
  * DraftActionRejected rejects initialization without retiring the transport:
  * the seat may already be reattached and a later state update remains valid.
- * A reconnect candidate is adopted only on its positive bootstrap
- * (`SetupConfirmation`), so a rejection that arrives first is replayed on
- * adoption, or rejects the reattach when no bootstrap follows within
- * `SETUP_CONFIRMATION_TIMEOUT_MS`. Create and Join impose no setup-response
- * deadline; a silent server can leave them pending.
+ * A reconnect candidate is adopted on its positive bootstrap or on that
+ * rejection (`SetupConfirmation`), so the rejection replays on the adopted
+ * candidate as before; an `Error`, a close, an abort or no answer within
+ * `SETUP_CONFIRMATION_TIMEOUT_MS` retires it and its incumbent. Create and
+ * Join impose no setup-response deadline; a silent server can leave them
+ * pending.
  */
 export class ServerDraftAdapter implements EngineAdapter {
   // ── Draft-phase state ──────────────────────────────────────────────
@@ -1082,11 +1083,11 @@ export class ServerDraftAdapter implements EngineAdapter {
 
   /**
    * The server replaces a seat's sender on `ReconnectDraft` and never closes
-   * the predecessor, so after that frame is written the incumbent no longer
-   * receives the seat's broadcasts. A candidate that is cancelled, closes or
-   * times out before its positive bootstrap must not leave the incumbent as the
-   * current socket: the incumbent stops being current, the work it owns is
-   * settled and it is released. Create and Join attach a different seat and
+   * the predecessor, so after that frame is written the incumbent may no longer
+   * receive the seat's broadcasts. A candidate that is cancelled, closes, is
+   * refused or times out before the server answers on it must not leave the
+   * incumbent as the current socket: the incumbent stops being current, the
+   * work it owns is settled and it is released. Create and Join attach a different seat and
    * leave the incumbent's seat untouched.
    */
   private retireSwappedIncumbent(
@@ -1197,9 +1198,9 @@ export class ServerDraftAdapter implements EngineAdapter {
       let confirmation: SetupConfirmation | null = null;
       sourceSocket.onmessage = (event) => {
         setupMessages.push(event);
-        // Only the positive bootstrap adopts; an `Error` ends the interval. A
-        // `DraftActionRejected` is only noted: the server also sends one ahead
-        // of the `DraftStateUpdate` of a reattach that succeeded.
+        // The positive bootstrap or the server's `DraftActionRejected` answer
+        // adopts (the seat may already be this candidate's); an `Error` ends
+        // the interval.
         confirmation?.observe("draft", event.data);
       };
       const handleMessage: NonNullable<PhaseSocketTransport["onmessage"]> = (event) => {
@@ -1287,7 +1288,8 @@ export class ServerDraftAdapter implements EngineAdapter {
         return;
       }
       // Same policy consumption for a live candidate; the incumbent socket and
-      // its credentials stay current until this candidate's setup is on the wire.
+      // its credentials stay current until this candidate's setup is on the wire
+      // and, for a ReconnectDraft, until the server answers on the candidate.
       if (bootstrap.failure !== null) {
         this.stateCodec.consumeFailure(bootstrap);
       }
@@ -1313,6 +1315,9 @@ export class ServerDraftAdapter implements EngineAdapter {
           } else if (first === "confirmed") {
             written = await write;
           } else {
+            // The receipt is still pending, so the frame's fate is unknown.
+            // The server may already have it and have moved the seat's sender,
+            // so it counts as written: the incumbent is not kept as if current.
             written = true;
             unconfirmed = first;
           }
@@ -1335,35 +1340,33 @@ export class ServerDraftAdapter implements EngineAdapter {
         // retries a reattach: this adapter schedules no retry and, as on main,
         // no product code calls `reconnectDraft`.
         this.retireSwappedIncumbent(incumbent, sourceSocket, attachment.owner);
-        // The server's answer, surfaced as the `DraftActionRejected` and
-        // `Error` handlers surface it on an adopted socket: the reattach
-        // rejects with its reason and the same event follows. A rejection the
-        // bootstrap never followed is the answer to a timed-out reattach.
-        const rejection = unconfirmed === "timeout" ? confirmation!.rejection : null;
+        // The server's `Error`, surfaced as the `Error` handler surfaces it on
+        // an adopted socket: the reattach rejects with its reason and the same
+        // event follows. A `DraftActionRejected` never reaches here: it is the
+        // server's answer on a candidate that may hold the seat, so it adopts.
         const refusal = unconfirmed === "refused" ? confirmation!.refusal : null;
         if (unconfirmed === "timeout") {
-          this.rejectAttachment(attachment.owner, rejection === null
-            ? new AdapterError("WS_CLOSED", "Reconnect was not confirmed in time", true)
-            : new AdapterError("ACTION_REJECTED", rejection.message, true));
+          this.rejectAttachment(attachment.owner, new AdapterError(
+            "WS_CLOSED", "Reconnect was not confirmed in time", true,
+          ));
         } else if (refusal !== null) {
           this.rejectAttachment(attachment.owner, new AdapterError("WS_ERROR", refusal.message, true));
         }
         // Retired before any listener runs, so a throwing listener strands nothing.
         this.abandonSocket(socket);
         if (this.disposed) return;
-        if (rejection !== null) this.emit({ type: "draftActionRejected", reason: rejection.message });
         if (refusal !== null) this.emit({ type: "error", message: refusal.message });
         return;
       }
       if (!this.ownsAttachment(attachment) || !this.sockets.has(sourceSocket)) {
-        // The frame is on the wire: a ReconnectDraft has already moved the
-        // seat's sender to this candidate, so the incumbent is deaf.
+        // The frame is on the wire: a ReconnectDraft may already have moved
+        // the seat's sender to this candidate, so the incumbent may be deaf.
         this.retireSwappedIncumbent(incumbent, sourceSocket, attachment.owner);
         this.abandonSocket(socket);
         return;
       }
       // Adoption retires the previous binding only after setup is on the wire
-      // and, for a ReconnectDraft, confirmed by its positive bootstrap.
+      // and, for a ReconnectDraft, after the server answered on the candidate.
       this.stateCodec.adopt(bootstrap, sourceSocket);
       this.ws = sourceSocket;
       this.acceptedGameSocket = null;

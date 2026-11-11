@@ -4175,30 +4175,25 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
-    it("adopts on the DraftStateUpdate that follows a DraftActionRejected, as the server sends on a reattach that succeeded", async () => {
+    it("adopts on a DraftActionRejected and lands the DraftStateUpdate that follows, as the server sends on a reattach that succeeded", async () => {
       vi.useFakeTimers();
-      const { adapter, ws, candidate, reconnecting } = await sentCandidate();
+      const { adapter, candidate, reconnecting } = await sentCandidate();
       const events: unknown[] = [];
       adapter.onEvent((event) => events.push(event));
       try {
         // attach_current_draft_match's success path when the match ended
         // (phase-server main.rs:2750-2754): the seat is reattached to this socket.
         receive(candidate, "DraftActionRejected", { reason: "Draft match is no longer active" });
-        await vi.advanceTimersByTimeAsync(1000);
-        expect(ws.close).not.toHaveBeenCalled();
-        expect(candidate.close).not.toHaveBeenCalled();
-        expect(reconnecting.value()).toBe("never settled");
-        const view = createMockDraftView({ pick_number: 3 });
-        receive(candidate, "DraftStateUpdate", { view });
-        // Replayed on the adopted socket in wire order, exactly as on an adopted
-        // socket: the rejection rejects the reattach and the view still lands.
+        // The server's answer adopts the candidate and replays there, as on
+        // the merge base: the rejection rejects the reattach at once.
         await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({
           code: "ACTION_REJECTED", message: "Draft match is no longer active",
         }));
-        await vi.waitFor(() => expect(events).toContainEqual({ type: "draftViewUpdated", view }));
         expect(events).toContainEqual({ type: "draftActionRejected", reason: "Draft match is no longer active" });
-        expect(candidate.close).not.toHaveBeenCalled();
-        await vi.advanceTimersByTimeAsync(10_000);
+        const view = createMockDraftView({ pick_number: 3 });
+        receive(candidate, "DraftStateUpdate", { view });
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "draftViewUpdated", view }));
+        await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS + 1000);
         expect(candidate.close).not.toHaveBeenCalled();
       } finally {
         adapter.dispose();
@@ -4206,28 +4201,33 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
-    it("rejects the reattach with a DraftActionRejected that no bootstrap follows, at the bound, retiring both sockets", async () => {
+    it.each([
+      // reconnect_draft_seat refuses before installing anything (main.rs:2582, answered at :13100).
+      ["Invalid player token"],
+      // attach_current_draft_match fails AFTER reconnect_draft_seat installed this
+      // candidate as the seat's sender (main.rs:2584, :2699 -> :2057), answered
+      // alone at :13091: the candidate owns the draft seat.
+      ["Reconnect grace period expired"],
+    ] as const)("keeps the candidate a lone DraftActionRejected (%s) answered, as the merge base did", async (reason) => {
       vi.useFakeTimers();
-      const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();
+      const { adapter, candidate, reconnecting } = await sentCandidate();
       const events: unknown[] = [];
       adapter.onEvent((event) => events.push(event));
       try {
-        receive(candidate, "DraftActionRejected", { reason: "Invalid player token" });
-        await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS - 1000);
-        expect(ws.close).not.toHaveBeenCalled();
-        expect(reconnecting.value()).toBe("never settled");
-        await vi.advanceTimersByTimeAsync(1000);
-        await vi.waitFor(() => expect(ws.close).toHaveBeenCalledOnce());
-        await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({
-          code: "ACTION_REJECTED", message: "Invalid player token",
-        }));
-        // The same event the DraftActionRejected handler emits on an adopted socket.
-        expect(events).toContainEqual({ type: "draftActionRejected", reason: "Invalid player token" });
-        await vi.waitFor(() => expect(command.value()).toMatchObject({ code: "WS_CLOSED" }));
-        expect(candidate.close).toHaveBeenCalled();
+        receive(candidate, "DraftActionRejected", { reason });
+        // Rejected at once, not at the bound.
+        await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({ code: "ACTION_REJECTED", message: reason }));
+        expect(events).toContainEqual({ type: "draftActionRejected", reason });
+        // No bound retires the socket the server may have given the seat, and
+        // nothing redials.
         const dialed = MockWebSocket.last;
-        await vi.advanceTimersByTimeAsync(130_000);
+        await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS + 130_000);
+        expect(candidate.close).not.toHaveBeenCalled();
         expect(MockWebSocket.last).toBe(dialed);
+        // A later broadcast to that seat still lands.
+        const view = createMockDraftView({ pick_number: 5 });
+        receive(candidate, "DraftStateUpdate", { view });
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "draftViewUpdated", view }));
       } finally {
         adapter.dispose();
         vi.useRealTimers();

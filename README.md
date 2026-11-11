@@ -440,12 +440,15 @@ including requests claimed before that candidate is abandoned.
 A replacement transport stays private until its own `JoinGameWithPassword` or
 `CreateDraftWithSettings`/`JoinDraftWithPassword` has entered the serialized
 write order, and a `Reconnect`/`ReconnectDraft` candidate until its positive
-bootstrap arrives; only then may `serverHello` or pending indicator consumers
-issue requests. The server replaces the seat's sender when it handles a
+bootstrap (or, for a draft, the server's rejection) arrives; only then may
+`serverHello` or pending indicator consumers issue requests. The server replaces the seat's sender when it handles a
 reconnect, so between that write and the bootstrap neither socket is known to
-own the seat: the incumbent stays current, and a close, a refusal, an abort or
-the bound (`SETUP_CONFIRMATION_TIMEOUT_MS`, the decoder's own deadline) retires
-both sockets and settles the incumbent's work. After a close or the bound the
+own the seat: the incumbent stays current, and a close, an `Error` refusal, an
+abort or the bound (`SETUP_CONFIRMATION_TIMEOUT_MS`, the decoder's own
+deadline) retires both sockets and settles the incumbent's work. A draft
+`DraftActionRejected` adopts the candidate instead, as before: the server sends
+it both for refusals and after it has already moved the seat to the candidate,
+so the rejection replays there and rejects the reattach. After a close or the bound the
 game adapter retries through `attemptReconnect`, a refusal ends the episode, and
 nothing retries a draft reattach. Two game attachments keep the write-time
 cutover: native sidecar sockets (`nativeAi` / `nativePregame`), whose transport

@@ -83,10 +83,8 @@ describe("classifySetupFrame", () => {
     });
   });
 
-  it("reads DraftActionRejected as a draft-only rejection that does not refuse", () => {
-    expect(classifySetupFrame("draft", frame("DraftActionRejected", { reason: "why" }))).toEqual({
-      kind: "rejection", refusal: { message: "why" },
-    });
+  it("reads DraftActionRejected as the draft server's answer, not a refusal", () => {
+    expect(classifySetupFrame("draft", frame("DraftActionRejected", { reason: "why" }))).toEqual({ kind: "answered" });
     expect(classifySetupFrame("game", frame("DraftActionRejected", { reason: "why" }))).toEqual({ kind: "other" });
   });
 
@@ -114,21 +112,11 @@ describe("SetupConfirmation.observe", () => {
     expect(confirmation.refusal).toEqual({ message: "gone" });
   });
 
-  it("only notes a draft rejection: the bootstrap that follows still confirms", async () => {
+  it("confirms on a draft DraftActionRejected, the server's answer on the candidate", async () => {
     const confirmation = new SetupConfirmation();
-    confirmation.observe("draft", frame("DraftActionRejected", { reason: "Draft match is no longer active" }));
-    expect(confirmation.current).toBeNull();
-    confirmation.observe("draft", frame("DraftStateUpdate", { view: {} }));
+    confirmation.observe("draft", frame("DraftActionRejected", { reason: "Reconnect grace period expired" }));
     await expect(confirmation.settled).resolves.toBe("confirmed");
-    expect(confirmation.rejection).toEqual({ message: "Draft match is no longer active" });
-  });
-
-  it("leaves a noted rejection for the timeout to report", async () => {
-    const confirmation = new SetupConfirmation();
-    confirmation.observe("draft", frame("DraftActionRejected", { reason: "Invalid player token" }));
-    await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS);
-    await expect(confirmation.settled).resolves.toBe("timeout");
-    expect(confirmation.rejection).toEqual({ message: "Invalid player token" });
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("classifies nothing once settled", async () => {
