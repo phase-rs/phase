@@ -877,7 +877,8 @@ struct StartIdentityBoard {
 
 /// Grizzly Bears with two synthetic Equipment of P0 attached: one white, one
 /// colorless (it turns white only after a grant starts), and a synthetic
-/// recipient that later grants carry their quoted statics to.
+/// colorless Aura of P0 that later grants carry their quoted statics to (an
+/// Aura, so the late-grant path can select it once it becomes a creature).
 fn start_identity_board() -> (GameRunner, StartIdentityBoard) {
     let mut s = scenario();
     let host = grizzly_bears(&mut s, P0);
@@ -888,7 +889,16 @@ fn start_identity_board() -> (GameRunner, StartIdentityBoard) {
     for equipment in [white_equipment, later_white_equipment] {
         attach_to(state, equipment, host);
     }
-    let recipient = spawn_grant_source(state, "Synthetic recipient", 112);
+    let recipient = create_object(
+        state,
+        CardId(112),
+        P0,
+        "Synthetic recipient Aura".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&recipient).unwrap();
+    obj.card_types.core_types.push(CoreType::Enchantment);
+    obj.card_types.subtypes.push("Aura".to_string());
     (
         runner,
         StartIdentityBoard {
@@ -922,6 +932,66 @@ fn start_blessing_grant(
         ),
     );
     granter
+}
+
+/// [`start_blessing_grant`] by `path`: a static's grant, a resolution-created
+/// grant, or a late grant the recipient joins in layer 4 (it becomes an Aura
+/// creature through a synthetic animation).
+fn start_blessing_grant_by(
+    state: &mut GameState,
+    board: &StartIdentityBoard,
+    card_id: u64,
+    path: GrantPath,
+) {
+    let inner = quoted_white_protection(
+        board.host,
+        ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached,
+    );
+    match path {
+        GrantPath::Static => {
+            start_blessing_grant(state, board, card_id);
+        }
+        GrantPath::Transient => {
+            let granter = spawn_grant_source(state, "Synthetic granting source", card_id);
+            state
+                .add_transient_continuous_effect(
+                    granter,
+                    P0,
+                    Duration::UntilEndOfTurn,
+                    TargetFilter::SpecificObject {
+                        id: board.recipient,
+                    },
+                    vec![ContinuousModification::GrantStaticAbility {
+                        definition: Box::new(inner),
+                    }],
+                    None,
+                )
+                .expect("transient grant must register");
+        }
+        GrantPath::Late => {
+            let granter = spawn_grant_source(state, "Synthetic granting source", card_id);
+            grant_static_to(
+                state,
+                granter,
+                TargetFilter::Typed(TypedFilter::creature().subtype("Aura".to_string())),
+                inner,
+            );
+            state
+                .add_transient_continuous_effect(
+                    granter,
+                    P0,
+                    Duration::UntilEndOfTurn,
+                    TargetFilter::SpecificObject {
+                        id: board.recipient,
+                    },
+                    vec![ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    }],
+                    None,
+                )
+                .expect("animation must register");
+        }
+    }
 }
 
 /// A synthetic static with no protection: `recipient` gets +1/+0.
@@ -968,9 +1038,8 @@ fn ridered_slot(state: &GameState, recipient: ObjectId) -> usize {
 /// older source, removed directly to stand in for the grant ending; the printed
 /// Benevolent Blessing (`cr_702_16p_snapshot_survives_later_ability_removal`)
 /// and the fixed-slot witness (`cr_702_16p_does_not_exempt_attachment_that_becomes_matching_after_grant_start`)
-/// sit beside it.
-#[test]
-fn earlier_grant_ending_keeps_the_start_snapshot() {
+/// sit beside it. Run for each path that produces a granted static.
+fn assert_earlier_grant_ending_keeps_the_start_snapshot(path: GrantPath) {
     let (mut runner, board) = start_identity_board();
     let state = runner.state_mut();
     let older = spawn_grant_source(state, "Synthetic older source", 121);
@@ -982,12 +1051,12 @@ fn earlier_grant_ending_keeps_the_start_snapshot() {
         },
         unrelated_static(board.recipient),
     );
-    start_blessing_grant(state, &board, 113);
+    start_blessing_grant_by(state, &board, 113, path);
     evaluate_protection_layers(state);
     assert_eq!(
         ridered_slot(state, board.recipient),
         1,
-        "reach guard: shifted slot"
+        "{path:?} reach guard: shifted slot"
     );
     let [occurrence] = <[_; 1]>::try_from(already_attached_occurrences(state, board.host))
         .expect("one ridered grant");
@@ -997,7 +1066,7 @@ fn earlier_grant_ending_keeps_the_start_snapshot() {
     assert_eq!(
         attachment_illegality(state, board.later_white_equipment, board.host),
         Some(AttachIllegality::Protection),
-        "reach guard: white only after the effect started"
+        "{path:?} reach guard: white only after the effect started"
     );
 
     let older = state.objects.get_mut(&older).unwrap();
@@ -1007,12 +1076,12 @@ fn earlier_grant_ending_keeps_the_start_snapshot() {
     assert_eq!(
         ridered_slot(state, board.recipient),
         0,
-        "reach guard: the slot moved"
+        "{path:?} reach guard: the slot moved"
     );
     assert_eq!(
         attachment_illegality(state, board.later_white_equipment, board.host),
         Some(AttachIllegality::Protection),
-        "a new snapshot at the moved slot would exempt the later-white Equipment"
+        "{path:?}: a new snapshot at the moved slot would exempt the later-white Equipment"
     );
     assert_eq!(
         attachment_illegality(state, board.white_equipment, board.host),
@@ -1022,25 +1091,40 @@ fn earlier_grant_ending_keeps_the_start_snapshot() {
     assert_eq!(
         protection_snapshot_ids(state, board.recipient, occurrence, 0, board.host),
         start,
-        "the start snapshot is kept under the grant occurrence"
+        "{path:?}: the start snapshot is kept under the grant occurrence"
     );
+}
+
+#[test]
+fn earlier_grant_ending_keeps_the_start_snapshot() {
+    assert_earlier_grant_ending_keeps_the_start_snapshot(GrantPath::Static);
+}
+
+#[test]
+fn earlier_grant_ending_keeps_a_transient_grants_start_snapshot() {
+    assert_earlier_grant_ending_keeps_the_start_snapshot(GrantPath::Transient);
+}
+
+#[test]
+fn earlier_grant_ending_keeps_a_late_grants_start_snapshot() {
+    assert_earlier_grant_ending_keeps_the_start_snapshot(GrantPath::Late);
 }
 
 /// CR 702.16p: an unrelated grant from an older source starts and installs on
 /// the recipient first, so the ridered static moves to a higher slot. The
 /// effect keeps its start snapshot. Constructed control (synthetic), the
-/// mirror of `earlier_grant_ending_keeps_the_start_snapshot`.
-#[test]
-fn earlier_grant_starting_keeps_the_start_snapshot() {
+/// mirror of `assert_earlier_grant_ending_keeps_the_start_snapshot`, run for
+/// each path that produces a granted static.
+fn assert_earlier_grant_starting_keeps_the_start_snapshot(path: GrantPath) {
     let (mut runner, board) = start_identity_board();
     let state = runner.state_mut();
     let older = spawn_grant_source(state, "Synthetic older source", 114);
-    start_blessing_grant(state, &board, 115);
+    start_blessing_grant_by(state, &board, 115, path);
     evaluate_protection_layers(state);
     assert_eq!(
         ridered_slot(state, board.recipient),
         0,
-        "reach guard: first slot"
+        "{path:?} reach guard: first slot"
     );
     let [occurrence] = <[_; 1]>::try_from(already_attached_occurrences(state, board.host))
         .expect("one ridered grant");
@@ -1059,12 +1143,12 @@ fn earlier_grant_starting_keeps_the_start_snapshot() {
     assert_eq!(
         ridered_slot(state, board.recipient),
         1,
-        "reach guard: the slot moved"
+        "{path:?} reach guard: the slot moved"
     );
     assert_eq!(
         attachment_illegality(state, board.later_white_equipment, board.host),
         Some(AttachIllegality::Protection),
-        "a new snapshot at the moved slot would exempt the later-white Equipment"
+        "{path:?}: a new snapshot at the moved slot would exempt the later-white Equipment"
     );
     assert_eq!(
         attachment_illegality(state, board.white_equipment, board.host),
@@ -1074,8 +1158,23 @@ fn earlier_grant_starting_keeps_the_start_snapshot() {
     assert_eq!(
         protection_snapshot_ids(state, board.recipient, occurrence, 0, board.host),
         start,
-        "the start snapshot is kept under the grant occurrence"
+        "{path:?}: the start snapshot is kept under the grant occurrence"
     );
+}
+
+#[test]
+fn earlier_grant_starting_keeps_the_start_snapshot() {
+    assert_earlier_grant_starting_keeps_the_start_snapshot(GrantPath::Static);
+}
+
+#[test]
+fn earlier_grant_starting_keeps_a_transient_grants_start_snapshot() {
+    assert_earlier_grant_starting_keeps_the_start_snapshot(GrantPath::Transient);
+}
+
+#[test]
+fn earlier_grant_starting_keeps_a_late_grants_start_snapshot() {
+    assert_earlier_grant_starting_keeps_the_start_snapshot(GrantPath::Late);
 }
 
 /// CR 702.16p + CR 113.2c: two sources grant the recipient byte-identical
@@ -1381,4 +1480,118 @@ fn copy_of_benevolent_blessing_takes_its_own_start_snapshot() {
     );
     assert!(printed_snapshot_ids(state, blessing, def_index, 0, copy_host).is_empty());
     assert_eq!(attachment_illegality(state, earlier_aura, copy_host), None);
+}
+
+/// CR 702.16m + CR 702.16n: a static that grants a chosen protection keyword
+/// carries that static's rider, as a fixed protection grant does. Synthetic:
+/// no printed card grants a chosen protection keyword (`AddChosenKeyword`'s
+/// printed user is Greymond, Avacyn's Stalwart, with first strike, vigilance
+/// or lifelink), and the rider is Flickering Ward's "This effect doesn't
+/// remove this Aura."
+#[test]
+fn chosen_protection_grant_carries_its_statics_rider() {
+    let mut s = scenario();
+    let host = grizzly_bears(&mut s, P0);
+    let mut runner = s.build();
+    let state = runner.state_mut();
+    let aura = spawn_synthetic_white_aura(state, "Synthetic chosen-protection Aura", 123, P0);
+    attach_to(state, aura, host);
+    {
+        let obj = state.objects.get_mut(&aura).unwrap();
+        obj.chosen_attributes
+            .push(ChosenAttribute::Keyword(Keyword::Protection(
+                ProtectionTarget::Color(ManaColor::White),
+            )));
+        obj.static_definitions.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SpecificObject { id: host })
+                .modifications(vec![ContinuousModification::AddChosenKeyword])
+                .protection_does_not_remove(ProtectionDoesNotRemove::Source),
+        );
+    }
+    persist_last_static(state, aura);
+    evaluate_protection_layers(state);
+
+    let riders = white_riders(state, host);
+    assert_eq!(riders.len(), 1, "reach guard: one chosen instance");
+    let rider = riders[0].as_ref().expect("the static's rider is carried");
+    assert_eq!(rider.source, aura);
+    assert_eq!(rider.does_not_remove, ProtectionDoesNotRemove::Source);
+    assert_eq!(
+        attachment_illegality(state, aura, host),
+        None,
+        "the chosen grant's own rider exempts its Aura"
+    );
+}
+
+/// CR 613.6 + CR 702.16p: a creature entering where a granted ridered static
+/// reaches it takes the full layer pass (`prepare_incremental_flush` escalates
+/// when a granted-static child of an outside carrier can reach an entrant), so
+/// the entrant's rider and start grant name the grant occurrence, never the
+/// slot of the carrier's installed copy. Synthetic: no printed card quotes a
+/// ridered static, and the entrant is created directly as a creature entering
+/// the battlefield.
+#[test]
+fn entrant_reached_by_a_granted_rider_takes_the_full_pass() {
+    let mut s = scenario();
+    let host = grizzly_bears(&mut s, P0);
+    let mut runner = s.build();
+    let state = runner.state_mut();
+    let carrier = spawn_grant_source(state, "Synthetic carrier", 124);
+    let granter = spawn_grant_source(state, "Synthetic granting source", 125);
+    grant_static_to(
+        state,
+        granter,
+        TargetFilter::SpecificObject { id: carrier },
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(TypedFilter::creature()))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::White)),
+            }])
+            .protection_does_not_remove(
+                ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached,
+            ),
+    );
+    evaluate_protection_layers(state);
+    assert_eq!(
+        white_riders(state, host).len(),
+        1,
+        "reach guard: the grant applies"
+    );
+
+    let entrant = create_object(
+        state,
+        CardId(126),
+        P0,
+        "Synthetic entrant".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&entrant).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+    }
+    crate::game::layers::mark_layers_entered(state, entrant);
+    crate::game::perf_counters::reset();
+    crate::game::layers::flush_layers(state);
+    let counters = crate::game::perf_counters::snapshot();
+    assert_eq!(
+        (counters.layers_incremental, counters.layers_full_eval),
+        (0, 1),
+        "the entrant's flush escalates to the full pass"
+    );
+    let riders = white_riders(state, entrant);
+    assert_eq!(riders.len(), 1, "reach guard: the entrant is protected");
+    let rider = riders[0].as_ref().expect("the granted rider");
+    assert!(matches!(
+        rider.occurrence,
+        ProtectionGrantOccurrence::Granted { .. }
+    ));
+    assert!(state.objects[&entrant]
+        .protection_start_grants
+        .iter()
+        .all(|grant| matches!(
+            grant.key.occurrence,
+            ProtectionGrantOccurrence::Granted { .. }
+        )));
 }

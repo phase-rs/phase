@@ -479,7 +479,7 @@ pub use crate::types::layers::ProtectionRiderGrant;
 pub struct ProtectionProvenance {
     pub quality: crate::types::keywords::ProtectionTarget,
     /// `None` = an instance with no rider: printed or copiable, transient,
-    /// chosen keyword, retained-other-abilities, or an unridered static.
+    /// retained-other-abilities, or from a static without a rider.
     pub rider: Option<ProtectionRiderGrant>,
 }
 

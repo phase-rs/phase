@@ -6594,8 +6594,7 @@ fn active_effects_force_incremental_escalation(
             if entered_ids.iter().any(|id| {
                 state.objects.get(id).is_some_and(|obj| {
                     // CR 718.3b: saved prototype colors are intrinsic and reapplied after reset.
-                    obj.is_phased_in_permanent()
-                        && obj.controller == you
+                    crate::game::keywords::is_controlled_color_contributor(obj, you)
                         && (!obj.color.is_empty()
                             || obj
                                 .prototype_form
@@ -12096,9 +12095,8 @@ fn apply_continuous_effect_filtered(
     // effect's "you", must be baked into concrete `Protection` qualities at
     // apply-time — the modifier lives on the granted creature, which has none of
     // those attributes. `keywords::resolve_granted_protection` is the single
-    // authority, shared with the CR 702.16p start-snapshot refresh
-    // (`effects/attach.rs`); attachment legality reads the
-    // `protection_provenance` this pass records.
+    // authority; attachment legality and the CR 702.16p start-snapshot refresh
+    // (`effects/attach.rs`) read what this pass records from it.
     let granted_protection: Vec<crate::types::keywords::ProtectionTarget> =
         if let ContinuousModification::AddKeyword {
             keyword: Keyword::Protection(quality),
@@ -12501,13 +12499,36 @@ fn apply_continuous_effect_filtered(
                 // the source has no stored chosen keyword (e.g. the static is
                 // gathered before the choose effect has resolved), the list is
                 // empty and this is a no-op rather than a panic.
+                // CR 702.16p: like `AddKeyword`, the "already attached" start
+                // snapshot keys one quality per effect, so it is recorded only
+                // when this effect chooses a single protection quality.
+                if let [quality] = add_chosen_keywords
+                    .iter()
+                    .filter_map(|kw| match kw {
+                        Keyword::Protection(quality) => Some(quality.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .as_slice()
+                {
+                    record_protection_start_grant(
+                        obj,
+                        effect,
+                        quality,
+                        std::slice::from_ref(quality),
+                    );
+                }
                 for (keyword_output_index, kw) in add_chosen_keywords.iter().enumerate() {
                     // CR 702.16m + CR 702.16n: a chosen protection grant is its
                     // own instance even when the flat keyword list already holds
-                    // that quality; record it before the duplicate check so a
-                    // ridered co-contributor cannot exempt an Aura alone.
+                    // that quality; record it, with the rider of the static that
+                    // produced it, before the duplicate check so a ridered
+                    // co-contributor cannot exempt an Aura alone.
                     if let Keyword::Protection(quality) = kw {
-                        obj.record_protection_provenance(quality.clone(), None);
+                        obj.record_protection_provenance(
+                            quality.clone(),
+                            effect.protection_rider.clone(),
+                        );
                     }
                     // CR 702.164b: summing keywords (Toxic) accumulate rather
                     // than dedup, mirroring the plain `AddKeyword` arm above.

@@ -891,18 +891,26 @@ pub fn protection_color_set_members(
                     .battlefield
                     .iter()
                     .filter_map(|id| state.objects.get(id))
-                    .filter(|obj| obj.is_phased_in_permanent() && obj.controller == you)
+                    .filter(|obj| is_controlled_color_contributor(obj, you))
                     .flat_map(|obj| obj.color.iter()),
             )
         }
     }
 }
 
+/// CR 110.1 + CR 702.26b + CR 109.5: whether `obj` is one of the "permanents
+/// you control" whose colors `ProtectionColorSet::AmongPermanentsYouControl`
+/// collects. The member census and the layer pass's entrant-escalation probe
+/// share this predicate.
+pub(crate) fn is_controlled_color_contributor(obj: &GameObject, you: PlayerId) -> bool {
+    obj.is_phased_in_permanent() && obj.controller == you
+}
+
 /// CR 702.16 + CR 702.16i + CR 109.5: Resolve a protection quality granted by a
 /// continuous effect from `source_id` whose "you" is `you` into the concrete
-/// qualities it grants. This is the single authority shared by the layer applier
-/// (which bakes the result into `obj.keywords`) and attachment legality (which
-/// reads grant definitions directly), so the two cannot drift.
+/// qualities it grants. The layer applier bakes the result into `obj.keywords`
+/// and records each instance's provenance; attachment legality reads that
+/// recorded result rather than resolving grant definitions again.
 ///
 /// CR 702.16i: a set quality ("each color that's not in ...") is shorthand for
 /// several separate protection abilities, so the result may hold 0..n entries.
