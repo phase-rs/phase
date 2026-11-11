@@ -11082,12 +11082,13 @@ mod tests {
     /// Deck coverage and coverage-report share one per-face gap computation, so a
     /// printed card whose only gaps are a parse warning or a silent drop is
     /// unsupported in both (issue #9972). The witnesses are exported faces, not
-    /// stubs: Flame Spill's "exile it instead" rider raises
+    /// stubs: Hinder's "top or bottom of its owner's library instead" rider raises
     /// `Swallow:Replacement_Instead`, and Druid of the Emerald Grove's printed
-    /// pipe-form die table leaves one line with no parse root.
+    /// pipe-form die table is flagged by silent-drop line accounting (the
+    /// exported RollDie still carries every result range).
     #[test]
     fn deck_coverage_matches_report_for_printed_warning_and_silent_drop_witnesses() {
-        const WARNING: &str = "Flame Spill";
+        const WARNING: &str = "Hinder";
         const SILENT_DROP: &str = "Druid of the Emerald Grove";
         let shared = crate::test_support::shared_card_db();
         let printed = |name: &str| {
