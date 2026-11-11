@@ -6491,3 +6491,203 @@ fn many_ready_altars_fund_jayemdae_tome() {
     resolve_stack(&mut runner);
     assert_eq!(hand_size(&runner, P0), 1, "the Tome drew");
 }
+
+/// Throne of Eldraine ("{3}, {T}: Draw two cards. Spend only mana of the chosen
+/// color to activate this ability.") with two cards to draw; [`choose_red`]
+/// chooses its color once the game is built.
+fn red_chosen_throne(scenario: &mut GameScenario) -> ObjectId {
+    let throne = scenario
+        .add_creature_from_oracle(P0, "Throne of Eldraine", 0, 1, THRONE_OF_ELDRAINE)
+        .as_artifact()
+        .with_mana_cost(ManaCost::generic(5))
+        .id();
+    scenario.add_card_to_library_top(P0, "First drawn card");
+    scenario.add_card_to_library_top(P0, "Second drawn card");
+    throne
+}
+
+fn choose_red(runner: &mut GameRunner, throne: ObjectId) {
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&throne)
+        .expect("the Throne")
+        .chosen_attributes
+        .push(engine::types::ability::ChosenAttribute::Color(
+            ManaColor::Red,
+        ));
+}
+
+fn red_in_pool(runner: &GameRunner) -> usize {
+    runner.state().players[P0.0 as usize]
+        .mana_pool
+        .count_color(engine::types::mana::ManaType::Red)
+}
+
+/// CR 601.2g + CR 106.6 (#10190 sixth review): the window's search tries one
+/// of several content-identical producers per board, so a row of them can't
+/// crowd out a distinct producer listed after them. Twenty Ashnod's Altars
+/// ("Sacrifice a creature: Add {C}{C}.") come before The Golden Throne ("{T},
+/// Sacrifice a creature: Add three mana in any combination of colors.") and
+/// share its only creature, and only the Throne's red pays a red-chosen Throne
+/// of Eldraine's {3}. The draw is offered for a manual payment and settles
+/// with the Golden Throne's {R}{R}{R}.
+#[test]
+fn a_late_golden_throne_funds_a_red_chosen_throne_past_a_row_of_altars() {
+    let mut scenario = scenario_at_main();
+    let throne = red_chosen_throne(&mut scenario);
+    let altars: Vec<ObjectId> = (0..20)
+        .map(|_| add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield))
+        .collect();
+    let golden = add(&mut scenario, P0, "The Golden Throne", Zone::Battlefield);
+    let creature = scenario.add_vanilla(P0, 2, 2);
+    let mut runner = build(scenario);
+    choose_red(&mut runner, throne);
+    let battlefield = &runner.state().battlefield;
+    let position = |id: ObjectId| battlefield.iter().position(|&listed| listed == id);
+    assert!(
+        altars
+            .iter()
+            .all(|&altar| position(altar) < position(golden)),
+        "reach: every Altar is listed before The Golden Throne"
+    );
+    let index = non_mana_ability_index(&runner, throne);
+    let hand_before = hand_size(&runner, P0);
+
+    assert_eq!(
+        offered_payment_modes(&runner, throne, index),
+        vec![CastPaymentMode::Manual],
+        "The Golden Throne's {{R}}{{R}}{{R}} pays the red-only {{3}}"
+    );
+    let waiting_for = activate_index(&mut runner, throne, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(
+        &mut runner,
+        golden,
+        &[creature],
+        Some(engine::types::game_state::ManaChoice::Combination(vec![
+            engine::types::mana::ManaType::Red;
+            3
+        ])),
+    );
+    assert_eq!(red_in_pool(&runner), 3);
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, throne), "the {{T}} was paid");
+    assert_eq!(pool_total(&runner), 0, "the {{3}} spent the red");
+    assert!(in_zone(&runner, creature, Zone::Graveyard));
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), hand_before + 2, "the draw resolved");
+}
+
+/// CR 605.3a + CR 605.3c + CR 106.6 (#10190 sixth review): a conversion can
+/// make floating mana the activation may not spend into mana it may, once per
+/// activation. With {C}{C}{C} floating and no other source, Manaforge Cinder's
+/// "{1}: Add {B} or {R}. Activate no more than three times each turn." turns
+/// it into {R}{R}{R} for a red-chosen Throne of Eldraine's {3}. The draw is
+/// offered for a manual payment and settles after three conversions.
+#[test]
+fn cinder_converts_floating_colorless_for_a_red_chosen_throne() {
+    let mut scenario = scenario_at_main();
+    let throne = red_chosen_throne(&mut scenario);
+    let cinder = add(&mut scenario, P0, "Manaforge Cinder", Zone::Battlefield);
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| {
+                engine::types::mana::ManaUnit::new(
+                    engine::types::mana::ManaType::Colorless,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                )
+            })
+            .collect(),
+    );
+    let mut runner = build(scenario);
+    choose_red(&mut runner, throne);
+    let index = non_mana_ability_index(&runner, throne);
+    let hand_before = hand_size(&runner, P0);
+    assert_eq!(pool_total(&runner), 3, "reach: {{C}}{{C}}{{C}} floats");
+
+    assert_eq!(
+        offered_payment_modes(&runner, throne, index),
+        vec![CastPaymentMode::Manual],
+        "three conversions make the red-only {{3}}"
+    );
+    let waiting_for = activate_index(&mut runner, throne, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    for _ in 0..3 {
+        activate_in_window(
+            &mut runner,
+            cinder,
+            &[],
+            Some(engine::types::game_state::ManaChoice::SingleColor(
+                engine::types::mana::ManaType::Red,
+            )),
+        );
+    }
+    assert_eq!(red_in_pool(&runner), 3, "each {{C}} became {{R}}");
+    assert_eq!(pool_total(&runner), 3);
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, throne), "the {{T}} was paid");
+    assert_eq!(pool_total(&runner), 0, "the {{3}} spent the red");
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), hand_before + 2, "the draw resolved");
+}
+
+/// CR 605.3a + CR 107.6 (#10190 sixth review): a producer can depend on
+/// another, so the window's entry estimate does not bound it. Grand Architect
+/// ("Tap an untapped blue creature you control: Add {C}{C}. Spend this mana
+/// only to cast artifact spells or activate abilities of artifacts.") has made
+/// Pili-Pala blue with its "{U}: Target artifact creature becomes blue until
+/// end of turn.", so it can tap itself and then Pili-Pala ("{2}, {Q}: Add one
+/// mana of any color.") for {C}{C}{C}{C}: Jayemdae Tome's "{4}, {T}: Draw a
+/// card." is offered for a manual payment and settles.
+#[test]
+fn grand_architect_tapping_a_blued_pili_pala_funds_jayemdae_tome() {
+    let mut scenario = scenario_at_main();
+    let tome = scenario
+        .add_artifact_from_oracle(P0, "Jayemdae Tome", JAYEMDAE_TOME)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let architect = add(&mut scenario, P0, "Grand Architect", Zone::Battlefield);
+    let pili = add(&mut scenario, P0, "Pili-Pala", Zone::Battlefield);
+    add(&mut scenario, P0, "Island", Zone::Battlefield);
+    scenario.add_card_to_library_top(P0, "Drawn card");
+    let mut runner = build(scenario);
+    let make_blue = ability_index_of(&runner, architect, "becomes blue");
+    activate_index(&mut runner, architect, make_blue, CastPaymentMode::Auto);
+    choose_targets(&mut runner, &[pili]);
+    resolve_stack(&mut runner);
+    assert!(
+        runner.state().objects[&pili]
+            .color
+            .contains(&ManaColor::Blue),
+        "reach: Pili-Pala is blue"
+    );
+    assert_eq!(pool_total(&runner), 0, "reach: the Island paid the {{U}}");
+    let index = non_mana_ability_index(&runner, tome);
+    let hand_before = hand_size(&runner, P0);
+
+    assert_eq!(
+        offered_payment_modes(&runner, tome, index),
+        vec![CastPaymentMode::Manual],
+        "two Architect activations make the {{4}}"
+    );
+    let waiting_for = activate_index(&mut runner, tome, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(&mut runner, architect, &[architect], None);
+    activate_in_window(&mut runner, architect, &[pili], None);
+    assert_eq!(pool_total(&runner), 4, "{{C}}{{C}}{{C}}{{C}}");
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, tome), "the {{T}} was paid");
+    assert_eq!(pool_total(&runner), 0, "the {{4}} was paid");
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), hand_before + 1, "the Tome drew");
+}

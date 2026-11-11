@@ -13,7 +13,6 @@
 //! inline resolution — which is why any irreversible sub-effect (damage,
 //! life loss, sacrifice) disqualifies a source from UI-level undo.
 
-use crate::game::effects::mana::resolve_restrictions;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::CounterCostSelection;
 use crate::types::ability::{cost_has_component, ManaSpendRestriction};
@@ -2472,8 +2471,10 @@ pub(crate) fn mana_capacity_matching(
         .filter_map(|(_, ability)| {
             let net = usable_mana_ability_net(state, object_id, controller, ability, capacity_use)?;
             Some(match capacity_use {
+                // An unbounded ability makes the bound no bound at all.
                 CapacityUse::ActivationWindow => net.saturating_mul(
-                    repeatable_mana_ability_multiplier(state, object_id, controller, ability),
+                    repeatable_mana_ability_multiplier(state, object_id, controller, ability)
+                        .unwrap_or(u32::MAX),
                 ),
                 CapacityUse::Castability | CapacityUse::XCeiling => net,
             })
@@ -2487,25 +2488,30 @@ pub(crate) fn mana_capacity_matching(
 }
 
 /// CR 605.3c: How many times one mana ability could be activated in the
-/// payment window. A tap or untap cost, or an explicit activation restriction,
-/// limits the permanent to one activation. A non-tap repeatable ability
-/// (Ashnod's Altar's creature sacrifice, Krark-Clan Ironworks's artifact
-/// sacrifice, discard, or pay-life) can be activated as many times as its
-/// resource supply allows.
+/// payment window, or `None` when nothing on the board bounds it. A tap cost or
+/// an explicit activation restriction limits the permanent to one activation.
+/// A non-tap repeatable ability (Ashnod's Altar's creature sacrifice,
+/// Krark-Clan Ironworks's artifact sacrifice, discard, or pay-life) can be
+/// activated as many times as its resource supply allows. An untap-symbol
+/// cost (CR 107.6: Pili-Pala's "{2}, {Q}") is paid again each time another
+/// ability taps its source, and a cost whose supply is not counted here (Grand
+/// Architect's "Tap an untapped blue creature you control") has no bound.
 fn repeatable_mana_ability_multiplier(
     state: &GameState,
     object_id: ObjectId,
     controller: PlayerId,
     ability: &AbilityDefinition,
-) -> u32 {
+) -> Option<u32> {
+    if cost_has_component(&ability.cost, |c| matches!(c, AbilityCost::Untap)) {
+        return None;
+    }
     if has_tap_component(&ability.cost)
-        || cost_has_component(&ability.cost, |c| matches!(c, AbilityCost::Untap))
         || ability
             .activation_restrictions
             .iter()
             .any(|r| matches!(r, ActivationRestriction::OnlyOnceEachTurn))
     {
-        return 1;
+        return Some(1);
     }
 
     // Each activation chooses its own objects (CR 118.10), so every supply-
@@ -2547,11 +2553,11 @@ fn repeatable_mana_ability_multiplier(
         .as_ref()
         .and_then(|cost| self_counter_cost_supply(state, object_id, cost));
 
-    if let Some(activations) = object_limits.chain(life_limit).chain(counter_limit).min() {
-        return u32::try_from(activations).unwrap_or(u32::MAX);
-    }
-
-    1
+    object_limits
+        .chain(life_limit)
+        .chain(counter_limit)
+        .min()
+        .map(|activations| u32::try_from(activations).unwrap_or(u32::MAX))
 }
 
 /// CR 118.3 + CR 122.1: how many activations a self counter-removal cost of
@@ -2758,6 +2764,7 @@ pub(crate) fn activatable_player_choice_mana_abilities_for_payment<'a>(
     exclude: Option<ObjectId>,
     payment_context: Option<&'a PaymentContext<'a>>,
 ) -> impl Iterator<Item = (ObjectId, usize)> + 'a {
+    let gates = mana_abilities::ManaActivationGates::compute(state);
     player_choice_mana_abilities_for_payment(state, controller).filter(
         move |&(object_id, index)| {
             Some(object_id) != exclude
@@ -2773,6 +2780,7 @@ pub(crate) fn activatable_player_choice_mana_abilities_for_payment<'a>(
                             index,
                             ability,
                             payment_context,
+                            &gates,
                         )
                     })
         },
@@ -2821,10 +2829,13 @@ fn player_choice_mana_ability_shape(ability: &AbilityDefinition) -> bool {
 }
 
 /// CR 605.3a + CR 117.1d: whether one candidate mana ability of
-/// [`player_choice_mana_abilities_for_payment`] can be activated on `state`
-/// now. The payment context is not used for the readiness screen; output
-/// restrictions (CR 106.6) are evaluated later in the witness search when mana
-/// is actually spent.
+/// [`player_choice_mana_abilities_for_payment`] can be activated in the payment
+/// window `payment_context` is for. That window is judged, not the priority the
+/// player may still hold while it is being opened: CR 304.5 keeps Lion's Eye
+/// Diamond's "Activate only as an instant" out of it, and its mana must pass
+/// every CR 106.6 restriction of that payment, as settlement spends it
+/// ([`mana_ability_allowed_for_payment`]: Food Chain's "Spend this mana only to
+/// cast creature spells" can't pay Prismite's {2}).
 pub(crate) fn player_choice_mana_ability_ready_for_payment(
     state: &GameState,
     controller: PlayerId,
@@ -2832,15 +2843,18 @@ pub(crate) fn player_choice_mana_ability_ready_for_payment(
     idx: usize,
     ability: &AbilityDefinition,
     payment_context: Option<&PaymentContext<'_>>,
+    gates: &mana_abilities::ManaActivationGates,
 ) -> bool {
-    let gates = mana_abilities::ManaActivationGates::compute(state);
-    player_choice_mana_ability_passes_screen(state, controller, object_id, idx, ability, &gates)
-        && mana_abilities::can_activate_mana_ability_now_gated(
-            state, controller, object_id, idx, ability, &gates,
+    let Effect::Mana { restrictions, .. } = &*ability.effect else {
+        return false;
+    };
+    mana_ability_allowed_for_payment(ability, restrictions, state, object_id, payment_context)
+        && player_choice_mana_ability_passes_screen(
+            state, controller, object_id, idx, ability, gates,
         )
-        && payment_context.is_none_or(|ctx| {
-            mana_ability_output_permits_payment_context(state, object_id, ability, ctx)
-        })
+        && mana_abilities::can_activate_mana_ability_now_gated(
+            state, controller, object_id, idx, ability, gates,
+        )
 }
 
 /// CR 605.3a + CR 117.1d: every check of
@@ -2899,27 +2913,6 @@ pub(crate) fn player_choice_mana_ability_passes_screen(
         return false;
     }
     matches!(&*ability.effect, Effect::Mana { .. })
-}
-
-/// Check if a mana ability's produced mana restrictions are compatible with
-/// a payment context. Returns true if the mana produced by this ability can
-/// be spent in the given payment context.
-pub(crate) fn mana_ability_output_permits_payment_context(
-    state: &GameState,
-    object_id: ObjectId,
-    ability: &AbilityDefinition,
-    payment_context: &PaymentContext<'_>,
-) -> bool {
-    let Effect::Mana { restrictions, .. } = &*ability.effect else {
-        return true; // Non-mana abilities are not filtered here
-    };
-    // If there are no restrictions, the mana can be spent anywhere.
-    if restrictions.is_empty() {
-        return true;
-    }
-    // Resolve the restrictions and check if any allow spending in this context.
-    let resolved = resolve_restrictions(restrictions, state, object_id);
-    resolved.iter().any(|r| r.allows(payment_context))
 }
 
 /// CR 117.1d + CR 601.2g: One activation's producible mana shape for the

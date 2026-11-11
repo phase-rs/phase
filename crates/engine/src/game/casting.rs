@@ -24056,7 +24056,9 @@ fn manual_mana_payment_route(
 /// find: it counts mana, not colors (the witness answers each color prompt),
 /// leaves out each Phyrexian symbol (CR 107.4f: it may be paid with 2 life,
 /// announced as the activation is proposed, CR 118.13a), and credits each
-/// mana ability every activation its cost's supply allows (CR 605.3c). The
+/// mana ability every activation its cost's supply allows (CR 605.3c), or
+/// without limit when nothing bounds it. A window with a conversion or an
+/// untap-symbol producer has no such bound, so it is left to the witness. The
 /// leg is judged in the activation's payment context (CR 106.6 restrictions
 /// and spend permissions), and a source whose cost needs it untapped
 /// contributes none of its own mana abilities
@@ -24085,11 +24087,27 @@ fn activation_window_mana_may_suffice(
     // ability it never activates can change the verdict. One whose own cost is
     // not payable yet counts too: the window's earlier activations can pay for
     // it (Manaforge Cinder's {1} after Ashnod's Altar's {C}{C}).
-    if super::mana_sources::player_choice_mana_abilities_for_payment(state, player)
-        .next()
-        .is_none()
-    {
+    let mut candidates =
+        super::mana_sources::player_choice_mana_abilities_for_payment(state, player)
+            .filter_map(|(id, index)| state.objects.get(&id)?.abilities.get(index))
+            .peekable();
+    if candidates.peek().is_none() {
         return false;
+    }
+    // CR 605.3a + CR 106.6 + CR 107.6: what follows bounds the window only
+    // when none of its producers converts mana or waits on another. A mana
+    // ability whose own cost spends mana (Manaforge Cinder's "{1}: Add {B} or
+    // {R}.") can turn floating mana the activation may not spend into mana it
+    // may, once per activation; an untap-symbol cost (Pili-Pala's "{2}, {Q}")
+    // is paid again each time another ability taps its source (Grand
+    // Architect). With either, only the witness can judge the window.
+    if candidates.any(|ability| {
+        super::mana_abilities::mana_sub_cost_of(&ability.cost).is_some()
+            || crate::types::ability::cost_has_component(&ability.cost, |component| {
+                matches!(component, AbilityCost::Untap)
+            })
+    }) {
+        return true;
     }
     let Some(residual) =
         spell_cost_residual_after_pool(state, player, Some(source_id), &mana, Some(&payment_ctx))
@@ -24124,7 +24142,7 @@ fn activation_window_mana_may_suffice(
                 },
             ) as usize
         })
-        .sum();
+        .fold(0, usize::saturating_add);
     capacity >= needed
 }
 
@@ -28268,12 +28286,23 @@ fn one_of_announcements(cost: &AbilityCost) -> Vec<std::borrow::Cow<'_, AbilityC
 /// (Phyrexian Vault's only creature spent to the first Ironworks sacrifice
 /// before the Clue sacrifice that leaves it).
 const MANA_ABILITY_WINDOW_WITNESS_BUDGET: usize = 256;
-/// Maximum number of ready candidates to try per board. This prevents the
-/// search from spending its entire budget on many functionally equivalent
-/// producers (e.g., 257 Ashnod's Altars) before extending a successful
-/// activation sequence. The remaining budget is used to explore boards
-/// reached by those activations (e.g., activating the same Altar twice).
+/// Maximum number of distinct ready producers to try per board
+/// ([`ManaWindowWitnessSearch::from`]). Content-identical producers (a row of
+/// Ashnod's Altars) are one producer, so a late distinct one (The Golden
+/// Throne) is still tried; a board with more distinct producers than this
+/// leaves the search inconclusive rather than unpayable.
 const MAX_CANDIDATES_PER_BOARD: usize = 16;
+
+/// What makes two ready mana abilities of a board interchangeable for the
+/// window: the same ability of content-identical sources
+/// ([`crate::ai_support::filter::ObjectFingerprint`]) with the same choices
+/// made for them and the same activations used (CR 602.5b).
+type CandidateClass = (
+    crate::ai_support::filter::ObjectFingerprint,
+    Vec<crate::types::ability::ChosenAttribute>,
+    usize,
+    (u32, u32),
+);
 
 /// The outcome of [`mana_ability_window_mana_witness`]. Keeps budget exhaustion
 /// distinct from proving an activation payable or unaffordable.
@@ -28340,6 +28369,7 @@ fn mana_ability_window_mana_witness(
         .collect();
     let mut search = ManaWindowWitnessSearch {
         player,
+        source_id,
         cost,
         payable,
         candidates: &candidates,
@@ -28417,6 +28447,9 @@ fn payment_distinguished_mana_types(
 
 struct ManaWindowWitnessSearch<'a, F> {
     player: PlayerId,
+    /// The activation's source, which is never interchangeable with another
+    /// producer: the rest of its cost may still need it (CR 113.7a).
+    source_id: ObjectId,
     cost: &'a AbilityCost,
     payable: &'a F,
     candidates: &'a [(ObjectId, usize)],
@@ -28497,18 +28530,19 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
     /// which the cost is payable; each resolved board it reaches that is not
     /// is queued for [`Self::run`] to extend.
     ///
-    /// Interleaves readiness checking with activation attempts (CR 605.3c):
-    /// for each candidate, check readiness and immediately try activating it
-    /// before moving to the next candidate. This prevents spending the full
-    /// budget on readiness checks for many ready producers (e.g., 257
-    /// Ashnod's Altars) before trying the first one that could succeed.
-    /// Only [`MAX_CANDIDATES_PER_BOARD`] ready candidates are tried per board
-    /// to leave budget for extending activation sequences.
+    /// Each ready candidate is activated as soon as it is found ready. Of
+    /// content-identical candidates ([`CandidateClass`]) only the first is
+    /// activated: the boards the others reach are the same position with the
+    /// sources' roles swapped, so trying them only spends the budget a
+    /// distinct producer needs (twenty Ashnod's Altars ahead of The Golden
+    /// Throne). At most [`MAX_CANDIDATES_PER_BOARD`] distinct producers are
+    /// tried per board; one left untried makes the board inconclusive.
     fn from(&mut self, board: &GameState) -> WitnessOutcome {
         let player = self.player;
         let gates = super::mana_abilities::ManaActivationGates::compute(board);
         let mut exhausted = false;
-        let mut tried = 0;
+        let mut tried: Vec<CandidateClass> = Vec::new();
+        let mut distinct = 0;
         for &(mana_source, index) in self.candidates {
             let Some(def) = board
                 .objects
@@ -28535,13 +28569,16 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
             ) {
                 continue;
             }
-            // Bound the number of ready candidates tried per board to leave
-            // budget for extending activation sequences on the frontier.
-            if tried >= MAX_CANDIDATES_PER_BOARD {
+            let class = self.candidate_class(board, mana_source, index);
+            if class.as_ref().is_some_and(|class| tried.contains(class)) {
+                continue;
+            }
+            if distinct >= MAX_CANDIDATES_PER_BOARD {
                 exhausted = true;
                 break;
             }
-            tried += 1;
+            distinct += 1;
+            tried.extend(class);
             // Try this activation immediately before checking the next candidate.
             // The screen already verified readiness; activate_mana_ability will
             // handle cost payment and any prompts, and try_each accounts for
@@ -28957,6 +28994,35 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
             });
         }
         !covered
+    }
+
+    /// The [`CandidateClass`] of ability `index` of `mana_source` on `board`,
+    /// or `None` when it shares no class: the activation's own source, or a
+    /// source whose relations to other objects (an attachment, a pairing) the
+    /// fingerprint leaves out.
+    fn candidate_class(
+        &self,
+        board: &GameState,
+        mana_source: ObjectId,
+        index: usize,
+    ) -> Option<CandidateClass> {
+        if mana_source == self.source_id {
+            return None;
+        }
+        let fingerprint = crate::ai_support::filter::object_fingerprint(board, mana_source)?;
+        let chosen = board.objects.get(&mana_source)?.chosen_attributes.clone();
+        let used = |counts: &im::HashMap<(ObjectId, usize), u32>| {
+            counts.get(&(mana_source, index)).copied().unwrap_or(0)
+        };
+        Some((
+            fingerprint,
+            chosen,
+            index,
+            (
+                used(&board.activated_abilities_this_turn),
+                used(&board.activated_abilities_this_game),
+            ),
+        ))
     }
 
     fn clone_board(&mut self, board: &GameState) -> Option<GameState> {
@@ -29858,13 +29924,25 @@ fn manual_activation_mana_route_possible(
     source_id: ObjectId,
     ability_index: usize,
 ) -> bool {
-    super::mana_sources::has_activatable_player_choice_mana_ability_for_payment(
-        state, player, None, None,
-    ) && manual_activation_total_cost_may_satisfy(state, player, source_id, ability_index, |cost| {
-        one_of_announcements(cost)
-            .iter()
-            .any(|announced| casting_costs::extract_mana_leg(announced).is_some())
-    })
+    // Cheapest first: a candidate's shape, then the cost's, then each
+    // candidate's readiness.
+    super::mana_sources::player_choice_mana_abilities_for_payment(state, player)
+        .next()
+        .is_some()
+        && manual_activation_total_cost_may_satisfy(
+            state,
+            player,
+            source_id,
+            ability_index,
+            |cost| {
+                one_of_announcements(cost)
+                    .iter()
+                    .any(|announced| casting_costs::extract_mana_leg(announced).is_some())
+            },
+        )
+        && super::mana_sources::has_activatable_player_choice_mana_ability_for_payment(
+            state, player, None, None,
+        )
 }
 
 /// CR 601.2f + CR 602.2b: whether the total cost of `player`'s activation of
