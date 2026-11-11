@@ -11097,17 +11097,20 @@ fn target_filter_for_last_revealed_sub(effect: &Effect) -> Option<&TargetFilter>
     }
 }
 
-/// CR 701.20e + CR 608.2c: whether the parent instruction hands its
-/// empty-targeted child no object at all — no targets (a look at the
-/// controller's own library), or only player targets ("target player's
-/// library", "that player"). A child whose `ParentTarget` names the object the
-/// look produced has nothing to inherit in that case, so the resolution's
-/// reveal ledger supplies it (see [`inject_last_revealed_targets`]).
-fn parent_hand_off_supplies_no_object(ability: &ResolvedAbility) -> bool {
-    !ability
-        .targets
-        .iter()
-        .any(|target| matches!(target, TargetRef::Object(_)))
+/// CR 118.12 + CR 701.20e + CR 608.2c: whether `sub` is a resolution-time
+/// payment ("you may pay 2 life") whose immediate continuation acts on the
+/// card the preceding look produced through a bare `ParentTarget` ("If you do,
+/// put it into that player's graveyard"). The payment itself takes no object,
+/// so the look's result must be bound to it for the gated move to inherit.
+fn payment_gates_look_result_consumer(sub: &ResolvedAbility) -> bool {
+    matches!(sub.effect, Effect::PayCost { .. })
+        && sub.sub_ability.as_deref().is_some_and(|consumer| {
+            consumer.targets.is_empty()
+                && matches!(
+                    target_filter_for_last_revealed_sub(&consumer.effect),
+                    Some(TargetFilter::ParentTarget)
+                )
+        })
 }
 
 fn inject_last_revealed_targets(
@@ -25790,22 +25793,7 @@ fn resolve_chain_body(
             progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
-            && (effect_writes_last_revealed_ids(&ability.effect)
-                // CR 701.20e + CR 608.2c: a look/reveal result stays the
-                // chain's "it" through an intervening instruction that took no
-                // object of its own — Wand of Denial's "Look at the top card of
-                // target player's library. If it's a nonland card, you may pay
-                // 2 life. If you do, put it into that player's graveyard."
-                // hands `PayCost` only the look's PLAYER target, and a player
-                // can never satisfy the trailing move's object anaphor. The
-                // reveal ledger is this resolution's only object provenance,
-                // so bind it exactly as the immediate-producer case below does
-                // instead of inheriting the player in the generic branch.
-                || (parent_hand_off_supplies_no_object(ability)
-                    && matches!(
-                        target_filter_for_last_revealed_sub(&sub.effect),
-                        Some(TargetFilter::ParentTarget)
-                    )))
+            && effect_writes_last_revealed_ids(&ability.effect)
             && (target_filter_for_last_revealed_sub(&sub.effect).is_some()
                 || effect_consumes_parent_object_referent(&sub.effect)
                 || has_member_driven_repeat(sub.as_ref()))
@@ -25834,6 +25822,42 @@ fn resolve_chain_body(
             );
             stamp_parent_target_iteration_members(&mut sub_with_targets);
             progress = resolve_ability_chain_step(state, &sub_with_targets, events, depth + 1)?;
+        } else if sub.targets.is_empty()
+            && !state.last_revealed_ids.is_empty()
+            && effect_writes_last_revealed_ids(&ability.effect)
+            && payment_gates_look_result_consumer(sub)
+        {
+            // CR 701.20e + CR 608.2c + CR 400.7: a resolution-time payment
+            // between a look and the move it gates takes no object of its own,
+            // yet the move's "it" still names the looked-at card (Wand of
+            // Denial: "Look at the top card of target player's library. If it's
+            // a nonland card, you may pay 2 life. If you do, put it into that
+            // player's graveyard."). Bind the look's result to the payment node
+            // here, at the producer's own hand-off, pinned to the incarnation
+            // looked at, alongside the look's inherited player targets. The
+            // binding rides the payment through its optional prompt and the
+            // dependent move inherits it through the ordinary parent-target
+            // hand-off, so a later producer's result (an `ExileTop`) is never
+            // displaced by this look's ledger.
+            let mut payment = sub.as_ref().clone();
+            let mut occurrences = inherited_parent_occurrences(ability, sub);
+            occurrences.extend(state.last_revealed_ids.iter().map(|&id| {
+                (
+                    TargetRef::Object(id),
+                    state
+                        .objects
+                        .get(&id)
+                        .map(crate::types::identifiers::ObjectIncarnationRef::from_object),
+                )
+            }));
+            payment.replace_target_occurrences(occurrences);
+            apply_parent_chain_context(
+                &mut payment,
+                ability,
+                effect_context_object.as_ref(),
+                state,
+            );
+            progress = resolve_ability_chain_step(state, &payment, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_zone_changed_ids.is_empty()
             && matches!(ability.effect, Effect::Draw { .. })

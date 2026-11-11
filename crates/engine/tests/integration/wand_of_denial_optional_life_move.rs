@@ -9,11 +9,12 @@
 //! 119.4 makes the 2 life actual life loss; CR 400.3 puts the card into its
 //! owner's graveyard. The declared target is the *player* whose library is
 //! looked at, so the chained move must bind the looked-at card from the
-//! resolution's reveal ledger, not the inherited player target.
+//! look's result carried through the payment, not the inherited player target.
 
 use engine::types::ability::{
     AbilityCondition, AbilityCost, Effect, EffectOutcomeSignal, QuantityExpr, TargetFilter,
 };
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -32,6 +33,8 @@ struct WandBoard {
     runner: GameRunner,
     /// The staged top card of P1's library (`None` when the library is empty).
     top: Option<ObjectId>,
+    /// Whether the optional 2-life payment was offered (to the controller).
+    offered: bool,
 }
 
 /// P0 controls Wand of Denial and activates it targeting P1, answering the
@@ -53,18 +56,34 @@ fn activate_wand(top: Option<&str>, accept: bool) -> Option<WandBoard> {
         id
     });
     let mut runner = scenario.build();
-    let activation = runner.activate(wand, 0).target_player(P1);
-    if accept {
-        activation.accept_optional().resolve();
-    } else {
-        activation.decline_optional().resolve();
-    }
+    runner
+        .activate(wand, 0)
+        .target_player(P1)
+        .stop_at_optional()
+        .resolve();
+    // CR 118.12 + CR 608.2d: "you may pay 2 life" is the Wand controller's
+    // choice, not the targeted library owner's. Only a nonland top card reaches
+    // the payment at all.
+    let offered =
+        if let WaitingFor::OptionalEffectChoice { player, .. } = runner.state().waiting_for {
+            assert_eq!(player, P0, "the Wand's controller answers the payment");
+            runner
+                .act(GameAction::DecideOptionalEffect { accept })
+                .expect("answer the optional 2-life payment");
+            true
+        } else {
+            false
+        };
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "the activation must resolve back to priority, got {:?}",
         runner.state().waiting_for
     );
-    Some(WandBoard { runner, top })
+    Some(WandBoard {
+        runner,
+        top,
+        offered,
+    })
 }
 
 #[test]
@@ -72,6 +91,7 @@ fn wand_of_denial_paid_life_moves_the_looked_at_card_to_the_graveyard() {
     let Some(board) = activate_wand(Some("Bonesplitter"), true) else {
         return;
     };
+    assert!(board.offered, "a nonland top card offers the payment");
     let top = board.top.expect("staged top card");
     let state = board.runner.state();
     assert_eq!(
@@ -101,6 +121,7 @@ fn wand_of_denial_declining_the_payment_leaves_the_card_in_place() {
     let Some(board) = activate_wand(Some("Bonesplitter"), false) else {
         return;
     };
+    assert!(board.offered, "a nonland top card offers the payment");
     let top = board.top.expect("staged top card");
     let state = board.runner.state();
     assert_eq!(
@@ -123,6 +144,7 @@ fn wand_of_denial_land_on_top_offers_no_payment() {
     let Some(board) = activate_wand(Some("Forest"), true) else {
         return;
     };
+    assert!(!board.offered, "a land top card offers no payment");
     let top = board.top.expect("staged top card");
     let state = board.runner.state();
     assert_eq!(
@@ -140,6 +162,7 @@ fn wand_of_denial_empty_library_pays_nothing_and_moves_nothing() {
     let Some(board) = activate_wand(None, true) else {
         return;
     };
+    assert!(!board.offered, "an empty library offers no payment");
     let state = board.runner.state();
     assert_eq!(state.players[P0.0 as usize].life, 20, "no payment offered");
     assert!(
