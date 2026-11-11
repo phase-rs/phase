@@ -5636,8 +5636,8 @@ fn bundle_leftovers_preserve_the_scarcer_hybrid_for_jinnie_fay() {
         .add_artifact_from_oracle(P0, "Astral Cornucopia", ASTRAL)
         .id();
     s.with_counter(astral, CounterType::Generic("charge".into()), 2);
-    // Two red units keep this source-planning regression independent of the
-    // pool spender's separate first-hybrid allocation limitation with {G}{G}{R}.
+    // Two red units keep this source-planning regression focused on bundle
+    // leftovers; complete mixed-hybrid pool payments are covered separately above.
     let alena = s.add_creature(P0, "Alena, Kessig Trapper", 4, 3)
         .from_oracle_text_with_keywords(&["First strike"], "First strike\n{T}: Add an amount of {R} equal to the greatest power among creatures you control that entered this turn.\nPartner (You can have two commanders if both have partner.)")
         .id();
