@@ -11117,6 +11117,88 @@ mod tests {
         );
     }
 
+    /// A card whose only gap is a resolver feature (CounterExileRiderTailDropped).
+    /// Transcendent Dragon's ", then you may cast it without paying its mana cost"
+    /// tail on its counter-rider is parsed but dropped at runtime. The deck
+    /// coverage must surface this through `evaluate_deck_compatibility`.
+    #[test]
+    fn deck_coverage_marks_transcendent_dragon_resolver_gap_unsupported() {
+        use crate::parser::parse_oracle_text;
+
+        const TRANSCENDENT_DRAGON: &str =
+            "Flash\nFlying\nWhen this creature enters, if you cast it, counter target spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard, then you may cast it without paying its mana cost.";
+
+        let mut cards = Map::new();
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+
+        let parsed = parse_oracle_text(
+            TRANSCENDENT_DRAGON,
+            "Transcendent Dragon",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        // Merge MTGJSON keywords (empty for this test) with parser-extracted keywords.
+        let mut keywords: Vec<engine::types::keywords::Keyword> = Vec::new();
+        engine::database::synthesis::merge_extracted_keywords(
+            &mut keywords,
+            parsed.extracted_keywords,
+        );
+        let mut dragon = planechase_card_json("Transcendent Dragon", &[], &["Creature"]);
+        dragon["oracle_text"] = Value::String(TRANSCENDENT_DRAGON.to_string());
+        dragon["keywords"] = serde_json::to_value(keywords).unwrap();
+        dragon["abilities"] = serde_json::to_value(parsed.abilities).unwrap();
+        dragon["triggers"] = serde_json::to_value(parsed.triggers).unwrap();
+        dragon["static_abilities"] = serde_json::to_value(parsed.statics).unwrap();
+        dragon["replacements"] = serde_json::to_value(parsed.replacements).unwrap();
+        dragon["additional_cost"] = serde_json::to_value(parsed.additional_cost).unwrap();
+        dragon["parse_warnings"] = serde_json::to_value(parsed.parse_warnings).unwrap();
+        cards.insert("transcendent dragon".to_string(), dragon);
+
+        let db = CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap();
+
+        let request = DeckCompatibilityRequest {
+            main_deck: vec!["Plains".to_string(), "Transcendent Dragon".to_string()],
+            ..Default::default()
+        };
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        let coverage = result.coverage.expect("coverage present");
+        assert_eq!(coverage.total_unique, 2);
+        assert_eq!(coverage.supported_unique, 1);
+        assert_eq!(coverage.unsupported_cards.len(), 1);
+        let unsupported = &coverage.unsupported_cards[0];
+        assert_eq!(unsupported.name, "Transcendent Dragon");
+        // The resolver gap for the dropped counter-rider tail.
+        assert!(
+            unsupported
+                .gaps
+                .iter()
+                .any(|g| g
+                    .starts_with("ResolverFeature:structural:counter_exile_rider_tail_dropped")),
+            "expected resolver feature gap, got: {:?}",
+            unsupported.gaps
+        );
+        // The Counter effect details should be present in the parse details.
+        assert!(
+            !unsupported.parse_details.is_empty(),
+            "parse_details should not be empty"
+        );
+        use crate::game::coverage::ParseCategory;
+        // The free-cast tail appears in the trigger's source_text (category Trigger)
+        let has_counter_effect = unsupported.parse_details.iter().any(|item| {
+            (item.category == ParseCategory::Trigger || item.category == ParseCategory::Ability)
+                && item
+                    .source_text
+                    .as_deref()
+                    .is_some_and(|s| s.contains("cast it without paying"))
+        });
+        assert!(
+            has_counter_effect,
+            "Counter effect with free-cast tail should appear in parse details"
+        );
+    }
+
     /// A DFC commander whose two faces are each indexed under their own key,
     /// the way `data/card-data.json` stores every multi-face card (it holds no
     /// composite `"A // B"` keys at all). Both faces are mono-red so the deck's
