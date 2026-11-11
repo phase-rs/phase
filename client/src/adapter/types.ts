@@ -4734,6 +4734,12 @@ export interface DerivedViews {
    * `engine::game::derived_views::DerivedViews::unblocked_attack_previews`.
    */
   unblocked_attack_previews?: Record<string, UnblockedAttackPreview>;
+  /**
+   * CR 506.4c: each attacking creature's current attack target, keyed by attacker id. An attacker
+   * whose relation has ended is absent: it is still attacking, but not any player, planeswalker,
+   * or battle. Mirrors `engine::game::derived_views::DerivedViews::attack_targets`.
+   */
+  attack_targets?: Record<string, AttackTarget>;
 }
 
 /** Mirrors `engine::game::derived_views::UnblockedAttackPreview`. */

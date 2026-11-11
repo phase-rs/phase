@@ -210,7 +210,8 @@
       "player": "Greift {{player}} an",
       "yourPlaneswalker": "Greift deinen Planeswalker {{name}} an",
       "planeswalker": "Greift den Planeswalker {{name}} von {{player}} an",
-      "battle": "Greift die Schlacht {{name}} an"
+      "battle": "Greift die Schlacht {{name}} an",
+      "nothing": "Greift an, aber keinen Spieler, keinen Planeswalker und keine Schlacht"
     }
   },
   "actionButton": {
@@ -836,7 +837,10 @@
     "defendingPlayerTrample": "Verteidigender Spieler (Trampelschaden)",
     "pwControllerTrample": "PW-Beherrscher (Trampelschaden über PW)",
     "assignRemainingButton": "+{{amount}}",
-    "assignRemainingTo": "Die verbleibenden {{amount}} Schaden {{target}} zuteilen"
+    "assignRemainingTo_few": "Die verbleibenden {{count}} Schaden {{target}} zuteilen",
+    "assignRemainingTo_many": "Die verbleibenden {{count}} Schaden {{target}} zuteilen",
+    "assignRemainingTo_one": "Den verbleibenden {{count}} Schaden {{target}} zuteilen",
+    "assignRemainingTo_other": "Die verbleibenden {{count}} Schaden {{target}} zuteilen"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",

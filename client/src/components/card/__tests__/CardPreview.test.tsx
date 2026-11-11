@@ -821,10 +821,12 @@ describe("CardPreview attack target flag", () => {
     useGameStore.setState({ gameMode: null });
   });
 
+  /** `projected` is the engine's `attack_targets` entry; `null` models an ended relation. */
   function previewAttacker(
     previewed: number,
     attackTarget: AttackTarget,
     defendingPlayer: PlayerId,
+    projected: AttackTarget | null = attackTarget,
   ) {
     const objects = [
       battlefieldObject({ id: ATTACKER, name: "Grizzly Bears" }),
@@ -855,6 +857,7 @@ describe("CardPreview attack target flag", () => {
           pending_damage: [],
           regular_damage_done: false,
         },
+        derived: { attack_targets: projected ? { [ATTACKER]: projected } : {} },
       }),
       spellCosts: {},
     });
@@ -893,6 +896,21 @@ describe("CardPreview attack target flag", () => {
     previewAttacker(ATTACKER, { type: "Planeswalker", data: 201 }, 0);
     expect(screen.getByText("⚔ Attacking Opp 1's planeswalker Jace Beleren")).toBeInTheDocument();
     expect(screen.queryByText(/your planeswalker/)).toBeNull();
+  });
+
+  it("reads the engine's current target: a planeswalker removed from combat is not named", () => {
+    // CR 506.4c: the declared target still names Jace, but the engine dropped the relation, so the
+    // creature is attacking without attacking any player, planeswalker, or battle.
+    previewAttacker(ATTACKER, { type: "Planeswalker", data: 202 }, 2, null);
+    expect(
+      screen.getByText("⚔ Attacking, but not any player, planeswalker, or battle"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Jace Beleren/)).toBeNull();
+    cleanup();
+
+    // Positive sibling: the same declaration while the relation is live names the planeswalker.
+    previewAttacker(ATTACKER, { type: "Planeswalker", data: 202 }, 2);
+    expect(screen.getByText("⚔ Attacking Opp 3's planeswalker Jace Beleren")).toBeInTheDocument();
   });
 
   it("names the battle being attacked", () => {

@@ -169,7 +169,7 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
               incrementDisabled={remaining <= 0}
               remaining={remaining}
               onAssignRemaining={() => setAmount(i, amounts[i] + remaining)}
-              assignRemainingLabel={t("combat.assignRemainingTo", { amount: remaining, target: name })}
+              assignRemainingLabel={t("combat.assignRemainingTo", { count: remaining, target: name })}
             >
               <span className="text-sm font-medium text-gray-200">
                 {name}
@@ -202,7 +202,7 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
             incrementDisabled={remaining <= 0}
             remaining={remaining}
             onAssignRemaining={() => setTrampleDamage(trampleDamage + remaining)}
-            assignRemainingLabel={t("combat.assignRemainingTo", { amount: remaining, target: trampleLabel })}
+            assignRemainingLabel={t("combat.assignRemainingTo", { count: remaining, target: trampleLabel })}
           >
             <span className="text-sm font-medium text-amber-300">
               {trampleLabel}
@@ -221,7 +221,7 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
             incrementDisabled={remaining <= 0}
             remaining={remaining}
             onAssignRemaining={() => setControllerDamage(controllerDamage + remaining)}
-            assignRemainingLabel={t("combat.assignRemainingTo", { amount: remaining, target: controllerLabel })}
+            assignRemainingLabel={t("combat.assignRemainingTo", { count: remaining, target: controllerLabel })}
           >
             <span className="text-sm font-medium text-purple-300">
               {controllerLabel}
@@ -292,7 +292,7 @@ export function BlockerDamageAssignmentModal({ data }: { data: AssignBlockerDama
               incrementDisabled={remaining <= 0}
               remaining={remaining}
               onAssignRemaining={() => setAmount(i, amounts[i] + remaining)}
-              assignRemainingLabel={t("combat.assignRemainingTo", { amount: remaining, target: name })}
+              assignRemainingLabel={t("combat.assignRemainingTo", { count: remaining, target: name })}
             >
               <span className="text-sm font-medium text-gray-200">
                 {name}

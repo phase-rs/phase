@@ -210,7 +210,8 @@
       "player": "Atakuje: {{player}}",
       "yourPlaneswalker": "Atakuje twojego planeswalkera {{name}}",
       "planeswalker": "Atakuje planeswalkera {{name}} gracza {{player}}",
-      "battle": "Atakuje bitwę {{name}}"
+      "battle": "Atakuje bitwę {{name}}",
+      "nothing": "Atakuje, ale żadnego gracza, planeswalkera ani bitwy"
     }
   },
   "actionButton": {
@@ -836,7 +837,10 @@
     "defendingPlayerTrample": "Broniący gracz (Tratowanie)",
     "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)",
     "assignRemainingButton": "+{{amount}}",
-    "assignRemainingTo": "Przydziel pozostałe {{amount}} obrażeń do: {{target}}"
+    "assignRemainingTo_few": "Przydziel pozostałe {{count}} obrażenia do: {{target}}",
+    "assignRemainingTo_many": "Przydziel pozostałych {{count}} obrażeń do: {{target}}",
+    "assignRemainingTo_one": "Przydziel pozostałe {{count}} obrażenie do: {{target}}",
+    "assignRemainingTo_other": "Przydziel pozostałe {{count}} obrażenia do: {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",

@@ -19,6 +19,7 @@ use std::num::NonZeroUsize;
 
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::{declared_targets_in_chain, flatten_targets_in_chain};
+use crate::game::combat::{active_attack_target, AttackTarget};
 use crate::game::combat_damage::combat_damage_to_defender;
 use crate::game::effects::deal_damage::DamageContext;
 use crate::game::filter::{matches_target_filter, FilterContext};
@@ -1034,6 +1035,12 @@ pub struct DerivedViews {
     /// id. Display-only; before replacement and prevention effects (CR 614.1 / CR 615.1).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub unblocked_attack_previews: HashMap<ObjectId, UnblockedAttackPreview>,
+
+    /// CR 506.4c: each attacking creature's current attack target, keyed by attacker id. An
+    /// attacker whose relation has ended is absent: it is still an attacking creature, but it
+    /// is not attacking any player, planeswalker, or battle.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub attack_targets: HashMap<ObjectId, AttackTarget>,
 }
 
 /// Serialize-only wrapper. The wire shape is
@@ -1567,6 +1574,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         dungeon_rooms: dungeon_rooms(state),
         storm_count: storm_count(state),
         unblocked_attack_previews: unblocked_attack_previews(state),
+        attack_targets: attack_targets(state),
         ..DerivedViews::default()
     };
 
@@ -2260,6 +2268,22 @@ fn unblocked_attack_previews(state: &GameState) -> HashMap<ObjectId, UnblockedAt
                 damage
             };
             Some((id, UnblockedAttackPreview { damage, life_loss }))
+        })
+        .collect()
+}
+
+/// CR 400.7 + CR 506.4c: each attacker's relation read through the combat authority, which
+/// drops a planeswalker or battle removed from combat (CR 506.4) and a player who has left
+/// the game; empty outside combat.
+fn attack_targets(state: &GameState) -> HashMap<ObjectId, AttackTarget> {
+    let Some(combat) = &state.combat else {
+        return HashMap::new();
+    };
+    combat
+        .attackers
+        .iter()
+        .filter_map(|info| {
+            active_attack_target(state, info).map(|(target, _)| (info.object_id, target))
         })
         .collect()
 }

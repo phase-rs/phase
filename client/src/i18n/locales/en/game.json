@@ -210,7 +210,8 @@
       "player": "Attacking {{player}}",
       "yourPlaneswalker": "Attacking your planeswalker {{name}}",
       "planeswalker": "Attacking {{player}}'s planeswalker {{name}}",
-      "battle": "Attacking battle {{name}}"
+      "battle": "Attacking battle {{name}}",
+      "nothing": "Attacking, but not any player, planeswalker, or battle"
     }
   },
   "actionButton": {
@@ -869,7 +870,10 @@
     "defendingPlayerTrample": "Defending Player (Trample)",
     "pwControllerTrample": "PW Controller (Trample Over PW)",
     "assignRemainingButton": "+{{amount}}",
-    "assignRemainingTo": "Assign the remaining {{amount}} damage to {{target}}"
+    "assignRemainingTo_few": "Assign the remaining {{count}} damage to {{target}}",
+    "assignRemainingTo_many": "Assign the remaining {{count}} damage to {{target}}",
+    "assignRemainingTo_one": "Assign the remaining {{count}} damage to {{target}}",
+    "assignRemainingTo_other": "Assign the remaining {{count}} damage to {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",

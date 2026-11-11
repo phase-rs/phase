@@ -7,7 +7,7 @@ import {
 } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
-import type { AttackerInfo, ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
+import type { AttackTarget, ChosenAttribute, GameObject, Keyword, ManaCost, PlayerId, Zone } from "../../adapter/types.ts";
 import { ABILITY_BLOCK_REASON_KEY } from "../../viewmodel/abilityBlockReason.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 import { abilityLabel, loyaltyBadge, spellCostDisplay, stripLoyaltyCostPrefix } from "../../viewmodel/costLabel.ts";
@@ -1425,16 +1425,20 @@ function CardInfoPanel({
   const keywordSources = buildGrantedKeywordSources(attribution, obj.id, deref);
   const ptSources = buildPTSources(attribution, obj.id, deref);
   const chosenAttributes = obj.chosen_attributes ?? [];
-  // CR 506.3 + CR 508.1b: the engine-declared target of this creature's attack, if it is attacking.
+  // CR 506.3 + CR 508.1b: this creature's attack declaration, if it is attacking.
   const attacker = useGameStore((s) =>
     s.gameState?.combat?.attackers.find((a) => a.object_id === obj.id),
   );
+  // CR 506.4c: the engine's current target of this creature's attack; absent once that relation
+  // has ended, while the creature is still attacking.
+  const attackTarget = useGameStore((s) => s.gameState?.derived?.attack_targets?.[String(obj.id)]);
   const myId = usePlayerId();
   // `usePlayerId()` answers seat 0 in spectate mode, so the second-person arms are gated on
   // `useSpectatorMode()`: a spectator reads the third-person copy, never "you".
   const spectating = useSpectatorMode();
 
-  const formatAttackTarget = ({ attack_target: target, defending_player }: AttackerInfo): string => {
+  const formatAttackTarget = (target: AttackTarget | undefined, defendingPlayer: PlayerId): string => {
+    if (!target) return t("preview.attacking.nothing");
     switch (target.type) {
       case "Player":
         return !spectating && target.data === myId
@@ -1443,11 +1447,11 @@ function CardInfoPanel({
       case "Planeswalker": {
         const name = objects?.[String(target.data)]?.name;
         // CR 506.2: the planeswalker's controller is the defending player the engine recorded.
-        return !spectating && defending_player === myId
+        return !spectating && defendingPlayer === myId
           ? t("preview.attacking.yourPlaneswalker", { name })
           : t("preview.attacking.planeswalker", {
               name,
-              player: getOpponentDisplayName(defending_player),
+              player: getOpponentDisplayName(defendingPlayer),
             });
       }
       case "Battle":
@@ -1522,7 +1526,7 @@ function CardInfoPanel({
         <RichLabel text={formatTypeLine(obj.card_types, obj.keywords)} size="xs" />
       </div>
       {attacker && (
-        <div className="mt-1 font-semibold text-red-300">⚔ {formatAttackTarget(attacker)}</div>
+        <div className="mt-1 font-semibold text-red-300">⚔ {formatAttackTarget(attackTarget, attacker.defending_player)}</div>
       )}
 
       {activateLabels.length > 0 && (
