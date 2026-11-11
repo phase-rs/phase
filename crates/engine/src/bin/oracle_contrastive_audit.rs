@@ -11,7 +11,7 @@ use std::process;
 
 use engine::database::mtgjson::AtomicCardsFile;
 use engine::database::synthesis::build_oracle_face;
-use engine::game::coverage::card_face_gaps;
+use engine::game::coverage::card_face_coverage;
 use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use engine::types::ability::{ControllerRef, Effect, FilterProp, QuantityExpr, TargetFilter};
 use engine::types::ability_visit::visit_ability_def;
@@ -492,9 +492,14 @@ fn classify(
     mutant_face: &CardFace,
     kind: MutationKind,
 ) -> (Status, Vec<String>, Vec<String>, ProjectionPair) {
-    let base_gaps = card_face_gaps(base_face);
-    let mutant_gaps = card_face_gaps(mutant_face);
-    let status = match (base_gaps.is_empty(), mutant_gaps.is_empty()) {
+    let base_coverage = card_face_coverage(base_face);
+    let mutant_coverage = card_face_coverage(mutant_face);
+    let base_gaps = base_coverage.gap_handlers();
+    let mutant_gaps = mutant_coverage.gap_handlers();
+    let status = match (
+        base_coverage.supported_before_parse_warnings,
+        mutant_coverage.supported_before_parse_warnings,
+    ) {
         (false, false) => Some(Status::BothUnsupported),
         (false, true) => Some(Status::BaseUnsupported),
         (true, false) => Some(Status::MutantUnsupported),
