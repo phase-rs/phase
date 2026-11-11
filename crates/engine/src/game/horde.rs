@@ -1116,7 +1116,6 @@ fn reveal_library_token(
         copy: None,
         enter_tapped: EtbTapState::Unspecified,
         count: 1,
-        blocking_target: None,
         appended: Vec::new(),
         applied: HashSet::new(),
     };

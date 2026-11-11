@@ -164,7 +164,6 @@ pub fn resolve(
             controller: ability.controller,
             // Pool-drawn values name no donor object; empty mods are stamp-proof.
             donor: None,
-            blocking_target: None,
         }),
     });
 

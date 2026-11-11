@@ -44,6 +44,24 @@ pub(super) fn private_zone_selection<'a>(
     Some((choosing_player, source_zone, eligible))
 }
 
+/// CR 400.7e + CR 730.3c: Whether this placement is the dies-trigger
+/// "shuffle it into its owner's library" shape, i.e. the instruction is
+/// immediately followed by a terminal library shuffle. Only there may the
+/// recorded merged departure expand into several cards: the shuffle erases the
+/// order, so no owner arrangement is owed. An ordered top/bottom/nth placement
+/// keeps the single chosen object (base behavior; the multi-card ordered gap is
+/// pre-existing and not claimed by this PR).
+fn shuffle_terminated_placement(ability: &ResolvedAbility) -> bool {
+    let mut next = ability.sub_ability.as_deref();
+    while let Some(link) = next {
+        if matches!(link.effect, Effect::Shuffle { .. }) {
+            return true;
+        }
+        next = link.sub_ability.as_deref();
+    }
+    false
+}
+
 /// Place target card at a specific position in its owner's library. Unlike
 /// ChangeZone { destination: Library } which shuffles the destination library,
 /// this places at a specific position without shuffling.
@@ -122,10 +140,20 @@ pub fn resolve(
     // `resolved_targets` already returns EMPTY for a stale non-triggered
     // `SelfRef` (`ResolvedAbility::self_ref_is_current`); the `[source]` shape is
     // the triggered and `None`/`ParentTarget` fallbacks.
+    // CR 400.7e + CR 730.3c: the departure expansion belongs only to the
+    // shuffle-terminated "shuffle it into its owner's library" shape, where the
+    // order the components land in is irrelevant because the library is
+    // randomized immediately. An ordered placement (top/bottom/nth) keeps base
+    // behavior: the single chosen object, no expansion.
+    let shuffle_terminated = shuffle_terminated_placement(ability);
     // CR 730.3c + CR 609.3: a stale survivor does not suppress the departure's
-    // surviving components; only a departure with nothing left to act on is a
-    // no-op.
-    let departure_components = crate::game::merge::selfref_departure_components(state, ability);
+    // surviving components on the shuffle path; only a departure with nothing
+    // left to act on is a no-op. An ordered placement stays the base no-op.
+    let departure_components = if shuffle_terminated {
+        crate::game::merge::selfref_departure_components(state, ability)
+    } else {
+        Vec::new()
+    };
     if resolves_to_source
         && (effective_targets.is_empty()
             || effective_targets == [crate::types::ability::TargetRef::Object(ability.source_id)])
@@ -285,12 +313,16 @@ pub fn resolve(
     // source's own departure is recorded, the placement covers every object that
     // merged permanent became; a fresh choice stays the single chosen card.
     let original_population_len = collected_targets.len();
-    let collected_targets = crate::game::merge::expand_returned_merge_components(
-        state,
-        ability,
-        collected_targets,
-        &target_filter,
-    );
+    let collected_targets = if shuffle_terminated {
+        crate::game::merge::expand_returned_merge_components(
+            state,
+            ability,
+            collected_targets,
+            &target_filter,
+        )
+    } else {
+        collected_targets
+    };
     // CR 730.3c: the same action is taken upon each object the merged permanent
     // became, so a departure expansion is not a choose-among-candidates prompt.
     let departure_expanded = collected_targets.len() > original_population_len;
@@ -564,31 +596,15 @@ pub fn resolve(
         },
         other => other,
     };
-    // Whether the owner can arrange a group placed at this position. Every
-    // concrete position can carry more than one card at once (`BeneathTop` only
-    // through a merged permanent's split, since its producers are single-target),
-    // and the shared placement authority in `engine_resolution_choices` honors
-    // each of them. `RandomWithinTop` is a random placement, not an arrangement.
+    // Whether the owner can arrange a group placed at this position.
+    // `BeneathTop` is not: `EffectZoneChoice` delivery normalizes it to `Top`
+    // and no announced multi-target `BeneathTop` producer exists (Unexpectedly
+    // Absent is single-target). `RandomWithinTop` is a random placement, not an
+    // arrangement.
     let position_can_be_arranged = match &position {
-        LibraryPosition::Top
-        | LibraryPosition::Bottom
-        | LibraryPosition::NthFromTop { .. }
-        | LibraryPosition::BeneathTop { .. } => true,
-        LibraryPosition::RandomWithinTop { .. } => false,
+        LibraryPosition::Top | LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. } => true,
+        LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => false,
     };
-    // CR 730.3 + CR 730.3c + CR 401.4: a single selected permanent that is still
-    // a merged permanent leaves as its physical component cards (CR 730.3), and
-    // CR 730.3c applies this instruction to each of them. Those cards land in one
-    // library position at the same time, so each owner orders theirs (CR 401.4).
-    // The merge primitive delivers the whole pile as ONE leave event, so the
-    // arrangement is opened over the components and applied by that event's
-    // delivery (`engine_resolution_choices`) instead of being bypassed here.
-    let merged_leave_components: Option<Vec<ObjectId>> = to_place
-        .first()
-        .filter(|_| to_place.len() == 1)
-        .and_then(|id| state.objects.get(id))
-        .filter(|object| !object.merged_components.is_empty())
-        .map(|object| object.merged_components.clone());
     // CR 401.4 + CR 601.2c + CR 608.2d: an announced target set arrives in the
     // caster's announcement order, which is not an arrangement; the owner of two
     // or more cards put into one position of their library orders them as the
@@ -598,72 +614,30 @@ pub fn resolve(
     // is delivered below. A linked-exile pool is a resolution-time scan, not the
     // announcement. Resolution-time selections and ordered searches already
     // carry the chooser's own arrangement and never announce a target set.
-    //
-    // CR 730.3 + CR 730.3c: the arrangement is over PHYSICAL ARRIVALS, not the
-    // announced ids. One target id can be a still-merged battlefield permanent
-    // whose leave delivers its whole component stack (Riptide Gearhulk can pick
-    // a two-card pile plus another same-owner permanent: two targets, three
-    // arriving cards), so every selected id expands here.
-    //
-    // CR 730.3c: a recorded-departure expansion already lists the physical cards
-    // the merged permanent became. That trigger announced no target set, so
-    // without this branch its only recorded order was the delivery order built
-    // by `expand_returned_merge_components`, never the owner's own (CR 401.4).
-    let arrangement_members: Option<Vec<ObjectId>> = if announced_target_set {
-        Some(crate::game::merge::physical_arrivals(state, to_place))
-    } else if departure_expanded {
-        Some(to_place.to_vec())
-    } else {
-        merged_leave_components
-    };
-    // CR 701.24a + CR 401.4: "shuffle it into its owner's library" is parsed as
-    // a library placement followed by a `Shuffle` somewhere in the remaining
-    // chain — immediately for the exact-source form, and after intervening
-    // instructions for Elixir of Immortality ("shuffle this artifact and your
-    // graveyard into their owner's library": stage the artifact, move the
-    // graveyard, then shuffle). A shuffle is not a placement at a specific
-    // position, so nothing is arranged when a later instruction randomizes these
-    // owners' libraries; the direct delivery below stages the cards and the
-    // chained shuffle randomizes them.
-    let position_is_staged_for_shuffle = arrangement_members.as_deref().is_some_and(|members| {
-        let owners: Vec<PlayerId> = members
-            .iter()
-            .filter_map(|id| state.objects.get(id).map(|object| object.owner))
-            .collect();
-        chained_shuffle_randomizes_owner(state, ability, &owners)
-    });
-    if let Some(members) = arrangement_members.as_deref() {
-        if !target_filter.references_exiled_by_source()
-            && position_can_be_arranged
-            && !position_is_staged_for_shuffle
-        {
-            let owner_batches = super::change_zone::group_object_ids_by_owner_apnap(state, members);
-            if owner_batches.iter().any(|(_, cards)| cards.len() >= 2) {
-                // CR 401.4 + CR 101.1 + CR 608.2c + CR 608.2d: the arranger the
-                // instruction names is determined now, at resolution, and snapshotted
-                // onto each owner's batch. A named arranger that resolves to no player
-                // leaves the owner default standing; that fallback is unreachable for
-                // every current producer, whose `Controller` always resolves.
-                let arranger = arranger_filter.as_ref().and_then(|filter| {
-                    super::resolve_player_for_context_ref(state, ability, filter)
-                });
-                if !announced_target_set {
-                    // CR 701.24c: the direct delivery this branch replaces published
-                    // the placed objects' owners before the move; keep that publication
-                    // ahead of the order prompt for the same chained consumers.
-                    publish_finalized_owner_library_subjects(state, ability, &collected_targets);
-                }
-                super::change_zone::open_owner_library_arrangement(
-                    state,
-                    owner_batches,
-                    arranger,
-                    ability.source_id,
-                    position,
-                    false,
-                    ability.duration.clone(),
-                );
-                return Ok(());
-            }
+    if announced_target_set
+        && !target_filter.references_exiled_by_source()
+        && position_can_be_arranged
+    {
+        let owner_batches = super::change_zone::group_object_ids_by_owner_apnap(state, to_place);
+        if owner_batches.iter().any(|(_, cards)| cards.len() >= 2) {
+            // CR 401.4 + CR 101.1 + CR 608.2c + CR 608.2d: the arranger the
+            // instruction names is determined now, at resolution, and snapshotted
+            // onto each owner's batch. A named arranger that resolves to no player
+            // leaves the owner default standing; that fallback is unreachable for
+            // every current producer, whose `Controller` always resolves.
+            let arranger = arranger_filter
+                .as_ref()
+                .and_then(|filter| super::resolve_player_for_context_ref(state, ability, filter));
+            super::change_zone::open_owner_library_arrangement(
+                state,
+                owner_batches,
+                arranger,
+                ability.source_id,
+                position,
+                false,
+                ability.duration.clone(),
+            );
+            return Ok(());
         }
     }
     // CR 701.24a + CR 401.4: Top placement is reversed at request construction so the
@@ -709,41 +683,6 @@ pub fn resolve(
     );
 
     Ok(())
-}
-
-/// CR 701.24a + CR 401.4: whether a `Shuffle` anywhere after this instruction
-/// randomizes one of `owners`' libraries, so a placement staged only for it can
-/// never be an owner arrangement. The shuffle need not be the immediate child:
-/// Elixir of Immortality stages its artifact, moves the graveyard, and only then
-/// shuffles. A shuffle seeded from the owners this instruction publishes
-/// (`OwnerLibraryShuffleSubject`) covers them by construction; any other shuffle
-/// is resolved against its own player reference. A scoped shuffle whose player
-/// is not bound yet still fans over this instruction's owners, so it counts.
-fn chained_shuffle_randomizes_owner(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    owners: &[PlayerId],
-) -> bool {
-    let mut next = ability.sub_ability.as_deref();
-    while let Some(node) = next {
-        if let Effect::Shuffle { target } = &node.effect {
-            if node
-                .player_scope
-                .as_ref()
-                .is_some_and(super::is_owner_library_shuffle_scope)
-            {
-                return true;
-            }
-            match super::resolve_player_for_context_ref(state, node, target) {
-                Some(player) if owners.contains(&player) => return true,
-                Some(_) => {}
-                None if matches!(target, TargetFilter::ScopedPlayer) => return true,
-                None => {}
-            }
-        }
-        next = node.sub_ability.as_deref();
-    }
-    false
 }
 
 /// CR 607.2a: the cards in exile linked to `source_id` right now (the live

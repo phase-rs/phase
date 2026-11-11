@@ -926,7 +926,6 @@ fn apply_pending_counter_post_action(
             sacrifice_at,
             source_id,
             controller,
-            blocking_target,
         } => {
             // CR 111.1 + CR 111.10 + CR 603.6a: once ETB counters finish,
             // complete token entry exactly as the uninterrupted token path
@@ -986,12 +985,6 @@ fn apply_pending_counter_post_action(
                 crate::game::triggers::install_delayed_trigger(state, sacrifice_token, events);
             }
             super::token::record_last_created_token(state, object_id);
-            // CR 506.3e + CR 509.4: this finalize is the token's publication
-            // after the counter-ordering pause; a replacement-appended member's
-            // inherited entering block applies exactly once, here.
-            if let Some(attacker) = blocking_target {
-                crate::game::combat::place_blocking(state, object_id, attacker, events);
-            }
             true
         }
         PendingCounterPostAction::ContinueTokenCreation {
@@ -999,35 +992,27 @@ fn apply_pending_counter_post_action(
             spec,
             enter_tapped,
             remaining_count,
-            blocking_target,
         } => {
             if remaining_count == 0 {
                 return true;
             }
-            let effect_source = spec.source_id;
             let event = ProposedEvent::CreateToken {
                 owner,
                 spec,
                 copy: None,
                 enter_tapped,
                 count: remaining_count,
-                blocking_target,
                 appended: Vec::new(),
                 applied: HashSet::new(),
             };
             let created_ids = state.last_created_token_ids.clone();
-            // CR 506.3e + CR 509.4: the remaining tokens of the same (appended)
-            // batch keep their declared entering block across the pause.
-            super::token::apply_create_token_batch(
+            super::token::apply_create_token_after_replacement_with_created_ids(
                 state,
                 event,
                 created_ids,
                 PendingEffectResolutionEvent::Suppress,
-                effect_source,
-                blocking_target,
                 events,
             )
-            .is_completed()
         }
         // CR 614.1a + CR 616.1f: the rest of a compound CreateToken event — the
         // batches still to deliver after the one that paused — and the single
@@ -1042,7 +1027,6 @@ fn apply_pending_counter_post_action(
             attack_destination,
             source_id,
             controller,
-            blocking_target,
         } => {
             // CR 508.4 + CR 111.1 + CR 603.6a: complete copy-token entry after
             // replacement-processed counters finish, preserving attacking
@@ -1080,12 +1064,6 @@ fn apply_pending_counter_post_action(
             // buffer as a separate statement republished the withheld id and overwrote the guarded
             // list with it.
             super::token::record_last_created_copy_batch_token(state, object_id);
-            // CR 506.3e + CR 509.3d: this finalize is the copy's publication (the
-            // counter-ordering pause ends here), so the declared entering block
-            // applies exactly once, after the entrant is actually created.
-            if let Some(attacker) = blocking_target {
-                crate::game::combat::place_blocking(state, object_id, attacker, events);
-            }
             true
         }
         PendingCounterPostAction::ContinueCopyTokenCreation {
@@ -1135,7 +1113,6 @@ fn apply_pending_counter_post_action(
             controller,
             remaining_modifications,
             donor,
-            blocking_target,
         } => super::token_copy::apply_remaining_token_modifications_after_counter_pause(
             state,
             object_id,
@@ -1146,7 +1123,6 @@ fn apply_pending_counter_post_action(
             controller,
             remaining_modifications,
             donor,
-            blocking_target,
             events,
         ),
         action @ PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry { .. } => {
@@ -1201,7 +1177,9 @@ fn apply_pending_counter_post_action(
             // this shape needs no second predicate; it needs the source to stay the GUARDED ledger,
             // which is what `state.last_created_token_ids` is after the call above.
             let created_ids = state.last_created_token_ids.clone();
-            super::token::merge_created_ids_into_copy_frame(state, &created_ids);
+            if let Some(pending) = state.active_copy_token_mut() {
+                pending.created_ids = created_ids;
+            }
             true
         }
         PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant } => {
@@ -9219,7 +9197,6 @@ mod tests {
                     ability_injection:
                         crate::types::game_state::LiminalTokenAbilityInjection::ResolvedToken,
                     entry_events,
-                    blocking_target: None,
                 };
             let action = match route {
                 Route::FinalizeCopyTokenEntry => PendingCounterPostAction::FinalizeCopyTokenEntry {
@@ -9229,7 +9206,6 @@ mod tests {
                     attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                     source_id,
                     controller: PlayerId(0),
-                    blocking_target: None,
                 },
                 Route::FinalizeTokenEntry => PendingCounterPostAction::FinalizeTokenEntry {
                     object_id,
@@ -9238,7 +9214,6 @@ mod tests {
                     sacrifice_at: None,
                     source_id,
                     controller: PlayerId(0),
-                    blocking_target: None,
                 },
                 // Empty `remaining_modifications`: `apply_token_modifications` returns `true` on an
                 // empty slice, so the resume reaches its emit tail — the statement under test —
@@ -9254,7 +9229,6 @@ mod tests {
                         controller: PlayerId(0),
                         remaining_modifications: Vec::new(),
                         donor: None,
-                        blocking_target: None,
                     }
                 }
                 Route::LiminalEntryEmit => {
@@ -9512,7 +9486,6 @@ mod tests {
                     attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                     source_id,
                     controller: PlayerId(0),
-                    blocking_target: None,
                 },
                 Route::ApplyCopyTokenModificationsAndFinalize => {
                     PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
@@ -9525,7 +9498,6 @@ mod tests {
                         controller: PlayerId(0),
                         remaining_modifications: Vec::new(),
                         donor: None,
-                        blocking_target: None,
                     }
                 }
             };

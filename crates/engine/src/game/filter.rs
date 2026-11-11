@@ -25568,7 +25568,6 @@ mod tests {
                 controller: PlayerId(0),
                 // Test-only enter-as-copy fixture stages no donor; empty mods are stamp-proof.
                 donor: None,
-                blocking_target: None,
             }));
             *face_down_profile = Some(Box::new(FaceDownProfile::vanilla_2_2()));
         } else {

@@ -1824,7 +1824,6 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
-            blocking_target: None,
         };
 
         let result = replace_event(&mut state, proposed, &mut events);
@@ -1922,7 +1921,6 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
-            blocking_target: None,
         };
 
         let result = replace_event(&mut state, proposed, &mut events);
@@ -2015,7 +2013,6 @@ mod tests {
             count: 1,
             appended: Vec::new(),
             applied: HashSet::new(),
-            blocking_target: None,
         };
 
         let result = replace_event(&mut state, proposed, &mut events);

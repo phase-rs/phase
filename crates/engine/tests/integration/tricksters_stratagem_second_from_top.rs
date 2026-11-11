@@ -95,7 +95,6 @@ fn owner_chooses_and_top_branch_is_second_from_the_top() {
             player,
             object_id,
             top_position,
-            ..
         } => {
             assert_eq!(*player, P1, "the creature's owner makes the choice");
             assert_eq!(*object_id, victim);

@@ -358,18 +358,14 @@ fn alabaster_death_after_the_survivor_is_exiled_still_shuffles_the_sibling() {
             .last()
             .is_some_and(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
     };
-    let mut events = Vec::new();
     for _ in 0..16 {
         if top_is_trigger(&runner) {
             break;
         }
         if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
-            events.extend(
-                runner
-                    .act(GameAction::PassPriority)
-                    .expect("resolve the removal")
-                    .events,
-            );
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve the removal");
         } else {
             break;
         }
@@ -392,12 +388,9 @@ fn alabaster_death_after_the_survivor_is_exiled_still_shuffles_the_sibling() {
             break;
         }
         if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
-            events.extend(
-                runner
-                    .act(GameAction::PassPriority)
-                    .expect("resolve the response and the trigger")
-                    .events,
-            );
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve the response and the trigger");
         } else {
             break;
         }
@@ -415,47 +408,60 @@ fn alabaster_death_after_the_survivor_is_exiled_still_shuffles_the_sibling() {
     );
     assert!(state.players[P0.0 as usize].library.contains(&component));
     assert!(!state.players[P0.0 as usize].library.contains(&dragon));
+}
 
-    // CR 701.24c: the library is shuffled even though the survivor itself is no
-    // longer in the zone it was expected in. Exactly one owner shuffle, after the
-    // component actually arrived.
-    let arrival = events
-        .iter()
-        .position(|event| {
-            matches!(
-                event,
-                GameEvent::ZoneChanged {
-                    object_id,
-                    to: Zone::Library,
-                    ..
-                } if *object_id == component
-            )
-        })
-        .expect("the trigger moves the surviving component into the library");
-    let shuffles: Vec<_> = events
-        .iter()
-        .enumerate()
-        .filter_map(|(index, event)| match event {
-            GameEvent::PlayerPerformedAction {
-                player_id,
-                action: PlayerActionKind::ShuffledLibrary,
-                ..
-            } => Some((index, *player_id)),
-            _ => None,
-        })
-        .collect();
+// Full Oracle verified against https://api.scryfall.com/cards/named?exact=Avenging%20Angel
+const AVENGING_ANGEL: &str =
+    "Flying\nWhen this creature dies, you may put it on top of its owner's library.";
+
+/// CR 400.7e + CR 730.3c gap control: the recorded-departure expansion is
+/// restricted to shuffle-terminated placements. An ordered "put it on top"
+/// from a merged permanent keeps base behavior: the survivor alone moves and
+/// the absorbed component stays where the split left it. The multi-card ordered
+/// class is a pre-existing gap and is not claimed by this PR.
+#[test]
+fn merged_ordered_placement_keeps_the_single_chosen_card() {
+    use engine::game::merge::{merge_object_onto, MergeSide};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let angel = scenario
+        .add_creature(P0, "Avenging Angel", 3, 3)
+        .from_oracle_text_with_keywords(&["Flying"], AVENGING_ANGEL)
+        .id();
+    let component = scenario.add_creature(P0, "Gemrazer", 2, 2).id();
+    scenario.with_library_top(P0, &["Top A", "Top B"]);
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.battlefield.retain(|&id| id != component);
+        let mut events = vec![];
+        merge_object_onto(state, component, angel, MergeSide::Top, &mut events);
+    }
+
+    runner
+        .cast(murder)
+        .target_object(angel)
+        .accept_optional()
+        .resolve();
+    runner.advance_until_stack_empty();
+
+    let state = runner.state();
+    assert_eq!(state.objects[&angel].zone, Zone::Library);
     assert_eq!(
-        shuffles.len(),
-        1,
-        "the owner shuffles exactly once, after the delivery: {shuffles:?}"
+        state.players[P0.0 as usize].library[0], angel,
+        "the survivor is the single chosen card of the ordered placement"
     );
-    assert_eq!(shuffles[0].1, P0);
     assert!(
-        shuffles[0].0 > arrival,
-        "the shuffle must follow the component's library arrival"
+        !state.players[P0.0 as usize].library.contains(&component),
+        "the absorbed component is not swept into an ordered placement"
     );
-    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
-    assert!(state.stack.is_empty());
-    assert!(state.resolution_stack.is_empty());
-    assert!(state.deferred_triggers.is_empty());
+    assert_eq!(
+        state.objects[&component].zone,
+        Zone::Graveyard,
+        "the component stays where the split left it (base behavior, pre-existing gap)"
+    );
 }

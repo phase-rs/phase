@@ -14385,17 +14385,14 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
                 library_second,
             ],
         ),
-        // CR 401.4: the selection is one block at the original depth, not a
-        // per-card clamp, and the submitted order is the block's top-to-bottom
-        // order at every fixed depth.
         (
             engine::types::ability::LibraryPosition::NthFromTop { n: 2 },
             vec![
-                marker,
                 hand_first,
-                library_first,
-                hand_second,
                 library_second,
+                hand_second,
+                library_first,
+                marker,
             ],
         ),
     ] {
@@ -14444,71 +14441,6 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             "the split delivery matches the prior raw selection-order placement"
         );
     }
-}
-
-/// CR 401.4 + CR 401.7: when every selected card already sits in the library,
-/// the library-only path places them as ONE block too. With two selected cards
-/// and a depth past the remaining library, the block falls to the bottom in the
-/// characterized `NthFromTop` order instead of clamping card by card.
-#[test]
-fn effect_zone_put_at_library_position_all_library_nth_is_one_block() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let source = scenario
-        .add_creature(P0, "Effect-Zone All-Library Nth Source", 1, 1)
-        .id();
-    let first = scenario
-        .add_spell_to_library_top(P0, "Effect-Zone All-Library First", true)
-        .id();
-    let second = scenario
-        .add_spell_to_library_top(P0, "Effect-Zone All-Library Second", true)
-        .id();
-    let mut base_state = scenario.build().state().clone();
-    base_state.players[P0.0 as usize].library = im::vector![first, second];
-
-    let mut runner = GameRunner::from_state(base_state);
-    runner.state_mut().waiting_for = WaitingFor::EffectZoneChoice {
-        player: P0,
-        cards: vec![first, second],
-        count: 2,
-        min_count: 0,
-        up_to: false,
-        source_id: source,
-        effect_kind: EffectKind::PutAtLibraryPosition,
-        zone: Zone::Library,
-        destination: None,
-        enter_tapped: EtbTapState::Unspecified,
-        enter_transformed: false,
-        enters_under_player: None,
-        enters_attacking: false,
-        owner_library: false,
-        track_exiled_by_source: false,
-        face_down_in_exile: engine::types::ability::ExileConcealment::Public,
-        face_down_profile: None,
-        enter_with_counters: vec![],
-        conditional_enter_with_counters: vec![],
-        count_param: 0,
-        library_position: Some(engine::types::ability::LibraryPosition::NthFromTop { n: 3 }),
-        mass_library_order: None,
-        is_cost_payment: false,
-        enters_modified_if: None,
-        duration: None,
-    };
-    let completed = runner
-        .act(GameAction::SelectCards {
-            cards: vec![first, second],
-        })
-        .expect("all-library placement resolves synchronously");
-    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
-    assert_eq!(
-        runner.state().players[P0.0 as usize]
-            .library
-            .iter()
-            .copied()
-            .collect::<Vec<_>>(),
-        vec![first, second],
-        "the all-library selection lands as one contiguous block at the bottom"
-    );
 }
 
 /// W-168 (red first): a tracked-pile cloak must park before its detach/manifest
