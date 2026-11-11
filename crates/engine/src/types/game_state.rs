@@ -1416,9 +1416,10 @@ pub struct ManaSpentSourceSnapshot {
     /// it ("mana from a nontoken source"). The departure capture is keyed by the
     /// epoch the unit was pinned to, and that capture rolls over at a step
     /// boundary, so a cast record read later needs the bit ON the fact. `Unknown`
-    /// is the state of a unit whose producer fact named no bit (a payload written
-    /// before this field, a pooled producer row): the leaf then refuses instead of
-    /// guessing, and no current-format write leaves it unstated.
+    /// is the state of a unit whose producer fact named no bit — a payload written
+    /// before this field existed: the leaf then refuses instead of guessing, and no
+    /// current-format write leaves it unstated (a pooled producer row states the bit
+    /// its producing source held).
     #[serde(default, skip_serializing_if = "CapturedTokenBit::is_unknown")]
     pub source_token: CapturedTokenBit,
 }

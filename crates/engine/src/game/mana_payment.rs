@@ -471,7 +471,7 @@ pub(crate) fn retain_pooled_mana_producer_snapshots(state: &mut GameState) {
     // epoch checks stay where they were, inside the bucket. A `(source, incarnation)`
     // lookup would hand the first-recorded unit's fact to every other unit of the same
     // tenure, which is the same "the entry belongs to some unit, not this one"
-    // mismatch [`pooled_mana_producer_snapshot`] exists to prevent; the bucket keeps
+    // mismatch [`pooled_mana_producer_row`] exists to prevent; the bucket keeps
     // the pip's own rows together so the remaining conjuncts are a handful of
     // comparisons instead of a scan of the whole ledger.
     //
@@ -922,7 +922,7 @@ mod pooled_producer_ledger_index_tests {
 /// makes the answer a fact about that unit is its PIP. Every reader therefore asks
 /// the same question by the same key: the step/phase boundary that rebuilds the
 /// ledger ([`retain_pooled_mana_producer_snapshots`]), the payment that spends a
-/// unit ([`pooled_mana_producer_snapshot`]), and the restore boundary that admits
+/// unit ([`pooled_mana_producer_row`]), and the restore boundary that admits
 /// a save ([`GameState::pip_recorded_producer_epochs`]). Indexing the rows by that
 /// key ONCE and reusing the index across the batch is what keeps each of those
 /// paths linear in the number of units rather than quadratic: an unindexed scan
@@ -979,7 +979,7 @@ impl<'a> PooledProducerLedgerIndex<'a> {
     /// Every row this ledger holds for `pip`, in ledger order.
     ///
     /// The restore boundary reads the rows THIS way rather than through
-    /// [`Self::lki_for`]: it asks how many epochs the save states for one unit, so a
+    /// [`Self::row_for`]: it asks how many epochs the save states for one unit, so a
     /// second row is a contradiction it must see, not a miss it can skip past.
     pub(crate) fn rows_for(
         &self,

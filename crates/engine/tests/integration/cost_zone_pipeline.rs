@@ -15259,7 +15259,7 @@ fn restore_validates_the_delve_completion_by_its_variant() {
     let error = PersistedGameState::capture(state)
         .into_game_state()
         .expect_err(
-            "CR 700.14: a Delve completion whose eraced amount falls back to a forged copy must \
+            "CR 700.14: a Delve completion whose erased amount falls back to a forged copy must \
              be refused, or the resume rewrites the cast's expenditure",
         );
     match error {
