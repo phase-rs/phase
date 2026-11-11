@@ -911,97 +911,6 @@ fn unexpectedly_absent_fixed_depth_component_arrangement_survives_reopen() {
     ));
 }
 
-/// CR 400.7 + CR 730.3c: a predecessor payload (every staged-only field
-/// removed) cannot carry a private arrangement, so the resumed delivery lands
-/// the merged pile in announcement order. What it must NOT do is ask the same
-/// CR 903.9b question twice or lose a card: the answered replacement stays
-/// answered and both cards reach the correct slot.
-#[test]
-fn legacy_payload_resume_keeps_every_card_and_does_not_reask_the_answer() {
-    let mut scenario =
-        GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_mana_pool(P0, burial_mana());
-    scenario.with_library_top(P0, &["Sentinel"]);
-    let host = scenario
-        .add_creature_from_oracle(P0, "Otrimi, the Ever-Playful", 6, 6, OTRIMI_ORACLE)
-        .with_subtypes(vec!["Nightmare", "Beast"])
-        .commander()
-        .id();
-    let rider = scenario
-        .add_creature_to_hand_from_oracle(P0, "Gemrazer", 4, 4, GEMRAZER_ORACLE)
-        .with_subtypes(vec!["Beast"])
-        .id();
-    let burial = add_hallowed_burial(&mut scenario);
-    let mut runner = scenario.build();
-    merge_pair(&mut runner, host, rider);
-    let sentinel = library(&runner, P0)[0];
-    runner.cast(burial).resolve();
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { player: P0, .. }
-    ));
-
-    // Emulate the previous writer: the staged payload did not exist.
-    fn strip(v: &mut serde_json::Value) {
-        match v {
-            serde_json::Value::Object(map) => {
-                for key in [
-                    "staged",
-                    "consult_order",
-                    "consult_pos",
-                    "pending_chooser",
-                    "expected_origin",
-                ] {
-                    map.remove(key);
-                }
-                for child in map.values_mut() {
-                    strip(child);
-                }
-            }
-            serde_json::Value::Array(items) => items.iter_mut().for_each(strip),
-            _ => {}
-        }
-    }
-    let mut saved = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
-        .expect("the pause serializes");
-    strip(&mut saved);
-    let restored = serde_json::from_value::<PersistedGameState>(saved)
-        .expect("the predecessor payload restores")
-        .into_game_state()
-        .expect("the predecessor payload finalizes");
-    *runner.state_mut() = restored;
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { player: P0, .. }
-    ));
-
-    let declined = runner
-        .act(GameAction::ChooseReplacement { index: 1 })
-        .expect("P0 keeps its commander out of the command zone");
-    // The predecessor payload has no arrangement to publish, so the resumed
-    // delivery completes without the private prompt (documented restore
-    // contract). What this row pins is card safety: no card is lost and the
-    // answered replacement is not asked again.
-    let _ = &declined;
-    assert!(
-        !matches!(
-            runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { .. }
-        ),
-        "the answered CR 903.9b replacement is not asked again: {:?}",
-        runner.state().waiting_for
-    );
-    assert_eq!(
-        library(&runner, P0),
-        vec![sentinel, host, rider],
-        "both cards land beneath the sentinel in announcement order"
-    );
-    assert_eq!(zone(&runner, host), Zone::Library);
-    assert_eq!(zone(&runner, rider), Zone::Library);
-    assert_arrangement_finished(&runner);
-}
-
 /// CR 903.9b + CR 401.4: an earlier consultation can pause while the seeded
 /// permanent has not yet been consulted. Its original submitted order survives.
 #[test]
@@ -1216,4 +1125,85 @@ fn hallowed_burial_survivor_commander_choice_skips_a_departed_later_member() {
     assert_eq!(zone(&runner, departed), Zone::Exile);
     assert_eq!(zone(&runner, burial), Zone::Graveyard);
     assert_arrangement_finished(&runner);
+}
+
+/// The predecessor writer (`bea11941d`, v0.122.0) asked the owner for Hallowed
+/// Burial's order before the CR 903.9b commander choice. These saves are taken
+/// at that choice; see each fixture's `.provenance` for the generator and what
+/// the predecessor itself did next.
+const BASE_9039B_ORDER: &str = include_str!("../fixtures/base_9039b_hallowed_order.json");
+const BASE_9039B_MERGED: &str = include_str!("../fixtures/base_9039b_merged_hallowed.json");
+
+/// CR 401.4 + CR 903.9b: a predecessor save in which P0 had already arranged
+/// Gemrazer above its commander Otrimi (the reverse of battlefield order) and
+/// then paused on the commander's command-zone choice. Checked restore keeps
+/// that submitted order: declining puts Otrimi beneath Gemrazer, with no second
+/// prompt, and the result survives another save and reopen.
+#[test]
+fn base_writer_submitted_order_survives_checked_restore_through_the_decline() {
+    let restored = serde_json::from_str::<PersistedGameState>(BASE_9039B_ORDER)
+        .expect("the predecessor payload decodes")
+        .into_game_state()
+        .expect("the predecessor payload passes checked restore");
+    restored
+        .resolution_stack
+        .validate_at_rest(&restored.waiting_for)
+        .expect("the restored pause validates");
+    let mut runner = GameRunner::from_state(restored);
+    let (sentinel, otrimi, gemrazer) = (ObjectId(1), ObjectId(2), ObjectId(3));
+    assert_eq!(
+        runner.state().objects[&otrimi].name,
+        "Otrimi, the Ever-Playful"
+    );
+    assert_eq!(runner.state().objects[&gemrazer].name, "Gemrazer");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    assert_eq!(
+        library(&runner, P0),
+        vec![sentinel, gemrazer],
+        "the card ordered first is already at the bottom"
+    );
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("P0 keeps its commander out of the command zone");
+    assert_eq!(
+        library(&runner, P0),
+        vec![sentinel, gemrazer, otrimi],
+        "the order P0 submitted before the save, not battlefield order"
+    );
+    assert_arrangement_finished(&runner);
+    round_trip_arrangement(&mut runner);
+    assert_eq!(library(&runner, P0), vec![sentinel, gemrazer, otrimi]);
+    assert_arrangement_finished(&runner);
+}
+
+/// CR 616.1 + CR 730.3d + CR 903.9b: the predecessor save of the same pause
+/// with Otrimi merged over Gemrazer holds the commander's choice in two batch
+/// deliveries that the payload does not relate. The predecessor engine panicked
+/// on the decline, live and after restore (see the fixture's `.provenance`).
+/// Checked restore refuses the save with a typed error instead of resuming it
+/// in a guessed order.
+#[test]
+fn base_writer_merged_commander_pause_is_rejected_at_checked_restore() {
+    let decoded = serde_json::from_str::<PersistedGameState>(BASE_9039B_MERGED)
+        .expect("the predecessor payload decodes");
+    match decoded.into_game_state() {
+        Err(engine::types::game_state::PersistedRestoreError::UnresumableSharedBatchPause {
+            member,
+        }) => {
+            assert_eq!(
+                member.object_id,
+                ObjectId(2),
+                "the commander's pause is named"
+            );
+        }
+        Ok(state) => panic!(
+            "the unresumable pause must not restore: {:?}",
+            state.waiting_for
+        ),
+        Err(other) => panic!("expected the typed shared-pause rejection, got {other}"),
+    }
 }

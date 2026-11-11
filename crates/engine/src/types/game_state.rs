@@ -6978,16 +6978,6 @@ pub struct PendingBatchDeliveries {
     /// CR 616.1: staged common-approval lifecycle, if this batch was
     /// admitted to it. `None` is every non-staged batch and every legacy save;
     /// the `requests` loop above remains its authority.
-    ///
-    /// Restore contract: a payload written WITHOUT this field (any save from
-    /// the release that predates the staged lifecycle) cannot carry a private
-    /// owner arrangement, because the arrangement needs each member's approved
-    /// event, and those events exist only here. Such a payload resumes at the
-    /// current member and delivers the remaining cards in announcement order;
-    /// `requests` is the per-member suffix, so a member that already answered
-    /// before the save has no legacy representation and is not re-consulted.
-    /// Saves written by this engine keep `staged` and therefore keep the
-    /// owner's submitted order across a reopen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged: Option<StagedBatchDelivery>,
 }
@@ -17873,6 +17863,13 @@ pub enum PersistedRestoreError {
     /// never inferred, so the save is not resumable.
     #[error("persisted copy announcement for {copy_id:?} has targets before its announcing-opponent election and is not resumable")]
     UnelectedCopyAnnouncer { copy_id: ObjectId },
+    /// CR 616.1 + CR 730.3d: one replacement pause is held by two batch
+    /// deliveries that the payload does not relate (a predecessor save of
+    /// Hallowed Burial over a mutated commander at its CR 903.9b choice, after
+    /// the owner's order was submitted). The answer can settle only one of
+    /// them, so the save is refused rather than resumed in a guessed order.
+    #[error("persisted batch pause for {member:?} is held by two unlinked batch deliveries and is not resumable")]
+    UnresumableSharedBatchPause { member: ObjectIncarnationRef },
 }
 
 impl PreparedPersistedGameState {
@@ -18112,6 +18109,9 @@ impl PersistedGameState {
         // production restore funnels through (WASM `prepare_restored_game_state`,
         // `server-core`'s `from_persisted`, and offline tooling), rather than at
         // each caller.
+        if let Some(member) = state.resolution_stack.unresumable_shared_batch_pause() {
+            return Err(PersistedRestoreError::UnresumableSharedBatchPause { member });
+        }
         let recovered_terminal_rest =
             crate::game::engine::recover_terminal_resolution_rest_on_restore(&mut state)?;
         // Priority-time recovery gets first chance to retire the exact terminal

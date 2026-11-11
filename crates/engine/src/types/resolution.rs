@@ -4734,6 +4734,49 @@ impl ResolutionStack {
             .expect("checked resolution child must be present"))
     }
 
+    /// CR 616.1 + CR 730.3d: a staged-absent batch delivery paused on a
+    /// member, with no terminal for it, while a second batch delivery that is
+    /// not linked to it holds the same member paused. Answering the prompt
+    /// settles only the frame that owns it; nothing in the payload relates the
+    /// other frame to that answer, so its resume can never classify the member.
+    /// The predecessor writer produced this shape for a merged commander under a
+    /// mass library placement (Hallowed Burial over a mutated commander, paused
+    /// at its CR 903.9b choice), and that engine could not finish it either.
+    pub(crate) fn unresumable_shared_batch_pause(&self) -> Option<ObjectIncarnationRef> {
+        let paused: Vec<&PendingBatchDeliveries> = self
+            .frames
+            .iter()
+            .filter_map(|frame| match frame {
+                ResolutionFrame::BatchDelivery(batch) if batch.paused_current.is_some() => {
+                    Some(&**batch)
+                }
+                _ => None,
+            })
+            .collect();
+        paused.iter().enumerate().find_map(|(index, stranded)| {
+            let held = stranded.paused_current.as_ref()?;
+            if stranded.staged.is_some() || held.terminal_completion.is_some() {
+                return None;
+            }
+            let stranded_group = stranded.logical_zone_change_group.logical_group_id;
+            paused
+                .iter()
+                .enumerate()
+                .any(|(other_index, other)| {
+                    other_index != index
+                        && other
+                            .paused_current
+                            .as_ref()
+                            .is_some_and(|other_held| other_held.member == held.member)
+                        && other
+                            .component_delivery_parent
+                            .as_ref()
+                            .is_none_or(|link| link.parent_group_id != stranded_group)
+                })
+                .then_some(held.member)
+        })
+    }
+
     /// Validate a public boundary, where no batch owner may remain detached.
     pub fn validate_at_rest(&self, waiting_for: &WaitingFor) -> Result<(), ResolutionStackError> {
         self.validate(waiting_for)?;
