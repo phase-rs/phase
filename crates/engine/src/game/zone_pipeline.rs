@@ -3951,12 +3951,17 @@ pub(crate) fn reconcile_staged_batch_after_departure(
     let Some(mut owner) = buried else {
         return Ok(crate::game::engine_resolution_choices::DepartureSettlement::NotSettled);
     };
+    let run_start = events.len();
     let settle = reconcile_staged_owner(state, &mut owner, identity.group, events);
     // A buried owner cannot be popped here: the child frame owns the stack.
     // All abandoned slots were already recorded by the departure sweep, so the
     // batch is coherent; the child's resume reaches `BatchDelivery` and settles
-    // it through the ordinary drain.
-    let _ = settle;
+    // it through the ordinary drain. A run that delivered here is held on the
+    // owner for that settlement, exactly as a pausing run parks itself.
+    if settle {
+        let approval_end = events.len();
+        park_staged_run_events(state, &mut owner, events, run_start, approval_end);
+    }
     state
         .resolution_stack
         .visit_staged_batch_owner_mut(&identity, |pending| *pending = owner.clone());
