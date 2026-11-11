@@ -6437,3 +6437,53 @@ fn a_reversible_conversion_does_not_starve_the_altar_route_for_vizkopa_guildmage
         "the lifelink resolved"
     );
 }
+
+/// CR 601.2g + CR 605.3c (#10190 review): with many READY Ashnod's Altars
+/// (untapped, with creatures to sacrifice), the search must not spend its
+/// entire budget trying each Altar once before extending the first one.
+/// Jayemdae Tome's "{4}, {T}: Draw a card." needs two Altar activations
+/// ({C}{C}{C}{C}) with two creatures. The first Altar can be activated twice.
+/// The offer must be made and the activation must complete.
+#[test]
+fn many_ready_altars_fund_jayemdae_tome() {
+    let mut scenario = scenario_at_main();
+    let tome = scenario
+        .add_artifact_from_oracle(P0, "Jayemdae Tome", JAYEMDAE_TOME)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    // Add 257 ready (untapped) Ashnod's Altars
+    let altars: Vec<ObjectId> = (0..257)
+        .map(|_| add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield))
+        .collect();
+    // Two creatures to sacrifice
+    let creatures = [
+        scenario.add_vanilla(P0, 2, 2),
+        scenario.add_vanilla(P0, 2, 2),
+    ];
+    scenario.add_card_to_library_top(P0, "Drawn card");
+    let mut runner = build(scenario);
+    let index = non_mana_ability_index(&runner, tome);
+
+    // The Tome should be offered for manual payment
+    assert_eq!(
+        offered_payment_modes(&runner, tome, index),
+        vec![CastPaymentMode::Manual],
+        "the Tome is offered despite many ready Altars"
+    );
+    let waiting_for = activate_index(&mut runner, tome, index, CastPaymentMode::Manual);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    
+    // Activate the first Altar twice, sacrificing both creatures
+    let first_altar = altars[0];
+    activate_in_window(&mut runner, first_altar, &[creatures[0]], None);
+    activate_in_window(&mut runner, first_altar, &[creatures[1]], None);
+    assert_eq!(pool_total(&runner), 4, "two Altar activations made {{C}}{{C}}{{C}}{{C}}");
+    
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert_eq!(pool_total(&runner), 0, "the {{4}} was paid");
+    assert!(tapped(&runner, tome));
+
+    resolve_stack(&mut runner);
+    assert_eq!(hand_size(&runner, P0), 1, "the Tome drew");
+}

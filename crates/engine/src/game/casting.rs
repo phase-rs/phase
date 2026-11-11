@@ -28268,6 +28268,12 @@ fn one_of_announcements(cost: &AbilityCost) -> Vec<std::borrow::Cow<'_, AbilityC
 /// (Phyrexian Vault's only creature spent to the first Ironworks sacrifice
 /// before the Clue sacrifice that leaves it).
 const MANA_ABILITY_WINDOW_WITNESS_BUDGET: usize = 256;
+/// Maximum number of ready candidates to try per board. This prevents the
+/// search from spending its entire budget on many functionally equivalent
+/// producers (e.g., 257 Ashnod's Altars) before extending a successful
+/// activation sequence. The remaining budget is used to explore boards
+/// reached by those activations (e.g., activating the same Altar twice).
+const MAX_CANDIDATES_PER_BOARD: usize = 16;
 
 /// The outcome of [`mana_ability_window_mana_witness`]. Keeps budget exhaustion
 /// distinct from proving an activation payable or unaffordable.
@@ -28496,10 +28502,13 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
     /// before moving to the next candidate. This prevents spending the full
     /// budget on readiness checks for many ready producers (e.g., 257
     /// Ashnod's Altars) before trying the first one that could succeed.
+    /// Only [`MAX_CANDIDATES_PER_BOARD`] ready candidates are tried per board
+    /// to leave budget for extending activation sequences.
     fn from(&mut self, board: &GameState) -> WitnessOutcome {
         let player = self.player;
         let gates = super::mana_abilities::ManaActivationGates::compute(board);
         let mut exhausted = false;
+        let mut tried = 0;
         for &(mana_source, index) in self.candidates {
             let Some(def) = board
                 .objects
@@ -28526,6 +28535,13 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
             ) {
                 continue;
             }
+            // Bound the number of ready candidates tried per board to leave
+            // budget for extending activation sequences on the frontier.
+            if tried >= MAX_CANDIDATES_PER_BOARD {
+                exhausted = true;
+                break;
+            }
+            tried += 1;
             // Try this activation immediately before checking the next candidate.
             // The screen already verified readiness; activate_mana_ability will
             // handle cost payment and any prompts, and try_each accounts for

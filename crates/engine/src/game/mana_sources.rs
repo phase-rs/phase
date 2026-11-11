@@ -13,6 +13,7 @@
 //! inline resolution — which is why any irreversible sub-effect (damage,
 //! life loss, sacrifice) disqualifies a source from UI-level undo.
 
+use crate::game::effects::mana::resolve_restrictions;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::CounterCostSelection;
 use crate::types::ability::{cost_has_component, ManaSpendRestriction};
@@ -2706,21 +2707,18 @@ fn usable_mana_ability_net(
     // net equals the gross (e.g., KCI activation cost is one
     // sacrificed artifact, no mana — full 2 colorless yield).
     //
-    // Caveat: collapsing mana sub-cost to a single `mana_value`
-    // assumes the sub-cost is paid from the SAME color domain as
-    // the produced mana (filter-land case: pay {1} or any color,
-    // produce {U/W}). For exotic abilities whose mana sub-cost is
-    // a different color than what they produce — e.g. a
-    // hypothetical `{T}, Pay {U}: Add {2}{R}` — this net of 2 is
-    // pessimistic-but-safe in one direction (we never claim
-    // capacity we can't produce) but over-states feasibility in
-    // the other (the {U} sub-cost has to come from another
-    // source, which this scan doesn't model). Such cards are
-    // vanishingly rare in real Magic; if one is added the
-    // sub-cost color domain should be threaded through here
-    // rather than collapsed to `mana_value`.
-    let activation_cost =
-        mana_abilities::mana_sub_cost_of(&ability.cost).map_or(0, |cost| cost.mana_value());
+    // For the activation window capacity check (CR 601.2g), we use a
+    // conservative upper bound that does NOT subtract mana sub-costs.
+    // Conversion abilities like Manaforge Cinder ("{1}: Add {B} or {R}")
+    // have a mana sub-cost but can pay it from the pool the window builds
+    // (e.g., Ashnod's Altar's {C}{C}). Subtracting the sub-cost here
+    // would give zero net capacity and incorrectly refuse the window.
+    // The witness search will correctly model the sub-cost payment.
+    let activation_cost = if capacity_use == CapacityUse::ActivationWindow {
+        0
+    } else {
+        mana_abilities::mana_sub_cost_of(&ability.cost).map_or(0, |cost| cost.mana_value())
+    };
     Some(gross.saturating_sub(activation_cost))
 }
 
@@ -2730,17 +2728,19 @@ fn usable_mana_ability_net(
 /// discard mana, pay-life mana abilities, etc.), or a `{T}` ability whose cost
 /// asks the player to choose an object (Phyrexian Tower's sacrifice, Holdout
 /// Settlement's tapped creature).
+/// If `payment_context` is provided, only mana abilities whose output
+/// restrictions permit spending in that context are counted (CR 106.6).
 pub(crate) fn has_activatable_player_choice_mana_ability_for_payment(
     state: &GameState,
     controller: PlayerId,
     exclude: Option<ObjectId>,
-    _payment_context: Option<&PaymentContext<'_>>,
+    payment_context: Option<&PaymentContext<'_>>,
 ) -> bool {
     activatable_player_choice_mana_abilities_for_payment(
         state,
         controller,
         exclude,
-        _payment_context,
+        payment_context,
     )
     .next()
     .is_some()
@@ -2750,11 +2750,13 @@ pub(crate) fn has_activatable_player_choice_mana_ability_for_payment(
 /// [`has_activatable_player_choice_mana_ability_for_payment`] reports: a
 /// currently activatable mana ability whose activation the automatic payer
 /// leaves to the player, in battlefield order.
+/// If `payment_context` is provided, only mana abilities whose output
+/// restrictions permit spending in that context are included (CR 106.6).
 pub(crate) fn activatable_player_choice_mana_abilities_for_payment<'a>(
     state: &'a GameState,
     controller: PlayerId,
     exclude: Option<ObjectId>,
-    _payment_context: Option<&'a PaymentContext<'a>>,
+    payment_context: Option<&'a PaymentContext<'a>>,
 ) -> impl Iterator<Item = (ObjectId, usize)> + 'a {
     player_choice_mana_abilities_for_payment(state, controller).filter(
         move |&(object_id, index)| {
@@ -2765,7 +2767,7 @@ pub(crate) fn activatable_player_choice_mana_abilities_for_payment<'a>(
                     .and_then(|obj| obj.abilities.get(index))
                     .is_some_and(|ability| {
                         player_choice_mana_ability_ready_for_payment(
-                            state, controller, object_id, index, ability, None,
+                            state, controller, object_id, index, ability, payment_context,
                         )
                     })
         },
@@ -2824,13 +2826,16 @@ pub(crate) fn player_choice_mana_ability_ready_for_payment(
     object_id: ObjectId,
     idx: usize,
     ability: &AbilityDefinition,
-    _payment_context: Option<&PaymentContext<'_>>,
+    payment_context: Option<&PaymentContext<'_>>,
 ) -> bool {
     let gates = mana_abilities::ManaActivationGates::compute(state);
     player_choice_mana_ability_passes_screen(state, controller, object_id, idx, ability, &gates)
         && mana_abilities::can_activate_mana_ability_now_gated(
             state, controller, object_id, idx, ability, &gates,
         )
+        && payment_context.is_none_or(|ctx| {
+            mana_ability_output_permits_payment_context(state, object_id, ability, ctx)
+        })
 }
 
 /// CR 605.3a + CR 117.1d: every check of
@@ -2889,6 +2894,27 @@ pub(crate) fn player_choice_mana_ability_passes_screen(
         return false;
     }
     matches!(&*ability.effect, Effect::Mana { .. })
+}
+
+/// Check if a mana ability's produced mana restrictions are compatible with
+/// a payment context. Returns true if the mana produced by this ability can
+/// be spent in the given payment context.
+pub(crate) fn mana_ability_output_permits_payment_context(
+    state: &GameState,
+    object_id: ObjectId,
+    ability: &AbilityDefinition,
+    payment_context: &PaymentContext<'_>,
+) -> bool {
+    let Effect::Mana { restrictions, .. } = &*ability.effect else {
+        return true; // Non-mana abilities are not filtered here
+    };
+    // If there are no restrictions, the mana can be spent anywhere.
+    if restrictions.is_empty() {
+        return true;
+    }
+    // Resolve the restrictions and check if any allow spending in this context.
+    let resolved = resolve_restrictions(restrictions, state, object_id);
+    resolved.iter().any(|r| r.allows(payment_context))
 }
 
 /// CR 117.1d + CR 601.2g: One activation's producible mana shape for the
