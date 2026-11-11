@@ -955,6 +955,169 @@ fn a_phased_out_source_keeps_the_pass() {
     assert!(viewer_recommends_pass(&runner));
 }
 
+/// Guildless Commons, verbatim.
+const GUILDLESS_COMMONS: &str = "This land enters tapped.\nWhen this land enters, return a land you control to its owner's hand.\n{T}: Add {C}{C}.";
+/// Inspiration, verbatim.
+const INSPIRATION: &str = "Target player draws two cards.";
+
+/// The opponent's Resolve All asks only the untap question. P0 plays Guildless
+/// Commons ("When this land enters, return a land you control to its owner's
+/// hand.") beside an untapped Forest and passes; P1 casts Inspiration above the
+/// trigger and asks to resolve the stack. The trigger's own window would be held
+/// for the Forest by the departure reason, which another player's Resolve All
+/// doesn't read, as on main: the trigger resolves, and P0 is asked which land
+/// to return.
+#[test]
+fn another_players_resolve_all_reads_no_departure_hold() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = main_phase_scenario();
+    scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    let commons = scenario
+        .add_land_from_oracle(P0, "Guildless Commons", GUILDLESS_COMMONS)
+        .id();
+    let inspiration = scenario
+        .add_spell_to_hand_from_oracle(P1, "Inspiration", true, INSPIRATION)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    for _ in 0..2 {
+        scenario.add_real_card(P1, "Island", Zone::Library, db);
+    }
+    let mut runner = scenario.build();
+    move_to_zone(runner.state_mut(), commons, Zone::Hand, &mut Vec::new());
+    let card_id = runner.state().objects[&commons].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: commons,
+            card_id,
+        })
+        .expect("P0 plays Guildless Commons");
+    assert_eq!(
+        top_source_name(&runner).as_deref(),
+        Some("Guildless Commons")
+    );
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    );
+    runner.cast(inspiration).target_player(P1).commit();
+    assert_eq!(runner.state().stack.len(), 2);
+    runner
+        .act(GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        })
+        .expect("P1 asks to resolve the stack");
+
+    assert!(
+        !runner.state().stack.iter().any(|entry| runner
+            .state()
+            .objects
+            .get(&entry.source_id)
+            .is_some_and(|o| o.name == "Guildless Commons")),
+        "the Commons trigger resolved under P1's Resolve All"
+    );
+}
+
+/// Humble, verbatim.
+const HUMBLE: &str =
+    "Until end of turn, target creature loses all abilities and has base power and toughness 0/1.";
+
+/// CR 613.1f + CR 113.7a: Soliton is a Forest under Ashaya, so it has the
+/// intrinsic "{T}: Add {G}", and its own "{U}: Untap this creature." on the
+/// stack holds. Humble resolving above the untap removes that mana ability,
+/// while the untap on the stack survives: the source has no mana to give
+/// again, and the pass stays.
+#[test]
+fn an_ability_removed_by_a_layer_keeps_the_pass() {
+    let Some(db) = shared_card_db() else { return };
+    for humble in [false, true] {
+        let mut scenario = main_phase_scenario();
+        scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+        let soliton = scenario
+            .add_creature_from_oracle(P0, "Soliton", 3, 4, SOLITON)
+            .id();
+        let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Humble", true, HUMBLE)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        flush_layers(runner.state_mut());
+        clear_summoning_sickness(&mut runner, soliton);
+        tap_for_mana(&mut runner, island);
+        let untap = untap_ability_index(&runner, soliton);
+        activate(&mut runner, soliton, untap, &[]);
+        assert!(
+            mana_action(&runner, soliton).is_some(),
+            "Soliton taps for {{G}}"
+        );
+        if humble {
+            runner.cast(spell).target_object(soliton).commit();
+            for _ in 0..4 {
+                if runner.state().stack.len() == 1 {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            assert_eq!(top_source_name(&runner).as_deref(), Some("Soliton"));
+            assert!(
+                runner.state().objects[&soliton].abilities.is_empty(),
+                "Humble removed Soliton's abilities, its intrinsic mana among them"
+            );
+        }
+        assert_eq!(
+            viewer_recommends_pass(&runner),
+            humble,
+            "Humble: {humble}: whether the untap window passes"
+        );
+    }
+}
+
+/// Lotus Petal, verbatim.
+const LOTUS_PETAL: &str = "{T}, Sacrifice this artifact: Add one mana of any color.";
+/// Sol Ring, verbatim.
+const SOL_RING: &str = "{T}: Add {C}{C}.";
+
+/// CR 701.21a: Myr Welder with Soliton and Lotus Petal exiled with it can tap
+/// for mana by sacrificing itself, which leaves nothing for Soliton's untap to
+/// untap, so the pass stays. With Sol Ring instead, the same untap holds. The
+/// borrowed mana action is offered either way.
+#[test]
+fn a_mana_ability_that_consumes_its_source_keeps_the_pass() {
+    let Some(db) = shared_card_db() else { return };
+    for (name, text, holds) in [
+        ("Lotus Petal", LOTUS_PETAL, false),
+        ("Sol Ring", SOL_RING, true),
+    ] {
+        let mut scenario = main_phase_scenario();
+        let welder = scenario.add_real_card(P0, "Myr Welder", Zone::Battlefield, db);
+        let exiled = [
+            scenario
+                .add_creature_to_hand_from_oracle(P0, "Soliton", 3, 4, SOLITON)
+                .id(),
+            scenario
+                .add_artifact_to_hand_from_oracle(P0, name, text)
+                .id(),
+        ];
+        let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        lend_to_welder(&mut runner, welder, &exiled);
+        tap_for_mana(&mut runner, island);
+        let untap = untap_ability_index(&runner, welder);
+        activate(&mut runner, welder, untap, &[]);
+        assert_eq!(top_source_name(&runner).as_deref(), Some("Myr Welder"));
+        assert!(
+            mana_action(&runner, welder).is_some(),
+            "{name}: the borrowed mana action is offered"
+        );
+        assert_eq!(
+            !viewer_recommends_pass(&runner),
+            holds,
+            "{name}: whether the untap window holds"
+        );
+    }
+}
+
 /// The engine's own auto-pass reads the same hold. P0 taps Staff of Compleation
 /// ("{T}, Pay 2 life"), activates its "{5}: Untap this artifact." and copies it
 /// with Rings of Brighthearth, then sets auto-pass to the end of the turn over

@@ -500,6 +500,19 @@ fn resolution_untaps_ready_mana_source(
         .is_some_and(|source| mana_sources::untap_would_repeat_mana(source, player))
 }
 
+/// CR 701.26b + CR 605.3a: the untap reason of [`StandingPriorityPass::Held`]
+/// alone: `player`'s own activated ability on top wastes an untap on its own
+/// mana source. For a window another player's consent to resolve the stack
+/// would pass; it reads only the entry and its source, never the departure
+/// reason's board scan.
+pub(crate) fn own_top_wastes_an_untap(
+    state: &GameState,
+    player: PlayerId,
+    top: &StackEntry,
+) -> bool {
+    top.controller == player && resolution_untaps_ready_mana_source(state, player, top)
+}
+
 /// The object `ability` untaps when it is a plain "Untap this artifact." /
 /// "Untap this creature." and nothing else: one unconditional, untargeted,
 /// non-optional instruction with no "unless" payment, player scope or branch

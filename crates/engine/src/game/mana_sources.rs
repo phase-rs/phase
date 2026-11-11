@@ -453,9 +453,11 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
 /// state, counters, types and own ability definitions, with no other object,
 /// static or cost leg consulted and nothing activated, paid or copied. `source`
 /// must be untapped with no stun counter (an untap would remove the counter
-/// instead), and have a {T} mana ability whose cost doesn't move it off the
-/// battlefield (Treasure, Lotus Petal, Mirrored Lotus), or be a land with a
-/// basic land type's intrinsic "{T}: Add" (CR 305.6). Whatever that leaves
+/// instead), and have, among its effective abilities, a {T} mana ability whose
+/// cost doesn't move it off the battlefield (Treasure, Lotus Petal, Mirrored
+/// Lotus). Effective means after layers: a basic land type's intrinsic "{T}:
+/// Add" is there (CR 305.6), and an ability a layer-6 effect removed (Humble)
+/// isn't (CR 613.1f). Whatever that leaves
 /// unchecked (summoning sickness, an activation prohibition or restriction, a
 /// cost leg such as Celestial Prism's {2} or Springleaf Drum's creature to tap)
 /// counts toward holding, so the hold can stop once where a use turns out
@@ -476,28 +478,21 @@ pub(crate) fn untap_would_repeat_mana(
     {
         return false;
     }
-    let intrinsic_land_mana = source.card_types.core_types.contains(&CoreType::Land)
-        && source
-            .card_types
-            .subtypes
-            .iter()
-            .any(|subtype| super::mana_payment::land_subtype_to_mana_type(subtype).is_some());
-    intrinsic_land_mana
-        || source.abilities.iter().any(|ability| {
-            ability.kind == AbilityKind::Activated
-                && mana_abilities::is_mana_ability(ability)
-                && has_tap_component(&ability.cost)
-                && mana_abilities::is_renewable_mana_ability(ability)
-                && !cost_has_component(&ability.cost, |component| {
-                    matches!(
-                        component,
-                        AbilityCost::Exile {
-                            filter: Some(TargetFilter::SelfRef),
-                            ..
-                        }
-                    )
-                })
-        })
+    source.abilities.iter().any(|ability| {
+        ability.kind == AbilityKind::Activated
+            && mana_abilities::is_mana_ability(ability)
+            && has_tap_component(&ability.cost)
+            && mana_abilities::is_renewable_mana_ability(ability)
+            && !cost_has_component(&ability.cost, |component| {
+                matches!(
+                    component,
+                    AbilityCost::Exile {
+                        filter: Some(TargetFilter::SelfRef),
+                        ..
+                    }
+                )
+            })
+    })
 }
 
 /// The `TapLandForMana` rows [`activatable_mana_actions_for_player`] emits for

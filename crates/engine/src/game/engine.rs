@@ -10997,14 +10997,16 @@ fn stack_resolution_session_priority_decision(
 }
 
 /// CR 117.1d + CR 605.3a + CR 117.3d: whether `player`'s own window over the
-/// top of the stack is `Held` for a mana activation. Another player's consent to
-/// resolve the stack doesn't pass it: the meaningful-action check never counts a
-/// mana activation, so it can't see that window.
+/// top of the stack is held for a wasted untap on its own mana source. Another
+/// player's consent to resolve the stack doesn't pass it: the meaningful-action
+/// check never counts a mana activation, so it can't see that window. Only the
+/// bounded untap reason is asked (`priority::own_top_wastes_an_untap`); the
+/// departure reason keeps main's behavior here.
 fn window_held_for_mana(state: &GameState, player: PlayerId) -> bool {
-    state.stack.back().is_some_and(|top| {
-        priority::standing_priority_pass(state, player, Some(top))
-            == priority::StandingPriorityPass::Held
-    })
+    state
+        .stack
+        .back()
+        .is_some_and(|top| priority::own_top_wastes_an_untap(state, player, top))
 }
 
 /// CR 117.3b + CR 117.3d + CR 117.4 + CR 732.2b: whether `participant` has
