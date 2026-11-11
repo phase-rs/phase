@@ -785,13 +785,14 @@ fn kilo_freed_relic_ballista_win_kind_follows_the_loss_axis() {
 
 /// CR 704.3 + CR 704.5a + CR 704.5c: Scheming Aspirant drains 2 life per proliferate while the
 /// proliferate adds a poison counter, so the win kind is the threshold crossed first. From 20
-/// life and 1 poison, poison reaches ten a repetition before life reaches zero; from 18 the two
-/// cross together (one SBA batch); from 12 life crosses first; with no poison only life moves.
+/// life and 1 poison, poison reaches ten a repetition before life reaches zero; from 18 both fall
+/// in the same repetition, which whole repetitions cannot order, so the label is neutral; from 12
+/// life crosses first; with no poison only life moves.
 #[test]
 fn kilo_freed_relic_aspirant_win_kind_is_the_first_threshold_crossed() {
     for (life, poison, expected) in [
         (20, 1, WinKind::PoisonLoss),
-        (18, 1, WinKind::LethalDamage),
+        (18, 1, WinKind::ImmediateWin),
         (12, 1, WinKind::LethalDamage),
         (12, 0, WinKind::LethalDamage),
     ] {

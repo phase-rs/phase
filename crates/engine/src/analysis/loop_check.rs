@@ -82,8 +82,8 @@ pub enum WinKind {
     Decking,
     /// CR 104.2: an explicit "you win the game" / "that player loses the game"
     /// effect fires each cycle (e.g. an Aetherflux-style life-payment, a
-    /// Thassa's-Oracle-style deckout win). Reserved for loops whose win is a
-    /// printed win/loss condition rather than a resource threshold.
+    /// Thassa's-Oracle-style deckout win). Also names a loop whose life and poison
+    /// thresholds fall in the same repetition, which neither axis alone decides.
     ImmediateWin,
     /// CR 500.7: unbounded extra turns — a turns loop that wins by simply never
     /// passing the game back.
@@ -545,15 +545,11 @@ pub(crate) fn live_mandatory_loop_winner(
     if !delta.net_progress_for(winner) {
         return None;
     }
-    // Scope the live shortcut to a determinate loss axis — CR 704.5a life drain
-    // (`LethalDamage`) or CR 704.5c poison (`PoisonLoss`) — never a pure advantage
-    // engine or mill. classify's branch order (opp-life<0 → opp-poison>0 → …)
-    // reaches the poison branch before the Advantage fallthrough, so the winner's own
-    // lifegain does not mask a rising-poison loss.
-    if !matches!(
-        classify_win_kind(winner, delta, Some(cycle_end)),
-        WinKind::LethalDamage | WinKind::PoisonLoss
-    ) {
+    // CR 704.5a + CR 704.5c: the live shortcut needs an opponent's life or poison loss axis,
+    // never a pure advantage engine or mill.
+    if !(opponent_loses_along(winner, &delta.life, -1)
+        || opponent_loses_along(winner, &delta.poison, 1))
+    {
         return None;
     }
 
@@ -652,6 +648,17 @@ pub(crate) fn fallers_lives_pairwise_equal(frames: &[&GameState], fallers: &[Pla
     })
 }
 
+/// CR 704.5a / CR 704.5c: whether `axis` moves a player other than `controller` toward a loss,
+/// `sign` being the losing direction (-1 for life, +1 for poison).
+fn opponent_loses_along(
+    controller: PlayerId,
+    axis: &std::collections::BTreeMap<PlayerId, i64>,
+    sign: i64,
+) -> bool {
+    axis.iter()
+        .any(|(pid, &n)| sign * n > 0 && *pid != controller)
+}
+
 /// Derive the [`WinKind`] from the measured per-cycle delta.
 ///
 /// Classification is by the **most decisive** unbounded axis, in CR loss-priority
@@ -660,7 +667,8 @@ pub(crate) fn fallers_lives_pairwise_equal(frames: &[&GameState], fallers: &[Pla
 /// advantage engine (mana/tokens/draw/…). A loop that pumps several axes is named
 /// by the first loss condition it satisfies; if none, it is [`WinKind::Advantage`].
 /// With a `state`, a loop that moves an opponent's life and poison together is named by
-/// the axis whose threshold it crosses in fewer repetitions.
+/// the axis whose threshold it crosses in fewer repetitions, or [`WinKind::ImmediateWin`] when
+/// both fall in the same repetition.
 ///
 /// `controller` distinguishes "an opponent" from the loop's controller: life loss from
 /// / poison on / mill on a player who is *not* the loop's controller is an
@@ -676,16 +684,11 @@ pub(crate) fn classify_win_kind(
 ) -> WinKind {
     // CR 704.5a: unbounded life *loss* from an opponent (drain loops report a
     // negative life delta on the victim) is lethal. A life *gain* on the
-    // controller is advantage, not a win, so require a strictly-negative life
-    // axis on a non-controller player.
-    if delta
-        .life
-        .iter()
-        .any(|(pid, &n)| n < 0 && *pid != controller)
-    {
-        // CR 704.3 + CR 704.5a + CR 704.5c: the first threshold crossed decides; a tie is one
-        // SBA batch and stays `LethalDamage`.
-        let poison_first = state.is_some_and(|state| {
+    // controller is advantage, not a win.
+    if opponent_loses_along(controller, &delta.life, -1) {
+        // CR 704.3 + CR 704.5a + CR 704.5c: whole repetitions order the thresholds; two in the
+        // same final repetition are ordered only inside it, so neither axis names the win.
+        let order = state.and_then(|state| {
             let fewest = |axis: &std::collections::BTreeMap<PlayerId, i64>,
                           headroom: fn(&crate::types::player::Player) -> i64,
                           sign: i64| {
@@ -697,22 +700,18 @@ pub(crate) fn classify_win_kind(
                     })
                     .min()
             };
-            let life = fewest(&delta.life, |p| i64::from(p.life) - 1, -1);
-            let poison = fewest(&delta.poison, |p| 9 - i64::from(p.poison_counters), 1);
-            matches!((life, poison), (Some(life), Some(poison)) if poison < life)
+            let life = fewest(&delta.life, |p| i64::from(p.life) - 1, -1)?;
+            let poison = fewest(&delta.poison, |p| 9 - i64::from(p.poison_counters), 1)?;
+            Some(poison.cmp(&life))
         });
-        return if poison_first {
-            WinKind::PoisonLoss
-        } else {
-            WinKind::LethalDamage
+        return match order {
+            Some(std::cmp::Ordering::Less) => WinKind::PoisonLoss,
+            Some(std::cmp::Ordering::Equal) => WinKind::ImmediateWin,
+            Some(std::cmp::Ordering::Greater) | None => WinKind::LethalDamage,
         };
     }
     // CR 704.5c: unbounded poison counters on an opponent.
-    if delta
-        .poison
-        .iter()
-        .any(|(pid, &n)| n > 0 && *pid != controller)
-    {
+    if opponent_loses_along(controller, &delta.poison, 1) {
         return WinKind::PoisonLoss;
     }
     // CR 104.3c / CR 121.4: an unbounded *downward* library delta on a player
@@ -1372,6 +1371,31 @@ mod tests {
             live_mandatory_loop_winner(&start, &end, &delta),
             Some(pid(0)),
             "a single-opponent forced life-drain shortcuts to the winner"
+        );
+    }
+
+    /// CR 704.3 + CR 704.5a + CR 704.5c: a drain that crosses life and poison in the same
+    /// repetition is labelled `ImmediateWin` and still names its winner. Card-free because no
+    /// printed board forms a mandatory loop crossing both axes in one repetition: proliferate is a
+    /// choice (CR 701.34a); the nearest are Sanguine Bond + Exquisite Blood (mandatory, life only)
+    /// and Kilo, Apogee Mind + Scheming Aspirant (both axes, optional).
+    #[test]
+    fn live_winner_life_and_poison_tie_keeps_its_winner() {
+        let mut end = GameState::new_two_player(7);
+        end.players[1].life = 18;
+        end.players[1].poison_counters = 1;
+        let start = end.clone();
+        let mut delta = ResourceVector::default();
+        delta.life.insert(pid(1), -2);
+        delta.life.insert(pid(0), 2);
+        delta.poison.insert(pid(1), 1);
+        assert_eq!(
+            classify_win_kind(pid(0), &delta, Some(&end)),
+            WinKind::ImmediateWin
+        );
+        assert_eq!(
+            live_mandatory_loop_winner(&start, &end, &delta),
+            Some(pid(0))
         );
     }
 
