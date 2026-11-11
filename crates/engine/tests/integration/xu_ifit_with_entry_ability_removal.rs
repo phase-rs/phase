@@ -13,7 +13,9 @@
 //! simultaneous "is/has" effect exists (CR 603.10 + CR 603.6a + CR 611.2e): the owner of a
 //! completed `ChangeZone` / `ChangeZoneAll` hands its entries to the post-action collector while
 //! a later instruction of the same resolution may still apply such an effect (R4, R4d, R8, R8b,
-//! R9), including a `ChangeZone` resumed after a CR 616.1 replacement-ordering pause (R4p).
+//! R9), including a `ChangeZone` resumed after a CR 616.1 replacement-ordering pause that
+//! precedes the entry (R4p); a pause after an entry has been delivered keeps the entry with its
+//! owner (known gap).
 //!
 //! Consequence (b) rows (entry-modifying abilities such as replacement effects) land in phase 2.
 //!
