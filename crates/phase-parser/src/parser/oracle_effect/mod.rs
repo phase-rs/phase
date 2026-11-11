@@ -23215,7 +23215,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // is exercised by a test.
     continuation_ctx.clause_subject_chooser = ctx.clause_subject_chooser.clone();
     continuation_ctx.clause_player_scope = ctx.clause_player_scope.clone();
-    continuation_ctx.clause_opponent_may_scope = ctx.clause_opponent_may_scope.clone();
+    continuation_ctx.clause_opponent_may_scope = ctx.clause_opponent_may_scope;
     // CR 608.2c + CR 608.2k: a bare object pronoun in an anaphoric continuation
     // names the object the primary instruction acted on. When that object is the
     // ability's source ("destroy it and all creatures it blocked this turn",
