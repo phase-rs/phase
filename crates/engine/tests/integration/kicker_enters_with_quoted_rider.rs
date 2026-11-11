@@ -21,7 +21,8 @@
 //! test asserts the +1/+1 counters alongside the grant so that a spell which
 //! never resolved cannot satisfy either assertion vacuously. Degavolver and
 //! Necravolver each decline the sibling kicker to isolate the quoted half and
-//! prove variant gating both ways.
+//! prove variant gating both ways; a dual-kicker Degavolver cast then proves
+//! both same-entry riders survive replacement ordering (CR 616.1).
 //!
 //! REVERT DISCRIMINATOR: `degavolver_first_kicker_grants_regenerate`. Remove
 //! the `compose_enters_with_entry_grants` quoted composition from
@@ -36,7 +37,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{AbilityCost, Effect, KickerVariant, QuantityExpr};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -66,8 +67,10 @@ fn pool(colors: &[ManaType]) -> Vec<ManaUnit> {
 }
 
 /// Cast `id` through the real optional-cost flow, deciding each offered kicker
-/// in order, and resolve it to the battlefield.
-fn cast_with_kickers(runner: &mut GameRunner, id: ObjectId, decisions: &[bool]) {
+/// in order. Stops after the decisions; the caller drives resolution — the
+/// plain priority loop via `resolve_to_battlefield`, or a prompt-aware loop
+/// when the cast parks a choice (dual kickers force CR 616.1 ordering).
+fn announce_cast_with_kickers(runner: &mut GameRunner, id: ObjectId, decisions: &[bool]) {
     let card = runner.state().objects[&id].card_id;
     runner
         .act(GameAction::CastSpell {
@@ -90,6 +93,11 @@ fn cast_with_kickers(runner: &mut GameRunner, id: ObjectId, decisions: &[bool]) 
             .act(GameAction::DecideOptionalCost { pay: *pay })
             .expect("P0 decides the kicker");
     }
+}
+
+/// Drive a cast creature to the battlefield through priority passes. Any other
+/// prompt is a test bug — a cast that parks a choice needs its own drive loop.
+fn resolve_to_battlefield(runner: &mut GameRunner, id: ObjectId) {
     while runner.state().objects.get(&id).map(|o| o.zone) != Some(Zone::Battlefield) {
         match &runner.state().waiting_for {
             WaitingFor::Priority { .. } => {
@@ -100,6 +108,13 @@ fn cast_with_kickers(runner: &mut GameRunner, id: ObjectId, decisions: &[bool]) 
             other => panic!("unexpected waiting state while resolving: {other:?}"),
         }
     }
+}
+
+/// Cast `id` through the real optional-cost flow, deciding each offered kicker
+/// in order, and resolve it to the battlefield.
+fn cast_with_kickers(runner: &mut GameRunner, id: ObjectId, decisions: &[bool]) {
+    announce_cast_with_kickers(runner, id, decisions);
+    resolve_to_battlefield(runner, id);
 }
 
 fn counters(runner: &GameRunner, id: ObjectId) -> u32 {
@@ -127,7 +142,9 @@ fn ability_index(runner: &GameRunner, source: ObjectId, pick: fn(&Effect) -> boo
         .expect("the ability is present")
 }
 
-fn cast_degavolver(decisions: &[bool]) -> (GameRunner, ObjectId) {
+/// Degavolver in P0's hand with a pool covering the base cost plus BOTH
+/// kickers ({1}{W} + {1}{B} + {R}); built, not yet cast.
+fn degavolver_ready() -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let degavolver = scenario
@@ -148,7 +165,11 @@ fn cast_degavolver(decisions: &[bool]) -> (GameRunner, ObjectId) {
             ManaType::Colorless,
         ]),
     );
-    let mut runner = scenario.build();
+    (scenario.build(), degavolver)
+}
+
+fn cast_degavolver(decisions: &[bool]) -> (GameRunner, ObjectId) {
+    let (mut runner, degavolver) = degavolver_ready();
     cast_with_kickers(&mut runner, degavolver, decisions);
     (runner, degavolver)
 }
@@ -229,6 +250,86 @@ fn degavolver_unkicked_gets_neither_counters_nor_grant() {
             .any(|a| matches!(&*a.effect, Effect::Regenerate { .. })),
         "the regenerate rider is gated on kicker (CR 702.33d), so an unkicked \
          Degavolver must NOT have it"
+    );
+}
+
+/// DUAL-KICKER COLLISION (CR 702.33d + CR 616.1f). Both kickers paid, so BOTH
+/// replacements apply: all three +1/+1 counters (2 black + 1 red), first
+/// strike from the red half, and an activatable "Pay 3 life: Regenerate" from
+/// the black half. Each half's grant wrapper heads its execute chain, so
+/// neither half's counters fold into the entry event; both continuations defer
+/// and the drain must preserve both — dropping either loses a rider and its
+/// counters. Exercises replacement ordering across both halves.
+#[test]
+fn degavolver_both_kickers_keep_all_counters_and_both_grants() {
+    let (mut runner, degavolver) = degavolver_ready();
+    announce_cast_with_kickers(&mut runner, degavolver, &[true, true]);
+    assert_eq!(
+        runner.state().objects[&degavolver].kickers_paid,
+        vec![KickerVariant::First, KickerVariant::Second]
+    );
+    // CR 616.1: both replacements apply to the same entry, so P0 orders them.
+    // Black first; the drain must still preserve the red half. The lookup is
+    // by description so the test pins the offered order explicitly rather
+    // than assuming candidate positions.
+    let mut ordered = false;
+    while runner.state().objects.get(&degavolver).map(|o| o.zone) != Some(Zone::Battlefield) {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority to resolve the creature");
+            }
+            WaitingFor::ReplacementChoice {
+                player,
+                candidates,
+                kind,
+                ..
+            } => {
+                assert_eq!(*player, P0, "P0 orders its own entry replacements");
+                assert!(
+                    matches!(kind, ReplacementChoiceKind::Order),
+                    "two applicable mandatory replacements force ordering, got {kind:?}"
+                );
+                assert_eq!(candidates.len(), 2, "both kicked halves offered");
+                let black = candidates
+                    .iter()
+                    .position(|c| c.description.contains("{1}{B}"))
+                    .expect("the black rider is offered");
+                runner
+                    .act(GameAction::ChooseReplacement { index: black })
+                    .expect("order the black rider first");
+                ordered = true;
+            }
+            other => panic!("unexpected waiting state while resolving: {other:?}"),
+        }
+    }
+    assert!(
+        ordered,
+        "both kickers paid must force a CR 616.1 ordering choice"
+    );
+    assert_eq!(
+        counters(&runner, degavolver),
+        3,
+        "both kicked replacements must place all three +1/+1 counters (2 black + 1 red)"
+    );
+    assert!(
+        runner.state().objects[&degavolver].has_keyword(&Keyword::FirstStrike),
+        "the paid {{R}} half must grant first strike"
+    );
+    let index = ability_index(&runner, degavolver, |e| {
+        matches!(e, Effect::Regenerate { .. })
+    });
+    let outcome = runner.activate(degavolver, index).resolve();
+    assert_eq!(outcome.life_delta(P0), -3);
+    assert!(
+        has_regeneration_shield(&runner, degavolver),
+        "the paid {{1}}{{B}} half must grant an activatable regenerate ability"
+    );
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "activation must resolve cleanly, got {:?}",
+        outcome.final_waiting_for()
     );
 }
 
