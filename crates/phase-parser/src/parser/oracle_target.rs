@@ -7,13 +7,13 @@ use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    filter_contains_filter_prop, AggregateFunction, AttachmentKind, AttachmentReferent,
-    BlockPairDirection, CardTypeSetSource, ChoiceType, CombatHistoryScope, CombatRelation,
-    CombatRelationSubject, Comparator, ControllerRef, CostCategory, CountScope, CrewRelation,
-    DamageKindFilter, FilterProp, NameStickerSet, ObjectProperty, ObjectScope, Parity,
-    ParitySource, PlayerFilter, PlayerRelation, PropertyAggregate, PtStat, PtValueScope,
-    QuantityExpr, QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
-    TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
+    AggregateFunction, AttachmentKind, AttachmentReferent, BlockPairDirection, CardTypeSetSource,
+    ChoiceType, CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
+    ControllerRef, CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp,
+    NameStickerSet, ObjectProperty, ObjectScope, Parity, ParitySource, PlayerFilter,
+    PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
+    ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -7173,8 +7173,10 @@ pub(crate) fn strip_block_history_clauses(lower: &str) -> String {
     stripped
 }
 
-/// CR 608.2c + CR 608.2i: does `lower` hold a block-history clause that none of
-/// `populations` carries as a `BlockPairing` filter of the clause's own direction and window?
+/// CR 608.2c + CR 608.2i: does `lower` hold a block-history clause that `populations`
+/// don't carry as a restricting `BlockPairing` filter of the clause's own direction and
+/// window? Each clause consumes one such filter, so a represented clause can't vouch for a
+/// second clause of the same shape (`restricting_block_pairings`).
 /// Both ways a parse drops the clause land here: a partner no subject word covers
 /// (Triton Tactics: "one of those creatures"; Time to Reflect's filter phrase "a Zombie"),
 /// and a recognized "it" or "that creature" whose antecedent `resolve_relation_subject`
@@ -7183,28 +7185,61 @@ pub(crate) fn population_drops_block_history_clause(
     lower: &str,
     populations: &[&TargetFilter],
 ) -> bool {
+    let mut available: Vec<(BlockPairDirection, CombatHistoryScope)> = populations
+        .iter()
+        .flat_map(|population| restricting_block_pairings(population))
+        .collect();
     let mut remaining = lower;
     while let Some((_, clause, rest)) =
         nom_primitives::scan_preceded(remaining, parse_block_history_clause)
     {
-        let represented = matches!(clause.partner, HistoryPartner::Subject(_))
-            && populations.iter().any(|population| {
-                filter_contains_filter_prop(population, &|prop| {
-                    matches!(
-                        prop,
-                        FilterProp::CombatRelation {
-                            relation: CombatRelation::BlockPairing { direction, scope },
-                            ..
-                        } if *direction == clause.direction && *scope == Some(clause.scope)
-                    )
-                })
-            });
-        if !represented {
-            return true;
+        let matched = matches!(clause.partner, HistoryPartner::Subject(_))
+            .then(|| {
+                available
+                    .iter()
+                    .position(|&key| key == (clause.direction, clause.scope))
+            })
+            .flatten();
+        match matched {
+            Some(index) => {
+                available.swap_remove(index);
+            }
+            None => return true,
         }
         remaining = rest;
     }
     false
+}
+
+/// CR 608.2i: the `BlockPairing` history relations that restrict `filter`'s objects, one
+/// entry per relation. A relation restricts only as a conjunct: under negation
+/// (`Not`) it excludes objects, and in a disjunction (`AnyOf`, `Or`) another branch can
+/// admit an object the relation doesn't, so neither represents a clause.
+pub(crate) fn restricting_block_pairings(
+    filter: &TargetFilter,
+) -> Vec<(BlockPairDirection, CombatHistoryScope)> {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .filter_map(|prop| match prop {
+                FilterProp::CombatRelation {
+                    relation:
+                        CombatRelation::BlockPairing {
+                            direction,
+                            scope: Some(scope),
+                        },
+                    ..
+                } => Some((*direction, *scope)),
+                _ => None,
+            })
+            .collect(),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .flat_map(restricting_block_pairings)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// CR 608.2k: whether a bare "it" heading a combat-history relative clause
@@ -13033,6 +13068,51 @@ mod tests {
         assert!(!population_drops_block_history_clause(
             "destroy each creature that blocked or was blocked this turn.",
             &[&bare]
+        ));
+        // Each clause needs its own filter: the first represented clause can't vouch
+        // for a second one of the same shape whose filter was dropped.
+        let two_clauses = "destroy all creatures it blocked this turn, then tap all creatures it blocked this turn.";
+        assert!(!population_drops_block_history_clause(
+            two_clauses,
+            &[&blocked_by_source, &blocked_by_source]
+        ));
+        assert!(population_drops_block_history_clause(
+            two_clauses,
+            &[&blocked_by_source, &bare]
+        ));
+        // A negated or disjunctive relation doesn't restrict the population.
+        let relation = || FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope: Some(CombatHistoryScope::ThisTurn),
+            },
+            subject: CombatRelationSubject::Source,
+        };
+        let clause = "destroy all creatures it blocked this turn.";
+        for unrestricted in [
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Not {
+                prop: Box::new(relation()),
+            }])),
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::AnyOf {
+                props: vec![FilterProp::Token, relation()],
+            }])),
+            TargetFilter::Or {
+                filters: vec![bare.clone(), blocked_by_source.clone()],
+            },
+            TargetFilter::Not {
+                filter: Box::new(blocked_by_source.clone()),
+            },
+        ] {
+            assert!(
+                population_drops_block_history_clause(clause, &[&unrestricted]),
+                "{unrestricted:?} doesn't represent the clause"
+            );
+        }
+        assert!(!population_drops_block_history_clause(
+            clause,
+            &[&TargetFilter::And {
+                filters: vec![bare.clone(), blocked_by_source.clone()],
+            }]
         ));
     }
 

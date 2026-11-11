@@ -24651,21 +24651,31 @@ fn resolve_chain_body(
     // CR 608.2c + CR 608.2h: a later instruction may read a public-to-hidden
     // move's last-known controller/owner metadata, without treating the hidden
     // object itself as an available parent referent.
-    // CR 608.2c: an instruction that left no referent event still names the object
-    // its root instruction announced (`announced_object_context`).
-    let effect_context_object = parent_referent_context_from_events(state, effect_events)
-        .or_else(|| announced_object_context(state, ability))
-        .or_else(|| {
-            ability
-                .sub_ability
-                .as_deref()
-                .is_some_and(|sub| {
-                    effect_refs_parent_target_metadata(&sub.effect)
-                        && !effect_requires_parent_target_object(&sub.effect)
-                })
-                .then(|| library_move_metadata_context_from_events(state, effect_events))
-                .flatten()
-        });
+    let event_context_object = parent_referent_context_from_events(state, effect_events);
+    // CR 608.2c + CR 609.3: an instruction that left no referent event still names
+    // the object its root instruction announced (`announced_object_context`), for
+    // the next instruction only. A later "that card" names what some other
+    // instruction looked for, and if it found nothing, it names nothing (Judge
+    // Unworthy with an empty library), so the object is stamped on the next
+    // instruction alone, below.
+    let announced_object = event_context_object
+        .is_none()
+        .then(|| announced_object_context(state, ability))
+        .flatten();
+    let effect_context_object = event_context_object.or_else(|| {
+        if announced_object.is_some() {
+            return None;
+        }
+        ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| {
+                effect_refs_parent_target_metadata(&sub.effect)
+                    && !effect_requires_parent_target_object(&sub.effect)
+            })
+            .then(|| library_move_metadata_context_from_events(state, effect_events))
+            .flatten()
+    });
     let amassed_army_object = amassed_army_context_from_events(state, &events[events_before..]);
 
     // CR 610.3a / CR 610.3b + CR 118.12: a bounded zone move refused because its "until"
@@ -24772,6 +24782,18 @@ fn resolve_chain_body(
         &effect_context_owned
     } else {
         ability
+    };
+    let announced_owned;
+    let ability = match &announced_object {
+        Some(snapshot) if ability.sub_ability.is_some() => {
+            let mut owned = ability.clone();
+            if let Some(next) = owned.sub_ability.as_deref_mut() {
+                next.effect_context_object = Some(snapshot.clone());
+            }
+            announced_owned = owned;
+            &announced_owned
+        }
+        _ => ability,
     };
 
     // CR 608.2c: "the revealed cards" of a reveal-only until-loop name the cards

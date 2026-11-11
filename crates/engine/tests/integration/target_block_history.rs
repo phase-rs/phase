@@ -2217,3 +2217,50 @@ fn choosing_new_targets_for_a_delayed_ability_offers_no_target() {
         );
     }
 }
+
+// ── The announced creature reaches only the next instruction ─────────────
+
+/// Heal the Scars' first two instructions, then Judge Unworthy's reveal and
+/// damage. Constructed: no printed card composes them.
+const HEAL_THEN_JUDGE: &str = "Regenerate target creature. You gain life equal to that creature's toughness. Scry 3, then reveal the top card of your library. This spell deals damage equal to that card's mana value to that creature.";
+
+/// CR 608.2c + CR 609.3: the regenerate leaves no event naming its target, so
+/// the life gain reads the announced creature (toughness 7). The reveal finds no
+/// card in the empty library, so "that card's mana value" names nothing and no
+/// damage is dealt, not the creature's mana value, 5.
+#[test]
+fn the_announced_creature_does_not_reach_past_the_next_instruction() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let t = s
+        .add_creature(P0, "T", 2, 7)
+        .with_mana_cost(ManaCost::generic(5))
+        .id();
+    let spell = free_spell(&mut s, P0, "Heal Then Judge", HEAL_THEN_JUDGE);
+    let mut runner = s.build();
+    assert!(
+        runner.state().players[0].library.is_empty(),
+        "reach: no card to reveal"
+    );
+    let before = life(&runner, P0);
+    runner.cast(spell).target_objects(&[t]).commit();
+    let events = resolve_keeping_scry_on_top(&mut runner);
+    assert_eq!(zone(&runner, spell), Zone::Graveyard, "reach: it resolved");
+    assert_eq!(
+        life(&runner, P0),
+        before + 7,
+        "reach: the next instruction read it"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::DealDamage,
+                source_id,
+                ..
+            } if *source_id == spell
+        )),
+        "reach: the damage instruction resolved; {events:?}"
+    );
+    assert_eq!(runner.state().objects[&t].damage_marked, 0);
+}

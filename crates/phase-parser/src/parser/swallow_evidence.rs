@@ -562,6 +562,36 @@ impl UnitEvidence {
         found
     }
 
+    /// [`Self::count`], skipping every node below one `barrier` holds for: a
+    /// node in a subtree whose meaning the barrier changes (a negation) is not
+    /// evidence of the fact `pred` names.
+    pub(super) fn count_outside<T: DeserializeOwned>(
+        &self,
+        barrier: impl Fn(&Value) -> bool,
+        pred: impl Fn(&T) -> bool,
+    ) -> usize {
+        fn walk<T: DeserializeOwned>(
+            node: &Value,
+            barrier: &impl Fn(&Value) -> bool,
+            pred: &impl Fn(&T) -> bool,
+        ) -> usize {
+            let own = usize::from(T::deserialize(node).is_ok_and(|value| pred(&value)));
+            if barrier(node) {
+                return own;
+            }
+            own + match node {
+                Value::Object(map) => map
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != DESCRIPTION_KEY)
+                    .map(|(_, v)| walk(v, barrier, pred))
+                    .sum(),
+                Value::Array(items) => items.iter().map(|v| walk(v, barrier, pred)).sum(),
+                _ => 0,
+            }
+        }
+        walk(&self.root, &barrier, &pred)
+    }
+
     /// Does any node stored at one of `keys` deserialize as `T` and satisfy `pred`?
     ///
     /// Key anchoring is **mandatory** for externally tagged enums, whose unit variants are

@@ -6439,7 +6439,8 @@ fn detect_damage_subject_conjunction(
 /// restriction on the affected object set. Every clause the shared recognizer
 /// `parse_block_history_clause` finds, whatever its partner, must surface as a
 /// `CombatRelation::BlockPairing` filter with the clause's own direction and
-/// window, so a one-way filter cannot vouch for a two-way clause; otherwise the
+/// window, one filter per clause, so a one-way filter cannot vouch for a two-way
+/// clause and one clause's filter cannot vouch for another's; otherwise the
 /// relative clause was dropped and the effect silently widened (#9179). The
 /// duration-ownership guard in `strip_trailing_duration` keeps the window from
 /// reappearing as a spurious effect duration, so without this detector a
@@ -6452,26 +6453,44 @@ fn detect_combat_history_relation(
     evidence: &UnitEvidence,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
+    // CR 608.2i: a relation restricts the affected set only as a conjunct; under a
+    // negation or in a disjunction it doesn't represent a clause.
     let represented = |direction: BlockPairDirection, scope: CombatHistoryScope| {
-        evidence.any::<FilterProp>(|prop| {
-            matches!(
-                prop,
-                FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockPairing {
-                        direction: found_direction,
-                        scope: found,
-                    },
-                    ..
-                } if *found_direction == direction && *found == Some(scope)
-            )
-        })
+        evidence.count_outside::<FilterProp>(
+            |node| {
+                node.get("type")
+                    .and_then(|tag| tag.as_str())
+                    .is_some_and(|tag| matches!(tag, "Not" | "AnyOf" | "Or"))
+            },
+            |prop| {
+                matches!(
+                    prop,
+                    FilterProp::CombatRelation {
+                        relation: CombatRelation::BlockPairing {
+                            direction: found_direction,
+                            scope: found,
+                        },
+                        ..
+                    } if *found_direction == direction && *found == Some(scope)
+                )
+            },
+        )
     };
+    let mut clauses: Vec<(BlockPairDirection, CombatHistoryScope)> = Vec::new();
     let mut remaining = cleaned;
-    let mut swallowed = false;
     while let Some((_, clause, rest)) = scan_preceded(remaining, parse_block_history_clause) {
-        swallowed |= !represented(clause.direction, clause.scope);
+        clauses.push((clause.direction, clause.scope));
         remaining = rest;
     }
+    // Each clause needs its own filter, so a represented clause can't vouch for a
+    // second clause of the same direction and window.
+    let swallowed = clauses.iter().any(|&(direction, scope)| {
+        let wanted = clauses
+            .iter()
+            .filter(|&&clause| clause == (direction, scope))
+            .count();
+        represented(direction, scope) < wanted
+    });
     if swallowed {
         diagnostics.push(OracleDiagnostic::swallowed_clause(
             OracleSemanticFeature::CombatHistoryRelation.detector_label(),
@@ -6754,8 +6773,9 @@ mod tests {
     use super::{
         any_ability_has_unimplemented, def_tree_has_cast_graveyard_redirect_rider,
         def_tree_has_optional, def_tree_has_target_replacement, def_tree_has_unimplemented,
-        detect_replacement, dynamic_markers_are_all_recorded_unrecognized,
-        effect_has_internal_optionality, trigger_tree_has_optional, twice_is_activation_limit,
+        detect_combat_history_relation, detect_replacement,
+        dynamic_markers_are_all_recorded_unrecognized, effect_has_internal_optionality,
+        trigger_tree_has_optional, twice_is_activation_limit,
     };
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_effect::gap_diagnosis::{
@@ -15955,6 +15975,70 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 .any_effect(|effect| matches!(effect, Effect::DestroyAll { .. })),
             "no destroy may survive beside the unbound clause; {:?}",
             parsed.abilities
+        );
+    }
+
+    /// CR 608.2i: each history clause needs its own restricting filter. Two
+    /// clauses of one direction and window with one represented and the other's
+    /// filter dropped are reported, and so is a relation that sits under a
+    /// negation or in a disjunction, which doesn't restrict the affected set.
+    /// Hand-built evidence: no printed card repeats a clause this way.
+    #[test]
+    fn combat_history_relation_needs_one_restricting_filter_per_clause() {
+        use crate::types::ability::{TargetFilter, TypedFilter};
+        let relation = FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope: Some(CombatHistoryScope::ThisTurn),
+            },
+            subject: CombatRelationSubject::Source,
+        };
+        let with = |props| TargetFilter::Typed(TypedFilter::creature().properties(props));
+        let restricting = with(vec![relation.clone()]);
+        let text =
+            "destroy all creatures it blocked this turn. tap all creatures it blocked this turn.";
+        let flagged = |filters: Vec<TargetFilter>| {
+            let evidence = UnitEvidence::from_json_for_test(
+                &serde_json::to_string(&filters).expect("filters serialize"),
+            );
+            let mut diagnostics = Vec::new();
+            detect_combat_history_relation(text, text, &evidence, &mut diagnostics);
+            !diagnostics.is_empty()
+        };
+        assert!(
+            !flagged(vec![restricting.clone(), restricting.clone()]),
+            "one filter per clause"
+        );
+        assert!(
+            flagged(vec![restricting.clone(), with(vec![])]),
+            "the second clause's filter was dropped"
+        );
+        assert!(
+            flagged(vec![
+                restricting.clone(),
+                with(vec![FilterProp::Not {
+                    prop: Box::new(relation.clone()),
+                }]),
+            ]),
+            "a negated relation doesn't restrict"
+        );
+        assert!(
+            flagged(vec![
+                restricting.clone(),
+                with(vec![FilterProp::AnyOf {
+                    props: vec![FilterProp::Token, relation.clone()],
+                }]),
+            ]),
+            "a disjunctive relation doesn't restrict"
+        );
+        assert!(
+            flagged(vec![
+                restricting.clone(),
+                TargetFilter::Or {
+                    filters: vec![with(vec![]), restricting.clone()],
+                },
+            ]),
+            "an unrestricted Or branch doesn't restrict"
         );
     }
 
