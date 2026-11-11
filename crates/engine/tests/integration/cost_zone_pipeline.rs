@@ -10976,6 +10976,158 @@ fn restore_refuses_a_copy_read_by_a_commit_prompt_root_that_states_no_amount() {
     }
 }
 
+/// CR 700.14 + CR 601.2h: the split is decided against the player the RESUME credits, not
+/// against the cast's controller by assumption.
+///
+/// `expend_credits_for_cast` (`casting_costs.rs`) is handed the continuation's own
+/// `player`: on the commit-time prompt path that is `WaitingFor::PayCost::player`, threaded
+/// by `continue_after_cost_discard` into `resume_prepaid_spell_finalization` and on into
+/// the finalizer. That field is independently serde-decodable from
+/// `PendingCast::ability.controller`, so a save that states the OPPONENT there credits the
+/// opponent with the caster's mana — CR 700.14's "the amount of mana that player spent this
+/// turn to cast spells" applied to a player who spent nothing, so the opponent's "Whenever
+/// you expend N" fires and the caster's does not.
+///
+/// The guard therefore reads the payer off the resume root and requires the journal to
+/// corroborate it, which refuses this save (the opponent spent nothing) while leaving every
+/// honest save — where the prompt's player IS the caster — untouched.
+#[test]
+fn restore_refuses_a_prepaid_prompt_whose_payer_is_not_the_player_the_journal_credits() {
+    let (runner, spell) = kaerveks_spite_commit_prompt_board();
+
+    // Reach guards: P0 cast it and P0's floating pool paid all three black shards; the
+    // journal records the spend under P0 and nothing at all under P1.
+    let recipient = engine::types::resolved_commands::ManaPaymentRecipient::Object(
+        engine::game::game_object::ObjectIncarnationRefExt::from_object(
+            &runner.state().objects[&spell],
+        ),
+    );
+    {
+        let WaitingFor::PayCost {
+            player,
+            resume: engine::types::game_state::CostResume::Spell { spell: parked },
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("reach-guard: the commit prompt carries the cast being finalized");
+        };
+        assert_eq!(
+            *player, P0,
+            "reach-guard: the live park names the caster as the payer — the save under test is \
+             what states another player"
+        );
+        assert_eq!(
+            parked.ability.controller, P0,
+            "reach-guard: the parked cast's controller is the caster"
+        );
+        assert_eq!(
+            parked.object_id, spell,
+            "reach-guard: and the prompt carries that cast"
+        );
+        assert_eq!(
+            runner
+                .state()
+                .resolved_rules_journal
+                .spent_units_for_payer_and_recipient(P0, &recipient)
+                .map(|units| units.len()),
+            Some(3),
+            "reach-guard: the journal records the caster's three units"
+        );
+        assert_eq!(
+            runner
+                .state()
+                .resolved_rules_journal
+                .spent_units_for_payer_and_recipient(P1, &recipient),
+            None,
+            "reach-guard: the opponent spent no mana on this cast at all"
+        );
+        assert_eq!(
+            runner.state().mana_spent_on_spells_this_turn.get(&P0),
+            None,
+            "reach-guard: the finalizer has not run yet, so no Expend credit exists — whatever \
+             the resume records below is caused by the resume"
+        );
+    }
+
+    // The CONTROL: the honest save admits, and the resumed cast credits the CASTER.
+    {
+        let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+            .expect("the paused prepaid cast serializes");
+        let restored: PersistedGameState =
+            serde_json::from_str(&saved).expect("the paused prepaid cast deserializes");
+        let mut honest = GameRunner::from_state(
+            restored
+                .into_game_state()
+                .expect("a prompt whose payer IS the player the journal credits is admitted"),
+        );
+        let WaitingFor::PayCost { choices, .. } = honest.state().waiting_for.clone() else {
+            panic!("reach-guard: the carrier is still the hand-discard prompt");
+        };
+        honest
+            .act(GameAction::SelectCards { cards: choices })
+            .expect("the hand is discarded and the prepaid cast finalizes");
+        assert_eq!(
+            honest.state().mana_spent_on_spells_this_turn.get(&P0),
+            Some(&3),
+            "CR 700.14: the caster is credited with the three units the journal records"
+        );
+        assert_eq!(
+            honest.state().mana_spent_on_spells_this_turn.get(&P1),
+            None,
+            "and the opponent, who spent nothing, is credited nothing"
+        );
+    }
+
+    // The save under test: the SAME payment, with the prompt's payer swapped to the
+    // opponent. Every copy fact still agrees with the journal, so no copy-shaped guard can
+    // explain a refusal — the payer is the only disagreement.
+    let mut state = runner.state().clone();
+    let WaitingFor::PayCost { player, .. } = &mut state.waiting_for else {
+        panic!("reach-guard: the carrier is still parked");
+    };
+    assert_eq!(
+        *player, P0,
+        "reach-guard: swapping the caster for the opponent"
+    );
+    *player = P1;
+    let error = PersistedGameState::capture(state)
+        .into_game_state()
+        .expect_err(
+            "CR 700.14: a prepaid prompt naming a payer the journal does not credit would grant \
+             the opponent the caster's Expend",
+        );
+    match error {
+        engine::types::game_state::PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+            source_id,
+            reason:
+                engine::types::game_state::PrepaidSpellCopyConflict::PayerSplitDisagreesWithSettledSpend {
+                    caster,
+                    caster_credit,
+                    caster_settled,
+                    ..
+                },
+        } => {
+            assert_eq!(source_id, spell, "the refusal names the cast it is about");
+            assert_eq!(
+                caster, P1,
+                "and the player the resume would have credited — the prompt's payer"
+            );
+            assert_eq!(
+                caster_credit, 3,
+                "with the whole settled payment, since the cast carries no contribution"
+            );
+            assert_eq!(
+                caster_settled, 0,
+                "while the journal records that player spending nothing (CR 118.3a)"
+            );
+        }
+        other => panic!(
+            "CR 700.14: a prepaid prompt whose payer is not the player the journal credits must \
+             be refused, got {other:?}"
+        ),
+    }
+}
+
 /// CR 700.14 + CR 702.132a + CR 118.3a: the payer SPLIT the resumed cast credits is
 /// validated, including the zero case.
 ///

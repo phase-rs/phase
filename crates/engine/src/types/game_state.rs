@@ -17733,6 +17733,14 @@ struct PrepaidSpellCopyCarrier<'a> {
     /// The amount THIS carrier states the payment settled at, or `None` when it states
     /// none and the resumed cast will read the copy the finalizers stamped.
     stated_amount: Option<u32>,
+    /// CR 700.14: the player this carrier's continuation passes to the finalizer as its
+    /// `player`, and therefore the player `expend_credits_for_cast` credits with the
+    /// remainder. It is READ FROM THE RESUME ROOT the continuation actually runs, not
+    /// assumed from `pending.ability.controller`: a commit-time prompt
+    /// (`WaitingFor::PayCost { player, .. }`), a replaced life payment and a paused cost
+    /// move each thread their own field into the finalizer, and a save that states a
+    /// different one has decided by itself whose "Whenever you expend N" fires.
+    credited_player: PlayerId,
 }
 
 impl GameState {
@@ -19060,6 +19068,7 @@ impl GameState {
             carriers.push(PrepaidSpellCopyCarrier {
                 pending,
                 stated_amount: pending.prepaid_actual_mana_spent,
+                credited_player: self.pending_cast_resume_player(owner, pending),
             });
         }
         if let Some(PendingCostMoveResume::Cast {
@@ -19076,10 +19085,91 @@ impl GameState {
                 carriers.push(PrepaidSpellCopyCarrier {
                     pending,
                     stated_amount: *prepaid_actual_mana_spent,
+                    credited_player: self
+                        .pending_cast_resume_player(PendingCastOwner::CostMove, pending),
                 });
             }
         }
         carriers
+    }
+
+    /// CR 700.14 + CR 601.2h: the player the continuation of `owner`'s parked cast passes to
+    /// the finalizer as its `player` — the field `expend_credits_for_cast` credits with the
+    /// payment's remainder, and therefore the field the split is decided against.
+    ///
+    /// This is READ from the resume root rather than assumed from
+    /// `PendingCast::ability`. A commit-time prompt threads `WaitingFor::PayCost::player`
+    /// through `continue_after_cost_discard` into `resume_prepaid_spell_finalization`; a
+    /// replaced life payment threads `DeferredLifeCostResume::Cast::player`; a paused cost
+    /// move threads `PendingCostMoveResume::Cast/SacrificeForCost::player`. Each of those is
+    /// an independent, save-decodable field, so "the cast's controller pays" is a claim the
+    /// save can falsify unless the guard reads the same field the resume does.
+    ///
+    /// A root that states no such field is answered with the cast's own controller, which
+    /// is then genuinely the value its continuation derives — there is nothing for the save
+    /// to disagree with.
+    fn pending_cast_resume_player(
+        &self,
+        owner: PendingCastOwner,
+        pending: &PendingCast,
+    ) -> PlayerId {
+        let stated = match owner {
+            // The external announcement carrier is resumed by the mana-payment prompt that
+            // owns it; the prompt states the payer of the outer spell cost.
+            PendingCastOwner::External => match &self.waiting_for {
+                WaitingFor::ManaPayment { player, .. } => Some(*player),
+                _ => None,
+            },
+            PendingCastOwner::Prompt => match &self.waiting_for {
+                WaitingFor::PayCost {
+                    player,
+                    resume: CostResume::Spell { .. } | CostResume::SpellCost { .. },
+                    ..
+                } => Some(*player),
+                _ => None,
+            },
+            PendingCastOwner::DeferredLifeCost => {
+                match self.pending_deferred_life_cost_resume.as_ref() {
+                    Some(DeferredLifeCostResume::Cast { player, .. }) => Some(*player),
+                    Some(
+                        DeferredLifeCostResume::PayAmount { .. }
+                        | DeferredLifeCostResume::ManaRoot { .. }
+                        | DeferredLifeCostResume::TurnFaceUp { .. },
+                    )
+                    | None => None,
+                }
+            }
+            PendingCastOwner::CostMove => match self.pending_cost_move_resume.as_ref() {
+                Some(
+                    PendingCostMoveResume::Cast { player, .. }
+                    | PendingCostMoveResume::SacrificeForCost { player, .. }
+                    | PendingCostMoveResume::CounterCostRemovalPayment { player, .. },
+                ) => Some(*player),
+                Some(
+                    PendingCostMoveResume::CollectEvidencePayment { .. }
+                    | PendingCostMoveResume::ActivationMillPayment { .. }
+                    | PendingCostMoveResume::WardSacrificePayment { .. }
+                    | PendingCostMoveResume::ReplacementMayCost { .. }
+                    | PendingCostMoveResume::Foretell { .. }
+                    | PendingCostMoveResume::UnlessBouncePayment { .. }
+                    | PendingCostMoveResume::ManaAbilityPayment { .. }
+                    | PendingCostMoveResume::LoyaltyActivation { .. }
+                    | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                    | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::TurnFaceUpCostMove { .. },
+                )
+                | None => None,
+            },
+            PendingCastOwner::DiscardForCost => {
+                self.pending_discard_for_cost
+                    .as_deref()
+                    .map(|resume| match resume {
+                        PendingDiscardForCostResume::Chosen { player, .. }
+                        | PendingDiscardForCostResume::Random { player, .. } => *player,
+                    })
+            }
+        };
+        stated.unwrap_or(pending.ability.controller)
     }
 
     /// CR 106.3 + CR 118.3a + CR 601.2h: the copy this save's settled spend proves for
@@ -19214,11 +19304,19 @@ impl GameState {
         // it, rather than assuming the caster paid it all, is what keeps a helper's mana out
         // of the caster's Expend tally (and the caster's mana out of the helper's).
         //
+        // The payer is the one the RESUME credits, read off its own root by
+        // [`Self::pending_cast_resume_player`], not `pending.ability.controller` by
+        // assumption: `expend_credits_for_cast` is handed the continuation's `player`
+        // (`WaitingFor::PayCost::player` on the commit-time prompt path), so a save that
+        // states a different player there credits that player — an opponent's "Whenever you
+        // expend N" instead of the caster's. Requiring the journal to corroborate that
+        // player makes the field and the record agree, or the save is refused.
+        //
         // CR 118.3a: the helper's settled units are a subset of the settled payment, so a
         // claim larger than the payment itself fails the `helper_settled == helper_credit`
         // conjunct below rather than underflowing this subtraction — no save can reach the
         // remainder with a claim the payment cannot cover.
-        let caster = pending.ability.controller;
+        let caster = carrier.credited_player;
         let caster_credit = settled.len().saturating_sub(helper_credit);
         let caster_settled = self.payer_settled_units(caster, &recipient);
         if helper_settled.unwrap_or_default() != helper_credit || caster_settled != caster_credit {
