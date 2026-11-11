@@ -1207,3 +1207,75 @@ fn base_writer_merged_commander_pause_is_rejected_at_checked_restore() {
         Err(other) => panic!("expected the typed shared-pause rejection, got {other}"),
     }
 }
+
+const EVACUATION_ORACLE: &str = "Return all creatures to their owners' hands.";
+
+/// CR 903.9b + CR 730.3d: Evacuation returns a merged commander (Otrimi over
+/// Gemrazer) to its owner's hand. Its owner may put the commander into the
+/// command zone instead, and that choice parks the original batch and its
+/// linked component child on the same incarnation. The linked pair is a valid
+/// save: checked restore accepts it whichever frame it inspects first, and the
+/// reopened choice settles either way.
+#[test]
+fn evacuation_merged_commander_choice_reopens_before_the_answer() {
+    for accept_command in [false, true] {
+        let mut scenario =
+            GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let host = scenario
+            .add_creature_from_oracle(P0, "Otrimi, the Ever-Playful", 6, 6, OTRIMI_ORACLE)
+            .as_legendary()
+            .with_subtypes(vec!["Nightmare", "Beast"])
+            .commander()
+            .id();
+        let rider = scenario
+            .add_creature_to_hand_from_oracle(P0, "Gemrazer", 4, 4, GEMRAZER_ORACLE)
+            .with_subtypes(vec!["Beast"])
+            .id();
+        let evacuation = scenario
+            .add_spell_to_hand_from_oracle(P0, "Evacuation", true, EVACUATION_ORACLE)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        merge_pair(&mut runner, host, rider);
+        runner.cast(evacuation).resolve();
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "expected the commander's CR 903.9b choice, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(player, P0);
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.description == "Move to command zone"));
+        // Save and reopen at the choice, before answering it.
+        round_trip_arrangement(&mut runner);
+        let index = candidates
+            .iter()
+            .position(|candidate| {
+                (candidate.description == "Move to command zone") == accept_command
+            })
+            .expect("both branches are offered");
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("P0 answers the reopened choice");
+        let expected_host = if accept_command {
+            Zone::Command
+        } else {
+            Zone::Hand
+        };
+        assert_eq!(
+            zone(&runner, host),
+            expected_host,
+            "accept={accept_command}"
+        );
+        assert_eq!(zone(&runner, rider), Zone::Hand, "accept={accept_command}");
+        assert_eq!(zone(&runner, evacuation), Zone::Graveyard);
+        assert!(runner.state().active_batch_delivery().is_none());
+        assert_arrangement_finished(&runner);
+    }
+}

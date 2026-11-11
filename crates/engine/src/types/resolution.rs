@@ -4742,6 +4742,13 @@ impl ResolutionStack {
     /// The predecessor writer produced this shape for a merged commander under a
     /// mass library placement (Hallowed Burial over a mutated commander, paused
     /// at its CR 903.9b choice), and that engine could not finish it either.
+    ///
+    /// A component child linked to its parent is the supported form of the
+    /// same pair (CR 903.9b: a merged commander's owner may choose the command
+    /// zone for it while its components split): the child's
+    /// `component_delivery_parent` names the parent's group and the shared
+    /// paused member. The link is checked in both traversal directions, so the
+    /// pair is accepted whichever frame is inspected first.
     pub(crate) fn unresumable_shared_batch_pause(&self) -> Option<ObjectIncarnationRef> {
         let paused: Vec<&PendingBatchDeliveries> = self
             .frames
@@ -4758,7 +4765,17 @@ impl ResolutionStack {
             if stranded.staged.is_some() || held.terminal_completion.is_some() {
                 return None;
             }
-            let stranded_group = stranded.logical_zone_change_group.logical_group_id;
+            // `child` is the immediate component child of `parent` for this
+            // shared paused member.
+            let links = |child: &PendingBatchDeliveries, parent: &PendingBatchDeliveries| {
+                child
+                    .component_delivery_parent
+                    .as_ref()
+                    .is_some_and(|link| {
+                        link.parent_group_id == parent.logical_zone_change_group.logical_group_id
+                            && link.member == held.member
+                    })
+            };
             paused
                 .iter()
                 .enumerate()
@@ -4768,10 +4785,8 @@ impl ResolutionStack {
                             .paused_current
                             .as_ref()
                             .is_some_and(|other_held| other_held.member == held.member)
-                        && other
-                            .component_delivery_parent
-                            .as_ref()
-                            .is_none_or(|link| link.parent_group_id != stranded_group)
+                        && !links(other, stranded)
+                        && !links(stranded, other)
                 })
                 .then_some(held.member)
         })
