@@ -24854,56 +24854,67 @@ pub(crate) fn mana_spent_source_snapshots(
     state: &GameState,
     units: &[crate::types::mana::ManaUnit],
 ) -> Vec<crate::types::game_state::ManaSpentSourceSnapshot> {
-    // CR 118.3a: the retained producer ledger answers for ONE unit at a time, and a
-    // payment asks it for EVERY unit it spends — so the ledger is indexed once for
-    // the batch rather than searched once per unit (which is quadratic in the pool a
-    // single payment can drain).
-    //
-    // CR 118.3a + CR 400.7: but the ledger is the LAST resort of each unit's read, so
-    // the index is built by the first unit that actually falls back to it and not
-    // before. Most payments never fall back — mana tapped and spent out of a live
-    // source is answered by that source's own live object — while under Upwelling
-    // ("Players don't lose unspent mana as steps and phases end.") the ledger can hold
-    // a row for every unit the pool still floats, carried for as long as the mana
-    // lasts. Indexing that up front charged every payment for facts a live or
-    // exit-cache answer already settled; the lazy index keeps the batch linear when the
-    // fallback IS reached and free when it is not.
-    //
-    // The read itself is the position-preserving sibling's, so the batch a payment asks
-    // and the comparator that pairs each fact with the unit carrying it share ONE body
-    // and therefore one index policy.
-    mana_spent_source_snapshots_by_unit(state, units)
-        .into_iter()
-        .flatten()
-        .collect()
+    ProducerFactReader::new(state).snapshots(units)
 }
 
-/// CR 118.3a + CR 400.7: the SAME single-authority read as
-/// [`mana_spent_source_snapshots`], but POSITION-PRESERVING — one entry per input unit,
-/// `None` for a unit whose producer the payment cannot name.
+/// CR 118.3a + CR 400.7: ONE position's producer-fact read — the retained ledger's index,
+/// built once for the position and reused by every unit any of its readers visits.
 ///
-/// The batch above answers a PAYMENT, which asks about the units it is about to spend and
-/// never needs to know which of them it could not name. A comparator that pairs a fact with
-/// the UNIT carrying it does, and both questions must still share ONE index over the
-/// retained producer rows: those rows are read per unit
-/// ([`mana_spent_source_snapshot`]'s last resort), so resolving a pool of N units through N
-/// separate single-unit calls builds that index N times — the units × rows shape the
-/// boundary's and the payment's own probes refuse — while one batch charges units + rows.
+/// The retained producer ledger answers for ONE unit at a time, and every caller asks it for
+/// MANY units in a row, so the ledger is indexed once per BATCH rather than searched once per
+/// unit (which is quadratic in the number of units a batch can drain). That batching is not
+/// only per call: a caller that reads several pools of ONE state — `analysis`'s loop
+/// comparison walks every payer's pool through
+/// `crate::analysis::resource::floating_producer_facts_match` — has ONE position, so it must
+/// build ONE index, not one per pool. That is why the reader is a value the caller binds to a
+/// position and lends to each of its reads, rather than a free function each read re-enters.
 ///
-/// Nothing else moves: the driver, the origin-zone chain, the exit cache and the retained
-/// ledger are all still answered by [`mana_spent_source_snapshot`], and the batch above is
-/// this function with the `None`s dropped.
-pub(crate) fn mana_spent_source_snapshots_by_unit(
-    state: &GameState,
-    units: &[crate::types::mana::ManaUnit],
-) -> Vec<Option<crate::types::game_state::ManaSpentSourceSnapshot>> {
-    let pooled_index = super::mana_payment::LazyPooledProducerLedgerIndex::new(
-        &state.pooled_mana_producer_snapshots,
-    );
-    units
-        .iter()
-        .map(|unit| mana_spent_source_snapshot(state, &pooled_index, unit))
-        .collect()
+/// CR 118.3a + CR 400.7: the index is LAZY. It is the LAST resort of each unit's read, and
+/// most reads never fall back — mana tapped and spent out of a live source is answered by
+/// that source's own live object — while under Upwelling ("Players don't lose unspent mana
+/// as steps and phases end.") the ledger can hold a row for every unit the pool still floats,
+/// carried for as long as the mana lasts. Indexing up front would charge every read for facts
+/// a live or exit-cache answer already settled; the lazy index keeps the batch linear when
+/// the fallback IS reached and free when it is not. A reader whose units are all answered by
+/// their live object therefore never builds one at all, however many pools it serves.
+pub(crate) struct ProducerFactReader<'a> {
+    state: &'a GameState,
+    pooled_index: super::mana_payment::LazyPooledProducerLedgerIndex<'a>,
+}
+
+impl<'a> ProducerFactReader<'a> {
+    /// Bind one reader to `state`, holding (not yet indexing) its retained producer rows.
+    pub(crate) fn new(state: &'a GameState) -> Self {
+        Self {
+            state,
+            pooled_index: super::mana_payment::LazyPooledProducerLedgerIndex::new(
+                &state.pooled_mana_producer_snapshots,
+            ),
+        }
+    }
+
+    /// The position-preserving batch: one entry per input unit, `None` for a unit whose
+    /// producer cannot be named, in unit order.
+    pub(crate) fn snapshots_by_unit(
+        &self,
+        units: &[crate::types::mana::ManaUnit],
+    ) -> Vec<Option<crate::types::game_state::ManaSpentSourceSnapshot>> {
+        units
+            .iter()
+            .map(|unit| mana_spent_source_snapshot(self.state, &self.pooled_index, unit))
+            .collect()
+    }
+
+    /// The payment's batch: the same answers, with the unnamable units dropped.
+    pub(crate) fn snapshots(
+        &self,
+        units: &[crate::types::mana::ManaUnit],
+    ) -> Vec<crate::types::game_state::ManaSpentSourceSnapshot> {
+        self.snapshots_by_unit(units)
+            .into_iter()
+            .flatten()
+            .collect()
+    }
 }
 
 /// CR 106.3 + CR 113.7 + CR 400.7: one spent unit's producing source.
