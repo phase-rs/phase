@@ -2663,12 +2663,11 @@ export class WebSocketAdapter implements EngineAdapter {
       // (`install_full_sender_while_state_locked`). The incumbent can never
       // receive the seat again, so from here cancellation or failure retires
       // BOTH sockets instead of preserving a deaf one.
-      const retireSwappedIncumbent = () => {
-        const incumbent = previous;
-        if (incumbent === null || this.ws !== incumbent) return;
-        this.ws = null;
-        this.closeSocket = null;
-        this.stateCodec.clearRecovery();
+      //
+      // `detachIncumbent` is the single place that takes the incumbent down,
+      // whether the candidate is adopted or abandoned: detach it, settle its
+      // owned requests, release its decoder and stop its keepalive.
+      const detachIncumbent = (incumbent: PhaseSocketTransport) => {
         if (this.pingInterval) {
           clearInterval(this.pingInterval);
           this.pingInterval = null;
@@ -2681,6 +2680,14 @@ export class WebSocketAdapter implements EngineAdapter {
         } finally {
           closePrevious?.();
         }
+      };
+      const retireSwappedIncumbent = () => {
+        const incumbent = previous;
+        if (incumbent === null || this.ws !== incumbent) return;
+        this.ws = null;
+        this.closeSocket = null;
+        this.stateCodec.clearRecovery();
+        detachIncumbent(incumbent);
         if (previousPending) {
           previousPending = false;
           this.emit({ type: "actionPendingChanged", pending: false });
@@ -2709,24 +2716,9 @@ export class WebSocketAdapter implements EngineAdapter {
       this.closeSocket = closeSocket;
       this.stateCodec.adopt(bootstrap, socket.ws);
       this._serverInfo = socket.serverInfo;
-      // Setup is on the wire, so the incumbent is now genuinely replaced:
-      // detach it, settle its owned requests, release its decoder and stop its
-      // keepalive. A candidate that never reached this point left all of that
-      // untouched and the incumbent usable.
-      if (previous && incumbentIsCurrent) {
-        previous.onmessage = null;
-        previous.onerror = null;
-        previous.onclose = null;
-        try {
-          previousPending = this.rejectSocketRequests(false) || previousPending;
-        } finally {
-          closePrevious?.();
-        }
-        if (this.pingInterval) {
-          clearInterval(this.pingInterval);
-          this.pingInterval = null;
-        }
-      }
+      // Setup is on the wire, so the incumbent is now genuinely replaced. A
+      // candidate that never reached this point left the incumbent usable.
+      if (previous && incumbentIsCurrent) detachIncumbent(previous);
       if (previousPending) {
         previousPending = false;
         this.emit({ type: "actionPendingChanged", pending: false });
