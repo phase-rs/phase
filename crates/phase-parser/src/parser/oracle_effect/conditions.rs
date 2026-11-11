@@ -12200,6 +12200,7 @@ mod tests {
     ///   `target_controller_suffix_on_a_later_spell_paragraph_is_an_explicit_gap`);
     /// - a fused half (CR 702.102d) or a spliced card (CR 702.47a), both
     ///   synthetic: Unified Will's printed text on a card with fuse or splice.
+    ///
     /// Each is an explicit condition gap, with no gate on any node.
     #[test]
     fn target_controller_suffix_on_an_unproven_root_is_an_explicit_gap() {
