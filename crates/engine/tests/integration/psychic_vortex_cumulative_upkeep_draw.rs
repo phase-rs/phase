@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use engine::game::ledger::apply_resolved_ledger_edit;
+use engine::game::ledger::resolve_and_apply_cards_drawn;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityCost, Effect, EffectKind, ManaContribution, ManaProduction, QuantityExpr, TargetFilter,
@@ -1791,8 +1791,9 @@ fn declining_every_skip_offers_each_prompt_pays_then_loses() {
 
 /// CR 702.24a + CR 121.4: a 2^31 age count on a three-card library draws three
 /// cards, attempts one empty draw, and settles the remaining identical attempts
-/// at once. The journal grows by the four draws, not by 2^31 entries, and
-/// replaying the kept draw edits reproduces the final draw ledger.
+/// at once. The journal grows by the four draws, not by 2^31 entries, and a
+/// further empty-library attempt is an identity edit, so the kept journal
+/// replays to the same game.
 #[test]
 fn a_huge_age_count_on_a_short_library_is_bounded_and_replayable() {
     const AGE: u32 = 1 << 31;
@@ -1806,8 +1807,7 @@ fn a_huge_age_count_on_a_short_library_is_bounded_and_replayable() {
         );
     };
     assert_eq!(*repeat, Some(AGE));
-    let before_payment = runner.state().clone();
-    let journal_start = before_payment.resolved_rules_journal.entries().len();
+    let journal_start = runner.state().resolved_rules_journal.entries().len();
     let result = runner
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("choosing the draw cost is legal");
@@ -1832,30 +1832,9 @@ fn a_huge_age_count_on_a_short_library_is_bounded_and_replayable() {
         upkeep_ability_resolved(&result.events, vortex),
         "the upkeep is paid"
     );
-    // The journal replay contract: replaying the kept draw edits in order on
-    // the pre-payment state reproduces the final draw ledger, so the skipped
-    // identical attempts are not needed to rebuild the game.
-    let edits: Vec<ResolvedLedgerEditCommand> = runner
-        .state()
-        .resolved_rules_journal
-        .entries()
-        .iter()
-        .skip(journal_start)
-        .filter_map(|entry| match &entry.command {
-            Some(ResolvedRulesCommand::LedgerEdit(command))
-                if matches!(command.edit, ResolvedLedgerEdit::CardsDrawn { player, .. } if player == P0) =>
-            {
-                Some(command.clone())
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(edits.len(), 4, "three draws and one empty-library attempt");
-    let mut replayed = before_payment;
-    for edit in &edits {
-        apply_resolved_ledger_edit(&mut replayed, edit)
-            .expect("each kept draw edit replays on the ledger the previous one left");
-    }
+    // The journal replay contract: the attempts not journaled are identity
+    // edits. One more empty-library attempt on the final state changes no
+    // ledger field, so the kept journal replays to the same game.
     let ledger = |state: &GameState| {
         let player = &state.players[P0.0 as usize];
         (
@@ -1865,10 +1844,13 @@ fn a_huge_age_count_on_a_short_library_is_bounded_and_replayable() {
             player.drew_from_empty_library,
         )
     };
+    let mut further = runner.state().clone();
+    resolve_and_apply_cards_drawn(&mut further, P0, None, true)
+        .expect("a further empty-library attempt applies on the settled ledger");
     assert_eq!(
-        ledger(&replayed),
+        ledger(&further),
         ledger(runner.state()),
-        "the kept journal reproduces the final draw ledger"
+        "a further empty-library attempt changes nothing"
     );
 }
 

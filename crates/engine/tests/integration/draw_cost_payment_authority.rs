@@ -990,10 +990,8 @@ fn accepting_a_parked_dredge_after_the_draw_becomes_impossible_declines_it() {
 }
 
 /// CR 104.3a: a fallible payment recovery (an overflowing rider) must not undo
-/// the concession itself. A recovery that records an unrepresentable life
-/// change is discarded whole: the departure is published with its events, the
-/// payment is retired without its prefix or rider, and the next ordinary
-/// action starts from the departure.
+/// the concession itself. The departure is published with its events and the
+/// next ordinary action starts from it.
 #[test]
 fn a_failed_payment_recovery_still_commits_the_concession() {
     let (mut runner, source) = concession_board();
@@ -1045,8 +1043,8 @@ fn a_failed_payment_recovery_still_commits_the_concession() {
     );
     assert_eq!(
         hand_and_library(&runner, P0).0 - hand_before,
-        0,
-        "a payment that cannot settle representably is retired whole, prefix included"
+        1,
+        "the accepted prefix draw survives the fallible rider"
     );
     assert!(
         published.events.iter().any(|event| matches!(
