@@ -20352,7 +20352,10 @@ pub struct PendingCombatLeg {
     pub source_is_commander: bool,
     pub target: TargetRef,
     /// CR 119.3 + CR 702.15b: the controller this source gains lifelink for
-    /// (`None` when the source has no lifelink).
+    /// (`None` when the source has no lifelink, or when the source's gain
+    /// already settled early: CR 616.1 + CR 101.4, an earlier-APNAP player's
+    /// gain is asked before a later player's result choice, and the cleared
+    /// marker keeps the later fold from gaining it again).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifelink_controller: Option<PlayerId>,
     /// Post-Phase-B survivor (`None` = fully prevented: applies as 0 with
@@ -20382,7 +20385,9 @@ pub struct PendingCombatPhaseCRemnant {
     /// Legs never applied, in batch order.
     pub remaining: Vec<PendingCombatLeg>,
     /// CR 119.3 + CR 702.15b: per-source lifelink sums so far, in
-    /// first-appearance order — `(source_id, controller, total_dealt)`.
+    /// first-appearance order — `(source_id, controller, total_dealt)`,
+    /// excluding sources whose gain already settled early (CR 616.1 +
+    /// CR 101.4).
     pub lifelink_by_source: Vec<(ObjectId, PlayerId, u32)>,
     /// CR 510.2: per-player, per-source damage so far.
     pub combat_damage_to_players: Vec<PerPlayerCombatDamage>,

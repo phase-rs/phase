@@ -26,7 +26,7 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def_with_targets;
 use super::effects;
-use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
+use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext, DamageResult};
 use super::effects::destroy::apply_destroy_after_replacement;
 use super::effects::draw::{apply_draw_after_replacement, settle_draw_instruction};
 use super::effects::life::{
@@ -723,7 +723,32 @@ fn handle_replacement_choice_inner(
                     // leg still gains the combined lifelink total.
                     ctx.excess_recipient = parked_excess_recipient;
                     ctx.lifelink_bonus = parked_lifelink_bonus;
-                    let _ = apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
+                    if matches!(
+                        apply_damage_after_replacement(state, &ctx, damage, is_combat, events),
+                        DamageResult::NeedsChoice
+                    ) {
+                        // CR 616.1 + CR 616.1f: the resumed hit raised its own
+                        // result prompt (poison counters, life loss, the
+                        // lifelink gain, or an excess-redirect leg), parked by
+                        // the nested pipeline together with any owed results.
+                        // Keep that wait: the Priority reset below and the
+                        // settled-stash drain must not run over it; the nested
+                        // answer's own tail drains the stash exactly once.
+                        debug_assert!(
+                            state.pending_replacement.is_some()
+                                || state.active_batch_delivery().is_some(),
+                            "a resumed damage NeedsChoice must leave its pause owned"
+                        );
+                        // CR 603.2 + CR 603.3b + CR 120.4b: this action ends on
+                        // a prompt, so the post-action scan never sees the
+                        // damage events dealt so far; defer their observers.
+                        super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                            state,
+                            events,
+                            replacement_action_event_start,
+                        );
+                        return Ok(state.waiting_for.clone());
+                    }
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
                 // Corpsejack Menace doubler on a prompted counter-placement).
@@ -1475,6 +1500,7 @@ fn handle_replacement_choice_inner(
                 state,
                 matches!(waiting_for, WaitingFor::Priority { .. }),
                 events,
+                replacement_action_event_start,
             ) {
                 waiting_for = next;
             }
@@ -1597,6 +1623,7 @@ fn handle_replacement_choice_inner(
                 // AFTER a collected simultaneous sacrifice queue: CR 101.4
                 // requires every already-announced sacrifice to finish before
                 // the original ability's later instructions resume.
+                let damage_chain = damage_parent_continuation_pending(state);
                 effects::drain_pending_continuation(state, events);
                 // CR 616.1e: The continuation may itself pause on another replacement
                 // (e.g., the second direction of fight damage hitting the same shield),
@@ -1604,6 +1631,12 @@ fn handle_replacement_choice_inner(
                 // Propagate that back so the engine surfaces the correct prompt.
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     waiting_for = state.waiting_for.clone();
+                    defer_damage_chain_observers_at_pause(
+                        state,
+                        damage_chain,
+                        events,
+                        replacement_action_event_start,
+                    );
                 }
             }
 
@@ -1670,9 +1703,16 @@ fn handle_replacement_choice_inner(
                 && (state.active_ability_continuation().is_some()
                     || state.active_change_zone_frame().is_some())
             {
+                let damage_chain = damage_parent_continuation_pending(state);
                 effects::drain_pending_continuation(state, events);
                 if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     waiting_for = state.waiting_for.clone();
+                    defer_damage_chain_observers_at_pause(
+                        state,
+                        damage_chain,
+                        events,
+                        replacement_action_event_start,
+                    );
                 }
             }
 
@@ -1743,8 +1783,17 @@ fn handle_replacement_choice_inner(
                 // this call site adds none.
                 finish_spell_resolution_exposed_by_child(state, parked_affected_object_id, events);
 
+                let damage_chain = damage_parent_continuation_pending(state);
                 super::engine::resume_pending_continuation_if_priority(state, events)?;
                 waiting_for = state.waiting_for.clone();
+                if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+                    defer_damage_chain_observers_at_pause(
+                        state,
+                        damage_chain,
+                        events,
+                        replacement_action_event_start,
+                    );
+                }
             }
 
             Ok(waiting_for)
@@ -1836,6 +1885,7 @@ fn handle_replacement_choice_inner(
                         WaitingFor::Priority { .. } | WaitingFor::ReplacementChoice { .. }
                     ),
                 events,
+                replacement_action_event_start,
             ) {
                 return Ok(next);
             }
@@ -2080,6 +2130,7 @@ fn handle_replacement_choice_inner(
                     state,
                     matches!(state.waiting_for, WaitingFor::Priority { .. }),
                     events,
+                    replacement_action_event_start,
                 ) {
                     return Ok(next);
                 }
@@ -2175,9 +2226,60 @@ fn handle_replacement_choice_inner(
             state.waiting_for = WaitingFor::Priority {
                 player: state.active_player,
             };
+            let damage_chain = damage_parent_continuation_pending(state);
             super::engine::resume_pending_continuation_if_priority(state, events)?;
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                defer_damage_chain_observers_at_pause(
+                    state,
+                    damage_chain,
+                    events,
+                    replacement_action_event_start,
+                );
+            }
             Ok(state.waiting_for.clone())
         }
+    }
+}
+
+/// CR 120.4b + CR 603.2: is the active continuation the rest of a damage
+/// effect (the kinds `effects/deal_damage.rs` marks with
+/// `mark_pending_continuation_parent`)? Read BEFORE a drain, which takes the
+/// frame. Fight is deliberately not included (its re-pausing continuations
+/// keep their pre-existing collection).
+fn damage_parent_continuation_pending(state: &GameState) -> bool {
+    matches!(
+        state
+            .active_ability_continuation_frame()
+            .and_then(|frame| frame.pending.parent_kind),
+        Some(
+            EffectKind::DamageAll
+                | EffectKind::DamageEachPlayer
+                | EffectKind::EachDealsDamageEqualToPower
+                | EffectKind::EachSourceDealsDamage
+        )
+    )
+}
+
+/// CR 120.4b + CR 603.2 + CR 603.3b: a damage effect's continuation drained in
+/// this answering action and left a non-Priority wait (a later recipient's
+/// result paused), so the action ends on a prompt and the post-action trigger
+/// scan never sees the damage events dealt so far. Abilities that trigger on
+/// that damage trigger now and wait in `deferred_triggers`; the action-wide
+/// start is used (the filter skips occurrences another collector claimed,
+/// CR 603.2c). Only damage-parent continuations defer here (see
+/// [`damage_parent_continuation_pending`]).
+fn defer_damage_chain_observers_at_pause(
+    state: &mut GameState,
+    damage_chain: bool,
+    events: &mut Vec<GameEvent>,
+    action_event_start: usize,
+) {
+    if damage_chain {
+        super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+            state,
+            events,
+            action_event_start,
+        );
     }
 }
 
@@ -2192,10 +2294,16 @@ fn handle_replacement_choice_inner(
 /// it; the `handle_replacement_choice` wrapper resumes it on every Priority
 /// return). Returns the wait to adopt when the lifelink gain parked its own
 /// prompt (the pending replacement owns the gain), else `None`.
+///
+/// CR 120.4b + CR 603.2 + CR 603.3b: when the settle pauses, the answering
+/// action ends on that prompt and the post-action scan never sees the damage
+/// events it (and the action before it) emitted, so their observers are
+/// deferred from `action_event_start` (the answering action's start).
 fn drain_settled_non_combat_damage_stash(
     state: &mut GameState,
     settled: bool,
     events: &mut Vec<GameEvent>,
+    action_event_start: usize,
 ) -> Option<WaitingFor> {
     if !settled
         || !state
@@ -2208,6 +2316,11 @@ fn drain_settled_non_combat_damage_stash(
     }
     match effects::deal_damage::drain_pending_damage_post_loss(state, events) {
         effects::deal_damage::DamagePostLossDrainOutcome::PausedForReplacement => {
+            super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                state,
+                events,
+                action_event_start,
+            );
             Some(state.waiting_for.clone())
         }
         effects::deal_damage::DamagePostLossDrainOutcome::Settled => None,
@@ -4928,7 +5041,7 @@ mod tests {
         let life = state.players[1].life;
         let mut events = Vec::new();
         assert_eq!(
-            drain_settled_non_combat_damage_stash(&mut state, true, &mut events),
+            drain_settled_non_combat_damage_stash(&mut state, true, &mut events, 0),
             None
         );
         assert!(state.pending_damage_post_loss.is_none(), "stash consumed");
@@ -4956,7 +5069,7 @@ mod tests {
         let mut state = fixture(false);
         let mut events = Vec::new();
         assert_eq!(
-            drain_settled_non_combat_damage_stash(&mut state, false, &mut events),
+            drain_settled_non_combat_damage_stash(&mut state, false, &mut events, 0),
             None
         );
         assert!(
@@ -4969,7 +5082,7 @@ mod tests {
         let mut state = fixture(true);
         let mut events = Vec::new();
         assert_eq!(
-            drain_settled_non_combat_damage_stash(&mut state, true, &mut events),
+            drain_settled_non_combat_damage_stash(&mut state, true, &mut events, 0),
             None
         );
         assert!(
@@ -4978,6 +5091,84 @@ mod tests {
         );
         assert!(events.is_empty());
         assert!(state.damage_dealt_this_turn.is_empty());
+    }
+
+    /// CR 120.4b + CR 603.2 + CR 603.3b: when the settled stash's lifelink gain
+    /// pauses on its own CR 616.1 choice, the answering action ends on that
+    /// prompt, so the helper defers the observers of the action's span (here
+    /// the stash's own `DamageDealt`, emitted by the `EmitAndRecord` stage).
+    /// Exactly one context is deferred for the one damage event. Sibling: the
+    /// same stash with no competing gain replacements settles (`None`) and
+    /// defers nothing (the post-action scan owns that action's events).
+    #[test]
+    fn drain_settled_non_combat_damage_stash_defers_observers_when_the_gain_pauses() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::game_state::{DamagePostLossStage, PendingDamagePostLoss};
+        const SPECTER: &str = "Flying\nWhenever Hypnotic Specter deals damage to an opponent, that player discards a card at random.";
+
+        for competing in [true, false] {
+            let mut scenario = GameScenario::new();
+            let specter = scenario
+                .add_creature(P0, "Hypnotic Specter", 2, 2)
+                .from_oracle_text_with_keywords(&["Flying"], SPECTER)
+                .id();
+            if competing {
+                scenario.add_enchantment_from_oracle(
+                    P0,
+                    "Plus One",
+                    "If you would gain life, you gain that much life plus 1 instead.",
+                );
+                scenario.add_enchantment_from_oracle(
+                    P0,
+                    "Twice",
+                    "If you would gain life, you gain twice that much life instead.",
+                );
+            }
+            scenario.add_card_to_hand(P1, "Filler");
+            let mut runner = scenario.build();
+            let state = runner.state_mut();
+            assert!(
+                !state.objects[&specter].trigger_definitions.is_empty(),
+                "reach-guard: the observer parsed"
+            );
+            state.pending_damage_post_loss = Some(Box::new(PendingDamagePostLoss {
+                source_id: specter,
+                source_incarnation: Some(state.objects[&specter].incarnation),
+                controller: P0,
+                target: P1,
+                actual_amount: 2,
+                has_lifelink: true,
+                lifelink_bonus: 0,
+                stage: DamagePostLossStage::EmitAndRecord,
+                is_combat: false,
+                toxic_poison: 0,
+            }));
+            let deferred_before = state.deferred_triggers.len();
+            let mut events = Vec::new();
+            let next = drain_settled_non_combat_damage_stash(state, true, &mut events, 0);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e, GameEvent::DamageDealt { .. }))
+                    .count(),
+                1,
+                "reach-guard: the stash emitted its damage event, competing={competing}"
+            );
+            if competing {
+                assert!(
+                    matches!(next, Some(WaitingFor::ReplacementChoice { player, .. }) if player == P0),
+                    "the gain paused on P0's choice"
+                );
+                assert_eq!(
+                    state.deferred_triggers.len(),
+                    deferred_before + 1,
+                    "the Specter observer of the one damage event is deferred once"
+                );
+            } else {
+                assert_eq!(next, None);
+                assert_eq!(state.deferred_triggers.len(), deferred_before);
+            }
+        }
     }
 
     /// Helper: install an Optional replacement on a battlefield object so the

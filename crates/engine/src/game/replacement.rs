@@ -9418,6 +9418,15 @@ impl ReplacementPromptCauses {
     pub(crate) const fn is_empty(self) -> bool {
         self.0 == 0
     }
+
+    /// CR 616.1: the pipeline can open a PLAYER choice on this event: an
+    /// optional candidate, or two or more competing candidates whose order is
+    /// material. A lone mandatory modifier (`MandatoryBodyContinuation`) never
+    /// prompts. The same pair `effects/token.rs`' batch gate reads.
+    pub(crate) const fn may_open_player_choice(self) -> bool {
+        self.contains(ReplacementPromptCause::OptionalCandidate)
+            || self.contains(ReplacementPromptCause::OrderingMaterial)
+    }
 }
 
 /// CR 614.1a + CR 616.1: can the live replacement pipeline open a player choice

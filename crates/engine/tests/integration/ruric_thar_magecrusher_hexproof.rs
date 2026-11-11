@@ -3462,3 +3462,1170 @@ fn b6_2_migration_ignores_the_printed_ref() {
         assert!(opponent_can_target(restored, token, opp_bolt));
     }
 }
+
+// ---------------------------------------------------------------------------
+// B7-B10: APNAP order of simultaneous combat results, the nested wait on a
+// damage resume, the incarnation-guarded damage history, and observers across
+// the damage-resume pauses.
+// ---------------------------------------------------------------------------
+
+/// Verbatim Oracle text of Healer's Hawk.
+const HAWK_ORACLE_TEXT: &str =
+    "Flying\nLifelink (Damage dealt by this creature also causes you to gain that much life.)";
+/// Verbatim Oracle text of Loxodon Warhammer.
+const WARHAMMER_ORACLE_TEXT: &str =
+    "Equipped creature gets +3/+0 and has trample and lifelink.\nEquip {3}";
+/// Verbatim Oracle text of Torbran, Thane of Red Fell.
+const TORBRAN_ORACLE_TEXT: &str = "If a red source you control would deal damage to an opponent or a permanent an opponent controls, it deals that much damage plus 2 instead.";
+/// Verbatim Oracle text of Karakyk Guardian.
+const KARAKYK_ORACLE_TEXT: &str = "Flying, vigilance, trample\nThis creature has hexproof as long as it hasn't dealt damage yet. (It can't be the target of spells or abilities your opponents control.)";
+/// The level-1 clause of Cleric Class (the full Class text installs every
+/// level's abilities, so only the one replacement clause is built).
+const CLERIC_CLASS_LEVEL_ONE: &str =
+    "If you would gain life, you gain that much life plus 1 instead.";
+
+fn add_hawk(scenario: &mut GameScenario, controller: PlayerId) -> ObjectId {
+    scenario
+        .add_creature(controller, "Healer's Hawk", 1, 1)
+        .from_oracle_text_with_keywords(&["Flying", "Lifelink"], HAWK_ORACLE_TEXT)
+        .id()
+}
+
+fn add_lifelink_blocker(scenario: &mut GameScenario, controller: PlayerId, name: &str) -> ObjectId {
+    let mut builder = scenario.add_creature(controller, name, 2, 5);
+    builder.with_keyword(Keyword::Lifelink);
+    builder.id()
+}
+
+/// Leyline of Hope and Boon Reflection for `player` (real cards): the
+/// non-commuting "+1" / "twice" pair. Returns `(leyline, boon)`.
+fn add_leyline_and_boon(scenario: &mut GameScenario, player: PlayerId) -> (ObjectId, ObjectId) {
+    let db = shared_card_db().expect("integration card fixture must be available");
+    let leyline = scenario.add_real_card(player, "Leyline of Hope", Zone::Battlefield, db);
+    let boon = scenario.add_real_card(player, "Boon Reflection", Zone::Battlefield, db);
+    (leyline, boon)
+}
+
+/// The open choice as `(chooser, kind)`; `kind` names the pending event.
+fn choice_kind(runner: &GameRunner) -> (PlayerId, &'static str) {
+    let state = runner.state();
+    let WaitingFor::ReplacementChoice { player, .. } = state.waiting_for else {
+        panic!("expected a ReplacementChoice, got {:?}", state.waiting_for);
+    };
+    let kind = match &state
+        .pending_replacement
+        .as_ref()
+        .expect("the choice is pending")
+        .proposed
+    {
+        ProposedEvent::AddCounter { .. } => "poison",
+        ProposedEvent::LifeGain { .. } => "gain",
+        ProposedEvent::LifeLoss { .. } => "loss",
+        ProposedEvent::Damage { .. } => "damage",
+        _ => "other",
+    };
+    (player, kind)
+}
+
+/// The combat-relevant event sequence: combat `DamageDealt`, life changes and
+/// the per-player aggregate.
+fn combat_event_seq(events: &[GameEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                is_combat: true, ..
+            } => Some("DamageDealt".to_string()),
+            GameEvent::LifeChanged {
+                player_id, amount, ..
+            } if *amount > 0 => Some(format!("Gain(P{})", player_id.0)),
+            GameEvent::LifeChanged {
+                player_id, amount, ..
+            } if *amount < 0 => Some(format!("Loss(P{})", player_id.0)),
+            GameEvent::CombatDamageDealtToPlayer {
+                player_id,
+                total_damage,
+                ..
+            } => Some(format!("Agg(P{},{})", player_id.0, total_damage)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Multi-defender combat drive: each defender declares only its own blockers.
+fn drive_combat_multi_defender(
+    runner: &mut GameRunner,
+    attacks: &[(ObjectId, AttackTarget)],
+    blocks: &[(ObjectId, ObjectId)],
+    mut on_prompt: impl FnMut(&mut GameRunner, usize) -> usize,
+) -> CombatDrive {
+    runner.advance_to_combat();
+    let mut events = runner
+        .declare_attackers(attacks)
+        .expect("attack declaration must succeed")
+        .events;
+    let mut prompts = 0;
+    for _ in 0..120 {
+        if runner.state().phase == Phase::PostCombatMain
+            && runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        let result = match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+            WaitingFor::DeclareBlockers { player, .. } => {
+                let own: Vec<_> = blocks
+                    .iter()
+                    .copied()
+                    .filter(|(blocker, _)| runner.state().objects[blocker].controller == player)
+                    .collect();
+                runner.declare_blockers(&own)
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                prompts += 1;
+                let index = on_prompt(runner, prompts);
+                runner.act(GameAction::ChooseReplacement { index })
+            }
+            other => panic!("unexpected window during combat: {other:?}"),
+        }
+        .expect("combat action must be accepted");
+        events.extend(result.events);
+    }
+    assert_eq!(
+        runner.state().phase,
+        Phase::PostCombatMain,
+        "combat must complete, stuck with {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().pending_replacement.is_none());
+    assert!(runner.state().pending_combat_lifelink.is_none());
+    CombatDrive { events, prompts }
+}
+
+/// What one B7-1 / B7-2 run observed.
+struct B7Run {
+    prompts: Vec<(PlayerId, &'static str, usize)>,
+    first_prompt_p1_life: i32,
+    first_prompt_p1_poison: u32,
+    first_prompt_remnant_markers: Option<Vec<Option<PlayerId>>>,
+    first_prompt_batch_seq: Vec<String>,
+    p0_delta: i32,
+    p1_delta: i32,
+    poison: u32,
+    gains: Vec<i32>,
+    seq: Vec<String>,
+}
+
+/// B7-1 board: P0 active; Ruric (power 3) with Phyresis (infect) and a
+/// Healer's Hawk attack P1 under the Vorinclex pair; Boon Reflection (and
+/// optionally Leyline of Hope) on P0. Answers are chosen by source: Boon
+/// first for the gain, the doubler first for the poison. `round_trip` serde
+/// round-trips the parked combat record at the first prompt (B7-9).
+fn b7_board(with_leyline: bool, round_trip: bool) -> B7Run {
+    let db = shared_card_db().expect("integration card fixture must be available");
+    let mut scenario = base_scenario();
+    let ruric = add_ruric(&mut scenario, P0, 3);
+    let phyresis = add_phyresis(&mut scenario);
+    let hawk = add_hawk(&mut scenario, P0);
+    if with_leyline {
+        scenario.add_real_card(P0, "Leyline of Hope", Zone::Battlefield, db);
+    }
+    let boon = scenario.add_real_card(P0, "Boon Reflection", Zone::Battlefield, db);
+    let (doubler, _halver) = add_two_vorinclex(&mut scenario);
+    let mut runner = scenario.build();
+    attach_phyresis(&mut runner, phyresis, ruric);
+    let (life0, life1) = (
+        runner.state().players[0].life,
+        runner.state().players[1].life,
+    );
+    let mut prompts = Vec::new();
+    let mut first = None;
+    let drive = drive_combat(&mut runner, &[ruric, hawk], &[], |runner, n| {
+        let (chooser, kind) = choice_kind(runner);
+        let WaitingFor::ReplacementChoice {
+            candidate_count, ..
+        } = runner.state().waiting_for
+        else {
+            unreachable!()
+        };
+        prompts.push((chooser, kind, candidate_count));
+        if n == 1 {
+            if round_trip {
+                let parked = runner
+                    .state()
+                    .pending_combat_lifelink
+                    .clone()
+                    .expect("reach-guard: the combat batch is parked");
+                assert!(parked.phase_c_remnant.is_some(), "reach-guard: a remnant");
+                let json = serde_json::to_string(&parked).expect("serialize");
+                let decoded = serde_json::from_str(&json).expect("deserialize");
+                assert_eq!(*parked, decoded, "the parked record round-trips");
+                runner.state_mut().pending_combat_lifelink = Some(Box::new(decoded));
+            }
+            let state = runner.state();
+            let record = state.pending_combat_lifelink.as_ref();
+            first = Some((
+                state.players[1].life,
+                state.players[1].poison_counters,
+                record
+                    .and_then(|record| record.phase_c_remnant.as_ref())
+                    .map(|remnant| {
+                        remnant
+                            .remaining
+                            .iter()
+                            .map(|leg| leg.lifelink_controller)
+                            .collect()
+                    }),
+                record
+                    .map(|record| combat_event_seq(&record.batch_events))
+                    .unwrap_or_default(),
+            ));
+        }
+        match kind {
+            "gain" => candidate_from(runner, boon),
+            _ => candidate_from(runner, doubler),
+        }
+    });
+    let (first_prompt_p1_life, first_prompt_p1_poison, markers, batch_seq) =
+        first.expect("reach-guard: at least one prompt");
+    let state = runner.state();
+    B7Run {
+        prompts,
+        first_prompt_p1_life,
+        first_prompt_p1_poison,
+        first_prompt_remnant_markers: markers,
+        first_prompt_batch_seq: batch_seq,
+        p0_delta: state.players[0].life - life0,
+        p1_delta: state.players[1].life - life1,
+        poison: state.players[1].poison_counters,
+        gains: gains_of(&drive.events, P0),
+        seq: combat_event_seq(&drive.events),
+    }
+}
+
+/// B7-1 - CR 510.2 + CR 616.1 + CR 101.4: the poison result (P1's choice) and
+/// the lifelink gain (P0's choice) are simultaneous results of one combat
+/// batch; P0 is active, so P0 chooses first. Ruric's 3 infect damage: poison
+/// 3, doubler first 3 -> 6 -> 3. The Hawk's 1 damage: P1 loses 1 and P0 gains
+/// 1, Boon first 1 -> 2 -> 3 (CR 120.3a/f, CR 702.15b). At P0's prompt the
+/// whole batch is still parked (both legs, the Hawk's gain marker cleared, no
+/// event yet): P1 is still at 20 only because Ruric's own leg can prompt.
+#[test]
+fn b7_1_active_players_gain_choice_precedes_the_defenders_poison_choice() {
+    let run = b7_board(true, false);
+    assert_eq!(run.prompts.len(), 2, "reach-guard: both choices opened");
+    assert_eq!(
+        run.prompts,
+        vec![(P0, "gain", 2), (P1, "poison", 2)],
+        "APNAP: the active player's gain choice first"
+    );
+    assert_eq!(run.first_prompt_p1_life, 20);
+    assert_eq!(run.first_prompt_p1_poison, 0);
+    assert_eq!(
+        run.first_prompt_remnant_markers,
+        Some(vec![None, None]),
+        "both legs parked; the Hawk's settled gain marker is cleared"
+    );
+    assert!(run.first_prompt_batch_seq.is_empty());
+    assert_eq!((run.p0_delta, run.p1_delta, run.poison), (3, -1, 3));
+    assert_eq!(run.gains, vec![3], "the gain occurs once");
+    assert_eq!(
+        run.seq,
+        vec![
+            "Gain(P0)",
+            "DamageDealt",
+            "Loss(P1)",
+            "DamageDealt",
+            "Agg(P1,4)"
+        ]
+    );
+}
+
+/// B7-2 - the same board without Leyline of Hope: a lone mandatory doubler
+/// opens no choice, so nothing is settled early and the batch keeps the
+/// established order (CR 510.2 specifies no order inside a simultaneous
+/// batch; preserved deliberately). Gain 1 -> 2; poison 3.
+#[test]
+fn b7_2_a_gain_that_cannot_prompt_keeps_its_position() {
+    let run = b7_board(false, false);
+    assert_eq!(
+        run.prompts,
+        vec![(P1, "poison", 2)],
+        "reach-guard: the poison choice"
+    );
+    assert_eq!(
+        run.first_prompt_remnant_markers,
+        Some(vec![Some(P0)]),
+        "the Hawk leg is parked with its gain still owed"
+    );
+    assert_eq!(run.first_prompt_batch_seq, vec!["DamageDealt"]);
+    assert_eq!((run.p0_delta, run.p1_delta, run.poison), (2, -1, 3));
+    assert_eq!(run.gains, vec![2]);
+    assert_eq!(
+        run.seq,
+        vec![
+            "DamageDealt",
+            "Loss(P1)",
+            "DamageDealt",
+            "Gain(P0)",
+            "Agg(P1,4)"
+        ]
+    );
+    let gain_at = run.seq.iter().position(|e| e == "Gain(P0)").unwrap();
+    let hawk_damage_at = run.seq.iter().rposition(|e| e == "DamageDealt").unwrap();
+    assert!(
+        gain_at > hawk_damage_at,
+        "the gain follows the Hawk's damage"
+    );
+}
+
+/// B7-9 - the B7-1 batch parked at P0's gain prompt round-trips through serde
+/// and resumes from the decoded record to the same final state.
+#[test]
+fn b7_9_parked_early_gain_round_trips() {
+    let live = b7_board(true, false);
+    let restored = b7_board(true, true);
+    assert_eq!(restored.prompts, live.prompts);
+    assert_eq!(
+        (restored.p0_delta, restored.p1_delta, restored.poison),
+        (live.p0_delta, live.p1_delta, live.poison)
+    );
+    assert_eq!(restored.gains, live.gains);
+    assert_eq!(restored.seq, live.seq);
+}
+
+/// B7-3 - CR 101.4c: one player's own simultaneous choices (P1 is both
+/// poisoned and gaining) keep the engine's fixed legs-first order. P1's 2/5
+/// lifelink blocker deals 2 to the Bear: Boon first 2 -> 4 -> 5; Ruric's
+/// infect 3: doubler first 3. P1 ends at 25 with 3 poison.
+#[test]
+fn b7_3_equal_owner_keeps_legs_first() {
+    let mut scenario = base_scenario();
+    let ruric = add_ruric_with(&mut scenario, P0, 3, &[Keyword::Infect]);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let blocker = add_lifelink_blocker(&mut scenario, P1, "Blocker");
+    let (_leyline, boon) = add_leyline_and_boon(&mut scenario, P1);
+    let (doubler, _) = add_two_vorinclex(&mut scenario);
+    let mut runner = scenario.build();
+    let mut prompts = Vec::new();
+    drive_combat(
+        &mut runner,
+        &[ruric, bear],
+        &[(blocker, bear)],
+        |runner, _| {
+            let (chooser, kind) = choice_kind(runner);
+            prompts.push((chooser, kind));
+            match kind {
+                "gain" => candidate_from(runner, boon),
+                _ => candidate_from(runner, doubler),
+            }
+        },
+    );
+    assert_eq!(prompts, vec![(P1, "poison"), (P1, "gain")]);
+    assert_eq!(runner.state().players[1].life, 25);
+    assert_eq!(runner.state().players[1].poison_counters, 3);
+}
+
+/// B7-4 - CR 616.1 + CR 101.4: two lifelink gains of different players with
+/// their own choices (no leg prompts: the tail order). P0 active: APNAP is P1
+/// then P2, in both declaration orders and although P2's blocker was created
+/// first. Each blocker deals 2: Boon first 5; P1 and P2 end at 25.
+#[test]
+fn b7_4_tail_gains_follow_apnap() {
+    for p2_attack_first in [true, false] {
+        let mut scenario = three_player_scenario();
+        let p2 = PlayerId(2);
+        let a1 = scenario.add_creature(P0, "A1", 2, 5).id();
+        let a2 = scenario.add_creature(P0, "A2", 2, 5).id();
+        let l2 = add_lifelink_blocker(&mut scenario, p2, "L2");
+        let l1 = add_lifelink_blocker(&mut scenario, P1, "L1");
+        let (_, boon1) = add_leyline_and_boon(&mut scenario, P1);
+        let (_, boon2) = add_leyline_and_boon(&mut scenario, p2);
+        let mut runner = scenario.build();
+        let mut attacks = vec![
+            (a1, AttackTarget::Player(P1)),
+            (a2, AttackTarget::Player(p2)),
+        ];
+        if p2_attack_first {
+            attacks.reverse();
+        }
+        let mut order = Vec::new();
+        let drive = drive_combat_multi_defender(
+            &mut runner,
+            &attacks,
+            &[(l1, a1), (l2, a2)],
+            |runner, _| {
+                let (chooser, kind) = choice_kind(runner);
+                assert_eq!(kind, "gain");
+                order.push(chooser);
+                candidate_from(runner, if chooser == P1 { boon1 } else { boon2 })
+            },
+        );
+        assert_eq!(drive.prompts, 2, "reach-guard: both gains prompted");
+        assert_eq!(order, vec![P1, p2], "p2_attack_first={p2_attack_first}");
+        assert_eq!(runner.state().players[1].life, 25);
+        assert_eq!(runner.state().players[2].life, 25);
+    }
+}
+
+/// B7-5 - APNAP follows the active player: P1 active, its attackers at P0 and
+/// P2 are blocked by lifelinkers of P0 (created first) and P2. APNAP from P1
+/// is P2 then P0.
+#[test]
+fn b7_5_tail_gains_follow_the_active_player() {
+    let mut scenario = three_player_scenario();
+    let p2 = PlayerId(2);
+    let a1 = scenario.add_creature(P1, "A1", 2, 5).id();
+    let a2 = scenario.add_creature(P1, "A2", 2, 5).id();
+    let l0 = add_lifelink_blocker(&mut scenario, P0, "L0");
+    let l2 = add_lifelink_blocker(&mut scenario, p2, "L2");
+    let (_, boon0) = add_leyline_and_boon(&mut scenario, P0);
+    let (_, boon2) = add_leyline_and_boon(&mut scenario, p2);
+    let mut runner = scenario.build();
+    park_active_priority(&mut runner, P1);
+    assert_eq!(
+        runner.state().active_player,
+        P1,
+        "reach-guard: P1 is active"
+    );
+    let mut order = Vec::new();
+    drive_combat_multi_defender(
+        &mut runner,
+        &[
+            (a1, AttackTarget::Player(P0)),
+            (a2, AttackTarget::Player(p2)),
+        ],
+        &[(l0, a1), (l2, a2)],
+        |runner, _| {
+            let (chooser, kind) = choice_kind(runner);
+            assert_eq!(kind, "gain");
+            order.push(chooser);
+            candidate_from(runner, if chooser == P0 { boon0 } else { boon2 })
+        },
+    );
+    assert_eq!(order, vec![p2, P0], "APNAP from P1: P2 then P0");
+    assert_eq!(runner.state().players[0].life, 25);
+    assert_eq!(runner.state().players[2].life, 25);
+}
+
+/// B7-6 - cross-rank: P0 active; Ruric (infect 3) attacks P2 under the pair
+/// (P2 chooses its poison), a Bear attacks P1 and is blocked by P1's 2/5
+/// lifelinker (P1 chooses its gain). P1 ranks before P2, so P1's gain choice
+/// opens first: Boon first 2 -> 4 -> 5 (Leyline first would be 6); P2 gets 3
+/// poison (doubler first).
+#[test]
+fn b7_6_earlier_players_gain_precedes_a_later_players_poison() {
+    let mut scenario = three_player_scenario();
+    let p2 = PlayerId(2);
+    let ruric = add_ruric_with(&mut scenario, P0, 3, &[Keyword::Infect]);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let blocker = add_lifelink_blocker(&mut scenario, P1, "L1");
+    let (_, boon) = add_leyline_and_boon(&mut scenario, P1);
+    let (doubler, _) = add_two_vorinclex(&mut scenario);
+    let mut runner = scenario.build();
+    let mut order = Vec::new();
+    let drive = drive_combat_multi_defender(
+        &mut runner,
+        &[
+            (ruric, AttackTarget::Player(p2)),
+            (bear, AttackTarget::Player(P1)),
+        ],
+        &[(blocker, bear)],
+        |runner, _| {
+            let (chooser, kind) = choice_kind(runner);
+            order.push((chooser, kind));
+            if kind == "poison" {
+                let (chooser, actor, receiver, count, candidates) = poison_prompt(runner);
+                assert_eq!(
+                    (chooser, actor, receiver, count, candidates),
+                    (p2, P0, p2, 3, 2),
+                    "reach-guard: P2 chooses its own poison"
+                );
+                candidate_from(runner, doubler)
+            } else {
+                candidate_from(runner, boon)
+            }
+        },
+    );
+    assert_eq!(order, vec![(P1, "gain"), (p2, "poison")]);
+    assert_eq!(gains_of(&drive.events, P1), vec![5]);
+    assert_eq!(runner.state().players[2].poison_counters, 3);
+}
+
+/// B7-13 - CR 732.2a: P0 active; a Bear and a Healer's Hawk hit P1 (no
+/// choice), Ruric (infect) hits P2 under the pair, P0 holds Leyline + Boon.
+/// P1's legs apply first (P1 loses 3), then P0's gain is settled ahead of
+/// P2's leg and pauses: the batch already moved a life total, so the
+/// loop-detection ring seeded after the declaration is gone at the prompt.
+#[test]
+fn b7_13_early_gain_pause_invalidates_the_loop_ring() {
+    let mut scenario = three_player_scenario();
+    let p2 = PlayerId(2);
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let hawk = add_hawk(&mut scenario, P0);
+    let ruric = add_ruric_with(&mut scenario, P0, 3, &[Keyword::Infect]);
+    let (_, boon) = add_leyline_and_boon(&mut scenario, P0);
+    let (doubler, _) = add_two_vorinclex(&mut scenario);
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (bear, AttackTarget::Player(P1)),
+            (hawk, AttackTarget::Player(P1)),
+            (ruric, AttackTarget::Player(p2)),
+        ])
+        .expect("attack");
+    let snapshot = runner.state().clone();
+    runner
+        .state_mut()
+        .loop_detect_ring
+        .push_back(std::sync::Arc::new(
+            engine::types::game_state::LoopDetectSample {
+                normalized: snapshot.clone(),
+                live: snapshot,
+                tally: Default::default(),
+                trace_at: None,
+            },
+        ));
+    assert!(
+        !runner.state().loop_detect_ring.is_empty(),
+        "reach-guard: seeded"
+    );
+    for _ in 0..30 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                runner.declare_blockers(&[]).expect("no blocks");
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(choice_kind(&runner), (P0, "gain"), "reach-guard: P0's gain");
+    assert_eq!(runner.state().players[1].life, 17, "P1's legs applied");
+    assert_eq!(
+        runner.state().players[0].life,
+        20,
+        "the gain is not applied yet"
+    );
+    assert!(
+        runner.state().loop_detect_ring.is_empty(),
+        "CR 732.2a: the ring is invalidated at the early-gain pause"
+    );
+    // The batch still completes: gain 1 -> 2 -> 3, P2 poison 3.
+    for _ in 0..8 {
+        if !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            break;
+        }
+        let index = match choice_kind(&runner).1 {
+            "gain" => candidate_from(&runner, boon),
+            _ => candidate_from(&runner, doubler),
+        };
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("answer");
+    }
+    assert_eq!(runner.state().players[0].life, 23);
+    assert_eq!(runner.state().players[2].poison_counters, 3);
+}
+
+/// One drive of the non-combat damage-resume waits: answers each
+/// `ReplacementChoice` with `choose`, accepts each optional effect, passes
+/// priority while the stack is non-empty. Returns the prompts seen (chooser,
+/// kind, whether a damage stash was parked) and the optional-effect count.
+fn drive_waits(
+    runner: &mut GameRunner,
+    events: &mut Vec<GameEvent>,
+    mut choose: impl FnMut(&GameRunner) -> usize,
+) -> (Vec<(PlayerId, &'static str, bool)>, usize) {
+    let mut prompts = Vec::new();
+    let mut optional = 0;
+    for _ in 0..32 {
+        let result = match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                let (chooser, kind) = choice_kind(runner);
+                prompts.push((
+                    chooser,
+                    kind,
+                    runner.state().pending_damage_post_loss.is_some(),
+                ));
+                let index = choose(runner);
+                runner.act(GameAction::ChooseReplacement { index })
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                optional += 1;
+                runner.act(GameAction::DecideOptionalEffect { accept: true })
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority)
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected wait {other:?}"),
+        }
+        .expect("act");
+        events.extend(result.events);
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    (prompts, optional)
+}
+
+/// The B8 board: a red Prodigal Pyromancer with Loxodon Warhammer (lifelink),
+/// optionally Phyresis (infect), Furnace of Rath and Torbran, and optionally
+/// the Vorinclex pair, Leyline + Boon on P0 and Curiosity on the Pyromancer.
+struct B8Board {
+    runner: GameRunner,
+    pyro: ObjectId,
+    torbran: ObjectId,
+    doubler: Option<ObjectId>,
+    boon: Option<ObjectId>,
+}
+
+fn b8_board(infect: bool, pair: bool, gain_pair: bool, curiosity: bool) -> B8Board {
+    let db = shared_card_db().expect("integration card fixture must be available");
+    let mut scenario = base_scenario();
+    let pyro = {
+        let mut builder = scenario.add_creature(P0, "Prodigal Pyromancer", 1, 1);
+        builder.from_oracle_text(PRODIGAL_PYROMANCER);
+        builder.with_color(vec![ManaColor::Red]);
+        builder.id()
+    };
+    let phyresis = infect.then(|| add_phyresis(&mut scenario));
+    let hammer = scenario
+        .add_artifact_from_oracle(P0, "Loxodon Warhammer", WARHAMMER_ORACLE_TEXT)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let curiosity =
+        curiosity.then(|| scenario.add_real_card(P0, "Curiosity", Zone::Battlefield, db));
+    scenario.add_real_card(P0, "Furnace of Rath", Zone::Battlefield, db);
+    let torbran = scenario
+        .add_creature(P0, "Torbran, Thane of Red Fell", 2, 4)
+        .from_oracle_text(TORBRAN_ORACLE_TEXT)
+        .id();
+    let boon = gain_pair.then(|| add_leyline_and_boon(&mut scenario, P0).1);
+    let doubler = pair.then(|| add_two_vorinclex(&mut scenario).0);
+    let mut runner = scenario.build();
+    if let Some(phyresis) = phyresis {
+        attach_phyresis(&mut runner, phyresis, pyro);
+    }
+    attach_to(runner.state_mut(), hammer, pyro);
+    if let Some(curiosity) = curiosity {
+        attach_to(runner.state_mut(), curiosity, pyro);
+    }
+    flush_layers(runner.state_mut());
+    assert!(
+        runner.state().objects[&pyro]
+            .keywords
+            .contains(&Keyword::Lifelink),
+        "reach-guard: the Warhammer grants lifelink"
+    );
+    B8Board {
+        runner,
+        pyro,
+        torbran,
+        doubler,
+        boon,
+    }
+}
+
+/// B8-1 - CR 616.1 + CR 616.1f: the Pyromancer (infect + lifelink) pings P1
+/// under Furnace of Rath + Torbran and the Vorinclex pair. Prompt 1 orders the
+/// damage modifiers; Torbran first: (1 + 2) * 2 = 6. The resumed hit's poison
+/// result raises a SECOND prompt (measured on N2p-a), which must stay the wait
+/// with its stash parked: P1's 2-candidate poison choice for 6, the owed
+/// lifelink parked, nothing gained yet, one `DamageDealt`. Its answer gives 6
+/// poison either way (6 -> 12 -> 6, 6 -> 3 -> 6), then P0 gains 6 exactly once.
+#[test]
+fn b8_1_resumed_damage_keeps_the_nested_poison_choice() {
+    let mut board = b8_board(true, true, false, false);
+    let (runner, pyro) = (&mut board.runner, board.pyro);
+    let life0 = runner.state().players[0].life;
+    let mut events = runner
+        .activate(pyro, 0)
+        .target_player(P1)
+        .resolve()
+        .events()
+        .to_vec();
+    assert_eq!(choice_kind(runner), (P1, "damage"), "reach-guard: prompt 1");
+    let mut sources: Vec<ObjectId> = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .unwrap()
+        .candidates
+        .iter()
+        .map(|c| c.source)
+        .collect();
+    sources.sort_by_key(|id| id.0);
+    assert_eq!(sources.len(), 2, "Furnace and Torbran compete");
+    assert!(sources.contains(&board.torbran));
+    let index = candidate_from(runner, board.torbran);
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("answer the damage ordering")
+            .events,
+    );
+    // The nested wait is kept.
+    let (chooser, actor, receiver, count, candidates) = poison_prompt(runner);
+    assert_eq!(
+        (chooser, actor, receiver, count, candidates),
+        (P1, P0, P1, 6, 2)
+    );
+    let stash = runner
+        .state()
+        .pending_damage_post_loss
+        .clone()
+        .expect("the owed lifelink is parked");
+    assert_eq!(stash.stage, DamagePostLossStage::LifelinkGain);
+    assert_eq!(stash.actual_amount, 6);
+    assert_eq!(runner.state().players[1].poison_counters, 0);
+    assert_eq!(runner.state().players[0].life, life0);
+    assert_eq!(damage_events(&events, pyro, false), 1);
+    let index = candidate_from(runner, board.doubler.unwrap());
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("answer the poison ordering")
+            .events,
+    );
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(state.players[1].poison_counters, 6);
+    assert_eq!(state.players[0].life, life0 + 6);
+    assert_eq!(gains_of(&events, P0), vec![6], "gained exactly once");
+    assert!(state.pending_damage_post_loss.is_none());
+    assert!(state.pending_replacement.is_none());
+    assert_eq!(records_from(state, pyro), 1);
+}
+
+/// B8-2 - control: without the Vorinclex pair the resumed hit applies at
+/// once (no nested prompt): one prompt, 6 poison, P0 gains 6.
+#[test]
+fn b8_2_resumed_damage_without_a_nested_choice_settles() {
+    let mut board = b8_board(true, false, false, false);
+    let (runner, pyro) = (&mut board.runner, board.pyro);
+    let life0 = runner.state().players[0].life;
+    let mut events = runner
+        .activate(pyro, 0)
+        .target_player(P1)
+        .resolve()
+        .events()
+        .to_vec();
+    assert_eq!(choice_kind(runner), (P1, "damage"), "reach-guard: prompt 1");
+    let index = candidate_from(runner, board.torbran);
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("answer")
+            .events,
+    );
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(state.players[1].poison_counters, 6);
+    assert_eq!(state.players[0].life, life0 + 6);
+    assert_eq!(gains_of(&events, P0), vec![6]);
+    assert!(state.pending_replacement.is_none());
+}
+
+/// B8-3 - the non-infect sibling: the resumed hit deals 6 (P1 to 14) and its
+/// lifelink gain opens P0's own choice (Leyline + Boon), which must stay the
+/// wait. Boon first: 6 -> 12 -> 13, gained once.
+#[test]
+fn b8_3_resumed_damage_keeps_the_nested_gain_choice() {
+    let mut board = b8_board(false, false, true, false);
+    let (runner, pyro) = (&mut board.runner, board.pyro);
+    let life0 = runner.state().players[0].life;
+    let mut events = runner
+        .activate(pyro, 0)
+        .target_player(P1)
+        .resolve()
+        .events()
+        .to_vec();
+    assert_eq!(choice_kind(runner), (P1, "damage"), "reach-guard: prompt 1");
+    let index = candidate_from(runner, board.torbran);
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("answer")
+            .events,
+    );
+    assert_eq!(
+        choice_kind(runner),
+        (P0, "gain"),
+        "the nested gain choice is the wait"
+    );
+    assert_eq!(runner.state().players[1].life, 14, "the damage was dealt");
+    assert_eq!(runner.state().players[0].life, life0);
+    let index = candidate_from(runner, board.boon.unwrap());
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("answer the gain ordering")
+            .events,
+    );
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(state.players[0].life, life0 + 13);
+    assert_eq!(gains_of(&events, P0), vec![13]);
+    assert!(state.pending_replacement.is_none());
+}
+
+/// B10-2 - CR 603.2 + CR 603.3b + CR 120.4b: the B8-1 board with Curiosity on
+/// the Pyromancer. The damage event of the resumed hit is emitted in the
+/// answering action that ends on the nested poison choice; its observer must
+/// still trigger exactly once.
+#[test]
+fn b10_2_observer_of_the_resumed_hit_fires_once() {
+    let mut board = b8_board(true, true, false, true);
+    let (torbran, doubler) = (board.torbran, board.doubler.unwrap());
+    let (runner, pyro) = (&mut board.runner, board.pyro);
+    let hand0 = runner.state().players[0].hand.len();
+    let mut events = runner
+        .activate(pyro, 0)
+        .target_player(P1)
+        .resolve()
+        .events()
+        .to_vec();
+    let (prompts, optional) =
+        drive_waits(runner, &mut events, |runner| match choice_kind(runner).1 {
+            "damage" => candidate_from(runner, torbran),
+            _ => candidate_from(runner, doubler),
+        });
+    assert_eq!(
+        prompts,
+        vec![(P1, "damage", false), (P1, "poison", true)],
+        "reach-guard: the nested poison choice occurred"
+    );
+    assert_eq!(optional, 1, "Curiosity triggers once for the one hit");
+    assert_eq!(runner.state().players[0].hand.len(), hand0 + 1);
+    assert_eq!(runner.state().players[1].poison_counters, 6);
+    assert_eq!(gains_of(&events, P0), vec![6]);
+}
+
+/// B10-4b - double-collect guard: the B8-1 board with Leyline + Boon on P0
+/// and Curiosity. After the poison answer the stash's lifelink gain opens
+/// P0's choice and the action exits through the settled-stash helper. The
+/// damage observer fires exactly once (it was deferred at the earlier poison
+/// pause). Torbran first 6; doubler first 6 poison; Boon first 6 -> 12 -> 13.
+/// The relative order of P1's poison choice and P0's gain choice is not
+/// asserted (non-combat APNAP is out of scope).
+#[test]
+fn b10_4b_stash_gain_pause_does_not_double_collect() {
+    let mut board = b8_board(true, true, true, true);
+    let (torbran, doubler, boon) = (board.torbran, board.doubler.unwrap(), board.boon.unwrap());
+    let (runner, pyro) = (&mut board.runner, board.pyro);
+    let mut events = runner
+        .activate(pyro, 0)
+        .target_player(P1)
+        .resolve()
+        .events()
+        .to_vec();
+    let (prompts, optional) =
+        drive_waits(runner, &mut events, |runner| match choice_kind(runner).1 {
+            "damage" => candidate_from(runner, torbran),
+            "gain" => candidate_from(runner, boon),
+            _ => candidate_from(runner, doubler),
+        });
+    assert_eq!(prompts.len(), 3);
+    assert!(prompts.contains(&(P1, "damage", false)));
+    assert!(
+        prompts.contains(&(P1, "poison", true)),
+        "poison with the stash parked"
+    );
+    assert!(
+        prompts
+            .iter()
+            .any(|&(chooser, kind, _)| (chooser, kind) == (P0, "gain")),
+        "P0's gain choice occurred"
+    );
+    assert_eq!(optional, 1, "the observer is collected exactly once");
+    assert_eq!(gains_of(&events, P0), vec![13]);
+    assert_eq!(runner.state().players[1].poison_counters, 6);
+    assert!(runner.state().pending_damage_post_loss.is_none());
+    assert!(runner.state().pending_replacement.is_none());
+}
+
+/// B10-4 - exit (b): SURVIVOR's lifelink pinger (Curiosity attached) pings
+/// the Horde seat. The damage is turned into a mill whose graveyard move
+/// collides Rest in Peace with Leyline of the Void (the Horde's choice, with
+/// the damage results stashed). After that answer the stash settles: the
+/// `DamageDealt` is emitted and the lifelink gain opens SURVIVOR's choice
+/// (Cleric Class clause + Boon), so the action ends through the settled-stash
+/// helper. Curiosity must trigger exactly once. Cleric first: (1 + 1) * 2 = 4.
+#[test]
+fn b10_4_settled_stash_pause_defers_the_damage_observer() {
+    let db = shared_card_db().expect("integration card fixture must be available");
+    let mut scenario = horde_scenario();
+    scenario.add_real_card(SURVIVOR, "Rest in Peace", Zone::Battlefield, db);
+    scenario.add_real_card(SURVIVOR, "Leyline of the Void", Zone::Battlefield, db);
+    for _ in 0..10 {
+        scenario.add_real_card(HORDE, "Lightning Bolt", Zone::Library, db);
+    }
+    scenario.with_library_top(SURVIVOR, &["Library A", "Library B", "Library C"]);
+    let pinger = {
+        let mut builder = scenario.add_creature(SURVIVOR, "Lifelink Pinger", 1, 1);
+        builder.from_oracle_text(PRODIGAL_PYROMANCER);
+        builder.with_keyword(Keyword::Lifelink);
+        builder.id()
+    };
+    let curiosity = scenario.add_real_card(SURVIVOR, "Curiosity", Zone::Battlefield, db);
+    let cleric = scenario
+        .add_enchantment_from_oracle(SURVIVOR, "Cleric Class", CLERIC_CLASS_LEVEL_ONE)
+        .id();
+    scenario.add_real_card(SURVIVOR, "Boon Reflection", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    park_survivor_priority(&mut runner);
+    attach_to(runner.state_mut(), curiosity, pinger);
+    flush_layers(runner.state_mut());
+    let hand0 = runner.state().players[SURVIVOR.0 as usize].hand.len();
+    let mut events = runner
+        .activate(pinger, 0)
+        .target_player(HORDE)
+        .resolve()
+        .events()
+        .to_vec();
+    let (prompts, optional) = drive_waits(&mut runner, &mut events, |runner| {
+        match choice_kind(runner).1 {
+            "gain" => candidate_from(runner, cleric),
+            _ => 0,
+        }
+    });
+    assert_eq!(prompts.len(), 2, "reach-guard: both prompts occurred");
+    assert!(
+        prompts.contains(&(HORDE, "other", true)),
+        "the mill ordering with the damage results stashed"
+    );
+    assert!(prompts
+        .iter()
+        .any(|&(c, k, _)| (c, k) == (SURVIVOR, "gain")));
+    assert_eq!(optional, 1, "Curiosity triggers exactly once");
+    assert_eq!(gains_of(&events, SURVIVOR), vec![4]);
+    assert_eq!(
+        runner.state().players[SURVIVOR.0 as usize].hand.len(),
+        hand0 + 1
+    );
+    assert!(runner.state().pending_replacement.is_none());
+    assert!(runner.state().pending_damage_post_loss.is_none());
+}
+
+/// The B10 Chandra's Ignition board (3 players): a Bear with Phyresis,
+/// Loxodon Warhammer (power 5, lifelink) and Curiosity; optionally the
+/// Vorinclex pair.
+fn ignition_board(pair: bool) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+    let db = shared_card_db().expect("integration card fixture must be available");
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, PlayerId(2)] {
+        scenario.with_library_top(
+            player,
+            &["Library A", "Library B", "Library C", "Library D"],
+        );
+    }
+    let bear = scenario.add_creature(P0, "Ignition Bear", 2, 2).id();
+    let phyresis = add_phyresis(&mut scenario);
+    let hammer = scenario
+        .add_artifact_from_oracle(P0, "Loxodon Warhammer", WARHAMMER_ORACLE_TEXT)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let curiosity = scenario.add_real_card(P0, "Curiosity", Zone::Battlefield, db);
+    let ignition = scenario.add_real_card(P0, "Chandra's Ignition", Zone::Hand, db);
+    for _ in 0..5 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    let doubler = pair.then(|| add_two_vorinclex(&mut scenario).0);
+    let mut runner = scenario.build();
+    attach_phyresis(&mut runner, phyresis, bear);
+    attach_to(runner.state_mut(), hammer, bear);
+    attach_to(runner.state_mut(), curiosity, bear);
+    flush_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&bear].power,
+        Some(5),
+        "reach-guard: power 5"
+    );
+    (runner, bear, ignition, doubler)
+}
+
+/// Damage events from `source` to players: `(player, amount)`.
+fn player_hits(events: &[GameEvent], source: ObjectId) -> Vec<(PlayerId, u32)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Player(player),
+                amount,
+                ..
+            } if *source_id == source => Some((*player, *amount)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// B10-1 - CR 603.2 + CR 603.3b + CR 120.4b: Chandra's Ignition makes the
+/// infect + lifelink Bear deal 5 to each other creature and each opponent.
+/// Under the pair each opponent's poison result opens its own choice; the
+/// second opponent's hit is dealt in the answering action that ends on that
+/// choice (the DamageAll continuation drain). Curiosity must trigger once per
+/// opponent hit: two optional draws. Doubler first: 5 poison each; lifelink
+/// 5 per hit on the two Vorinclex and two opponents. Control: no pair, two
+/// draws, gains [5, 5].
+#[test]
+fn b10_1_damage_chain_observers_survive_the_continuation_pause() {
+    for pair in [true, false] {
+        let (mut runner, bear, ignition, doubler) = ignition_board(pair);
+        let p2 = PlayerId(2);
+        let hand0 = runner.state().players[0].hand.len();
+        let life0 = runner.state().players[0].life;
+        let mut events = runner
+            .cast(ignition)
+            .target_object(bear)
+            .commit()
+            .events()
+            .to_vec();
+        let (prompts, optional) = drive_waits(&mut runner, &mut events, |runner| {
+            candidate_from(runner, doubler.expect("prompts only under the pair"))
+        });
+        let state = runner.state();
+        assert_eq!(player_hits(&events, bear), vec![(P1, 5), (p2, 5)]);
+        assert_eq!(
+            optional, 2,
+            "pair={pair}: one Curiosity trigger per opponent hit"
+        );
+        assert_eq!(
+            state.players[0].hand.len() as i64 - hand0 as i64,
+            1,
+            "two draws minus the cast card"
+        );
+        if pair {
+            assert_eq!(
+                prompts,
+                vec![(P1, "poison", true), (p2, "poison", true)],
+                "reach-guard: each opponent chose its own poison"
+            );
+            assert_eq!(
+                (
+                    state.players[1].poison_counters,
+                    state.players[2].poison_counters
+                ),
+                (5, 5)
+            );
+            assert_eq!(gains_of(&events, P0), vec![5, 5, 5, 5]);
+            assert_eq!(state.players[0].life, life0 + 20);
+        } else {
+            assert!(prompts.is_empty());
+            assert_eq!(gains_of(&events, P0), vec![5, 5]);
+        }
+    }
+}
+
+/// B9-1 - CR 400.7: Karakyk Guardian with Unquenchable Fury attacks; while
+/// the Fury trigger waits on the stack, Cloudshift blinks the Guardian. The
+/// trigger still deals X = 2 (P1's hand) to P1 from the old incarnation; the
+/// returned Guardian is a new object that dealt nothing, so neither sticky
+/// store is written for it and it keeps hexproof. The occurrence (record and
+/// event) carries the old incarnation. Control (no blink): both stores are
+/// written and hexproof is gone.
+#[test]
+fn b9_1_blinked_source_keeps_its_new_incarnations_history_clean() {
+    for blink in [true, false] {
+        let db = shared_card_db().expect("integration card fixture must be available");
+        let mut scenario = base_scenario();
+        let guardian = scenario
+            .add_creature(P0, "Karakyk Guardian", 6, 6)
+            .from_oracle_text_with_keywords(
+                &["Flying", "Vigilance", "Trample"],
+                KARAKYK_ORACLE_TEXT,
+            )
+            .id();
+        let fury = scenario.add_real_card(P0, "Unquenchable Fury", Zone::Battlefield, db);
+        let cloudshift = scenario.add_real_card(P0, "Cloudshift", Zone::Hand, db);
+        scenario.add_basic_land(P0, ManaColor::White);
+        let opp_bolt = scenario.add_bolt_to_hand(P1);
+        scenario.add_card_to_hand(P1, "Filler");
+        let mut runner = scenario.build();
+        attach_to(runner.state_mut(), fury, guardian);
+        flush_layers(runner.state_mut());
+        assert!(hexproof_now(runner.state(), guardian), "premise: hexproof");
+        runner.advance_to_combat();
+        let mut events = runner
+            .declare_attackers(&[(guardian, AttackTarget::Player(P1))])
+            .expect("attack")
+            .events;
+        if let WaitingFor::TriggerTargetSelection { .. } = runner.state().waiting_for {
+            events.extend(
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Player(P1)],
+                    })
+                    .expect("select the defending player")
+                    .events,
+            );
+        }
+        assert!(
+            !runner.state().stack.is_empty(),
+            "reach-guard: Fury's trigger waits"
+        );
+        let old = runner.state().objects[&guardian].incarnation;
+        if blink {
+            events.extend(
+                runner
+                    .cast(cloudshift)
+                    .target_object(guardian)
+                    .resolve()
+                    .events()
+                    .to_vec(),
+            );
+            assert_ne!(
+                runner.state().objects[&guardian].incarnation,
+                old,
+                "reach-guard: CR 400.7 new object"
+            );
+            assert_eq!(runner.state().objects[&guardian].zone, Zone::Battlefield);
+        }
+        for _ in 0..6 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            events.extend(runner.act(GameAction::PassPriority).expect("pass").events);
+        }
+        assert!(runner.state().stack.is_empty());
+        let state = runner.state();
+        assert_eq!(state.players[1].life, 18, "Fury dealt X = 2");
+        let records: Vec<_> = state
+            .damage_dealt_this_turn
+            .iter()
+            .filter(|record| record.source_id == guardian)
+            .map(|record| (record.source_incarnation, record.amount))
+            .collect();
+        assert_eq!(records, vec![(Some(old), 2)], "the occurrence is kept");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt { source_id, source_incarnation, .. }
+                if *source_id == guardian && *source_incarnation == Some(old)
+        )));
+        let stale = blink;
+        assert_eq!(state.objects_that_dealt_damage.contains(&guardian), !stale);
+        assert_eq!(
+            state.objects[&guardian].dealt_damage_kinds.is_empty(),
+            stale
+        );
+        assert_eq!(hexproof_now(state, guardian), stale);
+        let legal = bolt_legal_targets(&mut runner, P1, opp_bolt);
+        assert_eq!(
+            can_target(&legal, guardian, P0),
+            !stale,
+            "blink={blink}: an opponent can target only the damage-dealt incarnation"
+        );
+    }
+}

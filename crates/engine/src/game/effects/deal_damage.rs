@@ -1125,6 +1125,72 @@ fn owed_toxic_poison(ctx: &DamageContext, actual_amount: u32, is_combat: bool) -
     }
 }
 
+/// CR 616.1 + CR 120.3 + CR 120.4c: can applying this combat damage survivor
+/// open a replacement choice over one of its RESULTS? A read-only mirror of
+/// the player arm of [`apply_damage_after_replacement`]: infect gives a poison
+/// `AddCounter` (CR 120.3b; actor = the source's controller), otherwise the
+/// life loss (CR 120.3a; a Horde seat's loss is redirected to a `Mill`, the
+/// event `horde::mill_from_loss` proposes), and owed toxic adds a second
+/// poison `AddCounter` (CR 120.3g). True on the same pair of causes the
+/// lifelink gain reads (`ReplacementPromptCauses::may_open_player_choice`).
+/// Objects, phased-out players and `0` amounts have no player result and
+/// answer false. "May", not "will": the candidate authority is consulted, not
+/// the answer.
+pub(crate) fn combat_leg_may_prompt(
+    state: &GameState,
+    ctx: &DamageContext,
+    survivor: &ProposedEvent,
+) -> bool {
+    let ProposedEvent::Damage {
+        target: TargetRef::Player(player_id),
+        amount,
+        ..
+    } = survivor
+    else {
+        return false;
+    };
+    let (player_id, amount) = (*player_id, *amount);
+    if amount == 0
+        || state
+            .players
+            .iter()
+            .find(|p| p.id == player_id)
+            .is_some_and(|p| p.is_phased_out())
+    {
+        return false;
+    }
+    let may_prompt = |event: &ProposedEvent| {
+        replacement::proposed_event_prompt_cause(state, event, replacement::replacement_registry())
+            .may_open_player_choice()
+    };
+    // The same event `player_counter::add_player_counter_with_replacement`
+    // proposes for infect and toxic; that builder is fused with its mutation,
+    // so the read-only shape is rebuilt here.
+    let poison = |count: u32| ProposedEvent::AddCounter {
+        placement: crate::types::proposed_event::CounterPlacement::Player {
+            actor: ctx.controller,
+            player_id,
+            counter_kind: PlayerCounterKind::Poison,
+        },
+        count,
+        applied: HashSet::new(),
+    };
+    let result_may_prompt = if ctx.has_infect {
+        may_prompt(&poison(amount))
+    } else {
+        super::life::life_loss_may_prompt(state, player_id, amount)
+            || (crate::game::horde::player_has_no_life_total(state, player_id)
+                && may_prompt(&ProposedEvent::Mill {
+                    player_id,
+                    count: amount,
+                    destination: crate::types::zones::Zone::Graveyard,
+                    applied: HashSet::new(),
+                }))
+    };
+    let toxic = owed_toxic_poison(ctx, amount, true);
+    result_may_prompt || (toxic > 0 && may_prompt(&poison(toxic)))
+}
+
 /// CR 120.3g + CR 702.164c + CR 614.17: toxic gives the damaged player poison
 /// counters in addition to the damage's other results. Routed through the
 /// player-counter replacement pipeline (prevention/doublers); the actor is the
@@ -1211,7 +1277,9 @@ fn emit_parked_player_damage(
 /// the never-paused leg would. This is the single damage-history authority:
 /// the per-kind latch (`GameObject::dealt_damage_kinds`) is written here too,
 /// so every path (synchronous, replacement-choice resume, post-loss drain,
-/// combat Phase C remnant) updates it identically.
+/// combat Phase C remnant) updates it identically. Both sticky stores are
+/// written only for the source incarnation captured in `source_incarnation`
+/// (CR 400.7): a source that left and returned since is a new object.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_damage_dealt_and_record(
     state: &mut GameState,
@@ -1332,14 +1400,25 @@ pub(crate) fn emit_damage_dealt_and_record(
         // stores are always written. The kind latch is read before `get_mut`:
         // `ObjectMap::get_mut` unshares a copy-on-write object, so a repeat
         // same-kind hit (latch already set) must not take a mutable borrow.
-        let (on_battlefield, kind_pending) =
+        //
+        // CR 400.7: both sticky stores belong to the source INCARNATION that
+        // dealt the damage. When the context captured an incarnation and the
+        // object has since left and returned (a blink while the damage
+        // ability waited on the stack), the live object is a new object that
+        // dealt nothing: neither store is written for it (the occurrence,
+        // `DamageDealt` and the record above, still carries the old
+        // incarnation). `None` (a fallback context, or a snapshot saved before
+        // the field existed) has nothing to compare and keeps the zone check.
+        let (source_is_live_incarnation, kind_pending) =
             state.objects.get(&source_id).map_or((false, false), |obj| {
                 (
-                    obj.zone == crate::types::zones::Zone::Battlefield,
+                    obj.zone == crate::types::zones::Zone::Battlefield
+                        && source_incarnation
+                            .is_none_or(|incarnation| obj.incarnation == incarnation),
                     obj.dealt_damage_kinds.would_record(is_combat),
                 )
             });
-        if on_battlefield {
+        if source_is_live_incarnation {
             let newly_any = state.objects_that_dealt_damage.insert(source_id);
             let newly_kind = kind_pending
                 && state
@@ -6147,6 +6226,102 @@ mod tests {
             state.damage_dealt_this_turn[0].source_incarnation, source_incarnation,
             "damage records must retain the pre-pause source incarnation"
         );
+    }
+
+    /// CR 400.7: both sticky damage-history stores (`objects_that_dealt_damage`
+    /// and the per-kind `dealt_damage_kinds` latch) belong to the source
+    /// incarnation captured with the damage context. A source that became a
+    /// new object before the damage was applied keeps the occurrence (event and
+    /// record carry the OLD incarnation) but the new object gets neither store,
+    /// for combat and noncombat damage alike. The matching-incarnation control
+    /// writes both, and a context without a captured incarnation (fallback)
+    /// keeps the legacy zone-only behavior.
+    #[test]
+    fn sticky_damage_history_is_written_only_for_the_captured_source_incarnation() {
+        use crate::types::ability::DamageKindFilter;
+
+        // (bump the source's incarnation, use the fallback context, is_combat)
+        let cases = [
+            (false, false, false),
+            (false, false, true),
+            (true, false, false),
+            (true, false, true),
+            (true, true, false),
+        ];
+        for (bump, fallback, is_combat) in cases {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Source".to_string(),
+                Zone::Battlefield,
+            );
+            let ctx = if fallback {
+                DamageContext::fallback(source, PlayerId(0))
+            } else {
+                DamageContext::from_source(&state, source).unwrap()
+            };
+            let old_incarnation = state.objects[&source].incarnation;
+            if bump {
+                state.objects.get_mut(&source).unwrap().incarnation += 1;
+            }
+            let event = ProposedEvent::Damage {
+                source_id: source,
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 2,
+                is_combat,
+                applied: HashSet::new(),
+            };
+            let mut events = Vec::new();
+            apply_damage_after_replacement(&mut state, &ctx, event, is_combat, &mut events);
+
+            // Reach-guard: the occurrence happened in every case.
+            assert_eq!(
+                state.players[1].life, 18,
+                "case {bump} {fallback} {is_combat}"
+            );
+            assert_eq!(state.damage_dealt_this_turn.len(), 1);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e, GameEvent::DamageDealt { .. }))
+                    .count(),
+                1
+            );
+            if !fallback {
+                assert_eq!(
+                    state.damage_dealt_this_turn[0].source_incarnation,
+                    Some(old_incarnation)
+                );
+                assert!(events.iter().any(|e| matches!(
+                    e,
+                    GameEvent::DamageDealt { source_incarnation, .. }
+                        if *source_incarnation == Some(old_incarnation)
+                )));
+            }
+            let kind = if is_combat {
+                DamageKindFilter::CombatOnly
+            } else {
+                DamageKindFilter::NoncombatOnly
+            };
+            let stale = bump && !fallback;
+            assert_eq!(
+                state.objects_that_dealt_damage.contains(&source),
+                !stale,
+                "Any store, case bump={bump} fallback={fallback} combat={is_combat}"
+            );
+            assert_eq!(
+                state.objects[&source].dealt_damage_kinds.has(kind),
+                !stale,
+                "kind latch, case bump={bump} fallback={fallback} combat={is_combat}"
+            );
+            assert_eq!(
+                state.objects[&source].dealt_damage_kinds.is_empty(),
+                stale,
+                "no other kind is written for a stale incarnation"
+            );
+        }
     }
 
     /// CR 202.3d + CR 702.102b: A damage record snapshots its source's mana value
