@@ -1306,6 +1306,7 @@ fn handle_replacement_choice_inner(
                             group,
                             StagedMemberOutcome::Approved(event),
                             events,
+                            replacement_action_event_start,
                         ) {
                             crate::game::zone_pipeline::StagedConsultationHandback::NotOwned => {
                                 Ok(state.waiting_for.clone())
@@ -1993,6 +1994,7 @@ fn handle_replacement_choice_inner(
                             group,
                             StagedMemberOutcome::Approved(destroy),
                             events,
+                            replacement_action_event_start,
                         ) {
                             crate::game::zone_pipeline::StagedConsultationHandback::NotOwned => {
                                 Ok(state.waiting_for.clone())
@@ -2223,6 +2225,7 @@ fn handle_replacement_choice_inner(
                     group,
                     StagedMemberOutcome::Prevented,
                     events,
+                    replacement_action_event_start,
                 ) {
                     crate::game::zone_pipeline::StagedConsultationHandback::NotOwned => {
                         Ok(state.waiting_for.clone())

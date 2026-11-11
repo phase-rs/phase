@@ -26,6 +26,7 @@ use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::change_zone::resolve_all;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::engine::apply_as_current;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, Outcome, P0, P1};
 use engine::game::zones::create_object;
 use engine::parser::oracle_effect::parse_effect_chain;
@@ -43,7 +44,7 @@ use engine::types::events::GameEvent;
 use engine::types::game_state::{
     GameState, PersistedGameState, PersistedRestoreFinalization, WaitingFor,
 };
-use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -3291,80 +3292,162 @@ fn resolve_to_first_replacement_choice(runner: &mut GameRunner) {
 const AKROMAS_VENGEANCE: &str =
     "Destroy all artifacts, creatures, and enchantments.\nCycling {3} ({3}, Discard this card: Draw a card.)";
 
+const SPIDER_UMBRA: &str = "Enchant creature\nEnchanted creature gets +1/+1 and has reach. (It can block creatures with flying.)\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)";
+
+fn zone_changes_of(events: &[GameEvent], id: ObjectId) -> Vec<&GameEvent> {
+    events
+        .iter()
+        .filter(
+            |event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == id),
+        )
+        .collect()
+}
+
+fn destroyed_reports_of(events: &[GameEvent], id: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(event, GameEvent::CreatureDestroyed { object_id, .. } if *object_id == id)
+        })
+        .count()
+}
+
 /// CR 702.89a + CR 701.8a + CR 603.10a: Akroma's Vengeance destroys the
 /// creature and its Hyena Umbra at once. The Umbra's armor replaces the
 /// creature's destruction by destroying the Aura, so the Aura's own slot has
 /// exactly one occurrence (it is put into the graveyard once) whether the Aura
-/// is consulted before or after the creature it protects.
+/// is consulted before or after the creature it protects. In the third case a
+/// later host wears Hyena Umbra and Spider Umbra, so its owner's ordering
+/// choice (CR 616.1) parks the batch after the first Aura already left during
+/// approval; that departure must survive the pause, a save and reopen, and the
+/// answer, with one occurrence for the Aura's own incarnation and a completed
+/// batch.
 #[test]
 fn akromas_vengeance_umbra_member_gets_one_terminal_in_either_order() {
-    for aura_first in [true, false] {
+    for (aura_first, later_choice) in [(true, false), (false, false), (true, true)] {
+        let case = format!("aura_first={aura_first} later_choice={later_choice}");
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
-        let add_umbra = |scenario: &mut GameScenario| {
+        let add_aura = |scenario: &mut GameScenario, name: &str, oracle: &str| {
             scenario
-                .add_enchantment_from_oracle(P1, "Hyena Umbra", HYENA_UMBRA)
+                .add_enchantment_from_oracle(P1, name, oracle)
                 .with_subtypes(vec!["Aura"])
                 .id()
         };
         let (umbra, host) = if aura_first {
-            let umbra = add_umbra(&mut scenario);
+            let umbra = add_aura(&mut scenario, "Hyena Umbra", HYENA_UMBRA);
             (umbra, scenario.add_creature(P1, "Grizzly Bears", 2, 2).id())
         } else {
             let host = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
-            (add_umbra(&mut scenario), host)
+            (add_aura(&mut scenario, "Hyena Umbra", HYENA_UMBRA), host)
         };
         let bystander = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+        let later = later_choice.then(|| {
+            let hyena = add_aura(&mut scenario, "Hyena Umbra", HYENA_UMBRA);
+            let spider = add_aura(&mut scenario, "Spider Umbra", SPIDER_UMBRA);
+            let host = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+            (hyena, spider, host)
+        });
         let vengeance = zero_cost_spell(&mut scenario, "Akroma's Vengeance", AKROMAS_VENGEANCE);
         let mut runner = scenario.build();
-        // Infrastructure exception: preattach the full-Oracle Aura instead of
-        // casting it; the destruction population is produced by the public cast.
+        // Infrastructure exception: preattach the full-Oracle Auras instead of
+        // casting them; the destruction population is produced by the public cast.
         engine::game::effects::attach::attach_to(runner.state_mut(), umbra, host);
+        if let Some((hyena, spider, later_host)) = later {
+            engine::game::effects::attach::attach_to(runner.state_mut(), hyena, later_host);
+            engine::game::effects::attach::attach_to(runner.state_mut(), spider, later_host);
+        }
         engine::game::layers::flush_layers(runner.state_mut());
+        let umbra_identity = ObjectIncarnationRef::from_object(&runner.state().objects[&umbra]);
 
-        let outcome = runner.cast(vengeance).resolve();
+        let mut events = Vec::new();
+        if let Some((hyena, spider, later_host)) = later {
+            events.extend(runner.cast(vengeance).commit().events().to_vec());
+            for _ in 0..8 {
+                if matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ) {
+                    break;
+                }
+                events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+            }
+            let WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } = runner.state().waiting_for.clone()
+            else {
+                panic!(
+                    "{case}: expected the later host's Umbra order, got {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!(player, P1, "{case}");
+            assert_eq!(candidates.len(), 2, "{case}");
+            assert_eq!(
+                runner.state().objects[&umbra].zone,
+                Zone::Graveyard,
+                "{case}: the first Aura left during approval, before the pause"
+            );
+            round_trip_staged(&mut runner);
+            let spider_index = candidates
+                .iter()
+                .position(|candidate| candidate.source_id == spider)
+                .expect("Spider Umbra is offered");
+            events.extend(
+                runner
+                    .act(GameAction::ChooseReplacement {
+                        index: spider_index,
+                    })
+                    .expect("P1 applies Spider Umbra")
+                    .events,
+            );
+            let state = runner.state();
+            assert_eq!(state.objects[&later_host].zone, Zone::Battlefield, "{case}");
+            assert_eq!(state.objects[&spider].zone, Zone::Graveyard, "{case}");
+            // The unchosen Hyena Umbra is itself an enchantment in the
+            // population, so Akroma's Vengeance destroys it directly.
+            assert_eq!(state.objects[&hyena].zone, Zone::Graveyard, "{case}");
+            for aura in [spider, hyena] {
+                assert_eq!(zone_changes_of(&events, aura).len(), 1, "{case}");
+                assert_eq!(destroyed_reports_of(&events, aura), 1, "{case}");
+            }
+            assert_eq!(destroyed_reports_of(&events, later_host), 0, "{case}");
+        } else {
+            events.extend(runner.cast(vengeance).resolve().events().to_vec());
+        }
         let state = runner.state();
+        assert_eq!(state.objects[&host].zone, Zone::Battlefield, "{case}");
+        assert_eq!(state.objects[&umbra].zone, Zone::Graveyard, "{case}");
+        assert_eq!(state.objects[&bystander].zone, Zone::Graveyard, "{case}");
+        assert_eq!(state.objects[&vengeance].zone, Zone::Graveyard, "{case}");
+        let umbra_moves = zone_changes_of(&events, umbra);
         assert_eq!(
-            state.objects[&host].zone,
-            Zone::Battlefield,
-            "aura_first={aura_first}"
-        );
-        assert_eq!(
-            state.objects[&umbra].zone,
-            Zone::Graveyard,
-            "aura_first={aura_first}"
-        );
-        assert_eq!(state.objects[&bystander].zone, Zone::Graveyard);
-        assert_eq!(
-            outcome
-                .events()
-                .iter()
-                .filter(|event| matches!(
-                    event,
-                    GameEvent::ZoneChanged { object_id, .. } if *object_id == umbra
-                ))
-                .count(),
+            umbra_moves.len(),
             1,
-            "aura_first={aura_first}: the Aura is put into the graveyard once"
+            "{case}: the Aura is put into the graveyard once"
         );
-        assert!(!outcome.events().iter().any(|event| matches!(
-            event,
-            GameEvent::CreatureDestroyed { object_id, .. } if *object_id == host
-        )));
+        let GameEvent::ZoneChanged { record, .. } = umbra_moves[0] else {
+            unreachable!()
+        };
         assert_eq!(
-            outcome
-                .events()
-                .iter()
-                .filter(|event| matches!(
-                    event,
-                    GameEvent::CreatureDestroyed { object_id, .. } if *object_id == umbra
-                ))
-                .count(),
-            1,
-            "aura_first={aura_first}: the Aura is reported destroyed once, by its armor"
+            record
+                .trigger_source_context()
+                .map(|context| context.identity.reference),
+            Some(umbra_identity),
+            "{case}: the one occurrence is the battlefield Aura's own incarnation"
         );
-        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
-        assert!(state.resolution_stack.is_empty());
+        assert_eq!(destroyed_reports_of(&events, host), 0, "{case}");
+        assert_eq!(
+            destroyed_reports_of(&events, umbra),
+            1,
+            "{case}: the Aura is reported destroyed once, by its armor"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "{case}"
+        );
+        assert!(state.pending_replacement.is_none(), "{case}");
+        assert!(state.resolution_stack.is_empty(), "{case}");
         state
             .resolution_stack
             .validate_at_rest(&state.waiting_for)

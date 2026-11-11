@@ -1965,14 +1965,46 @@ enum StagedConsult {
     AllConsulted,
 }
 
+/// CR 603.10a + CR 616.1: a staged owner that parks keeps everything its
+/// run produced. Approval-time occurrences in `events[run_start..approval_end]`
+/// (a replacement applied while a member was consulted, such as an Umbra's
+/// armor destroying its Aura) go into the batch's own logical group through
+/// the same segment collector a delivery pause uses, so that group is their one
+/// collector and settlement finds their exact incarnation. The run's events
+/// are then held on the owner until the batch settles, so one co-departure
+/// batch is observable and no ordinary collector sees them twice. A delivery
+/// pause has already retained its own delivered segment, which starts at
+/// `approval_end`.
+fn park_staged_run_events(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+    events: &mut Vec<GameEvent>,
+    run_start: usize,
+    approval_end: usize,
+) {
+    crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+        state,
+        &mut owner.logical_zone_change_group,
+        &events[run_start..approval_end],
+    )
+    .expect("paused staged batch retains its exact approval segment");
+    owner.deferred_events.extend(events.drain(run_start..));
+}
+
 /// Drive the staged lifecycle from its current stage to the next stop. The
 /// owner is detached from the resolution stack for this call: delivering while
 /// the batch frame were installed would let a delivery child bury it, so the
 /// caller parks it only when the run actually pauses.
+///
+/// `run_start` is where this owner's events begin in `events`: the entry's
+/// own start, or the start of the answer or drain that resumed it. Every stop
+/// other than `Delivered` parks that segment with [`park_staged_run_events`];
+/// a `Delivered` stop leaves it to the caller's settlement.
 fn run_staged_batch(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
     events: &mut Vec<GameEvent>,
+    run_start: usize,
 ) -> StagedStop {
     loop {
         let Some(stage) = owner.staged.as_ref().map(|staged| staged.stage) else {
@@ -1987,6 +2019,8 @@ fn run_staged_batch(
                         // compatibility view once, at this boundary, instead of
                         // on every member transition.
                         sync_staged_requests(owner);
+                        let approval_end = events.len();
+                        park_staged_run_events(state, owner, events, run_start, approval_end);
                         return StagedStop::Paused;
                     }
                     StagedConsult::AllConsulted => {
@@ -1998,12 +2032,19 @@ fn run_staged_batch(
             BatchDeliveryStage::Arranging => {
                 if publish_next_staged_arrangement(state, owner).is_some() {
                     sync_staged_requests(owner);
+                    let approval_end = events.len();
+                    park_staged_run_events(state, owner, events, run_start, approval_end);
                     return StagedStop::Arranging;
                 }
                 continue;
             }
             BatchDeliveryStage::Delivering => {
-                return deliver_staged_members(state, owner, events);
+                let approval_end = events.len();
+                let stop = deliver_staged_members(state, owner, events);
+                if stop != StagedStop::Delivered {
+                    park_staged_run_events(state, owner, events, run_start, approval_end);
+                }
+                return stop;
             }
         }
     }
@@ -3180,6 +3221,7 @@ fn deliver_staged_batch_entry(
     component_delivery_parent: Option<PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchDeliveryResult {
+    let run_start = events.len();
     let mut owner = new_staged_owner(
         state,
         &reqs,
@@ -3187,7 +3229,7 @@ fn deliver_staged_batch_entry(
         staged,
         component_delivery_parent,
     );
-    match run_staged_batch(state, &mut owner, events) {
+    match run_staged_batch(state, &mut owner, events, run_start) {
         StagedStop::Paused | StagedStop::Arranging => {
             state
                 .resolution_stack
@@ -3241,7 +3283,7 @@ pub(crate) fn deliver_staged_destroy_batch(
         settled_destroyed: None,
     });
     let boundary = state.resolution_stack.capture_child_boundary();
-    match run_staged_batch(state, &mut owner, events) {
+    match run_staged_batch(state, &mut owner, events, event_start) {
         StagedStop::Paused | StagedStop::Arranging => {
             state.repark_batch_owner_below_children(owner, boundary);
             StagedFamilyOutcome::Paused
@@ -3307,7 +3349,7 @@ pub(crate) fn deliver_staged_change_zone_batch(
         tail: Box::new(tail),
         settled: None,
     });
-    match run_staged_batch(state, &mut owner, events) {
+    match run_staged_batch(state, &mut owner, events, event_start) {
         StagedStop::Paused | StagedStop::Arranging => {
             state.repark_batch_owner_below_children(owner, child_stack_start);
             state.staged_population_parent =
@@ -3408,11 +3450,15 @@ pub(crate) enum StagedConsultationHandback {
 /// CR 614.6 + CR 616.1: retain one staged consultation result, then continue
 /// approval and delivery for its whole population. Report settlement only when
 /// the completion left no live prompt for the shared Execute epilogue to preserve.
+///
+/// `run_start` is where the answering action's events begin: everything from
+/// there was produced by this member's consultation.
 pub(crate) fn record_staged_batch_consultation_result(
     state: &mut GameState,
     group_id: LogicalZoneChangeGroupId,
     outcome: StagedMemberOutcome,
     events: &mut Vec<GameEvent>,
+    run_start: usize,
 ) -> StagedConsultationHandback {
     // CR 616.1: detach the approved drain before checking for its batch owner.
     let mut retained = if matches!(outcome, StagedMemberOutcome::Approved(_)) {
@@ -3491,6 +3537,8 @@ pub(crate) fn record_staged_batch_consultation_result(
             }
         }
         let waiting = state.waiting_for.clone();
+        let approval_end = events.len();
+        park_staged_run_events(state, &mut owner, events, run_start, approval_end);
         state.repark_batch_owner_below_children(owner, boundary);
         return StagedConsultationHandback::Parked(Box::new(waiting));
     }
@@ -3498,13 +3546,15 @@ pub(crate) fn record_staged_batch_consultation_result(
         player: state.active_player,
     };
     if !finalize_staged_pending_outcome_on(state, &mut owner, events) {
+        let approval_end = events.len();
+        park_staged_run_events(state, &mut owner, events, run_start, approval_end);
         refuse(state, owner, retained);
         return StagedConsultationHandback::Parked(Box::new(state.waiting_for.clone()));
     }
     if let Some(drain) = retained.take() {
         attach_member_drain(&mut owner, cursor, drain);
     }
-    let stop = run_staged_batch(state, &mut owner, events);
+    let stop = run_staged_batch(state, &mut owner, events, run_start);
     if stop == StagedStop::Delivered {
         let deferred_events = owner.deferred_events.clone();
         settle_batch_owner(state, owner, deferred_events, events);
@@ -3660,6 +3710,7 @@ pub(crate) fn submit_staged_batch_arrangement(
     arrangement: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<(), String> {
+    let run_start = events.len();
     if scope != DigRestSplitScope::OrderOnly {
         return Err("batch-owned arrangement must be answered by the library owner".to_string());
     }
@@ -3775,7 +3826,7 @@ pub(crate) fn submit_staged_batch_arrangement(
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
-    match run_staged_batch(state, &mut owner, events) {
+    match run_staged_batch(state, &mut owner, events, run_start) {
         StagedStop::Delivered => {
             let deferred_events = owner.deferred_events.clone();
             settle_batch_owner(state, owner, deferred_events, events);
@@ -3971,7 +4022,8 @@ fn reconcile_staged_owner(
     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         return false;
     }
-    run_staged_batch(state, owner, events) == StagedStop::Delivered
+    let run_start = events.len();
+    run_staged_batch(state, owner, events, run_start) == StagedStop::Delivered
 }
 
 /// Record every staged member's terminal into its logical slot before the
@@ -4497,9 +4549,23 @@ fn drain_staged_batch(
     let completion = owner.completion.clone();
     let attempted = owner.attempted.clone();
     let zone_change_record_start = owner.zone_change_record_start;
-    let mut deferred_events = owner.deferred_events.clone();
-    deferred_events.append(events);
+    // The resumed window (the answer or child that let this owner continue) is
+    // held on the owner like every earlier parked segment. While approving, it
+    // is this member's consultation: retain its occurrences in the group, the
+    // one collector for them (see `park_staged_run_events`). A delivery-stage
+    // window is the paused member's own delivery, retained below from its
+    // boundary.
+    let resume_start = owner.deferred_events.len();
+    owner.deferred_events.append(events);
     let stage = owner.staged.as_ref().map(|staged| staged.stage);
+    if stage == Some(BatchDeliveryStage::Approving) {
+        crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+            state,
+            &mut owner.logical_zone_change_group,
+            &owner.deferred_events[resume_start..],
+        )
+        .expect("resumed staged approval retains its exact consultation segment");
+    }
 
     if stage == Some(BatchDeliveryStage::Delivering) {
         if let Some(paused) = owner.paused_current.clone() {
@@ -4531,16 +4597,17 @@ fn drain_staged_batch(
     let stop = match stage {
         Some(BatchDeliveryStage::Approving) => {
             let _ = finalize_staged_pending_outcome_on(state, &mut owner, events);
-            run_staged_batch(state, &mut owner, events)
+            run_staged_batch(state, &mut owner, events, 0)
         }
         Some(BatchDeliveryStage::Arranging) => {
             if matches!(state.waiting_for, WaitingFor::DigRestSplitChoice { .. }) {
+                owner.deferred_events.append(events);
                 StagedStop::Arranging
             } else {
-                run_staged_batch(state, &mut owner, events)
+                run_staged_batch(state, &mut owner, events, 0)
             }
         }
-        _ => run_staged_batch(state, &mut owner, events),
+        _ => run_staged_batch(state, &mut owner, events, 0),
     };
 
     match stop {
@@ -4549,8 +4616,6 @@ fn drain_staged_batch(
             owner.completion = completion;
             owner.attempted = attempted;
             owner.zone_change_record_start = zone_change_record_start;
-            deferred_events.append(events);
-            owner.deferred_events = deferred_events;
             state.repark_batch_owner_below_children(owner, repark_boundary);
         }
         StagedStop::Delivered => {
@@ -4563,6 +4628,7 @@ fn drain_staged_batch(
             owner.completion = completion;
             owner.attempted = attempted;
             owner.zone_change_record_start = zone_change_record_start;
+            let deferred_events = std::mem::take(&mut owner.deferred_events);
             settle_batch_owner(state, owner, deferred_events, events);
         }
     }
@@ -15062,6 +15128,7 @@ mod staged_batch_tests {
                 Some(source),
             )),
             &mut Vec::new(),
+            0,
         );
         let StagedConsultationHandback::Parked(waiting) = handback else {
             panic!("settlement must preserve the live completion prompt");
@@ -15401,6 +15468,7 @@ mod staged_batch_tests {
             group_id,
             StagedMemberOutcome::Approved(event),
             &mut events,
+            0,
         );
         let staged = state
             .active_batch_delivery()
