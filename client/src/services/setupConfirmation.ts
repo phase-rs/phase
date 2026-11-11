@@ -46,12 +46,12 @@ export type SetupFrameClass =
  * `GameCreated` and `SessionAttached` (`return_full_seat_while_session_locked`
  * :2389-2400) for a pregame seat; `StateWithheld` (`socket_io.rs:1094`,
  * `socket_mailbox.rs:150`) when the bootstrap frame itself was withheld.
- * Refusal, game: `Error` (:10563-10585 and the `ReconnectOutcome::Err` reply).
+ * Refusal, game: `Error` (:10564-10586 and the `ReconnectOutcome::Err` reply
+ * at :10841).
  *
  * Positive bootstrap, draft: `DraftStateUpdate` (`reconnect_draft_seat` :2644,
  * :2678) and `DraftMatchStart` (`attach_current_draft_match` :2795). Refusal,
- * draft: `DraftActionRejected` (:13036, :13048 and the failure arms) and
- * `Error`.
+ * draft: `DraftActionRejected` (:13037, :13049, :13091, :13100) and `Error`.
  *
  * Any other frame (pings, slot updates, lobby fan-out) is neither: it is kept
  * in order for the adopted socket and does not settle the interval.
