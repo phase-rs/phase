@@ -1419,6 +1419,7 @@
     },
     "config": {
       "startingLife": "Points de vie de départ",
+      "commanderDamage": "Blessures de commandant",
       "players": "Joueurs",
       "whoGoesFirst": "Qui commence",
       "firstPlayer": {

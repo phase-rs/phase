@@ -1419,6 +1419,7 @@
     },
     "config": {
       "startingLife": "Startleben",
+      "commanderDamage": "Kommandeurschaden",
       "players": "Spieler",
       "whoGoesFirst": "Wer beginnt",
       "firstPlayer": {
