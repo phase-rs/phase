@@ -26,6 +26,35 @@ describe("SetupConfirmation", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("defers once, at the bound, to a decode in flight; a frame it delivers confirms", async () => {
+    let finishDecode!: () => void;
+    const decoding = new Promise<void>((resolve) => { finishDecode = resolve; });
+    const confirmation = new SetupConfirmation(SETUP_CONFIRMATION_TIMEOUT_MS, () => decoding);
+    await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS + 30_000);
+    expect(confirmation.current).toBeNull();
+    finishDecode();
+    confirmation.confirm();
+    await expect(confirmation.settled).resolves.toBe("confirmed");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("times out once the decode it deferred to has answered without settling it", async () => {
+    let finishDecode!: () => void;
+    let calls = 0;
+    const decoding = new Promise<void>((resolve) => { finishDecode = resolve; });
+    const confirmation = new SetupConfirmation(SETUP_CONFIRMATION_TIMEOUT_MS, () => {
+      calls++;
+      return decoding;
+    });
+    await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS);
+    expect(confirmation.current).toBeNull();
+    finishDecode();
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(confirmation.settled).resolves.toBe("timeout");
+    // A single deferral, not one per decode.
+    expect(calls).toBe(1);
+  });
+
   it("clears its timer when confirmed", async () => {
     const confirmation = new SetupConfirmation();
     confirmation.confirm();

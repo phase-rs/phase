@@ -7,7 +7,7 @@ import { PROTOCOL_VERSION } from "../ws-adapter";
 import { AdapterError, AdapterErrorCode } from "../types";
 import type { DraftPlayerView } from "../draft-adapter";
 import type { GameAction, GameLogEntry, GameState, LegalActionsResult, ObjectAction, SubmitResult } from "../types";
-import { StateCodecRuntime, type StateCodecSession } from "../state-codec-runtime";
+import { STATE_CODEC_DECODE_TIMEOUT_MS, StateCodecRuntime, type StateCodecSession } from "../state-codec-runtime";
 import { STATE_CODEC_SOCKET_TIMEOUT_MS } from "../../services/stateCodecSocket";
 import type { EngineModule } from "../engine-queries";
 import type * as OpenPhaseSocketModule from "../../services/openPhaseSocket";
@@ -2863,7 +2863,7 @@ describe("draft attachment settlement", () => {
     },
   );
 
-  it("keeps A's pending-false reentry on A until B's raw setup send completes", async () => {
+  it("refuses A's pending-false reentry unsent while B's ReconnectDraft is being written", async () => {
     enterAcceptedFullMatch(adapter, established);
     const first = trackRejection(adapter.submitAction({ type: "PassPriority" }, 0));
     let next: (() => Promise<unknown>) | undefined;
@@ -2888,14 +2888,14 @@ describe("draft attachment settlement", () => {
     });
     await completeHandshake();
     expect(await first()).toMatchObject({ resolvedWith: { events: [{ marker: "first-A-command" }] } });
-    expect(await next!()).toBe("never settled");
+    // Once the ReconnectDraft is being written the seat may already be B's:
+    // the reentrant command is refused unsent, on neither socket.
+    expect(await next!()).toMatchObject({ code: "ACTION_NOT_SENT" });
     expect(submissionTypes(candidate)).toEqual([]);
-    expect(submissionTypes(established)).toEqual(["Action", "Action"]);
+    expect(submissionTypes(established)).toEqual(["Action"]);
     expect(candidate.close).not.toHaveBeenCalled();
     receive(candidate, "DraftStateUpdate", { view: createMockDraftView({ status: "MatchInProgress" }) });
     expect(await initialized()).toEqual({ resolvedWith: undefined });
-    deliverOwnershipStateUpdate(established, "next-A-command");
-    expect(await next!()).toMatchObject({ resolvedWith: { events: [{ marker: "next-A-command" }] } });
   });
 
   it("drains a hello-consumer pick's synchronous selected inventory after every buffered admission", async () => {
@@ -4171,6 +4171,134 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
         expect(provider).toHaveBeenCalledTimes(2);
         receive(replacement, "DraftStateUpdate", { view: createMockDraftView() });
         await vi.waitFor(() => expect(next.value()).toEqual({ resolvedWith: undefined }));
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(["none", "actionPendingChanged"] as const)(
+      "keeps the candidate's terminal codec failure for the reattach a %s listener starts",
+      async (trigger) => {
+        vi.useFakeTimers();
+        const session = draftCodecSession(decodeEnvelope);
+        const rejecting = draftCodecSession(() => ({ kind: "resyncRequired" }));
+        const { adapter, ws, provider } = await startCodecDraft(session.session);
+        const events: unknown[] = [];
+        adapter.onEvent((event) => events.push(event));
+        await enterCodecMatch(ws, events);
+        const command = watch(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+        provider.mockResolvedValueOnce(rejecting.session);
+        const reconnecting = watch(adapter.reconnectDraft());
+        await drainArt();
+        const candidate = MockWebSocket.last!;
+        let successor: Promise<unknown> | null = null;
+        adapter.onEvent((event) => {
+          if (event.type !== trigger || successor !== null) return;
+          successor = adapter.reconnectDraft().catch((error: unknown) => error);
+        });
+        try {
+          candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+          await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+            expect.stringContaining('"type":"ReconnectDraft"'),
+          ));
+          candidate.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+          expect(offeredCodec(candidate)).toBe(true);
+          candidate.dispatchSynthetic("message", draftFrame("Full", {
+            type: "GameStarted",
+            data: { state: matchState("reattach-start"), your_player: 0, full_key: FULL_KEY },
+          }));
+          await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({ code: "WS_CLOSED" }));
+          await vi.waitFor(() => expect(command.value()).toMatchObject({ code: "WS_CLOSED" }));
+          if (trigger !== "none") expect(successor).not.toBeNull();
+          expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "bootstrapRejection" });
+          // Whoever starts it, the next reattach does not offer the codec: a
+          // successor started inside the settlement selects its lease after
+          // `abandonCandidate` has moved the policy (`selectLease`).
+          if (successor === null) void adapter.reconnectDraft().catch(() => undefined);
+          await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(candidate));
+          const next = MockWebSocket.last!;
+          next.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+          await vi.waitFor(() => expect(next.send).toHaveBeenCalledWith(
+            expect.stringContaining('"type":"ReconnectDraft"'),
+          ));
+          expect(offeredCodec(next)).toBe(false);
+        } finally {
+          adapter.dispose();
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it("lets the decoder's own verdict on the reattach outlive the bound; the next reattach is snapshot-only", async () => {
+      vi.useFakeTimers();
+      const session = draftCodecSession(decodeEnvelope);
+      // The candidate's decode RPC hangs and fails at its own deadline,
+      // counted from its call, as the worker and fallback decoders do.
+      const hanging = draftCodecSession(decodeEnvelope);
+      hanging.decode.mockImplementationOnce(() => new Promise((_, reject) => {
+        setTimeout(() => reject(new Error("decode RPC timed out")), STATE_CODEC_DECODE_TIMEOUT_MS);
+      }));
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+      provider.mockResolvedValueOnce(hanging.session);
+      const reconnecting = watch(adapter.reconnectDraft());
+      await drainArt();
+      const candidate = MockWebSocket.last!;
+      try {
+        candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+          expect.stringContaining('"type":"ReconnectDraft"'),
+        ));
+        candidate.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+        expect(offeredCodec(candidate)).toBe(true);
+        await vi.advanceTimersByTimeAsync(50_000);
+        candidate.dispatchSynthetic("message", draftFrame("Full", {
+          type: "GameStarted",
+          data: { state: matchState("reattach-start"), your_player: 0, full_key: FULL_KEY },
+        }));
+        // Past the bound: it defers to the decode instead of pre-empting it.
+        await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS - 50_000 + 1000);
+        expect(candidate.close).not.toHaveBeenCalled();
+        expect(reconnecting.value()).toBe("never settled");
+        await vi.advanceTimersByTimeAsync(50_000);
+        await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({ code: "WS_CLOSED" }));
+        expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
+        const next = watch(adapter.reconnectDraft());
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(candidate));
+        const replacement = MockWebSocket.last!;
+        replacement.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.waitFor(() => expect(replacement.send).toHaveBeenCalledWith(
+          expect.stringContaining('"type":"ReconnectDraft"'),
+        ));
+        expect(offeredCodec(replacement)).toBe(false);
+        receive(replacement, "DraftStateUpdate", { view: createMockDraftView() });
+        await vi.waitFor(() => expect(next.value()).toEqual({ resolvedWith: undefined }));
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("refuses the incumbent's new seat-bound requests unsent while the reattach is unconfirmed", async () => {
+      vi.useFakeTimers();
+      const { adapter, ws, candidate, reconnecting } = await sentCandidate();
+      try {
+        const sentBefore = ws.send.mock.calls.length;
+        await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects.toMatchObject({
+          code: "ACTION_NOT_SENT", message: "A draft reattach is being confirmed; this submission was not sent.",
+        });
+        await expect(adapter.submitPick("not-yet-picked")).rejects.toMatchObject({
+          code: "ACTION_NOT_SENT", message: "A draft reattach is being confirmed; this pick was not sent.",
+        });
+        expect(ws.send.mock.calls.slice(sentBefore)).toEqual([]);
+        // After the server answers, the adopted candidate takes requests again.
+        receive(candidate, "DraftStateUpdate", { view: createMockDraftView() });
+        await vi.waitFor(() => expect(reconnecting.value()).toEqual({ resolvedWith: undefined }));
+        expect(() => (adapter as unknown as { assertNoReattachInterval(r: string): void })
+          .assertNoReattachInterval("probe")).not.toThrow();
       } finally {
         adapter.dispose();
         vi.useRealTimers();

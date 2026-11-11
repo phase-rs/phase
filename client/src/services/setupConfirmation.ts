@@ -31,15 +31,16 @@ import { frameType } from "./stateCodecSocket";
  * candidate that may already hold the seat (see {@link classifySetupFrame}).
  */
 /**
- * The bound on the interval. It runs from the setup write until the decoded
- * bootstrap reaches the adapter, so it spans the server's own work before the
- * bootstrap (session lock, any AI actions it runs first, building the frame),
- * the transfer and the decode. It is the decoder's own deadline: a bootstrap
- * whose decode alone takes that long has already failed its socket, so the
- * bound never retires a candidate the codec would still accept on decode time
- * alone. Server work and transfer share it; it is not measured against them, so
- * an attempt whose server work runs past it ends as a timeout and the game
- * adapter retries within its episode budget.
+ * The bound on the interval, counted from the setup write. It spans the
+ * server's own work before the bootstrap (session lock, any AI actions it runs
+ * first, building the frame) and the transfer; it is not measured against
+ * them, so an attempt whose server work runs past it ends as a timeout and the
+ * game adapter retries within its episode budget. It does not pre-empt a decode:
+ * when it expires while the candidate's codec transport is decoding a frame, it
+ * defers once to that decode, whose own deadline (the same value, counted from
+ * the decode call) bounds the wait, so the decoder's verdict settles the
+ * interval: a delivered bootstrap confirms, and a terminal `decodeFailure`
+ * closes the candidate with its failure recorded for the episode.
  */
 export const SETUP_CONFIRMATION_TIMEOUT_MS = STATE_CODEC_DECODE_TIMEOUT_MS;
 
@@ -157,12 +158,36 @@ export class SetupConfirmation {
   private outcome: SetupConfirmationOutcome | null = null;
   private timer: ReturnType<typeof setTimeout> | null;
   private abortSignal: AbortSignal | null = null;
+  private disposed = false;
   private refusalValue: SetupRefusal | null = null;
   private readonly onAbort = () => this.finish("aborted");
 
-  constructor(timeoutMs: number = SETUP_CONFIRMATION_TIMEOUT_MS) {
+  /**
+   * `decodeInFlight` reports the candidate transport's decode in flight, if
+   * any; the bound defers once to it (see {@link SETUP_CONFIRMATION_TIMEOUT_MS}).
+   */
+  constructor(
+    timeoutMs: number = SETUP_CONFIRMATION_TIMEOUT_MS,
+    private readonly decodeInFlight: () => Promise<void> | null = () => null,
+  ) {
     this.settled = new Promise((resolve) => { this.resolve = resolve; });
-    this.timer = setTimeout(() => this.finish("timeout"), timeoutMs);
+    this.timer = setTimeout(() => this.expire(), timeoutMs);
+  }
+
+  private expire(): void {
+    this.timer = null;
+    if (this.outcome !== null) return;
+    const decoding = this.decodeInFlight();
+    if (decoding === null) {
+      this.finish("timeout");
+      return;
+    }
+    // One deferral: once the decode has answered, its delivery or its terminal
+    // close (both queued behind it) settles first; otherwise this times out.
+    void decoding.then(() => {
+      if (this.outcome !== null || this.disposed) return;
+      this.timer = setTimeout(() => this.finish("timeout"), 0);
+    });
   }
 
   /**
@@ -228,6 +253,7 @@ export class SetupConfirmation {
 
   /** Releases the timer and the abort listener; idempotent. */
   dispose(): void {
+    this.disposed = true;
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
     this.abortSignal?.removeEventListener("abort", this.onAbort);

@@ -45,6 +45,7 @@ import {
   type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
 import {
+  SETUP_CONFIRMATION_TIMEOUT_MS,
   SetupConfirmation,
   type SetupConfirmationOutcome,
   type SetupFrameMessage,
@@ -1980,6 +1981,12 @@ export class WebSocketAdapter implements EngineAdapter {
    * successor's retry scheduling.
    */
   private setupWritePreparation: AbortController | null = null;
+  /**
+   * The attachment whose reconnect interval is open (setup written, bootstrap
+   * not yet received). While it is, the current socket is the incumbent and the
+   * server may already route the seat to the candidate.
+   */
+  private confirmingPreparation: AbortController | null = null;
   /** Monotonic attach identity: a retry timer belongs to the attempt that scheduled it. */
   private attachGeneration = 0;
   private socketDiagnostics: SocketDiagnosticObserver | null = null;
@@ -2591,6 +2598,14 @@ export class WebSocketAdapter implements EngineAdapter {
         // A natural close already released the wrapper's resources; later
         // disposal must not request another physical close.
         closed = true;
+        // A never-adopted candidate's terminal codec failure, published just
+        // before this close, moves the sticky delivery policy now: before any
+        // continuation or listener can start a successor that would negotiate
+        // again. Policy only (`consumeFailure`); an adopted binding's failure
+        // already degraded it, and a retired one never poisons its replacement.
+        if (!this.disposed && bootstrap.socket === null && bootstrap.failure !== null) {
+          this.stateCodec.consumeFailure(bootstrap);
+        }
         confirmation?.closed();
         if (this.ws !== socket.ws) return;
         this.ws = null;
@@ -2677,7 +2692,13 @@ export class WebSocketAdapter implements EngineAdapter {
       // Why the interval after the write did not end in a positive bootstrap.
       let unconfirmed: SetupConfirmationOutcome | null = null;
       try {
-        if (confirmsSetup) confirmation = new SetupConfirmation();
+        if (confirmsSetup) {
+          this.confirmingPreparation = preparation;
+          const transport = socket.ws;
+          confirmation = new SetupConfirmation(SETUP_CONFIRMATION_TIMEOUT_MS, () => (
+            transport instanceof StateCodecSocket ? transport.decodeInFlight : null
+          ));
+        }
         const write = writeSetupFrame(
           socket.ws, setupFrame, preparation.signal, (frame, target) => this.send(frame, target),
         );
@@ -2706,6 +2727,7 @@ export class WebSocketAdapter implements EngineAdapter {
         }
       } finally {
         if (this.setupWritePreparation === preparation) this.setupWritePreparation = null;
+        if (this.confirmingPreparation === preparation) this.confirmingPreparation = null;
         confirmation?.dispose();
       }
       if (!written) {
@@ -2888,6 +2910,16 @@ export class WebSocketAdapter implements EngineAdapter {
       throw new AdapterError("WS_ERROR", this.aiDriverFault.message, false);
     }
     this.stateCodec.assertNotRecovering();
+    // The reconnect interval is open: a submission on the incumbent would meet
+    // the server's seat-authority refusal once the candidate owns the seat, so
+    // it is not sent (the same typed refusal as during codec recovery).
+    if (this.confirmingPreparation !== null) {
+      throw new AdapterError(
+        AdapterErrorCode.ACTION_NOT_SENT,
+        "A reconnect is being confirmed; this submission was not sent.",
+        true,
+      );
+    }
     if (this.submission.occupied) {
       throw new AdapterError(
         AdapterErrorCode.ACTION_NOT_SENT,
@@ -4591,12 +4623,17 @@ export class WebSocketAdapter implements EngineAdapter {
 
       case "Error": {
         const data = msg.data as { message: string; code?: string };
-        const terminal = this.reconnectInFlight || this.initReject !== null
-          || this.pregameReject !== null || this.gameStartedReject !== null;
-        this.rejectInitialization(serverErrorInitializationError(data));
+        // While a reconnect interval is open this frame came from the incumbent
+        // (the candidate's frames are buffered): it answers the incumbent's own
+        // request, for example the server's seat-authority refusal once the
+        // candidate owns the seat, and never decides the candidate's episode.
+        const episode = this.confirmingPreparation === null;
+        const terminal = episode && (this.reconnectInFlight || this.initReject !== null
+          || this.pregameReject !== null || this.gameStartedReject !== null);
+        if (episode) this.rejectInitialization(serverErrorInitializationError(data));
         this.rejectPregameMutation(actionRejectionError(data.message));
         this.rejectAbandon(actionRejectionError(data.message));
-        if (this.reconnectInFlight) this.failReconnect();
+        if (episode && this.reconnectInFlight) this.failReconnect();
         this.emit({ type: terminal ? "error" : "operationFailed", message: data.message });
         break;
       }

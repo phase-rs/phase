@@ -35,7 +35,7 @@ import {
   WebSocketAdapter,
 } from "../ws-adapter";
 import { AdapterError, AdapterErrorCode, supportsMatchConcede, supportsTakeback, supportsTurnRewind } from "../types";
-import { StateCodecRuntime, type StateCodecSession } from "../state-codec-runtime";
+import { STATE_CODEC_DECODE_TIMEOUT_MS, StateCodecRuntime, type StateCodecSession } from "../state-codec-runtime";
 import type { EngineModule } from "../engine-queries";
 import {
   STATE_CODEC_PREPARATION_TIMEOUT_MS,
@@ -6336,7 +6336,7 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         expect.stringContaining('"type":"Reconnect"'),
       ));
       candidate.dispatchSynthetic("message", CODEC_CONFIRMATION);
-      return { adapter, raw, candidate, pending, events };
+      return { adapter, raw, candidate, pending, events, codec };
     }
 
     /** Delays the one retry owner has scheduled for this attempt (jitter pinned to 0 -> 800 ms). */
@@ -6524,6 +6524,106 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         }
       },
     );
+
+    it.each(["none", "reconnecting", "actionPendingChanged"] as const)(
+      "keeps a candidate's terminal codec failure for the successor a %s listener starts",
+      async (trigger) => {
+        const { adapter, candidate, codec, events } = await sentCandidate();
+        let started = false;
+        adapter.onEvent((event) => {
+          if (event.type !== trigger || started) return;
+          started = true;
+          adapter.tryReconnect(session() as never);
+        });
+        try {
+          // Reach guard: the candidate negotiated the codec.
+          expect(candidate.send).toHaveBeenCalledWith(expect.stringContaining("state_codecs"));
+          // The candidate's decoder rejects its bootstrap Full after the
+          // Reconnect write: a terminal bootstrapRejection before adoption.
+          codec.rejectNext();
+          deliverCodec(candidate, "Full", codecGameStarted(5, 5));
+          await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(candidate));
+          if (trigger !== "none") expect(started).toBe(true);
+          expect(events).not.toContainEqual({ type: "reconnected", inGame: true });
+          expect((adapter as unknown as { stateCodec: { deliveryPolicy: unknown } }).stateCodec.deliveryPolicy)
+            .toEqual({ kind: "snapshotOnly", reason: "bootstrapRejection" });
+          // Whoever starts it, the successor does not offer the codec again.
+          const successor = latestSocket();
+          successor.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+          await vi.waitFor(() => expect(successor.send).toHaveBeenCalledWith(
+            expect.stringContaining('"type":"Reconnect"'),
+          ));
+          expect(successor.send).not.toHaveBeenCalledWith(expect.stringContaining("state_codecs"));
+        } finally {
+          adapter.dispose();
+        }
+      },
+    );
+
+    it("lets the decoder's own verdict on the bootstrap outlive the bound, then reconnects snapshot-only within the budget", async () => {
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+      const { adapter, raw, candidate, codec, events } = await sentCandidate();
+      try {
+        // The decode RPC hangs and fails at its own deadline, counted from its
+        // call, as the worker and fallback decoders do.
+        codec.decode.mockImplementationOnce(() => new Promise((_, reject) => {
+          setTimeout(() => reject(new Error("decode RPC timed out")), STATE_CODEC_DECODE_TIMEOUT_MS);
+        }));
+        await vi.advanceTimersByTimeAsync(50_000);
+        deliverCodec(candidate, "Full", codecGameStarted(5, 5));
+        // Past the bound: it defers to the decode instead of pre-empting it.
+        await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS - 50_000 + 1000);
+        expect(candidate.close).not.toHaveBeenCalled();
+        expect(raw.close).not.toHaveBeenCalled();
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "reconnecting" }));
+        // The decoder's deadline fails the candidate; its failure stays with
+        // the episode and the one retry owner retries.
+        await vi.advanceTimersByTimeAsync(50_000);
+        await vi.waitFor(() => expect(raw.close).toHaveBeenCalledOnce());
+        expect((adapter as unknown as { stateCodec: { deliveryPolicy: unknown } }).stateCodec.deliveryPolicy)
+          .toEqual({ kind: "snapshotOnly", reason: "decodeFailure" });
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(candidate));
+        const successor = latestSocket();
+        successor.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+        await vi.waitFor(() => expect(successor.send).toHaveBeenCalledWith(
+          expect.stringContaining('"type":"Reconnect"'),
+        ));
+        expect(successor.send).not.toHaveBeenCalledWith(expect.stringContaining("state_codecs"));
+        successor.dispatchSynthetic("message", JSON.stringify(codecGameStarted(6, 6)));
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+        expect(events).not.toContainEqual({ type: "reconnectFailed" });
+      } finally {
+        random.mockRestore();
+        adapter.dispose();
+      }
+    });
+
+    it("refuses new submissions unsent and keeps the incumbent's authority Error from ending the episode", async () => {
+      const { adapter, raw, candidate, events } = await sentCandidate();
+      try {
+        const sentBefore = raw.send.mock.calls.length;
+        // The seat may already be the candidate's: nothing new goes on the incumbent.
+        await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects.toMatchObject({
+          code: "ACTION_NOT_SENT", message: "A reconnect is being confirmed; this submission was not sent.",
+        });
+        expect(raw.send.mock.calls.slice(sentBefore)
+          .filter(([frame]) => String(frame).includes('"type":"Action"'))).toEqual([]);
+        // The server's seat-authority refusal of an earlier incumbent request
+        // (phase-server main.rs:10083-10090) answers that request only.
+        raw.dispatchSynthetic("message", JSON.stringify({
+          type: "Error", data: { message: "This socket's game session identity is no longer current" },
+        }));
+        await vi.waitFor(() => expect(events).toContainEqual({
+          type: "operationFailed", message: "This socket's game session identity is no longer current",
+        }));
+        expect(events).not.toContainEqual({ type: "reconnectFailed" });
+        deliverCodec(candidate, "Full", codecGameStarted(5, 5));
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+        expect(events).not.toContainEqual({ type: "reconnectFailed" });
+      } finally {
+        adapter.dispose();
+      }
+    });
 
     it("does not adopt on a truncated canonical bootstrap: the bound retires both sockets and retries once", async () => {
       const random = vi.spyOn(Math, "random").mockReturnValue(0);

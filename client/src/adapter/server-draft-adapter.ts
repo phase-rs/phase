@@ -29,6 +29,7 @@ import {
   type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
 import {
+  SETUP_CONFIRMATION_TIMEOUT_MS,
   SetupConfirmation,
   type SetupConfirmationOutcome,
   type SetupFrameMessage,
@@ -53,6 +54,7 @@ import {
   StateCodecPreparationAbortError,
   prepareStateCodecSession as prepareBoundedStateCodecSession,
   StateCodecAttachment,
+  StateCodecSocket,
   type StateCodecBootstrapBinding,
   type StateCodecSessionProvider,
 } from "../services/stateCodecSocket";
@@ -282,6 +284,12 @@ export class ServerDraftAdapter implements EngineAdapter {
   } | null = null;
   private pendingInit: DraftInit | null = null;
   private unfinishedAttachment: DraftAttachment | null = null;
+  /**
+   * The reattach whose interval is open (ReconnectDraft written, the server's
+   * answer not yet received). While it is, the current socket is the incumbent
+   * and the server may already route the draft seat to the candidate.
+   */
+  private confirmingAttachment: DraftAttachment | null = null;
   private listeners: ServerDraftAdapterEventListener[] = [];
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
@@ -412,6 +420,7 @@ export class ServerDraftAdapter implements EngineAdapter {
 
   private assertNoPendingSubmission(): void {
     this.stateCodec.assertNotRecovering();
+    this.assertNoReattachInterval("this submission");
     if (this.submission.occupied) {
       throw new AdapterError(
         AdapterErrorCode.ACTION_NOT_SENT,
@@ -646,6 +655,21 @@ export class ServerDraftAdapter implements EngineAdapter {
    * The callback pair is the pending authority; settlement clears it together
    * with its socket owner before retiring an otherwise idle attachment.
    */
+  /**
+   * The reattach interval is open: a seat-bound request on the incumbent would
+   * meet the server's draft-seat authority refusal once the candidate owns the
+   * seat, so it is not sent (the same typed refusal as during codec recovery).
+   */
+  private assertNoReattachInterval(request: string): void {
+    if (this.confirmingAttachment !== null) {
+      throw new AdapterError(
+        AdapterErrorCode.ACTION_NOT_SENT,
+        `A draft reattach is being confirmed; ${request} was not sent.`,
+        true,
+      );
+    }
+  }
+
   private claimDraftAction(
     action: string,
     resolve: (view: DraftPlayerView) => void,
@@ -695,6 +719,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
+    this.assertNoReattachInterval("this pick");
     const view = this.draftView;
     if (view?.pool.some((card) => card.instance_id === cardInstanceId)) {
       // An already-owned instance can never be the outcome of this request,
@@ -749,6 +774,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
+    this.assertNoReattachInterval("this decision");
     return new Promise<DraftPlayerView>((resolve, reject) => {
       if (!this.claimDraftAction("SharedStackDecision", resolve, reject)) return;
       const sent = this.send({
@@ -779,6 +805,7 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
+    this.assertNoReattachInterval("this deck");
     return new Promise<DraftPlayerView>((resolve, reject) => {
       if (!this.claimDraftAction("SubmitDeck", resolve, reject, "PreparingDeck")) return;
       const ws = this.ws;
@@ -1319,7 +1346,12 @@ export class ServerDraftAdapter implements EngineAdapter {
       // candidate is not adopted (a successor may be current by then).
       const incumbent = this.ws;
       try {
-        if (initOwner?.kind === "reconnect") confirmation = new SetupConfirmation();
+        if (initOwner?.kind === "reconnect") {
+          this.confirmingAttachment = attachment;
+          confirmation = new SetupConfirmation(SETUP_CONFIRMATION_TIMEOUT_MS, () => (
+            sourceSocket instanceof StateCodecSocket ? sourceSocket.decodeInFlight : null
+          ));
+        }
         const write = writeSetupFrame(
           sourceSocket, setupFrame, attachment.controller.signal, (frame, target) => this.send(frame, target),
         );
@@ -1347,6 +1379,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         }
       } finally {
         confirmation?.dispose();
+        if (this.confirmingAttachment === attachment) this.confirmingAttachment = null;
       }
       if (!written) {
         throw new AdapterError("WS_CLOSED", "Failed to send setup frame", true);

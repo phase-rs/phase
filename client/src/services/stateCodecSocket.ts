@@ -236,8 +236,10 @@ export class StateCodecAttachment {
    * even when `binding` is not yet adopted; a notice recorded before adoption
    * has its join credentials replaced by `null`. It degrades the adapter's policy
    * immediately only when `binding` is current and owns `currentSocket`: a
-   * retired or still-pending attachment never poisons its replacement. It does
-   * not touch the recovery gate, which the close that follows clears.
+   * retired attachment never poisons its replacement, and a still-pending one's
+   * failure is applied by its owner (`consumeFailure`, policy only) when that
+   * candidate closes or is retired. It does not touch the recovery gate, which the close that
+   * follows clears.
    */
   handleRecovery(
     binding: StateCodecBootstrapBinding,
@@ -445,6 +447,8 @@ export class StateCodecSocket implements PhaseSocketTransport {
   private closeHandler: CloseListener | null = null;
 
   private handler: PhaseSocketTransport["onmessage"] = null;
+  /** The decoder call of the frame being decoded, if any (see `decodeInFlight`). */
+  private decoding: Promise<StateCodecDecodeResult> | null = null;
   private readonly messageListeners = new Map<MessageListener, boolean>();
   private readonly closeListeners = new Map<CloseListener, boolean>();
   private readonly queue: (() => Promise<void> | void)[] = [];
@@ -729,14 +733,28 @@ export class StateCodecSocket implements PhaseSocketTransport {
   /** Decode, or terminate. `null` means the transport is already finished. */
   private async decode(text: string): Promise<StateCodecDecodeResult | null> {
     const frame = this.encoder.encode(text);
+    const pending = this.options.session.decode(frame);
+    this.decoding = pending;
     try {
-      return await this.options.session.decode(frame);
+      return await pending;
     } catch {
       // Decoder/RPC failure (unknown session, session closed, RPC timeout) is
       // a transport failure, not codec integrity: the socket cannot continue.
       this.terminate("immediate", "decodeFailure", this.credentialsOf(text));
       return null;
+    } finally {
+      if (this.decoding === pending) this.decoding = null;
     }
+  }
+
+  /**
+   * The decode in flight on this socket, settling (never rejecting) when the
+   * decoder answers or its own deadline fails it; `null` when none is. Lets an
+   * owner's wait defer to the decoder's verdict instead of pre-empting it.
+   */
+  get decodeInFlight(): Promise<void> | null {
+    const pending = this.decoding;
+    return pending === null ? null : pending.then(() => undefined, () => undefined);
   }
 
   private handleConfirmation(text: string): void {

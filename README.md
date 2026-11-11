@@ -441,23 +441,31 @@ A replacement transport stays private until its own `JoinGameWithPassword` or
 `CreateDraftWithSettings`/`JoinDraftWithPassword` has entered the serialized
 write order, and a `Reconnect`/`ReconnectDraft` candidate until its positive
 bootstrap (or, for a draft, the server's rejection) arrives; only then may
-`serverHello` or pending indicator consumers issue requests. The server replaces the seat's sender when it handles a
-reconnect, so between that write and the bootstrap neither socket is known to
-own the seat: the incumbent stays current, and a close, an `Error` refusal, an
-abort or the bound (`SETUP_CONFIRMATION_TIMEOUT_MS`, the decoder's own
-deadline) retires both sockets and settles the incumbent's work. A draft
-`DraftActionRejected` adopts the candidate instead, as before: the server sends
-it both for refusals and after it has already moved the seat to the candidate,
-so the rejection replays there and rejects the reattach. After a close or the bound the
-game adapter retries through `attemptReconnect`, a refusal ends the episode, and
-nothing retries a draft reattach. Two game attachments keep the write-time
-cutover: native sidecar sockets (`nativeAi` / `nativePregame`), whose transport
-this change leaves as it was, and the attempts of an active initial-join
-fallback, which start only after the previous socket closed and have their own
-deadline. The interval reads each frame's tag from the canonical type-first
-envelope and materializes only its small refusal and notice frames, so the
-bootstrap is parsed once, after adoption. Frames already admitted for that candidate
-stay buffered through those callbacks and drain in wire order, so a synchronous
+`serverHello` or pending indicator consumers issue requests. The server
+replaces the seat's sender when it handles a reconnect, so between that write
+and the bootstrap neither socket is known to own the seat. The incumbent stays
+current for the replies it still owes, but new seat-bound submissions (game
+commands, draft picks, decisions and decks) are refused with the typed unsent
+error, and an `Error` it receives answers only its own request. A close, an
+`Error` refusal, an abort or the bound (`SETUP_CONFIRMATION_TIMEOUT_MS`, counted
+from the write) retires both sockets and settles the incumbent's work; the
+bound defers once to a decode already in flight, whose own deadline then
+decides. A draft `DraftActionRejected` adopts the candidate instead, as before:
+the server sends it both for refusals and after it has already moved the seat
+to the candidate, so the rejection replays there and rejects the reattach. A
+candidate's terminal codec failure moves the sticky snapshot-only policy before
+anything is notified, so a successor started from a listener is snapshot-only
+too. After a close or the bound the game adapter retries through
+`attemptReconnect`, a refusal ends the episode, and nothing retries a draft
+reattach. Two game attachments keep the write-time cutover: native sidecar
+sockets (`nativeAi` / `nativePregame`), whose transport this change leaves as it
+was, and the attempts of an active initial-join fallback, which start only
+after the previous socket closed and have their own deadline. The interval
+reads each frame's tag from the canonical type-first envelope; a frame whose
+tag can settle it is parsed once there, must parse as that envelope, and is
+the envelope dispatched after adoption, so the bootstrap is parsed once.
+Frames already admitted for that candidate stay buffered through those
+callbacks and drain in wire order, so a synchronous
 peer reply cannot overtake an older bootstrap. A game command is also refused
 with the typed unsent error until the *current* socket has accepted its own
 validated `GameStarted`; a predecessor's Full never authorizes the replacement.
