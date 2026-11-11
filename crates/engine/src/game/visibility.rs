@@ -4601,9 +4601,10 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
 /// observer holding a single snapshot read the hidden card's name or mana value.
 ///
 /// Policy, per table:
-/// - id-keyed LKI (`lki_cache`, `lki_by_incarnation`, `lki_copiable_values`,
-///   `lki_copiable_values_by_incarnation`, `departed_stack_spells`, `linked_exile_lki`
-///   keyed by a hidden source, and `pooled_mana_producer_snapshots`) is dropped;
+/// - id-keyed LKI (`lki_cache`, `lki_by_incarnation`, `departure_token_by_incarnation`,
+///   `lki_copiable_values`, `lki_copiable_values_by_incarnation`, `departed_stack_spells`,
+///   `linked_exile_lki` keyed by a hidden source, and `pooled_mana_producer_snapshots`) is
+///   dropped;
 /// - a departed activated ability whose source is hidden from the viewer is dropped (the
 ///   same rule as a departed spell keyed by a hidden id: once the ability left the stack,
 ///   its CR 701.20a reveal or its source's public zone is gone);
@@ -4636,6 +4637,11 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
     for id in hidden_ids {
         state.lki_cache.remove(id);
         state.lki_by_incarnation.remove(id);
+        // CR 111.1 + CR 400.2: the departure token captures are keyed by the same
+        // storage ids as the LKI above and are written with it, so they go with it.
+        // A surviving entry would still say "a departed object exists under this
+        // id", which is the id-existence oracle the LKI caches are dropped for.
+        state.departure_token_by_incarnation.remove(id);
         // CR 707.2: copiable values are the hidden card's printed identity.
         state.lki_copiable_values.remove(id);
         state.lki_copiable_values_by_incarnation.remove(id);
@@ -5644,6 +5650,9 @@ mod tests {
             id,
             lki: Box::new(state.objects[&id].snapshot_public_characteristics()),
             zone: crate::types::game_state::AnnouncedTargetZone::Known(state.objects[&id].zone),
+            token: crate::types::game_state::AnnouncedTargetToken::Known(
+                state.objects[&id].is_token,
+            ),
         };
 
         // (1) A fully-hidden cast naming a hidden target.
@@ -5709,6 +5718,9 @@ mod tests {
                 lki: Box::new(state.objects[&hidden_target].snapshot_public_characteristics()),
                 zone: crate::types::game_state::AnnouncedTargetZone::Known(
                     state.objects[&hidden_target].zone,
+                ),
+                token: crate::types::game_state::AnnouncedTargetToken::Known(
+                    state.objects[&hidden_target].is_token,
                 ),
             },
             "reach: the authoritative record still carries the hidden target's snapshot"
@@ -11216,6 +11228,9 @@ mod tests {
                 lki: Box::new(state.objects[&hidden].snapshot_public_characteristics()),
                 zone: crate::types::game_state::AnnouncedTargetZone::Known(
                     state.objects[&hidden].zone,
+                ),
+                token: crate::types::game_state::AnnouncedTargetToken::Known(
+                    state.objects[&hidden].is_token,
                 ),
             },
         ]);

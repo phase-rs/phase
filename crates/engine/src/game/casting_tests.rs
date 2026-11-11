@@ -63103,6 +63103,9 @@ fn an_activation_journal_row_round_trips() {
                 zone: crate::types::game_state::AnnouncedTargetZone::Known(
                     state.objects[&target].zone,
                 ),
+                token: crate::types::game_state::AnnouncedTargetToken::Known(
+                    state.objects[&target].is_token,
+                ),
             },
         ],
     };

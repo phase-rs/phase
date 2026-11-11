@@ -1514,6 +1514,12 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     state.lki_copiable_values.clear();
     state.lki_by_incarnation.clear();
     state.lki_copiable_values_by_incarnation.clear();
+    // CR 608.2h + CR 400.7: the departure token captures are written with the
+    // incarnation-keyed LKI above and live exactly as long as it does — one
+    // step. Keeping them past it would state a departed epoch's bit for a step
+    // whose last known information is gone, which is the same over-reach as
+    // reading the live object for a historical question.
+    state.departure_token_by_incarnation.clear();
     state.clear_departed_stack_records();
     // CR 607.2b + CR 113.7a: linked-exile LKI is likewise step-scoped — it only
     // needs to outlive the resolution of the ability whose source just left.

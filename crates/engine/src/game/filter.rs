@@ -32,9 +32,9 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
-    ActivationTargetFact, AnnouncedTargetZone, AttackDeclarationRecord, CounterAddedRecord,
-    DamageRecord, GameState, LKISnapshot, ManaSpentSourceSnapshot, SpellCastRecord, StackEntryKind,
-    TriggerSourceContext, ZoneChangeRecord,
+    ActivationTargetFact, AnnouncedTargetToken, AnnouncedTargetZone, AttackDeclarationRecord,
+    CounterAddedRecord, DamageRecord, GameState, LKISnapshot, ManaSpentSourceSnapshot,
+    SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggeringObjectRef};
 use crate::types::keywords::Keyword;
@@ -6245,7 +6245,7 @@ pub fn matches_target_filter_on_lki_snapshot(
             entered_incarnation: None,
             captured_incarnation: None,
             snapshot_zone: None,
-            reading: EpochReading::Projection,
+            captured_token: None,
         },
     )
 }
@@ -6276,6 +6276,7 @@ pub(crate) fn matches_target_filter_on_announced_lki(
     object_id: ObjectId,
     lki: &LKISnapshot,
     zone: AnnouncedTargetZone,
+    token: AnnouncedTargetToken,
     filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
@@ -6289,9 +6290,11 @@ pub(crate) fn matches_target_filter_on_announced_lki(
             entered_incarnation: None,
             captured_incarnation: None,
             snapshot_zone: zone.zone(),
-            reading: // CR 115.9: a committed target is read as it was WHEN IT WAS SELECTED —
-        // the one reading whose uncaptured leaves refuse (see `CapturedEpoch`).
-        EpochReading::SelectionTime,
+            // CR 111.1 + CR 115.9 + CR 730.2c + CR 730.2d: a committed target is
+            // read as it was WHEN IT WAS SELECTED, and the announcement's own
+            // token capture is that reading's answer. `None` (a record that states
+            // no bit) leaves the leaf UNKNOWN rather than reconstructed.
+            captured_token: token.bit(),
         },
     )
 }
@@ -6347,9 +6350,12 @@ pub(crate) fn declared_target_fact_matches(
         // `InZone { Battlefield }` (CR 109.2), which a target announced in a
         // graveyard — Reanimate's "target creature card from a graveyard"
         // (CR 109.2a) — must fail.
-        ActivationTargetFact::Object { id, lki, zone } => {
-            matches_target_filter_on_announced_lki(state, *id, lki, *zone, filter, ctx)
-        }
+        ActivationTargetFact::Object {
+            id,
+            lki,
+            zone,
+            token,
+        } => matches_target_filter_on_announced_lki(state, *id, lki, *zone, *token, filter, ctx),
         // CR 115.9b: a targeted player is still in the game unless they left it;
         // the player axis has no snapshot to read.
         ActivationTargetFact::Player(player) => player_matches_target_filter_in_state(
@@ -6401,9 +6407,14 @@ pub fn matches_target_filter_on_departed_battlefield_lki(
             entered_incarnation: None,
             captured_incarnation: None,
             snapshot_zone: Some(Zone::Battlefield),
-            // A departed subject is a look-back over the snapshot the caller holds,
-            // not a CR 115.9 selection-time reading of a chosen target.
-            reading: EpochReading::Projection,
+            // A departed subject is a look-back over the snapshot the caller
+            // holds, not a CR 115.9 selection-time reading of a chosen target, and
+            // this entry point carries no departure capture. The token leaves
+            // therefore refuse for it (`historical_token_identity`) rather than
+            // reading the live object or the journal; a caller that can name the
+            // departure epoch uses
+            // [`matches_target_filter_on_departed_lki_at_incarnation`].
+            captured_token: None,
         },
     )
 }
@@ -6416,11 +6427,11 @@ pub fn matches_target_filter_on_departed_battlefield_lki(
 ///
 /// Identical to [`matches_target_filter_on_lki_snapshot`] except that the
 /// incarnation travels with the snapshot, so the token leaf answers from the
-/// zone-change row THIS departure wrote
-/// ([`zone_change_record_for_epoch`]) instead of the newest row for the storage
-/// id. CR 400.7 makes the storage id reusable: a member that left and returned
-/// has a later row describing a different object, whose token-ness is not this
-/// member's.
+/// departure capture THIS epoch wrote
+/// ([`GameState::departure_token_by_incarnation`]) instead of the newest
+/// zone-change row for the storage id. CR 400.7 makes the storage id reusable: a
+/// member that left and returned has a later row describing a different object,
+/// whose token-ness is not this member's.
 pub(crate) fn matches_target_filter_on_departed_lki_at_incarnation(
     state: &GameState,
     object_id: ObjectId,
@@ -6443,7 +6454,9 @@ pub(crate) fn matches_target_filter_on_departed_lki_at_incarnation(
             // Left as the historical record shape: this entry point answers the
             // same question its unpinned sibling does, only dated.
             snapshot_zone: None,
-            reading: EpochReading::Projection,
+            // CR 111.1 + CR 608.2h: the bit comes from the departure capture the
+            // stated incarnation wrote, not from a caller-supplied value.
+            captured_token: None,
         },
     )
 }
@@ -6581,26 +6594,28 @@ pub(crate) fn source_incarnation_matches_filter(
 /// only by the LIVE `FilterProp::ZoneChangedThisTurn` arm), so it makes no
 /// semantic claim about where the target went and must not be read as one.
 ///
-/// `reading` states which CR 115.9 reading this projection answers — see
-/// [`EpochReading`].
 /// CR 115.9 + CR 400.7: the historical projection a caller asks this snapshot
 /// matching path for.
 ///
 /// `entered_incarnation` becomes the record's `from_zone` incarnation and
-/// `snapshot_zone` its `from_zone`; `reading` states which CR 115.9 reading the
-/// projection answers — see [`EpochReading`].
+/// `snapshot_zone` its `from_zone`.
 ///
-/// `captured_incarnation` is a different fact: the object incarnation the
-/// caller's SNAPSHOT was taken under, whenever the caller knows it. It dates the
-/// token leaf to the epoch the capture belongs to
-/// ([`zone_change_record_for_epoch`]); `None` states none, leaving the newest
-/// zone-change row as the only evidence there is.
+/// `captured_incarnation` is the object incarnation the caller's SNAPSHOT was
+/// taken under, whenever the caller knows it. It dates the token leaf to the
+/// departure capture that epoch wrote
+/// ([`GameState::departure_token_by_incarnation`]); `None` states none, and the
+/// leaf then refuses rather than reconstructing the bit.
+///
+/// `captured_token` is the token bit the caller's own capture STATES for this
+/// epoch, when it states one. It is the authority whenever it exists: a CR 115.9
+/// selection-time reading is the announced record's captured answer, and a
+/// zone-change record states the bit for the departure it records.
 #[derive(Clone, Copy)]
 struct LkiProjection {
     entered_incarnation: Option<u64>,
     captured_incarnation: Option<u64>,
     snapshot_zone: Option<Zone>,
-    reading: EpochReading,
+    captured_token: Option<bool>,
 }
 
 fn matches_target_filter_on_lki_snapshot_with_incarnation(
@@ -6618,7 +6633,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         entered_incarnation,
         captured_incarnation,
         snapshot_zone,
-        reading,
+        captured_token,
     } = projection;
     let record = ZoneChangeRecord {
         object_id,
@@ -6682,31 +6697,23 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
     // CR 115.9 + CR 608.2h: `lki` IS the epoch this projection answers for, so
     // the counter set and tap status it captured answer from it — not the live
     // object and not the ObjectId-keyed exit cache. Token identity is the one
-    // leaf the snapshot cannot state (CR 707.2: it is not a copiable value), so
-    // it answers from a derivation that dates the bit to THIS capture, never from
-    // "the latest zone-change row for this id", which can belong to another epoch
-    // of the object (see `selected_token_identity`).
+    // leaf the snapshot cannot state (CR 707.2: it is not a copiable value), so it
+    // answers from a CAPTURE that dates the bit to this epoch and from nothing
+    // else ([`historical_token_identity`]): the caller's own captured bit when its
+    // fact states one, otherwise the departure capture the caller's stated
+    // incarnation wrote. Neither a live read nor a rolling-journal reconstruction
+    // stands in for a missing capture; the leaf refuses instead.
     let epoch = CapturedEpoch {
         counters: &lki.counters,
         tapped: lki.tapped,
         snapshot_zone,
-        token: match reading {
-            // CR 115.9: the selection-time reading asks what the chosen target
-            // WAS when it was chosen, so a bit no capture can date refuses (see
-            // `CapturedEpoch::token_identity`).
-            EpochReading::SelectionTime => {
-                selected_token_identity(state, object_id, snapshot_zone, &lki.name)
-            }
-            // A look-back projection is not a selection epoch: it has no
-            // selection to date, so it answers from the engine's capture for the
-            // object — the row the capture's own epoch wrote, whenever the caller
-            // states that epoch — and otherwise keeps the projection's
-            // conservative bit.
-            EpochReading::Projection => {
-                projected_token_identity(state, object_id, snapshot_zone, captured_incarnation)
-            }
-        },
-        reading,
+        token: historical_token_identity(
+            state,
+            object_id,
+            snapshot_zone,
+            captured_token,
+            captured_incarnation,
+        ),
     };
     // CR 115.9 + CR 608.2h: three-valued, because a leaf this capture cannot
     // answer must neither report a match nor be inverted into one. UNKNOWN
@@ -6971,11 +6978,17 @@ pub fn matches_zone_change_event_object_filter(
                 ctx,
                 LkiProjection {
                     entered_incarnation: record.entered_incarnation,
-                    captured_incarnation: None,
+                    // CR 608.2h + CR 400.7: this snapshot IS the departure of the
+                    // epoch the record names, so its token bit is that epoch's
+                    // departure capture — the entry the same `zones.rs` departure
+                    // wrote beside this snapshot. An event without an incarnation
+                    // cannot select an exact history entry, so it states no epoch
+                    // and the token leaf refuses.
+                    captured_incarnation: record.entered_incarnation,
                     snapshot_zone: origin,
                     // A departed battlefield subject is a look-back over the
                     // snapshot the record holds, not a selection-time reading.
-                    reading: EpochReading::Projection,
+                    captured_token: None,
                 },
             )
         } else {
@@ -7899,183 +7912,80 @@ fn build_battlefield_entry_token_object(
     obj
 }
 
-/// The engine's own capture for an object's last zone change — the row it wrote
-/// when the object moved ([`crate::game::restrictions::record_zone_change`]).
-/// `None` means the object has not changed zones this turn, so no such capture
-/// exists. That is an absence of evidence, never evidence of anything.
-fn latest_zone_change_record(state: &GameState, object_id: ObjectId) -> Option<&ZoneChangeRecord> {
-    state
-        .zone_changes_this_turn
-        .iter()
-        .rev()
-        .find(|record| record.object_id == object_id)
-}
-
-/// CR 400.7: the object incarnation a zone-change row was captured under — the
-/// occurrence that moved, as `snapshot_for_zone_change` latched it immediately
-/// BEFORE the move (`TriggerSourceContext::identity.reference`). `None` for a
-/// record with no captured identity (a legacy saved state, a hand-built test
-/// record), which makes no claim about which life wrote it.
-fn record_captured_incarnation(record: &ZoneChangeRecord) -> Option<u64> {
-    record
-        .trigger_source_context()
-        .map(|context| context.identity.reference.incarnation)
-}
-
-/// CR 400.7 + CR 608.2h: the zone-change row that belongs to the epoch the caller
-/// is reading, never merely the newest row for the storage id.
-///
-/// `captured_incarnation` is the incarnation the caller's own capture names — the
-/// departure a tracked-set member is stamped with
-/// (`TrackedMemberOrigin::departure_incarnation`). Selecting by it is what keeps a
-/// same-storage-id REENTRY (CR 400.7: a new object that may carry the opposite
-/// token-ness) from answering for the object that left: the reentry wrote its own
-/// row under its own incarnation, and that row is simply not this epoch's.
-///
-/// A record without a captured identity cannot be placed, so it is never selected
-/// for a stated epoch — a row that does not say which life wrote it is not
-/// evidence about this one. With no epoch stated, the newest row is the only
-/// evidence there is (and the caller's reading is documented as resting on it).
-fn zone_change_record_for_epoch(
-    state: &GameState,
-    object_id: ObjectId,
-    captured_incarnation: Option<u64>,
-) -> Option<&ZoneChangeRecord> {
-    let rows = || {
-        state
-            .zone_changes_this_turn
-            .iter()
-            .rev()
-            .filter(move |record| record.object_id == object_id)
-    };
-    match captured_incarnation {
-        None => rows().next(),
-        Some(incarnation) => {
-            rows().find(|record| record_captured_incarnation(record) == Some(incarnation))
-        }
-    }
-}
-
-/// CR 111.1 + CR 111.7 + CR 115.9 + CR 730.2a + CR 730.2c + CR 730.2d: token
-/// identity of a target as it was WHEN IT WAS SELECTED, or `None` when no
+/// CR 111.1 + CR 111.7 + CR 111.8 + CR 115.9 + CR 400.7 + CR 608.2h: the token
+/// bit an object held at the epoch a caller's capture names, or `None` when no
 /// capture dates the bit to that epoch.
 ///
-/// The bit cannot be part of an `LKISnapshot` (CR 707.2: token-ness is not a
-/// copiable value), so this leaf has to answer from a capture that says WHEN the
-/// object held it. The object's latest zone-change row is not such a capture on
-/// its own: CR 730.2d lets a card merge onto a token and leave the SAME object
-/// (CR 730.2c) with the opposite token-ness, and a merge is not a zone change
-/// (CR 730.2b), so that row keeps stating the bit the object entered with while
-/// the object itself is now the other thing. Reading it as "the" answer reports
-/// an earlier epoch's bit for a later selection.
+/// The bit cannot be answered by the object itself. Token-ness is not a copiable
+/// value (CR 707.2), so no [`LKISnapshot`] states it, and it is not stable across
+/// a permanent's life: CR 730.2c keeps a merged permanent the same object while
+/// CR 730.2d hands its token-ness to the topmost component, so a card mutated onto
+/// a token flips the bit IN PLACE with no zone change for a journal row to record
+/// (CR 730.2b). Reading the live object therefore answers a question about the
+/// past with the PRESENT, and reading "the latest zone-change row for this storage
+/// id" answers with whichever epoch last moved a possibly different object
+/// through that id (CR 400.7 makes the id reusable). Both are reconstructions at
+/// read time, which is what this leaf must not do.
 ///
-/// What places the selection on one side of that in-place change is the other
-/// half of the same rule pair: CR 730.2a gives a merged permanent the topmost
-/// component's characteristics, so the name the epoch captured identifies which
-/// component was on top when the capture was taken. That placement is only
-/// evidence when exactly ONE side answers to the captured name.
+/// So the bit is captured where the epoch is and read back only from that capture.
+/// Two shapes state it, and either may answer for the epoch being asked about:
 ///
-/// The live object enters this derivation only as EVIDENCE about which epoch the
-/// selection is in — never as the answer: the live bit is returned only once the
-/// captured name has placed the selection on the post-change side, where
-/// CR 730.2d makes that bit the selection's own. Two residues are refused rather
-/// than guessed at:
+/// * `captured_bit` — the bit the caller's own fact states, captured beside the
+///   facts it travels with: the announcement's [`AnnouncedTargetToken`] for a
+///   CR 115.9 selection-time reading (captured in
+///   `casting::capture_target_facts`), or a zone-change record's own `is_token`
+///   for the departure that record is.
+/// * `captured_incarnation` — the exact object incarnation the caller's capture
+///   names, which selects that departure's bit out of
+///   [`GameState::departure_token_by_incarnation`], written by the same `zones.rs`
+///   departure that writes the epoch's `lki_by_incarnation`. A tracked-set member
+///   is stamped with the incarnation it departed at, so the bit answers for the
+///   object that LEFT rather than for whatever holds the storage id now.
 ///
-/// * the captured name names NEITHER side (a layer effect renamed the object
-///   after selection, a blank capture name); and
-/// * the captured name names BOTH sides — the same-named merge, e.g. a Cackling
-///   Counterpart token copy of Gemrazer with a real Gemrazer mutated on top. The
-///   name is unchanged while the bit changed (CR 730.2d), so the name cannot
-///   separate the two sides, and BOTH candidate bits are then genuine captures of
-///   the SAME object (CR 730.2c: the merge leaves the object it merged onto): the
-///   row states the pre-merge epoch and the live object the post-merge one. Since
-///   no capture dates the selection to either, answering with the row would
-///   report an earlier epoch (the base defect) and answering with the live bit
-///   would report the present for a historical question (CR 608.2h routes a
-///   departed epoch to last known information, not to now). Refuse instead.
-fn selected_token_identity(
+/// CR 111.7 outranks both: a token in a zone other than the battlefield ceases to
+/// exist, so an epoch placed outside the battlefield is certainly not a token, and
+/// where a record states both a non-battlefield zone and a token bit it contradicts
+/// itself on the side the rules settle.
+///
+/// With neither shape the answer is UNKNOWN, and every caller refuses the token
+/// leaves rather than reporting a default. A missing capture is missing evidence,
+/// not evidence of "not a token": CR 111.8 says a token that has left the
+/// battlefield can never come back to answer for itself, so for a departed epoch
+/// the capture is the last chance there was. Reporting `false` there is the silent
+/// "nontoken" that reads a destroyed token as a card in Ceaseless Conflict's "each
+/// nontoken creature you controlled that was destroyed this way" — a count
+/// CR 608.2h answers from last known information.
+fn historical_token_identity(
     state: &GameState,
     object_id: ObjectId,
     snapshot_zone: Option<Zone>,
-    captured_name: &str,
-) -> Option<bool> {
-    if let Some(zone) = snapshot_zone {
-        // CR 111.7: a token in a zone other than the battlefield ceases to exist,
-        // so a target announced anywhere else is certainly not one.
-        if zone != Zone::Battlefield {
-            return Some(false);
-        }
-    }
-    let record = latest_zone_change_record(state, object_id)?;
-    let Some(live) = state.objects.get(&object_id) else {
-        // The object is gone. A departure writes the row from the object as it
-        // left, so the row states the bit of the last epoch there was.
-        return Some(record.is_token);
-    };
-    if live.is_token == record.is_token {
-        // Nothing changed the bit in place since the row, so it spans the whole
-        // interval that contains the selection.
-        return Some(record.is_token);
-    }
-    // CR 730.2d: the bit changed IN PLACE — a card merged on top of this object —
-    // so the row states the pre-merge epoch and the live object the post-merge
-    // one. CR 730.2a is what tells them apart: the merge that decided the bit is
-    // the merge that put a component's characteristics on the top of the pile, so
-    // the captured name says which side the selection is on — but only when it
-    // names exactly one of the two sides.
-    match (
-        card_names_match(captured_name, &record.name),
-        card_names_match(captured_name, &live.name),
-    ) {
-        // The pre-change side, and the post-change side does not answer to it.
-        (true, false) => Some(record.is_token),
-        // The post-change side, and the pre-change side does not answer to it.
-        (false, true) => Some(live.is_token),
-        // Neither side, or BOTH (the same-named merge — see the doc above):
-        // the name cannot place this epoch, so no capture dates the bit to it.
-        (true, true) | (false, false) => None,
-    }
-}
-
-/// CR 111.1 + CR 111.7 + CR 400.7 + CR 608.2h: token identity for a LOOK-BACK
-/// projection — a snapshot the caller holds for another epoch (a departed
-/// subject, a spent mana source, a tracked-set member), NOT a CR 115.9
-/// selection-time reading of a chosen target.
-///
-/// The two readings differ in exactly one way. A selection-time reading has an
-/// epoch to date, so it must not take "the latest zone-change row for this id"
-/// as the answer unless that row is proven to be that epoch's
-/// ([`selected_token_identity`]). A projection's epoch is the one its own capture
-/// names, so this leaf reads the row THAT epoch wrote
-/// ([`zone_change_record_for_epoch`]) — never "the latest row for this storage
-/// id", which a reentry (CR 400.7) may have written for a different object, and
-/// never the live object or the ObjectId-keyed exit cache.
-///
-/// `captured_incarnation` is that epoch whenever the caller's capture states one
-/// (a tracked-set member is stamped with its producing departure's incarnation).
-/// A caller that states none leaves the newest row as the only evidence there is;
-/// `destroy_all_chain_counts_filtered_tracked_set_for_token_followup` reaches this
-/// leaf through such a projection.
-///
-/// With no capture at all, `None` lets the projection keep its own conservative
-/// bit ([`CapturedEpoch::token_identity`]). That is what keeps every tracked-set
-/// aggregate countable: a refusal there drops members the chain must still count.
-fn projected_token_identity(
-    state: &GameState,
-    object_id: ObjectId,
-    snapshot_zone: Option<Zone>,
+    captured_bit: Option<bool>,
     captured_incarnation: Option<u64>,
 ) -> Option<bool> {
     if let Some(zone) = snapshot_zone {
         // CR 111.7: a token in a zone other than the battlefield ceases to exist,
-        // so a subject projected in a stated non-battlefield zone is certainly
-        // not one.
+        // so a target announced anywhere else is certainly not one. This is a rules
+        // certainty about the epoch, so it outranks any capture: a record that
+        // states both a non-battlefield zone and a token bit contradicts itself,
+        // and the zone axis controls.
         if zone != Zone::Battlefield {
             return Some(false);
         }
     }
-    zone_change_record_for_epoch(state, object_id, captured_incarnation)
-        .map(|record| record.is_token)
+    // CR 115.9 + CR 111.1: the caller's own capture IS the answer for the epoch
+    // it names, and nothing below may overrule it.
+    if let Some(is_token) = captured_bit {
+        return Some(is_token);
+    }
+    // CR 400.7 + CR 608.2h: the departure capture the stated incarnation wrote.
+    // Keyed by the exact epoch, so a reentry at the same storage id can never
+    // answer for the object that left.
+    let incarnation = captured_incarnation?;
+    state
+        .departure_token_by_incarnation
+        .get(&object_id)
+        .and_then(|history| history.get(&incarnation))
+        .copied()
 }
 
 /// CR 115.9 + CR 608.2h + CR 400.7: the selection-time facts a captured
@@ -8094,11 +8004,9 @@ fn projected_token_identity(
 ///
 /// A fact this carrier cannot state is answered by REFUSING the leaf, never by
 /// falling back to the present: a missing captured fact is not a live answer.
-///
-/// The one exception is [`EpochReading::Projection`], which is a look-back over
-/// a snapshot for some other epoch rather than a CR 115.9 selection-time reading
-/// of a chosen target; there the projection's own conservative answer stands.
-/// See [`CapturedEpoch::token_identity`].
+/// That holds for both readings — a look-back projection over a snapshot for some
+/// other epoch has the same obligation to date its facts as a CR 115.9
+/// selection-time reading does. See [`CapturedEpoch::token_identity`].
 #[derive(Clone, Copy)]
 struct CapturedEpoch<'a> {
     /// CR 122.1: the counters the subject had when it was selected.
@@ -8110,57 +8018,29 @@ struct CapturedEpoch<'a> {
     /// property of permanents, so a capture taken in any other zone cannot answer
     /// them at all.
     snapshot_zone: Option<Zone>,
-    /// CR 111.1 + CR 111.7 + CR 730.2d: token identity, dated to this epoch by
-    /// [`selected_token_identity`] (a selection-time reading) or read from the
-    /// zone-change row the capture's own epoch wrote
-    /// ([`projected_token_identity`], a look-back projection, which has no
-    /// selection to date and dates the bit by the incarnation its snapshot was
-    /// taken under, when the caller states it). `None` means no capture states it;
-    /// [`Self::token_identity`] decides what that means for the reading being
-    /// answered.
+    /// CR 111.1 + CR 111.7 + CR 115.9 + CR 730.2c + CR 730.2d: token identity as
+    /// this epoch captured it — the announced record's own bit for a CR 115.9
+    /// selection-time reading, or the departure capture the epoch's incarnation
+    /// wrote ([`historical_token_identity`]) for a look-back. `None` means no
+    /// capture states it, and [`Self::token_identity`] then refuses.
     token: Option<bool>,
-    /// CR 115.9: which reading of this capture is being answered.
-    reading: EpochReading,
-}
-
-/// CR 115.9 + CR 608.2h: which reading of a captured snapshot an evaluation is
-/// answering.
-///
-/// CR 115.9 gives an effect three readings of another spell or ability's targets
-/// — the current state, the state at the time they were selected, or both. A
-/// `Projection` is neither a selection-time reading nor a live one: it is the
-/// snapshot a caller holds for some other epoch (a subject that has departed, a
-/// mana source that was spent, a tracked-set member), answered from the snapshot
-/// the caller has.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EpochReading {
-    /// "The state of the targets at the time they were selected" (CR 115.9) —
-    /// the announced-target reading. Answered from the capture only: a leaf the
-    /// capture cannot state refuses rather than reporting the present.
-    SelectionTime,
-    /// A look-back projection of a snapshot for another epoch. Leaves the
-    /// snapshot states answer from it; token identity keeps the projection's
-    /// conservative bit, which is not a live read.
-    Projection,
 }
 
 impl CapturedEpoch<'_> {
-    /// CR 111.1 + CR 108.2 + CR 115.9: token identity as this epoch may state
-    /// it. `None` means the leaf must refuse.
+    /// CR 111.1 + CR 111.8 + CR 608.2h + CR 115.9: token identity as this epoch
+    /// may state it. `None` means the leaf must refuse.
     ///
-    /// A capture that dates the bit to this epoch answers with it. One that does
-    /// not may stand as "not a token" only in a [`EpochReading::Projection`],
-    /// where that is the conservative bit a projected record already carries
-    /// (`is_token: false`) — the same fail-closed answer
-    /// `spell_record_matches_property` gives a cast record, and not a read of
-    /// any live object. A [`EpochReading::SelectionTime`] reading refuses
-    /// instead: there the question is what the target WAS when it was chosen,
-    /// and "presumably not a token" is not that answer.
+    /// The answer is the capture's, for both a selection-time reading and a
+    /// look-back, and UNKNOWN when the capture states nothing. It is never
+    /// "presumably not a token": a missing capture is missing evidence, and
+    /// CR 111.8 makes the epoch's own departure the last evidence a token epoch
+    /// will ever leave — a departed token cannot come back to answer for itself.
+    /// Reporting a defaulted `false` there is the silent "nontoken" that reads a
+    /// destroyed token as a card in Ceaseless Conflict's "each nontoken creature
+    /// you controlled that was destroyed this way" (CR 608.2h: that count reads
+    /// last known information).
     fn token_identity(self) -> Option<bool> {
-        self.token.or(match self.reading {
-            EpochReading::SelectionTime => None,
-            EpochReading::Projection => Some(false),
-        })
+        self.token
     }
 
     /// CR 110.5 + CR 110.5d: tap status as this epoch may state it. `None` means
@@ -8890,10 +8770,20 @@ fn zone_change_record_matches_type_filter(
         // cessation when the original departure record is the only authority.
         // CR 111.1 + CR 115.9: a historical subject answers from its captured
         // epoch — the token bit of the record the engine captured for this
-        // object, a zone that proves non-token-ness (CR 111.7), or, in a
-        // look-back projection only, the projection's own conservative bit.
+        // object, or a zone that proves non-token-ness (CR 111.7). A capture
+        // that states no bit for this epoch leaves the type NOUN permissive
+        // rather than refusing: `Card` is a type filter, not one of the
+        // three-valued token leaves, and the LIVE path reads it the same way
+        // (`type_filter_matches`: `Card => true` for every object). Refusing it
+        // would drop card-noun member filters — `tracked_set_anaphor_source`
+        // pins that aggregate end to end — while answering nothing about
+        // token-ness that `FilterProp::Token`/`NonToken` do not already answer,
+        // or refuse, on their own.
         TypeFilter::Card => match epoch {
-            Some(epoch) => epoch.token_identity() == Some(false),
+            // CR 108.2b: with a captured bit, a card noun is exactly "not a token".
+            Some(epoch) => epoch
+                .token_identity()
+                .map_or(!record.is_token, |is_token| !is_token),
             None => !record.is_token,
         },
         TypeFilter::Any => true,
@@ -24378,7 +24268,7 @@ mod tests {
                     entered_incarnation: Some(3),
                     captured_incarnation: None,
                     snapshot_zone: None,
-                    reading: EpochReading::Projection,
+                    captured_token: None,
                 },
             ),
             "the original triggering incarnation is not another object"
@@ -24394,7 +24284,7 @@ mod tests {
                     entered_incarnation: Some(4),
                     captured_incarnation: None,
                     snapshot_zone: None,
-                    reading: EpochReading::Projection,
+                    captured_token: None,
                 },
             ),
             "a later incarnation at the same storage id is another object"
@@ -24820,6 +24710,7 @@ mod tests {
             id: target,
             lki: Box::new(selected),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
         };
         let history = |prop: FilterProp| {
             declared_target_facts_match(
@@ -24911,6 +24802,7 @@ mod tests {
             id: target,
             lki: Box::new(selected),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
         };
         let history = |filter: TargetFilter| {
             declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)
@@ -24952,31 +24844,32 @@ mod tests {
         );
     }
 
-    /// CR 111.1 + CR 115.9 + CR 608.2h: token identity is the one leaf of the
-    /// three a selection-time `LKISnapshot` captures no fact for, so it answers
-    /// from the record the engine DID capture for the object itself — never from
-    /// the live token bit at the same storage id (CR 400.7). Two shapes:
+    /// CR 111.1 + CR 115.9 + CR 608.2h + CR 400.7: a selection-time token answer
+    /// comes from the fact's own capture and from nothing else. Three shapes:
     ///
-    /// * a captured on-move record states the object's token identity for its
-    ///   whole life, so a token that has ceased still answers `Token` = true
-    ///   while the live map holds nothing;
-    /// * with no captured record at all, both leaves refuse. The live object is
-    ///   never the answer, and a target announced outside the battlefield is
-    ///   provably not a token (CR 111.7), so that shape is answered rather than
-    ///   refused.
+    /// * a record that states no bit refuses BOTH leaves even while a zone-change
+    ///   row for the object sits in the turn journal. The journal is a rolling log
+    ///   of whatever last moved through the storage id, not this epoch's capture,
+    ///   so it is not consulted;
+    /// * the same refusal holds while the live object still says "token" — the
+    ///   present is not the past;
+    /// * a target announced outside the battlefield is provably not a token
+    ///   (CR 111.7), so that shape is answered rather than refused.
     ///
-    /// Revert-probe: reading the live `is_token` bit (the base behavior) inverts
-    /// the two token assertions below — it answers `Token` = false for the ceased
-    /// token and `Token` = true for the live one, i.e. exactly the present.
+    /// Revert-probe: reconstructing the bit at read time — from the journal row
+    /// the first shape leaves in place, or from the live object the second shape
+    /// leaves on the battlefield — answers `Token` = true in both shapes and makes
+    /// the first assertion of each pair fail.
     #[test]
-    fn history_token_leaf_answers_from_the_captured_record() {
+    fn history_token_leaf_reads_only_its_capture_not_the_journal_or_the_live_object() {
         let mut state = setup();
         let source = add_creature(&mut state, PlayerId(0), "Token Source");
         let ctx = FilterContext::from_source(&state, source);
 
-        // SHAPE 1 — a token that changed zones: the engine captured its identity
-        // in the on-move record, and the object has since ceased to exist. The
-        // live map holds no token bit at all; the capture still answers.
+        // SHAPE 1 — a token that changed zones, leaving a row in the turn journal
+        // that states its bit. The record handed in says nothing about the bit (a
+        // payload predating the capture), so the leaf has no epoch to answer from;
+        // the journal row is not a substitute for it.
         let ceased_token = add_creature(&mut state, PlayerId(0), "Ceased Token");
         state.objects.get_mut(&ceased_token).unwrap().is_token = true;
         let mut departure =
@@ -24989,23 +24882,43 @@ mod tests {
             id: ceased_token,
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
         };
         assert!(
-            declared_target_facts_match(
+            !declared_target_facts_match(
                 &state,
                 std::slice::from_ref(&ceased_fact),
                 &prop_filter(FilterProp::Token),
                 &ctx,
             ),
-            "the captured record says the object was a token, so 'is a token' holds \
-             even though the token has ceased to exist"
+            "a record that states no bit does not inherit the journal row's bit"
         );
-        assert!(!declared_target_facts_match(
-            &state,
-            std::slice::from_ref(&ceased_fact),
-            &prop_filter(FilterProp::NonToken),
-            &ctx,
-        ));
+        assert!(
+            !declared_target_facts_match(
+                &state,
+                std::slice::from_ref(&ceased_fact),
+                &prop_filter(FilterProp::NonToken),
+                &ctx,
+            ),
+            "and the same absent capture cannot prove non-token-ness either"
+        );
+        // The capture that DOES answer this shape, installed beside the epoch it
+        // belongs to, is the announcement's own bit.
+        let captured_fact = ActivationTargetFact::Object {
+            id: ceased_token,
+            lki: Box::new(epoch_snapshot(&[], false)),
+            zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+            token: crate::types::game_state::AnnouncedTargetToken::Known(true),
+        };
+        assert!(
+            declared_target_facts_match(
+                &state,
+                std::slice::from_ref(&captured_fact),
+                &prop_filter(FilterProp::Token),
+                &ctx,
+            ),
+            "the announced capture answers for the epoch it was taken in (CR 115.9)"
+        );
 
         // SHAPE 2 — no captured record: the live object still says "token", and
         // that bit is precisely what must NOT answer.
@@ -25015,6 +24928,7 @@ mod tests {
             id: live_token,
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
         };
         assert!(
             !declared_target_facts_match(
@@ -25041,6 +24955,7 @@ mod tests {
             id: live_token,
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Graveyard),
+            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
         };
         assert!(!declared_target_facts_match(
             &state,
@@ -25065,22 +24980,29 @@ mod tests {
         ));
     }
 
-    /// CR 608.2h + CR 115.9 + CR 108.2: the PROJECTION reading is not the
-    /// selection-time reading. A look-back over a snapshot the caller holds for
-    /// another epoch — a tracked-set member, a departed subject, a spent mana
-    /// source — answers the leaves the snapshot states from it, and token
-    /// identity from the projection's own conservative bit ("a card, not a
-    /// token"). Refusing there instead would drop every tracked-set aggregate
-    /// whose member filter is a card noun (`TypedFilter::card()`), which is what
-    /// `tracked_set_anaphor_source` pins end-to-end.
+    /// CR 608.2h + CR 111.8 + CR 115.9 + CR 108.2: an UNCAPTURED projection
+    /// states no token bit at all, and the leaf refuses BOTH `Token` and
+    /// `NonToken` rather than reporting "a card, not a token".
     ///
-    /// The same subject read as a SELECTED TARGET still refuses `NonToken`: that
-    /// is the reading CR 115.9 asks about the target as it was when chosen.
+    /// A projection's own record bit is a placeholder, not a capture: the
+    /// synthesized record is built from an `LKISnapshot`, which cannot carry
+    /// token-ness (CR 707.2). Where the engine captured the subject's departure
+    /// epoch, the capture answers
+    /// (`projection_reading_answers_a_captured_token_bit`); where nothing captured
+    /// it there is no evidence, and CR 111.8 makes that answer unrecoverable — a
+    /// departed token can never come back to state it. Reporting the placeholder's
+    /// `false` is the silent "nontoken" that reads a destroyed token as a card in
+    /// Ceaseless Conflict's "each nontoken creature you controlled that was
+    /// destroyed this way".
     ///
-    /// Revert-probe: routing the projection through the selection-time refusal
-    /// (`epoch.is_token == Some(false)`) makes the first three assertions fail.
+    /// The refusal is scoped to the token leaves: a card noun on the same
+    /// projection member still matches (CR 108.2b), so a tracked-set aggregate
+    /// whose member filter names no token-ness keeps counting.
+    ///
+    /// Revert-probe: answering the uncaptured projection from the placeholder
+    /// (`is_token: false`) makes the `NonToken` assertion fail.
     #[test]
-    fn projection_reading_keeps_the_conservative_token_bit() {
+    fn an_uncaptured_projection_refuses_the_token_leaf() {
         let mut state = setup();
         let source = add_creature(&mut state, PlayerId(0), "Projection Source");
         let member = add_creature(&mut state, PlayerId(0), "Projection Member");
@@ -25089,14 +25011,14 @@ mod tests {
         let lki = epoch_snapshot(&[], false);
 
         assert!(
-            super::matches_target_filter_on_lki_snapshot(
+            !super::matches_target_filter_on_lki_snapshot(
                 &state,
                 member,
                 &lki,
                 &prop_filter(FilterProp::NonToken),
                 &ctx,
             ),
-            "a projection keeps the conservative 'not a token' bit"
+            "with no capture, `nontoken` is not the projection's answer"
         );
         assert!(
             !super::matches_target_filter_on_lki_snapshot(
@@ -25106,7 +25028,7 @@ mod tests {
                 &prop_filter(FilterProp::Token),
                 &ctx,
             ),
-            "and never claims token-ness it cannot prove"
+            "and neither is `token`"
         );
         assert!(
             super::matches_target_filter_on_lki_snapshot(
@@ -25128,6 +25050,7 @@ mod tests {
             id: member,
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
         };
         assert!(
             !declared_target_facts_match(
@@ -25140,57 +25063,89 @@ mod tests {
         );
     }
 
-    /// CR 111.1 + CR 400.7 + CR 608.2h: the conservative bit above is the one a
-    /// projection falls back to when NO capture names the object — not a claim
-    /// that a projection cannot read a capture at all. A projection over a member
-    /// the engine DID capture as a token answers token, because a look-back
-    /// projection has no selection epoch to date and its capture is the only
-    /// historical evidence there is.
+    /// CR 111.1 + CR 400.7 + CR 111.8 + CR 608.2h: the counterpart of
+    /// `an_uncaptured_projection_refuses_the_token_leaf` — a look-back over a
+    /// departure the engine CAPTURED answers from that capture, because the
+    /// snapshot cannot state the bit (CR 707.2) and CR 111.8 makes the departure
+    /// the last evidence a token epoch ever leaves.
     ///
-    /// This is exactly the shape a tracked-set aggregate reads: members are
-    /// projected with no epoch stated, so a refusal (or a defaulted non-token
-    /// bit) here admits a token into a `NonToken` member filter and inflates the
-    /// count — `destroy_all_chain_counts_filtered_tracked_set_for_token_followup`
-    /// (R2 regression: token member counted, 2 where 1 is correct).
+    /// The history is the engine's own: the token creature leaves the battlefield
+    /// through `move_to_zone`, which writes the epoch's last known information and
+    /// its token bit under ONE incarnation. The turn journal is emptied afterwards,
+    /// so no reconstruction has a row left to read — the departure capture is the
+    /// only evidence there is, which is exactly the position a member whose
+    /// journal row is gone is in.
+    ///
+    /// This is the shape a tracked-set aggregate reads:
+    /// `destroy_all_chain_counts_filtered_tracked_set_for_token_followup` counts
+    /// "each nontoken creature you controlled that was destroyed this way" through
+    /// this entry point, and a defaulted bit there admits the destroyed token into
+    /// the count (2 where 1 is correct).
+    ///
+    /// Revert-probe: reading the newest zone-change row for the storage id — the
+    /// pre-capture behaviour — finds no row once the journal is empty and refuses,
+    /// making the `Token` assertion fail; reading the live object instead answers
+    /// with the graveyard object, which is not the departed epoch.
     #[test]
     fn projection_reading_answers_a_captured_token_bit() {
         let mut state = setup();
         let source = add_creature(&mut state, PlayerId(0), "Projection Source");
         let member = add_creature(&mut state, PlayerId(0), "Projected Token");
         state.objects.get_mut(&member).unwrap().is_token = true;
-        // The engine's own capture for this object as it left the battlefield.
-        let capture = state
-            .objects
+
+        // CR 111.7: the token leaves the battlefield through the engine's own
+        // write path, which stamps one incarnation on both of the epoch's captures.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, member, Zone::Graveyard, &mut events);
+        let incarnation = *state
+            .departure_token_by_incarnation
             .get(&member)
-            .unwrap()
-            .snapshot_for_zone_change(member, Some(Zone::Battlefield), Zone::Graveyard);
+            .expect("CR 608.2h: the departure writes the epoch's token capture")
+            .keys()
+            .next()
+            .expect("one departure, one incarnation");
         assert!(
-            capture.is_token,
-            "fixture precondition: the capture observed a token leaving"
+            state.departure_token_by_incarnation[&member][&incarnation],
+            "fixture precondition: the token departed as a token"
         );
-        state.zone_changes_this_turn.push_back(capture);
+        let lki = state.lki_by_incarnation[&member][&incarnation].clone();
+        // CR 514.2: the journal row the same departure wrote does not outlive the
+        // turn, so nothing below may depend on one.
+        state.zone_changes_this_turn.clear();
 
         let ctx = FilterContext::from_source(&state, source);
-        let lki = epoch_snapshot(&[], false);
         assert!(
-            super::matches_target_filter_on_lki_snapshot(
+            super::matches_target_filter_on_departed_lki_at_incarnation(
+                &state,
+                member,
+                &lki,
+                incarnation,
+                &prop_filter(FilterProp::Token),
+                &ctx,
+            ),
+            "a look-back answers the token bit its departure capture holds"
+        );
+        assert!(
+            !super::matches_target_filter_on_departed_lki_at_incarnation(
+                &state,
+                member,
+                &lki,
+                incarnation,
+                &prop_filter(FilterProp::NonToken),
+                &ctx,
+            ),
+            "so a nontoken member filter must not admit it"
+        );
+        // The unpinned door names no epoch, so it has no capture to answer from.
+        assert!(
+            !super::matches_target_filter_on_lki_snapshot(
                 &state,
                 member,
                 &lki,
                 &prop_filter(FilterProp::Token),
                 &ctx,
             ),
-            "a projection answers the token bit its capture holds"
-        );
-        assert!(
-            !super::matches_target_filter_on_lki_snapshot(
-                &state,
-                member,
-                &lki,
-                &prop_filter(FilterProp::NonToken),
-                &ctx,
-            ),
-            "so a nontoken member filter must not admit it"
+            "a read that names no epoch cannot date the bit, so it refuses"
         );
     }
 
@@ -25205,17 +25160,20 @@ mod tests {
 
     /// CR 730.2a + CR 730.2b + CR 730.2c + CR 730.2d + CR 115.9 + CR 400.7:
     /// Gemrazer mutating on top of a token host. The merge is not a zone change
-    /// (CR 730.2b/c), so the host's captured on-move row keeps stating the token
-    /// bit it ENTERED with, while the merged permanent — the same ObjectId — is a
-    /// nontoken creature (CR 730.2d). A history question about a target selected
-    /// after the merge must answer with the selection epoch's bit; that row is an
-    /// earlier epoch of the same object and cannot state it.
+    /// (CR 730.2b/c), so the host's ENTRY row keeps stating the token bit it
+    /// entered with, while the merged permanent — the same object (CR 730.2c) — is
+    /// a nontoken creature (CR 730.2d). That row is therefore an earlier epoch's
+    /// bit, and neither a later selection nor an unstated one may read it.
     ///
-    /// Revert-probe: reading the latest row for the object id (the base
-    /// behaviour) answers `Token` = true for the post-merge selection, i.e. the
-    /// entry epoch rather than the selected one.
+    /// Both halves are pinned: a stated capture answers each selection with its own
+    /// epoch's bit, and a record that states none refuses instead of taking the
+    /// entry row's bit (pre-merge) or the live object's (post-merge).
+    ///
+    /// Revert-probe: reading the entry row for the storage id answers
+    /// `Token` = true for the post-merge selection, making its `NonToken`
+    /// assertion fail.
     #[test]
-    fn history_token_leaf_answers_from_the_selected_epoch_not_the_entry_row() {
+    fn a_stale_entry_row_cannot_place_a_selection() {
         let mut state = setup();
         let source = add_creature(&mut state, PlayerId(0), "Gemrazer Source");
         let host = add_creature(&mut state, PlayerId(0), "Soldier Token");
@@ -25241,6 +25199,7 @@ mod tests {
             id: host,
             lki: Box::new(named_epoch_snapshot("Soldier Token")),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+            token: AnnouncedTargetToken::Known(true),
         };
 
         // Gemrazer mutates ON TOP: same ObjectId (CR 730.2c), nontoken from now
@@ -25275,6 +25234,7 @@ mod tests {
             id: host,
             lki: Box::new(named_epoch_snapshot("Gemrazer")),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+            token: AnnouncedTargetToken::Known(false),
         };
         assert!(
             !matches(&after, prop_filter(FilterProp::Token)),
@@ -25286,38 +25246,55 @@ mod tests {
             "the selection epoch states the nontoken bit"
         );
 
-        // The mirror: a selection taken BEFORE the merge still answers token,
-        // from the same capture, with the same stale row present.
+        // The mirror: a selection taken BEFORE the merge answers token, from its
+        // own epoch's capture, with the same stale entry row present.
         assert!(
             matches(&before, prop_filter(FilterProp::Token)),
             "a selection made while the host was a token answers token"
         );
         assert!(!matches(&before, prop_filter(FilterProp::NonToken)));
+
+        // And with NO stated bit, this is the shape a reconstruction must not
+        // guess at: the entry row says token, the live object says nontoken, and
+        // the epoch belongs to neither.
+        let unstated = ActivationTargetFact::Object {
+            id: host,
+            lki: Box::new(named_epoch_snapshot("Gemrazer")),
+            zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+            token: AnnouncedTargetToken::Unknown,
+        };
+        assert!(
+            !matches(&unstated, prop_filter(FilterProp::Token))
+                && !matches(&unstated, prop_filter(FilterProp::NonToken)),
+            "with no capture, neither the entry row nor the present answers"
+        );
     }
 
-    /// CR 111.1 + CR 730.2a + CR 730.2c + CR 730.2d + CR 115.9: a SAME-NAMED
-    /// merge. Cackling Counterpart makes a token copy of Gemrazer — a TOKEN that
-    /// carries Gemrazer's characteristics, its name included — and a real Gemrazer
-    /// card then mutates on top of it. CR 730.2c leaves the merged permanent the
-    /// same object; CR 730.2d hands its token-ness to the topmost component, so
-    /// the bit flips to nontoken while CR 730.2a leaves the name "Gemrazer" on
-    /// BOTH sides of the change.
+    /// CR 111.1 + CR 730.2a + CR 730.2c + CR 730.2d + CR 115.9 + CR 608.2h: a
+    /// SAME-NAMED merge, where no reconstruction can answer at all. Cackling
+    /// Counterpart makes a token copy of Gemrazer — a TOKEN that carries
+    /// Gemrazer's characteristics, its name included — and a real Gemrazer card
+    /// then mutates on top of it. CR 730.2c leaves the merged permanent the same
+    /// object; CR 730.2d hands its token-ness to the topmost component, so the bit
+    /// flips to nontoken while CR 730.2a leaves the name "Gemrazer" on BOTH sides
+    /// of the change.
     ///
-    /// A leaf that places the selection by NAME answers this shape with the entry
-    /// row's pre-merge bit: a confident "token" for a permanent that is not one,
-    /// and the opposite of what a `NonToken` member filter needs. Here the name
-    /// cannot separate the two sides, so each candidate bit is a genuine capture
-    /// of the SAME object (the row states the pre-merge epoch, the live object the
-    /// post-merge one) and no capture dates the selection to either. The leaf
-    /// therefore refuses: it reports neither the earlier epoch (the base defect)
-    /// nor the present, which CR 608.2h does not make the answer to a historical
-    /// question about an object that changed in place.
+    /// Every source a reconstruction could reach is present here and none of them
+    /// is this epoch's: the entry row states the pre-merge bit, the live object the
+    /// post-merge one, and the NAME identifies both sides equally, so it cannot
+    /// tell them apart. That is exactly why CR 601.2c captures the bit when the
+    /// target is committed — the capture is the only statement that survives this
+    /// shape. A fact carrying no capture therefore refuses: it reports neither the
+    /// earlier epoch (the old defect) nor the present, which CR 608.2h does not
+    /// make the answer to a historical question. The capture's own answers across
+    /// this same merge are pinned by
+    /// `announced_token_capture_answers_across_a_same_named_merge`.
     ///
-    /// Revert-probe: comparing names row-first — the base behaviour — makes the
-    /// first assertion fail, because the captured name matches the row and the row
-    /// says "token".
+    /// Revert-probe: comparing names row-first — the pre-capture behaviour — makes
+    /// the first assertion fail, because the captured name matches the row and the
+    /// row says "token".
     #[test]
-    fn a_same_named_merge_cannot_be_placed_by_the_captured_name() {
+    fn a_same_named_merge_states_no_bit_without_a_capture() {
         let mut state = setup();
         let source = add_creature(&mut state, PlayerId(0), "Cackling Source");
 
@@ -25363,6 +25340,7 @@ mod tests {
             id: copy,
             lki: Box::new(named_epoch_snapshot("Gemrazer")),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
         };
         let matches = |filter: TargetFilter| {
             declared_target_facts_match(&state, std::slice::from_ref(&selected), &filter, &ctx)
@@ -25371,11 +25349,240 @@ mod tests {
         assert!(
             !matches(prop_filter(FilterProp::Token)),
             "the entry row's pre-merge bit is an EARLIER epoch of this object, and the \
-             captured name cannot place the selection across a same-named merge"
+             name cannot place the selection across a same-named merge"
         );
         assert!(
             !matches(prop_filter(FilterProp::NonToken)),
             "the present is not the answer to a historical question either (CR 608.2h)"
+        );
+    }
+
+    /// CR 111.1 + CR 115.9 + CR 730.2a + CR 730.2c + CR 730.2d: the SAME
+    /// same-named merge as `a_same_named_merge_states_no_bit_without_a_capture`,
+    /// answered from the announced TOKEN CAPTURE instead of from evidence about
+    /// the object's later state.
+    ///
+    /// Cackling Counterpart makes a token copy of Gemrazer; a real Gemrazer card
+    /// then mutates on top. CR 730.2c leaves the merged permanent the same object
+    /// and CR 730.2d hands its token-ness to the topmost component, so the bit
+    /// flips to nontoken IN PLACE while CR 730.2a leaves the name "Gemrazer" on
+    /// both sides. No journal row records a merge (CR 730.2b: it is not a zone
+    /// change) and the live object is the present, so the selection-time answer
+    /// cannot be derived at all — which is exactly why CR 601.2c captures it when
+    /// the target is committed. A selection announced AFTER the merge is a
+    /// nontoken selection made on a live object that is also nontoken; a capture
+    /// taken before it is a token selection, and the tests below pin both.
+    ///
+    /// Revert-probe: derive the bit from the live object and the captured name
+    /// (the base behaviour) — the name cannot separate the two sides, so the leaf
+    /// refuses and every assertion below that expects a definite answer fails.
+    #[test]
+    fn announced_token_capture_answers_across_a_same_named_merge() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Cackling Source");
+
+        // CR 707.2 + CR 111.1: the token copy carries the copied card's name, and
+        // its battlefield entry row states the token bit it entered with.
+        let copy = add_creature(&mut state, PlayerId(0), "Gemrazer");
+        state.objects.get_mut(&copy).unwrap().is_token = true;
+        let entry = state.objects.get(&copy).unwrap().snapshot_for_zone_change(
+            copy,
+            None,
+            Zone::Battlefield,
+        );
+        assert!(
+            entry.is_token,
+            "fixture precondition: the copy entered as a token"
+        );
+        state.zone_changes_this_turn.push_back(entry.clone());
+
+        // A real Gemrazer card mutates ON TOP: same ObjectId (CR 730.2c), the
+        // topmost component supplies the name (CR 730.2a) and the bit (CR 730.2d).
+        let gemrazer = add_creature(&mut state, PlayerId(0), "Gemrazer");
+        state.battlefield.retain(|&id| id != gemrazer);
+        let mut events = Vec::new();
+        crate::game::merge::merge_object_onto(
+            &mut state,
+            gemrazer,
+            copy,
+            crate::game::merge::MergeSide::Top,
+            &mut events,
+        );
+        assert!(
+            !state.objects.get(&copy).unwrap().is_token,
+            "fixture precondition: a card on top of a token host is nontoken (CR 730.2d)"
+        );
+        assert_eq!(
+            state.objects.get(&copy).unwrap().name,
+            entry.name,
+            "fixture precondition: the merge changed the bit but not the name (CR 730.2a)"
+        );
+
+        let ctx = FilterContext::from_source(&state, source);
+        let matches = |token: AnnouncedTargetToken, filter: TargetFilter| {
+            let fact = ActivationTargetFact::Object {
+                id: copy,
+                lki: Box::new(named_epoch_snapshot("Gemrazer")),
+                zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+                token,
+            };
+            declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)
+        };
+
+        // A selection announced while the host WAS a token: "targets a token"
+        // holds, and the merged permanent's present bit must not overturn it.
+        assert!(
+            matches(
+                AnnouncedTargetToken::Known(true),
+                prop_filter(FilterProp::Token)
+            ),
+            "the capture states the selection's own epoch: it was a token (CR 115.9)"
+        );
+        assert!(
+            !matches(
+                AnnouncedTargetToken::Known(true),
+                prop_filter(FilterProp::NonToken)
+            ),
+            "and the live object's later nontoken bit is not that epoch's answer"
+        );
+
+        // A selection announced AFTER the merge: the very same live object, the
+        // opposite captured bit.
+        assert!(
+            matches(
+                AnnouncedTargetToken::Known(false),
+                prop_filter(FilterProp::NonToken)
+            ),
+            "a selection made after the merge is a nontoken selection (CR 730.2d)"
+        );
+        assert!(
+            !matches(
+                AnnouncedTargetToken::Known(false),
+                prop_filter(FilterProp::Token)
+            ),
+            "the entry row's pre-merge bit must not answer the post-merge selection"
+        );
+
+        // CR 730.2c: the capture names the object that is still there — the merge
+        // left the same ObjectId, so the fact is not a fact about a departed object
+        // and its zone axis still reads the battlefield it never left.
+        assert!(
+            matches(
+                AnnouncedTargetToken::Known(true),
+                prop_filter(FilterProp::InZone {
+                    zone: Zone::Battlefield
+                })
+            ),
+            "CR 730.2c: the merged permanent is the object that was selected"
+        );
+    }
+
+    /// CR 111.1 + CR 111.8 + CR 115.9 + CR 514.2: the announced capture is what
+    /// survives a turn boundary. The zone-change journal a reconstruction would
+    /// fall back on is turn-scoped and cleared at rollover, so a history question
+    /// asked later in the game has no row to read — while a capture written at
+    /// announcement still states the epoch.
+    ///
+    /// Revert-probe: with no capture (the base behaviour) the derivation finds no
+    /// row for the id and refuses, so the `Token` assertion fails; reading the live
+    /// object instead answers from the present, which for a departed token is the
+    /// silent "nontoken" CR 111.8 says can never be repaired.
+    #[test]
+    fn announced_token_capture_survives_the_turn_journal_rollover() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "History Source");
+        let token = add_creature(&mut state, PlayerId(0), "Soldier Token");
+        state.objects.get_mut(&token).unwrap().is_token = true;
+        let entry = state.objects.get(&token).unwrap().snapshot_for_zone_change(
+            token,
+            None,
+            Zone::Battlefield,
+        );
+        state.zone_changes_this_turn.push_back(entry);
+
+        let fact = ActivationTargetFact::Object {
+            id: token,
+            lki: Box::new(named_epoch_snapshot("Soldier Token")),
+            zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+            token: AnnouncedTargetToken::Known(true),
+        };
+        // CR 514.2: the cleanup step ends "this turn" state — the journal the
+        // derivation reads is one of them (`turns.rs`).
+        state.zone_changes_this_turn.clear();
+        let ctx = FilterContext::from_source(&state, source);
+
+        assert!(
+            declared_target_facts_match(
+                &state,
+                std::slice::from_ref(&fact),
+                &prop_filter(FilterProp::Token),
+                &ctx,
+            ),
+            "the announcement's own capture answers with no journal row left"
+        );
+        assert!(
+            !declared_target_facts_match(
+                &state,
+                std::slice::from_ref(&fact),
+                &prop_filter(FilterProp::NonToken),
+                &ctx,
+            ),
+            "and the rollover does not turn a token selection into a nontoken one"
+        );
+    }
+
+    /// CR 111.1 + CR 115.9 + CR 730.2d: the mirror direction. A target announced
+    /// as a NONTOKEN permanent that a token component is then merged ON TOP of is
+    /// a token from that moment (CR 730.2d: the topmost component decides), so the
+    /// live object and the selection epoch disagree in the opposite direction.
+    ///
+    /// Revert-probe: reading the live object (the base behaviour) reports the
+    /// post-merge token bit for the selection, so `NonToken` fails here.
+    #[test]
+    fn announced_nontoken_capture_survives_a_token_merged_on_top() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Mutate Source");
+        let host = add_creature(&mut state, PlayerId(0), "Bear");
+        assert!(
+            !state.objects.get(&host).unwrap().is_token,
+            "fixture precondition: the host is a real card"
+        );
+
+        // A token COPY of a card is the topmost component, so CR 730.2d makes the
+        // merged permanent a token while CR 730.2c keeps it the same object.
+        let token_copy = add_creature(&mut state, PlayerId(0), "Bear Copy");
+        state.objects.get_mut(&token_copy).unwrap().is_token = true;
+        let mut events = Vec::new();
+        crate::game::merge::merge_object_onto(
+            &mut state,
+            token_copy,
+            host,
+            crate::game::merge::MergeSide::Top,
+            &mut events,
+        );
+        assert!(
+            state.objects.get(&host).unwrap().is_token,
+            "fixture precondition: a token on top makes the merged permanent a token (CR 730.2d)"
+        );
+
+        let ctx = FilterContext::from_source(&state, source);
+        let fact = ActivationTargetFact::Object {
+            id: host,
+            lki: Box::new(named_epoch_snapshot("Bear")),
+            zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+            token: AnnouncedTargetToken::Known(false),
+        };
+        let matches = |filter: TargetFilter| {
+            declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)
+        };
+
+        assert!(
+            matches(prop_filter(FilterProp::NonToken)),
+            "the selection was a nontoken permanent when it was announced"
+        );
+        assert!(
+            !matches(prop_filter(FilterProp::Token)),
+            "the token merged on top afterwards is a later epoch of the same object"
         );
     }
 
@@ -25400,6 +25607,7 @@ mod tests {
                 id: card,
                 lki: Box::new(epoch_snapshot(&[], false)),
                 zone: AnnouncedTargetZone::Known(zone),
+                token: crate::types::game_state::AnnouncedTargetToken::Unknown,
             };
             declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)
         };
@@ -25451,6 +25659,7 @@ mod tests {
             id: candidate,
             lki: Box::new(epoch_snapshot(&[], false)),
             zone: AnnouncedTargetZone::Known(Zone::Battlefield),
+            token: crate::types::game_state::AnnouncedTargetToken::Unknown,
         };
         let matches = |filter: TargetFilter| {
             declared_target_facts_match(&state, std::slice::from_ref(&fact), &filter, &ctx)

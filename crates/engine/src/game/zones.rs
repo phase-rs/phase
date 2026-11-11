@@ -340,6 +340,19 @@ pub(crate) fn apply_zone_exit_cleanup(
                 .entry(object_id)
                 .or_default()
                 .insert(incarnation, lki);
+            // CR 111.1 + CR 608.2h: the epoch's token bit, captured with the same
+            // incarnation key as its last known information. The snapshot cannot
+            // carry it (CR 707.2: token-ness is not a copiable value), and no
+            // later source can reconstruct it — the live object is the present,
+            // CR 400.7 makes the storage id reusable, and the zone-change journal
+            // this departure also writes is turn-scoped. CR 111.8 makes this
+            // capture the only one there will ever be for a token epoch: a token
+            // that left the battlefield can never come back to answer for itself.
+            state
+                .departure_token_by_incarnation
+                .entry(object_id)
+                .or_default()
+                .insert(incarnation, obj.is_token);
         }
         if let Some(values) = lki_copiable_values {
             state

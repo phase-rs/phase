@@ -21827,26 +21827,32 @@ mod tests {
         );
     }
 
-    /// CR 608.2h + CR 400.7 + CR 111.1: a tracked-set member that LEFT and
-    /// RETURNED under the same storage id. The producing transition stamped the
-    /// member with the incarnation it departed at and `lki_by_incarnation` holds
-    /// that departure's snapshot — the exact departure the member filter must read
-    /// — but a later object now occupies the storage id and wrote its own
-    /// zone-change row.
+    /// CR 608.2h + CR 400.7 + CR 111.1 + CR 111.7 + CR 111.8: a tracked-set
+    /// member's token bit is answered from the capture its DEPARTURE epoch wrote.
     ///
-    /// The token leaf must answer from the DEPARTURE capture the member is stamped
-    /// with, not from the newest row for the storage id, which describes a
-    /// different object (CR 400.7). This is the Ceaseless Conflict shape: "each
-    /// nontoken creature you controlled that was destroyed this way" reads the
-    /// destroyed token member through exactly this projection.
+    /// The fixture is one legal transition end to end. A token creature leaves the
+    /// battlefield for the graveyard (CR 111.7) through the engine's own zone
+    /// change, which writes the member's last known information and its token bit
+    /// under the same incarnation. CR 111.8 says the token then ceases to exist and
+    /// can never come back to answer for itself, so that departure is the only
+    /// epoch that will ever state this bit. The producing transition stamps the
+    /// member with the incarnation it departed at
+    /// (`TrackedMemberOrigin::departure_incarnation`).
     ///
-    /// Revert-probe: taking the bit from the newest row by storage id — the base
-    /// behaviour — reads the reentry's nontoken row, so the destroyed token drops
-    /// out of a `Token` member filter and is admitted to a `NonToken` one, which is
-    /// precisely the wrong count in both directions.
+    /// The zone-change journal also records the departure, but it is a rolling log
+    /// of whatever last moved through the storage id — TURN-scoped (CR 514.2 clears
+    /// it at cleanup) and never this epoch's statement. The assertions below are
+    /// asked with it empty, so the only thing left that can answer is the departure
+    /// capture.
+    ///
+    /// Revert-probe: reconstructing the bit from that journal makes both assertions
+    /// fail (no row is left to read, so the token leaf refuses and the Token count
+    /// is 0); replacing the capture with a defaulted `false` counts the destroyed
+    /// token as a NONTOKEN, the wrong reading of Ceaseless Conflict's "each
+    /// nontoken creature you controlled that was destroyed this way".
     #[test]
-    fn tracked_member_token_bit_comes_from_its_departure_capture_not_the_newest_row() {
-        use crate::types::game_state::{LKISnapshot, TrackedMemberOrigin};
+    fn tracked_member_token_bit_comes_from_its_departure_capture() {
+        use crate::types::game_state::TrackedMemberOrigin;
 
         let mut state = GameState::new_two_player(42);
         let source = create_object(
@@ -21863,79 +21869,37 @@ mod tests {
             "Spirit Token".to_string(),
             Zone::Battlefield,
         );
-
-        // EPOCH 1 — the token, as it left the battlefield. Both captures belong to
-        // this epoch: the exit snapshot under incarnation 1, and the zone-change
-        // row the same departure wrote (pinned to the pre-move incarnation).
         {
             let obj = state.objects.get_mut(&member).unwrap();
             obj.is_token = true;
-            obj.incarnation = 1;
             obj.card_types.core_types = vec![CoreType::Creature];
         }
-        let departure = state
-            .objects
-            .get(&member)
-            .unwrap()
-            .snapshot_for_zone_change(member, Some(Zone::Battlefield), Zone::Graveyard);
-        assert!(
-            departure.is_token,
-            "fixture precondition: a token left the battlefield"
-        );
-        assert_eq!(
-            departure
-                .trigger_source_context()
-                .map(|context| context.identity.reference.incarnation),
-            Some(1),
-            "fixture precondition: the row is pinned to the departure epoch"
-        );
-        state.zone_changes_this_turn.push_back(departure);
-        state.lki_by_incarnation.entry(member).or_default().insert(
-            1,
-            LKISnapshot {
-                name: "Spirit Token".to_string(),
-                token_image_ref: None,
-                power: Some(3),
-                toughness: Some(2),
-                base_power: None,
-                base_toughness: None,
-                mana_value: 0,
-                controller: PlayerId(0),
-                owner: PlayerId(0),
-                card_types: vec![CoreType::Creature],
-                subtypes: vec![],
-                supertypes: vec![],
-                keywords: vec![],
-                colors: vec![],
-                chosen_attributes: vec![],
-                counters: Default::default(),
-                tapped: false,
-                is_suspected: false,
-                was_prepared: false,
-                attachments: Vec::new(),
-                intensity: 0,
-            },
-        );
 
-        // EPOCH 2 — the same storage id comes back as a real card and writes its
-        // own row. This is the row the base leaf answered from.
-        {
-            let obj = state.objects.get_mut(&member).unwrap();
-            obj.is_token = false;
-            obj.incarnation = 2;
-            obj.name = "Bear".to_string();
-            obj.card_types.core_types = vec![CoreType::Creature];
-        }
-        let reentry = state
-            .objects
+        // CR 111.7: the token leaves the battlefield. This is the only departure
+        // the member will ever have, and `move_to_zone` is the engine's own write
+        // path for it.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, member, Zone::Graveyard, &mut events);
+
+        // The departure epoch's capture exists, and it states the bit.
+        let departure_incarnation = *state
+            .departure_token_by_incarnation
             .get(&member)
-            .unwrap()
-            .snapshot_for_zone_change(member, Some(Zone::Graveyard), Zone::Battlefield);
+            .expect("CR 608.2h: the departure writes the epoch's token capture")
+            .keys()
+            .next()
+            .expect("one departure, one incarnation");
         assert!(
-            !reentry.is_token,
-            "fixture precondition: the reentry is not a token"
+            state.departure_token_by_incarnation[&member][&departure_incarnation],
+            "fixture precondition: the token departed as a token"
         );
-        state.zone_changes_this_turn.push_back(reentry);
+        assert!(
+            state
+                .lki_by_incarnation
+                .get(&member)
+                .is_some_and(|history| history.contains_key(&departure_incarnation)),
+            "fixture precondition: the same departure wrote the member's snapshot"
+        );
 
         let set_id = TrackedSetId(state.next_tracked_set_id);
         state.next_tracked_set_id += 1;
@@ -21946,12 +21910,16 @@ mod tests {
                 member,
                 TrackedMemberOrigin {
                     departed_from: Zone::Battlefield,
-                    departure_incarnation: 1,
+                    departure_incarnation,
                 },
             )]
             .into_iter()
             .collect(),
         );
+
+        // CR 514.2: the cleanup step ends "this turn" state, and the journal is one
+        // of them. Nothing below may depend on a row from it.
+        state.zone_changes_this_turn.clear();
 
         let count = |prop: FilterProp| {
             resolve_quantity(
@@ -21976,7 +21944,107 @@ mod tests {
         assert_eq!(
             count(FilterProp::NonToken),
             0,
-            "and the reentry's nontoken row — a different object — must not admit it"
+            "and the departure capture must keep it out of a NonToken count"
+        );
+    }
+
+    /// CR 608.2h + CR 111.8 + CR 115.9: a MISSING departure capture is UNKNOWN, not
+    /// "nontoken". The member is still in the set and still matches every other
+    /// leaf; only the token leaf has no evidence for its epoch, and an unanswerable
+    /// leaf must neither report a match nor be inverted into one.
+    ///
+    /// The capture is removed rather than never written because the absence has to
+    /// be expressible: a save that predates the capture, and any future epoch whose
+    /// departure is out of retention, reads exactly this shape. CR 111.8 is why it
+    /// matters — the departed token cannot return to supply the missing answer.
+    ///
+    /// Revert-probe: a read that defaults an uncaptured epoch to `false` — the
+    /// conservative bit a projection used to keep — makes the `NonToken` assertion
+    /// fail (the member is counted as a nontoken while nothing in the state says
+    /// whether it was one).
+    #[test]
+    fn a_missing_departure_capture_is_unknown_not_nontoken() {
+        use crate::types::game_state::TrackedMemberOrigin;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(0),
+            "Ceaseless Conflict".to_string(),
+            Zone::Graveyard,
+        );
+        let member = create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(0),
+            "Spirit Token".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&member).unwrap();
+            obj.is_token = true;
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, member, Zone::Graveyard, &mut events);
+        let departure_incarnation = *state
+            .departure_token_by_incarnation
+            .get(&member)
+            .expect("the departure writes the epoch's token capture")
+            .keys()
+            .next()
+            .expect("one departure, one incarnation");
+
+        // The capture gap under test: the epoch is known, the bit is not.
+        state.departure_token_by_incarnation.clear();
+        state.zone_changes_this_turn.clear();
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set_id, vec![member]);
+        state.tracked_set_member_origins.insert(
+            set_id,
+            [(
+                member,
+                TrackedMemberOrigin {
+                    departed_from: Zone::Battlefield,
+                    departure_incarnation,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        let count = |props: Vec<FilterProp>| {
+            resolve_quantity(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize {
+                        filter: Box::new(TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Creature).properties(props),
+                        )),
+                        caused_by: None,
+                    },
+                },
+                PlayerId(0),
+                source,
+            )
+        };
+        assert_eq!(
+            count(vec![]),
+            1,
+            "reach: the member is in the set and matches the type filter"
+        );
+        assert_eq!(
+            count(vec![FilterProp::NonToken]),
+            0,
+            "an unanswerable token leaf must not answer `nontoken` (CR 608.2h)"
+        );
+        assert_eq!(
+            count(vec![FilterProp::Token]),
+            0,
+            "and it must not answer `token` either"
         );
     }
 

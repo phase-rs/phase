@@ -1625,6 +1625,76 @@ impl<'de> Deserialize<'de> for AnnouncedTargetZone {
     }
 }
 
+/// CR 111.1 + CR 601.2c + CR 115.9: whether a committed target WAS a token at
+/// the moment it was announced, as the record STATES it.
+///
+/// CR 115.9 makes "the state of the targets at the time they were selected" a
+/// reading of its own, and CR 111.1 makes token-ness one of the state's facts.
+/// That reading has to be CAPTURED: token-ness is not a copiable value
+/// (CR 707.2), so an [`LKISnapshot`] does not carry it, and it is not stable
+/// across the permanent's life — CR 730.2c keeps a merged permanent the same
+/// object while CR 730.2d hands its token-ness to the topmost component, so a
+/// card mutated onto a token flips the bit IN PLACE with no zone change to
+/// write a row for. Reconstructing the selection-time answer from the live
+/// object therefore reports a later epoch, and reconstructing it from a
+/// turn-scoped zone-change journal loses it at rollover. This field is the
+/// capture that dates the bit to the announcement.
+///
+/// The two states are different values, and silence is [`Self::Unknown`]. It is
+/// never synthesized from a default: a bare `bool` field would decode every
+/// payload that predates this one as "not a token", which is exactly the silent
+/// answer the capture exists to replace.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum AnnouncedTargetToken {
+    /// The record states no token bit: the payload predates the field. A leaf
+    /// asked for a selection-time token answer then has no capture to answer
+    /// from and must refuse rather than report the present or the default.
+    #[default]
+    Unknown,
+    /// CR 111.1: the bit the target held when it was committed.
+    Known(bool),
+}
+
+impl AnnouncedTargetToken {
+    /// The bit this record states, or `None` when it states none.
+    pub fn bit(self) -> Option<bool> {
+        match self {
+            Self::Unknown => None,
+            Self::Known(is_token) => Some(is_token),
+        }
+    }
+
+    fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+}
+
+/// Encoded as the bare boolean, so a payload carrying the bit still decodes to
+/// [`Known`]. Only silence means [`Unknown`].
+///
+/// [`Known`]: AnnouncedTargetToken::Known
+/// [`Unknown`]: AnnouncedTargetToken::Unknown
+impl Serialize for AnnouncedTargetToken {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_some(&self.bit())
+    }
+}
+
+impl<'de> Deserialize<'de> for AnnouncedTargetToken {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match Option::<bool>::deserialize(deserializer)? {
+            Some(is_token) => Self::Known(is_token),
+            None => Self::Unknown,
+        })
+    }
+}
+
 /// CR 115.1 + CR 400.7: one committed target of a spell or ability, as it was
 /// when the target was committed (CR 601.2c). Carried by
 /// `AbilityActivationRecord.targets` for an activated ability and by
@@ -1658,6 +1728,18 @@ pub enum ActivationTargetFact {
         /// [`PersistedRestoreError::UnknownAnnouncedTargetZone`] refuses.
         #[serde(default, skip_serializing_if = "AnnouncedTargetZone::is_unknown")]
         zone: AnnouncedTargetZone,
+        /// CR 111.1 + CR 115.9 + CR 730.2c + CR 730.2d: whether the target was a
+        /// token when it was announced, captured with the commitment above.
+        ///
+        /// A selection-time token answer must come from here. The alternatives
+        /// are both unsound: the LIVE object reports whichever bit the object
+        /// holds now, and CR 730.2c + CR 730.2d let a merge flip that bit on the
+        /// same object with no zone change to record it; the zone-change journal
+        /// is turn-scoped and a merge writes no row at all. See
+        /// [`AnnouncedTargetToken`] for why silence is `Unknown` rather than
+        /// `Known(false)`.
+        #[serde(default, skip_serializing_if = "AnnouncedTargetToken::is_unknown")]
+        token: AnnouncedTargetToken,
     },
 }
 
@@ -29813,6 +29895,28 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
     pub lki_copiable_values_by_incarnation:
         im::HashMap<ObjectId, im::HashMap<u64, CopiableValues>>,
+    /// CR 111.1 + CR 111.7 + CR 608.2h + CR 400.7: the token bit each departing
+    /// incarnation held AS IT LEFT, keyed by exact object incarnation — the
+    /// departure-epoch capture `LKISnapshot` cannot carry (CR 707.2: token-ness
+    /// is not a copiable value, so it is not part of the snapshot's characteristic
+    /// projection).
+    ///
+    /// Written by the same `zones.rs` departure that writes
+    /// `lki_by_incarnation`, and cleared with it on step transitions: a departure
+    /// capture lives exactly as long as the last-known information it belongs to.
+    /// Every other source of this bit is unsound for a HISTORICAL answer. The live
+    /// object is the present, not the epoch (CR 400.7 makes the storage id
+    /// reusable, and CR 730.2c + CR 730.2d let a merge flip the bit in place on
+    /// the same object with no zone change to record it). The zone-change journal
+    /// is turn-scoped and is cleared at rollover, so a tracked-set member read
+    /// after that boundary would answer from the absence of evidence. That absence
+    /// is repaired here, and where even this capture is missing the answer is
+    /// UNKNOWN — never the silent "nontoken" a `bool` default would give. A token
+    /// never returns to answer for itself (CR 111.8), so an entry for a departed
+    /// token is the ONLY evidence there will ever be about that epoch.
+    #[serde(default, skip_serializing_if = "im::HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map_of_im_hash_map")]
+    pub departure_token_by_incarnation: im::HashMap<ObjectId, im::HashMap<u64, bool>>,
     /// CR 106.3 + CR 106.4 + CR 400.7: producer facts of the mana units that are
     /// still floating in a pool, for the units whose producing incarnation is no
     /// longer live at the storage id. Written by
@@ -37680,6 +37784,7 @@ impl GameState {
             lki_copiable_values: im::HashMap::new(),
             lki_by_incarnation: im::HashMap::new(),
             lki_copiable_values_by_incarnation: im::HashMap::new(),
+            departure_token_by_incarnation: im::HashMap::new(),
             pooled_mana_producer_snapshots: Vec::new(),
             departed_stack_spells: im::HashMap::new(),
             departed_activated_abilities: im::HashMap::new(),
@@ -39392,6 +39497,24 @@ impl GameState {
             })
             .collect();
 
+        // CR 104.4b + CR 732.2a + CR 608.2h: the departure token captures are the
+        // same historical support state, keyed by the same incarnations, so they are
+        // pruned by the same references. Not pruning them would make every loop
+        // cycle's departures accumulate in a compared field: two positions that
+        // differ only in a departure behind them would never compare equal, and an
+        // ordinary sacrifice loop would stop certifying (CR 732.2a: the loop is
+        // judged on reproducible results, not on the history that produced them).
+        self.departure_token_by_incarnation =
+            std::mem::take(&mut self.departure_token_by_incarnation)
+                .into_iter()
+                .filter_map(|(object_id, mut history)| {
+                    history.retain(|incarnation, _| {
+                        referenced_lki.contains(&ObjectIncarnationRef::of(object_id, *incarnation))
+                    });
+                    (!history.is_empty()).then_some((object_id, history))
+                })
+                .collect();
+
         // CR 106.3 + CR 106.4 + CR 104.4b: a floating unit's retained producer
         // fact is read by the POOL, not by a trigger-event carrier, so it is
         // pruned against the units pooled mana still holds rather than against
@@ -40118,6 +40241,23 @@ impl GameState {
                 (object_id, history)
             })
             .collect();
+        // CR 111.1 + CR 400.7 + CR 608.2h: a departure token capture is keyed by
+        // the same epoch as the snapshot that departure wrote, so it is renamed by
+        // the same function. Leaving it under the minted numbers while the origin
+        // stamps above are re-keyed would make the two positions describe the same
+        // game while the capture could no longer be found from the epoch the
+        // origin names.
+        self.departure_token_by_incarnation =
+            std::mem::take(&mut self.departure_token_by_incarnation)
+                .into_iter()
+                .map(|(object_id, history)| {
+                    let history = history
+                        .into_iter()
+                        .map(|(incarnation, is_token)| (key_name(object_id, incarnation), is_token))
+                        .collect();
+                    (object_id, history)
+                })
+                .collect();
         self.lki_copiable_values_by_incarnation =
             std::mem::take(&mut self.lki_copiable_values_by_incarnation)
                 .into_iter()
@@ -41790,6 +41930,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         lki_copiable_values: _,
         lki_by_incarnation: _,
         lki_copiable_values_by_incarnation: _,
+        // CR 111.1 + CR 608.2h: COMPARED, like the incarnation-keyed LKI caches it
+        // shadows. It is a function of the departures that wrote those caches — one
+        // bit per departing incarnation, dropped with them at a step boundary — so
+        // two positions that differ in it differ in a fact CR 115.9 and CR 608.2h
+        // answer from. Omitting it from the loop comparison would let a historical
+        // token answer change across a covered pair unseen.
+        departure_token_by_incarnation: _,
         // CR 106.3 + CR 106.4 + CR 400.7: COMPARED, like the incarnation-keyed
         // LKI caches it shadows. It is a function of the pools (an entry exists
         // only while a pool holds the exact unit it describes), so it carries no
@@ -42178,6 +42325,7 @@ impl PartialEq for GameState {
             && self.lki_by_incarnation == other.lki_by_incarnation
             && self.lki_copiable_values_by_incarnation
                 == other.lki_copiable_values_by_incarnation
+            && self.departure_token_by_incarnation == other.departure_token_by_incarnation
             && self.pooled_mana_producer_snapshots == other.pooled_mana_producer_snapshots
             && self.departed_stack_spells == other.departed_stack_spells
             && self.departed_activated_abilities == other.departed_activated_abilities

@@ -32109,6 +32109,12 @@ pub(crate) fn capture_target_facts(
                         lki: Box::new(obj.snapshot_public_characteristics()),
                         // CR 601.2c: the zone the announced target was legal in.
                         zone: crate::types::game_state::AnnouncedTargetZone::Known(obj.zone),
+                        // CR 111.1 + CR 115.9: the token bit the target held at
+                        // this announcement, captured HERE because no later epoch
+                        // can date it — CR 730.2c + CR 730.2d let a merge flip the
+                        // bit on the same object with no zone change to record,
+                        // and the zone-change journal is turn-scoped.
+                        token: crate::types::game_state::AnnouncedTargetToken::Known(obj.is_token),
                     })
             }
         })

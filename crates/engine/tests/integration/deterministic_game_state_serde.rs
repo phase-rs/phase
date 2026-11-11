@@ -18,13 +18,13 @@ use engine::types::counter::CounterType;
 use engine::types::definitions::Definitions;
 use engine::types::events::{BoundActivationCost, GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    AbilityActivationRecord, ActivationTargetFact, AnnouncedTargetZone, AutoPassMode,
-    DepartedStackSpell, LKISnapshot, LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileLki,
-    LinkedExileSnapshot, ManaSpentSourceSnapshot, PendingConniveReentry, PersistedGameState,
-    PriorityPassingMode, SpellCastRecord, StackEntry, StackEntryKind, StackPaidSnapshot,
-    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
-    StackResolutionPolicy, StackResolutionSession, TokenProjection, TrackedMemberOrigin,
-    WaitingFor,
+    AbilityActivationRecord, ActivationTargetFact, AnnouncedTargetToken, AnnouncedTargetZone,
+    AutoPassMode, DepartedStackSpell, LKISnapshot, LandPlayRecord, LiminalEntrant, LiminalEntry,
+    LinkedExileLki, LinkedExileSnapshot, ManaSpentSourceSnapshot, PendingConniveReentry,
+    PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry, StackEntryKind,
+    StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
+    StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, TokenProjection,
+    TrackedMemberOrigin, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use engine::types::keywords::ProtectionTarget;
@@ -134,6 +134,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_copiable_values", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_by_incarnation", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_copiable_values_by_incarnation", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::departure_token_by_incarnation", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::departed_stack_spells", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::departed_activated_abilities", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::linked_exile_lki", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -442,6 +443,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "GameState",
         None,
         "lki_copiable_values_by_incarnation",
+        "im::HashMap<im::HashMap>",
+        Classification::Canonical(IM_HASH_MAP_OF_IM_HASH_MAP),
+    );
+    add_spec(
+        &mut specs,
+        game_state,
+        "GameState",
+        None,
+        "departure_token_by_incarnation",
         "im::HashMap<im::HashMap>",
         Classification::Canonical(IM_HASH_MAP_OF_IM_HASH_MAP),
     );
@@ -1346,7 +1356,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        61,
+        62,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -2060,6 +2070,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                     id: ObjectId(2),
                     lki: Box::new(second_lki.clone()),
                     zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
+                    token: AnnouncedTargetToken::Known(false),
                 }],
             }]),
         ),
@@ -2108,6 +2119,12 @@ fn build_all_direct_numeric_maps_state() -> GameState {
                 (2, intrinsic_copiable_values(&first)),
             ]),
         ),
+    ]);
+    // CR 111.1 + CR 608.2h: the departure token captures are keyed by the same
+    // epochs as the snapshots above, one bit per departing incarnation.
+    state.departure_token_by_incarnation = im::HashMap::from_iter([
+        (ObjectId(1), im::HashMap::from_iter([(1, true), (2, false)])),
+        (ObjectId(2), im::HashMap::from_iter([(1, false), (2, true)])),
     ]);
     let departed_spell =
         |entry_id: ObjectId, controller: PlayerId, object: &GameObject| DepartedStackSpell {
@@ -2279,6 +2296,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "lki_copiable_values",
         "lki_by_incarnation",
         "lki_copiable_values_by_incarnation",
+        "departure_token_by_incarnation",
         "departed_stack_spells",
         "departed_activated_abilities",
         "linked_exile_lki",
@@ -2289,7 +2307,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     ];
     assert_eq!(
         direct_fields.len(),
-        46,
+        47,
         "private stack_trigger_firings is covered by its unit test"
     );
     for field in direct_fields {
@@ -2309,6 +2327,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "tracked_set_member_origins",
         "lki_by_incarnation",
         "lki_copiable_values_by_incarnation",
+        "departure_token_by_incarnation",
         "departed_stack_spells",
     ] {
         for (outer_key, inner) in before[field].as_object().unwrap() {
@@ -3406,6 +3425,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
                     intensity: 0,
                 }),
                 zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
+                token: AnnouncedTargetToken::Known(false),
             },
             // The player axis carries no snapshot at all.
             ActivationTargetFact::Player(PlayerId(1)),
@@ -3463,6 +3483,7 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
         id: target_id,
         lki: lki.clone(),
         zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Graveyard),
+        token: AnnouncedTargetToken::Known(false),
     };
     let graveyard_json = serde_json::to_string(&graveyard_fact).expect("fact serializes");
     assert!(
@@ -3496,8 +3517,57 @@ fn cast_record_targets_round_trip_and_stay_backward_compatible() {
             id: target_id,
             lki: lki.clone(),
             zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
+            token: AnnouncedTargetToken::Known(false),
         },
         "silence is a different value from a stated battlefield"
+    );
+
+    // (1c) CR 111.1 + CR 115.9: the announced TOKEN bit is captured the same way,
+    // and silence about it is a different value from a stated `false`. A token
+    // target writes the key; a payload that predates the capture decodes to
+    // Unknown, which the selection-time leaf refuses rather than reading as
+    // "nontoken".
+    let token_fact = ActivationTargetFact::Object {
+        id: target_id,
+        lki: lki.clone(),
+        zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
+        token: AnnouncedTargetToken::Known(true),
+    };
+    let token_json = serde_json::to_string(&token_fact).expect("fact serializes");
+    assert!(
+        token_json.contains("\"token\":true"),
+        "a token-announced target emits its captured bit: {token_json}"
+    );
+    assert_eq!(
+        serde_json::from_str::<ActivationTargetFact>(&token_json).expect("fact deserializes"),
+        token_fact,
+        "the announced token bit survives the round-trip"
+    );
+    let legacy_token_json = token_json.replace(",\"token\":true", "");
+    assert_ne!(
+        legacy_token_json, token_json,
+        "reach: the token key really was present"
+    );
+    let legacy_token_fact = serde_json::from_str::<ActivationTargetFact>(&legacy_token_json)
+        .expect("a legacy payload parses");
+    let ActivationTargetFact::Object { token, .. } = &legacy_token_fact else {
+        panic!("the legacy payload is an object fact");
+    };
+    assert_eq!(
+        *token,
+        AnnouncedTargetToken::Unknown,
+        "CR 115.9: a record predating the capture states no token bit; it is not \
+         a stated `false`"
+    );
+    assert_ne!(
+        legacy_token_fact,
+        ActivationTargetFact::Object {
+            id: target_id,
+            lki: lki.clone(),
+            zone: AnnouncedTargetZone::Known(engine::types::zones::Zone::Battlefield),
+            token: AnnouncedTargetToken::Known(false),
+        },
+        "silence is a different value from a stated `false`"
     );
 
     // (2) A KNOWN-EMPTY vector is written as an explicit `[]`, so it cannot be
