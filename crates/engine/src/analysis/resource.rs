@@ -6587,21 +6587,45 @@ fn last_known_records_grow_unread(prior: &GameState, current: &GameState) -> boo
 /// an object that exists in neither frame, and may never re-state or drop one either frame
 /// still holds.
 ///
-/// The epoch capture carries only the first half. An epoch entry `prior` states must still be
-/// stated identically by `current` — that bit is the last evidence of the epoch it was taken
-/// from (CR 111.8), and a live surface that names the epoch reads it — but ADDITIONAL epochs
-/// are admitted, in the shape of its `lki_by_incarnation` twin, which no gate limits: on the
-/// normalized frames the cover compares, every epoch no live surface names is already pruned
-/// from both, so a surviving ADDITION arrives with the tracked-set origin that names it and is
-/// judged by `HistoryMember::TrackedObjectSets`. On the raw frames the fodder gate compares,
-/// a permanent that leaves and returns once per cycle (a blink engine) appends one epoch per
-/// cycle under an id both frames still hold, and that accumulation is history, not position —
-/// refusing it would refuse every blink loop.
+/// The epoch capture carries the first half and a gated second: an epoch entry `prior` states
+/// must still be stated identically by `current` — that bit is the last evidence of the epoch
+/// it was taken from (CR 111.8), and a live surface that names the epoch reads it — and an
+/// epoch only `current` states is admitted only when it arrives in the shape the departure
+/// writer produces (the same id and epoch also gains its `lki_by_incarnation` record, which
+/// this member does not equalize and the comparand therefore sees) or names an object that
+/// exists in neither frame.
+///
+/// The gate on an ADDED epoch is what makes the admission sound for a restored payload.
+/// `normalize_for_loop` deliberately supports a capture whose epoch no record backs
+/// (`normalize_for_loop_places_a_departure_capture_with_no_lki_row_under_its_minted_epoch`),
+/// and a payload can hold two positions whose origin tables are identical and differ only in
+/// such an epoch. Admitting that addition would make the capture the only word for a bit (a
+/// refusal answers "not a token" — it matches no token filter, while `false` matches one), and
+/// equalizing it would certify a cycle whose token-leaf answer changes. It is admitted in the
+/// writer's shape because every epoch the engine writes arrives with its record, so the blink
+/// engine the raw-frame fodder gate compares — one epoch appended per cycle under an id both
+/// frames hold — still grows unread; refusing every addition outright would refuse every blink
+/// loop (`analysis::corpus_tests::drive_combo_61_kitten_firesinger`).
 fn departure_token_captures_grow_unread(
     prior: &GameState,
     current: &GameState,
     gone: impl Fn(&ObjectId) -> bool,
 ) -> bool {
+    // CR 608.2h + CR 400.7: the record this period ADDED for an epoch — the writer states
+    // the capture and its `lki_by_incarnation` row in one block, so an addition that names
+    // no new row is a capture speaking alone, and no comparison would see it once this
+    // member equalizes the capture.
+    let added_record = |id: &ObjectId, incarnation: u64| {
+        let row_here = current
+            .lki_by_incarnation
+            .get(id)
+            .is_some_and(|history| history.contains_key(&incarnation));
+        let row_before = prior
+            .lki_by_incarnation
+            .get(id)
+            .is_some_and(|history| history.contains_key(&incarnation));
+        row_here && !row_before
+    };
     prior
         .departure_token_cache
         .iter()
@@ -6617,6 +6641,17 @@ fn departure_token_captures_grow_unread(
                 let current_history = current.departure_token_by_incarnation.get(id);
                 history.iter().all(|(incarnation, bit)| {
                     current_history.and_then(|stated| stated.get(incarnation)) == Some(bit)
+                })
+            })
+        && current
+            .departure_token_by_incarnation
+            .iter()
+            .all(|(id, history)| {
+                let stated = prior.departure_token_by_incarnation.get(id);
+                history.keys().all(|incarnation| {
+                    stated.is_some_and(|stated| stated.contains_key(incarnation))
+                        || gone(id)
+                        || added_record(id, *incarnation)
                 })
             })
 }
@@ -29477,6 +29512,34 @@ mod tests {
         ));
     }
 
+    /// A last-known record a departure witness can state: no characteristic the board
+    /// reads, so only its presence matters.
+    fn departed_record(name: &str) -> LKISnapshot {
+        LKISnapshot {
+            name: name.to_string(),
+            token_image_ref: None,
+            power: Some(1),
+            toughness: Some(1),
+            base_power: Some(1),
+            base_toughness: Some(1),
+            mana_value: 1,
+            controller: PlayerId(0),
+            owner: PlayerId(0),
+            card_types: vec![CoreType::Creature],
+            subtypes: Vec::new(),
+            supertypes: Vec::new(),
+            keywords: Vec::new(),
+            colors: Vec::new(),
+            chosen_attributes: Vec::new(),
+            counters: HashMap::new(),
+            tapped: false,
+            is_suspected: false,
+            was_prepared: false,
+            attachments: Vec::new(),
+            intensity: 0,
+        }
+    }
+
     /// The board both departure-capture witnesses probe: a period that added exactly one
     /// last-known record, for an object that exists in neither frame — the growth
     /// [`last_known_records_grow_unread`] admits — over frames that otherwise hold the same
@@ -29484,32 +29547,6 @@ mod tests {
     /// it may be written off as unread.
     fn unread_record_period() -> (GameState, GameState, ObjectId) {
         use crate::game::zones::create_object;
-
-        fn record(name: &str) -> LKISnapshot {
-            LKISnapshot {
-                name: name.to_string(),
-                token_image_ref: None,
-                power: Some(1),
-                toughness: Some(1),
-                base_power: Some(1),
-                base_toughness: Some(1),
-                mana_value: 1,
-                controller: PlayerId(0),
-                owner: PlayerId(0),
-                card_types: vec![CoreType::Creature],
-                subtypes: Vec::new(),
-                supertypes: Vec::new(),
-                keywords: Vec::new(),
-                colors: Vec::new(),
-                chosen_attributes: Vec::new(),
-                counters: HashMap::new(),
-                tapped: false,
-                is_suspected: false,
-                was_prepared: false,
-                attachments: Vec::new(),
-                intensity: 0,
-            }
-        }
 
         let mut prior = GameState::new_two_player(42);
         let member = create_object(
@@ -29530,7 +29567,9 @@ mod tests {
             "fixture precondition: the captures start empty"
         );
         let mut current = prior.clone();
-        current.lki_cache.insert(departed, record("Departed"));
+        current
+            .lki_cache
+            .insert(departed, departed_record("Departed"));
         (prior, current, member)
     }
 
@@ -29620,6 +29659,67 @@ mod tests {
             !history_covers(&prior, &current),
             "a flipped epoch capture of an object either frame still holds is not history the \
              period may grow"
+        );
+    }
+
+    /// CR 111.1 + CR 608.2h + CR 732.2a: a restored payload is untrusted and may carry a
+    /// capture whose epoch no last-known row backs — normalization deliberately supports
+    /// that shape — while both positions' origin tables are identical. A period may not
+    /// GAIN such an epoch: the capture would be the only word for a bit a live read
+    /// answers from, so equalizing it certifies a cycle whose token-leaf answer changes
+    /// (a refusal matches no token filter, while `false` matches one).
+    ///
+    /// Revert-probe: admitting an added epoch that names no added record certifies the pair.
+    #[test]
+    fn an_epoch_with_no_added_record_refuses_the_history_cover() {
+        let (prior, mut current, member) = unread_record_period();
+        let unbacked = 7;
+        current
+            .departure_token_by_incarnation
+            .entry(member)
+            .or_default()
+            .insert(unbacked, true);
+        assert!(
+            !prior.lki_by_incarnation.contains_key(&member)
+                && !current.lki_by_incarnation.contains_key(&member),
+            "fixture precondition: the gained epoch names no last-known row in either frame"
+        );
+        assert!(
+            prior.objects.contains_key(&member) && current.objects.contains_key(&member),
+            "fixture precondition: the object it names exists in both frames"
+        );
+
+        assert!(
+            !history_covers(&prior, &current),
+            "a capture speaking alone for a bit is not history the period may grow"
+        );
+        assert!(
+            certifying_cover(&prior, &current, PlayerId(0), None).is_none(),
+            "no cover admits a position whose only bit evidence the period invented"
+        );
+    }
+
+    /// CR 608.2h: the shape the departure writer produces — an epoch that arrives WITH its
+    /// incarnation-keyed record — is growth the gate admits. (The record itself is compared
+    /// outside this member, so the cover still refuses that pair; this pins the admission,
+    /// which is what keeps the blink loops certifying.)
+    #[test]
+    fn a_capture_twinning_an_added_record_grows_unread() {
+        let (prior, mut current, member) = unread_record_period();
+        current
+            .lki_by_incarnation
+            .entry(member)
+            .or_default()
+            .insert(7, departed_record("Returned"));
+        current
+            .departure_token_by_incarnation
+            .entry(member)
+            .or_default()
+            .insert(7, false);
+
+        assert!(
+            last_known_records_grow_unread(&prior, &current),
+            "a capture written with its record is unread growth"
         );
     }
 
