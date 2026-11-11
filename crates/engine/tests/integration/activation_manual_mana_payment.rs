@@ -6472,13 +6472,17 @@ fn many_ready_altars_fund_jayemdae_tome() {
     );
     let waiting_for = activate_index(&mut runner, tome, index, CastPaymentMode::Manual);
     assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
-    
+
     // Activate the first Altar twice, sacrificing both creatures
     let first_altar = altars[0];
     activate_in_window(&mut runner, first_altar, &[creatures[0]], None);
     activate_in_window(&mut runner, first_altar, &[creatures[1]], None);
-    assert_eq!(pool_total(&runner), 4, "two Altar activations made {{C}}{{C}}{{C}}{{C}}");
-    
+    assert_eq!(
+        pool_total(&runner),
+        4,
+        "two Altar activations made {{C}}{{C}}{{C}}{{C}}"
+    );
+
     let waiting_for = pass(&mut runner);
     assert!(is_priority(&waiting_for), "{waiting_for:?}");
     assert_eq!(pool_total(&runner), 0, "the {{4}} was paid");

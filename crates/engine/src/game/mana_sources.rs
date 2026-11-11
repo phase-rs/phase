@@ -2767,7 +2767,12 @@ pub(crate) fn activatable_player_choice_mana_abilities_for_payment<'a>(
                     .and_then(|obj| obj.abilities.get(index))
                     .is_some_and(|ability| {
                         player_choice_mana_ability_ready_for_payment(
-                            state, controller, object_id, index, ability, payment_context,
+                            state,
+                            controller,
+                            object_id,
+                            index,
+                            ability,
+                            payment_context,
                         )
                     })
         },
