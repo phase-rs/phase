@@ -22864,8 +22864,7 @@ impl<'de> Deserialize<'de> for PendingLiminalEntryResume {
 /// separated at the type level.
 ///
 /// `normalized` is the **CR 104.4b comparand** — the only half
-/// `loop_states_equal_modulo_resources` / `loop_states_cover_modulo_growth*` may read. It is
-/// byte-identical to the frame the ring held before the split, because [`GameState::normalize_for_loop`] is unchanged.
+/// `loop_states_equal_modulo_resources` / `loop_states_cover_modulo_growth*` may read.
 ///
 /// `live` is the **CR 732.2a evaluable** — the same beat un-normalized, and the only
 /// half the period-touch consumers may read. Normalization zeroes `next_object_id` and

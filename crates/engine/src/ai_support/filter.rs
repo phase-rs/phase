@@ -200,7 +200,7 @@ impl SimulationFilter {
         let mut sim = state.clone();
         // PR-3 Defect-2: mark the entire nested clone-and-apply as a legality probe so
         // the top-level-only loop-shortcut detection (`reconcile_terminal_result` §3)
-        // and ring accumulation (`pass_priority_once_with_pipeline` §2) are suppressed
+        // and play-trace recording are suppressed
         // inside it. The guard restores the previous flag on drop (panic-safe, nesting-
         // correct), terminating the §3→§9→legal_actions→SimulationFilter recursion.
         let _probe = SimulationProbeGuard::enter();
@@ -1788,8 +1788,8 @@ mod tests {
     /// `SimulationProbeGuard` window, minus the perf counter.
     ///
     /// The guard is load-bearing, not ceremony. It suppresses top-level loop
-    /// reconciliation (`reconcile_terminal_result` §3) and ring accumulation
-    /// (`pass_priority_once_with_pipeline` §2) for the duration of the probe, so
+    /// reconciliation (`reconcile_terminal_result`) and play-trace recording
+    /// for the duration of the probe, so
     /// an oracle that omits it can return a verdict production legality
     /// filtering never produces. Every soundness assertion below is a comparison
     /// against this function; if it stops being `fallback_simulation`, those

@@ -3121,9 +3121,8 @@ impl ResourceVector {
     ///
     /// # Why the floor exists at all
     ///
-    /// [`PeriodicDelta::conforms`] is the only thing the drive checks a committed cycle
-    /// against, and it enforces a per-period TOTAL under the CR 601.2c re-aim licence its own
-    /// doc states — never a per-seat magnitude. So the published charge is an AGREEMENT, not an
+    /// Nothing the drive checks enforces a per-seat magnitude: a declared re-aim (CR 601.2c)
+    /// may move the period's charge between seats. So the published charge is an AGREEMENT, not an
     /// enforced quantity, and a signature reaching consumption with that field empty (its
     /// `#[serde(default)]` shape, which a persisted pre-field signature and a hostile restore
     /// both produce) would divide by nothing and narrow nothing. Flooring by what the drive
@@ -16485,8 +16484,7 @@ mod tests {
     /// CR 119.3 + CR 704.5a: **the consumption divisor floors an emptied publication by what
     /// the drive actually enforces.** `PeriodicDelta::seat_life_charge` is `#[serde(default)]`,
     /// so a signature reaching consumption can carry an EMPTY charge beside an untouched
-    /// `delta` — and `PeriodicDelta::conforms` enforces a per-period TOTAL, never a per-seat
-    /// magnitude, so nothing downstream would restore it. Flooring by the vector
+    /// `delta` — and nothing downstream enforces a per-seat magnitude to restore it. Flooring by the vector
     /// `seat_life_charges` builds from an empty charge slice is what leaves a ceiling standing
     /// on that signature.
     ///
