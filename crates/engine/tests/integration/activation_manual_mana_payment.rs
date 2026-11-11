@@ -6155,3 +6155,285 @@ fn calciform_pools_funded_by_the_altar_pays_jayemdae_tome() {
     resolve_stack(&mut runner);
     assert_eq!(hand_size(&runner, P0), hand_before + 1, "the Tome drew");
 }
+
+/// CR 304.5 + CR 605.3a + CR 601.2g (#10190 fifth review): the window is not
+/// priority, so a mana ability limited to instant timing can't be activated in
+/// it. Lion's Eye Diamond ("Discard your hand, Sacrifice this artifact: Add
+/// three mana of any one color. Activate only as an instant.") can't fund
+/// Figure of Destiny's "{R/W}: ..." during the payment, and the Wastes makes
+/// only colorless mana, so nothing is offered. Activated on its own while P0
+/// holds priority, the Diamond's red pays the {R/W} from the pool.
+#[test]
+fn lions_eye_diamond_funds_no_payment_window_but_pays_from_priority() {
+    let mut scenario = scenario_at_main();
+    let figure = add(&mut scenario, P0, "Figure of Destiny", Zone::Battlefield);
+    let diamond = add(&mut scenario, P0, "Lion's Eye Diamond", Zone::Battlefield);
+    add(&mut scenario, P0, "Wastes", Zone::Battlefield);
+    let in_hand = add(&mut scenario, P0, "Grizzly Bears", Zone::Hand);
+    let mut runner = build(scenario);
+    let index = ability_index_of(&runner, figure, "Kithkin Spirit with");
+
+    let modes = offered_payment_modes(&runner, figure, index);
+    assert!(
+        modes.is_empty(),
+        "the Diamond can't be activated in the payment window: {modes:?}"
+    );
+
+    let mut waiting_for = activate_mana_ability(&mut runner, diamond);
+    if is_cost_prompt(&waiting_for, |kind| *kind == PayCostKind::Discard) {
+        waiting_for = select_cards(&mut runner, &[in_hand]);
+    }
+    assert!(
+        matches!(waiting_for, WaitingFor::ChooseManaColor { .. }),
+        "{waiting_for:?}"
+    );
+    let waiting_for = act(
+        &mut runner,
+        GameAction::ChooseManaColor {
+            choice: engine::types::game_state::ManaChoice::SingleColor(
+                engine::types::mana::ManaType::Red,
+            ),
+            count: 1,
+        },
+    );
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(
+        in_zone(&runner, in_hand, Zone::Graveyard),
+        "the hand was discarded"
+    );
+    assert!(
+        in_zone(&runner, diamond, Zone::Graveyard),
+        "the Diamond was sacrificed"
+    );
+    assert_eq!(pool_total(&runner), 3);
+
+    let modes = offered_payment_modes(&runner, figure, index);
+    assert!(modes.contains(&CastPaymentMode::Auto), "{modes:?}");
+    let waiting_for = activate_index(&mut runner, figure, index, CastPaymentMode::Auto);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert_eq!(pool_total(&runner), 2, "one {{R}} paid the {{R/W}}");
+
+    resolve_stack(&mut runner);
+    assert_eq!(
+        (
+            runner.state().objects[&figure].power,
+            runner.state().objects[&figure].toughness
+        ),
+        (Some(2), Some(2)),
+        "the animation resolved"
+    );
+}
+
+/// The Molten-Tail Masticore board for the evidence-settlement rows: a
+/// one-charge Pentad Prism, Cryptex and two Wastes make exactly {4}, and
+/// Solemn Simulacrum is a creature card in the graveyard. With
+/// `distinct_fodder`, a mana-value-3 sorcery card sits beside it.
+fn prism_cryptex_board(distinct_fodder: bool) -> MasticoreBoard {
+    let mut scenario = scenario_at_main();
+    let masticore = scenario
+        .add_creature_from_oracle(P0, "Molten-Tail Masticore", 4, 4, MOLTEN_TAIL_MASTICORE)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let prism = add(&mut scenario, P0, "Pentad Prism", Zone::Battlefield);
+    scenario.with_counter(prism, CounterType::Generic("charge".to_string()), 1);
+    let cryptex = add(&mut scenario, P0, "Cryptex", Zone::Battlefield);
+    let wastes = [
+        add(&mut scenario, P0, "Wastes", Zone::Battlefield),
+        add(&mut scenario, P0, "Wastes", Zone::Battlefield),
+    ];
+    let solemn = add(&mut scenario, P0, "Solemn Simulacrum", Zone::Graveyard);
+    let sorcery = distinct_fodder.then(|| {
+        scenario
+            .add_spell_to_graveyard(P0, "Graveyard Sorcery", false)
+            .with_mana_cost(ManaCost::generic(3))
+            .id()
+    });
+    let runner = build(scenario);
+    let index = ability_index_of(&runner, masticore, "4 damage");
+    MasticoreBoard {
+        runner,
+        masticore,
+        index,
+        prism,
+        cryptex,
+        wastes,
+        solemn,
+        sorcery,
+    }
+}
+
+struct MasticoreBoard {
+    runner: GameRunner,
+    masticore: ObjectId,
+    index: usize,
+    prism: ObjectId,
+    cryptex: ObjectId,
+    wastes: [ObjectId; 2],
+    solemn: ObjectId,
+    sorcery: Option<ObjectId>,
+}
+
+/// CR 701.59a + CR 118.10 + CR 601.2g (#10190 fifth review): Cryptex's
+/// "Collect evidence 3" is paid when Cryptex's mana ability is activated, before
+/// the Masticore's "Exile a creature card from your graveyard" is paid. When
+/// Solemn Simulacrum is the only card in the graveyard, the evidence takes it,
+/// so the {4} the Prism, Cryptex and the Wastes make leaves nothing to exile.
+/// The activation is offered in neither payment mode.
+#[test]
+fn cryptex_evidence_and_the_masticores_exile_cannot_share_one_card() {
+    let MasticoreBoard {
+        runner,
+        masticore,
+        index,
+        ..
+    } = prism_cryptex_board(false);
+    assert!(
+        offered_payment_modes(&runner, masticore, index).is_empty(),
+        "Solemn can't be both the evidence and the exiled creature card"
+    );
+}
+
+/// CR 701.59a + CR 601.2g (#10190 fifth review): with a mana-value-3 sorcery
+/// card beside Solemn Simulacrum, Cryptex collects the sorcery and Solemn pays
+/// the Masticore's exile. The activation is offered for a manual payment and
+/// completes in the window.
+#[test]
+fn cryptex_evidence_with_distinct_fodder_leaves_the_masticores_creature_card() {
+    let MasticoreBoard {
+        mut runner,
+        masticore,
+        index,
+        prism,
+        cryptex,
+        wastes,
+        solemn,
+        sorcery,
+    } = prism_cryptex_board(true);
+    let sorcery = sorcery.expect("the distinct fodder");
+    assert_eq!(
+        offered_payment_modes(&runner, masticore, index),
+        vec![CastPaymentMode::Manual]
+    );
+    activate_index(&mut runner, masticore, index, CastPaymentMode::Manual);
+    let waiting_for = act(
+        &mut runner,
+        GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P1)],
+        },
+    );
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    let red = Some(engine::types::game_state::ManaChoice::SingleColor(
+        engine::types::mana::ManaType::Red,
+    ));
+    activate_in_window(&mut runner, prism, &[], red.clone());
+    activate_in_window(&mut runner, cryptex, &[sorcery], red);
+    assert!(
+        in_zone(&runner, sorcery, Zone::Exile),
+        "the sorcery was the evidence"
+    );
+    for land in wastes {
+        tap_land_for_mana(&mut runner, land);
+    }
+    assert_eq!(pool_total(&runner), 4);
+    let waiting_for = pass(&mut runner);
+    assert!(
+        is_cost_prompt(&waiting_for, |kind| matches!(
+            kind,
+            PayCostKind::ExileFromZone { .. }
+        )),
+        "the exile follows the window: {waiting_for:?}"
+    );
+    let waiting_for = select_cards(&mut runner, &[solemn]);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(in_zone(&runner, solemn, Zone::Exile));
+
+    resolve_stack(&mut runner);
+    assert_eq!(life(&runner, P1), 16, "the damage resolved");
+}
+
+const VIZKOPA_GUILDMAGE: &str = "{1}{W}{B}: Target creature gains lifelink until end of turn.\n\
+{1}{W}{B}: Whenever you gain life this turn, each opponent loses that much life.";
+
+/// CR 601.2g + CR 605.3a (#10190 fifth review): a reversible conversion must
+/// not keep the window's search from its other producers. With {B} floating,
+/// Skyshroud Elf's "{1}: Add {R} or {W}." can turn mana back and forth without
+/// end; Ashnod's Altar sacrificing a Grizzly Bears makes {C}{C}, and the Elf
+/// turns one into {W}, which pays Vizkopa Guildmage's {1}{W}{B}. It is offered
+/// for a manual payment, and the window settles it that way.
+#[test]
+fn a_reversible_conversion_does_not_starve_the_altar_route_for_vizkopa_guildmage() {
+    let mut scenario = scenario_at_main();
+    let elf = add(&mut scenario, P0, "Skyshroud Elf", Zone::Battlefield);
+    let altar = add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+    let bears = add(&mut scenario, P0, "Grizzly Bears", Zone::Battlefield);
+    let guildmage = scenario
+        .add_creature_from_oracle(P0, "Vizkopa Guildmage", 2, 2, VIZKOPA_GUILDMAGE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![engine::types::mana::ManaUnit::new(
+            engine::types::mana::ManaType::Black,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = build(scenario);
+    let index = ability_index_of(&runner, guildmage, "gains lifelink");
+    let convert = ability_index_of(&runner, elf, "{R} or {W}");
+
+    let modes = offered_payment_modes(&runner, guildmage, index);
+    assert!(modes.contains(&CastPaymentMode::Manual), "{modes:?}");
+
+    activate_index(&mut runner, guildmage, index, CastPaymentMode::Manual);
+    let waiting_for = choose_targets(&mut runner, &[guildmage]);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    activate_in_window(&mut runner, altar, &[bears], None);
+    assert_eq!(pool_total(&runner), 3, "{{B}}{{C}}{{C}}");
+    let mut waiting_for = act(
+        &mut runner,
+        GameAction::ActivateAbility {
+            source_id: elf,
+            ability_index: convert,
+            payment_mode: CastPaymentMode::Auto,
+        },
+    );
+    if matches!(waiting_for, WaitingFor::ChooseManaColor { .. }) {
+        waiting_for = act(
+            &mut runner,
+            GameAction::ChooseManaColor {
+                choice: engine::types::game_state::ManaChoice::SingleColor(
+                    engine::types::mana::ManaType::White,
+                ),
+                count: 1,
+            },
+        );
+    }
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    let pool = &runner.state().players[P0.0 as usize].mana_pool;
+    assert_eq!(pool.count_color(engine::types::mana::ManaType::Black), 1);
+    assert_eq!(pool.count_color(engine::types::mana::ManaType::White), 1);
+    assert_eq!(
+        pool.count_color(engine::types::mana::ManaType::Colorless),
+        1
+    );
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert_eq!(pool_total(&runner), 0, "{{1}}{{W}}{{B}} was paid");
+    assert!(in_zone(&runner, bears, Zone::Graveyard));
+    assert!(!tapped(&runner, elf), "the Elf's {{T}} was not used");
+
+    resolve_stack(&mut runner);
+    assert!(
+        runner.state().objects[&guildmage]
+            .keywords
+            .iter()
+            .any(|keyword| keyword.kind() == KeywordKind::Lifelink),
+        "the lifelink resolved"
+    );
+}

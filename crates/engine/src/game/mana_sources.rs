@@ -2827,19 +2827,21 @@ pub(crate) fn player_choice_mana_ability_ready_for_payment(
     _payment_context: Option<&PaymentContext<'_>>,
 ) -> bool {
     let gates = mana_abilities::ManaActivationGates::compute(state);
-    player_choice_mana_ability_passes_screen(
-        state, controller, object_id, idx, ability, None, &gates,
-    ) && mana_abilities::can_activate_mana_ability_now_gated(
-        state, controller, object_id, idx, ability, &gates,
-    )
+    player_choice_mana_ability_passes_screen(state, controller, object_id, idx, ability, &gates)
+        && mana_abilities::can_activate_mana_ability_now_gated(
+            state, controller, object_id, idx, ability, &gates,
+        )
 }
 
 /// CR 605.3a + CR 117.1d: every check of
 /// [`player_choice_mana_ability_ready_for_payment`] that needs no legality
 /// simulation — the candidate's shape, its source's readiness (a tapped source
-/// can't pay a {T} cost, CR 107.5 + CR 118.3), its activation condition. A
-/// candidate that fails it is not ready, so a caller that bounds its simulations
-/// need not spend one on it.
+/// can't pay a {T} cost, CR 107.5 + CR 118.3), its activation restrictions and
+/// condition, and its cost's non-mana legs. Its own mana cost is left to the
+/// activation (CR 601.2g), as no verdict here clones the board or auto-taps. A
+/// candidate that fails it is not ready, so a caller that bounds its
+/// simulations need not spend one on it; one that passes it may still fail
+/// when activated, which a bounded caller pays for as a simulation.
 ///
 /// We do NOT check the mana ability's output restrictions (CR 106.6 spend
 /// restrictions) here. Those restrictions are evaluated later in the witness
@@ -2854,19 +2856,23 @@ pub(crate) fn player_choice_mana_ability_passes_screen(
     object_id: ObjectId,
     idx: usize,
     ability: &AbilityDefinition,
-    _payment_context: Option<&PaymentContext<'_>>,
     gates: &mana_abilities::ManaActivationGates,
 ) -> bool {
     if !player_choice_mana_ability_shape(ability) {
         return false;
     }
-    // A tap cost that chooses an object (CR 605.3a) belongs here with the
-    // ambiguous non-tap costs (KCI's "Sacrifice an artifact", discard,
-    // pay-life); a choice-free tap ability pays through the tap path.
-    if has_tap_component(&ability.cost)
-        && !mana_abilities::cost_requires_object_choice(state, controller, object_id, ability)
-    {
-        return false;
+    if has_tap_component(&ability.cost) {
+        // CR 107.5 + CR 118.3: a tapped source can't pay a {T} cost, so it is
+        // refused before any of its cost's choices are gathered.
+        if state.objects.get(&object_id).is_none_or(|obj| obj.tapped) {
+            return false;
+        }
+        // A tap cost that chooses an object (CR 605.3a) belongs here with the
+        // ambiguous non-tap costs (KCI's "Sacrifice an artifact", discard,
+        // pay-life); a choice-free tap ability pays through the tap path.
+        if !mana_abilities::cost_requires_object_choice(state, controller, object_id, ability) {
+            return false;
+        }
     }
     if !mana_abilities::mana_ability_ready_without_simulation_gated(
         state,
@@ -2874,7 +2880,7 @@ pub(crate) fn player_choice_mana_ability_passes_screen(
         object_id,
         idx,
         ability,
-        ManaPayabilityMode::Current,
+        ManaPayabilityMode::Planning,
         gates,
     ) {
         return false;
@@ -3670,6 +3676,13 @@ fn land_mana_options(
 /// Single authority shared by `scan_mana_abilities` (which builds per-color
 /// `ManaSourceOption` rows) and `max_mana_yield` so the two never diverge on
 /// which abilities count as mana sources.
+///
+/// A cost that collects evidence is not choice-free: CR 701.59a lets the
+/// player exile any cards whose mana values reach the total, and which cards
+/// go can decide the rest of the payment (CR 118.10: the creature card
+/// Molten-Tail Masticore's own cost exiles can't also be the evidence). The
+/// automatic payer has no such answer, so Cryptex is activated only through
+/// its own prompt, as every other object-choosing mana cost is.
 fn is_active_tap_mana_ability(
     state: &GameState,
     object_id: ObjectId,
@@ -3683,6 +3696,14 @@ fn is_active_tap_mana_ability(
         return false;
     }
     if !has_tap_component(&ability.cost) && !has_unambiguous_self_sacrifice_component(&ability.cost)
+    {
+        return false;
+    }
+    if ability
+        .cost
+        .as_ref()
+        .and_then(mana_abilities::collect_evidence_cost_amount)
+        .is_some()
     {
         return false;
     }

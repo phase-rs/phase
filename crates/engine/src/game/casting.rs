@@ -28254,10 +28254,14 @@ fn one_of_announcements(cost: &AbilityCost) -> Vec<std::borrow::Cow<'_, AbilityC
 }
 
 /// The most work [`mana_ability_window_mana_witness`] does for one verdict:
-/// each readiness verdict that may simulate an activation, each board it
-/// builds, and each payability probe it runs. Each probe dry-runs the payment
-/// on a clone of its own, so all three are counted; a candidate the readiness
-/// screen refuses without simulating (a tapped source's {T} cost) is not. A
+/// each board it builds (the window's own, and one per activation and answer
+/// tried) and each payability probe it runs. Each probe dry-runs the payment
+/// on a clone of its own, so both are counted. The readiness screen never
+/// simulates ([`super::mana_sources::player_choice_mana_ability_passes_screen`]):
+/// a candidate it refuses (a tapped source's {T} cost) costs nothing, and one
+/// it admits is judged by being activated, on a board the budget pays for.
+/// A board's revisit check ([`ManaWindowWitnessSearch::first_reached`])
+/// normalizes it once and is covered by that board's unit. A
 /// search that runs out answers
 /// [`WitnessOutcome::BudgetExhausted`], which offers nothing — the budget must
 /// cover the work that finds the winning route, not only the boards after it
@@ -28289,8 +28293,11 @@ enum WitnessOutcome {
 /// ability's cost (CR 113.7a); `payable` then refuses any cost that still
 /// needs the source ({T}, "Sacrifice this", "Remove a counter from this").
 /// Traversal allows repeatable mana abilities and reverse-order sequences
-/// (e.g. Goblin Clearcutter before Ashnod's Altar). At most
-/// [`MANA_ABILITY_WINDOW_WITNESS_BUDGET`] boards and probes are spent.
+/// (e.g. Goblin Clearcutter before Ashnod's Altar), shortest first, and
+/// extends no board it has already reached. The window opens on the
+/// activation's mana payment, so the mana abilities' timing rules read it as
+/// the live window does. At most [`MANA_ABILITY_WINDOW_WITNESS_BUDGET`] boards
+/// and probes are spent.
 fn mana_ability_window_mana_witness(
     state: &GameState,
     player: PlayerId,
@@ -28335,8 +28342,22 @@ fn mana_ability_window_mana_witness(
         payment_context: activation_context,
         distinguished_mana_types,
         spend_contexts,
+        reached: Vec::new(),
+        frontier: std::collections::VecDeque::new(),
     };
-    search.from(state)
+    // CR 601.2g + CR 605.3a + CR 304.5: the window's mana abilities are
+    // activated while the activation's mana payment is pending, not while the
+    // player holds priority, so every timing rule reads the payment window the
+    // live payment opens: Lion's Eye Diamond's "Activate only as an instant"
+    // keeps it out (CR 304.5: "only as an instant" means only with priority).
+    let Some(mut window) = search.clone_board(state) else {
+        return WitnessOutcome::BudgetExhausted;
+    };
+    window.waiting_for = WaitingFor::ManaPayment {
+        player,
+        convoke_mode: None,
+    };
+    search.run(window)
 }
 
 /// CR 106.1 + CR 107.4: the mana types the window's payments can tell apart —
@@ -28407,7 +28428,31 @@ struct ManaWindowWitnessSearch<'a, F> {
     /// mana — an intermediate payment of the window
     /// ([`Self::pool_composition`]).
     spend_contexts: Vec<ActivationPaymentContext>,
+    /// Each resolved board the search has extended, normalized for comparison
+    /// ([`Self::first_reached`]), with its cheap pre-filter key.
+    reached: Vec<ReachedBoard>,
+    /// Resolved boards waiting to be extended, in the order they were reached.
+    frontier: std::collections::VecDeque<GameState>,
 }
+
+/// A board [`ManaWindowWitnessSearch::first_reached`] recorded: its pre-filter
+/// key, its normalized position, and its activation counts, which the position
+/// comparison leaves out.
+struct ReachedBoard {
+    key: ReachedKey,
+    position: GameState,
+    activations: ActivationCounts,
+}
+
+/// CR 602.5b: a board's per-turn and per-game activation counts.
+type ActivationCounts = (
+    im::HashMap<(ObjectId, usize), u32>,
+    im::HashMap<(ObjectId, usize), u32>,
+);
+
+/// The pre-filter of [`ManaWindowWitnessSearch::first_reached`]: the board's
+/// loop fingerprint and its pool as the window's payments see it.
+type ReachedKey = (u64, Vec<(PoolCompositionKey, usize)>);
 
 /// One bucket of [`ManaWindowWitnessSearch::pool_composition`]: the unit's
 /// told-apart type (`None` for the stand-in), and whether each of the window's
@@ -28415,8 +28460,36 @@ struct ManaWindowWitnessSearch<'a, F> {
 type PoolCompositionKey = (Option<ManaType>, Vec<bool>);
 
 impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
-    /// Whether some activations of `candidates` on `board` reach a
-    /// board on which the cost is payable.
+    /// Whether some sequence of activations from `window` reaches a board on
+    /// which the cost is payable. Boards are extended breadth-first, so every
+    /// route of fewer activations is tried before a longer one: a producer
+    /// whose activations can go on and on (a reversible conversion) can't keep
+    /// the search from a short route through another (Ashnod's Altar, then one
+    /// conversion).
+    fn run(&mut self, window: GameState) -> WitnessOutcome {
+        self.first_reached(&window);
+        self.frontier.push_back(window);
+        let mut exhausted = false;
+        while let Some(board) = self.frontier.pop_front() {
+            match self.from(&board) {
+                WitnessOutcome::Payable => return WitnessOutcome::Payable,
+                WitnessOutcome::BudgetExhausted if self.budget == 0 => {
+                    return WitnessOutcome::BudgetExhausted;
+                }
+                WitnessOutcome::BudgetExhausted => exhausted = true,
+                WitnessOutcome::Unpayable => {}
+            }
+        }
+        if exhausted {
+            WitnessOutcome::BudgetExhausted
+        } else {
+            WitnessOutcome::Unpayable
+        }
+    }
+
+    /// Whether one activation of some candidate on `board` reaches a board on
+    /// which the cost is payable; each resolved board it reaches that is not
+    /// is queued for [`Self::run`] to extend.
     ///
     /// Interleaves readiness checking with activation attempts (CR 605.3c):
     /// for each candidate, check readiness and immediately try activating it
@@ -28426,6 +28499,7 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
     fn from(&mut self, board: &GameState) -> WitnessOutcome {
         let player = self.player;
         let gates = super::mana_abilities::ManaActivationGates::compute(board);
+        let mut exhausted = false;
         for &(mana_source, index) in self.candidates {
             let Some(def) = board
                 .objects
@@ -28435,18 +28509,19 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                 continue;
             };
             // CR 601.2g + CR 118.3: a candidate the screen refuses (a tapped
-            // source's {T} cost, an unmet condition) is not ready, and judging
-            // it simulates nothing, so it costs no budget: no number of
-            // irrelevant producers keeps the search from the route that works.
-            // Output restrictions (CR 106.6) are NOT checked here; they are
-            // evaluated in pool_composition when mana is actually spent.
+            // source's {T} cost, an unmet condition or timing restriction) is
+            // not ready, and judging it simulates nothing, so it costs no
+            // budget: no number of irrelevant producers keeps the search from
+            // the route that works. Its own mana cost is judged by activating
+            // it on a board the budget pays for. Output restrictions (CR 106.6)
+            // are NOT checked here; they are evaluated in pool_composition when
+            // mana is actually spent.
             if !super::mana_sources::player_choice_mana_ability_passes_screen(
                 board,
                 player,
                 mana_source,
                 index,
                 def,
-                None,
                 &gates,
             ) {
                 continue;
@@ -28473,15 +28548,20 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                     )
                 },
             );
-            if outcome != WitnessOutcome::Unpayable {
-                return outcome;
+            match outcome {
+                WitnessOutcome::Payable => return WitnessOutcome::Payable,
+                WitnessOutcome::BudgetExhausted => exhausted = true,
+                WitnessOutcome::Unpayable => {}
             }
-            // If budget exhausted, stop searching.
             if self.budget == 0 {
                 return WitnessOutcome::BudgetExhausted;
             }
         }
-        WitnessOutcome::Unpayable
+        if exhausted {
+            WitnessOutcome::BudgetExhausted
+        } else {
+            WitnessOutcome::Unpayable
+        }
     }
 
     /// Tries each of `answers` on its own clone of `next` with `answer`, then
@@ -28538,6 +28618,13 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                     return WitnessOutcome::Unpayable;
                 }
                 next.waiting_for = board.waiting_for.clone();
+                // CR 605.3a: a reversible conversion (Skyshroud Elf's "{1}:
+                // Add {R} or {W}.") can return the window to a board it has
+                // already extended; extending it again finds nothing new and
+                // would spend the budget the other producers need.
+                if !self.first_reached(&next) {
+                    return WitnessOutcome::Unpayable;
+                }
                 // The payability probe dry-runs the payment on its own clone,
                 // so it spends the budget like a board does.
                 let Some(budget) = self.budget.checked_sub(1) else {
@@ -28547,7 +28634,8 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                 if (self.payable)(&next, self.cost) {
                     return WitnessOutcome::Payable;
                 }
-                self.from(&next)
+                self.frontier.push_back(next);
+                WitnessOutcome::Unpayable
             }
             Ok(WaitingFor::PayCost {
                 kind,
@@ -28825,11 +28913,75 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
         composition
     }
 
+    /// CR 601.2g + CR 602.5b: whether no board the search has already extended
+    /// offers everything `board` does. An earlier board does when it is the
+    /// same game position apart from activation counts (the CR 104.4b loop
+    /// comparison, which also compares the pool) and has used no more of any
+    /// limited ability's activations ("Activate only once each turn"). An
+    /// unlimited ability's count limits nothing, so it is not compared: two
+    /// Skyshroud Elf conversions back to the same pool are one board. A
+    /// first-reached board is recorded.
+    fn first_reached(&mut self, board: &GameState) -> bool {
+        let key: ReachedKey = (board.loop_fingerprint(), self.pool_composition(board));
+        let mut position = board.normalize_for_loop();
+        let activations: ActivationCounts = (
+            std::mem::take(&mut position.activated_abilities_this_turn),
+            std::mem::take(&mut position.activated_abilities_this_game),
+        );
+        let covered = self.reached.iter().any(|known| {
+            known.key == key
+                && crate::types::game_state::loop_states_equal(&known.position, &position)
+                && limited_activations_no_fewer(board, &activations, &known.activations)
+        });
+        if !covered {
+            self.reached.push(ReachedBoard {
+                key,
+                position,
+                activations,
+            });
+        }
+        !covered
+    }
+
     fn clone_board(&mut self, board: &GameState) -> Option<GameState> {
         self.budget = self.budget.checked_sub(1)?;
         crate::game::perf_counters::record_state_clone_for_legality();
         Some(board.clone())
     }
+}
+
+/// CR 602.5b: whether `later` has used at least as many activations as
+/// `earlier` of every ability on `board` whose activation is limited by count,
+/// so it can activate nothing `earlier` couldn't.
+fn limited_activations_no_fewer(
+    board: &GameState,
+    later: &ActivationCounts,
+    earlier: &ActivationCounts,
+) -> bool {
+    let limited = |&(id, index): &(ObjectId, usize)| {
+        board
+            .objects
+            .get(&id)
+            .and_then(|obj| obj.abilities.get(index))
+            .is_some_and(|ability| {
+                ability.activation_restrictions.iter().any(|restriction| {
+                    matches!(
+                        restriction,
+                        crate::types::ability::ActivationRestriction::OnlyOnceEachTurn
+                            | crate::types::ability::ActivationRestriction::OnlyOnce
+                            | crate::types::ability::ActivationRestriction::MaxTimesEachTurn { .. }
+                    )
+                })
+            })
+    };
+    let no_fewer = |later: &im::HashMap<(ObjectId, usize), u32>,
+                    earlier: &im::HashMap<(ObjectId, usize), u32>| {
+        earlier
+            .iter()
+            .filter(|(key, _)| limited(key))
+            .all(|(key, &count)| later.get(key).copied().unwrap_or(0) >= count)
+    };
+    no_fewer(&later.0, &earlier.0) && no_fewer(&later.1, &earlier.1)
 }
 
 /// CR 106.1 + CR 605.3b: each answer to "add `count` mana in any combination
