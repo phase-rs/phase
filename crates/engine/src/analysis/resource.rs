@@ -4975,6 +4975,10 @@ pub(crate) fn loop_states_cover_modulo_object_growth(
     // resources for the board/GameState equality axes.
     let pf = flush_clone(prior);
     let cf = flush_clone(current);
+    // CR 603.7c: the stack is set aside below, so a fired carrier's pin is judged here.
+    if stack_holds_stale_target_pin(&pf) || stack_holds_stale_target_pin(&cf) {
+        return false;
+    }
     let mut pa = project_out_resources(&pf);
     let mut pb = project_out_resources(&cf);
     pa.0.stack.clear();
@@ -5433,6 +5437,34 @@ pub(crate) fn loop_states_cover_modulo_fodder_growth(
         .is_empty()
 }
 
+/// CR 603.7c + CR 400.7: whether a stack entry's ability chain holds a keyed or positional
+/// target pin that no longer names the live object ("if that object left that zone and then
+/// returned, it's a new object and thus won't be affected"). The two covers that set the
+/// stack aside ask this of each frame: every other comparator keeps the stack, where the
+/// ranked pin itself separates a live carrier from a stale one.
+fn stack_holds_stale_target_pin(state: &GameState) -> bool {
+    fn chain_is_stale(state: &GameState, ability: &crate::types::ability::ResolvedAbility) -> bool {
+        ability
+            .target_incarnations
+            .iter()
+            .chain(ability.target_pins.iter().flatten())
+            .any(|pin| {
+                state
+                    .objects
+                    .get(&pin.object_id)
+                    .is_none_or(|object| object.incarnation != pin.incarnation)
+            })
+            || ability
+                .child_links()
+                .any(|(_, child)| chain_is_stale(state, child))
+    }
+    state
+        .stack
+        .iter()
+        .filter_map(|entry| entry.ability())
+        .any(|ability| chain_is_stale(state, ability))
+}
+
 /// A condition of [`loop_states_cover_modulo_fodder_growth`] that refused a frame pair, in the
 /// order the cover evaluates them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5442,6 +5474,11 @@ pub enum FodderCoverRefusal {
     StackEntryRead,
     NonObjectRemainder,
     LoyaltyActivationCount,
+    /// CR 603.7c + CR 400.7: a stack entry holds a target pin on an object that has left
+    /// and returned or is gone. This cover sets the stack aside, so the ranked pin never
+    /// reaches its comparand; it refuses the pair instead of certifying across a fired
+    /// carrier that would now do nothing.
+    StaleStackTargetPin,
 }
 
 /// CR 732.2a: the object-growth producer's verdict on its three settle frames, by the recurrence
@@ -5502,6 +5539,10 @@ pub(crate) fn fodder_growth_cover_refusals(
     let mut refusals = Vec::new();
     let pf = flush_clone(prior);
     let cf = flush_clone(current);
+    // CR 603.7c: the stack is set aside below, so a fired carrier's pin is judged here.
+    if stack_holds_stale_target_pin(&pf) || stack_holds_stale_target_pin(&cf) {
+        refusals.push(FodderCoverRefusal::StaleStackTargetPin);
+    }
     let mut pa = project_out_resources(&pf);
     let mut pb = project_out_resources(&cf);
     // CR 110.1 + CR 732.2a: compare battlefield permanents through the same
@@ -9020,15 +9061,19 @@ fn project_damage_recipient_relations_for_loop(
         });
     });
     drop(objects);
+    // No retained carrier names a damaged object: nothing to classify, nothing to scan.
+    if requested.is_empty() {
+        return smallvec::SmallVec::new();
+    }
     // CR 608.2k: a recipient answer is observable only through an exact top-level
     // `EventTarget` on the ability that owns the event. When every retained carrier is
     // paired, keep only the keys a reader owns; with none left no witness can affect the
     // comparand, and the H-row scan is skipped.
     if let Some(owned) = loop_reader_owned_recipient_keys(state, carrier_events) {
         requested.retain(|key, _| owned.contains(key));
-    }
-    if requested.is_empty() {
-        return smallvec::SmallVec::new();
+        if requested.is_empty() {
+            return smallvec::SmallVec::new();
+        }
     }
     for record in &journal {
         #[cfg(test)]
@@ -10649,6 +10694,70 @@ mod tests {
         }
     }
 
+    /// CR 603.7c: the fodder-growth and object-growth covers set the stack aside before they
+    /// compare, so the ranked pin of a fired carrier never reaches their comparand. Each
+    /// judges the stack itself first: a pair with a stack entry pinned to a recipient that
+    /// left and returned is refused, and the same pair with the pin on the live recipient,
+    /// minted earlier or later, is not refused on that ground.
+    #[test]
+    fn loop_stack_dropping_covers_refuse_a_stale_fired_carrier() {
+        for carrier in [
+            PinCarrier::FiredDestroy,
+            PinCarrier::FiredSacrifice,
+            PinCarrier::AnnouncedSpellTarget,
+        ] {
+            let live = pinned_frame(carrier, 5, 5);
+            let later = pinned_frame(carrier, 8, 8);
+            let stale = pinned_frame(carrier, 8, 5);
+            let fodder = live.objects[&ObjectId(20)].clone();
+            let refuses_pin = |prior: &GameState, current: &GameState| {
+                fodder_growth_cover_refusals(prior, current, &fodder, PlayerId(0))
+                    .0
+                    .contains(&FodderCoverRefusal::StaleStackTargetPin)
+            };
+            assert!(
+                !refuses_pin(&live, &later),
+                "{carrier:?}: fodder cover, live pin across a later mint"
+            );
+            assert!(
+                refuses_pin(&later, &stale) && refuses_pin(&stale, &later),
+                "{carrier:?}: fodder cover, live against stale"
+            );
+            // The object-growth cover needs a pair it admits: a steady inert-token engine
+            // grown by one token, with the fired carrier on the stack of both frames.
+            let grown = |live: u64, pin: u64| {
+                let donor = pinned_frame(carrier, live, pin);
+                let (mut prior, mut current) = og_cover_base();
+                for frame in [&mut prior, &mut current] {
+                    for id in [ObjectId(20), ObjectId(21)] {
+                        frame.objects.insert(id, donor.objects[&id].clone());
+                        frame.battlefield.push_back(id);
+                    }
+                    frame.stack.push_back(donor.stack[0].clone());
+                    frame.waiting_for = donor.waiting_for.clone();
+                }
+                (prior, current)
+            };
+            let (live_prior, live_current) = grown(8, 8);
+            let (stale_prior, stale_current) = grown(8, 5);
+            assert!(
+                loop_states_cover_modulo_object_growth(&live_prior, &live_current),
+                "{carrier:?}: reach guard, the object-growth cover admits the grown pair \
+                 with a live fired carrier"
+            );
+            for (prior, current, shape) in [
+                (&live_prior, &stale_current, "live then stale"),
+                (&stale_prior, &live_current, "stale then live"),
+                (&stale_prior, &stale_current, "stale in both"),
+            ] {
+                assert!(
+                    !loop_states_cover_modulo_object_growth(prior, current),
+                    "{carrier:?}: object-growth cover, {shape}"
+                );
+            }
+        }
+    }
+
     /// The growth covers compare the stack apart from the board, through
     /// `normalized_stack_entries`. That comparand is cut from the ranked projection and must
     /// keep the ranked pin: it used to strip every pin after the fact.
@@ -10701,97 +10810,148 @@ mod tests {
         );
     }
 
-    /// Innocent Bystander ("Whenever this creature is dealt 3 or more damage, investigate.")
-    /// dealt damage by two creatures at once: ONE trigger for two simultaneous damage events,
-    /// published as the entry's own event plus its sidecar batch. Investigate reads no
-    /// recipient. `buried_bystanders` such triggers and `buried_fillers` event-less triggers
-    /// sit at the bottom of the stack; the working entry above them is either one more
-    /// Bystander trigger or the fixture's recipient reader ("tap that creature"). Every
-    /// buried Bystander trigger comes from its own combat (2 and 1 damage, then 3 and 1, ...),
-    /// so no two sidecar batches hold the same events.
+    /// The published two-blocker batch, taken from play. Innocent Bystander ("Whenever this
+    /// creature is dealt 3 or more damage, investigate. (Create a Clue token. It's an artifact
+    /// with "{2}, Sacrifice this token: Draw a card.")") attacks and is blocked by a 2/2 and a
+    /// 1/2: ONE trigger for two simultaneous combat damage events, on the stack with its
+    /// sidecar batch and the two journal rows combat wrote. Returns that priority frame.
+    /// (The Bystander is given 0/9 so the attacker assigns no damage and survives; nothing
+    /// else departs from the printed card.)
+    fn two_blocker_bystander_frame() -> GameState {
+        use crate::game::combat::AttackTarget;
+        use crate::game::scenario::GameScenario;
+        use crate::types::actions::GameAction;
+
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bystander = scenario
+            .add_creature_from_oracle(
+                p0,
+                "Innocent Bystander",
+                0,
+                9,
+                "Whenever this creature is dealt 3 or more damage, investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")",
+            )
+            .id();
+        let first = scenario.add_creature(p1, "Blocker A", 2, 2).id();
+        let second = scenario.add_creature(p1, "Blocker B", 1, 2).id();
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(bystander, AttackTarget::Player(p1))])
+            .expect("declare attackers");
+        for _ in 0..8 {
+            if runner.waiting_for_kind() == "DeclareBlockers" {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass into declare blockers");
+        }
+        runner
+            .declare_blockers(&[(first, bystander), (second, bystander)])
+            .expect("declare blockers");
+        for _ in 0..8 {
+            if !runner.state().stack.is_empty() {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass into combat damage");
+        }
+        let state = runner.state().clone();
+        let entry = state
+            .stack
+            .back()
+            .expect("the Bystander trigger is on the stack");
+        assert_eq!(
+            state
+                .stack_trigger_event_batches
+                .get(&entry.id)
+                .map(Vec::len),
+            Some(2),
+            "reach guard: one trigger published a two-event batch"
+        );
+        assert_eq!(
+            state.damage_dealt_this_turn.len(),
+            2,
+            "reach guard: combat wrote both journal rows"
+        );
+        state
+    }
+
+    /// Floor frames built on [`two_blocker_bystander_frame`]. `buried_bystanders` Bystander
+    /// triggers and `buried_fillers` event-less triggers sit at the bottom of the stack; the
+    /// working entry above them is either the played Bystander trigger with its batch, or a
+    /// recipient reader ("tap that creature") of the first damage event. The first buried
+    /// Bystander trigger is the played one; each further one is that trigger again with the
+    /// first blocker's damage raised by one, standing for a later combat, so that no two
+    /// sidecar batches hold the same events.
     fn bystander_floor_frame(
         buried_bystanders: u64,
         buried_fillers: u64,
         working_bystander: bool,
     ) -> GameState {
-        use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
+        use crate::types::ability::{
+            Effect, EffectScope, ResolvedAbility, TapStateChange, TargetFilter,
+        };
         use crate::types::events::GameEvent;
-        use crate::types::game_state::{DamageRecord, StackEntry};
 
-        let mut state = relational_recipient_frame(Some(7), false, false);
-        if working_bystander {
-            state.stack.clear();
+        let mut state = two_blocker_bystander_frame();
+        let played = state.stack.back().unwrap().clone();
+        let batch = state
+            .stack_trigger_event_batches
+            .remove(&played.id)
+            .unwrap();
+        state.stack.clear();
+        // The played trigger under a new id, with its batch's first event raised by `extra`.
+        let bystander_trigger = |id: u64, extra: u32| {
+            let mut events = batch.clone();
+            if let Some(GameEvent::DamageDealt { amount, .. }) = events.first_mut() {
+                *amount += extra;
+            }
+            let mut entry = played.clone();
+            entry.id = ObjectId(id);
+            if let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut entry.kind {
+                *trigger_event = events.first().cloned();
+            }
+            (entry, events)
+        };
+        let mut filler = played.clone();
+        if let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut filler.kind {
+            *trigger_event = None;
         }
-        let first = ObjectId(20);
-        let bystander = battlefield_creature(&mut state, 22, 1);
-        let second = battlefield_creature(&mut state, 23, 0);
-        let recipient_epoch = state.objects[&bystander].incarnation;
-        // The two simultaneous damage events of one combat in which the first blocker
-        // dealt `heavy` and the second 1, each with its journal row.
-        let hits = |state: &mut GameState, heavy: u32| -> Vec<GameEvent> {
-            [(first, heavy), (second, 1)]
-                .into_iter()
-                .map(|(source, amount)| {
-                    let source_incarnation = Some(state.objects[&source].incarnation);
-                    state.damage_dealt_this_turn.push_back(DamageRecord {
-                        source_id: source,
-                        source_incarnation,
-                        target: TargetRef::Object(bystander),
-                        target_incarnation: Some(recipient_epoch),
-                        amount,
-                        is_combat: true,
-                        ..Default::default()
-                    });
-                    GameEvent::DamageDealt {
-                        source_id: source,
-                        source_incarnation,
-                        target: TargetRef::Object(bystander),
-                        amount,
-                        is_combat: true,
-                        excess: 0,
-                    }
-                })
-                .collect()
-        };
-        let trigger = |id: u64, event: Option<GameEvent>| StackEntry {
-            id: ObjectId(id),
-            source_id: bystander,
-            controller: PlayerId(1),
-            kind: StackEntryKind::TriggeredAbility {
-                source_id: bystander,
-                ability: Box::new(ResolvedAbility::new(
-                    Effect::Investigate,
+        if working_bystander {
+            let (entry, events) = bystander_trigger(400, 0);
+            state.stack_trigger_event_batches.insert(entry.id, events);
+            state.stack.push_back(entry);
+        } else {
+            let mut reader = played.clone();
+            reader.id = ObjectId(100);
+            if let StackEntryKind::TriggeredAbility { ability, .. } = &mut reader.kind {
+                **ability = ResolvedAbility::new(
+                    Effect::SetTapState {
+                        target: TargetFilter::EventTarget,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
                     vec![],
-                    bystander,
-                    PlayerId(1),
-                )),
-                condition: None,
-                trigger_event: event,
-                description: None,
-                source_name: String::new(),
-                subject_match_count: None,
-                die_result: None,
-                provenance: None,
-            },
-        };
+                    played.source_id,
+                    played.controller,
+                );
+            }
+            state.stack.push_back(reader);
+        }
         for index in 0..buried_bystanders {
-            let events = hits(&mut state, 2 + index as u32);
-            state
-                .stack
-                .push_front(trigger(200 + index, Some(events[0].clone())));
-            state
-                .stack_trigger_event_batches
-                .insert(ObjectId(200 + index), events);
+            let (entry, events) = bystander_trigger(200 + index, index as u32);
+            state.stack_trigger_event_batches.insert(entry.id, events);
+            state.stack.push_front(entry);
         }
         for index in 0..buried_fillers {
-            state.stack.push_front(trigger(300 + index, None));
-        }
-        if working_bystander {
-            let events = hits(&mut state, 2);
-            state.stack.push_back(trigger(400, Some(events[0].clone())));
-            state
-                .stack_trigger_event_batches
-                .insert(ObjectId(400), events);
+            let mut entry = filler.clone();
+            entry.id = ObjectId(300 + index);
+            state.stack.push_front(entry);
         }
         state
     }
@@ -10856,8 +11016,10 @@ mod tests {
     /// ("Whenever this creature deals damage to a creature, tap that creature and it doesn't
     /// untap during its controller's next untap step.") reads the recipient of its own event.
     /// An Innocent Bystander trigger beside it ("Whenever this creature is dealt 3 or more
-    /// damage, investigate.") reads none, like Stuffy Doll's "it deals that much damage to
-    /// the chosen player". The Sniper must not keep the Bystander's key: two frames that
+    /// damage, investigate.") reads none. The review named Stuffy Doll for the non-reader;
+    /// this fixture uses the Bystander's Investigate instead, which the same classifier
+    /// answers the same way, and does not exercise the Doll's own damage effect.
+    /// The Sniper must not keep the Bystander's key: two frames that
     /// differ only in whether the Bystander's recorded recipient epoch is still live are the
     /// same position for every ability that can read anything.
     #[test]
@@ -10866,32 +11028,32 @@ mod tests {
         use crate::types::events::GameEvent;
         use crate::types::game_state::{DamageRecord, StackEntry};
 
-        /// `sniper` / `bystander`: the recipient epoch each damage row recorded. Both
+        /// `sniper` / `bystander_epoch`: the recipient epoch each damage row recorded. Both
         /// recipients are live at 7. `unowned` adds a carrier with no paired ability.
-        fn mixed(sniper: u64, bystander: u64, unowned: bool) -> GameState {
+        fn mixed(sniper: u64, bystander_epoch: u64, unowned: bool) -> GameState {
             // stack[0]: the fixture's reader, dealer 20 -> recipient 21.
             let mut state = relational_recipient_frame(Some(sniper), false, false);
             let dealer = ObjectId(20);
-            let doll = battlefield_creature(&mut state, 22, 1);
-            state.objects.get_mut(&doll).unwrap().incarnation = 7;
+            let bystander = battlefield_creature(&mut state, 22, 1);
+            state.objects.get_mut(&bystander).unwrap().incarnation = 7;
             let event = GameEvent::DamageDealt {
                 source_id: dealer,
                 source_incarnation: Some(3),
-                target: TargetRef::Object(doll),
+                target: TargetRef::Object(bystander),
                 amount: 3,
                 is_combat: false,
                 excess: 0,
             };
             state.stack.push_back(StackEntry {
                 id: ObjectId(101),
-                source_id: doll,
+                source_id: bystander,
                 controller: PlayerId(1),
                 kind: StackEntryKind::TriggeredAbility {
-                    source_id: doll,
+                    source_id: bystander,
                     ability: Box::new(ResolvedAbility::new(
                         Effect::Investigate,
                         vec![],
-                        doll,
+                        bystander,
                         PlayerId(1),
                     )),
                     condition: None,
@@ -10906,8 +11068,8 @@ mod tests {
             state.damage_dealt_this_turn.push_back(DamageRecord {
                 source_id: dealer,
                 source_incarnation: Some(3),
-                target: TargetRef::Object(doll),
-                target_incarnation: Some(bystander),
+                target: TargetRef::Object(bystander),
+                target_incarnation: Some(bystander_epoch),
                 amount: 3,
                 ..Default::default()
             });
@@ -27793,7 +27955,7 @@ mod tests {
     /// THE INSTRUMENT-LIVENESS CONTROL IS THE ARM THAT MAKES THE EQUALITY MEAN ANYTHING. The
     /// derivation diverges earlier than the ALLOCATOR (`create_object` handing out
     /// `ObjectId(0)` over a live object) and more directly — `normalize_for_loop` runs
-    /// `clear_trigger_identity_recursive`, which sets `ability.source_id = ObjectId(0)`, and
+    /// `clear_source_provenance_for_loop_recursive`, which sets `ability.source_id = ObjectId(0)`, and
     /// the resolver carries that straight into `TokenSpec.source_id`. So a normalized carrier
     /// proposes a token whose CR 111.1 source is the null object, and the two sets differ.
     ///
@@ -27805,7 +27967,7 @@ mod tests {
     /// `r27_c_an_intervening_if_binds_with_the_retained_samples_trigger_source` below, and
     /// structurally by `game::engine`'s `the_period_touch_window_is_carried_by_the_live_half`.
     /// This arm's own flipping site is the control's: delete
-    /// `ResolvedAbility::clear_trigger_identity_recursive`'s `self.source_id = ObjectId(0)`
+    /// `ResolvedAbility::clear_source_provenance_for_loop_recursive`'s `self.source_id = ObjectId(0)`
     /// ⇒ the two halves stop differing ⇒ the control FAILS.
     #[test]
     fn r27_a3_a_retained_sample_derives_the_live_boards_event_set() {
@@ -27916,7 +28078,7 @@ mod tests {
             (token_source(&from_sample), token_source(&from_normalized)),
             (Some(SRC), Some(ObjectId(0))),
             "(a3) CONTROL — CR 400.7 + CR 111.1: `normalize_for_loop` runs \
-             `clear_trigger_identity_recursive`, which zeroes `ability.source_id`, and the \
+             `clear_source_provenance_for_loop_recursive`, which zeroes `ability.source_id`, and the \
              resolver carries that into `TokenSpec.source_id`. The normalized half therefore \
              proposes a token whose source is the NULL object. Without this arm the equality \
              above would be true of any two boards and would prove nothing"
@@ -27956,7 +28118,7 @@ mod tests {
     /// REVERT-PROBE (the shared carrier revert): point
     /// `game::engine::bounded_cycle_offer`'s `ring_live` at `&f.normalized` ⇒ the carrying
     /// frame becomes a comparand whose `ability.source_id` is `ObjectId(0)`
-    /// (`clear_trigger_identity_recursive`) ⇒ the `MayTriggerAutoChoiceKey` misses ⇒ the `may`
+    /// (`clear_source_provenance_for_loop_recursive`) ⇒ the `MayTriggerAutoChoiceKey` misses ⇒ the `may`
     /// slot IS minted ⇒ the negative arm OFFERS. A row that builds its own window is blind to
     /// the mint's carrier; a row driven through the mint is not.
     #[test]
@@ -28599,7 +28761,7 @@ mod tests {
                 &mut control_budget
             ),
             ResolutionChoiceFreedom::MayPrompt,
-            "(c) CONTROL — CR 603.4 + CR 400.7: `clear_trigger_identity_recursive` sets \
+            "(c) CONTROL — CR 603.4 + CR 400.7: `clear_source_provenance_for_loop_recursive` sets \
              `trigger_source = None`, so `check_trigger_condition_with_source` takes the \
              absent-context path, `bind_resolution_scope` returns false and the classifier is \
              fail-closed `MayPrompt`. Without this the equality above would hold on any board"

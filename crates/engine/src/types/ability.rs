@@ -2900,6 +2900,23 @@ struct AttachTargetBindingsInner {
     attachment_candidates: Vec<ObjectIncarnationRef>,
 }
 
+impl AttachTargetBindings {
+    /// CR 400.7: every pin the binding holds, as `(object, incarnation)`, for
+    /// loop normalization to rank with the other ability pins.
+    pub(crate) fn for_each_incarnation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
+        if let Some(inner) = self.inner.as_deref_mut() {
+            for pin in inner
+                .attachment_targets
+                .iter_mut()
+                .chain(inner.host_target.iter_mut())
+                .chain(inner.attachment_candidates.iter_mut())
+            {
+                f(pin.object_id, &mut pin.incarnation);
+            }
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum AttachObjectBindingCompat {
@@ -4801,16 +4818,37 @@ impl ResolvedAbility {
         }
     }
 
-    /// CR 400.7: every incarnation pin this chain captured, as
+    /// CR 400.7: every incarnation this chain captured for an object, as
     /// `(object, incarnation)`, for loop normalization to rank with the other
-    /// carriers: the keyed delayed-referent pins (CR 603.7c), the positional
-    /// announcement pins (CR 601.2c), the bound force-block attacker
-    /// (CR 509.1c), the granting object, the boon and exile-until batches, the
-    /// objects a forwarding instruction produced or selected (CR 608.2c), and
-    /// the announcement epoch of the source (CR 602.2a). That last one is a
-    /// bare epoch, so the caller supplies the object it belongs to:
-    /// `source_id` is the CARRIER's source, which normalization leaves in
-    /// place while it zeroes the ability's own.
+    /// carriers:
+    ///
+    /// - the keyed delayed-referent pins (CR 603.7c) and the positional
+    ///   announcement pins (CR 601.2c);
+    /// - the bound force-block attacker (CR 509.1c) and the granting object;
+    /// - the boon and exile-until batches, and the objects a forwarding
+    ///   instruction produced or selected (CR 608.2c);
+    /// - the Attach bindings: attachments, host and candidates (CR 701.3a);
+    /// - the paid, effect-context and amassed-army object snapshots' own
+    ///   incarnations (CR 608.2h);
+    /// - two bare epochs of the SOURCE, the announcement epoch (CR 602.2a) and
+    ///   the noted mana payment's. A bare epoch names no object, so the caller
+    ///   supplies it: `source_id` is the CARRIER's source, which normalization
+    ///   leaves in place while it zeroes the ability's own.
+    ///
+    /// Not visited here, each for a stated reason:
+    ///
+    /// - `source_incarnation`, `trigger_source`, `trigger_definition_ref` and
+    ///   `context.triggering_spell` are erased with `source_id` by
+    ///   `clear_source_provenance`;
+    /// - the last-known-information snapshots and the creation lookback event
+    ///   are walked by their own visitors
+    ///   ([`Self::for_each_loop_lki_snapshot_mut`],
+    ///   [`Self::for_each_creation_lookback_event_mut`]), because they hold
+    ///   records rather than one pin;
+    /// - `control_change_instruction` holds a capture id, not an incarnation:
+    ///   it keys a resolution-scoped table loop normalization clears, and a
+    ///   frame holding a resolution in progress is not loop-comparable;
+    /// - `cast_occurrence` is a journal coordinate, zeroed separately.
     pub(crate) fn for_each_loop_pin_mut(
         &mut self,
         source_id: ObjectId,
@@ -4842,8 +4880,50 @@ impl ResolvedAbility {
         {
             f(pin.object_id, &mut pin.incarnation);
         }
+        self.context
+            .attach_target_bindings
+            .for_each_incarnation_mut(f);
+        for snapshot in self
+            .cost_paid_object
+            .iter_mut()
+            .chain(self.effect_context_object.iter_mut())
+            .chain(self.amassed_army_object.iter_mut())
+        {
+            f(snapshot.object_id, &mut snapshot.incarnation);
+        }
+        if let Some(noted) = self.noted_mana_payment.as_mut() {
+            f(source_id, &mut noted.source_incarnation);
+        }
         for (_, child) in self.child_links_mut() {
             child.for_each_loop_pin_mut(source_id, f);
+        }
+    }
+
+    /// CR 608.2h + CR 400.7: every last-known-information snapshot this chain
+    /// carries, so loop normalization ranks the incarnations inside it (its
+    /// attachment pins) through the same visitor it uses for the stored
+    /// snapshots: the activation record's source, a discarded card's, and the
+    /// paid, effect-context and amassed-army objects'.
+    pub(crate) fn for_each_loop_lki_snapshot_mut(
+        &mut self,
+        f: &mut impl FnMut(&mut crate::types::game_state::LKISnapshot),
+    ) {
+        if let Some(record) = self.activation_record.as_deref_mut() {
+            f(&mut record.source_lki);
+        }
+        if let Some(result) = self.context.direct_discard_result.as_mut() {
+            f(&mut result.lki);
+        }
+        for snapshot in self
+            .cost_paid_object
+            .iter_mut()
+            .chain(self.effect_context_object.iter_mut())
+            .chain(self.amassed_army_object.iter_mut())
+        {
+            f(&mut snapshot.lki);
+        }
+        for (_, child) in self.child_links_mut() {
+            child.for_each_loop_lki_snapshot_mut(f);
         }
     }
 
