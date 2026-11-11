@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, Effect, PtValue,
-    TargetFilter,
+    StaticDefinition, TargetFilter,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
@@ -53,10 +53,12 @@ use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 use crate::ability_chain::collect_chain_effects;
-use crate::cast_facts::{collect_face_effects, EffectProfile};
+use crate::cast_facts::{
+    collect_face_effects, is_direct_removal, is_mass_damage_or_shrink, EffectProfile,
+};
 use crate::draft_eval::{dominant_colors, produced_color_count};
-use crate::features::aggro_pressure::static_grants_self_keyword;
 use crate::features::mana_ramp::{chain_has_mana_effect, chain_searches_for_land};
+use crate::policies::effect_classify::pt_value_is_non_negative;
 
 /// Where in the draft a pick happens: which booster, and which pick within it.
 ///
@@ -266,6 +268,16 @@ pub struct SetProfile {
     pub class_bonus: BTreeMap<CardClass, f64>,
     #[serde(default)]
     pub threat_need: Option<ThreatNeed>,
+    /// Whether a negative toughness `Pump` is removal in this set.
+    ///
+    /// CR 704.5f: a creature with toughness 0 or less is put into its owner's
+    /// graveyard, so "target creature gets -N/-N" is removal-shaped. Whether
+    /// that shape is part of a set's removal identity is a set-level fact:
+    /// Kamigawa prints cheap shrink removal, while a set that only prints it
+    /// incidentally keeps the class out of its existing scoring. Off by
+    /// default so a profile that does not opt in is never silently re-scored.
+    #[serde(default)]
+    pub toughness_reduction_removal: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -516,7 +528,10 @@ impl DraftProfile {
         let weights = self.stage_weights(position);
         let policy = &self.adaptive_draft_policy;
 
-        let classes = card.face.map(classify).unwrap_or_default();
+        let classes = card
+            .face
+            .map(|f| classify_with(f, set.toughness_reduction_removal))
+            .unwrap_or_default();
         let card_bonus = self.bonus_for_name(card.name);
         let award = ClassAward::new(set, &classes);
 
@@ -526,7 +541,7 @@ impl DraftProfile {
             .as_ref()
             .map_or(0.0, |need| self.threat_need_bonus(need, card, pool));
         let deck_need = if policy.deck_need_bonus.enabled {
-            deck_need_bonus(card, pool, policy.deck_need_bonus.maximum_per_card)
+            self.deck_need_bonus(card, pool, policy.deck_need_bonus.maximum_per_card)
         } else {
             0.0
         };
@@ -553,6 +568,7 @@ impl DraftProfile {
     }
 
     /// Distinct high-quality signals the pool has shown for each supported theme.
+    /// Each face is classified once and reused for every theme.
     pub fn theme_signals(&self, pool: &[ProfileCard<'_>]) -> BTreeMap<Theme, u32> {
         let themes = &self
             .adaptive_draft_policy
@@ -560,11 +576,11 @@ impl DraftProfile {
             .supported_themes;
         let mut seen: BTreeMap<Theme, BTreeSet<String>> = BTreeMap::new();
         for card in pool {
-            if self.bonus_for_name(card.name) < SIGNAL_QUALITY_THRESHOLD {
-                continue;
-            }
+            let classes = self.classify_card(card);
             for &theme in themes {
-                if self.is_theme_member(theme, card) {
+                if self.is_theme_signal(theme, card, &classes)
+                    && self.is_theme_member(theme, card, &classes)
+                {
                     seen.entry(theme)
                         .or_default()
                         .insert(card.name.to_lowercase());
@@ -577,14 +593,37 @@ impl DraftProfile {
             .collect()
     }
 
-    fn is_theme_member(&self, theme: Theme, card: &ProfileCard<'_>) -> bool {
+    /// Whether a card is a quality signal for `theme`.
+    ///
+    /// The name-keyed `card_bonus` list is the general gate, but it is
+    /// deliberately selective. Fixing is the one theme whose membership is
+    /// itself a quality judgement: a card that produces two colors or searches
+    /// out a land is real fixing even when the list does not name it, so
+    /// structural fixing qualifies without a named bonus. Without that, a
+    /// block whose fixers are modest (Orochi Leafcaller, Tendo Ice Bridge)
+    /// could never demonstrate the five-color theme the policy advertises.
+    fn is_theme_signal(
+        &self,
+        theme: Theme,
+        card: &ProfileCard<'_>,
+        classes: &BTreeSet<CardClass>,
+    ) -> bool {
+        self.bonus_for_name(card.name) >= SIGNAL_QUALITY_THRESHOLD
+            || (theme == Theme::FiveColorGoodstuff && classes.contains(&CardClass::ManaFixing))
+    }
+
+    fn is_theme_member(
+        &self,
+        theme: Theme,
+        card: &ProfileCard<'_>,
+        classes: &BTreeSet<CardClass>,
+    ) -> bool {
         if let Some(color) = theme.color() {
             return card.colors.iter().any(|c| c == color);
         }
         let Some(face) = card.face else {
             return false;
         };
-        let classes = classify(face);
         let in_pair = theme
             .color_pair()
             .is_some_and(|pair| card.colors.iter().any(|c| pair.contains(&c.as_str())));
@@ -655,10 +694,11 @@ impl DraftProfile {
         let policy = &self.adaptive_draft_policy;
         let minimum = policy.archetype_detection.minimum_signals.max(1);
         let cap = policy.archetype_synergy_bonus.maximum_per_card;
+        let classes = self.classify_card(card);
         self.theme_signals(pool)
             .into_iter()
             .filter(|&(_, signals)| signals >= minimum)
-            .filter(|&(theme, _)| self.is_theme_member(theme, card))
+            .filter(|&(theme, _)| self.is_theme_member(theme, card, &classes))
             .map(|(theme, signals)| {
                 let strength = cap * (f64::from(signals) / f64::from(2 * minimum)).min(1.0);
                 (strength - award.paid_through(theme.linked_classes())).max(0.0)
@@ -678,9 +718,10 @@ impl DraftProfile {
     /// artifacts count partially. Classes only another profile rewards (a
     /// Kamigawa evasive threat, say) do not make a Mirrodin artifact a role.
     fn artifact_weight(&self, card: &ProfileCard<'_>) -> f64 {
-        let has_role = card
-            .face
-            .is_some_and(|f| classify(f).into_iter().any(|c| self.rewards_class(c)));
+        let has_role = self
+            .classify_card(card)
+            .into_iter()
+            .any(|c| self.rewards_class(c));
         if has_role || self.bonus_for_name(card.name) >= SIGNAL_QUALITY_THRESHOLD {
             1.0
         } else {
@@ -733,7 +774,7 @@ impl DraftProfile {
         let Some(face) = card.face.filter(|f| is_creature(f)) else {
             return false;
         };
-        let classes = classify(face);
+        let classes = self.classify_card(card);
         if classes.contains(&CardClass::ManaCreature) || classes.contains(&CardClass::ManaFixing) {
             return false;
         }
@@ -743,6 +784,50 @@ impl DraftProfile {
         };
         self.bonus_for_name(card.name) >= PREMIUM_THREAT_THRESHOLD
             || (is_evasive(face) && power >= EVASIVE_THREAT_POWER)
+    }
+
+    /// Whether `set_code` treats a toughness reduction as removal.
+    fn shrink_counts_as_removal(&self, set_code: &str) -> bool {
+        self.set_profile(set_code)
+            .is_none_or(|set| set.toughness_reduction_removal)
+    }
+
+    /// Classify a card under its own set's removal policy.
+    fn classify_card(&self, card: &ProfileCard<'_>) -> BTreeSet<CardClass> {
+        let Some(face) = card.face else {
+            return BTreeSet::new();
+        };
+        classify_with(face, self.shrink_counts_as_removal(card.set_code))
+    }
+
+    /// The deck roles a card fills under its own set's removal policy.
+    fn roles_for(&self, card: &ProfileCard<'_>) -> Vec<DeckRole> {
+        let Some(face) = card.face else {
+            return Vec::new();
+        };
+        roles_with(face, self.shrink_counts_as_removal(card.set_code))
+    }
+
+    /// Diminishing-returns need: the best role the card fills, linearly spent
+    /// as the pool approaches that role's target and zero once it is met. Each
+    /// face is classified under its own set's removal policy.
+    fn deck_need_bonus(&self, card: &ProfileCard<'_>, pool: &[ProfileCard<'_>], cap: f64) -> f64 {
+        let card_roles = self.roles_for(card);
+        if card_roles.is_empty() {
+            return 0.0;
+        }
+        let mut have: BTreeMap<usize, f64> = BTreeMap::new();
+        for role in pool.iter().flat_map(|c| self.roles_for(c)) {
+            *have.entry(role as usize).or_insert(0.0) += 1.0;
+        }
+        ROLE_TARGETS
+            .iter()
+            .filter(|(role, _)| card_roles.contains(role))
+            .map(|&(role, target)| {
+                let held = have.get(&(role as usize)).copied().unwrap_or(0.0);
+                cap * ((target - held) / target).max(0.0)
+            })
+            .fold(0.0, f64::max)
     }
 }
 
@@ -775,48 +860,149 @@ const EVASION_KEYWORDS: &[Keyword] = &[
     Keyword::Horsemanship,
 ];
 
-/// Whether a continuous modification makes the affected creature evasive: an
-/// evasion keyword, or the CR 509.1b restriction "can't be blocked".
+/// CR 509.1b: `mode` restricts which creatures may block the affected
+/// creature — "can't be blocked", "can't be blocked by X", and "can't be
+/// blocked except by X" are all blocker restrictions on the attacker.
+fn is_block_restriction(mode: &StaticMode) -> bool {
+    matches!(
+        mode,
+        StaticMode::CantBeBlocked
+            | StaticMode::CantBeBlockedBy { .. }
+            | StaticMode::CantBeBlockedExceptBy { .. }
+    )
+}
+
+/// Whether a continuous modification makes the affected creature evasive:
+/// an evasion keyword, or a CR 509.1b blocker restriction.
 fn is_evasion_modification(modification: &ContinuousModification) -> bool {
     match modification {
         ContinuousModification::AddKeyword { keyword } => EVASION_KEYWORDS.contains(keyword),
-        ContinuousModification::AddStaticMode { mode } => *mode == StaticMode::CantBeBlocked,
-        _ => false,
+        ContinuousModification::AddStaticMode { mode } => is_block_restriction(mode),
+        // Exhaustive: every other modification changes a characteristic,
+        // grants an ability, or rewrites text — none restricts blocking.
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::CopyChosen
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
+        | ContinuousModification::SubstituteTextWord { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::GrantReplacement { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::SetDynamicPower { .. }
+        | ContinuousModification::SetDynamicToughness { .. }
+        | ContinuousModification::SetPowerDynamic { .. }
+        | ContinuousModification::SetToughnessDynamic { .. }
+        | ContinuousModification::AddDynamicPower { .. }
+        | ContinuousModification::AddDynamicToughness { .. }
+        | ContinuousModification::AddDynamicKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor { .. }
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. }
+        | ContinuousModification::RemoveManaCost => false,
     }
 }
 
+/// Whether a static definition applies to its own source (CR 604.1: an absent
+/// recipient means the source itself).
+fn static_affects_self(def: &StaticDefinition) -> bool {
+    matches!(def.affected, None | Some(TargetFilter::SelfRef))
+}
+
+/// Whether a static definition makes a creature other than its source
+/// evasive — the enabler shape ("enchanted creature can't be blocked by
+/// Spirits", "creatures you control have flying").
+fn static_grants_evasion(def: &StaticDefinition) -> bool {
+    !static_affects_self(def)
+        && (is_block_restriction(&def.mode)
+            || def.modifications.iter().any(is_evasion_modification))
+}
+
 /// Whether the face is evasive by its own abilities: a printed evasion
-/// keyword, one it grants itself, or "This creature can't be blocked"
-/// (CR 509.1b).
+/// keyword, or a CR 509.1b blocker restriction scoped to itself.
 fn is_evasive(face: &CardFace) -> bool {
     face.keywords.iter().any(|k| EVASION_KEYWORDS.contains(k))
         || face.static_abilities.iter().any(|s| {
-            (s.mode == StaticMode::CantBeBlocked
-                && matches!(s.affected, None | Some(TargetFilter::SelfRef)))
-                || (s.mode == StaticMode::Continuous
-                    && EVASION_KEYWORDS
-                        .iter()
-                        .any(|k| static_grants_self_keyword(s, k)))
+            static_affects_self(s)
+                && (is_block_restriction(&s.mode)
+                    || s.modifications.iter().any(is_evasion_modification))
         })
 }
 
-/// Whether a spell or ability on the face makes a creature evasive as it
-/// resolves ("Target creature ... can't be blocked this turn"): an attacker
-/// that connects is what a Ninjutsu activation needs (CR 702.49a).
-fn grants_evasion(face: &CardFace) -> bool {
-    face.abilities.iter().any(|a| {
-        collect_chain_effects(a).iter().any(|e| {
-            matches!(e, Effect::GenericEffect { static_abilities, .. }
-                if static_abilities
-                    .iter()
-                    .any(|s| s.modifications.iter().any(is_evasion_modification)))
-        })
+/// Whether an effect's granted static abilities make a creature evasive
+/// (CR 509.1b). A self-targeted grant stays the source's own evasion, not an
+/// enabler for another attacker.
+fn effect_grants_evasion(effect: &Effect) -> bool {
+    let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = effect
+    else {
+        return false;
+    };
+    if matches!(target, Some(TargetFilter::SelfRef)) {
+        return false;
+    }
+    static_abilities.iter().any(|s| {
+        is_block_restriction(&s.mode) || s.modifications.iter().any(is_evasion_modification)
     })
 }
 
-/// Whether a power/toughness value is a fixed reduction.
+/// Whether a spell, activated ability, trigger, or static on the face makes a
+/// creature evasive: an attacker that connects is what a Ninjutsu activation
+/// needs (CR 702.49a). Triggered abilities count — Guardian of Solitude's
+/// "whenever you cast a Spirit or Arcane spell, target creature gains flying"
+/// is exactly the enabler a Ninja deck wants.
+fn grants_evasion(face: &CardFace) -> bool {
+    collect_face_effects(face)
+        .into_iter()
+        .any(effect_grants_evasion)
+        || face.static_abilities.iter().any(static_grants_evasion)
+}
+
+/// Whether a power/toughness value lowers the stat. The parser carries the
+/// sign inside the value in two encodings the AI must read alike: a negative
+/// `Fixed`, and a signed variable (`Variable("-X")`) or a negative-multiplier
+/// `Quantity` — see [`crate::policies::effect_classify`].
 fn is_negative(value: &PtValue) -> bool {
-    matches!(value, PtValue::Fixed(n) if *n < 0)
+    !pt_value_is_non_negative(value)
 }
 
 /// Whether a power/toughness value is a fixed zero (no change).
@@ -834,14 +1020,33 @@ fn is_shrink_removal(effect: &Effect) -> bool {
     )
 }
 
-/// Removal-shaped effect anywhere on the face: what `EffectProfile` counts as
-/// removal or mass damage, or a toughness reduction (see [`is_shrink_removal`]).
-fn is_removal(face: &CardFace) -> bool {
-    let effects = collect_face_effects(face);
-    let profile = EffectProfile::from_effects(&effects);
-    profile.has_direct_removal_text
-        || profile.has_mass_damage_or_mass_shrink_text
-        || effects.into_iter().any(is_shrink_removal)
+/// Removal-shaped effect anywhere on the face: a direct removal effect, mass
+/// damage, or — when the set prints shrink removal — a toughness reduction
+/// (see [`is_shrink_removal`]).
+fn is_removal(face: &CardFace, shrink_is_removal: bool) -> bool {
+    collect_face_effects(face)
+        .into_iter()
+        .any(|effect| is_removal_effect(effect, shrink_is_removal))
+}
+
+fn is_removal_effect(effect: &Effect, shrink_is_removal: bool) -> bool {
+    match effect {
+        // CR 701.24: a bounce that returns the source itself ("you may return
+        // this creature to its owner's hand") does not remove an opposing
+        // threat, so it is not the Removal role.
+        Effect::Bounce {
+            target: TargetFilter::SelfRef,
+            ..
+        } => false,
+        // CR 704.5f: a toughness reduction can put a creature into its owner's
+        // graveyard. Mass shrink keeps counting for every profile (it is mass
+        // removal on its face); single-target shrink only in a set that
+        // declares it part of its removal identity.
+        Effect::Pump { .. } | Effect::PumpAll { .. } => {
+            (shrink_is_removal && is_shrink_removal(effect)) || is_mass_damage_or_shrink(effect)
+        }
+        other => is_direct_removal(other),
+    }
 }
 
 /// Whether the face makes mana of two or more colors or searches the library
@@ -859,8 +1064,16 @@ fn has_mana_ability(face: &CardFace) -> bool {
         .any(|a| a.kind == AbilityKind::Activated && chain_has_mana_effect(a))
 }
 
-/// Classify a face into the roles the profile's class bonuses key on.
+/// Classify a face into the roles the profile's class bonuses key on, with
+/// the rules-level reading that a toughness reduction is removal (CR 704.5f).
 pub fn classify(face: &CardFace) -> BTreeSet<CardClass> {
+    classify_with(face, true)
+}
+
+/// Classify a face under a set's removal policy: a set that does not treat
+/// shrink as removal (see [`SetProfile::toughness_reduction_removal`]) omits
+/// that class so its existing scores are unchanged.
+fn classify_with(face: &CardFace, shrink_is_removal: bool) -> BTreeSet<CardClass> {
     let core = &face.card_type.core_types;
     let mut classes = BTreeSet::new();
     let creature = is_creature(face);
@@ -879,7 +1092,7 @@ pub fn classify(face: &CardFace) -> BTreeSet<CardClass> {
     if is_equipment(face) {
         classes.insert(CardClass::Equipment);
     }
-    if is_removal(face) {
+    if is_removal(face, shrink_is_removal) {
         classes.insert(CardClass::Removal);
     }
     if face
@@ -999,10 +1212,17 @@ fn has_buff_effect(face: &CardFace) -> bool {
 }
 
 /// The deck roles a face fills, for the deck-need bonus. Each role uses the
-/// same predicate as the class bonus that advertises it.
+/// same predicate as the class bonus that advertises it. Test-only: scoring
+/// resolves each face's roles under its own set's removal policy through
+/// [`DraftProfile::roles_for`].
+#[cfg(test)]
 fn roles(face: &CardFace) -> Vec<DeckRole> {
+    roles_with(face, true)
+}
+
+fn roles_with(face: &CardFace, shrink_is_removal: bool) -> Vec<DeckRole> {
     let mut roles = Vec::new();
-    if is_removal(face) {
+    if is_removal(face, shrink_is_removal) {
         roles.push(DeckRole::Removal);
     }
     let creature = is_creature(face);
@@ -1022,32 +1242,6 @@ fn roles(face: &CardFace) -> Vec<DeckRole> {
         roles.push(DeckRole::Acceleration);
     }
     roles
-}
-
-/// Diminishing-returns need: the best role the card fills, linearly spent as the
-/// pool approaches that role's target and zero once it is met.
-fn deck_need_bonus(card: &ProfileCard<'_>, pool: &[ProfileCard<'_>], cap: f64) -> f64 {
-    let Some(face) = card.face else {
-        return 0.0;
-    };
-    let card_roles = roles(face);
-    if card_roles.is_empty() {
-        return 0.0;
-    }
-    let mut have: BTreeMap<usize, f64> = BTreeMap::new();
-    for owned in pool.iter().filter_map(|c| c.face) {
-        for role in roles(owned) {
-            *have.entry(role as usize).or_insert(0.0) += 1.0;
-        }
-    }
-    ROLE_TARGETS
-        .iter()
-        .filter(|(role, _)| card_roles.contains(role))
-        .map(|&(role, target)| {
-            let held = have.get(&(role as usize)).copied().unwrap_or(0.0);
-            cap * ((target - held) / target).max(0.0)
-        })
-        .fold(0.0, f64::max)
 }
 
 /// Unscaled off-color penalty: zero until the pool has a color read, then
@@ -1080,9 +1274,12 @@ fn off_color_penalty(card: &ProfileCard<'_>, pool: &[ProfileCard<'_>]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::types::ability::{AbilityDefinition, Effect, ManaContribution, ManaProduction};
+    use engine::types::ability::{
+        AbilityDefinition, Effect, ManaContribution, ManaProduction, StaticDefinition,
+    };
     use engine::types::card_type::CardType;
     use engine::types::mana::ManaColor;
+    use engine::types::statics::BlockExceptionKind;
 
     fn face(core: Vec<CoreType>, subtypes: &[&str]) -> CardFace {
         CardFace {
@@ -1609,6 +1806,37 @@ mod tests {
         engine::database::synthesis::build_oracle_face(&atomic, None)
     }
 
+    /// Sakura-Tribe Elder: a printed CHK fixer whose land search is the
+    /// controller's own library.
+    fn sakura_tribe_elder() -> CardFace {
+        oracle_face(serde_json::json!({
+            "name": "Sakura-Tribe Elder",
+            "manaCost": "{1}{G}",
+            "manaValue": 2.0,
+            "colors": ["G"],
+            "type": "Creature — Snake Shaman",
+            "types": ["Creature"],
+            "subtypes": ["Snake", "Shaman"],
+            "power": "1",
+            "toughness": "1",
+            "text": "Sacrifice this creature: Search your library for a basic land card, put that card onto the battlefield tapped, then shuffle.",
+        }))
+    }
+
+    /// Kodama's Reach: a printed CHK Arcane fixer.
+    fn kodama_s_reach() -> CardFace {
+        oracle_face(serde_json::json!({
+            "name": "Kodama's Reach",
+            "manaCost": "{2}{G}",
+            "manaValue": 3.0,
+            "colors": ["G"],
+            "type": "Sorcery — Arcane",
+            "types": ["Sorcery"],
+            "subtypes": ["Arcane"],
+            "text": "Search your library for up to two basic land cards, reveal those cards, put one onto the battlefield tapped and the other into your hand, then shuffle.",
+        }))
+    }
+
     #[test]
     fn channel_is_identified_per_ability() {
         let hand_discard_self = |f: &CardFace| {
@@ -1708,18 +1936,7 @@ mod tests {
     #[test]
     fn land_search_creature_rated_highly_is_not_a_finisher() {
         let p = DraftProfile::kamigawa_block();
-        let elder = oracle_face(serde_json::json!({
-            "name": "Sakura-Tribe Elder",
-            "manaCost": "{1}{G}",
-            "manaValue": 2.0,
-            "colors": ["G"],
-            "type": "Creature — Snake Shaman",
-            "types": ["Creature"],
-            "subtypes": ["Snake", "Shaman"],
-            "power": "1",
-            "toughness": "1",
-            "text": "Sacrifice this creature: Search your library for a basic land card, put that card onto the battlefield tapped, then shuffle.",
-        }));
+        let elder = sakura_tribe_elder();
         let green = vec!["G".to_string()];
         let elder_card = card("Sakura-Tribe Elder", "CHK", &green, &elder);
         assert!(p.bonus_for_name(elder_card.name) >= PREMIUM_THREAT_THRESHOLD);
@@ -1767,12 +1984,14 @@ mod tests {
         // Distinct quality Arcane spells (card bonus >= 1.0).
         let mut pool = vec![
             card("Glacial Ray", "CHK", &red, &arcane_instant),
-            card("Rend Flesh", "CHK", &black, &arcane_sorcery),
+            // Rend Flesh is printed as an Instant in Champions.
+            card("Rend Flesh", "CHK", &black, &arcane_instant),
         ];
         let below = score15(p, &probe, &pool, 0.0, 0.0).unwrap();
         assert_eq!(below.archetype_synergy, 0.0, "theme not yet demonstrated");
 
-        pool.push(card("Horobi's Whisper", "CHK", &black, &arcane_instant));
+        // Horobi's Whisper is printed in Betrayers.
+        pool.push(card("Horobi's Whisper", "BOK", &black, &arcane_instant));
         pool.push(card("Blind with Anger", "CHK", &red, &arcane_instant));
         assert_eq!(p.theme_signals(&pool)[&Theme::ArcaneSpliceControl], 4);
         let s = score15(p, &probe, &pool, 0.0, 0.0).unwrap();
@@ -1858,6 +2077,35 @@ mod tests {
         }
         // Positive control: an Equipment role earns the full weight.
         assert_eq!(density("Bonesplitter", &equipment), 1.0);
+
+        // Nim Replica prints a "-1/-1" shrink. It is rules-level removal, but
+        // Mirrodin does not opt into shrink removal, so the card keeps its
+        // 0.5 filler weight and earns no class bonus: Mirrodin scoring is
+        // unchanged by the Kamigawa role.
+        let nim = oracle_face(serde_json::json!({
+            "name": "Nim Replica",
+            "manaCost": "{3}",
+            "manaValue": 3.0,
+            "colors": [],
+            "type": "Artifact Creature — Zombie",
+            "types": ["Artifact", "Creature"],
+            "subtypes": ["Zombie"],
+            "power": "3",
+            "toughness": "1",
+            "text": "{2}{B}, Sacrifice this creature: Target creature gets -1/-1 until end of turn.",
+        }));
+        assert!(
+            classify(&nim).contains(&CardClass::Removal),
+            "positive guard: the shrink is removal-shaped"
+        );
+        assert!(!classify_with(&nim, false).contains(&CardClass::Removal));
+        assert_eq!(
+            p.artifact_weight(&card("Nim Replica", "MRD", &[], &nim)),
+            FILLER_ARTIFACT_WEIGHT
+        );
+        let nim_score = score15(p, &card("Nim Replica", "MRD", &[], &nim), &[], 0.0, 0.0).unwrap();
+        assert_eq!(nim_score.class_bonus, 0.0);
+        assert_eq!(nim_score.artifact_density, 0.5);
     }
 
     #[test]
@@ -1946,14 +2194,59 @@ mod tests {
             .class_bonus,
             0.9
         );
+
+        // Sickening Shoal: "Target creature gets -X/-X until end of turn."
+        // The sign lives in the typed variable, so the reduction must read as
+        // negative exactly like a fixed one.
+        let shoal = oracle_face(serde_json::json!({
+            "name": "Sickening Shoal",
+            "manaCost": "{X}{B}{B}",
+            "manaValue": 2.0,
+            "colors": ["B"],
+            "type": "Instant — Arcane",
+            "types": ["Instant"],
+            "subtypes": ["Arcane"],
+            "text": "You may exile a black card with mana value X from your hand rather than pay this spell's mana cost.\nTarget creature gets -X/-X until end of turn.",
+        }));
+        assert!(!has_buff_effect(&shoal), "a -X/-X is not a buff");
+        assert!(classify(&shoal).contains(&CardClass::Removal));
+        assert!(!classify(&shoal).contains(&CardClass::CombatTrick));
+        assert!(roles(&shoal).contains(&DeckRole::Removal));
+        assert_eq!(
+            score15(
+                p,
+                &card("Sickening Shoal", "BOK", &black, &shoal),
+                &[],
+                0.0,
+                0.0
+            )
+            .unwrap()
+            .class_bonus,
+            0.9
+        );
+
+        // Positive control: a real +2/+2 still reads as a buff and a trick.
+        let trick = oracle_face(serde_json::json!({
+            "name": "Test Arcane Trick",
+            "manaCost": "{1}{G}",
+            "manaValue": 2.0,
+            "colors": ["G"],
+            "type": "Instant — Arcane",
+            "types": ["Instant"],
+            "subtypes": ["Arcane"],
+            "text": "Target creature gets +2/+2 until end of turn.",
+        }));
+        assert!(has_buff_effect(&trick));
+        assert!(classify(&trick).contains(&CardClass::CombatTrick));
     }
 
     #[test]
     fn printed_land_search_is_fixing_for_both_class_and_deck_role() {
         let p = DraftProfile::kamigawa_block();
         let green = vec!["G".to_string()];
-        // Seek the Horizon: "Search your library for up to three basic land
-        // cards, reveal them, put them into your hand, then shuffle."
+        // Seek the Horizon's block printing is SOK, whose class table has no
+        // fixing award: its contribution must come from the deck-need Fixing
+        // role, not from a class bonus.
         let seek = oracle_face(serde_json::json!({
             "name": "Seek the Horizon",
             "manaCost": "{3}{G}",
@@ -1967,10 +2260,24 @@ mod tests {
         assert!(is_mana_fixing(&seek));
         assert!(classify(&seek).contains(&CardClass::ManaFixing));
         assert!(roles(&seek).contains(&DeckRole::Fixing));
+        let seek_score = score15(
+            p,
+            &card("Seek the Horizon", "SOK", &green, &seek),
+            &[],
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(seek_score.class_bonus, 0.0, "SOK has no fixing award");
+        assert_eq!(seek_score.deck_need, 2.0, "the Fixing role still applies");
+
+        // Sakura-Tribe Elder is the printed CHK fixer whose class the set pays.
+        let elder = sakura_tribe_elder();
+        assert!(classify(&elder).contains(&CardClass::ManaFixing));
         assert_eq!(
             score15(
                 p,
-                &card("Seek the Horizon", "CHK", &green, &seek),
+                &card("Sakura-Tribe Elder", "CHK", &green, &elder),
                 &[],
                 0.0,
                 0.0
@@ -1978,6 +2285,224 @@ mod tests {
             .unwrap()
             .class_bonus,
             0.25
+        );
+
+        // Kodama's Reach is also printed CHK fixing; its Arcane class outranks
+        // the fixing bonus, so the Fixing role is what the deck-need term reads.
+        let kodama = kodama_s_reach();
+        assert!(classify(&kodama).contains(&CardClass::ManaFixing));
+        assert!(roles(&kodama).contains(&DeckRole::Fixing));
+        assert_eq!(
+            score15(
+                p,
+                &card("Kodama's Reach", "CHK", &green, &kodama),
+                &[],
+                0.0,
+                0.0
+            )
+            .unwrap()
+            .class_bonus,
+            0.45,
+            "Arcane outranks the fixing award"
+        );
+    }
+
+    #[test]
+    fn printed_self_bounce_is_not_removal() {
+        let p = DraftProfile::kamigawa_block();
+        let green = vec!["G".to_string()];
+        let haru = oracle_face(serde_json::json!({
+            "name": "Haru-Onna",
+            "manaCost": "{3}{G}",
+            "manaValue": 4.0,
+            "colors": ["G"],
+            "type": "Creature — Spirit",
+            "types": ["Creature"],
+            "subtypes": ["Spirit"],
+            "power": "2",
+            "toughness": "1",
+            "text": "When this creature enters, draw a card.\nWhenever you cast a Spirit or Arcane spell, you may return this creature to its owner's hand.",
+        }));
+        assert!(
+            collect_face_effects(&haru).iter().any(|e| matches!(
+                e,
+                Effect::Bounce {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            )),
+            "positive guard: the trigger is a typed self-bounce"
+        );
+        let classes = classify(&haru);
+        assert!(!classes.contains(&CardClass::Removal));
+        assert!(!roles(&haru).contains(&DeckRole::Removal));
+        assert_eq!(
+            score15(p, &card("Haru-Onna", "SOK", &green, &haru), &[], 0.0, 0.0)
+                .unwrap()
+                .class_bonus,
+            0.5,
+            "Spirit, not Removal"
+        );
+    }
+
+    #[test]
+    fn printed_triggered_evasion_grant_is_a_ninjutsu_enabler() {
+        let p = DraftProfile::kamigawa_block();
+        let blue = vec!["U".to_string()];
+        // Guardian of Solitude: "Whenever you cast a Spirit or Arcane spell,
+        // target creature gains flying until end of turn."
+        let guardian = oracle_face(serde_json::json!({
+            "name": "Guardian of Solitude",
+            "manaCost": "{1}{U}",
+            "manaValue": 2.0,
+            "colors": ["U"],
+            "type": "Creature — Spirit",
+            "types": ["Creature"],
+            "subtypes": ["Spirit"],
+            "power": "1",
+            "toughness": "2",
+            "text": "Whenever you cast a Spirit or Arcane spell, target creature gains flying until end of turn.",
+        }));
+        let classes = classify(&guardian);
+        assert!(
+            classes.contains(&CardClass::NinjutsuEnabler),
+            "a triggered evasion grant is a Ninjutsu enabler"
+        );
+        assert!(!classes.contains(&CardClass::EvasiveThreat));
+        assert!(roles(&guardian).contains(&DeckRole::Evasion));
+        let scored = score15(
+            p,
+            &card("Guardian of Solitude", "CHK", &blue, &guardian),
+            &[],
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(scored.class_bonus, 0.55, "Spirit");
+        assert_eq!(
+            scored.deck_need, 2.0,
+            "the Evasion role is empty in the pool"
+        );
+    }
+
+    #[test]
+    fn blocker_restrictions_are_evasion_in_both_paths() {
+        let p = DraftProfile::kamigawa_block();
+        let blue = vec!["U".to_string()];
+
+        // Field of Reality: "Enchanted creature can't be blocked by Spirits."
+        let field = oracle_face(serde_json::json!({
+            "name": "Field of Reality",
+            "manaCost": "{2}{U}",
+            "manaValue": 3.0,
+            "colors": ["U"],
+            "type": "Enchantment — Aura",
+            "types": ["Enchantment"],
+            "subtypes": ["Aura"],
+            "text": "Enchant creature\nEnchanted creature can't be blocked by Spirits.\n{1}{U}: Return this Aura to its owner's hand.",
+        }));
+        assert!(
+            field
+                .static_abilities
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::CantBeBlockedBy { .. })),
+            "positive guard: the parser exports the blocker restriction"
+        );
+        let classes = classify(&field);
+        assert!(classes.contains(&CardClass::NinjutsuEnabler));
+        assert!(
+            !classes.contains(&CardClass::EvasiveThreat),
+            "an Aura is not itself an attacker"
+        );
+        assert!(
+            !classes.contains(&CardClass::Removal),
+            "returning the Aura itself is not removal"
+        );
+        assert!(roles(&field).contains(&DeckRole::Evasion));
+        assert_eq!(
+            score15(
+                p,
+                &card("Field of Reality", "CHK", &blue, &field),
+                &[],
+                0.0,
+                0.0
+            )
+            .unwrap()
+            .deck_need,
+            2.0
+        );
+
+        // A self-scoped typed "can't be blocked except by ..." static is the
+        // creature's own evasion.
+        let mut guarded = face(vec![CoreType::Creature], &[]);
+        guarded.static_abilities.push(
+            StaticDefinition::new(StaticMode::CantBeBlockedExceptBy {
+                kind: BlockExceptionKind::Quality(TargetFilter::Any),
+            })
+            .affected(TargetFilter::SelfRef),
+        );
+        assert!(classify(&guarded).contains(&CardClass::EvasiveThreat));
+
+        // A granted typed blocker restriction is an enabler as it resolves.
+        let grant = oracle_face(serde_json::json!({
+            "name": "Test Blocker Restriction Grant",
+            "manaCost": "{1}{U}",
+            "manaValue": 2.0,
+            "colors": ["U"],
+            "type": "Instant",
+            "types": ["Instant"],
+            "text": "Target creature can't be blocked by Spirits until end of turn.",
+        }));
+        assert!(classify(&grant).contains(&CardClass::NinjutsuEnabler));
+        assert!(roles(&grant).contains(&DeckRole::Evasion));
+    }
+
+    #[test]
+    fn five_color_theme_reaches_three_signals_with_printed_fixers() {
+        let p = DraftProfile::kamigawa_block();
+        let green = vec!["G".to_string()];
+        let kodama = kodama_s_reach();
+        let elder = sakura_tribe_elder();
+        let leafcaller = oracle_face(serde_json::json!({
+            "name": "Orochi Leafcaller",
+            "manaCost": "{G}",
+            "manaValue": 1.0,
+            "colors": ["G"],
+            "type": "Creature — Snake Shaman",
+            "types": ["Creature"],
+            "subtypes": ["Snake", "Shaman"],
+            "power": "1",
+            "toughness": "1",
+            "text": "{G}: Add one mana of any color.",
+        }));
+        // Structural fixing is a signal even without a named card bonus: the
+        // selective list does not name Orochi Leafcaller.
+        assert_eq!(p.bonus_for_name("Orochi Leafcaller"), 0.0);
+        assert!(classify(&leafcaller).contains(&CardClass::ManaFixing));
+
+        let two = vec![
+            card("Kodama's Reach", "CHK", &green, &kodama),
+            card("Sakura-Tribe Elder", "CHK", &green, &elder),
+        ];
+        assert_eq!(p.theme_signals(&two)[&Theme::FiveColorGoodstuff], 2);
+        let probe = card("Kodama's Reach", "CHK", &green, &kodama);
+        assert_eq!(
+            score15(p, &probe, &two, 0.0, 0.0)
+                .unwrap()
+                .archetype_synergy,
+            0.0,
+            "two signals is below the policy's minimum of three"
+        );
+
+        let mut three = two.clone();
+        three.push(card("Orochi Leafcaller", "CHK", &green, &leafcaller));
+        assert_eq!(p.theme_signals(&three)[&Theme::FiveColorGoodstuff], 3);
+        assert!(
+            score15(p, &probe, &three, 0.0, 0.0)
+                .unwrap()
+                .archetype_synergy
+                > 0.0,
+            "the third printed fixer activates the five-color theme"
         );
     }
 

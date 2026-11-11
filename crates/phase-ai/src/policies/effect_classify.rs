@@ -120,7 +120,7 @@ fn counter_sign_polarity(counter_type: &CounterType) -> EffectPolarity {
 ///
 /// Every other `Quantity` shape counts up from a non-negative game quantity, and
 /// a `Fixed` modifier carries its own sign.
-fn pt_value_is_non_negative(value: &PtValue) -> bool {
+pub(crate) fn pt_value_is_non_negative(value: &PtValue) -> bool {
     match value {
         PtValue::Fixed(v) => *v >= 0,
         PtValue::Variable(name) => !name.starts_with('-'),

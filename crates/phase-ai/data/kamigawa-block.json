@@ -13,6 +13,7 @@
         "combat_trick": 0.15,
         "mana_fixing": 0.25
       },
+      "toughness_reduction_removal": true,
       "threat_need": {
         "target": 4,
         "bonus": 1.25,
@@ -31,6 +32,7 @@
         "soulshift": 0.35,
         "splice": 0.35
       },
+      "toughness_reduction_removal": true,
       "threat_need": {
         "target": 4,
         "bonus": 1.25,
@@ -48,6 +50,7 @@
         "soulshift": 0.35,
         "splice": 0.3
       },
+      "toughness_reduction_removal": true,
       "threat_need": {
         "target": 4,
         "bonus": 1.25,

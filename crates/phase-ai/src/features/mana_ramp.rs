@@ -248,14 +248,31 @@ pub(crate) fn chain_has_mana_effect(ability: &AbilityDefinition) -> bool {
 }
 
 /// Return true if the ability's effect chain includes `Effect::SearchLibrary`
-/// whose filter references a Land (not any-card tutors).
+/// of the controller's own library whose filter references a Land (not
+/// any-card tutors, and not "search target opponent's library" such as Eternal
+/// Dominion, which takes a card away from the opponent rather than fixing the
+/// controller's mana).
 pub(crate) fn chain_searches_for_land(ability: &AbilityDefinition) -> bool {
     collect_chain_effects(ability).iter().any(|e| {
         matches!(
             e,
-            Effect::SearchLibrary { filter, .. } if target_filter_references_land(filter)
+            Effect::SearchLibrary {
+                filter,
+                target_player,
+                ..
+            } if searches_own_library(target_player) && target_filter_references_land(filter)
         )
     })
+}
+
+/// CR 701.23a: a search serves the controller's mana only when it searches the
+/// controller's own library. An explicit `target_player` names another player's
+/// library; `None` is the controller's own.
+fn searches_own_library(target_player: &Option<TargetFilter>) -> bool {
+    matches!(
+        target_player,
+        None | Some(TargetFilter::Controller | TargetFilter::SourceController)
+    )
 }
 
 /// Return true if the chain puts the found card to the battlefield or hand.
@@ -579,6 +596,51 @@ mod tests {
             },
         )));
         let mut face = card_face_with_types("Gift Spell", vec![CoreType::Sorcery]);
+        face.abilities.push(ability);
+        let deck = vec![entry(face, 1)];
+
+        let feature = detect(&deck);
+        assert_eq!(feature.land_fetch_count, 0);
+    }
+
+    #[test]
+    fn opponent_scoped_land_search_not_fixing() {
+        // Eternal Dominion: "Search target opponent's library for an artifact,
+        // creature, enchantment, or land card. Put that card onto the
+        // battlefield under your control." The land filter alone must not make
+        // an opponent's library count as the controller's fixing.
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::land()),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::Opponent),
+                selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
+            },
+        );
+        ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                library_shuffle: Default::default(),
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter::land()),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )));
+        let mut face = card_face_with_types("Eternal Dominion", vec![CoreType::Sorcery]);
         face.abilities.push(ability);
         let deck = vec![entry(face, 1)];
 
