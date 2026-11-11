@@ -650,25 +650,32 @@ pub(crate) fn apply_damage_to_target(
             Ok(DamageResult::Applied(0))
         }
         ReplacementResult::NeedsChoice(player) => {
+            park_damage_context(state, ctx);
             // Only set waiting_for for non-combat damage; combat damage cannot pause mid-resolution.
             if !is_combat {
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
             }
-            // CR 120.4a + CR 702.15b: stash the excess-redirect rider and the
-            // deferred lifelink bonus on the parked replacement so the resume
-            // (`handle_replacement_choice`, which rebuilds the ctx from the source
-            // and cannot re-derive either) still redirects the excess and gains the
-            // combined lifelink for a paused redirect leg.
-            if let Some(pending) = state.pending_replacement.as_mut() {
-                pending.excess_recipient = ctx.excess_recipient;
-                pending.lifelink_bonus = ctx.lifelink_bonus;
-                // CR 400.7: and the source incarnation that dealt the damage,
-                // which the source-derived rebuild would read from the live
-                // (possibly new) object.
-                pending.source_incarnation = ctx.source_incarnation;
-            }
             Ok(DamageResult::NeedsChoice)
         }
+    }
+}
+
+/// CR 120.4a + CR 702.15b + CR 400.7: Stash the paused source's `DamageContext`
+/// riders on the `ProposedEvent::Damage` record the replacement pipeline just
+/// parked. The resume (`handle_replacement_choice`) rebuilds the ctx from the
+/// source and cannot re-derive the excess-redirect rider, the deferred lifelink
+/// bonus, or the incarnation that dealt the damage (the rebuild would read the
+/// live, possibly new, object). Every non-combat damage park calls this before
+/// surfacing the prompt, so the capture lives in one place.
+fn park_damage_context(state: &mut GameState, ctx: &DamageContext) {
+    if let Some(pending) = state
+        .pending_replacement
+        .as_mut()
+        .filter(|pending| matches!(pending.proposed, ProposedEvent::Damage { .. }))
+    {
+        pending.excess_recipient = ctx.excess_recipient;
+        pending.lifelink_bonus = ctx.lifelink_bonus;
+        pending.source_incarnation = ctx.source_incarnation;
     }
 }
 
@@ -2699,12 +2706,14 @@ fn resolve_each_target_power_damage(
                 // the recipient needs a player ordering choice — pause the batch.
                 // The paused source's own damage event lives in `pending_replacement`
                 // and resumes through `handle_replacement_choice` (which rebuilds
-                // its `DamageContext` from the event's own `source_id`). Apply the
+                // its `DamageContext` from the event's own `source_id` and restores
+                // the riders `park_damage_context` stashed). Apply the
                 // survivors already chosen this pass, then stash only the sources
                 // AFTER this one (`batch[idx + 1..]`) — each with PER-SOURCE
                 // identity so it resumes through its OWN source id's keywords/LKI,
                 // never flattened to a single source (the exact defect this batch
                 // replaces). Including `idx` would double-deal the paused source.
+                park_damage_context(state, ctx);
                 apply_batch_survivors_before_replacement_pause(state, &survivors, events);
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                 let remaining = batch
@@ -3901,6 +3910,7 @@ pub fn resolve_each_source_deals_damage(
                 // (they still need replacement). The `replace_event` call already
                 // registered the pending replacement in state; we just set
                 // `waiting_for` and return.
+                park_damage_context(state, ctx);
                 phase_b_paused_at = Some(i);
                 phase_b_waiting_for_player = Some(player);
                 break;
@@ -4570,6 +4580,90 @@ mod tests {
             parent_event_seen,
             "pause-and-resume path must emit the parent effect resolution event"
         );
+    }
+
+    /// CR 400.7 + CR 616.1e: the `EachSourceDealsDamage` Phase B park stashes
+    /// the paused source's incarnation on the parked damage record (via
+    /// `park_damage_context`), and the resumed hit records that incarnation.
+    #[test]
+    fn each_source_phase_b_park_captures_the_source_incarnation() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = GameState::new_two_player(42);
+        state.priority_player = PlayerId(0);
+        state.active_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Pinger".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Large Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, power) in [(source, 2), (recipient, 0)] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(power);
+            obj.base_power = Some(power);
+            obj.toughness = Some(9);
+            obj.base_toughness = Some(9);
+        }
+        install_optional_damage_replacement(&mut state);
+        let incarnation = state.objects[&source].incarnation;
+
+        let ability = ResolvedAbility::new(
+            Effect::EachSourceDealsDamage {
+                sources: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }),
+                amount: QuantityExpr::Fixed { value: 1 },
+                recipient: EachDamageRecipient::Shared(TargetFilter::Any),
+            },
+            vec![TargetRef::Object(recipient)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_each_source_deals_damage(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let pending = state
+            .pending_replacement
+            .as_ref()
+            .expect("reach-guard: the Phase B damage park");
+        assert!(
+            matches!(pending.proposed, ProposedEvent::Damage { source_id, .. } if source_id == source),
+            "reach-guard: the parked record is the source's damage"
+        );
+        assert_eq!(
+            pending.source_incarnation,
+            Some(incarnation),
+            "the park captured the dealing incarnation"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("accept the damage replacement");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        let records: Vec<_> = state
+            .damage_dealt_this_turn
+            .iter()
+            .filter(|record| record.source_id == source)
+            .map(|record| record.source_incarnation)
+            .collect();
+        assert_eq!(records, vec![Some(incarnation)]);
     }
 
     /// CR 120.3 + CR 616.1e + CR 202.3e: Lady Loki, Agent of Chaos — when a

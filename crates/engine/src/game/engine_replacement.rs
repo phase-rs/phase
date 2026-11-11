@@ -731,9 +731,14 @@ fn handle_replacement_choice_inner(
                     ctx.lifelink_bonus = parked_lifelink_bonus;
                     // CR 400.7: the rebuild read the LIVE object's incarnation; a
                     // source that left and returned since dealing the damage is a
-                    // new object, so restore the captured one (`None`, a record
-                    // saved before the field, keeps the history guard's zone check).
-                    ctx.source_incarnation = parked_source_incarnation;
+                    // new object, so restore the captured one. `Some` = captured
+                    // at park time (`park_damage_context`); `None` = not captured
+                    // (a record saved before the field, or a park that never
+                    // passed through the helper), so keep the rebuilt live value
+                    // exactly as before the field existed.
+                    if let Some(incarnation) = parked_source_incarnation {
+                        ctx.source_incarnation = Some(incarnation);
+                    }
                     if matches!(
                         apply_damage_after_replacement(state, &ctx, damage, is_combat, events),
                         DamageResult::NeedsChoice
@@ -2186,9 +2191,10 @@ fn handle_replacement_choice_inner(
             // ZoneChange arm above).
             //
             // This clear is pre-existing and unconditional: after a prevented
-            // resumed damage hit it also drops the remaining recipients of a
-            // damage effect's continuation (e.g. the rest of a `DamageAll`), so
-            // no damage-chain continuation survives to the resume below.
+            // resumed damage hit it drops the active (top) continuation,
+            // including a damage effect's remaining recipients (e.g. the rest
+            // of a `DamageAll`). A damage-parent frame stacked beneath another
+            // continuation frame is not expected here.
             if state.active_ability_continuation().is_some() {
                 let _ = state
                     .clear_active_ability_continuation()

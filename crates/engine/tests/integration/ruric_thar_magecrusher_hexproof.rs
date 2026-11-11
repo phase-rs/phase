@@ -47,7 +47,7 @@ use engine::types::game_state::{CastPaymentMode, DamagePostLossStage, GameState,
 use engine::types::game_state::{DamageRecord, PersistedGameState, PersistedRestoreFinalization};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, ProtectionTarget};
-use engine::types::mana::ManaColor;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::proposed_event::{CounterPlacement, ProposedEvent};
@@ -4798,6 +4798,125 @@ fn b9_2_blinked_source_history_survives_a_damage_ordering_prompt() {
             can_target(&legal, guardian, P0),
             !stale,
             "blink={blink}: an opponent can target only the damage-dealt incarnation"
+        );
+    }
+}
+
+/// Verbatim Oracle text of Coordinated Clobbering.
+const COORDINATED_CLOBBERING_ORACLE_TEXT: &str = "Tap one or two target untapped creatures you control. They each deal damage equal to their power to target creature an opponent controls.";
+
+/// B9-3 - CR 400.7 + CR 616.1: Coordinated Clobbering makes a red Karakyk Guardian and
+/// a vanilla 2/2 each deal their power to P1's 0/30 creature under Furnace of
+/// Rath and Torbran, so the each-target-power batch parks the Guardian's damage
+/// on P1's ORDER prompt (CR 616.1); the non-red 2/2 (Furnace only) needs no
+/// prompt. The park must capture the Guardian's incarnation on the record; the
+/// answer resumes through a context rebuilt from the live object. Torbran
+/// first: (6 + 2) * 2 = 16, plus 2 * 2 = 4 from the 2/2. `legacy` clears the
+/// parked incarnation at the prompt (a record saved before the field, or an
+/// uncaptured park): the resume must keep the live incarnation rather than
+/// regress to `None`. Either way the occurrence carries the dealing
+/// incarnation, both sticky stores are written and the Guardian loses hexproof.
+#[test]
+fn b9_3_each_target_power_park_keeps_the_dealing_incarnation() {
+    for legacy in [false, true] {
+        let db = shared_card_db().expect("integration card fixture must be available");
+        let mut scenario = base_scenario();
+        let guardian = {
+            let mut builder = scenario.add_creature(P0, "Karakyk Guardian", 6, 6);
+            builder.from_oracle_text_with_keywords(
+                &["Flying", "Vigilance", "Trample"],
+                KARAKYK_ORACLE_TEXT,
+            );
+            builder.with_color(vec![ManaColor::Red]);
+            builder.id()
+        };
+        scenario.add_real_card(P0, "Furnace of Rath", Zone::Battlefield, db);
+        let torbran = scenario
+            .add_creature(P0, "Torbran, Thane of Red Fell", 2, 4)
+            .from_oracle_text(TORBRAN_ORACLE_TEXT)
+            .id();
+        let ally = scenario.add_vanilla(P0, 2, 2);
+        let wall = scenario.add_vanilla(P1, 0, 30);
+        let clobbering = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Coordinated Clobbering",
+                false,
+                COORDINATED_CLOBBERING_ORACLE_TEXT,
+            )
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let opp_bolt = scenario.add_bolt_to_hand(P1);
+        let mut runner = scenario.build();
+        assert!(hexproof_now(runner.state(), guardian), "premise: hexproof");
+        let incarnation = runner.state().objects[&guardian].incarnation;
+        let mut events = runner
+            .cast(clobbering)
+            .target_objects(&[guardian, ally, wall])
+            .commit()
+            .events()
+            .to_vec();
+        for _ in 0..4 {
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            events.extend(runner.act(GameAction::PassPriority).expect("pass").events);
+        }
+        assert_eq!(
+            choice_kind(&runner),
+            (P1, "damage"),
+            "legacy={legacy}: reach-guard: the damage ordering prompt occurred"
+        );
+        let pending = runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .expect("the choice is pending");
+        assert!(
+            matches!(pending.proposed, ProposedEvent::Damage { source_id, .. } if source_id == guardian),
+            "reach-guard: the parked record is the Guardian's damage"
+        );
+        assert_eq!(
+            pending.source_incarnation,
+            Some(incarnation),
+            "the each-target-power park captured the dealing incarnation"
+        );
+        if legacy {
+            runner
+                .state_mut()
+                .pending_replacement
+                .as_mut()
+                .expect("the choice is pending")
+                .source_incarnation = None;
+        }
+        let (prompts, _) = drive_waits(&mut runner, &mut events, |runner| {
+            candidate_from(runner, torbran)
+        });
+        assert_eq!(
+            prompts,
+            vec![(P1, "damage", false)],
+            "legacy={legacy}: one damage ordering prompt"
+        );
+        let state = runner.state();
+        assert_eq!(state.objects[&wall].damage_marked, 20, "16 + 4");
+        let records: Vec<_> = state
+            .damage_dealt_this_turn
+            .iter()
+            .filter(|record| record.source_id == guardian)
+            .map(|record| (record.source_incarnation, record.amount))
+            .collect();
+        assert_eq!(
+            records,
+            vec![(Some(incarnation), 16)],
+            "legacy={legacy}: the occurrence keeps the dealing incarnation"
+        );
+        assert!(state.objects_that_dealt_damage.contains(&guardian));
+        assert!(!state.objects[&guardian].dealt_damage_kinds.is_empty());
+        assert!(!hexproof_now(state, guardian));
+        let legal = bolt_legal_targets(&mut runner, P1, opp_bolt);
+        assert!(
+            can_target(&legal, guardian, P0),
+            "legacy={legacy}: the Guardian dealt damage, so an opponent can target it"
         );
     }
 }
