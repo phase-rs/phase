@@ -4261,9 +4261,9 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       // reconnect_draft_seat refuses before installing anything (main.rs:2582, answered at :13100).
       ["Invalid player token"],
       // attach_current_draft_match fails AFTER reconnect_draft_seat installed this
-      // candidate as the seat's sender (main.rs:2584, :2699 -> :2057), answered
-      // alone at :13091: the candidate owns the draft seat.
-      ["Reconnect grace period expired"],
+      // candidate as the seat's sender (main.rs:2584, then :2685), answered alone
+      // at :13091: the candidate owns the draft seat.
+      ["Draft match Full identity is unavailable"],
     ] as const)("keeps the candidate a lone DraftActionRejected (%s) answered, as the merge base did", async (reason) => {
       vi.useFakeTimers();
       const { adapter, candidate, reconnecting } = await sentCandidate();
@@ -4284,6 +4284,29 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
         const view = createMockDraftView({ pick_number: 5 });
         receive(candidate, "DraftStateUpdate", { view });
         await vi.waitFor(() => expect(events).toContainEqual({ type: "draftViewUpdated", view }));
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not adopt on a truncated canonical bootstrap: the bound retires both sockets and rejects the reattach", async () => {
+      vi.useFakeTimers();
+      const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();
+      try {
+        // Canonical prefix, body that does not parse.
+        candidate.dispatchSynthetic("message", '{"type":"DraftStateUpdate","data":{"view":');
+        await vi.advanceTimersByTimeAsync(4000);
+        expect(ws.close).not.toHaveBeenCalled();
+        expect(candidate.close).not.toHaveBeenCalled();
+        expect(reconnecting.value()).toBe("never settled");
+        await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS);
+        await vi.waitFor(() => expect(ws.close).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({
+          code: "WS_CLOSED", message: "Reconnect was not confirmed in time",
+        }));
+        await vi.waitFor(() => expect(command.value()).toMatchObject({ code: "WS_CLOSED" }));
+        expect(candidate.close).toHaveBeenCalled();
       } finally {
         adapter.dispose();
         vi.useRealTimers();

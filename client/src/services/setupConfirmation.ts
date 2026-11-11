@@ -8,8 +8,9 @@ import { frameType } from "./stateCodecSocket";
  * The server replaces a seat's sender when it handles `Reconnect` /
  * `ReconnectDraft` and never closes the predecessor, so once the frame is sent
  * neither the incumbent nor the candidate is known to own the seat. The
- * candidate is adopted only on its positive bootstrap; a close, timeout or
- * abort first retires both sockets.
+ * candidate is adopted on its positive bootstrap (or, for a draft, on the
+ * server's `DraftActionRejected` answer); an `Error` refusal, a close, the
+ * bound or an abort first retires both sockets.
  *
  * `SetupConfirmation` is the single owner of that interval for both server
  * adapters. It settles exactly once, with whichever of these happens first:
@@ -50,18 +51,24 @@ export interface SetupRefusal {
   readonly code?: string;
 }
 
+/** A setup frame parsed once by the interval, handed on to the adapter's dispatch. */
+export interface SetupFrameMessage {
+  readonly type: string;
+  readonly data?: unknown;
+}
+
 export type SetupFrameClass =
   /** The positive bootstrap: the server installed the candidate's sender. */
-  | { readonly kind: "positive" }
+  | { readonly kind: "positive"; readonly message: SetupFrameMessage }
   /** `Error`: the server refused the setup and installed nothing. Settles the interval. */
-  | { readonly kind: "refusal"; readonly refusal: SetupRefusal }
+  | { readonly kind: "refusal"; readonly refusal: SetupRefusal; readonly message: SetupFrameMessage }
   /**
    * Draft `DraftActionRejected`: the server's answer on the candidate, which may
    * already hold the draft seat (see {@link classifySetupFrame}). It adopts the
    * candidate exactly as the merge base did, and the rejection then replays to
    * reject the reattach.
    */
-  | { readonly kind: "answered" }
+  | { readonly kind: "answered"; readonly message: SetupFrameMessage }
   /** Anything else: neither adopts nor refuses; kept in order for the adopted socket. */
   | { readonly kind: "other" };
 
@@ -105,26 +112,37 @@ const POSITIVE_FRAMES: Record<"game" | "draft", ReadonlySet<string>> = {
 export function classifySetupFrame(surface: "game" | "draft", text: unknown): SetupFrameClass {
   if (typeof text !== "string") return { kind: "other" };
   // The tag comes from the canonical type-first envelope without materializing
-  // the frame: the positive bootstrap carries the whole board and is parsed
-  // once, by the adapter, after adoption. Only the small frames whose data the
-  // decision needs are parsed here.
+  // the frame, so an unrelated frame is never parsed here. A frame whose tag can
+  // settle the interval is parsed exactly once, here: a body that does not parse
+  // as that envelope is `other` (it neither adopts nor refuses, and keeps its
+  // malformed-frame handling), and the parsed envelope is what the adapter
+  // dispatches after adoption, so the bootstrap is still materialized once.
   const type = frameType(text);
-  if (POSITIVE_FRAMES[surface].has(type)) return { kind: "positive" };
-  if (surface === "draft" && type === "DraftActionRejected") return { kind: "answered" };
-  const needsData = type === "Error" || (surface === "game" && type === "StateWithheld");
-  if (!needsData) return { kind: "other" };
-  let data: { message?: unknown; code?: unknown; withheld?: unknown };
+  const settling = POSITIVE_FRAMES[surface].has(type)
+    || (surface === "draft" && type === "DraftActionRejected")
+    || type === "Error"
+    || (surface === "game" && type === "StateWithheld");
+  if (!settling) return { kind: "other" };
+  let parsed: unknown;
   try {
-    data = ((JSON.parse(text) as { data?: unknown }).data ?? {}) as typeof data;
+    parsed = JSON.parse(text);
   } catch {
     return { kind: "other" };
   }
+  if (typeof parsed !== "object" || parsed === null || (parsed as { type?: unknown }).type !== type) {
+    return { kind: "other" };
+  }
+  const message = parsed as SetupFrameMessage;
+  if (POSITIVE_FRAMES[surface].has(type)) return { kind: "positive", message };
+  if (type === "DraftActionRejected") return { kind: "answered", message };
+  const data = (message.data ?? {}) as { message?: unknown; code?: unknown; withheld?: unknown };
   if (type === "StateWithheld") {
     const withheld = data.withheld as { type?: unknown } | null | undefined;
-    return withheld?.type === "GameStarted" ? { kind: "positive" } : { kind: "other" };
+    return withheld?.type === "GameStarted" ? { kind: "positive", message } : { kind: "other" };
   }
   return {
     kind: "refusal",
+    message,
     refusal: {
       message: typeof data.message === "string" ? data.message : "The server refused the setup.",
       ...(typeof data.code === "string" ? { code: data.code } : {}),
@@ -147,22 +165,26 @@ export class SetupConfirmation {
     this.timer = setTimeout(() => this.finish("timeout"), timeoutMs);
   }
 
-  /** Feeds one frame the candidate received during the interval. */
-  observe(surface: "game" | "draft", data: unknown): void {
+  /**
+   * Feeds one frame the candidate received during the interval. Returns the
+   * envelope it parsed to settle the interval, which the adapter must dispatch
+   * instead of parsing the frame again; `undefined` when it parsed nothing.
+   */
+  observe(surface: "game" | "draft", data: unknown): SetupFrameMessage | undefined {
     // A settled interval classifies nothing more: later frames only wait, in
     // order, for the adopted socket's own handler.
-    if (this.outcome !== null) return;
+    if (this.outcome !== null) return undefined;
     const frame = classifySetupFrame(surface, data);
     switch (frame.kind) {
       case "positive":
       case "answered":
         this.confirm();
-        return;
+        return frame.message;
       case "refusal":
         this.refuse(frame.refusal);
-        return;
+        return frame.message;
       case "other":
-        return;
+        return undefined;
     }
   }
 

@@ -57,19 +57,19 @@ describe("classifySetupFrame", () => {
 
   it.each(["GameStarted", "GameCreated", "SessionAttached"])(
     "treats game %s as the positive bootstrap", (type) => {
-      expect(classifySetupFrame("game", frame(type, {}))).toEqual({ kind: "positive" });
+      expect(classifySetupFrame("game", frame(type, {}))).toEqual({ kind: "positive", message: { type, data: {} } });
     });
 
   it("treats a StateWithheld only of the GameStarted as the positive bootstrap", () => {
     const withheld = (inner: unknown) => frame("StateWithheld", { state_revision: 2, withheld: inner, reason: "" });
     expect(classifySetupFrame("game", withheld({ type: "GameStarted", data: { your_player: 1 } })))
-      .toEqual({ kind: "positive" });
+      .toMatchObject({ kind: "positive", message: { type: "StateWithheld" } });
     expect(classifySetupFrame("game", withheld({ type: "StateUpdate" }))).toEqual({ kind: "other" });
     expect(classifySetupFrame("game", frame("StateWithheld", {}))).toEqual({ kind: "other" });
   });
 
   it.each(["DraftStateUpdate", "DraftMatchStart"])("treats draft %s as the positive bootstrap", (type) => {
-    expect(classifySetupFrame("draft", frame(type, {}))).toEqual({ kind: "positive" });
+    expect(classifySetupFrame("draft", frame(type, {}))).toEqual({ kind: "positive", message: { type, data: {} } });
   });
 
   it("does not let one surface's bootstrap adopt the other's", () => {
@@ -79,17 +79,30 @@ describe("classifySetupFrame", () => {
 
   it.each(["game", "draft"] as const)("reads a %s Error as a refusal with its message and code", (surface) => {
     expect(classifySetupFrame(surface, frame("Error", { message: "no", code: "X" }))).toEqual({
-      kind: "refusal", refusal: { message: "no", code: "X" },
+      kind: "refusal",
+      refusal: { message: "no", code: "X" },
+      message: { type: "Error", data: { message: "no", code: "X" } },
     });
   });
 
   it("reads DraftActionRejected as the draft server's answer, not a refusal", () => {
-    expect(classifySetupFrame("draft", frame("DraftActionRejected", { reason: "why" }))).toEqual({ kind: "answered" });
+    expect(classifySetupFrame("draft", frame("DraftActionRejected", { reason: "why" }))).toEqual({
+      kind: "answered", message: { type: "DraftActionRejected", data: { reason: "why" } },
+    });
     expect(classifySetupFrame("game", frame("DraftActionRejected", { reason: "why" }))).toEqual({ kind: "other" });
   });
 
   it.each(["Pong", "OpponentReconnected", "PlayerSlotsUpdate"])("leaves %s unclassified", (type) => {
     expect(classifySetupFrame("game", frame(type, {}))).toEqual({ kind: "other" });
+  });
+
+  it.each([
+    ["game", '{"type":"GameStarted","data":{"state":'],
+    ["game", '{"type":"Error","data":{"message":'],
+    ["draft", '{"type":"DraftStateUpdate","data":{"view":'],
+    ["draft", '{"type":"DraftActionRejected","data":'],
+  ] as const)("leaves a truncated canonical %s frame unclassified: %s", (surface, text) => {
+    expect(classifySetupFrame(surface, text)).toEqual({ kind: "other" });
   });
 
   it("leaves malformed or non-text frames unclassified", () => {
@@ -133,15 +146,26 @@ describe("SetupConfirmation.observe", () => {
     }
   });
 
-  it("reads a canonical bootstrap's tag without parsing it", () => {
+  it("reads an unrelated canonical frame's tag without parsing it, and a bootstrap once", () => {
     const parse = vi.spyOn(JSON, "parse");
     try {
-      expect(classifySetupFrame("game", frame("GameStarted", { state: { objects: [] } }))).toEqual({ kind: "positive" });
-      expect(classifySetupFrame("draft", frame("DraftStateUpdate", { view: {} }))).toEqual({ kind: "positive" });
+      expect(classifySetupFrame("game", frame("StateUpdate", { state: { objects: [] } }))).toEqual({ kind: "other" });
       expect(parse).not.toHaveBeenCalled();
+      expect(classifySetupFrame("game", frame("GameStarted", { state: { objects: [] } })))
+        .toMatchObject({ kind: "positive" });
+      expect(parse).toHaveBeenCalledOnce();
     } finally {
       parse.mockRestore();
     }
+  });
+
+  it("hands the envelope it parsed to the caller, and nothing for a frame it did not settle on", () => {
+    const confirmation = new SetupConfirmation();
+    expect(confirmation.observe("game", frame("Pong", { timestamp: 1 }))).toBeUndefined();
+    expect(confirmation.observe("game", frame("GameStarted", { state: {} })))
+      .toEqual({ type: "GameStarted", data: { state: {} } });
+    // Settled: later frames are left to the adopted socket's own parse.
+    expect(confirmation.observe("game", frame("GameStarted", { state: {} }))).toBeUndefined();
   });
 
   it("ignores frames that are neither positive nor a refusal", () => {

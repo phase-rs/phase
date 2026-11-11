@@ -28,7 +28,11 @@ import {
   type PhaseSocket,
   type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
-import { SetupConfirmation, type SetupConfirmationOutcome } from "../services/setupConfirmation";
+import {
+  SetupConfirmation,
+  type SetupConfirmationOutcome,
+  type SetupFrameMessage,
+} from "../services/setupConfirmation";
 import { isValidWebSocketUrl } from "../services/serverDetection";
 import { captureSubmissionArtPreferences, submitDeckList } from "../services/deckSubmission";
 import type {
@@ -1209,17 +1213,22 @@ export class ServerDraftAdapter implements EngineAdapter {
       // received) has one owner; Create and Join attach a different seat.
       // Created at the setup write, so no earlier return leaves its timer behind.
       let confirmation: SetupConfirmation | null = null;
+      // Envelopes the confirmation interval already parsed, by frame: the
+      // drain dispatches them without materializing the frame a second time.
+      const parsedSetupFrames = new WeakMap<object, SetupFrameMessage>();
       sourceSocket.onmessage = (event) => {
         setupMessages.push(event);
         // The positive bootstrap or the server's `DraftActionRejected` answer
         // adopts (the seat may already be this candidate's); an `Error` ends
         // the interval.
-        confirmation?.observe("draft", event.data);
+        const parsed = confirmation?.observe("draft", event.data);
+        if (parsed !== undefined) parsedSetupFrames.set(event, parsed);
       };
       const handleMessage: NonNullable<PhaseSocketTransport["onmessage"]> = (event) => {
         if (!this.sockets.has(sourceSocket)) return;
         try {
-          const message: { type: string; data?: unknown; command_id?: unknown } = JSON.parse(event.data);
+          const message: { type: string; data?: unknown; command_id?: unknown } = parsedSetupFrames.get(event)
+            ?? JSON.parse(event.data);
           if (this.ws !== sourceSocket) {
             switch (message.type) {
               case "StateUpdate":

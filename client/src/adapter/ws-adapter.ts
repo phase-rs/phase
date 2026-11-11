@@ -44,7 +44,11 @@ import {
   type PhaseSocketFactory,
   type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
-import { SetupConfirmation, type SetupConfirmationOutcome } from "../services/setupConfirmation";
+import {
+  SetupConfirmation,
+  type SetupConfirmationOutcome,
+  type SetupFrameMessage,
+} from "../services/setupConfirmation";
 import { isValidWebSocketUrl, mixedContentBlockReason } from "../services/serverDetection";
 import type { FullSessionKey, WsSessionData } from "../services/multiplayerSession";
 import {
@@ -2529,11 +2533,14 @@ export class WebSocketAdapter implements EngineAdapter {
       // retired, whether or not the candidate is adopted).
       if (this.disposed || this.stateCodecPreparation !== preparation) return;
 
+      // Envelopes the confirmation interval already parsed, by frame: the
+      // drain dispatches them without materializing the frame a second time.
+      const parsedSetupFrames = new WeakMap<MessageEvent<string>, SetupFrameMessage>();
       const handleSocketMessage = (event: MessageEvent<string>) => {
         if (this.disposed || this.ws !== socket.ws) return;
         this.lastInboundAt = Date.now();
-        let message: unknown;
-        try {
+        let message: unknown = parsedSetupFrames.get(event);
+        if (message === undefined) try {
           message = JSON.parse(event.data as string);
         } catch {
           this.rejectAuthoritativeStateExport(
@@ -2559,7 +2566,8 @@ export class WebSocketAdapter implements EngineAdapter {
       socket.ws.onmessage = (event) => {
         (setupMessages ??= []).push(event);
         // Only the positive bootstrap adopts; a refusal ends the interval.
-        confirmation?.observe("game", event.data);
+        const parsed = confirmation?.observe("game", event.data);
+        if (parsed !== undefined) parsedSetupFrames.set(event, parsed);
       };
 
       socket.ws.onerror = () => {

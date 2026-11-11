@@ -6525,6 +6525,33 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       },
     );
 
+    it("does not adopt on a truncated canonical bootstrap: the bound retires both sockets and retries once", async () => {
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+      const { adapter, raw, candidate, pending, events } = await sentCandidate();
+      const timers = vi.spyOn(globalThis, "setTimeout");
+      try {
+        // Canonical prefix, body that does not parse.
+        candidate.dispatchSynthetic("message", '{"type":"GameStarted","data":{"state":');
+        await vi.advanceTimersByTimeAsync(4000);
+        expect(raw.close).not.toHaveBeenCalled();
+        expect(pending.value()).toBe("never settled");
+        expect(events).not.toContainEqual({ type: "reconnected", inGame: true });
+        await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS - 4000);
+        await vi.waitFor(() => expect(raw.close).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(pending.value()).toMatchObject({ code: "WS_CLOSED" }));
+        expect(candidate.close).toHaveBeenCalled();
+        await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "reconnecting" })));
+        expect(scheduledRetryDelays(timers)).toHaveLength(1);
+        const dialed = MockWebSocket.last;
+        await vi.advanceTimersByTimeAsync(800);
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(dialed));
+      } finally {
+        timers.mockRestore();
+        random.mockRestore();
+        adapter.dispose();
+      }
+    });
+
     it("retires both sockets and leaves the retry to the successor when the attachment is aborted before the bootstrap", async () => {
       const random = vi.spyOn(Math, "random").mockReturnValue(0);
       const { adapter, raw, candidate, pending, events } = await sentCandidate();
