@@ -11945,40 +11945,43 @@ fn emit_node(
     node: &ResolvedAbility,
     path: &[ChainStep],
     base_exposed: bool,
+    declared: &DeclaredPositions,
     bindings: &mut Vec<RetargetSlotBinding>,
     next_run: &mut usize,
 ) {
-    if node.targets.is_empty() {
+    // CR 115.7 + CR 115.10a: only a chosen target can be changed. The node's
+    // declared positions are projected out of what it holds, each keeping its
+    // own address, so a value it carries without having received it as a choice
+    // (a delayed ability's creation-time referent) neither takes a slot filter
+    // nor is offered.
+    let positions = declared.at(node, path);
+    if positions.is_empty() {
         return;
     }
+    let binding = |slot: usize, enforcement, run| RetargetSlotBinding {
+        address: RetargetSlotAddress {
+            path: path.to_vec(),
+            slot,
+        },
+        enforcement,
+        current: node.targets[slot].clone(),
+        run,
+    };
     match node_slot_filters(node) {
-        NodeSlotFilters::PerSlot(filters) if filters.len() == node.targets.len() => {
-            for (slot, (filter, target)) in filters.into_iter().zip(node.targets.iter()).enumerate()
-            {
-                bindings.push(RetargetSlotBinding {
-                    address: RetargetSlotAddress {
-                        path: path.to_vec(),
-                        slot,
-                    },
-                    enforcement: SlotEnforcement::Filtered(filter),
-                    current: target.clone(),
-                    run: None,
-                });
+        NodeSlotFilters::PerSlot(filters) if filters.len() == positions.len() => {
+            for (filter, &slot) in filters.into_iter().zip(&positions) {
+                bindings.push(binding(slot, SlotEnforcement::Filtered(filter), None));
             }
         }
         NodeSlotFilters::UniformRun(filter) => {
             let run = *next_run;
             *next_run += 1;
-            for (slot, target) in node.targets.iter().enumerate() {
-                bindings.push(RetargetSlotBinding {
-                    address: RetargetSlotAddress {
-                        path: path.to_vec(),
-                        slot,
-                    },
-                    enforcement: SlotEnforcement::Filtered(filter.clone()),
-                    current: target.clone(),
-                    run: Some(run),
-                });
+            for &slot in &positions {
+                bindings.push(binding(
+                    slot,
+                    SlotEnforcement::Filtered(filter.clone()),
+                    Some(run),
+                ));
             }
         }
         other => {
@@ -11990,24 +11993,49 @@ fn emit_node(
                     false,
                     "node_slot_filters PerSlot length {} disagrees with {} declared targets for {:?}",
                     filters.len(),
-                    node.targets.len(),
+                    positions.len(),
                     node.effect,
                 );
             }
             if base_exposed {
-                for (slot, target) in node.targets.iter().enumerate() {
-                    bindings.push(RetargetSlotBinding {
-                        address: RetargetSlotAddress {
-                            path: path.to_vec(),
-                            slot,
-                        },
-                        enforcement: SlotEnforcement::Legacy,
-                        current: target.clone(),
-                        run: None,
-                    });
+                for &slot in &positions {
+                    bindings.push(binding(slot, SlotEnforcement::Legacy, None));
                 }
             }
         }
+    }
+}
+
+/// CR 601.2c + CR 115.10a: the positions of each node's targets that are
+/// declared ones, by path, as [`walk_declared_slots`] numbers them. A node the
+/// numbering doesn't declare positions for (a per-opponent fanout, whose
+/// numbering compacts its slots, or a node it reads through a delegate) keeps
+/// every position it holds.
+struct DeclaredPositions(Vec<(Vec<ChainStep>, Vec<usize>)>);
+
+impl DeclaredPositions {
+    fn of(root: &ResolvedAbility) -> Self {
+        let mut nodes = Vec::new();
+        walk_declared_slots(
+            root,
+            DeclaredNumbering::of(root),
+            &mut |node, path, declared| {
+                if let Some(declared) = declared {
+                    if !is_per_opponent_target_fanout(node) {
+                        nodes.push((path.to_vec(), declared.positions.clone()));
+                    }
+                }
+            },
+        );
+        Self(nodes)
+    }
+
+    fn at(&self, node: &ResolvedAbility, path: &[ChainStep]) -> Vec<usize> {
+        self.0
+            .iter()
+            .find(|(node_path, _)| node_path.as_slice() == path)
+            .map(|(_, positions)| positions.clone())
+            .unwrap_or_else(|| (0..node.targets.len()).collect())
     }
 }
 
@@ -12019,6 +12047,7 @@ fn emit_node(
 fn descend_retarget_slots(
     ability: &ResolvedAbility,
     path: &[ChainStep],
+    declared: &DeclaredPositions,
     bindings: &mut Vec<RetargetSlotBinding>,
     next_run: &mut usize,
 ) {
@@ -12027,17 +12056,18 @@ fn descend_retarget_slots(
         child_path.push(edge);
         match disposition {
             AnnouncementDisposition::Declare => {
-                emit_node(child, &child_path, false, bindings, next_run);
-                descend_retarget_slots(child, &child_path, bindings, next_run);
+                emit_node(child, &child_path, false, declared, bindings, next_run);
+                descend_retarget_slots(child, &child_path, declared, bindings, next_run);
             }
             AnnouncementDisposition::Inherited => {
-                descend_retarget_slots(child, &child_path, bindings, next_run)
+                descend_retarget_slots(child, &child_path, declared, bindings, next_run)
             }
             AnnouncementDisposition::AfterDeferred => {
                 // The route already names the skipped immediate child.
                 descend_retarget_slots_after_deferred_effect(
                     child.sub_ability.as_deref(),
                     &child_path,
+                    declared,
                     bindings,
                     next_run,
                 );
@@ -12056,6 +12086,7 @@ fn descend_retarget_slots(
 fn descend_retarget_slots_after_deferred_effect(
     sub_ability: Option<&ResolvedAbility>,
     path: &[ChainStep],
+    declared: &DeclaredPositions,
     bindings: &mut Vec<RetargetSlotBinding>,
     next_run: &mut usize,
 ) {
@@ -12071,13 +12102,14 @@ fn descend_retarget_slots_after_deferred_effect(
         descend_retarget_slots_after_deferred_effect(
             sub.sub_ability.as_deref(),
             &sub_path,
+            declared,
             bindings,
             next_run,
         );
         return;
     }
-    emit_node(sub, &sub_path, false, bindings, next_run);
-    descend_retarget_slots(sub, &sub_path, bindings, next_run);
+    emit_node(sub, &sub_path, false, declared, bindings, next_run);
+    descend_retarget_slots(sub, &sub_path, declared, bindings, next_run);
 }
 
 pub fn chain_retarget_slots(ability: &ResolvedAbility) -> Vec<RetargetSlotBinding> {
@@ -12098,23 +12130,32 @@ pub fn chain_retarget_slots(ability: &ResolvedAbility) -> Vec<RetargetSlotBindin
     }
     let (base_node, base_path) = resolve_base_exposed(ability, Vec::new());
 
+    let declared = DeclaredPositions::of(ability);
     let mut bindings = Vec::new();
     let mut next_run = 0usize;
     // Step 2: emit the BASE-exposed node, unconditionally.
-    emit_node(base_node, &base_path, true, &mut bindings, &mut next_run);
+    emit_node(
+        base_node,
+        &base_path,
+        true,
+        &declared,
+        &mut bindings,
+        &mut next_run,
+    );
 
     // Step 3: blanket early-outs — the faithful mirror of
     // `assign_targets_in_chain`'s own early-outs, which assign the node's
     // targets and stop without gating on derivability.
     if !is_per_opponent_target_fanout(base_node) && chain_has_target_sink(base_node) {
         // Step 4: descend.
-        descend_retarget_slots(base_node, &base_path, &mut bindings, &mut next_run);
+        descend_retarget_slots(
+            base_node,
+            &base_path,
+            &declared,
+            &mut bindings,
+            &mut next_run,
+        );
     }
-    // CR 115.7 + CR 115.10a: only a chosen target can be changed. A value a
-    // node holds without having received it as a choice (a delayed ability's
-    // creation-time referent) is not a target.
-    let undeclared = undeclared_position_addresses(ability);
-    bindings.retain(|binding| !undeclared.contains(&binding.address));
     bindings
 }
 
@@ -12537,35 +12578,6 @@ pub(crate) fn declared_position_addresses(
                         slot,
                     })
                 }));
-            }
-        },
-    );
-    out
-}
-
-/// CR 115.10a: the retarget address of each position a node holds that its
-/// declared positions leave out: a recorded node's values it never received
-/// as a choice. Empty for a chain without a record, whose numbering is every
-/// position a node holds, and for a per-opponent fanout, whose numbering
-/// compacts its slots.
-fn undeclared_position_addresses(ability: &ResolvedAbility) -> Vec<RetargetSlotAddress> {
-    let mut out = Vec::new();
-    walk_declared_slots(
-        ability,
-        DeclaredNumbering::of(ability),
-        &mut |node, path, declared| {
-            if let Some(declared) = declared {
-                if is_per_opponent_target_fanout(node) {
-                    return;
-                }
-                out.extend(
-                    (0..node.targets.len())
-                        .filter(|slot| !declared.positions.contains(slot))
-                        .map(|slot| RetargetSlotAddress {
-                            path: path.to_vec(),
-                            slot,
-                        }),
-                );
             }
         },
     );

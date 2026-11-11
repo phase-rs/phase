@@ -7185,7 +7185,7 @@ pub(crate) fn population_drops_block_history_clause(
     lower: &str,
     populations: &[&TargetFilter],
 ) -> bool {
-    let mut available: Vec<(BlockPairDirection, CombatHistoryScope)> = populations
+    let mut available: Vec<BlockHistoryKey> = populations
         .iter()
         .flat_map(|population| restricting_block_pairings(population))
         .collect();
@@ -7193,14 +7193,13 @@ pub(crate) fn population_drops_block_history_clause(
     while let Some((_, clause, rest)) =
         nom_primitives::scan_preceded(remaining, parse_block_history_clause)
     {
-        let matched = matches!(clause.partner, HistoryPartner::Subject(_))
-            .then(|| {
-                available
-                    .iter()
-                    .position(|&key| key == (clause.direction, clause.scope))
-            })
-            .flatten();
-        match matched {
+        let HistoryPartner::Subject(word) = clause.partner else {
+            return true;
+        };
+        match available
+            .iter()
+            .position(|key| key.represents(clause.direction, clause.scope, Some(word)))
+        {
             Some(index) => {
                 available.swap_remove(index);
             }
@@ -7211,38 +7210,94 @@ pub(crate) fn population_drops_block_history_clause(
     false
 }
 
-/// CR 608.2i: the `BlockPairing` history relations that restrict `filter`'s objects, one
-/// entry per relation. A relation restricts only as a conjunct: under negation
-/// (`Not`) it excludes objects, and in a disjunction (`AnyOf`, `Or`) another branch can
-/// admit an object the relation doesn't, so neither represents a clause.
-pub(crate) fn restricting_block_pairings(
-    filter: &TargetFilter,
-) -> Vec<(BlockPairDirection, CombatHistoryScope)> {
-    match filter {
-        TargetFilter::Typed(typed) => typed
-            .properties
-            .iter()
-            .filter_map(|prop| match prop {
-                FilterProp::CombatRelation {
-                    relation:
-                        CombatRelation::BlockPairing {
-                            direction,
-                            scope: Some(scope),
-                        },
-                    ..
-                } => Some((*direction, *scope)),
-                _ => None,
-            })
-            .collect(),
-        TargetFilter::And { filters } => filters
-            .iter()
-            .flat_map(restricting_block_pairings)
-            .collect(),
-        TargetFilter::TrackedSetFiltered { filter, .. } => restricting_block_pairings(filter),
-        // A negation or a disjunction doesn't restrict (above); every other
-        // filter names objects without a history relation of its own.
-        _ => Vec::new(),
+/// One restricting history relation: the direction, window and subject a
+/// `BlockPairing` filter carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BlockHistoryKey {
+    pub(crate) direction: BlockPairDirection,
+    pub(crate) scope: CombatHistoryScope,
+    pub(crate) subject: CombatRelationSubject,
+}
+
+impl BlockHistoryKey {
+    /// Whether this relation represents a clause of `direction` and `scope`
+    /// naming `word`, which it does when its subject is one the word can bind
+    /// (`CombatRelationSubjectWord::history_subjects`). `None` is a partner no
+    /// subject word covers, whose subject the clause doesn't say.
+    pub(crate) fn represents(
+        self,
+        direction: BlockPairDirection,
+        scope: CombatHistoryScope,
+        word: Option<CombatRelationSubjectWord>,
+    ) -> bool {
+        self.direction == direction
+            && self.scope == scope
+            && word.is_none_or(|word| word.history_subjects().contains(&self.subject))
     }
+}
+
+impl CombatRelationSubjectWord {
+    /// CR 608.2c: the subjects a history clause naming this word can bind, as
+    /// `resolve_relation_subject` binds them: "~" its source, "that creature" an
+    /// earlier instruction's target, and "it" either, by its antecedent.
+    pub(crate) fn history_subjects(self) -> &'static [CombatRelationSubject] {
+        match self {
+            Self::SelfName => &[CombatRelationSubject::Source],
+            Self::Pronoun => &[
+                CombatRelationSubject::AnaphoricTarget,
+                CombatRelationSubject::Source,
+            ],
+            Self::Demonstrative => &[CombatRelationSubject::AnaphoricTarget],
+            Self::TargetCreature => &[CombatRelationSubject::ParentTarget],
+        }
+    }
+}
+
+/// CR 608.2i: the distinct `BlockPairing` history relations that restrict `filter`'s
+/// objects. A relation restricts only as a conjunct: under negation (`Not`) it excludes
+/// objects, and in a disjunction (`AnyOf`, `Or`) another branch can admit an object the
+/// relation doesn't, so neither represents a clause. A conjunction restricts once per
+/// distinct relation, so one population repeating a relation can't vouch for a clause
+/// another population dropped.
+pub(crate) fn restricting_block_pairings(filter: &TargetFilter) -> Vec<BlockHistoryKey> {
+    fn collect(filter: &TargetFilter, keys: &mut Vec<BlockHistoryKey>) {
+        match filter {
+            TargetFilter::Typed(typed) => {
+                for prop in &typed.properties {
+                    if let FilterProp::CombatRelation {
+                        relation:
+                            CombatRelation::BlockPairing {
+                                direction,
+                                scope: Some(scope),
+                            },
+                        subject,
+                    } = prop
+                    {
+                        let key = BlockHistoryKey {
+                            direction: *direction,
+                            scope: *scope,
+                            subject: *subject,
+                        };
+                        if !keys.contains(&key) {
+                            keys.push(key);
+                        }
+                    }
+                }
+            }
+            TargetFilter::And { filters } => {
+                for filter in filters {
+                    collect(filter, keys);
+                }
+            }
+            TargetFilter::TrackedSetFiltered { filter, .. } => collect(filter, keys),
+            // A negation or a disjunction doesn't restrict (above); every other
+            // filter names objects without a history relation of its own.
+            _ => {}
+        }
+    }
+    let mut keys = Vec::new();
+    collect(filter, &mut keys);
+    keys
 }
 
 /// CR 608.2k: whether a bare "it" heading a combat-history relative clause
@@ -13116,6 +13171,38 @@ mod tests {
             &[&TargetFilter::And {
                 filters: vec![bare.clone(), blocked_by_source.clone()],
             }]
+        ));
+        // One population repeating a relation vouches for it once, so it can't
+        // cover the second instruction's clause, whose population dropped it.
+        let repeated =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![relation(), relation()]));
+        assert!(population_drops_block_history_clause(
+            two_clauses,
+            &[&repeated, &bare]
+        ));
+        // The relation must be on a subject the clause's partner can bind: "~" is
+        // the source, not an earlier instruction's target.
+        let on_earlier_target = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: Some(CombatHistoryScope::ThisTurn),
+                },
+                subject: CombatRelationSubject::AnaphoricTarget,
+            },
+        ]));
+        assert!(population_drops_block_history_clause(
+            "destroy all creatures ~ blocked this turn.",
+            &[&on_earlier_target]
+        ));
+        assert!(!population_drops_block_history_clause(
+            "destroy all creatures ~ blocked this turn.",
+            &[&blocked_by_source]
+        ));
+        // "it" binds either, by its antecedent.
+        assert!(!population_drops_block_history_clause(
+            clause,
+            &[&on_earlier_target]
         ));
     }
 

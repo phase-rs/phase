@@ -636,8 +636,17 @@ struct FissureTrigger {
 /// resolves. P0 then casts Murder at the 2/2 and passes until the delayed
 /// trigger is on the stack, choosing the first Swamp if asked.
 fn fissure_trigger(lands: usize) -> FissureTrigger {
+    fissure_trigger_with(lands, |_| ()).0
+}
+
+/// [`fissure_trigger`], with `setup` adding to the board first.
+fn fissure_trigger_with<T>(
+    lands: usize,
+    setup: impl FnOnce(&mut GameScenario) -> T,
+) -> (FissureTrigger, T) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let extra = setup(&mut scenario);
     let bear = scenario.add_creature(P1, "Bear", 2, 2).id();
     let fissure = scenario
         .add_spell_to_hand_from_oracle(P0, "Fatal Fissure", true, FATAL_FISSURE)
@@ -688,15 +697,18 @@ fn fissure_trigger(lands: usize) -> FissureTrigger {
         Zone::Graveyard,
         "reach guard: the creature the delayed trigger waited on died"
     );
-    FissureTrigger {
-        runner,
-        bear,
-        swamps,
-        entry,
-        at_prompt,
-        targeted,
-        criminals,
-    }
+    (
+        FissureTrigger {
+            runner,
+            bear,
+            swamps,
+            entry,
+            at_prompt,
+            targeted,
+            criminals,
+        },
+        extra,
+    )
 }
 
 #[test]
@@ -741,6 +753,102 @@ fn a_delayed_trigger_with_a_chosen_land_targets_only_the_land() {
         "CR 115.10a"
     );
     assert_eq!(fissure.criminals, Vec::new(), "CR 700.13");
+}
+
+/// CR 115.7a + CR 115.9a + CR 115.10a: Fatal Fissure's delayed earthbend holds
+/// the creature it waited on and declares only "target land you control". Its
+/// one declared target makes it a single-target ability for Bolt Bend, and the
+/// retarget checks that slot against the land filter, at the land's own
+/// address: P0's creature isn't offered, and with a second Swamp the change
+/// takes, so the earthbend animates that Swamp. With one Swamp, chosen without
+/// a prompt, that Swamp is the only legal choice and stays the target.
+#[test]
+fn bolt_bend_changes_only_the_delayed_earthbends_land() {
+    for lands in [1, 2] {
+        let (mut fissure, (bend, guard)) = fissure_trigger_with(lands, |scenario| {
+            let bend = scenario
+                .add_spell_to_hand_from_oracle(P0, "Bolt Bend", true, BOLT_BEND)
+                .with_mana_cost(ManaCost::generic(0))
+                .id();
+            let guard = scenario.add_creature(P0, "Guard", 2, 2).id();
+            (bend, guard)
+        });
+        assert_eq!(
+            fissure.at_prompt.is_some(),
+            lands == 2,
+            "reach guard: lands {lands}: whether the land was chosen at a prompt"
+        );
+        let runner = &mut fissure.runner;
+        let card_id = runner.state().objects[&bend].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: bend,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("cast Bolt Bend");
+        let top = runner.state().stack.last().expect("Bolt Bend");
+        assert_eq!(top.source_id, bend, "reach guard: no target prompt");
+        assert_eq!(
+            top.ability().expect("a spell").targets,
+            vec![TargetRef::Object(fissure.entry)],
+            "the delayed earthbend has a single target"
+        );
+        runner.act(GameAction::PassPriority).expect("pass");
+        runner
+            .act(GameAction::PassPriority)
+            .expect("Bolt Bend resolves");
+        let WaitingFor::RetargetChoice {
+            scope,
+            current_targets,
+            slots,
+            legal_new_targets,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("a retarget prompt: {:?}", runner.state().waiting_for);
+        };
+        assert_eq!(*scope, RetargetScope::Single);
+        assert_eq!(current_targets, &vec![TargetRef::Object(fissure.swamps[0])]);
+        let held = &runner.state().stack[0]
+            .ability()
+            .expect("the delayed earthbend")
+            .targets;
+        assert_eq!(
+            held.get(slots[0].slot),
+            Some(&TargetRef::Object(fissure.swamps[0])),
+            "the slot keeps the land's own address beside the held creature: {held:?}"
+        );
+        assert!(
+            !legal_new_targets.contains(&TargetRef::Object(guard)),
+            "the land filter, not a legacy pool"
+        );
+        let animated = fissure.swamps[lands - 1];
+        assert!(
+            legal_new_targets.contains(&TargetRef::Object(animated)),
+            "lands {lands}: the land to keep or change to is offered"
+        );
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(animated)),
+            })
+            .expect("change the land, or keep the only one");
+        runner.advance_until_stack_empty();
+        assert!(
+            runner.state().objects[&animated]
+                .card_types
+                .core_types
+                .contains(&engine::types::card_type::CoreType::Creature),
+            "lands {lands}: the earthbend animated the land it targets"
+        );
+        if lands == 2 {
+            assert!(!runner.state().objects[&fissure.swamps[0]]
+                .card_types
+                .core_types
+                .contains(&engine::types::card_type::CoreType::Creature));
+        }
+    }
 }
 
 const GIFT_OF_IMMORTALITY: &str = "Enchant creature\nWhen enchanted creature dies, return that card to the battlefield under its owner's control. Return this card to the battlefield attached to that creature at the beginning of the next end step.";

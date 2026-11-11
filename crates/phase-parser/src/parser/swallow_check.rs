@@ -33,21 +33,21 @@ use super::oracle_nom::error::OracleError;
 use super::oracle_nom::primitives::{scan_contains, scan_preceded, split_sentence_units};
 use super::oracle_nom::quantity::parse_using_mana_produced_by_head;
 use super::oracle_target::{
-    parse_block_history_clause, parse_block_pairing_clause, BlockPairingForm,
-    CombatRelationSubjectWord,
+    parse_block_history_clause, parse_block_pairing_clause, restricting_block_pairings,
+    BlockHistoryKey, BlockPairingForm, CombatRelationSubjectWord, HistoryPartner,
 };
 use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BlockPairDirection,
-    CastManaObjectScope, CastManaSpentMetric, CastingPermission, ChooseFromZoneConstraint,
-    CoinFlipRun, CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
-    ContinuousModification, CopyRetargetPermission, DamageModification, DelayedTriggerCondition,
-    Duration, Effect, FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope,
-    ParsedCondition, PerPlayerScope, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, RestrictionExpiry, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, UnlessPayScaling, ZoneOwner,
+    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastManaObjectScope,
+    CastManaSpentMetric, CastingPermission, ChooseFromZoneConstraint, CoinFlipRun,
+    CombatRelationSubject, Comparator, ContinuousModification, CopyRetargetPermission,
+    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, ManaProduction,
+    ModalSelectionConstraint, OpponentMayScope, ParsedCondition, PerPlayerScope, PlayerFilter,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    RestrictionExpiry, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
+    ZoneOwner,
 };
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
@@ -6453,46 +6453,43 @@ fn detect_combat_history_relation(
     evidence: &UnitEvidence,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
-    // CR 608.2i: a relation restricts the affected set only as a conjunct; under a
-    // negation or in a disjunction it doesn't represent a clause.
-    let represented = |direction: BlockPairDirection, scope: CombatHistoryScope| {
-        evidence.count_outside::<FilterProp>(
-            |node| {
-                <FilterProp as serde::Deserialize>::deserialize(node).is_ok_and(|prop| {
-                    matches!(prop, FilterProp::Not { .. } | FilterProp::AnyOf { .. })
-                }) || <TargetFilter as serde::Deserialize>::deserialize(node).is_ok_and(|filter| {
+    // CR 608.2i: each typed filter's own restricting relations, one per distinct
+    // relation (`restricting_block_pairings`). A filter under a negation or a
+    // disjunction, or one a property names (a reference, not the affected set),
+    // doesn't restrict, so the walk stops at those.
+    let mut available = evidence.collect_outside::<TargetFilter, BlockHistoryKey>(
+        |node| {
+            <FilterProp as serde::Deserialize>::deserialize(node).is_ok()
+                || <TargetFilter as serde::Deserialize>::deserialize(node).is_ok_and(|filter| {
                     matches!(filter, TargetFilter::Not { .. } | TargetFilter::Or { .. })
                 })
-            },
-            |prop| {
-                matches!(
-                    prop,
-                    FilterProp::CombatRelation {
-                        relation: CombatRelation::BlockPairing {
-                            direction: found_direction,
-                            scope: found,
-                        },
-                        ..
-                    } if *found_direction == direction && *found == Some(scope)
-                )
-            },
-        )
-    };
-    let mut clauses: Vec<(BlockPairDirection, CombatHistoryScope)> = Vec::new();
+        },
+        |filter| match filter {
+            TargetFilter::Typed(_) => restricting_block_pairings(filter),
+            _ => Vec::new(),
+        },
+    );
+    // Each clause needs its own relation, of its direction and window and on a
+    // subject its partner can bind, so a represented clause can't vouch for a
+    // second one.
+    let mut swallowed = false;
     let mut remaining = cleaned;
     while let Some((_, clause, rest)) = scan_preceded(remaining, parse_block_history_clause) {
-        clauses.push((clause.direction, clause.scope));
+        let word = match clause.partner {
+            HistoryPartner::Subject(word) => Some(word),
+            HistoryPartner::Filter | HistoryPartner::Unbound => None,
+        };
+        match available
+            .iter()
+            .position(|key| key.represents(clause.direction, clause.scope, word))
+        {
+            Some(index) => {
+                available.swap_remove(index);
+            }
+            None => swallowed = true,
+        }
         remaining = rest;
     }
-    // Each clause needs its own filter, so a represented clause can't vouch for a
-    // second clause of the same direction and window.
-    let swallowed = clauses.iter().any(|&(direction, scope)| {
-        let wanted = clauses
-            .iter()
-            .filter(|&&clause| clause == (direction, scope))
-            .count();
-        represented(direction, scope) < wanted
-    });
     if swallowed {
         diagnostics.push(OracleDiagnostic::swallowed_clause(
             OracleSemanticFeature::CombatHistoryRelation.detector_label(),
@@ -16055,6 +16052,46 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         assert!(
             diagnostics.is_empty(),
             "a union of populations restricts each"
+        );
+        assert!(
+            flagged(vec![
+                with(vec![relation.clone(), relation.clone()]),
+                with(vec![])
+            ]),
+            "one filter repeating a relation vouches for one clause"
+        );
+        let on_earlier_target = with(vec![FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope: Some(CombatHistoryScope::ThisTurn),
+            },
+            subject: CombatRelationSubject::AnaphoricTarget,
+        }]);
+        let source_clause = "destroy all creatures ~ blocked this turn.";
+        let flags_source_clause = |filters: Vec<TargetFilter>| {
+            let evidence = UnitEvidence::from_json_for_test(
+                &serde_json::to_string(&filters).expect("filters serialize"),
+            );
+            let mut diagnostics = Vec::new();
+            detect_combat_history_relation(
+                source_clause,
+                source_clause,
+                &evidence,
+                &mut diagnostics,
+            );
+            !diagnostics.is_empty()
+        };
+        assert!(
+            flags_source_clause(vec![on_earlier_target]),
+            "a relation on the wrong subject"
+        );
+        assert!(!flags_source_clause(vec![restricting.clone()]));
+        // A filter a property names is a reference, not the affected set.
+        assert!(
+            flags_source_clause(vec![with(vec![FilterProp::DistinctFrom {
+                reference: Box::new(restricting.clone()),
+            }])]),
+            "a referenced filter doesn't restrict"
         );
     }
 
