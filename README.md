@@ -437,10 +437,17 @@ waiters instead follow the attachment handoff. Each acquired candidate keeps an
 idempotent cleanup owner through throwing, disposal and superseding callbacks,
 including requests claimed before that candidate is abandoned.
 
-A replacement transport stays private until its own `JoinGameWithPassword`,
-`Reconnect` or `CreateDraftWithSettings`/`JoinDraftWithPassword`/`ReconnectDraft`
-has entered the serialized write order; only then may `serverHello` or pending
-indicator consumers issue requests. Frames already admitted for that candidate
+A replacement transport stays private until its own `JoinGameWithPassword` or
+`CreateDraftWithSettings`/`JoinDraftWithPassword` has entered the serialized
+write order, and a `Reconnect`/`ReconnectDraft` candidate until its positive
+bootstrap arrives; only then may `serverHello` or pending indicator consumers
+issue requests. The server replaces the seat's sender when it handles a
+reconnect, so between that write and the bootstrap neither socket is known to
+own the seat: the incumbent stays current, and a close, a refusal, an abort or
+the bound (`SETUP_CONFIRMATION_TIMEOUT_MS`, the decoder's own deadline) retires
+both sockets and settles the incumbent's work. After a close or the bound the
+game adapter retries through `attemptReconnect`, a refusal ends the episode, and
+nothing retries a draft reattach. Frames already admitted for that candidate
 stay buffered through those callbacks and drain in wire order, so a synchronous
 peer reply cannot overtake an older bootstrap. A game command is also refused
 with the typed unsent error until the *current* socket has accepted its own
@@ -457,7 +464,8 @@ their transport so a reused ID cannot overwrite another source's pending reply.
 Disposal rejects owned work and closes every current or retired transport even
 when the server never closes the old peer. Abandoning an adopted setup candidate
 also settles that source's owned work before releasing it, including synchronous
-`serverHello` reentry and setup-send failure. No new reply timeout is introduced.
+`serverHello` reentry and setup-send failure. The only new reply bound is the
+reconnect interval above; Create and Join keep waiting without one.
 
 A draft view on either socket completes a pick only when its inventory proves
 the exact newly selected instance from the complete selection offered in the

@@ -1089,10 +1089,15 @@ export class ServerDraftAdapter implements EngineAdapter {
    * settled and it is released. Create and Join attach a different seat and
    * leave the incumbent's seat untouched.
    */
-  private retireSwappedIncumbent(candidate: PhaseSocketTransport, owner: AttachmentOwner): void {
+  private retireSwappedIncumbent(
+    incumbent: PhaseSocketTransport | null,
+    candidate: PhaseSocketTransport,
+    owner: AttachmentOwner,
+  ): void {
     if (owner.type !== "init" || owner.init.kind !== "reconnect") return;
-    const incumbent = this.ws;
-    if (incumbent === null || incumbent === candidate) return;
+    // Only the incumbent this candidate's setup replaced: a successor that
+    // became current meanwhile owns the seat and is left alone.
+    if (incumbent === null || incumbent === candidate || this.ws !== incumbent) return;
     this.ws = null;
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
@@ -1187,7 +1192,8 @@ export class ServerDraftAdapter implements EngineAdapter {
       const setupMessages: Parameters<NonNullable<PhaseSocketTransport["onmessage"]>>[0][] = [];
       // The uncertain interval of a reattach (setup sent, bootstrap not yet
       // received) has one owner; Create and Join attach a different seat.
-      const confirmation = initOwner?.kind === "reconnect" ? new SetupConfirmation() : null;
+      // Created at the setup write, so no earlier return leaves its timer behind.
+      let confirmation: SetupConfirmation | null = null;
       sourceSocket.onmessage = (event) => {
         setupMessages.push(event);
         // Only the positive bootstrap adopts; an `Error` ends the interval. A
@@ -1288,7 +1294,11 @@ export class ServerDraftAdapter implements EngineAdapter {
       let written: boolean;
       // Why the interval after the write did not end in a positive bootstrap.
       let unconfirmed: SetupConfirmationOutcome | null = null;
+      // The incumbent this setup replaces: only it is retired if the
+      // candidate is not adopted (a successor may be current by then).
+      const incumbent = this.ws;
       try {
+        if (initOwner?.kind === "reconnect") confirmation = new SetupConfirmation();
         const write = writeSetupFrame(
           sourceSocket, setupFrame, attachment.controller.signal, (frame, target) => this.send(frame, target),
         );
@@ -1323,7 +1333,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         // initialization; a timeout or a refusal settles it here. Nothing
         // retries a reattach: this adapter schedules no retry and, as on main,
         // no product code calls `reconnectDraft`.
-        this.retireSwappedIncumbent(sourceSocket, attachment.owner);
+        this.retireSwappedIncumbent(incumbent, sourceSocket, attachment.owner);
         if (unconfirmed === "timeout") {
           // A rejection the bootstrap never followed is the server's answer.
           const rejection = confirmation!.rejection;
@@ -1343,7 +1353,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       if (!this.ownsAttachment(attachment) || !this.sockets.has(sourceSocket)) {
         // The frame is on the wire: a ReconnectDraft has already moved the
         // seat's sender to this candidate, so the incumbent is deaf.
-        this.retireSwappedIncumbent(sourceSocket, attachment.owner);
+        this.retireSwappedIncumbent(incumbent, sourceSocket, attachment.owner);
         this.abandonSocket(socket);
         return;
       }

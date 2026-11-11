@@ -1970,7 +1970,8 @@ export class WebSocketAdapter implements EngineAdapter {
   private reconnectStartedAt: number | null = null;
   private socketOpening = false;
   /**
-   * The attachment whose setup frame is awaiting its ordered write receipt.
+   * The attachment whose setup frame is awaiting its ordered write receipt
+   * and, for a reconnect, its positive bootstrap (`SetupConfirmation`).
    * Tracked by identity so a superseded candidate's write cannot block its
    * successor's retry scheduling.
    */
@@ -2490,11 +2491,11 @@ export class WebSocketAdapter implements EngineAdapter {
     //    is no live incumbent for the gate to keep or settle; the episode's one
     //    non-extending deadline (`admitInitialFallback`) fails the join once
     //    when no bootstrap arrives.
-    const confirmation = !this.isNativeSocket()
+    const confirmsSetup = !this.isNativeSocket()
       && !this.initialFallbackActive()
-      && (setupFrame as { type?: unknown }).type === "Reconnect"
-      ? new SetupConfirmation()
-      : null;
+      && (setupFrame as { type?: unknown }).type === "Reconnect";
+    // Created at the setup write, so no earlier return leaves its timer behind.
+    let confirmation: SetupConfirmation | null = null;
     // Until setup completes, this continuation owns cleanup even if a public
     // listener throws, disposes the adapter, or starts another attachment.
     let retained = false;
@@ -2666,6 +2667,7 @@ export class WebSocketAdapter implements EngineAdapter {
       // Why the interval after the write did not end in a positive bootstrap.
       let unconfirmed: SetupConfirmationOutcome | null = null;
       try {
+        if (confirmsSetup) confirmation = new SetupConfirmation();
         const write = writeSetupFrame(
           socket.ws, setupFrame, preparation.signal, (frame, target) => this.send(frame, target),
         );
@@ -2787,8 +2789,10 @@ export class WebSocketAdapter implements EngineAdapter {
       this.closeSocket = closeSocket;
       this.stateCodec.adopt(bootstrap, socket.ws);
       this._serverInfo = socket.serverInfo;
-      // Setup is on the wire, so the incumbent is now genuinely replaced. A
-      // candidate that never reached this point left the incumbent usable.
+      // Setup is on the wire and confirmed, so the incumbent is now genuinely
+      // replaced. Only a candidate whose setup was never written leaves the
+      // incumbent usable; every written one that was not adopted retired it
+      // above while it was still current.
       if (previous && incumbentIsCurrent) detachIncumbent(previous);
       if (previousPending) {
         previousPending = false;

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SETUP_CONFIRMATION_TIMEOUT_MS } from "../../services/setupConfirmation";
 import { diagnosticIdFor, getDiagnosticHistory } from "../../services/troubleshooting";
 import { loadDiagnosticHistory } from "../../services/diagnosticHistory";
 
@@ -6295,7 +6296,9 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
     it("keeps the incumbent until the candidate's bootstrap, then adopts it and retires the incumbent", async () => {
       const { adapter, raw, candidate, pending, events } = await sentCandidate();
       try {
-        await vi.advanceTimersByTimeAsync(4000);
+        // A slow but valid bootstrap: twice the 5 s handshake bound, inside this one.
+        expect(SETUP_CONFIRMATION_TIMEOUT_MS).toBeGreaterThan(10_000);
+        await vi.advanceTimersByTimeAsync(10_000);
         // Ownership is uncertain, not decided: nothing has been retired.
         expect(raw.close).not.toHaveBeenCalled();
         expect(candidate.close).not.toHaveBeenCalled();
@@ -6309,6 +6312,27 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         await vi.advanceTimersByTimeAsync(10_000);
         expect(candidate.close).not.toHaveBeenCalled();
       } finally {
+        adapter.dispose();
+      }
+    });
+
+    it("arms no confirmation bound for a candidate that returns before its setup write", async () => {
+      const codec = scriptedCodec();
+      const provider = vi.fn(() => Promise.resolve(codec.session));
+      const { adapter, raw } = await establishCodecAdapter(provider);
+      const timers = vi.spyOn(globalThis, "setTimeout");
+      try {
+        expect(adapter.tryReconnect(session() as never)).toBe(true);
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+        const candidate = latestSocket();
+        candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+        // Disposal lands before the handshake's continuation resumes.
+        adapter.dispose();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(candidate.send).not.toHaveBeenCalledWith(expect.stringContaining('"type":"Reconnect"'));
+        expect(timers.mock.calls.map(([, delay]) => delay)).not.toContain(SETUP_CONFIRMATION_TIMEOUT_MS);
+      } finally {
+        timers.mockRestore();
         adapter.dispose();
       }
     });
@@ -6404,7 +6428,7 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
             candidate.readyState = 3;
             candidate.dispatchSynthetic("close");
           } else {
-            await vi.advanceTimersByTimeAsync(5000);
+            await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS);
           }
           await vi.waitFor(() => expect(raw.close).toHaveBeenCalledOnce());
           await vi.waitFor(() => expect(pending.value()).toMatchObject({ code: "WS_CLOSED" }));
@@ -6491,7 +6515,7 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         candidate.sendReceipt = vi.fn(() => new Promise<void>(() => undefined));
         candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
         await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS);
         await vi.waitFor(() => expect(raw.close).toHaveBeenCalledOnce());
         await vi.waitFor(() => expect(candidate.close).toHaveBeenCalled());
         await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "reconnecting" })));

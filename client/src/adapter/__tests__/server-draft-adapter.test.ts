@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SETUP_CONFIRMATION_TIMEOUT_MS } from "../../services/setupConfirmation";
 
 import { EMPTY_DRAFT_POOL_GROUPS } from "../draft-adapter";
 import { ServerDraftAdapter, type ServerDraftAdapterEvent } from "../server-draft-adapter";
@@ -4104,7 +4105,9 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       vi.useFakeTimers();
       const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();
       try {
-        await vi.advanceTimersByTimeAsync(4000);
+        // A slow but valid bootstrap: twice the 5 s handshake bound, inside this one.
+        expect(SETUP_CONFIRMATION_TIMEOUT_MS).toBeGreaterThan(10_000);
+        await vi.advanceTimersByTimeAsync(10_000);
         expect(ws.close).not.toHaveBeenCalled();
         expect(candidate.close).not.toHaveBeenCalled();
         expect(reconnecting.value()).toBe("never settled");
@@ -4184,7 +4187,7 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();
       try {
         receive(candidate, "DraftActionRejected", { reason: "Invalid player token" });
-        await vi.advanceTimersByTimeAsync(4000);
+        await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS - 1000);
         expect(ws.close).not.toHaveBeenCalled();
         expect(reconnecting.value()).toBe("never settled");
         await vi.advanceTimersByTimeAsync(1000);
@@ -4249,7 +4252,7 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
             candidate.readyState = 3;
             candidate.dispatchSynthetic("close");
           } else {
-            await vi.advanceTimersByTimeAsync(5000);
+            await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS);
           }
           await vi.waitFor(() => expect(ws.close).toHaveBeenCalledOnce());
           await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({ code: "WS_CLOSED" }));
@@ -4315,6 +4318,49 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
+    it("leaves a successor that became current alone when a superseded reattach's bound expires", async () => {
+      vi.useFakeTimers();
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+      provider.mockResolvedValueOnce(draftCodecSession(decodeEnvelope).session);
+      const first = watch(adapter.reconnectDraft());
+      await drainArt();
+      const stale = MockWebSocket.last!;
+      try {
+        // Reattach A's receipt never settles, so only its bound can end it.
+        stale.sendReceipt = vi.fn(() => new Promise<void>(() => undefined));
+        stale.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.waitFor(() => expect(stale.sendReceipt).toHaveBeenCalledOnce());
+        // Reattach B supersedes it and is adopted on its bootstrap.
+        provider.mockResolvedValueOnce(draftCodecSession(decodeEnvelope).session);
+        const second = watch(adapter.reconnectDraft());
+        await drainArt();
+        const successor = MockWebSocket.last!;
+        expect(successor).not.toBe(stale);
+        successor.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.waitFor(() => expect(successor.send).toHaveBeenCalledWith(
+          expect.stringContaining('"type":"ReconnectDraft"'),
+        ));
+        successor.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+        receive(successor, "DraftStateUpdate", { view: createMockDraftView() });
+        await vi.waitFor(() => expect(second.value()).toEqual({ resolvedWith: undefined }));
+        expect(first.value()).toMatchObject({ code: "WS_CLOSED" });
+        // A's bound expires after B is current: only A is retired.
+        await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS);
+        await vi.waitFor(() => expect(stale.close).toHaveBeenCalled());
+        expect(successor.close).not.toHaveBeenCalled();
+        const view = createMockDraftView({ pick_number: 4 });
+        receive(successor, "DraftStateUpdate", { view });
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "draftViewUpdated", view }));
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
     it("bounds a receipt that never settles and settles the reattach", async () => {
       vi.useFakeTimers();
       const session = draftCodecSession(decodeEnvelope);
@@ -4331,7 +4377,7 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
         candidate.sendReceipt = vi.fn(() => new Promise<void>(() => undefined));
         candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
         await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS);
         await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({ code: "WS_CLOSED" }));
         await vi.waitFor(() => expect(ws.close).toHaveBeenCalledOnce());
         expect(candidate.close).toHaveBeenCalled();

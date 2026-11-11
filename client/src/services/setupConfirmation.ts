@@ -1,3 +1,5 @@
+import { STATE_CODEC_DECODE_TIMEOUT_MS } from "../adapter/state-codec-runtime";
+
 /**
  * The uncertain interval of a reconnect: from the moment a candidate's setup
  * frame is sent until its positive bootstrap arrives.
@@ -26,7 +28,15 @@
  * A draft `DraftActionRejected` does not settle the interval (see
  * {@link classifySetupFrame}); it is only noted, so a timeout can report it.
  */
-export const SETUP_CONFIRMATION_TIMEOUT_MS = 5_000;
+/**
+ * The bound on the interval. It runs from the setup write until the decoded
+ * bootstrap reaches the adapter, so it covers the server's own work (session
+ * lock, AI turn, building the frame), the transfer and the decode. It is the
+ * decoder's own deadline: a bootstrap whose decode alone takes that long has
+ * already failed its socket, so the bound never retires a candidate the codec
+ * would still accept on decode time alone. Server work and transfer share it.
+ */
+export const SETUP_CONFIRMATION_TIMEOUT_MS = STATE_CODEC_DECODE_TIMEOUT_MS;
 
 export type SetupConfirmationOutcome = "confirmed" | "refused" | "closed" | "timeout" | "aborted";
 
