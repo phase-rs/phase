@@ -6472,6 +6472,43 @@ pub(crate) fn settle_recurs(boundary: &GameState, settled: &GameState) -> bool {
         || crate::analysis::resource::loop_states_cover_modulo_growth(boundary, settled)
 }
 
+/// What each loop comparator entry point answers for one frame pair, each side put through
+/// the production normalization that entry point applies. The sample form and the
+/// comparators are crate-private; integration tests reach them through
+/// [`loop_entry_point_verdicts_for_tests`].
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoopEntryPointVerdicts {
+    /// CR 104.4b: the strict comparator of the auto-pass window, on two sample forms.
+    pub strict: bool,
+    /// CR 732.2a: a ring walk, a stored sample-form prior against the raw current state.
+    pub ring_walk: bool,
+    /// CR 732.2a + CR 732.2c: fixed settlement and mandatory replay, a [`take_boundary`]
+    /// against a settle frame seeded and sampled the same way.
+    pub settlement: bool,
+}
+
+/// See [`LoopEntryPointVerdicts`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn loop_entry_point_verdicts_for_tests(
+    prior: &GameState,
+    current: &GameState,
+) -> LoopEntryPointVerdicts {
+    let sampled_prior = prior.normalize_for_loop_sample();
+    let frames = crate::analysis::resource::SharedCurrentFrames::new(current);
+    LoopEntryPointVerdicts {
+        strict: crate::types::game_state::loop_states_equal(
+            &sampled_prior,
+            &current.normalize_for_loop_sample(),
+        ),
+        ring_walk: crate::analysis::resource::loop_states_equal_modulo_resources_side(
+            &sampled_prior,
+            &frames,
+        ),
+        settlement: settle_recurs(&take_boundary(prior), &take_boundary(current)),
+    }
+}
+
 /// Drive ONE whole cycle of a confirmed loop shortcut on a fresh clone
 /// of `committed`, seeded to the canonical settle beat (`Priority{active_player}`, the same
 /// beat the detector ring samples). Recurrence is detected against `boundary` (normalized).
@@ -23583,6 +23620,156 @@ mod stage2_injector_tests {
             drive_visits, 0,
             "{drive_visits} journal visits through the fixed-cycle drive ({rows} rows, \
              cap {cap}) on a rig whose retained carriers cannot read the recipient"
+        );
+    }
+
+    /// CR 732.2a + CR 732.2c: the FIXED-CYCLE caller on a take that COMMITS. One targeted
+    /// drainer and the feedback engine in a three-player game: each life gain makes exactly
+    /// one drain, so the cascade holds a constant depth and, with the pinned opponent far
+    /// from lethal, no seat leaves. The drive reaches the settle arm and returns `Recurred`
+    /// ("The game advances to the last proposed ending point"). The turn already holds a long
+    /// damage history, and the journal counter is reset BEFORE the boundary is built, so the
+    /// measurement covers boundary construction and every settle comparison of the take.
+    #[test]
+    fn drive_one_cycle_recurs_on_a_committed_take_over_a_populated_damage_journal() {
+        use crate::types::game_state::{DamageRecord, LOOP_DAMAGE_JOURNAL_VISITS};
+
+        const ROWS: usize = 256;
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.with_life(P0, 20);
+        scenario.with_life(P1, 400);
+        scenario.with_life(P2, 400);
+        let drainer = scenario
+            .add_creature_from_oracle(P0, "Drainer A", 1, 4, TARGET_DRAIN)
+            .id();
+        scenario.add_creature_from_oracle(P0, "Feedback", 3, 4, FEEDBACK);
+        let kickoff = scenario
+            .add_spell_to_hand_from_oracle(P0, "Kickoff", false, KICKOFF)
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Off;
+        let card_id = runner.state().objects.get(&kickoff).unwrap().card_id;
+        apply_action(
+            runner.state_mut(),
+            P0,
+            GameAction::CastSpell {
+                object_id: kickoff,
+                card_id,
+                targets: vec![],
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
+            None,
+        )
+        .expect("cast seed");
+        let source = this_object(drainer);
+        let template = DecisionTemplate {
+            owner: P0,
+            decisions: vec![PinnedDecision::Targets {
+                slot: DecisionSlot {
+                    source: source.clone(),
+                    point: ChoicePoint::AnnouncedTarget,
+                    index: 0,
+                },
+                targets: vec![TargetPin::Player(P1)],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::UntilLethal,
+            },
+            key: DecisionGroupKey::from_sources(&[source], DecisionKind::LoopChoice),
+        };
+        // Prime to a settle beat INSIDE the cascade: the active player's priority with a
+        // trigger pending, after the first drain has resolved. The earlier beat that still
+        // holds the seed spell never recurs, so it cannot bound a committed take.
+        let mut primed = false;
+        for _ in 0..40 {
+            let wf = runner.state().waiting_for.clone();
+            match wf {
+                WaitingFor::Priority { player }
+                    if player == P0
+                        && !runner.state().stack.is_empty()
+                        && life(runner.state(), P1) < 400 =>
+                {
+                    primed = true;
+                    break;
+                }
+                WaitingFor::Priority { player } => {
+                    apply_action(runner.state_mut(), player, GameAction::PassPriority, None)
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+                    inject_pinned_answer(runner.state_mut(), Some(&template), 0, &wf).unwrap();
+                }
+                _ => break,
+            }
+        }
+        assert!(primed, "must reach a primed Priority{{P0}} settle beat");
+        let mut committed = runner.state().clone();
+        let cap = auto_pass_loop_max_iterations(&committed);
+        let dealer = committed.battlefield[0];
+        let recipient = committed.battlefield[1];
+        for _ in 0..ROWS {
+            committed.damage_dealt_this_turn.push_back(DamageRecord {
+                source_id: dealer,
+                source_incarnation: Some(committed.objects[&dealer].incarnation),
+                target: TargetRef::Object(recipient),
+                target_incarnation: Some(committed.objects[&recipient].incarnation),
+                amount: 1,
+                ..Default::default()
+            });
+        }
+        let lives_before = [life(&committed, P1), life(&committed, P2)];
+
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let boundary = take_boundary(&committed);
+        let outcome = drive_one_shortcut_cycle(
+            &committed,
+            &boundary,
+            Some(&template),
+            0,
+            cap,
+            None,
+            DepartureStop::EndsRepetition,
+        )
+        .expect("the fixture's shortcut cycle is representable");
+        let visits = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
+
+        let state = match outcome {
+            CycleOutcome::Recurred { state, .. } => state,
+            CycleOutcome::SeatLeft { .. } => panic!("expected `Recurred`, got `SeatLeft`"),
+            CycleOutcome::CrossLethal { .. } => panic!("expected `Recurred`, got `CrossLethal`"),
+            CycleOutcome::Abort => panic!("expected `Recurred`, got `Abort`"),
+        };
+        assert_eq!(
+            state.waiting_for,
+            WaitingFor::Priority {
+                player: state.active_player
+            },
+            "CR 732.2a: the committed ending point is the active player's settle beat"
+        );
+        assert!(
+            life(&state, P1) < lives_before[0] && life(&state, P2) == lives_before[1],
+            "the committed take performed the cycle: the pinned opponent lost life and the \
+             other did not ({:?} -> {:?})",
+            lives_before,
+            [life(&state, P1), life(&state, P2)]
+        );
+        assert_eq!(
+            state.players.iter().filter(|p| p.is_eliminated).count(),
+            0,
+            "reach guard: no seat left, so this is the settle arm and not `SeatLeft`"
+        );
+        assert_eq!(
+            state.damage_dealt_this_turn.len(),
+            ROWS,
+            "reach guard: the take carried the whole damage history"
+        );
+        // The drain and feedback triggers are life-change carriers that read no damage
+        // recipient, so the settle comparisons of the whole committed take read no journal
+        // row; a strict boundary alone would rank all {ROWS} rows.
+        assert_eq!(
+            visits, 0,
+            "{visits} journal visits from boundary construction through the committed take"
         );
     }
 
