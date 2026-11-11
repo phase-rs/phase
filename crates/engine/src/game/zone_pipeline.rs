@@ -1965,16 +1965,18 @@ enum StagedConsult {
     AllConsulted,
 }
 
-/// CR 603.10a + CR 616.1: a staged owner that parks keeps everything its
-/// run produced. Approval-time occurrences in `events[run_start..approval_end]`
-/// (a replacement applied while a member was consulted, such as an Umbra's
-/// armor destroying its Aura) go into the batch's own logical group through
-/// the same segment collector a delivery pause uses, so that group is their one
-/// collector and settlement finds their exact incarnation. The run's events
-/// are then held on the owner until the batch settles, so one co-departure
-/// batch is observable and no ordinary collector sees them twice. A delivery
-/// pause has already retained its own delivered segment, which starts at
-/// `approval_end`.
+/// CR 603.10a: leaves-the-battlefield abilities look back in time, so every
+/// departure of one logical action must reach them as one co-departure batch.
+/// A staged owner that parks therefore keeps everything its run produced.
+/// Occurrences in `events[run_start..approval_end]` go into the batch's own
+/// logical group through the same segment collector a delivery pause uses, so
+/// that group is their one collector and settlement finds their exact
+/// incarnation. That segment is the run's approval-time departures (a
+/// replacement applied while a member was consulted, such as an Umbra's armor
+/// destroying its Aura), or, for a buried owner's reconcile, the whole run it
+/// delivered. The run's events are then held on the owner until the batch
+/// settles, so no ordinary collector sees them twice. A delivery pause has
+/// already retained its own delivered segment, which starts at `approval_end`.
 fn park_staged_run_events(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
@@ -2050,7 +2052,7 @@ fn run_staged_batch(
     }
 }
 
-/// CR 400.7 + CR 603.7c: the frozen identity and the producer's origin
+/// CR 400.7: the frozen identity and the producer's origin
 /// snapshot both still describe the live object, so a replacement may be
 /// offered for this member.
 fn staged_member_is_consultable(
@@ -2071,7 +2073,7 @@ fn staged_member_is_consultable(
     )
 }
 
-/// CR 400.7 + CR 603.7c: retire a staged member whose object left before the
+/// CR 400.7: retire a staged member whose object left before the
 /// batch consulted it. The member is never consulted or delivered. Its
 /// battlefield slot, if it has one, is finalized at settlement from the actual
 /// occurrences: an earlier member's replacement may have moved it inside this
@@ -2099,9 +2101,9 @@ fn consult_next_staged_member(
     owner: &mut PendingBatchDeliveries,
     events: &mut Vec<GameEvent>,
 ) -> StagedConsult {
-    // The approval cursor IS the member being asked, exactly as before the
-    // choice scheduler was introduced: consultation and delivery walk the same
-    // announcement order, so every park/answer/restore site can key on `cursor`.
+    // The approval cursor IS the member being asked: consultation and delivery
+    // walk the same announcement order (the producer's APNAP-adjusted order),
+    // so every park/answer/restore site can key on `cursor`.
     let Some(member) = owner
         .staged
         .as_ref()
@@ -2110,7 +2112,7 @@ fn consult_next_staged_member(
     else {
         return StagedConsult::AllConsulted;
     };
-    // CR 400.7 + CR 603.7c: a later member that changed zone or incarnation
+    // CR 400.7: a later member that changed zone or incarnation
     // while an earlier chooser was answering cannot undergo this move. The
     // ordinary path refuses it before proposing; a staged member must not open
     // a replacement for it either, even though delivery re-checks the frozen
@@ -2118,7 +2120,7 @@ fn consult_next_staged_member(
     if member.state == StagedBatchMemberState::Unconsulted
         && !staged_member_is_consultable(state, &member)
     {
-        // CR 400.7 + CR 603.7c: the object left the battlefield or changed
+        // CR 400.7: the object left the battlefield or changed
         // incarnation before this batch asked it. That is terminal for the
         // original logical action with no occurrence and no post-event source
         // authority — not a `Remained`, which asserts the object is still there.
@@ -2131,8 +2133,9 @@ fn consult_next_staged_member(
     };
     match (destroy_operation, member.state) {
         (_, StagedBatchMemberState::Terminal | StagedBatchMemberState::Abandoned) => {
-            // CR 800.4a: a later member may have left while an earlier chooser
-            // was answering. Its frozen slot is finished, not a live pause.
+            // A later member may have left while an earlier chooser was
+            // answering (an ordinary zone change, or its owner leaving the game
+            // under CR 800.4a). Its frozen slot is finished, not a live pause.
             advance_staged_cursor(owner, member.announcement_index as usize);
             return StagedConsult::Continue;
         }
@@ -3333,7 +3336,7 @@ pub(crate) fn deliver_staged_change_zone_batch(
     let event_start = events.len();
     let group_id = logical_zone_change_group.logical_group_id;
     let mut staged = new_staged_batch(state, &reqs, Vec::new());
-    // CR 400.7 + CR 603.7c: carry the producer's origin snapshot so a member
+    // CR 400.7: carry the producer's origin snapshot so a member
     // that moved during a preceding pause is refused before any replacement is
     // offered for it, matching the ordinary per-member guard.
     for member in &mut staged.members {
@@ -4062,7 +4065,7 @@ fn record_staged_terminals_for_settlement<'e>(
         .iter()
         .filter_map(|member| match (member.state, member.terminal) {
             (_, Some(terminal)) => Some((member.identity, Some(terminal))),
-            // CR 400.7 + CR 603.7c: preempted before consultation.
+            // CR 400.7: preempted before consultation.
             (StagedBatchMemberState::Abandoned, None) => Some((member.identity, None)),
             _ => None,
         })
@@ -4606,7 +4609,6 @@ fn drain_staged_batch(
         }
         Some(BatchDeliveryStage::Arranging) => {
             if matches!(state.waiting_for, WaitingFor::DigRestSplitChoice { .. }) {
-                owner.deferred_events.append(events);
                 StagedStop::Arranging
             } else {
                 run_staged_batch(state, &mut owner, events, 0)
@@ -15431,6 +15433,84 @@ mod staged_batch_tests {
                     GameEvent::ZoneChanged { object_id, .. } if object_id == creature
                 )),
             "the paused member's occurrence enters the batch's retained list"
+        );
+    }
+
+    /// CR 603.10a + CR 702.89a. Synthetic (unit level), with Akroma's
+    /// Vengeance over a Hyena Umbra host as the nearest printed analogue: one
+    /// `run_staged_batch` call whose approval already put a member into the
+    /// graveyard (the Aura its armor destroyed) and which then stops in the
+    /// delivery stage on a member that is not yet approved. The stop parks the
+    /// run's approval segment: the departure is collected into the batch's own
+    /// group exactly once and the run's events are held on the owner. No
+    /// printed population is known to combine an approval-time departure with
+    /// a delivery-stage stop in one run, so this drives the branch directly.
+    #[test]
+    fn delivering_stop_parks_the_runs_approval_segment() {
+        let mut state = GameState::new_two_player(42);
+        effect_source(&mut state);
+        let aura = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Departed during approval".to_string(),
+            Zone::Battlefield,
+        );
+        let aura_member = staged_member(
+            &state,
+            aura,
+            None,
+            StagedBatchMemberState::Abandoned,
+            Zone::Graveyard,
+            None,
+        );
+        let waiting = graveyard_card(&mut state, 21);
+        let waiting_member = staged_member(
+            &state,
+            waiting,
+            None,
+            StagedBatchMemberState::Unconsulted,
+            Zone::Graveyard,
+            None,
+        );
+        let group_id = push_approved_staged(
+            &mut state,
+            vec![aura_member, waiting_member],
+            BatchDeliveryStage::Delivering,
+        );
+        let mut owner = take_owner(&mut state, group_id);
+        owner.staged.as_mut().unwrap().cursor = 0;
+        let is_aura_move = |event: &GameEvent| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == aura);
+        // The run's approval segment: the Aura's own departure.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, aura, Zone::Graveyard, &mut events);
+        assert_eq!(events.iter().filter(|event| is_aura_move(event)).count(), 1);
+
+        let stop = run_staged_batch(&mut state, &mut owner, &mut events, 0);
+
+        assert_eq!(
+            stop,
+            StagedStop::Paused,
+            "the unapproved member stops delivery"
+        );
+        assert!(events.is_empty(), "the run's events are held on the owner");
+        assert_eq!(
+            owner
+                .deferred_events
+                .iter()
+                .filter(|event| is_aura_move(event))
+                .count(),
+            1
+        );
+        assert_eq!(
+            owner
+                .logical_zone_change_group
+                .all_origin_occurrences
+                .iter()
+                .filter(|occurrence| is_aura_move(&occurrence.event))
+                .count(),
+            1,
+            "the approval-time departure is collected into the batch's group once"
         );
     }
 

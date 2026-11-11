@@ -2141,6 +2141,16 @@ fn handle_replacement_choice_inner(
         super::replacement::ReplacementResult::NeedsChoice(player) => {
             // The proposed event retains its canonical placement across parks.
             // Preserve the other delivery context independently of that value.
+            //
+            // A staged member's same-event re-park leaves this answer's events
+            // in the action buffer rather than on the staged owner: the applied
+            // replacement modified the member's own event, which is still being
+            // consulted. Only a replacement that also moved another population
+            // member while leaving this event with a further choice would need
+            // its segment parked (`park_staged_run_events`); the printed
+            // destruction replacements that move another object (Umbra armor,
+            // CR 702.89a) end the event instead, and are parked at their own
+            // `Prevented` result.
             let same_event_repark = state.pending_replacement.as_ref().is_some_and(|pending| {
                 parked_delivery_boundary.is_some_and(|boundary| {
                     pending.proposed.affected_object_id() == boundary.affected_object_id()

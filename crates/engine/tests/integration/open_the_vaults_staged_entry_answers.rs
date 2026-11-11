@@ -440,7 +440,7 @@ fn fu7_foreign_owned_mox_does_not_reassign_departed_beacon_payer() {
     assert_settled(&runner);
 }
 
-/// CR 400.7 + CR 603.7c: a graveyard member that left while an earlier member's
+/// CR 400.7: a graveyard member that left while an earlier member's
 /// entry ordering was pending is never returned, and it has no battlefield
 /// occurrence slot to finalize. Open the Vaults returns both Ornithopters from
 /// P0's graveyard; Root Maze and Archelos make each entry an ordering choice.

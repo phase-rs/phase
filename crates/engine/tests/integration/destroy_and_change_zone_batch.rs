@@ -2941,7 +2941,7 @@ fn two_player_replacement_chooser_concession_keeps_game_over() {
     assert!(state.resolution_stack.is_empty());
 }
 
-/// CR 400.7 + CR 603.7c: the later member returns to the battlefield as a NEW
+/// CR 400.7: the later member returns to the battlefield as a NEW
 /// object, with a live replacement ready to ask for that new object. It is still
 /// never offered: the staged population froze the old incarnation, so the guard
 /// preempts the slot instead of consulting the replacement.
@@ -3132,7 +3132,7 @@ fn approved_outer_destroy_finishes_before_the_next_member_parks() {
     assert!(state.resolution_stack.is_empty());
 }
 
-/// CR 400.7 + CR 603.7c: a staged member that changed zone while an earlier
+/// CR 400.7: a staged member that changed zone while an earlier
 /// chooser was answering is refused before any replacement is offered for it.
 /// The pause here is a real replacement choice with the second member still
 /// unconsulted, not the commander graveyard SBA that runs after delivery.
@@ -3317,7 +3317,7 @@ fn destroyed_reports_of(events: &[GameEvent], id: ObjectId) -> usize {
 /// creature's destruction by destroying the Aura, so the Aura's own slot has
 /// exactly one occurrence (it is put into the graveyard once) whether the Aura
 /// is consulted before or after the creature it protects. In the third case a
-/// later host wears Hyena Umbra and Spider Umbra, so its owner's ordering
+/// later host wears Hyena Umbra and Spider Umbra, so its controller's ordering
 /// choice (CR 616.1) parks the batch after the first Aura already left during
 /// approval; that departure must survive the pause, a save and reopen, and the
 /// answer, with one occurrence for the Aura's own incarnation and a completed

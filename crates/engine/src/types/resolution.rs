@@ -4744,8 +4744,9 @@ impl ResolutionStack {
     /// at its CR 903.9b choice), and that engine could not finish it either.
     ///
     /// A component child linked to its parent is the supported form of the
-    /// same pair (CR 903.9b: a merged commander's owner may choose the command
-    /// zone for it while its components split): the child's
+    /// same pair (CR 903.9b + CR 903.9c: a merged commander's owner may choose
+    /// the command zone for it, and its other components go to the appropriate
+    /// zone): the child's
     /// `component_delivery_parent` names the parent's group and the shared
     /// paused member. The link is checked in both traversal directions, so the
     /// pair is accepted whichever frame is inspected first.

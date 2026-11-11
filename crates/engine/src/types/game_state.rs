@@ -3556,7 +3556,7 @@ pub enum LogicalZoneChangeTerminalOutcome {
     /// not an ordinary replacement result and must not synthesize its original
     /// `ZoneChanged` event or any settlement source authority.
     AbandonedByPlayerLeft,
-    /// CR 400.7 + CR 603.7c: the object left the battlefield, or changed
+    /// CR 400.7: the object left the battlefield, or changed
     /// incarnation, before this shared batch consulted it — another effect
     /// resolved first. The member is terminal for the original logical action
     /// with no occurrence and no post-event authority, exactly like a departed
@@ -4140,7 +4140,7 @@ impl LogicalZoneChangeGroup {
     /// its owner left the game. A shared batch retains its other members and
     /// their original event authority; the abandoned member contributes neither
     /// an occurrence nor a post-event source context to the original action.
-    /// CR 400.7 + CR 603.7c: retire a member whose object left the battlefield
+    /// CR 400.7: retire a member whose object left the battlefield
     /// or changed incarnation before it was consulted. No occurrence and no
     /// post-event source context belong to the original action.
     pub fn record_preempted(&mut self, member: ObjectIncarnationRef) -> Result<(), String> {
@@ -7839,7 +7839,7 @@ pub struct StagedBatchMember {
     pub announcement_index: u32,
     pub request: PendingBatchZoneMoveRequest,
     pub identity: ObjectIncarnationRef,
-    /// CR 400.7 + CR 603.7c: the origin zone the producer snapshotted for this
+    /// CR 400.7: the origin zone the producer snapshotted for this
     /// member. A member that is no longer there must not be consulted for a
     /// replacement, exactly as the ordinary path refuses it before proposing.
     /// `None` (legacy saves) keeps the frozen delivery-time identity check only.
