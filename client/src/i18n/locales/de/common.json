@@ -87,6 +87,7 @@
     "sandboxTools": "Sandbox-Werkzeuge",
     "sandboxToolsTitle": "Sandbox-Werkzeuge — beliebigen Spielzustand einrichten (`)",
     "openSandboxTools": "Sandbox-Werkzeuge öffnen",
+    "clickMode": "Klickmodus",
     "clickModeButton": "Klickmodus-Schaltfläche",
     "shown": "Sichtbar",
     "hidden": "Ausgeblendet",
@@ -255,6 +256,10 @@
       "advancedDebugPanel": {
         "title": "Erweitertes Debug-Panel",
         "body": "Das erweiterte Debug-Panel öffnen. Die meisten Spieler sollten zuerst mit den Wiederherstellungswerkzeugen beginnen."
+      },
+      "toggleClickMode": {
+        "title": "Klickmodus umschalten",
+        "body": "In Spielen mit Sandbox-Werkzeugen den Klickmodus ein- oder ausschalten. Solange er aktiv ist, öffnet ein Klick auf eine Karte ihr Debug-Menü (Zonen, S/W, Marken, Schlüsselwörter), statt sie zu spielen."
       },
       "reportOrExportState": {
         "title": "Zustand melden oder exportieren",
