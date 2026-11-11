@@ -16,6 +16,8 @@
 //!    put it onto the battlefield."
 //!   Rebuking Ceremony: "Put two target artifacts on top of their owners'
 //!    libraries."
+//!   Kor Skyfisher: "Flying / When this creature enters, return a permanent you
+//!    control to its owner's hand."
 //!   Ninth Bridge Patrol: "Whenever another creature you control leaves the
 //!    battlefield, put a +1/+1 counter on this creature."
 //!   Karn, Silver Golem and Traxos, Scourge of Kroog: legendary artifact
@@ -656,6 +658,73 @@ fn another_seat_concession_leaves_the_commander_prompt_and_its_owner_intact() {
         assert_eq!(
             mender_departure_triggers(runner.state()),
             vec![P1],
+            "{label}: one merged permanent left, so its ability triggers once"
+        );
+    }
+}
+
+/// CR 730.3 + CR 603.2c + CR 903.9b: Kor Skyfisher's enters trigger returns a
+/// permanent its controller chooses at resolution; the merged permanent is
+/// chosen from several, so the move runs through the selected-card loop. The
+/// commander's prompt parks the split, and after either answer that loop — the
+/// announcing owner — records the departure once.
+#[test]
+fn kor_skyfisher_selection_hands_a_parked_component_back_to_its_loop() {
+    for answer_index in [0, 1] {
+        let db = shared_card_db().expect("integration card fixture must load");
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let (mender, brokkos) = add_pile(&mut scenario, P0);
+        let skyfisher = scenario.add_real_card(P0, "Kor Skyfisher", Zone::Hand, db);
+        scenario.with_mana_pool(P0, mana(ManaType::White, 2));
+        let mut runner = scenario.build();
+        let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
+        let label = format!("answer {answer_index}");
+
+        cast_until_resolved_or_asked(&mut runner, skyfisher, &[]);
+        for _ in 0..6 {
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("priority passes while the trigger resolves");
+        }
+        let WaitingFor::EffectZoneChoice { cards, .. } = &runner.state().waiting_for else {
+            panic!("{label}: {:?}", runner.state().waiting_for);
+        };
+        assert!(
+            cards.contains(&pile.survivor) && cards.contains(&skyfisher),
+            "{label}: the merged permanent is one of several permanents to choose from"
+        );
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![pile.survivor],
+            })
+            .expect("the controller chooses the merged permanent");
+        assert_commander_prompt(runner.state(), P0, pile.brokkos);
+        save_and_restore(&mut runner);
+        answer(&mut runner, answer_index);
+
+        resolution_finished(runner.state());
+        assert_eq!(
+            runner.state().objects[&pile.mender].zone,
+            Zone::Hand,
+            "{label}"
+        );
+        assert_eq!(
+            runner.state().objects[&pile.brokkos].zone,
+            if answer_index == 0 {
+                Zone::Command
+            } else {
+                Zone::Hand
+            },
+            "{label}"
+        );
+        assert_eq!(runner.state().objects[&skyfisher].zone, Zone::Battlefield);
+        assert_eq!(
+            mender_departure_triggers(runner.state()),
+            vec![P0],
             "{label}: one merged permanent left, so its ability triggers once"
         );
     }
