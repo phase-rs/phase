@@ -12667,6 +12667,24 @@ pub enum AnnouncedTargetFactConflict {
         /// The declared target the latch omits.
         target: TargetRef,
     },
+    /// CR 601.2c + CR 400.7: the latch states a zone that the announced target's own
+    /// incarnation pin forbids. A pin that is still current proves the object never changed
+    /// zones since the declaration, so the zone it was announced in IS the zone it is in
+    /// now; a fact that says otherwise was not captured at that announcement.
+    ///
+    /// This is deliberately an IDENTITY-and-ZONE binding, never a live characteristics
+    /// comparison: an object's characteristics are re-derived continuously (CR 613.1), so
+    /// a target that was a creature when it was announced may not be one by the time the
+    /// cast resumes — Heliod, Sun-Crowned at five devotion, then a white permanent
+    /// sacrificed for mana. Refusing that drift would reject an honest save; the
+    /// announcement-time characteristics live only in the latch and are not re-derivable.
+    ZoneContradictsAnnouncement {
+        /// The declared target whose announcement zone the latch contradicts.
+        target: TargetRef,
+        stated: AnnouncedTargetZone,
+        /// The zone the pin proves the announcement happened in.
+        pinned: Zone,
+    },
 }
 
 impl std::fmt::Display for AnnouncedTargetFactConflict {
@@ -12683,6 +12701,16 @@ impl std::fmt::Display for AnnouncedTargetFactConflict {
                 "its announced-target latch omits the declared target {target:?}, which the \
                  save still holds, so the record would state a declaration the cast did not \
                  make (CR 601.2c + CR 115.1)"
+            ),
+            Self::ZoneContradictsAnnouncement {
+                target,
+                stated,
+                pinned,
+            } => write!(
+                f,
+                "its announced-target latch states the zone {stated:?} for {target:?}, but that \
+                 target's announcement pin is still current in {pinned:?}, so the object never \
+                 changed zones and was announced there (CR 601.2c + CR 400.7)"
             ),
         }
     }
@@ -19139,20 +19167,58 @@ impl GameState {
                 credited_player: self.pending_cast_resume_player(owner, pending),
             });
         }
-        if let Some(PendingCostMoveResume::Cast {
-            pending: Some(pending),
-            completion:
-                PendingCostMoveCompletion::FinalizeCast {
-                    prepaid_actual_mana_spent,
+        // CR 601.2h + CR 700.14 + CR 702.66a: the cost-move roots are keyed by their
+        // COMPLETION VARIANT, because the completion is what decides whether the parked
+        // cast's mana has already been paid — not the optional data the `PendingCast`
+        // happens to carry. All three of these re-enter the same prepaid resume
+        // (`casting_costs.rs`'s `resume_prepaid_spell_finalization`), which consumes
+        // `pending.prepaid_actual_mana_spent` when it is set and otherwise falls back to
+        // the spell COPY (`recorded_mana_spent_to_cast`); that number then becomes the
+        // cast's `actual_mana_spent` — the CR 601.2h paid-facts snapshot and CR 700.14's
+        // per-player Expend ledger. A save that parked one of these with the amount erased
+        // would otherwise be skipped by the `PendingCast` walk above (which admits only a
+        // stated amount or a `prepaid_finalization`) and still resume against an
+        // unvalidated copy.
+        //
+        // Every OTHER completion parks a cost move that has not paid the cast's mana, so
+        // it has no payment to validate; the wildcard states that negative rather than
+        // defaulting a paid shape open.
+        let carried: Option<(&PendingCast, Option<u32>)> = match self.pending_cost_move_resume.as_ref() {
+                // CR 702.190a + CR 702.188a: the Sneak / Web-slinging returned-creature
+                // move rebuilt the cast at the park, so the amount rides on the completion
+                // and may be absent — in which case the copy supplies it.
+                Some(PendingCostMoveResume::Cast {
+                    pending: Some(pending),
+                    completion:
+                        PendingCostMoveCompletion::FinalizeCast {
+                            prepaid_actual_mana_spent,
+                            ..
+                        },
                     ..
-                },
-            ..
-        }) = self.pending_cost_move_resume.as_ref()
-        {
+                }) => Some((pending, *prepaid_actual_mana_spent)),
+                Some(PendingCostMoveResume::Cast {
+                    pending: Some(pending),
+                    completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
+                    ..
+                })
+                // CR 601.2h + CR 601.2f: the sacrifice-for-cost commit re-pays a deferred
+                // hand discard and then resumes the cast under the same
+                // `PrepaidSpellFinalization`, reading the payment off the same cast.
+                | Some(PendingCostMoveResume::SacrificeForCost {
+                    pending: Some(pending),
+                    completion: PendingSacrificeCostCompletion::FinalizeSpell { .. },
+                    ..
+                }) => Some((pending, pending.prepaid_actual_mana_spent)),
+                // CR 601.2h + CR 702.66a: the Delve exiles settle first and this completion
+                // re-enters the inner finalizer with what the first pass decided; the
+                // payment travels on the cast the root holds.
+                _ => None,
+            };
+        if let Some((pending, stated_amount)) = carried {
             if pending.activation_ability_index.is_none() {
                 carriers.push(PrepaidSpellCopyCarrier {
                     pending,
-                    stated_amount: *prepaid_actual_mana_spent,
+                    stated_amount,
                     credited_player: self
                         .pending_cast_resume_player(PendingCastOwner::CostMove, pending),
                 });
@@ -19667,7 +19733,7 @@ impl GameState {
             pending: &PendingCast,
             latched: Option<&[ActivationTargetFact]>,
         ) -> Result<(), PersistedRestoreError> {
-            let Some(latched) = latched else {
+            let Some(latched_facts) = latched else {
                 // An ABSENT latch is `reject_unknown_pending_target_facts`'s refusal.
                 return Ok(());
             };
@@ -19676,12 +19742,16 @@ impl GameState {
             if pending.activation_ability_index.is_some() {
                 return Ok(());
             }
-            let declared: Vec<TargetRef> =
-                crate::game::ability_utils::declared_target_entries_in_chain(&pending.ability)
-                    .into_iter()
-                    .map(|entry| entry.target)
-                    .collect();
-            let latched: Vec<TargetRef> = latched
+            // CR 601.2c + CR 400.7: the declared slots AND their announcement pins. The pin
+            // is the recorded authority this guard binds the latch to; the object's live
+            // characteristics are never read.
+            let declared_entries =
+                crate::game::ability_utils::declared_target_entries_in_chain(&pending.ability);
+            let declared: Vec<TargetRef> = declared_entries
+                .iter()
+                .map(|entry| entry.target.clone())
+                .collect();
+            let latched: Vec<TargetRef> = latched_facts
                 .iter()
                 .map(ActivationTargetFact::target_ref)
                 .collect();
@@ -19710,6 +19780,52 @@ impl GameState {
                         target: target.clone(),
                     },
                 });
+            }
+            // CR 601.2c + CR 400.7: bind each object fact's stated ZONE to the announcement
+            // pin recorded for the slot that declared it. A still-current pin proves the
+            // object has not changed zones since CR 601.2c, so the zone it was announced in
+            // is the zone it occupies now — a fact that says otherwise was captured at some
+            // other moment and is not this announcement.
+            //
+            // This is the ONLY announcement-time property a save can still be checked
+            // against. The characteristics the fact carries are likewise announcement-time
+            // (the latch is their only record), and they are deliberately NOT compared with
+            // the live object: CR 613.1 re-derives them continuously, so an announced
+            // creature can legitimately stop being one during the payment (Heliod,
+            // Sun-Crowned at five devotion, then a white permanent sacrificed for mana).
+            // Refusing that drift would reject an honest save, which is the opposite of the
+            // error this guard exists to catch.
+            for fact in latched_facts {
+                let ActivationTargetFact::Object { id, zone, .. } = fact else {
+                    continue;
+                };
+                let Some(entry) = declared_entries
+                    .iter()
+                    .find(|entry| matches!(&entry.target, TargetRef::Object(declared_id) if declared_id == id))
+                else {
+                    continue;
+                };
+                let Some(pin) = entry.pin.as_ref() else {
+                    continue;
+                };
+                if !pin.is_current(state) {
+                    // CR 400.7: the object left the announced zone since; the latch is the
+                    // only surviving record and owes nothing to the live board.
+                    continue;
+                }
+                let Some(object) = state.objects.get(id) else {
+                    continue;
+                };
+                if *zone != AnnouncedTargetZone::Known(object.zone) {
+                    return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+                        spell_object_id: pending.object_id,
+                        reason: AnnouncedTargetFactConflict::ZoneContradictsAnnouncement {
+                            target: TargetRef::Object(*id),
+                            stated: *zone,
+                            pinned: object.zone,
+                        },
+                    });
+                }
             }
             Ok(())
         }

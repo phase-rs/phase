@@ -15076,6 +15076,217 @@ fn post_distribution_delve_exile_parks_for_a_replacement_choice() {
         .all(|l| l.exiled_id != fuel));
 }
 
+/// CR 601.2h + CR 702.66a: the Delve cost-move completion re-enters the PREPAID resume
+/// (`casting_costs.rs` `resume_prepaid_spell_finalization`), which reads
+/// `pending.prepaid_actual_mana_spent` and falls back to the spell COPY when it is absent.
+/// The carrier is therefore keyed by the completion variant, not by the optional amount:
+/// a save that erases the amount still resumes, so the copy that supplies the number it
+/// consumes has to be validated against the journal.
+fn delve_commit_park() -> (GameRunner, ObjectId, ObjectId) {
+    const ORACLE: &str =
+        "Delve (Each card you exile from your graveyard while casting this spell pays for {1}.)\n\
+~ deals X damage divided as you choose among any number of targets.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Delve Volley", false, ORACLE)
+        .from_oracle_text_with_keywords(&["Delve"], ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red],
+            generic: 1,
+        })
+        .id();
+    let fuel = scenario.add_spell_to_graveyard(P0, "Delve Fuel", true).id();
+    for name in ["First Delve Exile Redirect", "Second Delve Exile Redirect"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Hand));
+    }
+    scenario.with_mana_pool(
+        P0,
+        vec![engine::types::mana::ManaUnit::new(
+            ManaType::Red,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("delve spell reaches mana payment");
+    runner
+        .act(GameAction::ChooseX { value: 0 })
+        .expect("announce X = 0");
+    runner
+        .act(GameAction::TapForConvoke {
+            object_id: fuel,
+            mana_type: ManaType::Colorless,
+        })
+        .expect("fuel is selectable");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("payment reaches the post-payment distribution");
+    runner
+        .act(GameAction::DistributeAmong {
+            distribution: vec![],
+        })
+        .expect("completing the distribution pays the delve exile");
+    (runner, spell, fuel)
+}
+
+/// CR 700.14 + CR 601.2h: every prepaid continuation is validated by its COMPLETION
+/// variant. `FinalizeDelvedCast` reaches the prepaid resume — whose `actual_mana_spent`
+/// becomes CR 601.2h's paid-facts snapshot and CR 700.14's "Whenever you expend N" ledger
+/// — whether or not the cast it holds still states an amount, so the copy that supplies a
+/// missing amount must be checked against the journal.
+#[test]
+fn restore_validates_the_delve_completion_by_its_variant() {
+    let (runner, spell, fuel) = delve_commit_park();
+    let recipient = engine::types::resolved_commands::ManaPaymentRecipient::Object(
+        engine::game::game_object::ObjectIncarnationRefExt::from_object(
+            &runner.state().objects[&spell],
+        ),
+    );
+    // CR 702.66a + CR 702.51a: the delve exile is recorded as a spend unit but is not mana
+    // paid, so it is excluded exactly as the production projection excludes it.
+    let settled_units = runner
+        .state()
+        .resolved_rules_journal
+        .spent_units_for_payer_and_recipient(P0, &recipient)
+        .expect("the journal recorded the caster's spend")
+        .iter()
+        .filter(|unit| !unit.is_convoke_payment())
+        .count();
+    let settled = settled_units as u32;
+
+    // Reach guards: the park IS the delve completion, and the cast it holds states the
+    // amount that continuation would consume.
+    {
+        let Some(PendingCostMoveResume::Cast {
+            pending: Some(parking),
+            completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
+            ..
+        }) = runner.state().pending_cost_move_resume.as_ref()
+        else {
+            panic!(
+                "reach-guard: the delve exile parks the commit on its completion, got {:?}",
+                runner.state().pending_cost_move_resume
+            );
+        };
+        assert_eq!(
+            parking.prepaid_actual_mana_spent,
+            Some(settled),
+            "reach-guard: the post-payment delve park repeats the amount it settled"
+        );
+        assert_eq!(
+            runner.state().objects[&spell].mana_spent_to_cast_amount,
+            settled,
+            "reach-guard: the finalizers already stamped the copy this continuation reads"
+        );
+        assert!(
+            settled > 0,
+            "reach-guard: this cast really spent mana, so the amount is worth validating"
+        );
+    }
+
+    // (a) The UNTOUCHED control: the honest save restores and resumes.
+    {
+        let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+            .expect("the delve park serializes");
+        let restored: PersistedGameState =
+            serde_json::from_str(&saved).expect("the delve park deserializes");
+        let mut resumed = GameRunner::from_state(
+            restored
+                .into_game_state()
+                .expect("CR 601.2h: the untouched delve park is admitted"),
+        );
+        resumed
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("the redirect resolves and the commit resumes");
+        assert!(
+            resumed.state().pending_cost_move_resume.is_none(),
+            "reach-guard: the resumed commit retired the cost-move root"
+        );
+    }
+
+    // (b) The amount ERASED and the copy honest: still admitted, because the continuation
+    // consumes the copy and the copy is the payment the journal recorded.
+    {
+        let mut state = runner.state().clone();
+        let Some(PendingCostMoveResume::Cast {
+            pending: Some(parking),
+            ..
+        }) = state.pending_cost_move_resume.as_mut()
+        else {
+            panic!("reach-guard: the delve completion is still parked");
+        };
+        parking.prepaid_actual_mana_spent = None;
+        let admitted = PersistedGameState::capture(state).into_game_state().expect(
+            "CR 601.2h: a Delve completion whose cast states no amount is admitted when the \
+                 copy it consumes states the settled payment",
+        );
+        assert_eq!(
+            admitted.objects[&spell].mana_spent_to_cast_amount, settled,
+            "and the admitted copy still states the caster's spend"
+        );
+    }
+
+    // (c) The amount ERASED and the copy stating a payment nobody made: REFUSED. Before
+    // the completion-keyed enumeration this save was skipped entirely (the cast states no
+    // amount and carries no `prepaid_finalization`), and the resume spent the forged copy.
+    let mut state = runner.state().clone();
+    let Some(PendingCostMoveResume::Cast {
+        pending: Some(parking),
+        ..
+    }) = state.pending_cost_move_resume.as_mut()
+    else {
+        panic!("reach-guard: the delve completion is still parked");
+    };
+    parking.prepaid_actual_mana_spent = None;
+    state
+        .objects
+        .get_mut(&spell)
+        .expect("the spell object is in the save")
+        .mana_spent_to_cast_amount = settled + 1;
+    let error = PersistedGameState::capture(state)
+        .into_game_state()
+        .expect_err(
+            "CR 700.14: a Delve completion whose eraced amount falls back to a forged copy must \
+             be refused, or the resume rewrites the cast's expenditure",
+        );
+    match error {
+        engine::types::game_state::PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+            source_id,
+            reason:
+                engine::types::game_state::PrepaidSpellCopyConflict::AmountDisagreesWithSettledSpend {
+                    copy_amount,
+                    settled: reported,
+                    ..
+                },
+        } => {
+            assert_eq!(source_id, spell, "the refusal names the cast it is about");
+            assert_eq!(copy_amount, settled + 1, "and the amount the copy states");
+            assert_eq!(
+                reported, settled_units,
+                "against the units the journal records for this cast (CR 118.3a)"
+            );
+        }
+        other => panic!(
+            "CR 700.14 + CR 702.66a: the Delve completion must have its copy validated against \
+             the journal, got {other:?}"
+        ),
+    }
+    let _ = fuel;
+}
+
 /// CR 406.6: only a fuel that actually arrived in exile is linked to the spell.
 #[test]
 fn commit_links_only_fuel_delivered_to_exile() {

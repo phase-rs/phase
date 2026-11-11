@@ -57,8 +57,8 @@ use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
-    ActivationTargetFact, CastPaymentMode, GameState, PersistedGameState, PersistedRestoreError,
-    SpellCastRecord, WaitingFor,
+    ActivationTargetFact, AnnouncedTargetFactConflict, AnnouncedTargetZone, CastPaymentMode,
+    GameState, PersistedGameState, PersistedRestoreError, SpellCastRecord, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -1004,6 +1004,85 @@ fn a_mid_payment_characteristics_change_without_a_latch_is_refused() {
             spell_object_id: Some(id),
         }) if id == spell => {}
         Err(other) => panic!("the mid-payment park was refused for the wrong reason: {other:?}"),
+    }
+}
+
+/// CR 601.2c + CR 400.7: the same-TARGET inconsistency control. The object id, the
+/// announcement-time characteristics and every other field of the latch are the HONEST ones;
+/// only the stated ZONE is restated. An announcement pin that is still current proves the
+/// object never changed zones since CR 601.2c, so a fact claiming another zone was not
+/// captured at this announcement — and `record_spell_cast_from_zone` would publish it as the
+/// CR 601.2i history row. The honest pack is admitted (the control above), this one is not.
+///
+/// The characteristics are deliberately left untouched: they are the announcement's record
+/// and are NOT re-derivable, so the guard binds the zone and never compares the live object.
+#[test]
+fn a_latch_stating_a_zone_the_announcement_pin_forbids_is_refused() {
+    let MidPaymentBoard {
+        runner,
+        spell,
+        heliod,
+        ..
+    } = bolt_announced_at_a_creature_heliod_mid_payment();
+
+    // The control: this exact pack, unmodified, is admitted.
+    admitted(persisted_json(runner.state())).expect("reach-guard: the honest pack is admitted");
+
+    // Same id, same announcement-time characteristics, only the zone restated.
+    let mut state = runner.state().clone();
+    let parked = state
+        .pending_cast
+        .as_deref_mut()
+        .expect("reach-guard: the ManaPayment prompt owns the cast");
+    let latched = parked
+        .committed_target_facts
+        .as_deref_mut()
+        .expect("reach-guard: the engine-written park carries its announced-target latch");
+    let fact = latched
+        .iter_mut()
+        .find(|fact| matches!(fact, ActivationTargetFact::Object { id, .. } if *id == heliod))
+        .expect("reach-guard: the latch names Heliod");
+    let ActivationTargetFact::Object { zone, .. } = fact else {
+        unreachable!("filtered to the object fact above");
+    };
+    assert_eq!(
+        *zone,
+        AnnouncedTargetZone::Known(Zone::Battlefield),
+        "reach-guard: the honest fact states the battlefield it was announced on"
+    );
+    *zone = AnnouncedTargetZone::Known(Zone::Graveyard);
+
+    let refused = PersistedGameState::capture(state).into_game_state();
+    match refused {
+        Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+            spell_object_id,
+            reason:
+                AnnouncedTargetFactConflict::ZoneContradictsAnnouncement {
+                    target: TargetRef::Object(target),
+                    stated,
+                    pinned,
+                },
+        }) => {
+            assert_eq!(
+                spell_object_id, spell,
+                "the refusal names the cast it is about"
+            );
+            assert_eq!(target, heliod, "and the target whose zone it contradicts");
+            assert_eq!(
+                stated,
+                AnnouncedTargetZone::Known(Zone::Graveyard),
+                "and the zone the latch states"
+            );
+            assert_eq!(
+                pinned,
+                Zone::Battlefield,
+                "against the battlefield its still-current pin proves"
+            );
+        }
+        other => panic!(
+            "CR 601.2c + CR 400.7: a latch stating a zone its announcement pin forbids must be \
+             refused, got {other:?}"
+        ),
     }
 }
 
