@@ -497,6 +497,13 @@ fn run_post_action_pipeline_core(
     // the loss without sending the still-entering permanent to the graveyard.
     while matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         let events_before = events.len();
+        // CR 702.145c + CR 702.145f: a permanent whose face disagrees with day or night
+        // transforms (not a state-based action). Run here, after this action's triggers were
+        // scanned above: CR 603.10 checks an entry's triggers against the objects immediately
+        // after it, so an entering token's own enters triggers see the face it entered with.
+        // Its Transformed events are scanned with this iteration's events, and this
+        // iteration's SBA check sees the face it turned to.
+        super::day_night::keep_faces_in_agreement(state, events);
         sba::check_state_based_actions_in_pass(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             // CR 603.3b + CR 903.9a: an SBA batch can open a resumable

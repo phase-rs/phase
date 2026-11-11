@@ -3013,6 +3013,9 @@ impl GameObject {
                 face_down: self.face_down,
                 mana_cost: self.mana_cost.clone(),
                 transformed: self.transformed,
+                // CR 701.27g: latch the authority's answer for this incarnation; the raw bit
+                // above stays for reconstruction.
+                transformed_permanent: crate::game::transform::is_transformed_permanent(self),
                 is_renowned: self.is_renowned,
                 is_saddled: self.is_saddled,
                 echo_due: self.echo_due,
@@ -3470,6 +3473,9 @@ impl GameObject {
     /// projection's state-level relationships with no `GameObject` counterpart
     /// (`linked_exile_snapshot`, `cards_exiled_this_turn`, `combat_status`, `granting_object`)
     /// are left to their state-level authorities.
+    /// `transformed_permanent` is a derived rules answer with no `GameObject` field and is not
+    /// written back; the skeleton view in `filter::matches_target_filter_on_entry_observation`
+    /// installs it.
     pub(crate) fn overlay_source_projection(&mut self, context: &TriggerSourceContext) {
         let lki = &context.lki;
         // Identity.

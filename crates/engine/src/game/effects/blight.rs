@@ -958,6 +958,249 @@ mod tests {
         );
     }
 
+    /// The B3 typed witness: "Any player may gain 3 life. If a player does, any player may
+    /// blight 1. If no one does, you lose 3 life." `outer` is the outer offer's scope: an
+    /// any-player offer (its acceptor is `ScopedPlayer`), or `None` for a controller-only "you
+    /// may gain 3 life". The nested any-player blight is gated on the outer offer being taken,
+    /// and its "If no one does" reward is a `Not(OptionalEffectPerformed)` sub. Synthetic: no
+    /// printed card nests an any-player optional under an accepted optional. The nearest printed
+    /// members are Browbeat ("Any player may have Browbeat deal 5 damage to them. If no one
+    /// does, target player draws three cards.") for the reward and Gutsplitter Gang ("you may
+    /// blight 2. If you don't, you lose 3 life.") for the loss.
+    fn nested_any_seat_blight_with_reward(
+        source: ObjectId,
+        outer: Option<crate::types::ability::OpponentMayScope>,
+    ) -> ResolvedAbility {
+        use crate::types::ability::{
+            AbilityCondition, EffectOutcomeSignal, OpponentMayScope, QuantityExpr,
+        };
+
+        let performed = || AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        };
+        let mut reward = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        reward.condition = Some(AbilityCondition::Not {
+            condition: Box::new(performed()),
+        });
+        let mut nested = ResolvedAbility::new(
+            Effect::BlightEffect {
+                count: 1,
+                player: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        nested.optional = true;
+        nested.optional_for = Some(OpponentMayScope::AnyPlayer);
+        nested.condition = Some(performed());
+        nested.sub_ability = Some(Box::new(reward));
+        let mut outer_offer = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: if outer.is_some() {
+                    TargetFilter::ScopedPlayer
+                } else {
+                    TargetFilter::Controller
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        outer_offer.optional = true;
+        outer_offer.optional_for = outer;
+        outer_offer.sub_ability = Some(Box::new(nested));
+        outer_offer
+    }
+
+    /// Resolves `ability` and has the controller take its any-player outer offer, gaining 3.
+    fn controller_takes_the_outer_any_player_offer(
+        state: &mut GameState,
+        ability: &ResolvedAbility,
+    ) {
+        crate::game::effects::resolve_ability_chain(state, ability, &mut Vec::new(), 0).unwrap();
+        assert_offered(
+            state,
+            PlayerId(0),
+            &[PlayerId(1)],
+            "reach guard: the outer any-player offer goes to the controller first",
+        );
+        let accepted = apply(
+            state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("the controller accepts the outer offer");
+        assert_gained_three(&accepted.events);
+    }
+
+    /// Reach guard: the accepted outer offer gained the controller 3 (the rest of the chain may
+    /// already have resolved, so the life total alone can't show it).
+    fn assert_gained_three(events: &[crate::types::events::GameEvent]) {
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                crate::types::events::GameEvent::LifeChanged {
+                    player_id: PlayerId(0),
+                    amount: 3,
+                    ..
+                }
+            )),
+            "reach guard: the accepted outer offer gained the controller 3; events: {events:?}"
+        );
+    }
+
+    fn assert_settled_at_life(state: &GameState, life: i32, why: &str) {
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "{why}: got {:?}",
+            state.waiting_for
+        );
+        assert!(state.stack.is_empty(), "{why}: the stack is empty");
+        assert_eq!(state.players[0].life, life, "{why}");
+    }
+
+    /// CR 118.12 + CR 608.2d + CR 701.68b: no seat can blight, so no one is offered the nested
+    /// blight and no one chose to; its "If no one does" reward runs even though the enclosing
+    /// offer was taken.
+    #[test]
+    fn a_nested_any_player_blight_no_seat_can_take_runs_its_if_no_one_does_reward() {
+        use crate::types::ability::OpponentMayScope;
+
+        let mut state = GameState::new_two_player(7);
+        let source = noncreature_source(&mut state);
+        let ability = nested_any_seat_blight_with_reward(source, Some(OpponentMayScope::AnyPlayer));
+
+        controller_takes_the_outer_any_player_offer(&mut state, &ability);
+        assert_settled_at_life(
+            &state,
+            20,
+            "CR 118.12: no one chose to blight, so the controller loses 3",
+        );
+    }
+
+    /// CR 118.12 + CR 608.2d + CR 101.4: every seat offered the nested blight declines, so its
+    /// "If no one does" reward runs through the all-declined handler.
+    #[test]
+    fn a_nested_any_player_blight_every_seat_declines_runs_its_reward() {
+        use crate::types::ability::OpponentMayScope;
+
+        let mut state = GameState::new_two_player(7);
+        let source = noncreature_source(&mut state);
+        make_creature(&mut state, 2, PlayerId(1));
+        let ability = nested_any_seat_blight_with_reward(source, Some(OpponentMayScope::AnyPlayer));
+
+        controller_takes_the_outer_any_player_offer(&mut state, &ability);
+        assert_offered(
+            &state,
+            PlayerId(1),
+            &[],
+            "reach guard: the opponent is offered the nested blight",
+        );
+        apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .expect("the opponent declines the nested blight");
+        assert_settled_at_life(
+            &state,
+            20,
+            "CR 118.12: every seat declined, so the controller loses 3",
+        );
+    }
+
+    /// CR 608.2d: the sibling "If a player does, you gain 1 life. If no one does, you lose 3
+    /// life." on the nested blight: its else branch runs whether no seat can blight or every
+    /// seat declines.
+    #[test]
+    fn a_nested_if_no_one_does_else_branch_still_runs() {
+        use crate::types::ability::QuantityExpr;
+
+        let with_else = |source: ObjectId| {
+            let mut ability = nested_any_seat_blight(source);
+            let rider = ability
+                .sub_ability
+                .as_mut()
+                .and_then(|nested| nested.sub_ability.as_mut())
+                .expect("the nested blight carries its \"if a player does\" rider");
+            rider.else_ability = Some(Box::new(ResolvedAbility::new(
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    target: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )));
+            ability
+        };
+
+        let mut state = GameState::new_two_player(7);
+        let source = noncreature_source(&mut state);
+        controller_takes_the_outer_any_player_offer(&mut state, &with_else(source));
+        assert_settled_at_life(&state, 20, "no seat can blight: the else branch runs");
+
+        let mut state = GameState::new_two_player(7);
+        let source = noncreature_source(&mut state);
+        make_creature(&mut state, 2, PlayerId(1));
+        controller_takes_the_outer_any_player_offer(&mut state, &with_else(source));
+        assert_offered(
+            &state,
+            PlayerId(1),
+            &[],
+            "reach guard: the opponent is offered the nested blight",
+        );
+        apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .expect("the opponent declines the nested blight");
+        assert_settled_at_life(&state, 20, "every seat declined: the else branch runs");
+    }
+
+    /// CR 118.12 + CR 608.2d: the inherited acceptance can come from a controller-only "you
+    /// may" rather than an any-player offer; the nested offer's "If no one does" reward still
+    /// reads its own outcome.
+    #[test]
+    fn a_nested_any_player_blight_under_an_accepted_you_may_runs_its_reward() {
+        let mut state = GameState::new_two_player(7);
+        let source = noncreature_source(&mut state);
+        let ability = nested_any_seat_blight_with_reward(source, None);
+
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .unwrap();
+        let WaitingFor::OptionalEffectChoice { player, .. } = &state.waiting_for else {
+            panic!(
+                "reach guard: the \"you may\" is asked; got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(*player, PlayerId(0), "reach guard: the controller is asked");
+        let accepted = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("the controller accepts the \"you may\"");
+        assert_gained_three(&accepted.events);
+        assert_settled_at_life(
+            &state,
+            20,
+            "CR 118.12: no one chose to blight, so the controller loses 3 after gaining 3",
+        );
+    }
+
     /// CR 101.4 + CR 608.2c + CR 701.68b: the building block. Context an any-player
     /// blight inherited from an earlier accepted offer is not this offer's seat: the
     /// generic gate does not judge it, and the per-seat judge answers for whichever seat

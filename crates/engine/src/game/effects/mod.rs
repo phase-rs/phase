@@ -17180,7 +17180,9 @@ pub(crate) fn next_offerable_seat(
 /// any-player optional runs when every seat declined or none could be offered: the
 /// `OptionalEffectPerformed` sub's else branch, or a `Not(OptionalEffectPerformed)`
 /// sub's own reward. Shared by the fan-out (no seat offerable) and the handler
-/// (`resolve_all_declined_opponent_may`).
+/// (`resolve_all_declined_opponent_may`). The branch resolves with
+/// `optional_effect_performed = false`: "If no one does" checks whether a player chose to
+/// (CR 118.12).
 pub(crate) fn declined_by_every_seat_branch(ability: &ResolvedAbility) -> Option<ResolvedAbility> {
     let sub = ability.sub_ability.as_ref()?;
     if sub
@@ -17200,6 +17202,10 @@ pub(crate) fn declined_by_every_seat_branch(ability: &ResolvedAbility) -> Option
             else_resolved.mirror_targets_from(ability);
         }
         else_resolved.context = ability.context.clone();
+        // CR 118.12 + CR 608.2d: no seat chose this offer's option, so the branch reads this
+        // offer's outcome, not an acceptance inherited from an enclosing optional (the
+        // single-seat decline in resolve_optional_effect_decision_step resets it the same way).
+        else_resolved.context.optional_effect_performed = false;
         else_resolved.set_replacement_applied_recursive(ability.replacement_applied.clone());
         Some(else_resolved)
     } else if sub
@@ -17215,6 +17221,10 @@ pub(crate) fn declined_by_every_seat_branch(ability: &ResolvedAbility) -> Option
         // evaluates this same negated condition as false and skips it.)
         let mut sub_resolved = sub.as_ref().clone();
         sub_resolved.context = ability.context.clone();
+        // CR 118.12 + CR 608.2d: no seat chose this offer's option, so the branch reads this
+        // offer's outcome, not an acceptance inherited from an enclosing optional (the
+        // single-seat decline in resolve_optional_effect_decision_step resets it the same way).
+        sub_resolved.context.optional_effect_performed = false;
         Some(sub_resolved)
     } else {
         None

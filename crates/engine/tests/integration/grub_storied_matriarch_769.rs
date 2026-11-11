@@ -38,6 +38,11 @@
 //! front-face-up permanent, a Room cast as its right half or a merged permanent.
 //! CR 702.145b + CR 702.145e: daybound and nightbound turn a permanent over by the face
 //! that is up, not by whether it last transformed.
+//! CR 702.145c + CR 702.145f: a permanent whose face disagrees with day or night transforms at
+//! the next checkpoint after its entry is observed — a token copy of a daybound card made at
+//! night enters front face up, triggers, then transforms.
+//! CR 701.27g: a latched source carries the answer at its observation; the raw face-swap bit
+//! stays for reconstruction.
 
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
@@ -60,7 +65,7 @@ use engine::types::counter::CounterType;
 use engine::types::game_state::{
     CastPaymentMode, DayNight, GameState, ReplacementChoiceKind, StackEntryKind, WaitingFor,
 };
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -117,6 +122,8 @@ const SCOUNDREL: &str = "Baneblade Scoundrel";
 const MARAUDER: &str = "Baneclaw Marauder";
 const INTO_THE_NIGHT: &str = "Into the Night";
 const CELESTUS: &str = "The Celestus";
+const BRUTAL_CATHAR: &str = "Brutal Cathar";
+const MOONRAGE_BRUTE: &str = "Moonrage Brute";
 
 const AUNTIE_ORACLE: &str = "Menace\nWhenever Grub attacks, you may blight 1. If you do, create a tapped and attacking token that's a copy of the blighted creature, except it has \"At the beginning of the end step, sacrifice this token.\"\nAt the beginning of your first main phase, you may pay {B}. If you do, transform Grub.";
 const NEXUS_ORACLE: &str = "At the beginning of combat on your turn, draw a card. Then you may exile an artifact or creature card from your hand. If you do, create a token that's a copy of the exiled card, except it's a 3/3 Golem artifact creature in addition to its other types.";
@@ -170,6 +177,8 @@ const CONNOISSEUR_ORACLE: &str =
 const GEMRAZER_ORACLE: &str = "Mutate {1}{G}{G} (If you cast this spell for its mutate cost, put it over or under target non-Human creature you own. They mutate into the creature on top plus all abilities from under it.)\nReach, trample\nWhenever this creature mutates, destroy target artifact or enchantment an opponent controls.";
 const SCOUNDREL_ORACLE: &str = "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nDaybound (If a player casts no spells during their own turn, it becomes night next turn.)";
 const MARAUDER_ORACLE: &str = "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nWhenever a creature blocking this creature dies, that creature's controller loses 1 life.\nNightbound (If a player casts at least two spells during their own turn, it becomes day next turn.)";
+const BRUTAL_CATHAR_ORACLE: &str = "Whenever this creature enters or transforms into Brutal Cathar, exile target creature an opponent controls until this creature leaves the battlefield.\nDaybound (If a player casts no spells during their own turn, it becomes night next turn.)";
+const MOONRAGE_BRUTE_ORACLE: &str = "First strike\nWard—Pay 3 life.\nNightbound (If a player casts at least two spells during their own turn, it becomes day next turn.)";
 const INTO_THE_NIGHT_ORACLE: &str =
     "It becomes night. Discard any number of cards, then draw that many cards plus one.";
 const CELESTUS_ORACLE: &str = "If it's neither day nor night, it becomes day as The Celestus enters.\n{T}: Add one mana of any color.\n{3}, {T}: If it's night, it becomes day. Otherwise, it becomes night. Activate only as a sorcery.\nWhenever day becomes night or night becomes day, you gain 1 life. You may draw a card. If you do, discard a card.";
@@ -4471,4 +4480,334 @@ fn assert_scoundrel_turned_back(runner: &GameRunner, scoundrel: ObjectId) {
         "positive control: the Scoundrel transforms back"
     );
     assert_eq!(stored_face(runner, scoundrel).name, MARAUDER);
+}
+
+/// A Feldon of the Third Path board: Feldon, able to activate, with `copied` the only creature
+/// card in P0's graveyard and Into the Night in P0's hand during the day; `opponent_bears`
+/// puts Grizzly Bears under P1.
+fn feldon_copy_board(
+    copied: &'static str,
+    copied_oracle: &'static str,
+    opponent_bears: bool,
+) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+    let (mut runner, (feldon, night, bears)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, FELDON, FELDON_ORACLE);
+        assert_oracle(db, copied, copied_oracle);
+        assert_oracle(db, INTO_THE_NIGHT, INTO_THE_NIGHT_ORACLE);
+        scenario.add_real_card(P0, copied, Zone::Graveyard, db);
+        (
+            scenario.add_real_card(P0, FELDON, Zone::Battlefield, db),
+            scenario.add_real_card(P0, INTO_THE_NIGHT, Zone::Hand, db),
+            opponent_bears.then(|| scenario.add_real_card(P1, BEARS, Zone::Battlefield, db)),
+        )
+    });
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&feldon)
+        .expect("Feldon exists")
+        .summoning_sick = false;
+    runner.state_mut().day_night = Some(DayNight::Day);
+    (runner, feldon, night, bears)
+}
+
+/// Activates Feldon of the Third Path targeting the only creature card in the graveyard and
+/// resolves the ability, returning the events of both passes and the token it made.
+fn feldon_makes_a_token(
+    runner: &mut GameRunner,
+    feldon: ObjectId,
+) -> (Vec<engine::types::events::GameEvent>, ObjectId) {
+    fund(runner, ManaType::Red, 3);
+    activate(runner, feldon);
+    top_of_stack_from(runner, feldon);
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority must succeed")
+                .events,
+        );
+    }
+    let made = tokens(runner);
+    assert_eq!(made.len(), 1, "reach guard: Feldon made exactly one token");
+    (events, made[0])
+}
+
+fn transformed_events(events: &[engine::types::events::GameEvent], id: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(event, engine::types::events::GameEvent::Transformed { object_id } if *object_id == id)
+        })
+        .count()
+}
+
+fn entry_record_names(events: &[engine::types::events::GameEvent], id: ObjectId) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            engine::types::events::GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                record,
+                ..
+            } if *object_id == id => Some(record.name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 702.145c: "Any time a player controls a permanent that is front face up with daybound and
+/// it's night, that player transforms that permanent." Feldon of the Third Path ("{2}{R}, {T}:
+/// Create a token that's a copy of target creature card in your graveyard, except it's an
+/// artifact in addition to its other types. It gains haste. Sacrifice it at the beginning of the
+/// next end step.") copies Baneblade Scoundrel at night. CR 111.1 + CR 702.145b: the token isn't
+/// represented by a card, so it enters front face up (CR 707.8a) and then transforms into
+/// Baneclaw Marauder, before the next designation change. CR 707.9b: the artifact exception is on
+/// both faces. CR 712.18: the haste grant and the delayed sacrifice still apply to it.
+#[test]
+fn feldons_copy_of_a_daybound_card_made_at_night_transforms() {
+    let (mut runner, feldon, night, _) = feldon_copy_board(SCOUNDREL, SCOUNDREL_ORACLE, false);
+    assert_oracle(load_db().expect("card db"), MARAUDER, MARAUDER_ORACLE);
+    cast_into_the_night(&mut runner, night);
+
+    let (events, token) = feldon_makes_a_token(&mut runner, feldon);
+    assert_settled(&runner);
+    settle(&mut runner);
+    assert_eq!(
+        entry_record_names(&events, token),
+        vec![SCOUNDREL.to_string()],
+        "reach guard: the token entered front face up"
+    );
+    let obj = &runner.state().objects[&token];
+    assert_eq!(
+        obj.name, MARAUDER,
+        "CR 702.145c: at night the daybound token transforms"
+    );
+    assert!(obj.transformed);
+    assert_eq!(obj.transformation_count, 1);
+    assert!(obj.card_types.core_types.contains(&CoreType::Artifact));
+    assert!(obj.keywords.contains(&Keyword::Nightbound));
+    assert!(obj.keywords.contains(&Keyword::Haste));
+    assert!(!obj.keywords.contains(&Keyword::Daybound));
+    assert_eq!(stored_face(&runner, token).name, SCOUNDREL);
+    assert_eq!(transformed_events(&events, token), 1);
+    assert_eq!(runner.state().day_night, Some(DayNight::Night));
+
+    drive_to_end(&mut runner);
+    runner.advance_until_stack_empty();
+    assert!(
+        !runner.state().battlefield.contains(&token),
+        "Feldon's delayed trigger sacrifices it"
+    );
+}
+
+/// CR 603.10 + CR 603.6a + CR 702.145c: Feldon of the Third Path copies Brutal Cathar
+/// ("Whenever this creature enters or transforms into Brutal Cathar, exile target creature an
+/// opponent controls until this creature leaves the battlefield.") at night. The token enters
+/// as Brutal Cathar, so its enters trigger triggers; then it transforms into Moonrage Brute.
+#[test]
+fn feldons_copy_of_brutal_cathar_at_night_triggers_then_transforms() {
+    let (mut runner, feldon, night, bears) =
+        feldon_copy_board(BRUTAL_CATHAR, BRUTAL_CATHAR_ORACLE, true);
+    assert_oracle(
+        load_db().expect("card db"),
+        MOONRAGE_BRUTE,
+        MOONRAGE_BRUTE_ORACLE,
+    );
+    let bears = bears.expect("the Bears are staged");
+    cast_into_the_night(&mut runner, night);
+
+    let (events, token) = feldon_makes_a_token(&mut runner, feldon);
+    assert_eq!(
+        entry_record_names(&events, token),
+        vec![BRUTAL_CATHAR.to_string()]
+    );
+    let stack = &runner.state().stack;
+    assert_eq!(stack.len(), 1, "reach guard: the enters trigger waits");
+    assert!(
+        matches!(
+            stack[0].kind,
+            StackEntryKind::TriggeredAbility { source_id, .. } if source_id == token
+        ),
+        "the trigger's source is the token; stack: {stack:?}"
+    );
+    let obj = &runner.state().objects[&token];
+    assert_eq!(obj.name, MOONRAGE_BRUTE, "CR 702.145c: then it transforms");
+    assert!(obj.transformed);
+    assert_eq!(obj.transformation_count, 1);
+
+    both_pass(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(
+        runner.state().objects[&bears].zone,
+        Zone::Exile,
+        "CR 603.10: the trigger of the face it entered with resolves"
+    );
+    assert_eq!(runner.state().objects[&token].name, MOONRAGE_BRUTE);
+}
+
+/// CR 702.145c: during the day a daybound token front face up agrees, so Feldon of the Third
+/// Path's copy of Baneblade Scoundrel stays Baneblade Scoundrel.
+#[test]
+fn feldons_copy_of_a_daybound_card_made_during_the_day_stays_front_face_up() {
+    let (mut runner, feldon, _, _) = feldon_copy_board(SCOUNDREL, SCOUNDREL_ORACLE, false);
+
+    let (events, token) = feldon_makes_a_token(&mut runner, feldon);
+    assert_settled(&runner);
+    settle(&mut runner);
+    let obj = &runner.state().objects[&token];
+    assert!(
+        obj.keywords.contains(&Keyword::Daybound),
+        "reach guard: the token is daybound"
+    );
+    assert_eq!(stored_face(&runner, token).name, MARAUDER);
+    let obj = &runner.state().objects[&token];
+    assert_eq!(obj.name, SCOUNDREL);
+    assert!(!obj.transformed);
+    assert_eq!(obj.transformation_count, 0);
+    assert_eq!(transformed_events(&events, token), 0);
+    assert_eq!(runner.state().day_night, Some(DayNight::Day));
+}
+
+/// CR 702.145b: "If it is night and this permanent is represented by a double-faced card, it
+/// enters transformed." Brutal Cathar cast at night enters as Moonrage Brute, so the
+/// agreement pass doesn't transform it again and the front face's enters trigger never
+/// triggers: the opponent's Grizzly Bears stay.
+#[test]
+fn brutal_cathar_cast_at_night_enters_transformed_without_its_trigger() {
+    let (mut runner, (cathar, night, bears)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, BRUTAL_CATHAR, BRUTAL_CATHAR_ORACLE);
+        assert_oracle(db, MOONRAGE_BRUTE, MOONRAGE_BRUTE_ORACLE);
+        assert_oracle(db, INTO_THE_NIGHT, INTO_THE_NIGHT_ORACLE);
+        (
+            scenario.add_real_card(P0, BRUTAL_CATHAR, Zone::Exile, db),
+            scenario.add_real_card(P0, INTO_THE_NIGHT, Zone::Hand, db),
+            scenario.add_real_card(P1, BEARS, Zone::Battlefield, db),
+        )
+    });
+    runner.state_mut().day_night = Some(DayNight::Day);
+    // Staged outside the hand, so Into the Night's "Discard any number of cards" has
+    // nothing to ask about.
+    cast_into_the_night(&mut runner, night);
+    put(&mut runner, cathar, Zone::Hand);
+
+    fund(&mut runner, ManaType::White, 3);
+    runner.cast(cathar).commit();
+    both_pass(&mut runner);
+    assert_settled(&runner);
+    settle(&mut runner);
+    let obj = &runner.state().objects[&cathar];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(obj.transformed, "reach guard: it entered transformed");
+    assert_eq!(stored_face(&runner, cathar).name, BRUTAL_CATHAR);
+    let obj = &runner.state().objects[&cathar];
+    assert_eq!(obj.name, MOONRAGE_BRUTE);
+    assert_eq!(obj.transformation_count, 0);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+}
+
+/// Moves `card` from the battlefield to the graveyard and returns (raw `transformed`, latched
+/// `transformed_permanent`, the latched source read, the departed connive subject's
+/// `transformed`) for the departed incarnation.
+fn depart_and_read(runner: &mut GameRunner, card: ObjectId) -> (bool, bool, bool, bool) {
+    let identity = ObjectIncarnationRef {
+        object_id: card,
+        incarnation: runner.state().objects[&card].incarnation,
+    };
+    put(runner, card, Zone::Graveyard);
+    let state = runner.state();
+    let record = state
+        .zone_changes_this_turn
+        .iter()
+        .find(|record| record.object_id == card && record.from_zone == Some(Zone::Battlefield))
+        .expect("the departure is recorded");
+    let context = record
+        .trigger_source_context()
+        .expect("the departure carries its source context");
+    (
+        context.transformed,
+        context.transformed_permanent,
+        context.source_read(state).transformed(),
+        state
+            .capture_departed_connive_subject(identity)
+            .expect("the departed incarnation has a connive subject")
+            .snapshot
+            .transformed,
+    )
+}
+
+/// CR 701.27g + CR 400.7: Valentin, Dean of the Vein cast as Lisette, Dean of the Root is a
+/// transformed permanent, and the departed incarnation's latched answer says so; the raw
+/// face-swap bit stays false for reconstruction. Shared-path witness: no printed card reads a
+/// departed source's "transformed permanent"; the nearest printed reader is Mutagen Connoisseur
+/// ("This creature gets +1/+0 for each transformed permanent you control.").
+#[test]
+fn a_departed_modal_card_back_face_up_was_a_transformed_permanent() {
+    let (mut runner, card) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
+        assert_oracle(db, LISETTE, LISETTE_ORACLE);
+        scenario.add_real_card(P0, VALENTIN, Zone::Hand, db)
+    });
+    cast_as_lisette(&mut runner, card);
+    let obj = &runner.state().objects[&card];
+    assert!(
+        obj.modal_back_face && !obj.transformed,
+        "reach guard: Lisette, back face up"
+    );
+
+    assert_eq!(
+        depart_and_read(&mut runner, card),
+        (false, true, true, true),
+        "CR 701.27g: the departed Lisette was a transformed permanent"
+    );
+}
+
+/// CR 701.27g: "A permanent with its front face up is never considered a transformed
+/// permanent, even if it had its back face up previously." Lisette, Dean of the Root
+/// Moonmisted into Valentin, Dean of the Vein has both flags; its departure latches false.
+#[test]
+fn a_departed_front_face_up_modal_card_with_both_flags_was_not_a_transformed_permanent() {
+    let (mut runner, (card, moonmist)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
+        assert_oracle(db, MOONMIST, MOONMIST_ORACLE);
+        (
+            scenario.add_real_card(P0, VALENTIN, Zone::Hand, db),
+            scenario.add_real_card(P0, MOONMIST, Zone::Hand, db),
+        )
+    });
+    cast_as_lisette(&mut runner, card);
+    fund(&mut runner, ManaType::Green, 2);
+    runner.cast(moonmist).resolve();
+    settle(&mut runner);
+    let obj = &runner.state().objects[&card];
+    assert_eq!(obj.name, VALENTIN, "reach guard: Moonmist turned it over");
+    assert!(obj.modal_back_face && obj.transformed);
+
+    assert_eq!(
+        depart_and_read(&mut runner, card),
+        (true, false, false, false),
+        "CR 701.27g: the departed Valentin was not a transformed permanent"
+    );
+}
+
+/// CR 701.27g: the positive control. A transformed Kessig Prowler ("{4}{G}: Transform this
+/// creature.") departs as Sinuous Predator, a transformed permanent on every read.
+#[test]
+fn a_departed_transformed_card_was_a_transformed_permanent() {
+    let (mut runner, prowler) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, PROWLER, PROWLER_ORACLE);
+        assert_oracle(db, PREDATOR, PREDATOR_ORACLE);
+        scenario.add_real_card(P0, PROWLER, Zone::Battlefield, db)
+    });
+    engine::game::transform::transform_permanent(runner.state_mut(), prowler, &mut Vec::new())
+        .expect("Kessig Prowler transforms");
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&prowler].name, PREDATOR);
+
+    assert_eq!(
+        depart_and_read(&mut runner, prowler),
+        (true, true, true, true)
+    );
 }

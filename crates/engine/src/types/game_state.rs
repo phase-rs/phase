@@ -694,8 +694,18 @@ pub struct TriggerSourceContext {
     /// object's mana symbols answers from this capture.
     #[serde(default)]
     pub mana_cost: ManaCost,
+    /// The raw face-swap record (`GameObject::transformed`), restored by
+    /// `overlay_source_projection`; see `transformed_permanent`.
     #[serde(default)]
     pub transformed: bool,
+    /// CR 701.27g: whether the observed object was a "transformed permanent" (a double-faced
+    /// permanent with its back face up), latched from `transform::is_transformed_permanent` at the
+    /// observation. `transformed` beside it is the raw face-swap record that
+    /// `GameObject::overlay_source_projection` restores; latched rules readers read this answer.
+    /// Like the predicate it reads the face only; the zone scope (CR 701.27g "on the battlefield")
+    /// is the reader's, through `identity.expected_zone`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transformed_permanent: bool,
     #[serde(default)]
     pub is_renowned: bool,
     #[serde(default)]
@@ -806,6 +816,9 @@ impl std::fmt::Debug for TriggerSourceContext {
             .field("transformed", &self.transformed)
             .field("is_renowned", &self.is_renowned)
             .field("is_saddled", &self.is_saddled);
+        if self.transformed_permanent {
+            debug.field("transformed_permanent", &self.transformed_permanent);
+        }
         if self.echo_due {
             debug.field("echo_due", &self.echo_due);
         }
@@ -1246,9 +1259,9 @@ impl<'context, 'state> TriggerSourceRead<'context, 'state> {
     pub fn transformed(self) -> bool {
         match self {
             // CR 701.27g: a live source answers through the one "transformed permanent"
-            // authority. The latched context keeps the raw swap record.
+            // authority; a latched source reads the answer latched at its observation.
             Self::ExactLive(object) => crate::game::transform::is_transformed_permanent(object),
-            Self::Latched(context) => context.transformed,
+            Self::Latched(context) => context.transformed_permanent,
         }
     }
 
@@ -32133,7 +32146,8 @@ impl GameState {
                 is_commander: false,
                 tapped: lki.tapped,
                 face_down: context.is_some_and(|context| context.face_down),
-                transformed: context.is_some_and(|context| context.transformed),
+                // CR 701.27g + CR 400.7: the departed incarnation's latched answer.
+                transformed: context.is_some_and(|context| context.transformed_permanent),
                 is_suspected: lki.is_suspected,
                 is_renowned: context.is_some_and(|context| context.is_renowned),
                 is_saddled: context.is_some_and(|context| context.is_saddled),
@@ -36168,6 +36182,7 @@ impl GameState {
                 face_down: _,
                 mana_cost: _,
                 transformed: _,
+                transformed_permanent: _,
                 is_renowned: _,
                 is_saddled: _,
                 echo_due: _,

@@ -21,6 +21,51 @@ pub(crate) fn face_disagrees_with(obj: &GameObject, designation: DayNight) -> bo
     }
 }
 
+/// CR 702.145b + CR 702.145c + CR 702.145e + CR 702.145f: transforms every permanent whose face
+/// disagrees with `designation` (`face_disagrees_with`). CR 701.27c + CR 712.9: a permanent that
+/// isn't a double-faced token or card is left as it is (`transform_permanent` refuses it).
+fn transform_disagreeing_permanents(
+    state: &mut GameState,
+    designation: DayNight,
+    events: &mut Vec<GameEvent>,
+) {
+    let to_transform: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| face_disagrees_with(obj, designation))
+        })
+        .collect();
+    for id in to_transform {
+        let _ = transform::transform_permanent(state, id, events);
+    }
+}
+
+/// CR 702.145c + CR 702.145f: "Any time a player controls a permanent that is front face up with
+/// daybound and it's night, that player transforms that permanent. This happens immediately and
+/// isn't a state-based action." (and the nightbound/day mirror). CR 111.1 + CR 702.145b: a token
+/// isn't represented by a card, so a token copy of a daybound card made at night enters front
+/// face up (CR 707.8a). CR 603.10 + CR 603.6a: its entry's triggers are checked against the
+/// objects as they exist immediately after that event, so its own enters triggers see the face it
+/// entered with; the transform is the next event. The engine collects an action's triggers from
+/// the live object in the post-action pipeline, so this pass runs at the first checkpoint after
+/// that collection, not inside the resolution; no printed "create a token that's a copy of … card"
+/// producer observes the token between the two.
+pub(crate) fn keep_faces_in_agreement(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let Some(designation) = state.day_night else {
+        return;
+    };
+    // CR 613.1: a copy effect's daybound/nightbound is a layer-applied keyword.
+    if state.layers_dirty.is_dirty() {
+        super::layers::flush_layers(state);
+    }
+    transform_disagreeing_permanents(state, designation, events);
+}
+
 /// Check and apply day/night transition at end of turn.
 ///
 /// CR 502.2 (see also CR 731, "Day and Night"):
@@ -60,25 +105,11 @@ pub fn check_day_night_transition(state: &mut GameState, events: &mut Vec<GameEv
         },
     });
 
-    // Transform all Daybound/Nightbound permanents
-    let to_transform: Vec<_> = state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .is_some_and(|obj| face_disagrees_with(obj, new_state))
-        })
-        .collect();
-
-    // CR 702.145c + CR 702.145f: Daybound/Nightbound permanents entering under
-    // the opposite designation are handled at ETB time in zones::move_to_zone,
-    // not here. This loop only handles on-transition transforms.
-    for id in to_transform {
-        let _ = transform::transform_permanent(state, id, events);
-    }
+    // CR 702.145b + CR 702.145e: as it becomes day or night, each disagreeing permanent
+    // transforms. A card entering at night enters transformed (zones::move_to_zone,
+    // CR 702.145b); any other disagreement, a token's included, is corrected by
+    // keep_faces_in_agreement.
+    transform_disagreeing_permanents(state, new_state, events);
 }
 
 /// CR 731.1: Set the game's day/night designation to a specific value.
@@ -101,21 +132,7 @@ pub fn resolve_set_day_night(state: &mut GameState, to: DayNight, events: &mut V
     }
 
     // Transform all Daybound/Nightbound permanents
-    let to_transform: Vec<_> = state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .is_some_and(|obj| face_disagrees_with(obj, to))
-        })
-        .collect();
-
-    for id in to_transform {
-        let _ = transform::transform_permanent(state, id, events);
-    }
+    transform_disagreeing_permanents(state, to, events);
 }
 
 /// Initialize day/night to Day when a daybound/nightbound card first enters the game.
@@ -361,6 +378,111 @@ mod tests {
         assert_eq!(obj.name, "Daybound Werewolf");
         assert_eq!(obj.power, Some(2));
         assert_eq!(obj.toughness, Some(2));
+    }
+
+    fn transformed_events(events: &[GameEvent], id: crate::types::identifiers::ObjectId) -> usize {
+        events
+            .iter()
+            .filter(
+                |event| matches!(event, GameEvent::Transformed { object_id } if *object_id == id),
+            )
+            .count()
+    }
+
+    /// CR 702.145c: a daybound token front face up at night transforms at the next agreement
+    /// pass, and an agreeing permanent is left alone by the next one. DN1 isolates the shape D1
+    /// runs on a printed card: Feldon of the Third Path's copy of Baneblade Scoundrel at night.
+    #[test]
+    fn a_daybound_token_front_face_up_at_night_transforms() {
+        let mut state = GameState::new_two_player(42);
+        let id = setup_daybound_creature(&mut state);
+        state.objects.get_mut(&id).unwrap().is_token = true;
+        state.day_night = Some(DayNight::Night);
+
+        let mut events = Vec::new();
+        keep_faces_in_agreement(&mut state, &mut events);
+
+        assert_eq!(transformed_events(&events, id), 1);
+        let obj = &state.objects[&id];
+        assert!(obj.transformed);
+        assert_eq!(obj.name, "Nightbound Werewolf");
+
+        let mut again = Vec::new();
+        keep_faces_in_agreement(&mut state, &mut again);
+        assert!(
+            again.is_empty(),
+            "an agreeing face is not transformed again"
+        );
+    }
+
+    /// CR 702.145f: a nightbound permanent back face up during the day transforms. DN2's printed
+    /// shape is Baneblade Scoundrel turned to Baneclaw Marauder during the day by Moonmist
+    /// ("Transform all Humans. Prevent all combat damage that would be dealt this turn by
+    /// creatures other than Werewolves and Wolves."); that board also passes through the
+    /// pre-existing CR 702.145b defect (Moonmist shouldn't transform it at all), so the synthetic
+    /// object isolates CR 702.145f.
+    #[test]
+    fn a_nightbound_permanent_back_face_up_during_the_day_transforms() {
+        let mut state = GameState::new_two_player(42);
+        let id = setup_daybound_creature(&mut state);
+        let mut setup_events = Vec::new();
+        transform::transform_permanent(&mut state, id, &mut setup_events).unwrap();
+        assert!(state.objects[&id].transformed, "precondition: back face up");
+        assert!(state.objects[&id].has_keyword(&Keyword::Nightbound));
+        state.day_night = Some(DayNight::Day);
+
+        let mut events = Vec::new();
+        keep_faces_in_agreement(&mut state, &mut events);
+
+        assert_eq!(transformed_events(&events, id), 1);
+        let obj = &state.objects[&id];
+        assert!(!obj.transformed);
+        assert_eq!(obj.name, "Daybound Werewolf");
+    }
+
+    /// CR 701.27c + CR 712.9: a permanent with daybound that isn't double-faced can't transform,
+    /// so nothing happens. DN3's printed shape is Clone ("You may have this creature enter as a
+    /// copy of any creature on the battlefield.") copying Baneblade Scoundrel during the day,
+    /// followed by Into the Night: that permanent has daybound and is front face up, but it isn't
+    /// a double-faced card.
+    #[test]
+    fn a_permanent_that_isnt_double_faced_is_left_alone() {
+        let mut state = GameState::new_two_player(42);
+        let id = setup_daybound_creature(&mut state);
+        state.objects.get_mut(&id).unwrap().back_face = None;
+        state.day_night = Some(DayNight::Night);
+        assert!(
+            face_disagrees_with(&state.objects[&id], DayNight::Night),
+            "reach: the pass considers it"
+        );
+
+        let mut events = Vec::new();
+        keep_faces_in_agreement(&mut state, &mut events);
+
+        assert!(events.is_empty());
+        let obj = &state.objects[&id];
+        assert!(!obj.transformed);
+        assert_eq!(obj.name, "Daybound Werewolf");
+    }
+
+    /// CR 731.1: with neither day nor night, no face disagrees, so nothing transforms. The row
+    /// asserts only that: CR 702.145d ("Any time a player controls a permanent with daybound, if
+    /// it's neither day nor night, it becomes day.") is not applied by this pass, which is
+    /// pre-existing (`initialize_day_night` has no production caller).
+    #[test]
+    fn no_designation_transforms_nothing() {
+        let mut state = GameState::new_two_player(42);
+        let id = setup_daybound_creature(&mut state);
+        state.objects.get_mut(&id).unwrap().is_token = true;
+        assert_eq!(state.day_night, None);
+
+        let mut events = Vec::new();
+        keep_faces_in_agreement(&mut state, &mut events);
+
+        assert_eq!(transformed_events(&events, id), 0);
+        let obj = &state.objects[&id];
+        assert!(!obj.transformed);
+        assert_eq!(obj.transformation_count, 0);
     }
 
     #[test]
