@@ -754,6 +754,112 @@ fn head_bare_choose_does_not_hide_later_printed_target() {
     ));
 }
 
+/// Casts `text` as a {G} sorcery-speed spell for P0 against a board of one P0
+/// creature and `artifacts` P1 artifacts.
+fn cast_with_artifacts(
+    name: &str,
+    text: &str,
+    artifacts: usize,
+) -> (GameRunner, ObjectId, Vec<ObjectId>, Result<(), String>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P0, "Own creature", 2, 2);
+    let artifact_ids: Vec<ObjectId> = (0..artifacts)
+        .map(|index| {
+            scenario
+                .add_artifact_from_oracle(P1, &format!("Opposing artifact {index}"), "")
+                .id()
+        })
+        .collect();
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, name, false, text)
+        .with_mana_cost(parse_mtgjson_mana_cost("{G}"))
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .map(|_| ())
+        .map_err(|error| format!("{error:?}"));
+    (runner, spell, artifact_ids, result)
+}
+
+/// CR 601.2c + CR 608.2d: the two producers whose `TargetOnly` choice was already
+/// `Resolution`-timed before this change (the object-and-player choice, and a
+/// choice under an "any opponent may" scope through the accepting-player
+/// fallback) keep that timing. When such a choice sits mid-chain, the engine's
+/// `TargetOnly` exemption in `defers_conditional_target_selection` now lets the
+/// printed target of an independent later instruction be announced as the spell
+/// is cast, where before it was deferred with the choice. A spell with no legal
+/// artifact is rejected, and with one the artifact is announced on the destroy
+/// instruction while the choice itself stays a resolution-time pick. Synthetic
+/// Oracle: Risky Move's "choose a creature you control and an opponent" and an
+/// "any opponent may choose" choice, each between "Draw a card." and "Destroy
+/// target artifact."; no printed card has a later printed target after either
+/// choice (Risky Move's choice opens its trigger and has none).
+#[test]
+fn earlier_resolution_choices_keep_a_later_printed_target_at_cast() {
+    for (name, text) in [
+        (
+            "Synthetic object-and-player choice",
+            "Draw a card. Choose a creature you control and an opponent. Destroy target artifact.",
+        ),
+        (
+            "Synthetic accepting-player choice",
+            "Draw a card. Any opponent may choose a creature you control. Destroy target artifact.",
+        ),
+    ] {
+        let (runner, spell, _, result) = cast_with_artifacts(name, text, 0);
+        let error = result.expect_err("no artifact: the printed target has no legal choice");
+        assert!(
+            error.contains("No legal targets available"),
+            "{name}: {error}"
+        );
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Hand, "{name}");
+
+        let (runner, spell, artifacts, result) = cast_with_artifacts(name, text, 1);
+        result.unwrap_or_else(|error| panic!("{name}: one artifact makes it castable: {error}"));
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "{name}: {:?}",
+            runner.state().waiting_for
+        );
+        let entry = &runner.state().stack[0];
+        assert_eq!(entry.source_id, spell, "{name}");
+        let head = entry.ability().expect("the spell must be on the stack");
+        let chain: Vec<_> =
+            std::iter::successors(Some(head), |node| node.sub_ability.as_deref()).collect();
+        let choice = chain
+            .iter()
+            .find(|node| matches!(node.effect, Effect::TargetOnly { .. }))
+            .unwrap_or_else(|| panic!("{name}: the mid-chain choice"));
+        assert_eq!(
+            choice.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "{name}: the choice keeps its resolution timing"
+        );
+        assert!(
+            choice.targets.is_empty(),
+            "{name}: the choice is not announced"
+        );
+        let destroy = chain
+            .iter()
+            .find(|node| matches!(node.effect, Effect::Destroy { .. }))
+            .unwrap_or_else(|| panic!("{name}: the destroy instruction must remain on the stack"));
+        assert_eq!(
+            destroy.targets,
+            vec![TargetRef::Object(artifacts[0])],
+            "{name}: the artifact is announced while casting"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Printed cards whose bare, untargeted "choose a <object> you control" sits in
 // a LATER chunk of the chain (CR 115.10a + CR 608.2d): the choice is made while
