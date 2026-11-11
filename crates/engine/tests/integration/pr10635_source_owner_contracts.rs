@@ -464,11 +464,12 @@ fn alabaster_death_after_the_survivor_is_exiled_still_shuffles_the_sibling() {
 const AVENGING_ANGEL: &str =
     "Flying\nWhen this creature dies, you may put it on top of its owner's library.";
 
-/// CR 400.7e + CR 730.3c gap control: the recorded-departure expansion is
-/// restricted to shuffle-terminated placements. An ordered "put it on top"
-/// from a merged permanent keeps base behavior: the survivor alone moves and
-/// the absorbed component stays where the split left it. The multi-card ordered
-/// class is a pre-existing gap and is not claimed by this PR.
+/// CR 400.7e + CR 401.4 control: a recorded merged departure widens a library
+/// placement only when a chained shuffle randomizes that library. An ordered
+/// "put it on top" has no such shuffle, so the dies trigger places the one
+/// object it found and the absorbed component stays where the split left it.
+/// Placing every component in an owner-chosen order (CR 730.3c + CR 401.4) is
+/// not implemented for this path.
 #[test]
 fn merged_ordered_placement_keeps_the_single_chosen_card() {
     use engine::game::merge::{merge_object_onto, MergeSide};
@@ -512,6 +513,82 @@ fn merged_ordered_placement_keeps_the_single_chosen_card() {
     assert_eq!(
         state.objects[&component].zone,
         Zone::Graveyard,
-        "the component stays where the split left it (base behavior, pre-existing gap)"
+        "the component stays where the split left it"
     );
+    assert_eq!(
+        state.players[P0.0 as usize].library.len(),
+        3,
+        "exactly one card was added to the two-card library"
+    );
+}
+
+// Full Oracle verified against https://api.scryfall.com/cards/named?exact=Tel-Jilad%20Stylus
+const TEL_JILAD_STYLUS: &str = "{T}: Put target permanent you own on the bottom of your library.";
+
+/// CR 730.3 + CR 701.24a: a merged permanent that is still on the battlefield
+/// leaves as one permanent, and each physical card is put at the instructed
+/// library position. A placement is not a shuffle. The relative order of the
+/// delivered cards is deliberately not asserted: no owner arrangement
+/// (CR 401.4) is offered on this path.
+#[test]
+fn stylus_puts_each_card_of_a_live_merged_permanent_on_the_bottom_without_a_shuffle() {
+    use engine::game::merge::{merge_object_onto, MergeSide};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Existing A", "Existing B"]);
+    let stylus = scenario
+        .add_artifact_from_oracle(P0, "Tel-Jilad Stylus", TEL_JILAD_STYLUS)
+        .id();
+    let host = scenario.add_creature(P0, "Host Creature", 2, 2).id();
+    let component = scenario.add_creature(P0, "Migratory Greathorn", 3, 4).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.battlefield.retain(|&id| id != component);
+        let mut events = vec![];
+        merge_object_onto(state, component, host, MergeSide::Top, &mut events);
+    }
+    let library_before: Vec<_> = runner.state().players[P0.0 as usize]
+        .library
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(library_before.len(), 2);
+
+    let outcome = runner.activate(stylus, 0).target_object(host).resolve();
+
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the placement settles without a prompt: {:?}",
+        outcome.final_waiting_for()
+    );
+    outcome.assert_zone(&[host, component], Zone::Library);
+    let state = outcome.state();
+    let library: Vec<_> = state.players[P0.0 as usize]
+        .library
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(
+        &library[..2],
+        &library_before[..],
+        "the existing cards keep their order above the placed cards"
+    );
+    let mut placed = library[2..].to_vec();
+    placed.sort_by_key(|id| id.0);
+    let mut expected = vec![host, component];
+    expected.sort_by_key(|id| id.0);
+    assert_eq!(placed, expected, "both physical cards are on the bottom");
+    assert!(
+        !outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )),
+        "a placement at a library position does not shuffle"
+    );
+    assert!(state.stack.is_empty());
 }

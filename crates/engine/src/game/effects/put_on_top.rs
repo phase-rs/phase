@@ -44,22 +44,58 @@ pub(super) fn private_zone_selection<'a>(
     Some((choosing_player, source_zone, eligible))
 }
 
-/// CR 400.7e + CR 730.3c: Whether this placement is the dies-trigger
-/// "shuffle it into its owner's library" shape, i.e. the instruction is
-/// immediately followed by a terminal library shuffle. Only there may the
-/// recorded merged departure expand into several cards: the shuffle erases the
-/// order, so no owner arrangement is owed. An ordered top/bottom/nth placement
-/// keeps the single chosen object (base behavior; the multi-card ordered gap is
-/// pre-existing and not claimed by this PR).
-fn shuffle_terminated_placement(ability: &ResolvedAbility) -> bool {
+/// CR 701.24a + CR 401.4: whether a `Shuffle` anywhere after this instruction
+/// randomizes one of `owners`' libraries, so the cards this placement stages
+/// there never have an order for their owner to choose. The shuffle need not be
+/// the immediate child: Elixir of Immortality stages its artifact, moves the
+/// graveyard, and only then shuffles. A shuffle seeded from the owners this
+/// instruction publishes (`OwnerLibraryShuffleSubject`) covers them by
+/// construction; any other shuffle is resolved against its own player
+/// reference. A scoped shuffle whose player is not bound yet still fans over
+/// this instruction's owners, so it counts.
+fn chained_shuffle_randomizes_owner(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    owners: &[PlayerId],
+) -> bool {
     let mut next = ability.sub_ability.as_deref();
-    while let Some(link) = next {
-        if matches!(link.effect, Effect::Shuffle { .. }) {
-            return true;
+    while let Some(node) = next {
+        if let Effect::Shuffle { target } = &node.effect {
+            if node
+                .player_scope
+                .as_ref()
+                .is_some_and(super::is_owner_library_shuffle_scope)
+            {
+                return true;
+            }
+            match super::resolve_player_for_context_ref(state, node, target) {
+                Some(player) if owners.contains(&player) => return true,
+                Some(_) => {}
+                None if matches!(target, TargetFilter::ScopedPlayer) => return true,
+                None => {}
+            }
         }
-        next = link.sub_ability.as_deref();
+        next = node.sub_ability.as_deref();
     }
     false
+}
+
+/// CR 730.3c + CR 401.4: whether a recorded merged departure may widen this
+/// placement to every card the merged permanent became. It may only when a
+/// chained shuffle randomizes a library those cards land in ("shuffle it into
+/// its owner's library"): the shuffle erases their order, so no owner
+/// arrangement is owed. A top, bottom or nth-from-top placement with no such
+/// shuffle keeps the single object the instruction found.
+fn departure_expansion_is_shuffled(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    arrivals: &[ObjectId],
+) -> bool {
+    let owners: Vec<PlayerId> = arrivals
+        .iter()
+        .filter_map(|id| state.objects.get(id).map(|obj| obj.owner))
+        .collect();
+    chained_shuffle_randomizes_owner(state, ability, &owners)
 }
 
 /// Place target card at a specific position in its owner's library. Unlike
@@ -140,20 +176,23 @@ pub fn resolve(
     // `resolved_targets` already returns EMPTY for a stale non-triggered
     // `SelfRef` (`ResolvedAbility::self_ref_is_current`); the `[source]` shape is
     // the triggered and `None`/`ParentTarget` fallbacks.
-    // CR 400.7e + CR 730.3c: the departure expansion belongs only to the
-    // shuffle-terminated "shuffle it into its owner's library" shape, where the
-    // order the components land in is irrelevant because the library is
-    // randomized immediately. An ordered placement (top/bottom/nth) keeps base
-    // behavior: the single chosen object, no expansion.
-    let shuffle_terminated = shuffle_terminated_placement(ability);
     // CR 730.3c + CR 609.3: a stale survivor does not suppress the departure's
-    // surviving components on the shuffle path; only a departure with nothing
-    // left to act on is a no-op. An ordered placement stays the base no-op.
-    let departure_components = if shuffle_terminated {
-        crate::game::merge::selfref_departure_components(state, ability)
-    } else {
-        Vec::new()
-    };
+    // surviving components; only a departure with nothing left to act on is a
+    // no-op. CR 401.4: that holds only where a chained shuffle randomizes the
+    // library they land in. Without one the placement is ordered, and a stale
+    // source places nothing.
+    let departure_components = crate::game::merge::selfref_departure_components(state, ability);
+    let departure_arrivals: Vec<ObjectId> = departure_components
+        .iter()
+        .copied()
+        .chain(std::iter::once(ability.source_id))
+        .collect();
+    let departure_components =
+        if departure_expansion_is_shuffled(state, ability, &departure_arrivals) {
+            departure_components
+        } else {
+            Vec::new()
+        };
     if resolves_to_source
         && (effective_targets.is_empty()
             || effective_targets == [crate::types::ability::TargetRef::Object(ability.source_id)])
@@ -312,14 +351,20 @@ pub fn resolve(
     // library" lowers to this exact-source placement, not a ChangeZone. When the
     // source's own departure is recorded, the placement covers every object that
     // merged permanent became; a fresh choice stays the single chosen card.
+    // CR 401.4: the expansion applies only when a chained shuffle randomizes
+    // the library the cards land in; an ordered placement keeps the objects the
+    // instruction found.
     let original_population_len = collected_targets.len();
-    let collected_targets = if shuffle_terminated {
-        crate::game::merge::expand_returned_merge_components(
-            state,
-            ability,
-            collected_targets,
-            &target_filter,
-        )
+    let expanded_targets = crate::game::merge::expand_returned_merge_components(
+        state,
+        ability,
+        collected_targets.clone(),
+        &target_filter,
+    );
+    let collected_targets = if expanded_targets.len() > original_population_len
+        && departure_expansion_is_shuffled(state, ability, &expanded_targets)
+    {
+        expanded_targets
     } else {
         collected_targets
     };
