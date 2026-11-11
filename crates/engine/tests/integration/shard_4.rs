@@ -553,6 +553,7 @@ mod queen_velocity_upkeep;
 mod quest_counter_sacrifice_it_cost;
 mod quick_draw_target_opponent;
 mod quirion_ranger_activation;
+mod raffine_informant_departed_connive;
 mod rage_reflection_double_strike_grant;
 mod rally_the_righteous_radiance_pump;
 mod random_discard_cost_replacement_resume;
