@@ -1137,8 +1137,8 @@ function WorkspaceDeckBuilder({
     deckEntries: commanderDeckEntries,
     draftSetCodes,
   });
-  // The saved-deck form submit and the library autosave produce: commanders
-  // leave `main` for the `[Commander]` section.
+  // The saved-deck form that submit and the library autosave produce:
+  // commanders leave `main` for the `[Commander]` section.
   const exportableDeck = useMemo(
     () => draftSubmissionToParsedDeck(
       projectWorkspacePartition(workspace, pool),
