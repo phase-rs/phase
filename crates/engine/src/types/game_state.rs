@@ -24072,14 +24072,15 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_entry_events: Vec<GameEvent>,
 
-    /// CR 603.6a + CR 611.3c: completed battlefield-entry events of an entering
-    /// instruction whose action has not settled (it stopped on a co-entrant's
-    /// CR 616.1 ordering or CR 614.12a entry choice). All permanents, newcomers
-    /// included, are checked against the event once it has finished, so these
-    /// wait unmatched. `triggers::settle_entry_batch_scan` is the only writer:
-    /// it releases them to the first observer scan that runs after the
-    /// instruction completes. `zones::settle_battlefield_entry_observations`
-    /// reads them so their entrants are observed with the last co-entrant.
+    /// CR 603.6a + CR 611.3c: completed battlefield-entry events whose action
+    /// stopped while a co-entrant's entry was still being made (its CR 616.1
+    /// ordering, CR 707.5 copy choice or CR 614.12a entry choice). All
+    /// permanents, newcomers included, are checked against the event once it
+    /// has finished, so these wait unmatched. `triggers::settle_entry_batch_scan`
+    /// is the only writer: it releases them to the first observer scan that runs
+    /// once no entry is in progress, their entry has been observed, or the
+    /// action has settled. `zones::settle_battlefield_entry_observations` reads
+    /// them so their entrants are observed with the last co-entrant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unsettled_entry_batch_events: Vec<GameEvent>,
 

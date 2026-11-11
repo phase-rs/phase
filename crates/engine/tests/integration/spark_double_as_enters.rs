@@ -2110,6 +2110,95 @@ mod feldon_tokens {
         );
     }
 
+    const BRUDICLAD: &str = "Creature tokens you control have haste.\nAt the beginning of combat on your turn, create a 2/1 blue Phyrexian Myr artifact creature token. Then you may choose a token you control. If you do, each other token you control becomes a copy of that token.";
+    const GLORIOUS_ANTHEM: &str = "Creatures you control get +1/+1.";
+
+    /// Cards Elemental Bond draws when Brudiclad's combat trigger creates its
+    /// Myr and then, after the "you may" choice, makes it a copy of a resident
+    /// 3/3 Elephant token. Returns the draws and the Myr's final power.
+    fn bond_draws_for_brudiclad_myr(anthem: bool) -> (usize, i32) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario
+            .add_creature_from_oracle(P0, "Brudiclad, Telchor Engineer", 4, 4, BRUDICLAD)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Phyrexian", "Artificer"])
+            .as_legendary();
+        scenario.add_enchantment_from_oracle(P0, "Elemental Bond", ELEMENTAL_BOND);
+        if anthem {
+            scenario.add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM);
+        }
+        // Board setup (synthetic): a resident 3/3 green Elephant token, the
+        // token Bestial Menace makes, built as a creature and marked a token.
+        let elephant = scenario
+            .add_creature(P0, "Elephant", 3, 3)
+            .with_subtypes(vec!["Elephant"])
+            .with_color(vec![ManaColor::Green])
+            .id();
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&elephant)
+            .unwrap()
+            .is_token = true;
+        let library = runner.state().players[0].library.len();
+        // Both players pass: beginning of combat, Brudiclad's trigger on the stack.
+        runner.act(GameAction::PassPriority).unwrap();
+        runner.act(GameAction::PassPriority).unwrap();
+        assert_eq!(runner.state().phase, Phase::BeginCombat);
+        assert_eq!(runner.state().stack.len(), 1);
+        runner.advance_until_stack_empty();
+        // Reach guard: the Myr has entered and the trigger stopped on its later
+        // "you may choose a token" instruction.
+        let myr = runner
+            .state()
+            .objects
+            .values()
+            .find(|object| object.is_token && object.name == "Phyrexian Myr")
+            .map(|object| object.id)
+            .expect("the Myr token entered");
+        assert_eq!(runner.state().objects[&myr].zone, Zone::Battlefield);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "the later instruction's choice is open: {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(runner.state().objects[&myr].name, "Elephant");
+        (
+            library - runner.state().players[0].library.len(),
+            runner.state().objects[&myr]
+                .power
+                .expect("the Myr is still a creature"),
+        )
+    }
+
+    /// CR 603.6a + CR 603.10: the Myr's entry is its own completed event; the
+    /// "you may choose a token" prompt belongs to a later instruction, not to
+    /// that entry. Elemental Bond ("Whenever a creature you control with power 3
+    /// or greater enters, draw a card.") is checked against the 2/1 that
+    /// entered, not against the 3/3 Elephant copy it became afterwards.
+    #[test]
+    fn a_later_instructions_choice_does_not_hold_a_completed_token_entry() {
+        let (draws, power) = bond_draws_for_brudiclad_myr(true);
+        assert_eq!(power, 4);
+        assert_eq!(
+            draws, 1,
+            "positive control: under Glorious Anthem the Myr enters as a 3/2 and draws once"
+        );
+        let (draws, power) = bond_draws_for_brudiclad_myr(false);
+        assert_eq!(power, 3, "the Myr became a copy of the 3/3 Elephant");
+        assert_eq!(draws, 0, "the Myr entered as a 2/1");
+    }
+
     #[test]
     fn t8_triskelion_self_counters_and_spark_share_one_scales_application() {
         let (mut scenario, feldon) = setup();

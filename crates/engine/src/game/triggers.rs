@@ -9648,10 +9648,25 @@ fn action_has_settled(state: &GameState) -> bool {
     matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.pending_replacement.is_none()
 }
 
+/// CR 614.12a + CR 616.1 + CR 707.5: is a battlefield entry still being made?
+/// Every carrier of an entry that has been decided but not completed: a parked
+/// replacement (an ordering choice, a copy offer, an entry-controller choice),
+/// an entrant held liminal for its copy choice, a token committed before its
+/// entry record, and an entry parked for its own mid-entry choice. A pause
+/// that holds none of them belongs to a later instruction, not to an entry.
+fn battlefield_entry_in_progress(state: &GameState) -> bool {
+    state.pending_replacement.is_some()
+        || !state.liminal_entries.is_empty()
+        || state.pending_token_battlefield_entry.is_some()
+        || !state.deferred_entry_events.is_empty()
+}
+
 /// CR 603.6a + CR 611.3c: has the instruction that put this permanent onto the
-/// battlefield completed? Its observation is written only at an instruction
-/// boundary (`effects::settle_entries_before_instruction`), never while a
-/// co-entering step or a choice of the same instruction is outstanding.
+/// battlefield been seen to complete? Its observation is written only at an
+/// instruction boundary (`effects::settle_entries_before_instruction`), never
+/// while a co-entering step or a choice of the same instruction is outstanding.
+/// One direction only: a boundary can defer the observation
+/// (`entry_observation_deferred`), so an entry without one may still be complete.
 fn battlefield_entry_is_observed(state: &GameState, event: &GameEvent) -> bool {
     matches!(
         event,
@@ -9674,13 +9689,17 @@ fn battlefield_entry_is_observed(state: &GameState, event: &GameEvent) -> bool {
 /// trigger suppression or characteristic-changing static would be missed, and a
 /// firing limit could be spent on an event the completed state does not match.
 ///
-/// So a battlefield entry that reaches a collector before its action has
-/// settled, and whose entering instruction has not completed, is held in
+/// So a battlefield entry that reaches a collector while its action has not
+/// settled and another battlefield entry is still being made
+/// ([`battlefield_entry_in_progress`]), and that has no observation, is held in
 /// `GameState::unsettled_entry_batch_events` instead of being matched. It is
 /// released, ahead of the caller's own events, to the first collector that runs
-/// once the instruction has completed or the action has settled. That collector
-/// matches the whole event in one scan against the completed state, so batched
-/// ("one or more", CR 603.2c) definitions and firing limits see it once.
+/// once no entry is in progress, the entry has been observed, or the action has
+/// settled. That collector matches the whole event in one scan against the
+/// completed state, so batched ("one or more", CR 603.2c) definitions and
+/// firing limits see it once. A pause for a later instruction's own choice
+/// holds nothing: entries reaching it are matched there, as before, against
+/// the state the instruction left.
 ///
 /// The collectors that run as an action pauses or settles route through here:
 /// the post-action scan, and [`collect_action_end_triggers_into_deferred`] for
@@ -9694,7 +9713,7 @@ pub(crate) fn settle_entry_batch_scan(
     state: &mut GameState,
     candidates: Vec<GameEvent>,
 ) -> Vec<GameEvent> {
-    let unsettled = !action_has_settled(state);
+    let unsettled = !action_has_settled(state) && battlefield_entry_in_progress(state);
     if !unsettled && state.unsettled_entry_batch_events.is_empty() {
         return candidates;
     }
@@ -46192,11 +46211,22 @@ pub mod tests {
         (state, events)
     }
 
+    /// CR 614.12a: a co-entrant whose entry is still being made, parked for its
+    /// own mid-entry choice the way `capture_deferred_entry_events_if_mid_entry_choice`
+    /// parks one.
+    fn park_co_entrant_mid_entry(state: &mut GameState) {
+        let co_entrant = make_creature(state, PlayerId(0), "Co-entrant", 2, 2);
+        let mut parked = Vec::new();
+        crate::game::zones::record_and_emit_entry_from_no_zone(state, co_entrant, &mut parked)
+            .expect("co-entrant exists");
+        state.deferred_entry_events.extend(parked);
+    }
+
     /// CR 603.6a: the paused-resolution helper is handed a battlefield entry
-    /// whose entering instruction has not completed. It must not match it there
-    /// (a co-entrant may still be entering), and the entry must still be checked
-    /// once the action settles, even though the settling action's own buffer no
-    /// longer holds it.
+    /// while a co-entrant is still entering. It must not match it there, and the
+    /// entry must still be checked once the action settles, even though the
+    /// settling action's own buffer no longer holds it. A pause with no entry in
+    /// progress belongs to a later instruction: the entry is matched there.
     #[test]
     fn observer_helpers_leave_an_unsettled_battlefield_entry_for_the_settled_scan() {
         // Positive reach guard: at a settled action the same entry is collected.
@@ -46211,14 +46241,26 @@ pub mod tests {
             "positive reach guard: the observer matches this entry"
         );
 
+        // A later instruction's pause, no entry in progress: matched at the pause.
+        let (mut later, mut later_events) = entry_observer_fixture();
+        park_observer_triggers_if_paused(&mut later, &mut later_events, 0);
+        assert_eq!(
+            later.deferred_triggers.len(),
+            1,
+            "no entry is being made: the completed entry is matched at the pause"
+        );
+        assert!(later.unsettled_entry_batch_events.is_empty());
+
         let (mut state, mut events) = entry_observer_fixture();
+        park_co_entrant_mid_entry(&mut state);
         park_observer_triggers_if_paused(&mut state, &mut events, 0);
         // Reading the same buffer again must not match it either.
         park_observer_triggers_if_paused(&mut state, &mut events, 0);
         assert!(
             state.deferred_triggers.is_empty() && state.stack.is_empty(),
-            "the entering instruction has not completed: nothing is matched at the pause"
+            "a co-entrant is still entering: nothing is matched at the pause"
         );
+        state.deferred_entry_events.clear();
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
@@ -46242,6 +46284,7 @@ pub mod tests {
         let GameEvent::ZoneChanged { record, .. } = events[0].clone() else {
             panic!("the fixture emits a battlefield entry");
         };
+        park_co_entrant_mid_entry(&mut state);
         park_observer_triggers_if_paused(&mut state, &mut events, 0);
         assert!(state.battlefield_entry_observation(&record).is_none());
         // The boundary runs in a later answer, whose buffer does not hold the entry.
