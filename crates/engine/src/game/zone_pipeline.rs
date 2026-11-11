@@ -14395,22 +14395,36 @@ mod staged_batch_tests {
     }
 
     /// CR 401.4: the persisted groups must jointly cover the approved
-    /// positioned cohort with one group per owner/position key. A repeated
-    /// key and a member missing from every group are both refused. These are
-    /// the joint checks in `PendingBatchDeliveries::validate_staged` that run
-    /// after each group's own validation.
+    /// positioned cohort with one group per owner/position key. Each group on
+    /// its own is valid here; a repeated key and an approval whose whole group
+    /// is missing are refused by the joint checks in
+    /// `PendingBatchDeliveries::validate_staged`.
     #[test]
     fn staged_validator_requires_jointly_covering_groups_without_repeated_keys() {
         let mut state = GameState::new_two_player(42);
         effect_source(&mut state);
         let a = graveyard_card(&mut state, 1);
         let b = graveyard_card(&mut state, 2);
-        let group_id = replacement_origin_group(&mut state, &[a, b], LibraryPosition::Bottom);
+        let members = [(a, LibraryPosition::Top), (b, LibraryPosition::Bottom)]
+            .into_iter()
+            .map(|(id, position)| {
+                staged_member(
+                    &state,
+                    id,
+                    Some(approved_library_event(&state, id, position)),
+                    StagedBatchMemberState::Approved,
+                    Zone::Graveyard,
+                    None,
+                )
+            })
+            .collect();
+        let group_id = push_approved_staged(&mut state, members, BatchDeliveryStage::Approving);
         let mut owner = take_owner(&mut state, group_id);
         begin_staged_arrangement(&state, &mut owner);
+        owner.staged.as_mut().unwrap().stage = BatchDeliveryStage::Delivering;
         owner
             .validate_staged()
-            .expect("control: one group covers both approvals");
+            .expect("control: the Top and Bottom groups jointly cover both approvals");
 
         let mut repeated = owner.clone();
         let staged = repeated.staged.as_mut().unwrap();
@@ -14421,13 +14435,16 @@ mod staged_batch_tests {
         );
 
         let mut missing = owner.clone();
-        missing.staged.as_mut().unwrap().arrangements[0]
-            .batch
-            .members
-            .retain(|entry| entry.identity.object_id != b);
-        assert!(
-            missing.validate_staged().is_err(),
-            "an approved member outside every group is refused"
+        missing
+            .staged
+            .as_mut()
+            .unwrap()
+            .arrangements
+            .retain(|arrangement| arrangement.position != LibraryPosition::Bottom);
+        assert_eq!(
+            missing.validate_staged().unwrap_err(),
+            "a positioned staged approval has no arrangement group",
+            "the Bottom approval is covered by no group"
         );
     }
 
