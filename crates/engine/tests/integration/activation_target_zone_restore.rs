@@ -32,8 +32,8 @@ use engine::game::mana_sources::activatable_mana_actions_for_player;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
-    ActivationTargetFact, AnnouncedTargetZone, CastPaymentMode, PayCostKind, PersistedGameState,
-    PersistedRestoreError, WaitingFor,
+    ActivationTargetFact, AnnouncedTargetZone, CapturedTokenBit, CastPaymentMode, PayCostKind,
+    PersistedGameState, PersistedRestoreError, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaColor;
@@ -219,6 +219,71 @@ fn strip_target_fact_zones(value: &mut serde_json::Value) -> usize {
                             }
                         }
                     }
+                    stripped += walk(child);
+                }
+            }
+            _ => {}
+        }
+        stripped
+    }
+    walk(value)
+}
+
+/// Remove the captured TOKEN bit from every committed target fact in the payload,
+/// reproducing a save written before the fact carried one. Same walk as
+/// [`strip_target_fact_zones`]: only an object-fact `data` object (one carrying
+/// both `id` and `lki`) is touched.
+fn strip_target_fact_tokens(value: &mut serde_json::Value) -> usize {
+    fn walk(value: &mut serde_json::Value) -> usize {
+        let mut stripped = 0;
+        match value {
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    stripped += walk(item);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (key, child) in map.iter_mut() {
+                    if key == "targets" {
+                        if let serde_json::Value::Array(facts) = child {
+                            for fact in facts {
+                                if let Some(data) = fact
+                                    .get_mut("data")
+                                    .and_then(serde_json::Value::as_object_mut)
+                                {
+                                    if data.contains_key("lki") && data.remove("token").is_some() {
+                                        stripped += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    stripped += walk(child);
+                }
+            }
+            _ => {}
+        }
+        stripped
+    }
+    walk(value)
+}
+
+/// Remove the record's own SOURCE token bit (`AbilityActivationRecord::source_token`),
+/// reproducing a save written before the record carried one.
+fn strip_activation_source_tokens(value: &mut serde_json::Value) -> usize {
+    fn walk(value: &mut serde_json::Value) -> usize {
+        let mut stripped = 0;
+        match value {
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    stripped += walk(item);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                if map.contains_key("source_lki") && map.remove("source_token").is_some() {
+                    stripped += 1;
+                }
+                for child in map.values_mut() {
                     stripped += walk(child);
                 }
             }
@@ -513,6 +578,124 @@ fn a_pending_activation_without_a_target_zone_is_refused_at_restore() {
             "CR 601.2c + CR 109.2: a PENDING activation whose record states no \
              announcement zone must be refused — `take_activation_record` publishes \
              that record to the turn journal as soon as payment finishes"
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CR 111.1 + CR 115.9: the TOKEN bit a committed fact must state, refused when
+// absent. Silence is not fail-closed for a negated predicate: `TriggerCondition::Not`
+// inverts the leaf, so an unstated bit turns "if this creature isn't a token" into a
+// match for a token (Progenitor Mimic).
+// ---------------------------------------------------------------------------
+
+/// CR 111.1 + CR 115.9 + CR 601.2c: the completed activation's recorded target states
+/// the token bit it held at announcement, and a save that leaves it unstated is
+/// refused instead of read as "not a token".
+#[test]
+fn a_completed_activation_without_a_target_token_bit_is_refused_at_restore() {
+    let mut board = discount_board();
+    drive_tortured_existence(&mut board, CastPaymentMode::Auto, DriveTo::Resolved);
+    let DiscountBoard {
+        runner,
+        tortured,
+        graveyard_creature,
+        ..
+    } = &board;
+
+    // The current-format control: the fact states the bit, so the save is admitted.
+    let row = runner
+        .state()
+        .abilities_activated_this_turn_by_player
+        .get(&P0)
+        .and_then(|rows| rows.iter().find(|row| row.source == *tortured))
+        .expect("reach: the activation is journaled");
+    let ActivationTargetFact::Object { token, .. } = &row.targets[0] else {
+        panic!("the committed target is an object fact");
+    };
+    assert_eq!(
+        *token,
+        CapturedTokenBit::Known(false),
+        "reach: a current record states the bit its target held"
+    );
+    assert!(
+        admitted(persisted_json(runner.state())).is_ok(),
+        "a current-format save must stay admitted"
+    );
+
+    // --- The legacy shape: the same save, with the token bit absent.
+    let mut legacy = persisted_json(runner.state());
+    // Two carriers hold the SAME record: the turn journal the reader scans, and the
+    // resolved-rules command operand that appended it, so both lose the bit.
+    assert_eq!(
+        strip_target_fact_tokens(&mut legacy),
+        2,
+        "every committed target fact must lose its token bit"
+    );
+    match admitted(legacy) {
+        Err(PersistedRestoreError::UnknownCapturedTokenBit { owner, subject }) => {
+            assert_eq!(owner, Some(*tortured));
+            assert_eq!(
+                subject, *graveyard_creature,
+                "the refusal names the target whose token bit the save cannot prove"
+            );
+        }
+        Err(other) => panic!("expected an unknown-captured-token-bit refusal, got {other:?}"),
+        Ok(_) => panic!(
+            "CR 111.1 + CR 115.9: a committed target fact that states no token bit must be \
+             refused — the announcement is gone, CR 707.2 keeps it out of every snapshot, \
+             and a refusal is not even fail-closed under a negated predicate"
+        ),
+    }
+}
+
+/// CR 111.1 + CR 602.2: the activation record's OWN source bit is the same question.
+/// `Mutagen Man, Living Ooze` and `The Dining Car` narrow a cost modifier on
+/// token-ness of the recorded source, so a save that leaves that bit unstated is
+/// refused rather than answering every source with a refusal.
+#[test]
+fn a_pending_activation_without_a_source_token_bit_is_refused_at_restore() {
+    let mut board = discount_board();
+    drive_tortured_existence(&mut board, CastPaymentMode::Manual, DriveTo::ManaPayment);
+    let DiscountBoard {
+        runner, tortured, ..
+    } = &board;
+
+    let record = runner
+        .state()
+        .pending_cast
+        .as_ref()
+        .and_then(|pending| pending.ability.activation_record.as_deref())
+        .expect("reach: the parked activation carries its announced record");
+    assert_eq!(record.source, *tortured);
+    assert_eq!(
+        record.source_token,
+        CapturedTokenBit::Known(false),
+        "reach: the parked record states its source's bit"
+    );
+
+    let mut legacy = persisted_json(runner.state());
+    // Two carriers hold the SAME record: the parked ability's announced record and
+    // the resolved-rules command operand beside it, so both lose the bit — the same
+    // pairing the zone sibling documents.
+    assert_eq!(
+        strip_activation_source_tokens(&mut legacy),
+        2,
+        "every carrier of the parked record must lose its source bit"
+    );
+    match admitted(legacy) {
+        Err(PersistedRestoreError::UnknownCapturedTokenBit { owner, subject }) => {
+            assert_eq!(owner, Some(*tortured));
+            assert_eq!(
+                subject, *tortured,
+                "the refusal names the source whose bit the save cannot prove"
+            );
+        }
+        Err(other) => panic!("expected an unknown-captured-token-bit refusal, got {other:?}"),
+        Ok(_) => panic!(
+            "CR 111.1 + CR 602.2: an activation record that states no source token bit must \
+             be refused — `take_activation_record` publishes it to the journal one action \
+             later, where a source-scoped modifier reads it"
         ),
     }
 }

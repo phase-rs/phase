@@ -1769,6 +1769,20 @@ impl ActivationTargetFact {
         }
     }
 
+    /// CR 111.1 + CR 115.9: the object target whose captured token bit this save
+    /// does not state, or `None` when it states one (or the fact names a player,
+    /// which has no token axis).
+    fn object_target_without_token_capture(&self) -> Option<ObjectId> {
+        match self {
+            Self::Object {
+                id,
+                token: CapturedTokenBit::Unknown,
+                ..
+            } => Some(*id),
+            Self::Object { .. } | Self::Player(_) => None,
+        }
+    }
+
     /// CR 601.2c + CR 109.2: the object target whose announced zone this save
     /// does not state, or `None` when it states one (or the fact names a
     /// player, which has no zone axis).
@@ -17860,8 +17874,17 @@ impl GameState {
         }
     }
 
-    /// CR 601.2c + CR 109.2 + CR 109.2a: refuse a save whose committed target
-    /// facts do not say which zone the target was announced in.
+    /// CR 111.1 + CR 115.9 + CR 601.2c + CR 109.2 + CR 109.2a: refuse a save whose
+    /// committed activation facts leave one of their two unreconstructable axes
+    /// unstated — the target's announcement ZONE and the subject's TOKEN bit.
+    ///
+    /// Both questions are asked of the same carriers in one walk, because both are
+    /// facts about the epoch the record was written for: the zone decides which
+    /// target-gated rules could fire (CR 109.2 / CR 109.2a, below), and the token
+    /// bit decides whether a token leaf over that subject holds
+    /// ([`PersistedRestoreError::UnknownCapturedTokenBit`], which also covers the
+    /// record's own source). Neither is recoverable from anything else the save
+    /// holds, so both are refused rather than defaulted.
     ///
     /// [`ActivationTargetFact::Object::zone`] is what separates a permanent on
     /// the battlefield from a card in some other zone for a bare type
@@ -17919,34 +17942,46 @@ impl GameState {
     /// fabricating the battlefield claim this guard exists to stop. Any save
     /// whose journal row exists is refused on that row regardless of the
     /// operand.
-    fn reject_unknown_activation_target_zone(&self) -> Result<(), PersistedRestoreError> {
-        fn check(record: &AbilityActivationRecord) -> Result<(), PersistedRestoreError> {
-            match record
-                .targets
-                .iter()
-                .find_map(ActivationTargetFact::object_target_without_announced_zone)
-            {
-                Some(target) => Err(PersistedRestoreError::UnknownAnnouncedTargetZone {
-                    owner: Some(record.source),
-                    target,
-                }),
-                None => Ok(()),
+    fn reject_unstated_activation_target_facts(&self) -> Result<(), PersistedRestoreError> {
+        /// CR 601.2c + CR 111.1 + CR 115.9: the two facts a committed target MUST
+        /// state — the zone it was announced in and the token bit it held. Both are
+        /// unreconstructable after the fact, for the reasons their error variants
+        /// document.
+        fn check_fact(
+            fact: &ActivationTargetFact,
+            owner: Option<ObjectId>,
+        ) -> Result<(), PersistedRestoreError> {
+            if let Some(target) = fact.object_target_without_announced_zone() {
+                return Err(PersistedRestoreError::UnknownAnnouncedTargetZone { owner, target });
             }
+            if let Some(subject) = fact.object_target_without_token_capture() {
+                return Err(PersistedRestoreError::UnknownCapturedTokenBit { owner, subject });
+            }
+            Ok(())
+        }
+        fn check(record: &AbilityActivationRecord) -> Result<(), PersistedRestoreError> {
+            // CR 602.2 + CR 111.1: the record's OWN source fact answers a
+            // source-scoped modifier's token leaf (`Mutagen Man, Living Ooze`; `The
+            // Dining Car`), so it is stated by every record this build writes.
+            if record.source_token == CapturedTokenBit::Unknown {
+                return Err(PersistedRestoreError::UnknownCapturedTokenBit {
+                    owner: Some(record.source),
+                    subject: record.source,
+                });
+            }
+            for fact in &record.targets {
+                check_fact(fact, Some(record.source))?;
+            }
+            Ok(())
         }
         fn check_facts(facts: &[ActivationTargetFact]) -> Result<(), PersistedRestoreError> {
-            match facts
-                .iter()
-                .find_map(ActivationTargetFact::object_target_without_announced_zone)
-            {
-                Some(target) => Err(PersistedRestoreError::UnknownAnnouncedTargetZone {
-                    // A bare fact list names no owning object; the refusal still
-                    // names the target whose zone the save cannot prove, which is
-                    // what a reader needs.
-                    owner: None,
-                    target,
-                }),
-                None => Ok(()),
+            for fact in facts {
+                // A bare fact list names no owning object; the refusal still names
+                // the target whose fact the save cannot prove, which is what a
+                // reader needs.
+                check_fact(fact, None)?;
             }
+            Ok(())
         }
         /// CR 601.2c: check the fact list a cast's OWN finalization latch carries.
         /// `None` is the pre-latch shape, which
@@ -17968,16 +18003,11 @@ impl GameState {
                 // refusal, not this one.
                 return Ok(());
             };
-            match facts
-                .iter()
-                .find_map(ActivationTargetFact::object_target_without_announced_zone)
-            {
-                Some(target) => Err(PersistedRestoreError::UnknownAnnouncedTargetZone {
-                    owner: record.spell_object_id,
-                    target,
-                }),
-                None => Ok(()),
+            for fact in facts {
+                // The record's own spell object names the owner, already optional.
+                check_fact(fact, record.spell_object_id)?;
             }
+            Ok(())
         }
         fn check_pre_payment_checks(
             checks: &Option<Box<FinalizePrePaymentChecks>>,
@@ -19559,7 +19589,7 @@ impl GameState {
     /// declaration its own spell chain states.
     ///
     /// [`Self::reject_unknown_pending_target_facts`] and
-    /// [`Self::reject_unknown_activation_target_zone`] ask whether the latch EXISTS and
+    /// [`Self::reject_unstated_activation_target_facts`] ask whether the latch EXISTS and
     /// whether its object facts state a zone. Neither asks the question the latch is FOR:
     /// `casting::latch_committed_target_facts` writes it by projecting
     /// `declared_targets_in_chain(ability)` through
@@ -19966,6 +19996,32 @@ pub enum PersistedRestoreError {
         owner: Option<ObjectId>,
         target: ObjectId,
     },
+    /// CR 111.1 + CR 115.9 + CR 601.2c: a committed target fact, or an
+    /// activation record's own source fact, does not state the token bit it held
+    /// when it was recorded.
+    ///
+    /// CR 115.9 makes "the state of the targets at the time they were selected" a
+    /// reading of its own, and CR 111.1 makes token-ness part of it; token-ness is
+    /// not a copiable value (CR 707.2), so no snapshot in the save can supply the
+    /// missing answer, and CR 730.2d lets the live object's bit change in place.
+    /// A payload that predicates the field is therefore unreconstructable, and
+    /// restore refuses it for the same reason it refuses an unstated zone: the
+    /// alternative is the silent default the capture exists to replace. Silence is
+    /// not even fail-closed for a negated predicate — `TriggerCondition::Not`
+    /// inverts the leaf's answer, so an unstated bit would turn Progenitor Mimic's
+    /// "if this creature isn't a token" into a match for a token.
+    #[error(
+        "persisted activation facts owned by {owner:?} carry an unknown captured token bit \
+         for {subject:?} and cannot be restored"
+    )]
+    UnknownCapturedTokenBit {
+        /// The record's owning object — the activation's source — or `None` for
+        /// the bare fact list a parked cast's latch carries.
+        owner: Option<ObjectId>,
+        /// The object whose token bit the save leaves unstated: the committed
+        /// target, or the record's own source.
+        subject: ObjectId,
+    },
     /// CR 106.3 + CR 400.7: a saved mana pool holds floating mana whose producing
     /// object the save does not name. `ManaUnit::source_incarnation` is the pin
     /// that binds a unit to the epoch that produced it, and
@@ -20351,7 +20407,7 @@ impl PersistedGameState {
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
         state.reject_unknown_cast_history_provenance()?;
-        state.reject_unknown_activation_target_zone()?;
+        state.reject_unstated_activation_target_facts()?;
         state.bind_or_reject_floating_mana_provenance()?;
         // CR 605.3b: decide this payload's settlement-record format BEFORE any reader
         // asks whether a node resolved, so a current save cannot lose one node's

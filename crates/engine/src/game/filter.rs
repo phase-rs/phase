@@ -6576,18 +6576,28 @@ pub(crate) fn source_subject_matches_filter(
                 source.identity.reference.object_id,
                 source.identity.reference.incarnation,
             );
+            // CR 111.1 + CR 115.9: the context LATCHED the source's token bit at
+            // the same observation as `lki` (`TriggerSourceContext::is_token`), so
+            // the token leaves answer from it instead of refusing. Reading the live
+            // object would answer with the present, and the latch is the whole
+            // reason this arm exists.
+            let stated = Some(source.is_token);
             match exit_lki {
-                Some(lki) => matches_target_filter_on_lki_snapshot(
+                Some(lki) => super::filter::matches_target_filter_on_stated_lki(
                     state,
                     source.identity.reference.object_id,
                     lki,
+                    None,
+                    stated,
                     filter,
                     &context,
                 ),
-                None => matches_target_filter_on_lki_snapshot(
+                None => super::filter::matches_target_filter_on_stated_lki(
                     state,
                     source.identity.reference.object_id,
                     &source.lki,
+                    None,
+                    stated,
                     filter,
                     &context,
                 ),
@@ -6649,8 +6659,18 @@ pub(crate) fn source_incarnation_matches_filter(
     {
         return matches_target_filter(state, object_id, filter, context);
     }
+    // CR 400.7 + CR 608.2h: the caller's `incarnation` IS the epoch this exit
+    // record belongs to, and the departure token capture is keyed by it, so the
+    // token leaves answer from that epoch rather than refusing.
     exit_lki_for_incarnation(state, object_id, incarnation).is_some_and(|lki| {
-        matches_target_filter_on_lki_snapshot(state, object_id, lki, filter, context)
+        matches_target_filter_on_departed_lki_at_incarnation(
+            state,
+            object_id,
+            lki,
+            incarnation,
+            filter,
+            context,
+        )
     })
 }
 
@@ -6853,16 +6873,75 @@ pub fn matches_target_filter_on_cost_paid_reference(
             crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
         });
 
+    // CR 400.7 + CR 608.2h: the snapshot's `incarnation` is the epoch the cost's
+    // own move produced (post-move: `capture_departed` reads the row after
+    // `bump_incarnation`), while the departure that produced it recorded its
+    // snapshot and its token capture under the PREVIOUS epoch. The departure that
+    // belongs to this reference is therefore the greatest recorded departure
+    // strictly beneath the snapshot's epoch — a later object's departure is above
+    // it and is never selected (CR 400.7), and a stale snapshot has no departure
+    // beneath it at all.
+    let departure = departure_epoch_beneath(state, object_id, snapshot.incarnation);
     match refreshed {
         Some(keywords) => {
             let mut lki = lki.clone();
             lki.keywords = keywords;
-            matches_target_filter_on_lki_snapshot(state, object_id, &lki, filter, ctx)
+            match departure {
+                Some(incarnation) => matches_target_filter_on_departed_lki_at_incarnation(
+                    state,
+                    object_id,
+                    &lki,
+                    incarnation,
+                    filter,
+                    ctx,
+                ),
+                None => matches_target_filter_on_lki_snapshot(state, object_id, &lki, filter, ctx),
+            }
         }
         // Gone, or moved to a hidden zone: CR 608.2h mandates last known
         // information, which is exactly what the payment snapshot holds.
-        None => matches_target_filter_on_lki_snapshot(state, object_id, lki, filter, ctx),
+        None => match departure {
+            Some(incarnation) => matches_target_filter_on_departed_lki_at_incarnation(
+                state,
+                object_id,
+                lki,
+                incarnation,
+                filter,
+                ctx,
+            ),
+            None => matches_target_filter_on_lki_snapshot(state, object_id, lki, filter, ctx),
+        },
     }
+}
+
+/// CR 400.7 + CR 608.2h: the departure whose zone change produced the referenced
+/// epoch — the greatest epoch this object's last-known information records
+/// strictly beneath `epoched`.
+///
+/// The two departure tables (`lki_by_incarnation` and
+/// `GameState::departure_token_by_incarnation`) are written together, keyed by the
+/// incarnation the object held AS IT LEFT, and `zones.rs` bumps the incarnation on
+/// the way into the new zone. A reference stamped after the move therefore sits
+/// exactly one tenure above the departure that created it, and a reference to a
+/// DIFFERENT (later) object sits above that later object's own departure. Reading
+/// the greatest recorded epoch beneath the reference selects the right departure
+/// in both cases and refuses when there is none.
+fn departure_epoch_beneath(state: &GameState, object_id: ObjectId, epoched: u64) -> Option<u64> {
+    state
+        .lki_by_incarnation
+        .get(&object_id)?
+        .keys()
+        .copied()
+        .filter(|incarnation| *incarnation < epoched)
+        .max()
+        .filter(|incarnation| {
+            // The capture is written with the snapshot, so this only guards a
+            // pruned table.
+            state
+                .departure_token_by_incarnation
+                .get(&object_id)
+                .is_some_and(|history| history.contains_key(incarnation))
+        })
 }
 
 /// CR 400.7 + CR 603.10a: Match an event subject from its captured facts,
@@ -25138,6 +25217,117 @@ mod tests {
                 &ctx,
             ),
             "the unpinned door names no epoch, so it still refuses both leaves"
+        );
+    }
+
+    /// CR 111.1 + CR 113.7a + CR 115.9 + CR 608.2h: a LATCHED trigger source
+    /// answers the token leaves from the bit the context captured beside its
+    /// snapshot (`TriggerSourceContext::is_token`), not from a refusal and not
+    /// from the live object.
+    ///
+    /// This is the shape `SourceMatchesFilter` takes when its source is destroyed
+    /// in response: the CR 603.4 re-check at resolution runs against the latched
+    /// context, so every leaf it cannot state would silently fail — and under a
+    /// negated predicate (`TriggerCondition::Not`, Progenitor Mimic's "if this
+    /// creature isn't a token") a refusal becomes a match.
+    ///
+    /// Revert-probe: dropping the stated bit (the refusing matcher this used to
+    /// call) fails the first assertion.
+    #[test]
+    fn a_latched_trigger_source_states_its_token_bit() {
+        let mut state = setup();
+        let token = add_creature(&mut state, PlayerId(0), "Latched Token");
+        state.objects.get_mut(&token).unwrap().is_token = true;
+
+        // CR 113.7a: the context latches the observation — snapshot and token bit
+        // together — BEFORE the source leaves.
+        let latched = state.objects.get(&token).unwrap().snapshot_for_zone_change(
+            token,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        let context = latched
+            .trigger_source_context()
+            .cloned()
+            .expect("the snapshot latches a trigger source context");
+        assert!(
+            context.is_token,
+            "fixture precondition: the latch observed a token"
+        );
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, token, Zone::Graveyard, &mut events);
+
+        assert!(
+            super::source_subject_matches_filter(&state, &context, &prop_filter(FilterProp::Token)),
+            "a departed token source still matches `token` through its latch"
+        );
+        assert!(
+            !super::source_subject_matches_filter(
+                &state,
+                &context,
+                &prop_filter(FilterProp::NonToken)
+            ),
+            "and does not match `nontoken`"
+        );
+        // The activation-epoch sibling, keyed by the same incarnation.
+        let ctx = FilterContext::from_trigger_source(&context);
+        assert!(
+            super::source_incarnation_matches_filter(
+                &state,
+                token,
+                context.identity.reference.incarnation,
+                &prop_filter(FilterProp::Token),
+                &ctx,
+            ),
+            "the incarnation-pinned source read answers from its own epoch"
+        );
+    }
+
+    /// CR 111.1 + CR 400.7 + CR 608.2h: a cost-paid reference answers the token
+    /// leaves from the departure that produced its snapshot's epoch.
+    ///
+    /// `CostPaidObjectSnapshot` stamps the POST-move incarnation (the cost's own
+    /// move bumped it), while the departure recorded its snapshot and its token
+    /// capture under the pre-move epoch, so the door has to place the reference on
+    /// the departure beneath it. `AbilityCondition::CostPaidObjectMatchesFilter`
+    /// reads this through `matches_target_filter_on_cost_paid_reference`.
+    ///
+    /// Revert-probe: calling the refusing matcher instead fails the first
+    /// assertion — a sacrificed token reads as neither token nor nontoken.
+    #[test]
+    fn a_cost_paid_reference_states_its_token_bit() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Cost Source");
+        let paid = add_creature(&mut state, PlayerId(0), "Sacrificed Token");
+        state.objects.get_mut(&paid).unwrap().is_token = true;
+
+        // CR 701.21a: the cost's own move is the departure this reference names.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, paid, Zone::Graveyard, &mut events);
+        let snapshot = crate::types::ability::CostPaidObjectSnapshot::capture_departed(
+            &state,
+            paid,
+            state.lki_cache[&paid].clone(),
+        );
+
+        let ctx = FilterContext::from_source(&state, source);
+        assert!(
+            super::matches_target_filter_on_cost_paid_reference(
+                &state,
+                &snapshot,
+                &prop_filter(FilterProp::Token),
+                &ctx,
+            ),
+            "a sacrificed token still matches `token`"
+        );
+        assert!(
+            !super::matches_target_filter_on_cost_paid_reference(
+                &state,
+                &snapshot,
+                &prop_filter(FilterProp::NonToken),
+                &ctx,
+            ),
+            "and does not match `nontoken`"
         );
     }
 
