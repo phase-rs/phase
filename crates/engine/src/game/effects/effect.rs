@@ -2269,10 +2269,20 @@ mod tests {
         );
     }
 
-    /// CR 109.5 + CR 702.11c: a top-level `Or` affected union is SPLIT and each member is
-    /// recursed as its own transient effect. This executes the `bind_transient_effect` split
-    /// the recipient-read gate is built on: the player member binds to its controller, and
-    /// the `EventTarget` member resolves against the trigger event's damage recipient.
+    /// CR 611.2c + CR 109.5 + CR 608.2k: a top-level `Or` affected union is SPLIT and each
+    /// member is recursed as its own transient effect, so the set the effect applies to is
+    /// fixed member by member when it begins. This executes the `bind_transient_effect` split
+    /// the recipient-read gate is built on: the player member ("you", CR 109.5) binds to the
+    /// controller, and the `EventTarget` member resolves against the trigger event's damage
+    /// recipient (CR 608.2k).
+    ///
+    /// SYNTHETIC FIXTURE: no printed card grants one keyword to "you and that creature". The
+    /// nearest printed text is Shalai, Voice of Plenty's "You, planeswalkers you control, and
+    /// other creatures you control have hexproof.", whose separate "You ... have hexproof"
+    /// member is the player half (CR 702.11c) and whose permanent members are the object
+    /// half (CR 702.11b). The fixture keeps that keyword and replaces the object members with
+    /// the event recipient, which isolates the one thing under test: the split binds BOTH
+    /// members instead of dropping either.
     #[test]
     fn transient_effect_split_binds_each_union_member_including_event_target() {
         use crate::types::game_state::DamageRecord;
@@ -2319,8 +2329,10 @@ mod tests {
             .affected(TargetFilter::Or {
                 filters: vec![TargetFilter::Controller, TargetFilter::EventTarget],
             })
+            // CR 702.11b + CR 702.11c: hexproof is a keyword both a player and a permanent
+            // can have, so one payload is meaningful for both members of the union.
             .modifications(vec![ContinuousModification::AddKeyword {
-                keyword: Keyword::Flying,
+                keyword: Keyword::Hexproof,
             }]);
         let ability = ResolvedAbility::new(
             Effect::GenericEffect {
