@@ -815,6 +815,11 @@ fn hydrate_runtime_authorities(shadow: &mut GameState, live: &GameState) {
     shadow.debug_mode = live.debug_mode;
     shadow.debug_permitted = live.debug_permitted.clone();
     shadow.format_config = live.format_config.clone();
+    // The ingress window belongs to the live action, not to the action that
+    // stored the checkpoint: a player-resource change the shadow cannot
+    // represent is recorded where this action's boundary rejects it (a
+    // concession instead retires the payment and keeps the departure).
+    shadow.ingress_life_window = live.ingress_life_window;
 }
 
 /// CR 614.17c + CR 616.1f + CR 800.4a: settle a parked replacement prompt the

@@ -10247,10 +10247,15 @@ pub(crate) fn stored_candidate_executes(
 /// would now be applicable to the parked event. A rule-derived candidate is
 /// judged by its own applier's live input, as [`stored_candidate_executes`]
 /// does. An object's definition must still be found by the discovery that
-/// offered it, [`object_replacement_candidate_applies`]: its source still
-/// functions from its zone (CR 113.6) and the definition still matches the
-/// event. A source that changed zones, or left the game with its owner
-/// (CR 800.4a), keeps its stored definition but no longer applies.
+/// offered it ([`find_applicable_replacements`]): its source still functions
+/// from its zone (CR 113.6) and the definition still matches the event. A
+/// source that changed zones, or left the game with its owner (CR 800.4a),
+/// keeps its stored definition but no longer applies.
+///
+/// The event is judged as it stood when the candidate was offered: a resume
+/// that already marked this candidate applied before re-entering its handler
+/// (an entry-controller or as-enters answer, an accepted MayCost) has its own
+/// mark cleared first, as [`token_batch_admits`] does.
 fn stored_candidate_applies(
     state: &GameState,
     proposed: &ProposedEvent,
@@ -10258,10 +10263,13 @@ fn stored_candidate_applies(
 ) -> bool {
     rule_derived_candidate_executes(state, proposed, rid).unwrap_or_else(|| {
         if rid.source == ObjectId(0) {
-            stored_replacement_definition(state, rid).is_some()
-        } else {
-            object_replacement_candidate_applies(state, proposed, replacement_registry(), rid)
+            return stored_replacement_definition(state, rid).is_some();
         }
+        let mut offered = proposed.clone();
+        offered
+            .applied_set_mut()
+            .remove(&AppliedReplacementKey::for_event(proposed, rid));
+        find_applicable_replacements(state, &offered, replacement_registry()).contains(&rid)
     })
 }
 

@@ -991,7 +991,9 @@ fn accepting_a_parked_dredge_after_the_draw_becomes_impossible_declines_it() {
 
 /// CR 104.3a: a fallible payment recovery (an overflowing rider) must not undo
 /// the concession itself. The departure is published with its events and the
-/// next ordinary action starts from it.
+/// next ordinary action starts from it. The rider's unrepresentable gain is
+/// recorded in the concession's own ingress window, so the payment is retired
+/// whole: neither its staged draw nor a skipped gain is published.
 #[test]
 fn a_failed_payment_recovery_still_commits_the_concession() {
     let (mut runner, source) = concession_board();
@@ -1043,8 +1045,8 @@ fn a_failed_payment_recovery_still_commits_the_concession() {
     );
     assert_eq!(
         hand_and_library(&runner, P0).0 - hand_before,
-        1,
-        "the accepted prefix draw survives the fallible rider"
+        0,
+        "the retired payment's staged draw is not committed"
     );
     assert!(
         published.events.iter().any(|event| matches!(
@@ -2225,8 +2227,12 @@ fn second_concession_board(rider: Option<Effect>, stack: Vec<StackEntry>) -> Gam
 }
 
 /// The second departure, its published event, the retired checkpoint, a
-/// checked save and restore, and the next ordinary action.
+/// checked save and restore, and the next ordinary action. The published
+/// board is the departure's: none of the staged draws is in P0's hand and no
+/// life changed, so a payment completed on the departed checkpoint (with its
+/// failed life change skipped) was not kept.
 fn assert_second_departure_retires_the_checkpoint(runner: &mut GameRunner) {
+    let hand_before = runner.state().players[P0.0 as usize].hand.clone();
     let published = apply(
         runner.state_mut(),
         PlayerId(2),
@@ -2247,6 +2253,15 @@ fn assert_second_departure_retires_the_checkpoint(runner: &mut GameRunner) {
     assert!(
         state.payment_transaction.is_none(),
         "a recovery that cannot include the departure is retired, not kept stale"
+    );
+    assert_eq!(
+        state.players[P0.0 as usize].hand, hand_before,
+        "the retired payment's staged draws are not committed"
+    );
+    assert_eq!(
+        state.players[P0.0 as usize].life,
+        i32::MAX,
+        "no life changed"
     );
     let mut restored =
         checked_round_trip(state).expect("the published state passes checked restore");
@@ -2271,8 +2286,12 @@ fn a_second_concession_whose_parked_draw_fails_to_settle_retires_the_checkpoint(
 }
 
 /// CR 104.3a: the same second concession, with the failure in the payment's
-/// rider instead: settlement records an unrepresentable life gain, and the
-/// concession still publishes the departure and retires the payment.
+/// rider instead. The rider resolves as ordinary resolution on the departed
+/// checkpoint, so its unrepresentable life gain is recorded in the action's
+/// ingress window and the settlement itself returns `Ok`: this reaches the
+/// Concede arm's life-failure branch, which publishes the departure and
+/// retires the payment rather than the completed payment with the gain
+/// skipped.
 #[test]
 fn a_second_concession_whose_rider_is_unrepresentable_retires_the_payment() {
     let mut runner = second_concession_board(Some(gain_hand_size()), Vec::new());
