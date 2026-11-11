@@ -1037,6 +1037,9 @@ fn fixed_one_lantern_grants_pay_the_printed_mixed_hybrid_spell() {
         .as_legendary().with_subtypes(vec!["Eldrazi"])
         .with_mana_cost(parse_mtgjson_mana_cost("{C/W}{C/U}{C/B}{C/R}{C/G}")).id();
     let mut r = s.build();
+    // Lantern is an established, already tapped permanent; only the Forests
+    // are available to fund this cast.
+    r.state_mut().objects.get_mut(&lantern).unwrap().tapped = true;
     evaluate_layers(r.state_mut());
     for &forest in &forests {
         assert!(activatable_land_mana_options(r.state(), forest, P0)
@@ -1045,11 +1048,26 @@ fn fixed_one_lantern_grants_pay_the_printed_mixed_hybrid_spell() {
                 && row.atomic_combination.is_none()
                 && row.ability_index.is_some()));
     }
-    // CR 106.3 + CR 107.4e: five fixed-one granted activations can supply
-    // W/U/B/R/G; land preference leaves Lantern itself untapped.
+    // CR 106.3 + CR 107.4e: the grant supplies the Forest-produced W/U/B/R.
+    // CR 305.6: the fifth Forest may supply G natively or through the grant.
     let payment = r.cast(ulalek).commit();
     assert!(forests.iter().all(|id| payment.state().objects[id].tapped));
-    assert!(!payment.state().objects[&lantern].tapped);
+    assert!(payment.state().objects[&lantern].tapped);
+    for color in [
+        ManaType::White,
+        ManaType::Blue,
+        ManaType::Black,
+        ManaType::Red,
+        ManaType::Green,
+    ] {
+        assert_eq!(
+            forests
+                .iter()
+                .map(|&forest| production_count(payment.events(), forest, color))
+                .sum::<usize>(),
+            1
+        );
+    }
     for &forest in &forests {
         assert_eq!(
             payment
@@ -1060,7 +1078,22 @@ fn fixed_one_lantern_grants_pay_the_printed_mixed_hybrid_spell() {
                 .count(),
             1
         );
+        // CR 601.2h: each Forest's one produced unit is actually spent.
+        assert_eq!(
+            payment.state().objects[&ulalek]
+                .mana_spent_source_snapshots
+                .iter()
+                .filter(|snapshot| snapshot.source_id == forest)
+                .count(),
+            1
+        );
     }
+    assert_eq!(payment.state().objects[&ulalek].zone, Zone::Stack);
+    assert_eq!(
+        payment.state().objects[&ulalek].mana_spent_to_cast_amount,
+        5
+    );
+    assert!(payment.state().players[0].mana_pool.is_empty());
     payment.resolve().assert_zone(&[ulalek], Zone::Battlefield);
     assert_complete(&r, 0);
 }
@@ -3687,9 +3720,9 @@ fn snow_pool_z_hybrid_life_choices_indices_and_memo() {
 
 #[test]
 fn snow_pool_z_hybrid_keeps_executable_baseline_and_pins() {
-    // H6: the tempting C/Z alternative strands strict C because the existing
-    // C/U dispatch greedily consumes the other C. An abstract matching using
-    // U for C/U is not an executable witness for this engine policy.
+    // H6: CR 107.4e + CR 107.4f + CR 107.4h: with R/P, C2 pays Z,
+    // U4 pays C/U, C3 pays strict C, Snow G1 pays S, and R5 pays R/P.
+    // This complete zero-life route beats the baseline that pays life.
     for phyrexian in [false, true] {
         let cost = parse_mtgjson_mana_cost(if phyrexian {
             "{Z}{C/U}{C}{S}{R/P}"
@@ -3714,12 +3747,20 @@ fn snow_pool_z_hybrid_keeps_executable_baseline_and_pins() {
             &[],
         )
         .unwrap();
-        assert_eq!(
-            spent.iter().map(|u| u.pip_id.0).collect::<Vec<_>>(),
-            [1, 3, 2, 5]
-        );
-        assert_eq!(life.len(), usize::from(phyrexian));
-        assert_eq!(pool.units().map(|u| u.pip_id.0).collect::<Vec<_>>(), [4]);
+        if phyrexian {
+            assert_eq!(
+                spent.iter().map(|u| u.pip_id.0).collect::<Vec<_>>(),
+                [2, 4, 3, 1, 5]
+            );
+            assert!(pool.is_empty());
+        } else {
+            assert_eq!(
+                spent.iter().map(|u| u.pip_id.0).collect::<Vec<_>>(),
+                [1, 3, 2, 5]
+            );
+            assert_eq!(pool.units().map(|u| u.pip_id.0).collect::<Vec<_>>(), [4]);
+        }
+        assert!(life.is_empty());
     }
     let cost = parse_mtgjson_mana_cost("{Z}{C/U}{S}");
     for spare_snow in [false, true] {
