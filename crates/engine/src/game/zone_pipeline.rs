@@ -14389,6 +14389,43 @@ mod staged_batch_tests {
         }
     }
 
+    /// CR 401.4: the persisted groups must jointly cover the approved
+    /// positioned cohort with one group per owner/position key. A repeated
+    /// key and a member missing from every group are both refused. These are
+    /// the joint checks in `PendingBatchDeliveries::validate_staged` that run
+    /// after each group's own validation.
+    #[test]
+    fn staged_validator_requires_jointly_covering_groups_without_repeated_keys() {
+        let mut state = GameState::new_two_player(42);
+        effect_source(&mut state);
+        let a = graveyard_card(&mut state, 1);
+        let b = graveyard_card(&mut state, 2);
+        let group_id = replacement_origin_group(&mut state, &[a, b], LibraryPosition::Bottom);
+        let mut owner = take_owner(&mut state, group_id);
+        begin_staged_arrangement(&state, &mut owner);
+        owner
+            .validate_staged()
+            .expect("control: one group covers both approvals");
+
+        let mut repeated = owner.clone();
+        let staged = repeated.staged.as_mut().unwrap();
+        staged.arrangements.push(staged.arrangements[0].clone());
+        assert_eq!(
+            repeated.validate_staged().unwrap_err(),
+            "staged arrangements repeat an owner/position group"
+        );
+
+        let mut missing = owner.clone();
+        missing.staged.as_mut().unwrap().arrangements[0]
+            .batch
+            .members
+            .retain(|entry| entry.identity.object_id != b);
+        assert!(
+            missing.validate_staged().is_err(),
+            "an approved member outside every group is refused"
+        );
+    }
+
     #[test]
     fn staged_validator_rejects_duplicate_submitted_seed_keys_with_disjoint_members() {
         for position in [
