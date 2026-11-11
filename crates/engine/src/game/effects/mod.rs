@@ -17173,25 +17173,6 @@ pub(crate) fn upfront_optional_gate(
     })
 }
 
-/// CR 603.5: is that gate ALREADY ANSWERED by a stored "don't ask again" preference?
-///
-/// The CONSUMER half of [`upfront_optional_gate`], so the mint's suppression and production's
-/// own early return can no longer disagree about which mays are answered. `None` ⇒ the gate will PROMPT, or there is no gate, or the ability carries no
-/// `may_trigger_origin` for a preference to key on — all three are unspecified windows, which
-/// is the fail-closed direction for every consumer.
-///
-/// Passes [`OptionalFeasibility::Probe`]: a caller asking "is this already answered?" has by
-/// definition not run the feasibility probe itself.
-#[cfg(test)]
-pub(crate) fn stored_may_answer(
-    state: &GameState,
-    ability: &ResolvedAbility,
-) -> Option<AutoMayChoice> {
-    let gate = upfront_optional_gate(state, ability, OptionalFeasibility::Probe)?;
-    let key = gate.key.as_ref()?;
-    state.may_trigger_auto_choice_for_live_prompt(key)
-}
-
 /// CR 603.12a + CR 608.2c: True when this ability is a "you may pay {cost} up to
 /// N times. When you do, [reflexive]" process (Hawkeye, Master Marksman — "Trick
 /// Arrows"). Unlike a generic `repeat_for` loop (one up-front "you may" then N
@@ -23324,12 +23305,9 @@ fn resolve_chain_body(
             .description
             .clone()
             .or_else(|| crate::game::un_actions::say_phrase_prompt(&ability.effect));
-        // Deliberately the DIRECT store read rather than `stored_may_answer`, and this is
-        // not a duplicated authority: the KEY is what has to be built in one place, and it
-        // was — by `upfront_optional_gate`, above. `stored_may_answer` would re-enter the
-        // authority with `Probe` and run the feasibility clone a second time, which is the
-        // exact defect `OptionalFeasibility` exists to prevent. Same key, same store, same
-        // answer, one probe.
+        // Deliberately the DIRECT store read, and this is not a duplicated authority: the
+        // KEY is what has to be built in one place, and it was — by `upfront_optional_gate`,
+        // above.
         let same_card_may_trigger_choice_available = may_trigger_key
             .as_ref()
             .is_some_and(|key| state.may_trigger_same_card_choice_available(key));
@@ -29710,20 +29688,10 @@ mod tests {
         }
         let instance = instance.expect("Pantlaza's trigger reaches the stack");
 
-        // Positive control: before the action is taken the instance opens a keyed gate,
-        // and a stored answer for that key is read.
+        // Positive control: before the action is taken the instance opens a keyed gate.
         let gate = upfront_optional_gate(runner.state(), &instance, OptionalFeasibility::Probe)
             .expect("an untaken instance opens its gate");
-        let key = gate
-            .key
-            .clone()
-            .expect("the may-trigger instance carries a key");
-        let mut remembered = runner.state().clone();
-        remembered.set_may_trigger_auto_choice(key.clone(), AutoMayChoice::Accept);
-        assert_eq!(
-            stored_may_answer(&remembered, &instance),
-            Some(AutoMayChoice::Accept)
-        );
+        assert!(gate.key.is_some(), "the may-trigger instance carries a key");
 
         runner.advance_until_stack_empty();
         assert!(matches!(
@@ -29758,12 +29726,6 @@ mod tests {
         assert!(
             upfront_optional_gate(runner.state(), &instance, OptionalFeasibility::Probe).is_none(),
             "an instance whose indicated action was taken opens no gate"
-        );
-        let mut remembered = runner.state().clone();
-        remembered.set_may_trigger_auto_choice(key, AutoMayChoice::Accept);
-        assert!(
-            stored_may_answer(&remembered, &instance).is_none(),
-            "no gate, so no stored answer is read for the spent instance"
         );
     }
 

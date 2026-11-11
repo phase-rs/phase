@@ -190,10 +190,8 @@ impl TacticalPolicy for LoopShortcutPolicy {
             //
             // NOTE (tripwire, still live for the unbounded branch): a `Fixed(n)` large enough
             // to cross lethal WOULD commit a `GameOver` — and against an offer whose name is
-            // RIGHT it still does. `materialize_fixed_shortcut`'s `CrossLethal` arm now crowns
-            // only the seat `proposal.predicted_winner` names (or any seat when it names
-            // nobody), so what lets such a declare through is no longer the absence of a filter
-            // but the offer's own prediction agreeing with the drive. Such a declare by a faller
+            // RIGHT it still does. the drive crowns only the seat `proposal.predicted_winner` names
+            // (or any seat when it names nobody). Such a declare by a faller
             // proposer is a committed self-loss, and this arm is still neutral on it. On a BOUNDED offer that hazard is
             // discharged by the `loop_shortcut_declare_eliminates_proposer` arm BELOW, which asks
             // `cycles_to_proposer_elimination` of the proposer alone. It is NOT discharged by
@@ -234,9 +232,7 @@ impl TacticalPolicy for LoopShortcutPolicy {
             // crossing bound it — CR 732.2a's shortcut proposer "need not be the player proposing
             // the shortcut" who benefits, so the producer is right not to gate on proposer
             // benefit. That makes it the
-            // DECIDING side's job, and nothing was doing it: a bounded offer always carries
-            // `predicted_winner: None`, so the "hands somebody else the win" arm above is
-            // structurally unreachable here, and the AI's only bounded candidate is `Fixed` at
+            // DECIDING side's job, and nothing was doing it: the AI's only bounded candidate is `Fixed` at
             // the published SUGGESTION — a count the offer's suggestion drives, at or below
             // the published capacity, which the producer carries all the way to the binding
             // seat's own crossing. A self-mill period whose binding seat is the proposer

@@ -19893,36 +19893,34 @@ mod tests {
     /// shared predicates and OMITS `optional_for` and the CR 608.2d feasibility probe calls a
     /// may "already answered" on two ability shapes where production never reads the store.
     ///
-    /// This row is that divergence, asserted at the authority. Every arm seeds a stored
-    /// `Accept` under exactly the key such a copy would build, so an omitted conjunct
-    /// shows up as a WRONG ANSWER rather than as an absent one.
+    /// This row is that divergence, asserted at the authority.
     ///
-    /// | arm | one field different | gate | `stored_may_answer` |
-    /// |---|---|---|---|
-    /// | (P) plain optional | — | `Some` | `Some(Accept)` |
-    /// | (O) `optional_for: AnyOpponent` | CR 608.2d fan-out | `None` | **`None`** |
-    /// | (I) infeasible `RemoveCounter` | zero matching counters | `None` | **`None`** |
-    /// | (I-pos) the SAME `RemoveCounter`, feasible | one counter on the source | `Some` | `Some(Accept)` |
+    /// | arm | one field different | gate |
+    /// |---|---|---|
+    /// | (P) plain optional | — | `Some` |
+    /// | (O) `optional_for: AnyOpponent` | CR 608.2d fan-out | `None` |
+    /// | (I) infeasible `RemoveCounter` | zero matching counters | `None` |
+    /// | (I-pos) the SAME `RemoveCounter`, feasible | one counter on the source | `Some` |
     ///
     /// (I-pos) is what keys (I) to FEASIBILITY rather than to the effect discriminant: the two
     /// boards differ only in whether the source carries a `+1/+1` counter. (P) is the paired
     /// positive for (O).
     ///
     /// It is also the row that EXERCISES `OptionalFeasibility::Probe` on both of its outcomes
-    /// — `stored_may_answer` passes `Probe`, so (I) and (I-pos) run the real probe and take
-    /// opposite branches. Without them the variant would be constructed but never decisive.
+    /// — (I) and (I-pos) run the real probe and take opposite branches. Without them the
+    /// variant would be constructed but never decisive.
     ///
     /// REVERT-PROBE: delete `optional_for.is_some() ⇒ None` from the authority ⇒ (O) FLIPS.
     /// Delete the feasibility conjunct ⇒ (I) FLIPS. Neither touches (P) or (I-pos).
     #[test]
     fn f2a_the_upfront_gate_authority_answers_the_two_shapes_the_third_copy_omitted() {
-        use crate::game::effects::{stored_may_answer, upfront_optional_gate, OptionalFeasibility};
+        use crate::game::effects::{upfront_optional_gate, OptionalFeasibility};
         use crate::types::ability::{
             Effect, OpponentMayScope, QuantityExpr, ResolvedAbility, TargetFilter,
             TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
         };
         use crate::types::counter::CounterType;
-        use crate::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin};
+        use crate::types::game_state::MayTriggerOrigin;
         use crate::types::identifiers::ObjectIncarnationRef;
 
         let src = ObjectId(CHURN_SRC);
@@ -19935,16 +19933,8 @@ mod tests {
                 },
             },
         };
-        // The key such a copy builds: `optional_prompt_player` (P0 here) + source + origin.
-        // Seeded on every arm, so an omitted conjunct is a wrong answer and not a missing one.
-        let key = MayTriggerAutoChoiceKey {
-            player: PlayerId(0),
-            source_id: src,
-            origin: origin.clone(),
-        };
         let board = |counters: u32| {
             let mut state = drain_state(4);
-            state.set_may_trigger_auto_choice(key.clone(), AutoMayChoice::Accept);
             if counters > 0 {
                 state
                     .objects
@@ -19984,11 +19974,6 @@ mod tests {
             "(P) MATCHED POSITIVE, asserted first: a plain optional ability DOES open one \
              up-front gate. Without it every `None` below could be a broken authority"
         );
-        assert_eq!(
-            stored_may_answer(&plain, &draw()),
-            Some(AutoMayChoice::Accept),
-            "(P) …and the stored preference answers it"
-        );
 
         let mut fanned = draw();
         fanned.optional_for = Some(OpponentMayScope::AnyOpponent);
@@ -19998,23 +19983,11 @@ mod tests {
              to one window PER LIVING PLAYER, not one up-front gate — production returns at \
              the fan-out before the gate is reached at all"
         );
-        assert_eq!(
-            stored_may_answer(&plain, &fanned),
-            None,
-            "(O) THE DIVERGENCE: the store holds an `Accept` under exactly the key the third \
-             copy built, and the answer is still `None`, because the gate that preference \
-             would answer never opens"
-        );
 
         assert!(
             upfront_optional_gate(&plain, &remove_counter(), OptionalFeasibility::Probe).is_none(),
             "(I) CR 608.2d: \"a player can't choose an impossible option\" — with zero matching \
              counters the optional removal opens no window"
-        );
-        assert_eq!(
-            stored_may_answer(&plain, &remove_counter()),
-            None,
-            "(I) THE SECOND DIVERGENCE, on the same seeded store"
         );
 
         let stocked = board(1);
@@ -20025,11 +19998,6 @@ mod tests {
              different DOES open its gate. This is what keys (I) to feasibility rather than \
              to the effect discriminant — and it is the arm that proves \
              `OptionalFeasibility::Probe` reaches a decision, not merely a construction"
-        );
-        assert_eq!(
-            stored_may_answer(&stocked, &remove_counter()),
-            Some(AutoMayChoice::Accept),
-            "(I-pos) …and the same stored preference now answers it"
         );
 
         // `Known` is the mode production uses, and it must OVERRIDE the probe rather than

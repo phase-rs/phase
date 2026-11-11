@@ -45,11 +45,11 @@ use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-const MACHETE: &str = "When this Equipment enters, manifest dread, then attach this Equipment to that creature.\nEquipped creature gets +2/+1.\nEquip {4}";
+const CONDUCTIVE_MACHETE: &str = "When this Equipment enters, manifest dread, then attach this Equipment to that creature.\nEquipped creature gets +2/+1.\nEquip {4}";
 
 /// The already-working sibling shape: a token producer with the same
 /// "then attach this Equipment to it" continuation.
-const ANCESTRAL_BLADE: &str = "When this Equipment enters, create a 1/1 white Soldier creature token, then attach this Equipment to it.\nEquipped creature gets +1/+1.\nEquip {3}";
+const ANCESTRAL_BLADE: &str = "When this Equipment enters, create a 1/1 white Soldier creature token, then attach this Equipment to it.\nEquipped creature gets +1/+1.\nEquip {1}";
 
 /// An Equipment in hand with `oracle`, plus `library` library cards so manifest
 /// dread has something to look at.
@@ -87,7 +87,7 @@ fn host_of(runner: &GameRunner, equipment: ObjectId) -> Option<ObjectId> {
 /// `LastCreated` resolves to a stale (or empty) id.
 #[test]
 fn the_equipment_attaches_to_the_creature_manifest_dread_produced() {
-    let (mut runner, machete) = board("Conductive Machete", MACHETE, 2);
+    let (mut runner, machete) = board("Conductive Machete", CONDUCTIVE_MACHETE, 2);
     let manifested = runner.state().players[0].library[0];
 
     runner.cast(machete).resolve();
@@ -127,7 +127,7 @@ fn the_equipment_attaches_to_the_creature_manifest_dread_produced() {
 /// show up here as an unexpected host.
 #[test]
 fn an_empty_library_manifests_nothing_and_attaches_nothing() {
-    let (mut runner, machete) = board("Conductive Machete", MACHETE, 0);
+    let (mut runner, machete) = board("Conductive Machete", CONDUCTIVE_MACHETE, 0);
 
     runner.cast(machete).resolve();
     runner.advance_until_stack_empty();
@@ -188,7 +188,7 @@ fn board_with_a_prior_referent(
 #[test]
 fn a_paused_continuation_overwrites_a_prior_referent() {
     let (mut runner, machete, prior) =
-        board_with_a_prior_referent("Conductive Machete", MACHETE, 2);
+        board_with_a_prior_referent("Conductive Machete", CONDUCTIVE_MACHETE, 2);
     let manifested = runner.state().players[0].library[0];
 
     runner.cast(machete).resolve();
@@ -237,7 +237,7 @@ fn a_paused_continuation_overwrites_a_prior_referent() {
 #[test]
 fn a_producer_that_produces_nothing_does_not_leave_a_prior_referent_standing() {
     let (mut runner, machete, prior) =
-        board_with_a_prior_referent("Conductive Machete", MACHETE, 0);
+        board_with_a_prior_referent("Conductive Machete", CONDUCTIVE_MACHETE, 0);
 
     runner.cast(machete).resolve();
     runner.advance_until_stack_empty();
