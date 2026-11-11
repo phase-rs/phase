@@ -1,7 +1,0 @@
-{
-  "surfaces": [
-    "full",
-    "wire"
-  ],
-  "reason": "GameObject gains persisted protection_provenance; old peers drop it and could reconstruct protection that layer 6 removed"
-}
