@@ -16546,7 +16546,11 @@ fn auto_tap_mana_sources_inner(
                         }
                     })
                 });
-                if produced_units.is_some() {
+                // CR 605.3b + CR 605.3c: successful, unpaused resolution
+                // completes the activation even when its live amount is zero
+                // and no ManaAbilityProduced event is emitted.
+                let completed = resolved.is_ok();
+                if completed {
                     completed_sources.insert(option.object_id);
                 }
                 // CR 106.3 + CR 608.2h + CR 605.3b: a counted producer can
@@ -16562,16 +16566,15 @@ fn auto_tap_mana_sources_inner(
                 let refresh = count.is_some_and(|count| {
                     !count.contains_x()
                         && (!matches!(count, QuantityExpr::Fixed { .. })
-                            || produced_units.is_some_and(|actual| {
-                                actual
+                            || (completed
+                                && produced_units.unwrap_or(0)
                                     != option
                                         .atomic_combination
                                         .as_ref()
                                         .map_or(1, Vec::len)
-                                        .saturating_sub(option.taps_for_mana_overrides.len())
-                            }))
+                                        .saturating_sub(option.taps_for_mana_overrides.len())))
                 });
-                if produced_units.is_some() && refresh {
+                if completed && refresh {
                     super::triggers::resolve_tap_mana_triggers_inline(
                         state,
                         events,
@@ -16705,7 +16708,8 @@ fn auto_tap_output_projection(
     for option in available.iter().filter(|option| {
         needs_snow
             || !option.taps_for_mana_overrides.is_empty()
-            || single_color_choice_source(state, option)
+            || (single_color_choice_source(state, option)
+                && !proven_scalar_single_color_choice(state, option))
     }) {
         let player = state.objects[&option.object_id].controller;
         rows.entry((option.object_id, option.ability_index))
@@ -16918,6 +16922,29 @@ fn single_color_choice_source(state: &GameState, option: &ManaSourceOption) -> b
         .is_some_and(|ability| {
             matches!(&*ability.effect, Effect::Mana { produced, .. }
                     if mana_sources::single_color_production_count(produced).is_some())
+        })
+}
+
+/// CR 106.3 + CR 608.2h: only an unconditional, unrepeated single instruction
+/// with a fixed one-unit yield can use its already resolved scalar row. A
+/// conditional/subchain or live amount still needs the live-output authority.
+fn proven_scalar_single_color_choice(state: &GameState, option: &ManaSourceOption) -> bool {
+    option
+        .ability_index
+        .and_then(|index| state.objects.get(&option.object_id)?.abilities.get(index))
+        .is_some_and(|ability| {
+            matches!(&*ability.effect,
+                Effect::Mana { produced, target: None, .. }
+                    if matches!(mana_sources::single_color_production_count(produced),
+                        Some(QuantityExpr::Fixed { value: 1 })))
+                && ability.condition.is_none()
+                && ability.sub_ability.is_none()
+                && ability.else_ability.is_none()
+                && ability.repeat_for.is_none()
+                && ability.repeat_until.is_none()
+                && ability.modal.is_none()
+                && ability.mode_abilities.is_empty()
+                && !ability.optional
         })
 }
 
@@ -20237,6 +20264,99 @@ mod tests {
         let mut shards = vec![ManaCostShard::X];
         shards.extend_from_slice(extra);
         ManaCost::Cost { shards, generic: 0 }
+    }
+
+    #[test]
+    fn fixed_one_grants_skip_projection_but_conditional_snow_and_triggers_keep_it() {
+        use crate::game::scenario::GameScenario;
+
+        for (conditional, snow, enchanted) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let mut scenario = GameScenario::new();
+            scenario.add_artifact_from_oracle(P0, "Chromatic Lantern",
+                "Lands you control have \"{T}: Add one mana of any color.\"\n{T}: Add one mana of any color.")
+                .with_mana_cost(crate::types::mana::parse_mtgjson_mana_cost("{3}"));
+            let source = if conditional {
+                scenario.add_creature_from_oracle(P0, "Ilysian Caryatid", 1, 1,
+                    "{T}: Add one mana of any color. If you control a creature with power 4 or greater, add two mana of any one color instead.")
+                    .with_subtypes(vec!["Plant"])
+                    .with_mana_cost(crate::types::mana::parse_mtgjson_mana_cost("{1}{G}")).id()
+            } else if snow {
+                scenario
+                    .add_land_from_oracle(P0, "Snow-Covered Forest", "({T}: Add {G}.)")
+                    .with_subtypes(vec!["Forest"])
+                    .as_snow()
+                    .id()
+            } else {
+                scenario.add_basic_land(P0, crate::types::mana::ManaColor::Green)
+            };
+            let aura = enchanted.then(|| {
+                scenario.add_enchantment_from_oracle(P0, "Fertile Ground",
+                    "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional one mana of any color.")
+                    .with_subtypes(vec!["Aura"])
+                    .with_mana_cost(crate::types::mana::parse_mtgjson_mana_cost("{1}{G}")).id()
+            });
+            let mut runner = scenario.build();
+            if let Some(aura) = aura {
+                crate::game::effects::attach::attach_to(runner.state_mut(), aura, source);
+            }
+            crate::game::layers::evaluate_layers(runner.state_mut());
+            let available = collect_sorted_auto_tap_source_options(
+                runner.state(),
+                P0,
+                None,
+                &HashSet::new(),
+                None,
+            );
+            let selected: Vec<_> = available
+                .into_iter()
+                .filter(|row| {
+                    row.object_id == source && single_color_choice_source(runner.state(), row)
+                })
+                .collect();
+            assert!(
+                !selected.is_empty(),
+                "real fixed-one/conditional color rows must exist"
+            );
+            let output = auto_tap_output_projection(runner.state(), &selected, snow);
+            if !conditional && !snow && !enchanted {
+                assert_eq!(selected.len(), 5, "Lantern actually grants every color");
+                assert!(selected
+                    .iter()
+                    .all(|row| proven_scalar_single_color_choice(runner.state(), row)));
+                assert!(
+                    output.is_none(),
+                    "fixed-one grants take the scalar row path"
+                );
+            } else {
+                // CR 608.2h + CR 107.4h + CR 106.3: conditional yield,
+                // Snow quality and separate Aura producers retain live groups.
+                let output = output.as_ref().expect("live output is still required");
+                for row in &selected {
+                    let groups = projected_mana_output(row, Some(output)).unwrap();
+                    assert_eq!(groups.base.len(), 1);
+                    if conditional {
+                        assert!(!proven_scalar_single_color_choice(runner.state(), row));
+                    }
+                    if snow {
+                        assert!(groups
+                            .base
+                            .iter()
+                            .all(|unit| unit.supertype
+                                == Some(crate::types::mana::ManaSupertype::Snow)));
+                    }
+                    if let Some(aura) = aura {
+                        assert_eq!(groups.triggers.len(), 1);
+                        assert_eq!(groups.triggers[0].0.source.object_id, aura);
+                        assert_eq!(groups.triggers[0].1.len(), 1);
+                    }
+                }
+            }
+        }
     }
 
     /// CR 107.3a + CR 602.1a: "contains {X}" means the `{X}` mana symbol, read

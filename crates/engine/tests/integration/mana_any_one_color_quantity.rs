@@ -703,6 +703,369 @@ fn toluz_keeps_a_payable_hybrid_suffix_with_ineligible_mana() {
 }
 
 #[test]
+fn zero_yield_counted_activation_refills_from_the_unplanned_lotus_blossom() {
+    // CR 605.3b + CR 608.2h: Arbor's other creature disappears during Farm's
+    // resolution. Its completed activation adds zero; Blossom must fund UU.
+    for (depletion, with_blossom) in [(1, true), (2, true), (1, false)] {
+        let mut s = board();
+        let arbor = s.add_creature_from_oracle(P0, "Arbor Adherent", 2, 4,
+            "{T}: Add one mana of any color.\n{T}: Add X mana of any one color, where X is the greatest toughness among other creatures you control.")
+            .with_subtypes(vec!["Dog", "Druid"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{3}{G}")).id();
+        let farm = s.add_land_from_oracle(P0, "Remote Farm",
+            "This land enters tapped with two depletion counters on it.\n{T}, Remove a depletion counter from this land: Add {W}{W}. If there are no depletion counters on this land, sacrifice it.").id();
+        s.with_counter(
+            farm,
+            CounterType::Generic("depletion".to_owned()),
+            depletion,
+        );
+        let blossom = with_blossom.then(|| {
+            let id = s.add_artifact_from_oracle(P0, "Lotus Blossom",
+                "At the beginning of your upkeep, you may put a petal counter on this artifact.\n{T}, Sacrifice this artifact: Add X mana of any one color, where X is the number of petal counters on this artifact.")
+                .with_mana_cost(parse_mtgjson_mana_cost("{2}")).id();
+            s.with_counter(id, CounterType::Generic("petal".to_owned()), 2);
+            id
+        });
+        let forests: Vec<_> = (0..5)
+            .map(|_| s.add_basic_land(P0, ManaColor::Green))
+            .collect();
+        let awakening = spell(&mut s, "Awakening of Vitu-Ghazi", true,
+            "Put nine +1/+1 counters on target land you control. It becomes a legendary 0/0 Elemental creature with haste named Vitu-Ghazi. It's still a land.", "{3}{G}{G}");
+        let absorb = spell(
+            &mut s,
+            "Absorb",
+            true,
+            "Counter target spell. You gain 3 life.",
+            "{W}{U}{U}",
+        );
+        let opt = s.add_spell_to_hand_from_oracle(P1, "Opt", true,
+            "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\nDraw a card.")
+            .with_mana_cost(parse_mtgjson_mana_cost("{U}")).id();
+        s.add_basic_land(P1, ManaColor::Blue);
+        let mut r = s.build();
+        // This established Farm has untapped since entry. Only the dedicated
+        // Forests fund the real animation spell, leaving the payment sources.
+        r.state_mut().objects.get_mut(&farm).unwrap().tapped = false;
+        for &forest in &forests {
+            float_land(&mut r, forest, ManaType::Green);
+        }
+        r.cast(awakening)
+            .target_object(farm)
+            .resolve()
+            .assert_zone(&[farm], Zone::Battlefield);
+        assert_complete(&r, 0);
+        assert!(forests.iter().all(|id| r.state().objects[id].tapped));
+        assert!(r.state().objects[&farm]
+            .card_types
+            .core_types
+            .contains(&engine::types::card_type::CoreType::Creature));
+        assert_eq!(
+            r.state().objects[&farm]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&9)
+        );
+        let rows = activatable_mana_options(r.state(), arbor, P0);
+        assert!(rows.iter().any(|row| row.mana_type == ManaType::Blue
+            && row.ability_index == Some(1)
+            && row
+                .atomic_combination
+                .as_ref()
+                .is_some_and(|units| units == &vec![ManaType::Blue; 9])));
+        if let Some(blossom) = blossom {
+            assert!(activatable_mana_options(r.state(), blossom, P0)
+                .iter()
+                .any(|row| row.mana_type == ManaType::Blue
+                    && row
+                        .atomic_combination
+                        .as_ref()
+                        .is_some_and(|units| units == &[ManaType::Blue, ManaType::Blue])));
+        }
+        r.act(GameAction::PassPriority).unwrap();
+        let mut target = r.cast(opt).commit();
+        target.act(GameAction::PassPriority).unwrap();
+        assert_eq!(target.state().objects[&opt].zone, Zone::Stack);
+        assert!(matches!(
+            target.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        if blossom.is_none() {
+            // CR 601.2h: Farm's WW plus Arbor's eventual zero cannot pay WUU.
+            assert!(target
+                .cast(absorb)
+                .target_object(opt)
+                .try_resolve()
+                .is_err());
+            assert_eq!(target.state().objects[&absorb].zone, Zone::Hand);
+            assert!(!target.state().objects[&farm].tapped);
+            assert!(!target.state().objects[&arbor].tapped);
+            assert!(target.state().players[0].mana_pool.is_empty());
+            continue;
+        }
+        let blossom = blossom.unwrap();
+        let payment = target.cast(absorb).target_object(opt).commit();
+        assert_eq!(production_count(payment.events(), farm, ManaType::White), 2);
+        assert_eq!(
+            production_count(payment.events(), arbor, ManaType::Blue),
+            if depletion == 1 { 0 } else { 9 }
+        );
+        assert_eq!(payment.events().iter().filter(|event| matches!(event,
+            engine::types::events::GameEvent::AbilityActivated { source_id, .. } if *source_id == arbor)).count(), 1);
+        assert!(payment.state().objects[&arbor].tapped);
+        assert_eq!(
+            production_count(payment.events(), blossom, ManaType::Blue),
+            if depletion == 1 { 2 } else { 0 }
+        );
+        assert_eq!(
+            payment.state().objects[&farm].zone,
+            if depletion == 1 {
+                Zone::Graveyard
+            } else {
+                Zone::Battlefield
+            }
+        );
+        assert_eq!(
+            payment.state().objects[&blossom].zone,
+            if depletion == 1 {
+                Zone::Graveyard
+            } else {
+                Zone::Battlefield
+            }
+        );
+        // CR 601.2h: the real cast spends exactly three units after refresh.
+        assert_eq!(
+            payment.state().objects[&absorb].mana_spent_to_cast_amount,
+            3
+        );
+        assert_eq!(
+            payment.state().objects[&absorb]
+                .mana_spent_source_snapshots
+                .len(),
+            3
+        );
+        assert_eq!(
+            payment.state().players[0].mana_pool.total(),
+            if depletion == 1 { 1 } else { 8 }
+        );
+        let resolved = payment.resolve();
+        resolved.assert_zone(&[absorb, opt], Zone::Graveyard);
+        resolved.assert_life_delta(P0, 3);
+        drop(target);
+        assert_complete(&r, if depletion == 1 { 1 } else { 8 });
+    }
+}
+
+#[test]
+fn printed_ulalek_uses_the_complete_colorless_hybrid_allocation() {
+    // CR 107.4e + CR 601.2h: W/U/C/R/G pays all five printed hybrids.
+    // Spending the sole C on C/W would strand the otherwise payable C/B.
+    for (manual, last_color) in [
+        (false, ManaColor::Green),
+        (true, ManaColor::Green),
+        (false, ManaColor::Red),
+    ] {
+        let mut s = board();
+        let sources = [
+            (
+                s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id(),
+                ManaType::Colorless,
+            ),
+            (s.add_basic_land(P0, ManaColor::White), ManaType::White),
+            (s.add_basic_land(P0, ManaColor::Blue), ManaType::Blue),
+            (s.add_basic_land(P0, ManaColor::Red), ManaType::Red),
+            (s.add_basic_land(P0, last_color), ManaType::from(last_color)),
+        ];
+        let ulalek = s.add_creature_to_hand_from_oracle(P0, "Ulalek, Fused Atrocity", 2, 5,
+            "Devoid (This card has no color.)\nWhenever you cast an Eldrazi spell, you may pay {C}{C}. If you do, copy all spells you control, then copy all other activated and triggered abilities you control. You may choose new targets for the copies. (Mana abilities can't be copied.)")
+            .as_legendary().with_subtypes(vec!["Eldrazi"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{C/W}{C/U}{C/B}{C/R}{C/G}")).id();
+        let mut r = s.build();
+        for (source, color) in sources {
+            float_land(&mut r, source, color);
+        }
+        assert!(sources.iter().all(|(id, _)| r.state().objects[id].tapped));
+        assert_eq!(r.state().players[0].mana_pool.total(), 5);
+        let colorless = r.state().players[0]
+            .mana_pool
+            .units()
+            .find(|unit| unit.color == ManaType::Colorless)
+            .unwrap()
+            .pip_id;
+        if last_color == ManaColor::Red {
+            // There is still five mana, but C/B and C/G cannot share the sole C.
+            let before = r.state().players[0].mana_pool.clone();
+            assert!(r.cast(ulalek).try_resolve().is_err());
+            assert_eq!(r.state().objects[&ulalek].zone, Zone::Hand);
+            assert_eq!(r.state().players[0].mana_pool, before);
+            assert_complete(&r, 5);
+            continue;
+        }
+        if manual {
+            r.act(GameAction::CastSpell {
+                object_id: ulalek,
+                card_id: r.state().objects[&ulalek].card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .unwrap();
+            assert!(matches!(
+                r.state().waiting_for,
+                WaitingFor::ManaPayment { player: P0, .. }
+            ));
+            // The pinned C is a unit preference. A complete assignment spends
+            // it on C/B instead of the first hybrid (CR 107.4e).
+            r.act(GameAction::SpendPoolMana { pip_id: colorless })
+                .unwrap();
+            r.act(GameAction::PassPriority).unwrap();
+            assert_eq!(r.state().objects[&ulalek].zone, Zone::Stack);
+            r.advance_until_stack_empty();
+        } else {
+            r.cast(ulalek)
+                .resolve()
+                .assert_zone(&[ulalek], Zone::Battlefield);
+        }
+        assert_eq!(r.state().objects[&ulalek].zone, Zone::Battlefield);
+        assert_eq!(r.state().objects[&ulalek].mana_spent_to_cast_amount, 5);
+        assert_eq!(
+            r.state().objects[&ulalek].mana_spent_source_snapshots.len(),
+            5
+        );
+        assert_complete(&r, 0);
+    }
+}
+
+#[test]
+fn colorless_hybrid_preview_preserves_life_choices_raw_indices_and_snow() {
+    // Supplemental cost, not a claimed printing: Astrolabe supplies S, Ulalek
+    // the five hybrids, K'rrik B/P, and Birthing Pod G/P.
+    // CR 107.4e + CR 107.4f + CR 107.4h:
+    // preserve B for its mana choice and the sole Snow pip for S; G/P pays life.
+    for life in [3, 1] {
+        let mut s = board();
+        s.with_life(P0, life);
+        let snow = s.add_land_from_oracle(P0, "Faceless Haven",
+            "{T}: Add {C}.\n{S}{S}{S}: This land becomes a 4/3 creature with vigilance and all creature types until end of turn. It's still a land. ({S} can be paid with one mana from a snow source.)")
+            .as_snow().id();
+        let sources = [
+            (
+                s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id(),
+                ManaType::Colorless,
+            ),
+            (s.add_basic_land(P0, ManaColor::White), ManaType::White),
+            (s.add_basic_land(P0, ManaColor::Blue), ManaType::Blue),
+            (s.add_basic_land(P0, ManaColor::Red), ManaType::Red),
+            (s.add_basic_land(P0, ManaColor::Green), ManaType::Green),
+            (s.add_basic_land(P0, ManaColor::Black), ManaType::Black),
+            (snow, ManaType::Colorless),
+        ];
+        let cost = parse_mtgjson_mana_cost("{C/W}{C/U}{C/B}{C/R}{C/G}{B/P}{G/P}{S}");
+        let astrolabe = s.add_artifact_to_hand_from_oracle(P0, "Arcum's Astrolabe",
+            "({S} can be paid with one mana from a snow source.)\nWhen this artifact enters, draw a card.\n{1}, {T}: Add one mana of any color.")
+            .as_snow().with_mana_cost(cost.clone()).id();
+        let mut r = s.build();
+        for (source, color) in sources {
+            float_land(&mut r, source, color);
+        }
+        assert!(sources.iter().all(|(id, _)| r.state().objects[id].tapped));
+        assert_eq!(r.state().players[0].mana_pool.total(), 7);
+        assert_eq!(r.state().players[0].mana_pool.units()
+            .filter(|unit| unit.supertype == Some(ManaSupertype::Snow) && unit.source_id == snow).count(), 1);
+        let pool = r.state().players[0].mana_pool.clone();
+        let result = r.act(GameAction::CastSpell {
+            object_id: astrolabe,
+            card_id: r.state().objects[&astrolabe].card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        });
+        if life == 1 {
+            // CR 601.2h: eight symbols cannot consume the seven units without
+            // an allowed life payment; rejection preserves the actual pool.
+            assert!(result.is_err());
+            assert_eq!(r.state().objects[&astrolabe].zone, Zone::Hand);
+            assert_eq!(r.state().players[0].mana_pool, pool);
+            assert_eq!(r.state().players[0].life, 1);
+            assert_complete(&r, 7);
+            continue;
+        }
+        result.unwrap();
+        let WaitingFor::PhyrexianPayment {
+            player,
+            spell_object,
+            shards,
+        } = &r.state().waiting_for
+        else {
+            panic!("the real cast must offer the suffix's Phyrexian choices");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(*spell_object, astrolabe);
+        assert_eq!(shards.len(), 2);
+        assert_eq!(
+            (shards[0].shard_index, shards[0].options),
+            (5, ShardOptions::ManaOrLife)
+        );
+        assert_eq!(
+            (shards[1].shard_index, shards[1].options),
+            (6, ShardOptions::LifeOnly)
+        );
+        r.act(GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayMana, ShardChoice::PayLife],
+        })
+        .unwrap();
+        assert_eq!(r.state().objects[&astrolabe].zone, Zone::Stack);
+        assert_eq!(r.state().objects[&astrolabe].mana_spent_to_cast_amount, 7);
+        assert_eq!(r.state().players[0].life, 1);
+        assert!(r.state().players[0].mana_pool.is_empty());
+        let library_before = r.state().players[0].library.len();
+        r.advance_until_stack_empty();
+        assert_eq!(r.state().objects[&astrolabe].zone, Zone::Battlefield);
+        assert_eq!(r.state().players[0].library.len(), library_before - 1);
+        assert_complete(&r, 0);
+    }
+}
+
+#[test]
+fn fixed_one_lantern_grants_pay_the_printed_mixed_hybrid_spell() {
+    let mut s = board();
+    let lantern = s.add_artifact_from_oracle(P0, "Chromatic Lantern",
+        "Lands you control have \"{T}: Add one mana of any color.\"\n{T}: Add one mana of any color.")
+        .with_mana_cost(parse_mtgjson_mana_cost("{3}")).id();
+    let forests: Vec<_> = (0..5)
+        .map(|_| s.add_basic_land(P0, ManaColor::Green))
+        .collect();
+    let ulalek = s.add_creature_to_hand_from_oracle(P0, "Ulalek, Fused Atrocity", 2, 5,
+        "Devoid (This card has no color.)\nWhenever you cast an Eldrazi spell, you may pay {C}{C}. If you do, copy all spells you control, then copy all other activated and triggered abilities you control. You may choose new targets for the copies. (Mana abilities can't be copied.)")
+        .as_legendary().with_subtypes(vec!["Eldrazi"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{C/W}{C/U}{C/B}{C/R}{C/G}")).id();
+    let mut r = s.build();
+    evaluate_layers(r.state_mut());
+    for &forest in &forests {
+        assert!(activatable_land_mana_options(r.state(), forest, P0)
+            .iter()
+            .any(|row| row.mana_type == ManaType::Blue
+                && row.atomic_combination.is_none()
+                && row.ability_index.is_some()));
+    }
+    // CR 106.3 + CR 107.4e: five fixed-one granted activations can supply
+    // W/U/B/R/G; land preference leaves Lantern itself untapped.
+    let payment = r.cast(ulalek).commit();
+    assert!(forests.iter().all(|id| payment.state().objects[id].tapped));
+    assert!(!payment.state().objects[&lantern].tapped);
+    for &forest in &forests {
+        assert_eq!(
+            payment
+                .events()
+                .iter()
+                .filter(|event| matches!(event,
+            engine::types::events::GameEvent::ManaAdded { source_id, .. } if *source_id == forest))
+                .count(),
+            1
+        );
+    }
+    payment.resolve().assert_zone(&[ulalek], Zone::Battlefield);
+    assert_complete(&r, 0);
+}
+
+#[test]
 fn conditional_counted_bundle_refills_after_its_power_condition_disappears() {
     // CR 605.3b + CR 608.2h: Remote Farm's complete resolution sacrifices
     // the animated land before Caryatid reads its four-power condition.

@@ -2302,7 +2302,8 @@ fn pay_cost_with_demand_and_choices_from(
             }
             // CR 107.3: {X} defaults to 0; caller specifies X value separately.
             ShardRequirement::X => {}
-            // CR 107.4e: Colorless hybrid {C/color} — prefer colorless, then colored.
+            // CR 107.4e + CR 601.2h: prefer colorless only when that half
+            // leaves a complete payment of the remaining cost.
             ShardRequirement::ColorlessHybrid(color) => {
                 if any_color {
                     let unit = spend_any_for_required_colors(
@@ -2318,22 +2319,34 @@ fn pay_cost_with_demand_and_choices_from(
                 } else {
                     let selected =
                         quality_demand.hybrid_color(pool, ManaType::Colorless, color, spell, pins);
-                    let unit = spend_eligible(pool, selected, spell, pins, quality_demand)
-                        .or_else(|| {
-                            spend_eligible(
-                                pool,
-                                if selected == color {
-                                    ManaType::Colorless
-                                } else {
-                                    color
-                                },
-                                spell,
-                                pins,
-                                quality_demand,
-                            )
-                        })
-                        .ok_or(PaymentError::InsufficientMana)?;
-                    spent.push(unit);
+                    let (suffix_spent, suffix_life) = PaymentContinuation {
+                        next_position: position + 1,
+                        quality_demand,
+                        ..continuation
+                    }
+                    .pay_hybrid_and_suffix(
+                        pool,
+                        (
+                            selected,
+                            if selected == color {
+                                ManaType::Colorless
+                            } else {
+                                color
+                            },
+                        ),
+                        hand_demand,
+                        spell,
+                        mana_spend_permission,
+                        phyrexian_choices,
+                        life_colors,
+                        pins,
+                        choice_cursor,
+                        &preferred_hybrid_colors,
+                        max_life_payments.map(|limit| limit.saturating_sub(life_payments.len())),
+                    )?;
+                    spent.extend(suffix_spent);
+                    life_payments.extend(suffix_life);
+                    return Ok((spent, life_payments));
                 }
             }
             // CR 107.4f: Hybrid Phyrexian — pay either color or 2 life.
@@ -2834,19 +2847,30 @@ pub fn compute_phyrexian_shards(
                 } else {
                     let selected =
                         quality_demand.hybrid_color(&sim, ManaType::Colorless, color, spell, &[]);
-                    if spend_eligible(&mut sim, selected, spell, &[], quality_demand).is_none() {
-                        let _ = spend_eligible(
-                            &mut sim,
+                    let selected = PaymentContinuation {
+                        shards,
+                        generic,
+                        order: &order,
+                        next_position: position + 1,
+                        quality_demand,
+                    }
+                    .hybrid_color_for_preview(
+                        &sim,
+                        (
+                            selected,
                             if selected == color {
                                 ManaType::Colorless
                             } else {
                                 color
                             },
-                            spell,
-                            &[],
-                            quality_demand,
-                        );
-                    }
+                        ),
+                        spell,
+                        mana_spend_permission,
+                        life_colors,
+                        life_budget,
+                        &mut preferred_hybrid_colors,
+                    );
+                    let _ = spend_eligible(&mut sim, selected, spell, &[], quality_demand);
                 }
             }
             ShardRequirement::HybridPhyrexian(a, b) => {
