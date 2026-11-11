@@ -40447,6 +40447,87 @@ fn resolve_it_pronoun_any_subject() {
     assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
 }
 
+/// CR 608.2c + CR 706.2: `condition_compares_only_event_amount` holds for a
+/// comparison of the triggering event's amount with a constant, on either side,
+/// and for nothing else: another quantity, a wrapped event amount, a constant
+/// against a constant, and every non-comparison condition (including a negated
+/// or conjoined event-amount check) name no event amount alone.
+#[test]
+fn condition_compares_only_event_amount_names_a_bare_event_amount_comparison() {
+    let amount = || QuantityExpr::Ref {
+        qty: QuantityRef::EventContextAmount,
+    };
+    let fixed = |value| QuantityExpr::Fixed { value };
+    let check = |lhs, rhs| AbilityCondition::QuantityCheck {
+        lhs,
+        comparator: Comparator::GE,
+        rhs,
+    };
+    assert!(condition_compares_only_event_amount(&check(
+        amount(),
+        fixed(4)
+    )));
+    assert!(condition_compares_only_event_amount(&check(
+        fixed(4),
+        amount()
+    )));
+    assert!(condition_compares_only_event_amount(&check(
+        amount(),
+        amount()
+    )));
+
+    assert!(!condition_compares_only_event_amount(&check(
+        fixed(1),
+        fixed(4)
+    )));
+    assert!(!condition_compares_only_event_amount(&check(
+        QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
+        },
+        fixed(4)
+    )));
+    assert!(!condition_compares_only_event_amount(&check(
+        amount(),
+        QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: None,
+            },
+        }
+    )));
+    assert!(!condition_compares_only_event_amount(&check(
+        QuantityExpr::Offset {
+            inner: Box::new(amount()),
+            offset: 1,
+        },
+        fixed(4)
+    )));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::Not {
+            condition: Box::new(check(amount(), fixed(4))),
+        }
+    ));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::And {
+            conditions: vec![check(amount(), fixed(4))],
+        }
+    ));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::PreviousEffectAmount {
+            comparator: Comparator::LE,
+            rhs: fixed(3),
+            channel: crate::types::ability::DamageChannel::Total,
+        }
+    ));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        }
+    ));
+}
+
 /// Issue #6507 (CR 122.1): `condition_refs_source_object` must
 /// recognize a source-scoped counter-threshold `QuantityCheck` ("if there are
 /// no mining counters on this land") as source-referential — that gate is what
@@ -96982,6 +97063,70 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
             "reveal-choice return keeps its pre-routing outcome, got {parsed:?} for {line:?}"
         );
     }
+}
+
+/// CR 608.2c: building block for the generic "if you can't" strict-fail
+/// class. A compound clause's nested "and" remainder resolves as its own
+/// nodes, so `def_chain_is_zone_ledger_invisible` certifies a chain only when
+/// every nested node's effect is ledger-invisible and no node carries a cost,
+/// an "unless" payment, an else branch or modes. Hand-built chains reach the
+/// walk whatever shape the chunker gives a printed line.
+#[test]
+fn def_chain_is_zone_ledger_invisible_walks_the_nested_compound_chain() {
+    let tap = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+        )
+    };
+    let put_counter = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Stun,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    );
+    let sacrifice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+    );
+
+    assert!(
+        def_chain_is_zone_ledger_invisible(&tap().sub_ability(put_counter.clone())),
+        "tap → put a counter: every node's success is ledger-invisible"
+    );
+    assert!(
+        !def_chain_is_zone_ledger_invisible(&tap().sub_ability(sacrifice)),
+        "tap → sacrifice: the nested sacrifice writes the ledger"
+    );
+    assert!(
+        !def_chain_is_zone_ledger_invisible(&tap().cost(AbilityCost::Tap)),
+        "a node with a cost is not certified"
+    );
+    assert!(
+        !def_chain_is_zone_ledger_invisible(&tap().unless_pay(UnlessPayModifier {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            payer: TargetFilter::Controller,
+        })),
+        "a node with an \"unless\" payment is not certified"
+    );
+    let mut with_else = tap();
+    with_else.else_ability = Some(Box::new(put_counter));
+    assert!(
+        !def_chain_is_zone_ledger_invisible(&with_else),
+        "a node with an else branch is not certified"
+    );
 }
 
 #[test]

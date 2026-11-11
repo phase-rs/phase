@@ -680,6 +680,100 @@ fn quantity_expr_reads_source_counters(expr: &QuantityExpr) -> bool {
     }
 }
 
+/// CR 608.2c + CR 706.2: whether `condition` only compares the triggering
+/// event's amount, against itself or a constant ("If the roll was 4 or
+/// higher"). Such a guard names no object, so it introduces no antecedent for a
+/// bare "it" in the clause it gates. Only `QuantityCheck` can qualify, and only
+/// when each operand is the event amount or a constant and at least one is the
+/// event amount; a wrapped or composite operand never qualifies.
+fn condition_compares_only_event_amount(condition: &AbilityCondition) -> bool {
+    /// `Some(true)` for the triggering event's amount, `Some(false)` for a
+    /// constant, `None` for any other operand.
+    fn leaf(expr: &QuantityExpr) -> Option<bool> {
+        match expr {
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            } => Some(true),
+            QuantityExpr::Ref { .. } => None,
+            QuantityExpr::Fixed { .. } => Some(false),
+            QuantityExpr::DivideRounded { .. }
+            | QuantityExpr::Offset { .. }
+            | QuantityExpr::ClampMin { .. }
+            | QuantityExpr::Multiply { .. }
+            | QuantityExpr::Sum { .. }
+            | QuantityExpr::Max { .. }
+            | QuantityExpr::UpTo { .. }
+            | QuantityExpr::Power { .. }
+            | QuantityExpr::Difference { .. } => None,
+        }
+    }
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => matches!(
+            (leaf(lhs), leaf(rhs)),
+            (Some(lhs_is_amount), Some(rhs_is_amount)) if lhs_is_amount || rhs_is_amount
+        ),
+        AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+        | AbilityCondition::TriggerEventTargetExploitedBySource
+        | AbilityCondition::AdditionalCostPaid { .. }
+        | AbilityCondition::AdditionalCostPaidInstead
+        | AbilityCondition::AlternativeManaCostPaid
+        | AbilityCondition::EffectOutcome { .. }
+        | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
+        | AbilityCondition::WhenYouDo
+        | AbilityCondition::WasCast { .. }
+        | AbilityCondition::CastDuringPhase { .. }
+        | AbilityCondition::CurrentPhaseIs { .. }
+        | AbilityCondition::CastTimingPermission { .. }
+        | AbilityCondition::ManaColorSpent { .. }
+        | AbilityCondition::RevealedHasCardType { .. }
+        | AbilityCondition::ObjectsShareQuality { .. }
+        | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+        | AbilityCondition::SourceEnteredThisTurn
+        | AbilityCondition::CastVariantPaid { .. }
+        | AbilityCondition::CastVariantPaidInstead { .. }
+        | AbilityCondition::QuantityQuality { .. }
+        | AbilityCondition::PreviousEffectAmount { .. }
+        | AbilityCondition::HasMaxSpeed
+        | AbilityCondition::IsMonarch
+        | AbilityCondition::IsInitiative
+        | AbilityCondition::HasCityBlessing
+        | AbilityCondition::HasEnduringStory
+        | AbilityCondition::ControlsCommander { .. }
+        | AbilityCondition::DiscardedCardMatchesFilter { .. }
+        | AbilityCondition::IsRingBearer
+        | AbilityCondition::CompletedDungeon { .. }
+        | AbilityCondition::TargetHasKeywordInstead { .. }
+        | AbilityCondition::TargetMatchesFilter { .. }
+        | AbilityCondition::HasObjectTarget
+        | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+        | AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+        | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+        | AbilityCondition::ControllerControlsMatching { .. }
+        | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+        | AbilityCondition::IsYourTurn
+        | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+        | AbilityCondition::FirstCombatPhaseOfTurn
+        | AbilityCondition::FirstEndStepOfTurn
+        | AbilityCondition::ZoneChangedThisWay { .. }
+        | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+        | AbilityCondition::SourceIsTapped
+        | AbilityCondition::SourceAttachedToCreature
+        | AbilityCondition::ConditionInstead { .. }
+        | AbilityCondition::And { .. }
+        | AbilityCondition::Or { .. }
+        | AbilityCondition::Not { .. }
+        | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::DayNightIs { .. }
+        | AbilityCondition::AbilityUseCountThisTurn { .. }
+        | AbilityCondition::SourceLacksKeyword { .. }
+        | AbilityCondition::ScopedPlayerMatches { .. } => false,
+    }
+}
+
 fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
     match condition {
         AbilityCondition::SourceMatchesFilter { .. }
@@ -1027,22 +1121,15 @@ fn if_you_do_object_anchor(
 /// one of these zone-change-ledger-invisible effect classes; other effects
 /// (Sacrifice, Exile, Discard, Mill, …) keep the zone-change proxy unchanged,
 /// since their success IS a `ZoneChanged`/`PermanentSacrificed` event.
+/// A generic rider this rewrite does not claim, whose every antecedent passes
+/// `effect_success_is_zone_ledger_invisible`, is not re-expressed here; it
+/// strict-fails through
+/// `cant_rider_reads_only_zone_ledger_invisible_antecedents` below.
 fn rewrite_cant_rider_for_non_zone_change_parent(
     condition: Option<AbilityCondition>,
     clauses: &[ClauseIr],
 ) -> Option<AbilityCondition> {
-    let is_generic_cant = matches!(
-        &condition,
-        Some(AbilityCondition::Not { condition })
-            if matches!(
-                condition.as_ref(),
-                AbilityCondition::ZoneChangedThisWay {
-                    filter: TargetFilter::Any,
-                    destination: None,
-                }
-            )
-    );
-    if !is_generic_cant {
+    if !is_generic_cant_rider(condition.as_ref()) {
         return condition;
     }
     let prev_is_ledger_invisible = clauses
@@ -1061,6 +1148,126 @@ fn rewrite_cant_rider_for_non_zone_change_parent(
         });
     }
     condition
+}
+
+/// CR 608.2c: whether a condition is the generic lowering of "if you can't" /
+/// "if they can't" (`try_nom_condition_as_ability_condition`), shared by the
+/// rewrite and the strict-fail sibling below.
+fn is_generic_cant_rider(condition: Option<&AbilityCondition>) -> bool {
+    matches!(
+        condition,
+        Some(AbilityCondition::Not { condition })
+            if matches!(
+                condition.as_ref(),
+                AbilityCondition::ZoneChangedThisWay {
+                    filter: TargetFilter::Any,
+                    destination: None,
+                }
+            )
+    )
+}
+
+/// CR 608.2c: whether an effect's success is invisible to the zone-change
+/// ledger that the generic "if you can't" guard reads.
+///
+/// The ledger (`last_zone_changed_ids`) is rewritten after each resolved node
+/// from that node's own `ZoneChanged` events (`effects::resolve_chain_body`)
+/// and cleared per top-level resolution. Each member's success is a non-zone
+/// event in `effects::mandatory_parent_effect_performed` (`CounterAdded`,
+/// `CounterRemoved`, `PermanentTapped`/`PermanentUntapped`, `LifeChanged`,
+/// `DamageDealt`, `StickerPlaced`, `StackPushed`, `TurnedFaceUp`), and its
+/// resolver moves no object, so its success never reaches the ledger.
+///
+/// `PayCost` (its `AbilityCost` may sacrifice, discard or exile) and `NoOp`
+/// (nothing to perform) are deliberately absent. An effect may join only after
+/// both checks: a non-zone success event in that authority, and a resolver
+/// that moves no object.
+fn effect_success_is_zone_ledger_invisible(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::PutCounter { .. }
+            | Effect::PutCounterAll { .. }
+            | Effect::RemoveCounter { .. }
+            | Effect::MoveCounters { .. }
+            | Effect::MultiplyCounter { .. }
+            | Effect::ReproduceEventCounters { .. }
+            | Effect::SetTapState { .. }
+            | Effect::GainLife { .. }
+            | Effect::LoseLife { .. }
+            | Effect::DealDamage { .. }
+            | Effect::DamageAll { .. }
+            | Effect::Fight { .. }
+            | Effect::PutSticker { .. }
+            | Effect::ApplySticker { .. }
+            | Effect::CopySpell { .. }
+            | Effect::TurnFaceUp { .. }
+    )
+}
+
+/// CR 608.2c: a compound clause's "and" remainder resolves as its own nodes,
+/// each of which rewrites the ledger; every one must be certified.
+fn def_chain_is_zone_ledger_invisible(def: &AbilityDefinition) -> bool {
+    effect_success_is_zone_ledger_invisible(def.effect.as_ref())
+        && def.cost.is_none()
+        && def.unless_pay.is_none()
+        && def.else_ability.is_none()
+        && def.mode_abilities.is_empty()
+        && def
+            .sub_ability
+            .as_deref()
+            .is_none_or(def_chain_is_zone_ledger_invisible)
+}
+
+/// CR 608.2c: the clauses of the instruction printed immediately before the
+/// clause being parsed. A `Sentence` boundary starts the next instruction, and
+/// every other boundary continues the same one (`sub_link_after_boundary`), so
+/// the slice keeps each node of a compound or continuation chain.
+fn immediately_preceding_instruction(clauses: &[ClauseIr]) -> &[ClauseIr] {
+    let start = clauses.split_last().map_or(0, |(_, earlier)| {
+        earlier
+            .iter()
+            .rposition(|clause| {
+                sub_link_after_boundary(clause.boundary) == SubAbilityLink::SequentialSibling
+            })
+            .map_or(0, |index| index + 1)
+    });
+    &clauses[start..]
+}
+
+/// CR 608.2c: "If you can't" names the outcome of the instruction before it
+/// (Fading's printed form (CR 702.32a) — "remove a fade counter … If you
+/// can't, sacrifice" — is answered by the counter-removal count,
+/// `PreviousEffectAmount`, never the ledger). After antecedents whose success
+/// is never a zone change, the generic `Not { ZoneChangedThisWay }` guard is
+/// true whether or not the instruction was performed, so the rider is a
+/// strict failure until its guard is repaired (Temp of the Damned, Cocoon).
+/// Only that instruction is certified: the node after an earlier sentence
+/// rewrites the ledger, so the earlier sentence cannot answer the guard. A
+/// rider any rewrite above already re-expressed is not this shape; an
+/// uncertified clause (another effect, another disposition, a continuation
+/// channel, an "unless" payment) keeps today's parse.
+fn cant_rider_reads_only_zone_ledger_invisible_antecedents(
+    condition: Option<&AbilityCondition>,
+    clauses: &[ClauseIr],
+) -> bool {
+    let antecedents = immediately_preceding_instruction(clauses);
+    is_generic_cant_rider(condition)
+        && !antecedents.is_empty()
+        && antecedents.iter().all(|clause| {
+            matches!(
+                clause.disposition,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None
+                }
+            ) && clause.parsed.unless_pay.is_none()
+                && effect_success_is_zone_ledger_invisible(&clause.parsed.effect)
+                && clause
+                    .parsed
+                    .sub_ability
+                    .as_deref()
+                    .is_none_or(def_chain_is_zone_ledger_invisible)
+        })
 }
 
 /// CR 603.12 + CR 701.16a + CR 608.2c: rebind an active-past "you exiled …
@@ -47405,6 +47612,24 @@ fn parse_effect_chain_ir_body(
             );
             continue;
         }
+        // CR 608.2c: a generic "if you can't" rider whose every
+        // antecedent's success is invisible to the zone-change ledger has a
+        // constant guard (a successful counter removal still reads "can't").
+        // Runs after the rewrite family so a `TurnFaceUp`/`PayCost` parent the
+        // rewrite re-expressed is never marked. Strict-fail so coverage reports
+        // the gap — see the predicate.
+        if cant_rider_reads_only_zone_ledger_invisible_antecedents(
+            condition.as_ref(),
+            builder.clauses(),
+        ) {
+            unimplemented_clause(
+                &mut builder,
+                "cant_rider_without_zone_change_antecedent",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         // CR 608.2c: "[effect] a number of times equal to the difference" — when
         // a leading comparison condition was just stripped, a trailing
         // difference-repeat suffix repeats the effect by the unsigned magnitude
@@ -49808,6 +50033,18 @@ fn parse_effect_chain_ir_body(
             // binding; a mis-scoped bare "it" over a prior typed target
             // (Revelation of Power) still rewrites to the parent target here.
             && !binds_source_counter_pronoun
+            // CR 608.2c + CR 706.2: a guard that only compares the triggering
+            // event's amount ("If the roll was 4 or higher") introduces no object,
+            // so a bare "it" in the clause it gates keeps the referent the trigger
+            // condition pinned to the ability's own source (the die-roll pin in
+            // `trigger_object_pronoun_ref_for_condition`). The pin is withheld
+            // whenever this chain introduced its own typed referent
+            // (`prior_typed_referent`), so a nearer antecedent still takes the
+            // parent-target rewrite.
+            && !(matches!(ctx.object_pronoun_ref, Some(TargetFilter::SelfRef))
+                && condition
+                    .as_ref()
+                    .is_some_and(condition_compares_only_event_amount))
             && !builder.is_empty()
             && has_anaphoric_reference(&recipient_anaphor_lower)
             && !matches!(if_you_do_anchor, Some(TargetFilter::SelfRef))

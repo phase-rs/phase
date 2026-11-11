@@ -3540,6 +3540,25 @@ pub struct LogicalZoneChangeProspectiveMember {
     pub identity: ObjectIncarnationRef,
 }
 
+/// One object a logical zone-change action announces, with the zone the action
+/// moves it to. The announcement is what
+/// [`GameState::allocate_logical_zone_change_group`] classifies; it is never
+/// serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZoneChangeAnnouncement {
+    pub object_id: ObjectId,
+    pub to: Zone,
+}
+
+impl ZoneChangeAnnouncement {
+    /// Each of `ids`, announced to the same zone `to`.
+    pub fn all(ids: &[ObjectId], to: Zone) -> Vec<Self> {
+        ids.iter()
+            .map(|&object_id| Self { object_id, to })
+            .collect()
+    }
+}
+
 /// Terminal disposition of one prospective battlefield member.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -3686,6 +3705,12 @@ pub struct LatchedSuppressTrigger {
 pub struct LogicalZoneChangeGroup {
     pub logical_group_id: LogicalZoneChangeGroupId,
     pub prospective_battlefield_members: Vec<LogicalZoneChangeProspectiveMember>,
+    /// CR 603.6a: the announced members that were not on the battlefield when
+    /// this zone change was announced and that it announced to the battlefield.
+    /// The permanents this one event puts onto the battlefield are among them
+    /// (CR 603.6d + CR 614.12a: each one's as-enters effects are part of that
+    /// event).
+    pub prospective_entrants: Vec<LogicalZoneChangeProspectiveMember>,
     pub terminal_outcomes: Vec<LogicalZoneChangeTerminalOutcome>,
     /// Exact post-delivery authority for prospective members that remained on
     /// the battlefield. A later same-ID incarnation cannot stand in for this
@@ -3714,6 +3739,7 @@ pub struct LogicalZoneChangeGroup {
 struct LogicalZoneChangeGroupWire {
     logical_group_id: LogicalZoneChangeGroupId,
     prospective_battlefield_members: Vec<LogicalZoneChangeProspectiveMember>,
+    prospective_entrants: Vec<LogicalZoneChangeProspectiveMember>,
     terminal_outcomes: Vec<LogicalZoneChangeTerminalOutcome>,
     post_event_member_contexts: Vec<Option<TriggerSourceContext>>,
     all_origin_occurrences: Vec<LogicalZoneChangeOccurrence>,
@@ -3730,6 +3756,7 @@ impl From<LogicalZoneChangeGroupWire> for LogicalZoneChangeGroup {
         Self {
             logical_group_id: wire.logical_group_id,
             prospective_battlefield_members: wire.prospective_battlefield_members,
+            prospective_entrants: wire.prospective_entrants,
             terminal_outcomes: wire.terminal_outcomes,
             post_event_member_contexts: wire.post_event_member_contexts,
             all_origin_occurrences: wire.all_origin_occurrences,
@@ -3768,14 +3795,32 @@ impl LogicalZoneChangeGroup {
         if self.prospective_battlefield_members.len() != self.post_event_member_contexts.len() {
             return Err("logical zone-change member/post-event-context lengths differ".to_string());
         }
-        for (index, member) in self.prospective_battlefield_members.iter().enumerate() {
-            if self.prospective_battlefield_members[..index]
-                .iter()
-                .any(|prior| prior.identity == member.identity)
-            {
+        // One pass over each list: a set of the identities seen so far finds a
+        // repeat without rescanning the prefix.
+        let mut members = HashSet::with_capacity(self.prospective_battlefield_members.len());
+        let mut member_ids = HashSet::with_capacity(self.prospective_battlefield_members.len());
+        for member in &self.prospective_battlefield_members {
+            if !members.insert(member.identity) {
                 return Err(format!(
                     "logical zone-change member {}:{} was announced more than once",
                     member.identity.object_id.0, member.identity.incarnation
+                ));
+            }
+            member_ids.insert(member.identity.object_id);
+        }
+        let mut entrants = HashSet::with_capacity(self.prospective_entrants.len());
+        for entrant in &self.prospective_entrants {
+            if !entrants.insert(entrant.identity) {
+                return Err(format!(
+                    "logical zone-change entrant {}:{} was announced more than once",
+                    entrant.identity.object_id.0, entrant.identity.incarnation
+                ));
+            }
+            // One announced object was either on the battlefield or not.
+            if member_ids.contains(&entrant.identity.object_id) {
+                return Err(format!(
+                    "logical zone-change object {} is both a battlefield member and an entrant",
+                    entrant.identity.object_id.0
                 ));
             }
         }
@@ -3962,6 +4007,7 @@ impl LogicalZoneChangeGroup {
     pub fn new(
         logical_group_id: LogicalZoneChangeGroupId,
         prospective_battlefield_members: Vec<LogicalZoneChangeProspectiveMember>,
+        prospective_entrants: Vec<LogicalZoneChangeProspectiveMember>,
     ) -> Self {
         let terminal_outcomes = prospective_battlefield_members
             .iter()
@@ -3974,6 +4020,7 @@ impl LogicalZoneChangeGroup {
         Self {
             logical_group_id,
             prospective_battlefield_members,
+            prospective_entrants,
             terminal_outcomes,
             post_event_member_contexts,
             all_origin_occurrences: Vec::new(),
@@ -4193,20 +4240,22 @@ impl LogicalZoneChangeGroup {
         object_id: ObjectId,
         completion: ZoneMoveCompletion,
     ) -> Result<(), String> {
-        let Some(member) = self
+        // A moved member is bound by its `ZoneChanged` record in
+        // `append_delivery_events`, so its completion reads no member here.
+        let outcome = match completion {
+            ZoneMoveCompletion::Moved => return Ok(()),
+            ZoneMoveCompletion::Prevented => LogicalZoneChangeTerminalOutcome::Prevented,
+            ZoneMoveCompletion::Remained => LogicalZoneChangeTerminalOutcome::Remained,
+        };
+        // One lookup: the member's slot is passed down, not searched for again.
+        let Some(member_index) = self
             .prospective_battlefield_members
             .iter()
-            .find(|member| member.identity.object_id == object_id)
-            .map(|member| member.identity)
+            .position(|member| member.identity.object_id == object_id)
         else {
             return Ok(());
         };
-
-        match completion {
-            ZoneMoveCompletion::Moved => Ok(()),
-            ZoneMoveCompletion::Prevented => self.record_prevented(member),
-            ZoneMoveCompletion::Remained => self.record_remained(member),
-        }
+        self.record_terminal_outcome(member_index, outcome)
     }
 
     fn record_terminal_for_member(
@@ -4422,17 +4471,7 @@ impl LogicalZoneChangeGroup {
         if self.prospective_battlefield_members.len() != self.post_event_member_contexts.len() {
             return Err("logical zone-change member/post-event-context lengths differ".to_string());
         }
-        for (index, member) in self.prospective_battlefield_members.iter().enumerate() {
-            if self.prospective_battlefield_members[..index]
-                .iter()
-                .any(|prior| prior.identity == member.identity)
-            {
-                return Err(format!(
-                    "logical zone-change member {}:{} was announced more than once",
-                    member.identity.object_id.0, member.identity.incarnation
-                ));
-            }
-        }
+        // A repeated member was refused by `validate_serialized_authority`.
 
         for (expected_ordinal, occurrence) in self.all_origin_occurrences.iter().enumerate() {
             if occurrence.ordinal != expected_ordinal {
@@ -7900,6 +7939,114 @@ pub struct PendingTokenBattlefieldEntry {
     pub source_id: ObjectId,
 }
 
+/// Where a newly paused batch owner was parked
+/// (`GameState::park_batch_delivery_for_paused_member`), so the caller that
+/// attaches its completion addresses that exact owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParkedBatchOwner {
+    /// The active top frame.
+    Active,
+    /// CR 706.6 + CR 614.12a: at the paused member's child boundary, beneath
+    /// the member's child stack whose top frame owns the live choice.
+    AtChildBoundary(crate::types::resolution::ChildStackDepth),
+}
+
+/// CR 603.2 + CR 614.12a: whether a parked entry happened. Each producer records
+/// this; the settled take, the whole-carrier abandonment and
+/// `entrant_entry_is_pending` read it, and every other reader of the park keeps
+/// its membership reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ParkedEntryState {
+    /// Its entry has not happened. `carrier` is the stack object whose
+    /// resolution parked it, `None` outside a resolution.
+    Pending { carrier: Option<ObjectId> },
+    /// Its entry happened and it waits for its collector (CR 603.2).
+    Completed,
+}
+
+/// One entry in [`GameState::deferred_entry_events`]: the entry occurrence and
+/// whether it happened.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ParkedEntry {
+    pub event: GameEvent,
+    pub state: ParkedEntryState,
+    /// CR 508.4: an entry put onto the battlefield attacking whose as-enters
+    /// continuation paused owes its attacking seat; the owner that resumes the
+    /// paused member seats it. `None` for every other entry and for a roll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_attack: Option<crate::types::ability::EntryAttackDestination>,
+    /// CR 603.2 + CR 603.3: the trigger contexts an as-enters roll produced when
+    /// it was rolled; the settled release places them. Held on the first roll of
+    /// the instruction, empty for every other entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_triggers: Vec<crate::game::triggers::DeferredTrigger>,
+}
+
+impl ParkedEntry {
+    /// An entry that has not happened yet, parked by the resolution of `carrier`.
+    pub fn pending(event: GameEvent, carrier: Option<ObjectId>) -> Self {
+        Self {
+            event,
+            state: ParkedEntryState::Pending { carrier },
+            entry_attack: None,
+            held_triggers: Vec::new(),
+        }
+    }
+
+    /// CR 614.1c + CR 706.2: an occurrence inside a pending entry that has already
+    /// happened: an as-enters roll.
+    pub fn occurred(event: GameEvent) -> Self {
+        Self {
+            event,
+            state: ParkedEntryState::Completed,
+            entry_attack: None,
+            held_triggers: Vec::new(),
+        }
+    }
+}
+
+/// An object with an `event` key is the current shape. Anything else is a
+/// pre-[`ParkedEntry`] bare `GameEvent`: a legacy paused drain has no binding, so
+/// such an entry could never complete, and `Completed` keeps it collectable, as
+/// its take did for an entrant whose owner and controller were still in the game.
+impl<'de> Deserialize<'de> for ParkedEntry {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Repr {
+            event: GameEvent,
+            state: ParkedEntryState,
+            #[serde(default)]
+            entry_attack: Option<crate::types::ability::EntryAttackDestination>,
+            #[serde(default)]
+            held_triggers: Vec<crate::game::triggers::DeferredTrigger>,
+        }
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value.get("event").is_some() {
+            let Repr {
+                event,
+                state,
+                entry_attack,
+                held_triggers,
+            } = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            return Ok(Self {
+                event,
+                state,
+                entry_attack,
+                held_triggers,
+            });
+        }
+        let event = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            event,
+            state: ParkedEntryState::Completed,
+            entry_attack: None,
+            held_triggers: Vec::new(),
+        })
+    }
+}
+
 /// CR 707.2 + CR 614.1c: everything the non-liminal copy-token entry tail still
 /// has to do for ONE token after its body is materialized — the copy exceptions,
 /// its entry counters, its entry events, and the rest of the batch.
@@ -8113,11 +8260,13 @@ pub enum PendingCounterPostAction {
         ability_injection: LiminalTokenAbilityInjection,
         entry_events: TokenEntryEventEmission,
     },
+    /// CR 707.2 + CR 122.6a: create the rest of a liminal copy batch after a
+    /// committed token's counter pause. A liminal batch has no creation counters
+    /// and each token's scheduled counters are its own, so none is carried.
     ContinueLiminalCopyTokenBatch {
         owner: PlayerId,
         copy: Box<CopyTokenSpec>,
         enter_tapped: EtbTapState,
-        enter_with_counters: Vec<(CounterType, u32)>,
         remaining_count: u32,
     },
     /// CR 400.7 + CR 616.1: realize the token battlefield entry parked in
@@ -14247,6 +14396,7 @@ pub(crate) fn live_return_result_occurrences(
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
             | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::EntryAttackSeat(_)
             | ResolutionFrame::PostReplacement(_) => {}
         }
     }
@@ -14417,6 +14567,7 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
             | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::EntryAttackSeat(_)
             | ResolutionFrame::PostReplacement(_) => {}
         }
     }
@@ -16932,7 +17083,8 @@ impl PersistedGameState {
             | ResolutionFrame::LifeTotalAssignment(_)
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
-            | ResolutionFrame::CipherEncode(_) => false,
+            | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::EntryAttackSeat(_) => false,
         }) {
             return Err(PersistedRestoreError::OwnerlessPostReplacementDispatch);
         }
@@ -23813,6 +23965,20 @@ declare_game_state! {
     // (`..GameState::default()`) in sibling engine modules requires access.
     #[serde(skip)]
     pub(crate) active_rules_execution_node: Option<RulesExecutionNodeRef>,
+    /// CR 603.6a: the prospective entrants of the simultaneous zone change whose
+    /// member a logical owner is delivering inline
+    /// (`zone_pipeline::SimultaneousEntrants::deliver_member`). Empty outside that
+    /// synchronous window. A parked owner's change is read from its frame
+    /// instead. Never serialized and never compared.
+    #[serde(skip)]
+    pub(crate) active_simultaneous_entrants: Vec<ObjectId>,
+    /// CR 111.1 + CR 603.6a: the tokens the copy-token resolution being drained
+    /// inline has already created, which enter in one event with the token it is
+    /// creating now (`token_copy::publish_committed_copy_tokens`). `None` outside
+    /// that synchronous window; a paused resolution's tokens are read from its
+    /// parked `CopyToken` frame instead. Never serialized and never compared.
+    #[serde(skip)]
+    pub(crate) active_copy_token_resolution_tokens: Option<Vec<ObjectId>>,
     /// CR 601.2a: transient copy of the object-attached casting permission
     /// identity while finalization owns the `PendingCast` by value. Payment
     /// consults it only inside that synchronous window; it is never serialized.
@@ -24057,19 +24223,24 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_replacement_token_substitution_count: Option<i32>,
 
-    /// CR 614.12a + CR 707.9 + CR 603.2: `ZoneChanged`-to-battlefield events
-    /// for an object whose entry is paused mid-resolution awaiting an
-    /// interactive choice (e.g. `WaitingFor::CopyTargetChoice`). Per CR
-    /// 614.12a, effects that modify how a permanent enters function
-    /// continuously *while it is entering* — so the entry isn't finalized
-    /// (and trigger scanning can't run) until the choice resolves. The
-    /// post-action pipeline moves matching events here before
-    /// `process_triggers`, and `handle_copy_target_choice` replays them
-    /// after `BecomeCopy` resolves + layers re-evaluate so granted ETBs
-    /// (Callidus Assassin's destroy-same-name) and observer ETBs
-    /// (Soul Warden) match against the fully-realized copy.
+    /// CR 614.12a + CR 707.9 + CR 603.2: the park. Entry occurrences whose
+    /// collection is deferred, written by every producer that pauses an entry:
+    /// an as-enters continuation's bracket, a mid-entry choice's capture
+    /// (`CopyTargetChoice`, an enters-counter `ChooseOneOfBranch`, an as-enters
+    /// `NamedChoice`), a played land's pause and a meld's. Per CR 614.12a,
+    /// effects that modify how a permanent enters function continuously *while
+    /// it is entering*, so trigger scanning waits for the realized object
+    /// (Callidus Assassin's granted ETB, Soul Warden on the finished copy). It
+    /// also holds an entrant's own as-enters rolls, which happened inside its
+    /// entry and are collected with it (CR 614.1c + CR 603.2).
+    ///
+    /// Each entry carries a [`ParkedEntryState`]: `Pending` until its producer
+    /// records that the entry happened, then `Completed` until its collector
+    /// takes it. Only the settled take, the whole-carrier abandonment and
+    /// `entrant_entry_is_pending` read the state. Every other reader holds a
+    /// parked entry the same in either state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deferred_entry_events: Vec<GameEvent>,
+    pub deferred_entry_events: Vec<ParkedEntry>,
 
     /// CR 400.7 + CR 403.3 + CR 614.12a: a token that was committed to the battlefield with its
     /// entry EVENTS suppressed and whose CR 400.7 record has NOT been written yet, because the
@@ -28227,6 +28398,7 @@ fn validate_restored_attack_authority(
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
             | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::EntryAttackSeat(_)
             | ResolutionFrame::PostReplacement(_) => {}
         }
     }
@@ -28701,6 +28873,12 @@ pub struct PostReplacementDrain {
     /// where the affected object's controller remains the fallback.
     #[serde(default)]
     pub controller: Option<crate::types::player::PlayerId>,
+
+    /// CR 603.6d + CR 614.12a: the entrants whose entry this paused continuation
+    /// parked. Empty for every other drain. The binding dies with its drain
+    /// unless a retire hands it on to the drain that owns the rest of the entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked_entrants: Vec<crate::types::identifiers::ObjectIncarnationRef>,
 }
 
 /// CR 616.1g: what an install does when a continuation is already resident.
@@ -28825,6 +29003,22 @@ impl PostReplacementDrain {
             event_source: None,
             event_target: None,
             controller: None,
+            parked_entrants: Vec::new(),
+        }
+    }
+
+    /// The owner of a copied as-enters choice's chain. That chain runs outside a
+    /// dispatch, so this drain has no event context: it exists to carry
+    /// `entrant`'s binding to the completion authority.
+    pub fn paused_owner_of(entrant: crate::types::identifiers::ObjectIncarnationRef) -> Self {
+        Self {
+            status: DrainStatus::Paused,
+            source: None,
+            applied: HashSet::new(),
+            event_source: None,
+            event_target: None,
+            controller: None,
+            parked_entrants: vec![entrant],
         }
     }
 
@@ -28895,7 +29089,11 @@ impl PostReplacementDrainStack {
     /// Wielder of Mysteries' win; Abundance's reveal-until). Colliding on mere
     /// residency drops it, and `draw_through_replacement` — which gates its drain on
     /// `has_post_replacement_drain()`, i.e. on `has_ready()` — then never runs it.
-    pub fn install(&mut self, drain: PostReplacementDrain, policy: ResidentDrainPolicy) -> bool {
+    pub fn install(
+        &mut self,
+        mut drain: PostReplacementDrain,
+        policy: ResidentDrainPolicy,
+    ) -> bool {
         match policy {
             ResidentDrainPolicy::KeepResident if self.has_ready() => false,
             ResidentDrainPolicy::KeepResident => {
@@ -28917,7 +29115,12 @@ impl PostReplacementDrainStack {
                     .last()
                     .is_some_and(|resident| matches!(resident.status, DrainStatus::Ready(_)))
                 {
-                    self.drains.pop();
+                    // CR 616.1g: the incoming drain now owns the rest of the
+                    // event, so the entries the evicted drain would have
+                    // completed are its to complete.
+                    if let Some(evicted) = self.drains.pop() {
+                        drain.parked_entrants.extend(evicted.parked_entrants);
+                    }
                 }
                 self.drains.push(drain);
                 true
@@ -29033,6 +29236,14 @@ impl PostReplacementDrainStack {
     /// `GameState::abandon_active_post_replacement_drains`.
     pub fn abandon_all(&mut self) {
         self.drains.clear();
+    }
+
+    /// Take every entrant bound to a drain in this frame, leaving the drains.
+    pub fn take_parked_entrants(&mut self) -> Vec<crate::types::identifiers::ObjectIncarnationRef> {
+        self.drains
+            .iter_mut()
+            .flat_map(|drain| std::mem::take(&mut drain.parked_entrants))
+            .collect()
     }
 
     /// This frame's identity, or `None` if it has never been dispatched.
@@ -30722,12 +30933,84 @@ impl GameState {
         self.resolution_stack.push_batch_delivery(pending);
     }
 
-    /// Re-park the active BatchDelivery owner after another replacement pause.
-    pub fn replace_active_batch_delivery(
+    /// CR 706.6 + CR 614.12a: a batch member's as-enters choice (a tied roll's
+    /// ignore choice, CR 706.6) is made before that member enters, so the rest of
+    /// the batch waits beneath that member's whole child stack; the frame that
+    /// owns the live choice stays on top. A single move's standalone completion
+    /// record (`zone_pipeline::defer_completion_on_paused_move`) is parked the
+    /// same way, at the boundary captured before that move.
+    ///
+    /// A prompt owned outside the stack (`pending_replacement`'s
+    /// `ReplacementChoice`, `ReturnAsAuraTarget`) leaves the batch on top, where
+    /// the replacement-choice epilogue's and the Aura handlers' top-only readers
+    /// find it.
+    pub(crate) fn park_batch_delivery_for_paused_member(
         &mut self,
         pending: PendingBatchDeliveries,
-    ) -> Result<(), ResolutionStackError> {
-        self.resolution_stack.replace_active_batch_delivery(pending)
+        member_stack_start: ChildStackDepth,
+    ) -> ParkedBatchOwner {
+        match self.resolution_stack.last().map(ResolutionFrame::gate) {
+            Some(super::resolution::FrameGate::DirectChoice(_)) => {
+                match self
+                    .resolution_stack
+                    .capture_child_boundary()
+                    .cmp(&member_stack_start)
+                {
+                    std::cmp::Ordering::Less => {
+                        panic!("a paused batch member removed a parent before its batch was parked")
+                    }
+                    // The prompt's frame predates the member, so the member raised
+                    // no child of its own: park on top, as before.
+                    std::cmp::Ordering::Equal => {
+                        self.push_batch_delivery(pending);
+                        ParkedBatchOwner::Active
+                    }
+                    std::cmp::Ordering::Greater => {
+                        self.resolution_stack
+                            .insert_parent_at_child_boundary(
+                                ResolutionFrame::BatchDelivery(Box::new(pending)),
+                                member_stack_start,
+                            )
+                            .expect(
+                                "a paused batch must be inserted below its member's child stack",
+                            );
+                        ParkedBatchOwner::AtChildBoundary(member_stack_start)
+                    }
+                }
+            }
+            Some(super::resolution::FrameGate::AfterChild) | None => {
+                self.push_batch_delivery(pending);
+                ParkedBatchOwner::Active
+            }
+        }
+    }
+
+    /// CR 508.4: an entrant put onto the battlefield attacking joins combat once
+    /// its entry has completed. Park its seat beneath the complete child stack
+    /// the move raised, at the boundary captured before the move's operation
+    /// pushed its first frame, so the seat wakes only after the entry's paused
+    /// continuation and every frame it raised have retired.
+    pub(crate) fn park_entry_attack_seat_after_child(
+        &mut self,
+        entrant: crate::types::identifiers::ObjectIncarnationRef,
+        child_stack_start: ChildStackDepth,
+    ) {
+        let frame =
+            ResolutionFrame::EntryAttackSeat(super::resolution::PendingEntryAttackSeat { entrant });
+        match self
+            .resolution_stack
+            .capture_child_boundary()
+            .cmp(&child_stack_start)
+        {
+            std::cmp::Ordering::Less => {
+                panic!("an attacking entry removed a parent before its seat could be parked")
+            }
+            std::cmp::Ordering::Equal => self.resolution_stack.push_inner(frame),
+            std::cmp::Ordering::Greater => self
+                .resolution_stack
+                .insert_parent_at_child_boundary(frame, child_stack_start)
+                .expect("an entry's seat must be inserted below its complete child stack"),
+        }
     }
 
     /// Consume exactly the active BatchDelivery owner after its one logical
@@ -31795,6 +32078,46 @@ impl GameState {
             .finish_post_replacement_dispatch(dispatch)
     }
 
+    /// Bind `entrant` to the resident of `dispatch`'s own frame, found by
+    /// identity. Pure delegation.
+    pub(crate) fn bind_parked_entrant(
+        &mut self,
+        dispatch: super::resolution::IdentifiedPostReplacementDispatch,
+        entrant: crate::types::identifiers::ObjectIncarnationRef,
+    ) -> bool {
+        self.resolution_stack.bind_parked_entrant(dispatch, entrant)
+    }
+
+    /// Bind `entrant` to the active frame's resident drain. `false` when there
+    /// is no resident, or the resident carries another entrant, whose abandonment
+    /// would end this binding too: the caller parks `entrant`'s own owner.
+    pub(crate) fn bind_parked_entrant_to_active_drain(
+        &mut self,
+        entrant: crate::types::identifiers::ObjectIncarnationRef,
+    ) -> bool {
+        let Some(resident) = self
+            .active_post_replacement_drains_mut()
+            .and_then(PostReplacementDrainStack::resident_mut)
+            .filter(|drain| {
+                drain
+                    .parked_entrants
+                    .iter()
+                    .all(|bound| bound.object_id == entrant.object_id)
+            })
+        else {
+            return false;
+        };
+        resident.parked_entrants.push(entrant);
+        true
+    }
+
+    /// The parked entry occurrences, in either state.
+    pub(crate) fn parked_entry_events(&self) -> impl Iterator<Item = &GameEvent> {
+        self.deferred_entry_events
+            .iter()
+            .map(|parked| &parked.event)
+    }
+
     /// CR 608.2c + CR 614.1a: Retires the exact top general drain after its
     /// interrupted instruction completes. An empty Attach replacement pair
     /// also retires its marked child before generic continuation draining can
@@ -31803,7 +32126,13 @@ impl GameState {
         let finished = self
             .active_post_replacement_drains_mut()
             .and_then(PostReplacementDrainStack::finish_paused_dispatch);
-        if finished.is_some() {
+        if let Some(finished) = finished {
+            // CR 603.2: the continuation is over, so the entries it parked are
+            // recorded here, the one completion authority of a paused dispatch.
+            crate::game::engine_replacement::record_parked_entry_completion(
+                self,
+                &finished.parked_entrants,
+            );
             if !self
                 .resolution_stack
                 .take_active_empty_post_replacement_attach_choice_pair()
@@ -31850,10 +32179,18 @@ impl GameState {
     /// Its only production caller is `continue_replacement_impl`'s
     /// no-post-effect ACCEPT; the no-post-effect DECLINE deliberately does not
     /// call it (CR 614.6 + CR 616.1f).
+    ///
+    /// That accept is a retire inside a running event, not an abandonment: no
+    /// one left, and the continuation's tail goes on through its own frame, so
+    /// the entries these drains parked reach the completion authority. The
+    /// abandonment path is [`Self::abandon_active_replacement_tails`].
     pub fn abandon_active_post_replacement_drains(&mut self) {
-        if let Some(drains) = self.active_post_replacement_drains_mut() {
-            drains.abandon_all();
-        }
+        let Some(drains) = self.active_post_replacement_drains_mut() else {
+            return;
+        };
+        let entrants = drains.take_parked_entrants();
+        drains.abandon_all();
+        crate::game::engine_replacement::record_parked_entry_completion(self, &entrants);
     }
 
     /// Returns the complete general post-replacement drain authority. A
@@ -32640,29 +32977,46 @@ impl GameState {
     /// any member is delivered. Only objects on the battlefield at this exact
     /// point become prospective battlefield members; nonbattlefield actions
     /// still receive an owner with an empty member list so their all-origin
-    /// occurrence authority is retained.
+    /// occurrence authority is retained. An announced object off the
+    /// battlefield at this point that is announced to the battlefield is a
+    /// prospective entrant of the one event.
     pub fn allocate_logical_zone_change_group(
         &mut self,
-        announced_members: &[ObjectId],
+        announced: &[ZoneChangeAnnouncement],
     ) -> LogicalZoneChangeGroup {
         let logical_group_id = LogicalZoneChangeGroupId(self.next_logical_zone_change_group_id);
         self.next_logical_zone_change_group_id = self
             .next_logical_zone_change_group_id
             .checked_add(1)
             .expect("logical zone-change group allocator exhausted");
-        let prospective_battlefield_members = announced_members
-            .iter()
-            .filter_map(|object_id| self.objects.get(object_id))
-            .filter(|object| {
+        let mut prospective_battlefield_members = Vec::new();
+        let mut prospective_entrants = Vec::new();
+        for (announcement, object) in announced.iter().filter_map(|announcement| {
+            self.objects
+                .get(&announcement.object_id)
+                .map(|object| (announcement, object))
+        }) {
+            let member = LogicalZoneChangeProspectiveMember {
+                identity: ObjectIncarnationRef::from_object(object),
+            };
+            if object.zone != Zone::Battlefield {
+                // CR 603.6a: only the permanents this one event puts onto the
+                // battlefield are its entrants; a mill, discard or bounce batch
+                // announces none.
+                if announcement.to == Zone::Battlefield {
+                    prospective_entrants.push(member);
+                }
+            } else if self.battlefield.contains(&object.id) {
                 // CR 730.2: an absorbed component represents the merged
                 // permanent, not an independent battlefield member.
-                object.zone == Zone::Battlefield && self.battlefield.contains(&object.id)
-            })
-            .map(|object| LogicalZoneChangeProspectiveMember {
-                identity: ObjectIncarnationRef::from_object(object),
-            })
-            .collect();
-        LogicalZoneChangeGroup::new(logical_group_id, prospective_battlefield_members)
+                prospective_battlefield_members.push(member);
+            }
+        }
+        LogicalZoneChangeGroup::new(
+            logical_group_id,
+            prospective_battlefield_members,
+            prospective_entrants,
+        )
     }
 
     /// Capture the live ChaCha20 stream offset into `rng_word_pos` so it
@@ -33920,6 +34274,8 @@ impl GameState {
             ability_onset_record: AbilityOnsetRecord::Recorded,
             active_payment_pins: Vec::new(),
             active_rules_execution_node: None,
+            active_simultaneous_entrants: Vec::new(),
+            active_copy_token_resolution_tokens: None,
             active_casting_permission_index: None,
             active_graveyard_permission_latch: None,
             active_paid_resolution_offer_tail: None,
@@ -37847,6 +38203,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         ability_onset_record: _,
         active_payment_pins: _,
         active_rules_execution_node: _,
+        active_simultaneous_entrants: _,
+        active_copy_token_resolution_tokens: _,
         active_casting_permission_index: _,
         active_graveyard_permission_latch: _,
         active_paid_resolution_offer_tail: _,
@@ -39595,6 +39953,90 @@ mod drain_stack_reentrancy_tests {
         )))
     }
 
+    /// CR 616.1g: an evicted `Ready` drain's binding moves onto the drain that
+    /// now owns the rest of the event, and a discarded incoming drain moves
+    /// nothing.
+    #[test]
+    fn an_evicted_drain_hands_its_binding_to_the_incoming_drain() {
+        let entrant = ObjectIncarnationRef::of(ObjectId(1), 1);
+        let mut bound = ready_drain("bound");
+        bound.parked_entrants.push(entrant);
+
+        let mut stack = PostReplacementDrainStack::default();
+        stack.install(bound.clone(), ResidentDrainPolicy::Replace);
+        assert!(stack.install(ready_drain("incoming"), ResidentDrainPolicy::Replace));
+        assert_eq!(stack.len(), 1);
+        assert_eq!(
+            stack.resident().expect("incoming").parked_entrants,
+            vec![entrant]
+        );
+
+        let mut stack = PostReplacementDrainStack::default();
+        stack.install(bound, ResidentDrainPolicy::Replace);
+        assert!(!stack.install(ready_drain("incoming"), ResidentDrainPolicy::KeepResident));
+        assert_eq!(
+            stack.resident().expect("resident").parked_entrants,
+            vec![entrant]
+        );
+    }
+
+    /// The park's wire shape: both states round-trip byte-stably, with or without
+    /// an owed attacking seat (none writes no key), a pre-bump bare
+    /// `GameEvent` decodes as `Completed` (its take read presence, and a legacy
+    /// paused drain has no binding), a malformed event still reports its schema
+    /// error, and a drain with no binding writes no key.
+    #[test]
+    fn a_parked_entry_round_trips_and_a_bare_event_decodes_as_completed() {
+        let event = GameEvent::LandPlayed {
+            object_id: ObjectId(1),
+            player_id: PlayerId(0),
+            from_zone: Zone::Hand,
+        };
+        for state in [
+            ParkedEntryState::Completed,
+            ParkedEntryState::Pending { carrier: None },
+            ParkedEntryState::Pending {
+                carrier: Some(ObjectId(5)),
+            },
+        ] {
+            for entry_attack in [
+                None,
+                Some(crate::types::ability::EntryAttackDestination::AnyDefender),
+            ] {
+                let entry = ParkedEntry {
+                    event: event.clone(),
+                    state,
+                    entry_attack: entry_attack.clone(),
+                    held_triggers: Vec::new(),
+                };
+                let wire = serde_json::to_value(&entry).expect("serializes");
+                assert_eq!(wire.get("entry_attack").is_some(), entry_attack.is_some());
+                let decoded: ParkedEntry = serde_json::from_value(wire.clone()).expect("decodes");
+                assert_eq!(decoded, entry);
+                assert_eq!(serde_json::to_value(&decoded).expect("serializes"), wire);
+            }
+        }
+
+        let legacy = serde_json::to_value(&event).expect("serializes");
+        let decoded: ParkedEntry = serde_json::from_value(legacy).expect("decodes");
+        assert_eq!(decoded.event, event);
+        assert_eq!(decoded.state, ParkedEntryState::Completed);
+
+        let mut malformed =
+            serde_json::to_value(ParkedEntry::pending(event, None)).expect("serializes");
+        malformed["event"]["data"]
+            .as_object_mut()
+            .expect("event data is an object")
+            .remove("object_id");
+        let error = serde_json::from_value::<ParkedEntry>(malformed)
+            .expect_err("a malformed event refuses")
+            .to_string();
+        assert!(error.contains("missing field `object_id`"), "{error}");
+
+        let wire = serde_json::to_value(ready_drain("empty")).expect("serializes");
+        assert!(wire.get("parked_entrants").is_none(), "{wire}");
+    }
+
     /// CR 616.1g: a continuation that is RUNNING must not block a new one from
     /// being installed.
     ///
@@ -40952,7 +41394,7 @@ mod tests {
             sacrificed: victim,
             record,
         };
-        state.deferred_entry_events = vec![exploit.clone()];
+        state.deferred_entry_events = vec![ParkedEntry::pending(exploit.clone(), None)];
         (state, exploit)
     }
 
@@ -40963,7 +41405,10 @@ mod tests {
         let direct: GameState =
             serde_json::from_value(serde_json::to_value(&state).expect("current state serializes"))
                 .expect("current state with complete exploit evidence decodes");
-        assert_eq!(direct.deferred_entry_events, vec![expected.clone()]);
+        assert_eq!(
+            direct.parked_entry_events().collect::<Vec<_>>(),
+            vec![&expected]
+        );
 
         for persisted in [
             PersistedGameState::Raw(Box::new(state.clone())),
@@ -40974,7 +41419,10 @@ mod tests {
             )
             .expect("persisted state with complete exploit evidence decodes")
             .into_game_state_unchecked();
-            assert_eq!(restored.deferred_entry_events, vec![expected.clone()]);
+            assert_eq!(
+                restored.parked_entry_events().collect::<Vec<_>>(),
+                vec![&expected]
+            );
         }
     }
 
@@ -41369,39 +41817,40 @@ mod tests {
             serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
                 .expect("versioned fixture serializes");
         let base = serde_json::to_value(state).expect("fixture serializes");
-        let event_path = "$.deferred_entry_events[0].data";
+        let event_path = "$.deferred_entry_events[0].event.data";
 
         let mut cases = Vec::new();
         let mut missing_record = base.clone();
-        missing_record["deferred_entry_events"][0]["data"]
+        missing_record["deferred_entry_events"][0]["event"]["data"]
             .as_object_mut()
             .expect("event data is an object")
             .remove("record");
         cases.push((missing_record, "record is missing"));
 
         let mut null_record = base.clone();
-        null_record["deferred_entry_events"][0]["data"]["record"] = serde_json::Value::Null;
+        null_record["deferred_entry_events"][0]["event"]["data"]["record"] =
+            serde_json::Value::Null;
         cases.push((null_record, "record must be an object"));
 
         let mut scalar_record = base.clone();
-        scalar_record["deferred_entry_events"][0]["data"]["record"] =
+        scalar_record["deferred_entry_events"][0]["event"]["data"]["record"] =
             serde_json::Value::from("not a record");
         cases.push((scalar_record, "record must be an object"));
 
         let mut missing_token = base.clone();
-        missing_token["deferred_entry_events"][0]["data"]["record"]
+        missing_token["deferred_entry_events"][0]["event"]["data"]["record"]
             .as_object_mut()
             .expect("record is an object")
             .remove("is_token");
         cases.push((missing_token, "record.is_token is missing"));
 
         let mut invalid_token = base.clone();
-        invalid_token["deferred_entry_events"][0]["data"]["record"]["is_token"] =
+        invalid_token["deferred_entry_events"][0]["event"]["data"]["record"]["is_token"] =
             serde_json::Value::from("true");
         cases.push((invalid_token, "record.is_token must be a boolean"));
 
         let mut mismatched_id = base.clone();
-        mismatched_id["deferred_entry_events"][0]["data"]["record"]["object_id"] =
+        mismatched_id["deferred_entry_events"][0]["event"]["data"]["record"]["object_id"] =
             serde_json::Value::from(99_999_u64);
         cases.push((
             mismatched_id,
@@ -41421,7 +41870,7 @@ mod tests {
         }
 
         let mut partial_record = base.clone();
-        partial_record["deferred_entry_events"][0]["data"]["record"]
+        partial_record["deferred_entry_events"][0]["event"]["data"]["record"]
             .as_object_mut()
             .expect("record is an object")
             .remove("name");
@@ -41460,7 +41909,7 @@ mod tests {
                     .expect("wire is an object")
                     .remove("resolution_frames");
             }
-            historical_wire["deferred_entry_events"][0]["data"]
+            historical_wire["deferred_entry_events"][0]["event"]["data"]
                 .as_object_mut()
                 .expect("event data is an object")
                 .remove("record");
@@ -42630,7 +43079,9 @@ mod tests {
             ProposedEvent::zone_change(object, Zone::Battlefield, Zone::Exile, Some(object));
         let mut paused = PendingZoneChangeDelivery::new(member, expected_event.clone());
         paused.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
-        let logical_zone_change_group = state.allocate_logical_zone_change_group(&[object]);
+        let logical_zone_change_group = state.allocate_logical_zone_change_group(
+            &ZoneChangeAnnouncement::all(&[object], Zone::Exile),
+        );
         state.push_change_zone_iteration(PendingChangeZoneIteration {
             pending_return_result_producer: None,
             logical_zone_change_group,
@@ -44603,7 +45054,7 @@ mod tests {
         let record = persisted_zone_change_record(ObjectId(9_151), 19, 0);
         let event = persisted_zone_change_event(record.clone());
         state.zone_changes_this_turn.push_back(record);
-        state.deferred_entry_events = vec![event.clone()];
+        state.deferred_entry_events = vec![ParkedEntry::pending(event.clone(), None)];
         state.pending_trigger_event_batch = vec![event.clone()];
         state.current_trigger_event = Some(event.clone());
         state.current_trigger_events = vec![event.clone()];
@@ -44809,7 +45260,7 @@ mod tests {
         serde_json::from_value::<PersistedGameState>(persisted)
             .expect("historical journal event is not a live occurrence carrier");
 
-        state.deferred_entry_events = vec![historical];
+        state.deferred_entry_events = vec![ParkedEntry::pending(historical, None)];
         let persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
             .expect("live carrier fixture serializes");
         let error = serde_json::from_value::<PersistedGameState>(persisted)
@@ -50605,13 +51056,14 @@ mod tests {
             "reach guard: a settled state equals its copy"
         );
         let mut unsettled = settled.clone();
-        unsettled
-            .deferred_entry_events
-            .push(GameEvent::PermanentTapped {
+        unsettled.deferred_entry_events.push(ParkedEntry::pending(
+            GameEvent::PermanentTapped {
                 object_id: ObjectId(50),
                 caused_by: None,
                 incarnation: Some(3),
-            });
+            },
+            None,
+        ));
         assert!(!unsettled.is_loop_comparable());
         let normalized = unsettled.normalize_for_loop();
         assert!(
@@ -54778,7 +55230,7 @@ mod tests {
     #[test]
     fn change_zone_iteration_modern_shape_roundtrips() {
         let mut logical_zone_change_group =
-            LogicalZoneChangeGroup::new(LogicalZoneChangeGroupId(1), Vec::new());
+            LogicalZoneChangeGroup::new(LogicalZoneChangeGroupId(1), Vec::new(), Vec::new());
         logical_zone_change_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty immediately-before authority is still explicitly latched");
@@ -54944,7 +55396,10 @@ mod tests {
         state.objects.insert(hand_id, hand);
         state.battlefield.push_back(battlefield_id);
 
-        let group = state.allocate_logical_zone_change_group(&[battlefield_id, hand_id]);
+        let group = state.allocate_logical_zone_change_group(&ZoneChangeAnnouncement::all(
+            &[battlefield_id, hand_id],
+            Zone::Graveyard,
+        ));
 
         assert_eq!(group.logical_group_id, LogicalZoneChangeGroupId(1));
         assert_eq!(
@@ -54958,6 +55413,440 @@ mod tests {
             vec![LogicalZoneChangeTerminalOutcome::Pending]
         );
         assert!(group.all_origin_occurrences.is_empty());
+    }
+
+    /// U-C1. CR 603.6a: every announced object off the battlefield that is
+    /// announced to the battlefield is a prospective entrant of the one event,
+    /// with its incarnation; a battlefield
+    /// object is a battlefield member; an absorbed component (CR 730.2) and an
+    /// absent id are neither. The entrant list is required wire authority, and a
+    /// duplicate or an object in both lists is refused.
+    #[test]
+    fn logical_zone_change_group_latches_its_prospective_entrants() {
+        let mut state = GameState::new_two_player(19);
+        let battlefield_id = ObjectId(81);
+        let library_id = ObjectId(82);
+        let absorbed_id = ObjectId(83);
+        let absent_id = ObjectId(84);
+        let mut battlefield = GameObject::new(
+            battlefield_id,
+            CardId(81),
+            PlayerId(0),
+            "battlefield member".to_string(),
+            Zone::Battlefield,
+        );
+        battlefield.incarnation = 4;
+        let mut library = GameObject::new(
+            library_id,
+            CardId(82),
+            PlayerId(0),
+            "library entrant".to_string(),
+            Zone::Library,
+        );
+        library.incarnation = 9;
+        let absorbed = GameObject::new(
+            absorbed_id,
+            CardId(83),
+            PlayerId(0),
+            "absorbed component".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(battlefield_id, battlefield);
+        state.objects.insert(library_id, library);
+        state.objects.insert(absorbed_id, absorbed);
+        state.battlefield.push_back(battlefield_id);
+
+        let mut group = state.allocate_logical_zone_change_group(&ZoneChangeAnnouncement::all(
+            &[battlefield_id, library_id, absorbed_id, absent_id],
+            Zone::Battlefield,
+        ));
+
+        assert_eq!(
+            group.prospective_battlefield_members,
+            vec![LogicalZoneChangeProspectiveMember {
+                identity: ObjectIncarnationRef::of(battlefield_id, 4),
+            }]
+        );
+        assert_eq!(
+            group.prospective_entrants,
+            vec![LogicalZoneChangeProspectiveMember {
+                identity: ObjectIncarnationRef::of(library_id, 9),
+            }]
+        );
+
+        group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("the test group owns an explicit pre-delivery latch");
+        let wire = serde_json::to_value(&group).expect("the group serializes");
+        let roundtripped: LogicalZoneChangeGroup =
+            serde_json::from_value(wire.clone()).expect("the group deserializes");
+        assert_eq!(roundtripped, group);
+
+        let mut legacy = wire;
+        legacy
+            .as_object_mut()
+            .expect("the group is a JSON object")
+            .remove("prospective_entrants")
+            .expect("reach: the entrant list is on the wire");
+        assert!(
+            serde_json::from_value::<LogicalZoneChangeGroup>(legacy).is_err(),
+            "a group without its entrant list is refused"
+        );
+
+        let rejects_on_wire = |candidate: LogicalZoneChangeGroup, reason: &str| {
+            let wire = serde_json::to_value(candidate).expect("malformed group still serializes");
+            assert!(
+                serde_json::from_value::<LogicalZoneChangeGroup>(wire).is_err(),
+                "wire boundary must reject {reason}"
+            );
+        };
+        let mut duplicate_entrant = group.clone();
+        duplicate_entrant
+            .prospective_entrants
+            .push(duplicate_entrant.prospective_entrants[0]);
+        rejects_on_wire(duplicate_entrant, "a duplicate prospective entrant");
+        let mut overlapping = group.clone();
+        overlapping
+            .prospective_entrants
+            .push(LogicalZoneChangeProspectiveMember {
+                identity: ObjectIncarnationRef::of(battlefield_id, 5),
+            });
+        rejects_on_wire(
+            overlapping,
+            "an object both a battlefield member and an entrant",
+        );
+    }
+
+    /// L1. CR 603.6a: an announced object off the battlefield is a prospective
+    /// entrant only when the action announces it to the battlefield. A mill
+    /// (library to graveyard) has none; a hand-to-battlefield put lists each
+    /// object; a mixed batch lists only its battlefield-bound objects.
+    #[test]
+    fn logical_zone_change_group_lists_only_battlefield_bound_entrants() {
+        let mut state = GameState::new_two_player(19);
+        let library = |state: &mut GameState, n: u64| {
+            let id = ObjectId(90 + n);
+            let mut object = GameObject::new(
+                id,
+                CardId(90 + n),
+                PlayerId(0),
+                format!("card {n}"),
+                Zone::Library,
+            );
+            object.incarnation = n;
+            state.objects.insert(id, object);
+            id
+        };
+        let entrant = |id: ObjectId, incarnation: u64| LogicalZoneChangeProspectiveMember {
+            identity: ObjectIncarnationRef::of(id, incarnation),
+        };
+        let milled = [1, 2, 3].map(|n| library(&mut state, n));
+        let mill = state.allocate_logical_zone_change_group(&ZoneChangeAnnouncement::all(
+            &milled,
+            Zone::Graveyard,
+        ));
+        assert!(
+            mill.prospective_entrants.is_empty(),
+            "a mill puts nothing onto the battlefield: {:?}",
+            mill.prospective_entrants
+        );
+
+        let put = [4, 5, 6].map(|n| library(&mut state, n));
+        for id in put {
+            state.objects.get_mut(&id).expect("put object exists").zone = Zone::Hand;
+        }
+        let battlefield_bound = state.allocate_logical_zone_change_group(
+            &ZoneChangeAnnouncement::all(&put, Zone::Battlefield),
+        );
+        assert_eq!(
+            battlefield_bound.prospective_entrants,
+            vec![entrant(put[0], 4), entrant(put[1], 5), entrant(put[2], 6)],
+            "reach: a put onto the battlefield lists every object it moves"
+        );
+
+        let mixed = state.allocate_logical_zone_change_group(&[
+            ZoneChangeAnnouncement {
+                object_id: milled[0],
+                to: Zone::Graveyard,
+            },
+            ZoneChangeAnnouncement {
+                object_id: put[0],
+                to: Zone::Battlefield,
+            },
+            ZoneChangeAnnouncement {
+                object_id: milled[1],
+                to: Zone::Exile,
+            },
+            ZoneChangeAnnouncement {
+                object_id: put[2],
+                to: Zone::Battlefield,
+            },
+        ]);
+        assert_eq!(
+            mixed.prospective_entrants,
+            vec![entrant(put[0], 4), entrant(put[2], 6)],
+            "a mixed batch lists only its battlefield-bound objects, in order"
+        );
+        assert!(mixed.prospective_battlefield_members.is_empty());
+    }
+
+    /// L3. The serialized-authority check refuses a member or an entrant
+    /// announced more than once, and an object that is both a battlefield
+    /// member and an entrant (one announced object was either on the
+    /// battlefield or not, CR 603.6a), with the same messages, and accepts a
+    /// large group of distinct entrants. Final settlement refuses a repeated
+    /// member through the same check.
+    #[test]
+    fn logical_zone_change_group_validation_refuses_repeats_with_its_messages() {
+        let announced = |id: u64, incarnation: u64| LogicalZoneChangeProspectiveMember {
+            identity: ObjectIncarnationRef::of(ObjectId(id), incarnation),
+        };
+        let latched = |members: Vec<LogicalZoneChangeProspectiveMember>,
+                       entrants: Vec<LogicalZoneChangeProspectiveMember>| {
+            let mut group =
+                LogicalZoneChangeGroup::new(LogicalZoneChangeGroupId(1), members, entrants);
+            group
+                .latch_immediately_before(Vec::new(), Vec::new())
+                .expect("the test group owns an explicit pre-delivery latch");
+            group
+        };
+        let distinct = latched(
+            vec![announced(1, 0), announced(2, 0), announced(3, 0)],
+            vec![announced(10, 0), announced(11, 0), announced(12, 0)],
+        );
+        assert_eq!(
+            distinct.validate_serialized_authority(),
+            Ok(()),
+            "reach: three distinct members and three distinct entrants validate"
+        );
+
+        let repeated_members = latched(
+            vec![
+                announced(1, 0),
+                announced(2, 0),
+                announced(3, 0),
+                announced(3, 0),
+                announced(2, 0),
+                announced(1, 0),
+            ],
+            Vec::new(),
+        );
+        let member_error =
+            Err("logical zone-change member 3:0 was announced more than once".into());
+        assert_eq!(
+            repeated_members.validate_serialized_authority(),
+            member_error
+        );
+        assert_eq!(
+            repeated_members.validate_complete(),
+            member_error,
+            "final settlement refuses the repeated member through the same check"
+        );
+
+        let repeated_entrants = latched(
+            Vec::new(),
+            vec![
+                announced(10, 0),
+                announced(11, 0),
+                announced(12, 0),
+                announced(12, 0),
+                announced(11, 0),
+                announced(10, 0),
+            ],
+        );
+        assert_eq!(
+            repeated_entrants.validate_serialized_authority(),
+            Err("logical zone-change entrant 12:0 was announced more than once".into())
+        );
+
+        // The same object id under another incarnation is still one object.
+        let member_and_entrant = latched(
+            vec![announced(1, 0), announced(2, 0)],
+            vec![announced(10, 0), announced(2, 5)],
+        );
+        assert_eq!(
+            member_and_entrant.validate_serialized_authority(),
+            Err("logical zone-change object 2 is both a battlefield member and an entrant".into())
+        );
+
+        let large = latched(
+            vec![announced(0, 0)],
+            (1..=50_000).map(|id| announced(id, 1)).collect(),
+        );
+        assert_eq!(large.validate_serialized_authority(), Ok(()));
+    }
+
+    /// A latched group announcing `n` battlefield members (object ids `1..=n`,
+    /// incarnation 2), and the `ZoneChanged` event each member's exile emits.
+    fn battlefield_exile_batch(n: u64) -> (LogicalZoneChangeGroup, Vec<GameEvent>) {
+        let objects: Vec<GameObject> = (1..=n)
+            .map(|id| {
+                let mut object = GameObject::new(
+                    ObjectId(id),
+                    CardId(id),
+                    PlayerId(0),
+                    format!("member {id}"),
+                    Zone::Battlefield,
+                );
+                object.incarnation = 2;
+                object
+            })
+            .collect();
+        let mut group = LogicalZoneChangeGroup::new(
+            LogicalZoneChangeGroupId(1),
+            objects
+                .iter()
+                .map(|object| LogicalZoneChangeProspectiveMember {
+                    identity: ObjectIncarnationRef::from_object(object),
+                })
+                .collect(),
+            Vec::new(),
+        );
+        group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("the test group owns an explicit pre-delivery latch");
+        let events = objects
+            .iter()
+            .map(|object| GameEvent::ZoneChanged {
+                object_id: object.id,
+                from: Some(Zone::Battlefield),
+                to: Zone::Exile,
+                record: Box::new(object.snapshot_for_zone_change(
+                    object.id,
+                    Some(Zone::Battlefield),
+                    Zone::Exile,
+                )),
+            })
+            .collect();
+        (group, events)
+    }
+
+    /// CR 603.10a: each member's delivery completion is recorded in its own
+    /// slot. A moved completion records nothing (its `ZoneChanged` record binds
+    /// it), a prevented or remaining member is recorded at its own index, a
+    /// non-member is ignored, and a second terminal result is refused.
+    #[test]
+    fn logical_zone_change_group_records_each_completion_in_its_members_slot() {
+        let (mut group, events) = battlefield_exile_batch(4);
+        for (object_id, completion) in [
+            (ObjectId(3), ZoneMoveCompletion::Prevented),
+            (ObjectId(4), ZoneMoveCompletion::Remained),
+            (ObjectId(2), ZoneMoveCompletion::Moved),
+            (ObjectId(1), ZoneMoveCompletion::Moved),
+            (ObjectId(99), ZoneMoveCompletion::Prevented),
+            (ObjectId(99), ZoneMoveCompletion::Moved),
+        ] {
+            group
+                .record_delivery_completion(object_id, completion)
+                .expect("each completion is recorded");
+        }
+        assert_eq!(
+            group.terminal_outcomes,
+            vec![
+                LogicalZoneChangeTerminalOutcome::Pending,
+                LogicalZoneChangeTerminalOutcome::Pending,
+                LogicalZoneChangeTerminalOutcome::Prevented,
+                LogicalZoneChangeTerminalOutcome::Remained,
+            ],
+            "a moved completion waits for its record"
+        );
+
+        group
+            .append_delivery_events(&[events[1].clone(), events[0].clone()])
+            .expect("the moved members' records bind them");
+        assert_eq!(
+            group.terminal_outcomes,
+            vec![
+                LogicalZoneChangeTerminalOutcome::Moved {
+                    occurrence_ordinal: 1
+                },
+                LogicalZoneChangeTerminalOutcome::Moved {
+                    occurrence_ordinal: 0
+                },
+                LogicalZoneChangeTerminalOutcome::Prevented,
+                LogicalZoneChangeTerminalOutcome::Remained,
+            ]
+        );
+        assert_eq!(
+            group.record_delivery_completion(ObjectId(3), ZoneMoveCompletion::Remained),
+            Err("logical zone-change member 3 already has a terminal outcome".into())
+        );
+        assert_eq!(
+            group.record_delivery_completion(ObjectId(1), ZoneMoveCompletion::Prevented),
+            Err("logical zone-change member 1 already has a terminal outcome".into())
+        );
+        group
+            .validate_complete()
+            .expect("every member has its terminal outcome");
+    }
+
+    /// Wall time of a battlefield-origin batch's group bookkeeping alone: N
+    /// moved completions, then the one slice that appends their N records
+    /// (`deliver_batch` then `complete_logical_zone_trigger_collection`), and
+    /// N remaining completions on a fresh group. A measurement, not a gate: run
+    /// with `--ignored --nocapture` and read the printed lines.
+    ///
+    /// Measured on one debug build, one test thread (ms), before and after a
+    /// moved completion stopped scanning the members and a remaining one
+    /// stopped scanning them twice:
+    ///
+    /// ```text
+    ///   N       moved completions   append          remained completions
+    ///           before   after      before  after   before   after
+    ///   2000    5        0          14      14      15       7
+    ///   8000    94       0          157     148     243      106
+    ///   32000   1519     0          2392    2269    3969     1725
+    /// ```
+    ///
+    /// Appending the records (`append_delivery_events`, unchanged) and a
+    /// remaining completion still find each member with one scan.
+    #[test]
+    #[ignore = "perf measurement; run manually"]
+    fn logical_zone_change_group_completion_wall_time_profile() {
+        for n in [2_000u64, 4_000, 8_000, 16_000, 32_000] {
+            let (mut group, events) = battlefield_exile_batch(n);
+            let started = std::time::Instant::now();
+            for id in 1..=n {
+                group
+                    .record_delivery_completion(ObjectId(id), ZoneMoveCompletion::Moved)
+                    .expect("moved completion");
+            }
+            let moved = started.elapsed();
+            let started = std::time::Instant::now();
+            group
+                .append_delivery_events(&events)
+                .expect("the records bind every member");
+            let appended = started.elapsed();
+            assert!(
+                group.terminal_outcomes.iter().all(|outcome| matches!(
+                    outcome,
+                    LogicalZoneChangeTerminalOutcome::Moved { .. }
+                )),
+                "reach: every member moved"
+            );
+
+            let (mut group, _) = battlefield_exile_batch(n);
+            let started = std::time::Instant::now();
+            for id in 1..=n {
+                group
+                    .record_delivery_completion(ObjectId(id), ZoneMoveCompletion::Remained)
+                    .expect("remained completion");
+            }
+            let remained = started.elapsed();
+            assert!(
+                group
+                    .terminal_outcomes
+                    .iter()
+                    .all(|outcome| matches!(outcome, LogicalZoneChangeTerminalOutcome::Remained)),
+                "reach: every member remained"
+            );
+            eprintln!(
+                "group n={n} moved_completions_ms={} append_ms={} remained_completions_ms={}",
+                moved.as_millis(),
+                appended.as_millis(),
+                remained.as_millis()
+            );
+        }
     }
 
     #[test]
@@ -55006,6 +55895,7 @@ mod tests {
                     identity: ObjectIncarnationRef::from_object(&remained),
                 },
             ],
+            Vec::new(),
         );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
@@ -55255,6 +56145,7 @@ mod tests {
                     identity: ObjectIncarnationRef::from_object(&second),
                 },
             ],
+            Vec::new(),
         );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
@@ -59130,6 +60021,7 @@ mod restored_exact_attack_authority_tests {
                 5 => {
                     let mut group = LogicalZoneChangeGroup::new(
                         crate::types::identifiers::LogicalZoneChangeGroupId(1),
+                        Vec::new(),
                         Vec::new(),
                     );
                     group

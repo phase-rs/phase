@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ResolutionFrame gains EntryAttackSeat and ParkedEntry gains held_triggers (an as-enters roll's observers collected when it is rolled). An older reader cannot load a resolution stack holding the frame and drops held roll observers."
+}

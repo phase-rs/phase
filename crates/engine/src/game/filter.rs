@@ -5613,6 +5613,11 @@ impl BattlefieldEntrantProjection {
         Some(Self { scratch, entrant })
     }
 
+    /// CR 614.12: the entrant as it would exist on the battlefield.
+    pub(crate) fn entrant(&self) -> Option<&crate::game::game_object::GameObject> {
+        self.scratch.objects.get(&self.entrant)
+    }
+
     /// CR 614.12: whether the projected entrant matches `filter` under `ctx`.
     pub(crate) fn matches(&self, filter: &TargetFilter, ctx: &FilterContext<'_>) -> bool {
         matches_target_filter(&self.scratch, self.entrant, filter, ctx)

@@ -17,7 +17,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ChangeZoneMemberEntry, GameState, MassLibraryOrderBatch, MassLibraryOrderMember,
     PendingCounterPostAction, PendingMassLibraryOrderBatches, PendingMassLibraryOrderChoice,
-    PendingZoneChangeDelivery, WaitingFor, ZoneOpponentChooserPurpose,
+    PendingZoneChangeDelivery, WaitingFor, ZoneChangeAnnouncement, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -1277,6 +1277,11 @@ pub fn resolve(
                 .random_range(0..eligible.len());
             let chosen = eligible[index];
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
+            // CR 508.4 + CR 614.12a: the seat frame's boundary is captured before
+            // this entry's Devour snapshot, so a seat frame parked for it lies
+            // beneath the snapshot and the snapshot stays adjacent to its
+            // PostReplacement frame.
+            let attack_seat = crate::game::zone_pipeline::PausedEntryAttackSeat::seat_frame(state);
             capture_devour_snapshot_before_single_entry(state, chosen, dest_zone);
             // CR 614.12: resolve the chosen object's gated entry counters and
             // tapped/attacking riders before it moves.
@@ -1294,6 +1299,7 @@ pub fn resolve(
                 effect_enter_transformed,
                 member.enter_tapped,
                 member.enters_attacking,
+                attack_seat,
                 enters_under_player,
                 &member.enter_with_counters,
                 face_down_profile.as_ref(),
@@ -1354,6 +1360,11 @@ pub fn resolve(
         if eligible.len() == 1 && !choice_up_to && choice_count == 1 {
             let chosen = eligible[0];
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
+            // CR 508.4 + CR 614.12a: the seat frame's boundary is captured before
+            // this entry's Devour snapshot, so a seat frame parked for it lies
+            // beneath the snapshot and the snapshot stays adjacent to its
+            // PostReplacement frame.
+            let attack_seat = crate::game::zone_pipeline::PausedEntryAttackSeat::seat_frame(state);
             capture_devour_snapshot_before_single_entry(state, chosen, dest_zone);
             // CR 614.12: resolve the chosen object's gated entry counters and
             // tapped/attacking riders before it moves.
@@ -1371,6 +1382,7 @@ pub fn resolve(
                 effect_enter_transformed,
                 member.enter_tapped,
                 member.enters_attacking,
+                attack_seat,
                 enters_under_player,
                 &member.enter_with_counters,
                 face_down_profile.as_ref(),
@@ -1511,8 +1523,12 @@ pub fn resolve(
     // Tracked the same way the mass `resolve_all` path counts, so the chained
     // sub-ability's `QuantityRef::EventContextAmount` resolves correctly.
     let mut moved_count: i32 = 0;
-    let mut logical_zone_change_group =
-        crate::game::triggers::allocate_logical_zone_change_group(state, &targeted_objects);
+    let mut logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+        state,
+        &ZoneChangeAnnouncement::all(&targeted_objects, dest_zone),
+    );
+    let mut entrants =
+        crate::game::zone_pipeline::SimultaneousEntrants::of(&logical_zone_change_group);
     let logical_group_event_start = events.len();
     for (i, member) in members.iter().enumerate() {
         let obj_id = &member.object_id;
@@ -1560,7 +1576,7 @@ pub fn resolve(
         );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
-        match process_one_zone_move_with_terminal(state, &ctx, member, events) {
+        match process_one_zone_move_with_terminal(state, &mut entrants, &ctx, member, events) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
                     .record_delivery_completion(*obj_id, completion)
@@ -2026,13 +2042,45 @@ pub(crate) fn process_one_zone_move(
     member: &ChangeZoneMemberEntry,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
-    process_one_zone_move_with_terminal(state, ctx, member, events).into_zone_move_result()
+    // CR 508.4: its one caller, `search_outside_game.rs`, parks no logical owner,
+    // so a paused attacking entry is seated by a seat frame parked at the
+    // boundary captured here, before the move's operation pushes a frame.
+    let attack_seat = crate::game::zone_pipeline::PausedEntryAttackSeat::seat_frame(state);
+    process_one_zone_move_with_attack_seat(state, ctx, member, attack_seat, events)
+        .into_zone_move_result()
 }
 
+/// Its callers, the targeted loop, the drain's resume of `remaining` members and
+/// the two `EffectZoneChoice` member loops, each park a
+/// `PendingChangeZoneIteration` on `NeedsChoice`, whose resume takes an owed
+/// attacking seat (CR 508.4); the `EffectZoneChoice` loops park it above the
+/// paused child, and that route is not verified. CR 603.6a: each caller is the
+/// logical owner of a change, and the member is delivered with that change's
+/// prospective `entrants` published, which the caller collected once before its
+/// loop (`zone_pipeline::SimultaneousEntrants`).
 pub(crate) fn process_one_zone_move_with_terminal(
+    state: &mut GameState,
+    entrants: &mut crate::game::zone_pipeline::SimultaneousEntrants,
+    ctx: &ChangeZoneIterationCtx,
+    member: &ChangeZoneMemberEntry,
+    events: &mut Vec<GameEvent>,
+) -> crate::game::zone_pipeline::ZoneMoveTerminalResult {
+    entrants.deliver_member(state, |state| {
+        process_one_zone_move_with_attack_seat(
+            state,
+            ctx,
+            member,
+            crate::game::zone_pipeline::PausedEntryAttackSeat::ResumingOwner,
+            events,
+        )
+    })
+}
+
+fn process_one_zone_move_with_attack_seat(
     state: &mut GameState,
     ctx: &ChangeZoneIterationCtx,
     member: &ChangeZoneMemberEntry,
+    attack_seat: crate::game::zone_pipeline::PausedEntryAttackSeat,
     events: &mut Vec<GameEvent>,
 ) -> crate::game::zone_pipeline::ZoneMoveTerminalResult {
     let obj_id = member.object_id;
@@ -2071,6 +2119,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.enter_transformed,
         member.enter_tapped,
         member.enters_attacking,
+        attack_seat,
         ctx.enters_under_player,
         &member.enter_with_counters,
         ctx.face_down_profile.as_ref(),
@@ -3096,8 +3145,12 @@ pub fn resolve_all(
     }
 
     let mut moved_count: i32 = 0;
-    let mut logical_zone_change_group =
-        crate::game::triggers::allocate_logical_zone_change_group(state, &matching);
+    let mut logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+        state,
+        &ZoneChangeAnnouncement::all(&matching, dest_zone),
+    );
+    let mut entrants =
+        crate::game::zone_pipeline::SimultaneousEntrants::of(&logical_zone_change_group);
     let logical_group_event_start = events.len();
     for (i, obj_id) in matching.iter().enumerate() {
         let obj_id = *obj_id;
@@ -3124,28 +3177,35 @@ pub fn resolve_all(
         );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
-        match crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
-            state,
-            obj_id,
-            per_object_origin,
-            dest_zone,
-            ability.source_id,
-            ability.duration.as_ref(),
-            false,
-            enter_tapped,
-            enters_attacking,
-            enters_under_player,
-            &enter_with_counters,
-            face_down_profile.as_ref(),
-            ability.context.face_down_in_exile,
-            track_exiled_by_source,
-            member_library_placement.clone(),
-            None,
-            Some(ability.controller),
-            // CR 608.2c: the controller follows the instruction, so it performs the move.
-            Some(ability.controller),
-            events,
-        ) {
+        // CR 603.6a: the member is delivered as part of the mass move's one event.
+        match entrants.deliver_member(state, |state| {
+            crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
+                state,
+                obj_id,
+                per_object_origin,
+                dest_zone,
+                ability.source_id,
+                ability.duration.as_ref(),
+                false,
+                enter_tapped,
+                enters_attacking,
+                // CR 508.4: the mass loop pushes its owner on `NeedsChoice`, and
+                // that owner resumes the paused member and seats it.
+                crate::game::zone_pipeline::PausedEntryAttackSeat::ResumingOwner,
+                enters_under_player,
+                &enter_with_counters,
+                face_down_profile.as_ref(),
+                ability.context.face_down_in_exile,
+                track_exiled_by_source,
+                member_library_placement.clone(),
+                None,
+                Some(ability.controller),
+                // CR 608.2c: the controller follows the instruction, so it performs
+                // the move.
+                Some(ability.controller),
+                events,
+            )
+        }) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                 logical_zone_change_group
                     .record_delivery_completion(obj_id, completion)
@@ -3918,8 +3978,17 @@ mod tests {
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
         };
-        let result =
-            process_one_zone_move_with_terminal(&mut state, &ctx, &member, &mut Vec::new());
+        let group = state.allocate_logical_zone_change_group(&ZoneChangeAnnouncement::all(
+            &[card],
+            Zone::Battlefield,
+        ));
+        let result = process_one_zone_move_with_terminal(
+            &mut state,
+            &mut crate::game::zone_pipeline::SimultaneousEntrants::of(&group),
+            &ctx,
+            &member,
+            &mut Vec::new(),
+        );
         assert!(matches!(
             result,
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(
@@ -10281,8 +10350,10 @@ mod tests {
         let hero = creature_in_graveyard(&mut state, 1, PlayerId(0));
         let soldier = creature_in_graveyard(&mut state, 2, PlayerId(0));
 
-        let logical_zone_change_group =
-            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[hero, soldier]);
+        let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            &mut state,
+            &ZoneChangeAnnouncement::all(&[hero, soldier], Zone::Battlefield),
+        );
         state.push_change_zone_iteration(crate::types::game_state::PendingChangeZoneIteration {
             pending_return_result_producer: None,
             logical_zone_change_group,

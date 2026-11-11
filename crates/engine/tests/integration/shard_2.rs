@@ -76,6 +76,7 @@ mod arena_of_glory_any_of_that_mana_haste;
 mod ark_of_hunger_play_from_graveyard_751;
 mod arm_the_cathars_conjunct_anaphor_p6;
 mod armored_kincaller_or_condition;
+mod as_enters_dice_counters;
 mod ashaya_nontoken_lands;
 mod ashes_of_the_fallen_owner_scope_5864;
 mod ashling_delayed_sacrifice_unless_pay;

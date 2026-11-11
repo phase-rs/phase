@@ -555,7 +555,8 @@ fn park_meld_entry_event(state: &mut GameState, source_id: ObjectId, events: &mu
             } if *object_id == source_id
         )
     }) {
-        state.deferred_entry_events.push(events.remove(index));
+        let event = events.remove(index);
+        crate::game::engine_replacement::park_pending_entry(state, event);
     }
 }
 
@@ -570,9 +571,17 @@ fn finalize_meld_entry_snapshot(
     let combat_status = crate::game::zones::capture_combat_status(state, source_id);
     refresh_meld_entry_records(state, source_id, combat_status, events);
 
-    let replay_deferred_entry = !state.deferred_entry_events.is_empty();
+    let replay_deferred_entry =
+        crate::game::engine_replacement::entry_park_holds_entrant(state, source_id);
     if replay_deferred_entry {
-        events.extend(state.deferred_entry_events.iter().cloned());
+        events.extend(
+            state
+                .parked_entry_events()
+                .filter(|parked| {
+                    crate::game::engine_replacement::is_entry_event_of(parked, source_id)
+                })
+                .cloned(),
+        );
     }
     // CR 701.42a: the pair is now one permanent on the battlefield. Announced
     // after its entry event so observers see the entry, then the meld.
@@ -618,10 +627,12 @@ fn refresh_meld_entry_records(
         *record = realized;
     };
 
-    for event in events
-        .iter_mut()
-        .chain(state.deferred_entry_events.iter_mut())
-    {
+    for event in events.iter_mut().chain(
+        state
+            .deferred_entry_events
+            .iter_mut()
+            .map(|parked| &mut parked.event),
+    ) {
         if let GameEvent::ZoneChanged {
             object_id,
             to: Zone::Battlefield,

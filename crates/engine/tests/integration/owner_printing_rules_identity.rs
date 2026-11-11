@@ -1651,7 +1651,7 @@ fn a_printing_never_chooses_between_rules_identical_occurrences() {
             (turn, twin_index),
             "{label} (iii): the stack carrier keeps its stamp"
         );
-        let GameEvent::ZoneChanged { record, .. } = &both.deferred_entry_events[0] else {
+        let GameEvent::ZoneChanged { record, .. } = &both.deferred_entry_events[0].event else {
             panic!("{label} (iii): the copy is a zone-change event");
         };
         assert_eq!(stamps(record), (turn, row), "{label} (iii): the copy too");
@@ -1871,7 +1871,7 @@ fn fast_paths_keep_their_structure() {
         })
         .expect("printing-only carriers of one key agree");
         assert_bound(&pair, turn, row, &format!("{label}: printing-only pair"));
-        let GameEvent::ZoneChanged { record, .. } = &pair.deferred_entry_events[0] else {
+        let GameEvent::ZoneChanged { record, .. } = &pair.deferred_entry_events[0].event else {
             panic!("{label}: the copy is a zone-change event");
         };
         assert_eq!(stamps(record), (turn, row));

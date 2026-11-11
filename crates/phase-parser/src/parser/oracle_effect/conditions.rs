@@ -8982,6 +8982,24 @@ fn parse_objects_share_quality_reference<'a>(
 }
 
 fn parse_die_result_condition(lower: &str) -> Option<AbilityCondition> {
+    // CR 706.2 + CR 608.2c: "the roll" a die-roll ability's body names is the
+    // roll it is resolving for — the triggering DieRolled event's result, which
+    // EventContextAmount reads (extract_amount_from_event); "If the roll was N
+    // or higher" gates the instruction it heads.
+    if let Ok((_, n)) = all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("the roll was "),
+        terminated(nom_primitives::parse_number, tag(" or higher")),
+    ))
+    .parse(lower)
+    {
+        return Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        });
+    }
     let rest = tag::<_, _, OracleError<'_>>("the result is ")
         .parse(lower)
         .ok()
@@ -15062,6 +15080,52 @@ mod tests {
                 destination: Some(Zone::Battlefield),
             }),
             None
+        );
+    }
+
+    /// CR 706.2 + CR 608.2c: "If the roll was N or higher" (Monoxa, Midway
+    /// Manager) reads the triggering die roll's result through the event-context
+    /// amount, `EventContextAmount >= N`, both as the building block and through
+    /// the production condition dispatcher. The grammar is exactly "the roll was
+    /// N or higher": a bare number or a trailing word stays unparsed, and the
+    /// "the result is" arm keeps its own reading.
+    #[test]
+    fn the_roll_was_n_or_higher_reads_the_triggering_roll() {
+        let at_least = |value: i32| AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value },
+        };
+        assert_eq!(
+            parse_die_result_condition("the roll was 4 or higher"),
+            Some(at_least(4))
+        );
+        assert_eq!(
+            parse_die_result_condition("the roll was 5 or higher"),
+            Some(at_least(5))
+        );
+        assert_eq!(
+            try_nom_condition_as_ability_condition(
+                "the roll was 4 or higher",
+                &mut ParseContext::default()
+            ),
+            Some(at_least(4)),
+            "the production dispatcher reaches the arm"
+        );
+        assert_eq!(parse_die_result_condition("the roll was 4"), None);
+        assert_eq!(
+            parse_die_result_condition("the roll was 4 or higher than"),
+            None
+        );
+        assert_eq!(
+            parse_die_result_condition("the result is 3 or less"),
+            Some(AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+                channel: DamageChannel::Total,
+            })
         );
     }
 }

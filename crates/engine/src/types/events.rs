@@ -1887,6 +1887,14 @@ pub enum GameEvent {
         player_id: PlayerId,
         sides: u8,
         result: Option<u8>,
+        /// CR 614.1c + CR 614.12 + CR 113.6 + CR 603.10: the entrant whose as-enters
+        /// replacement made this roll before its entry happened. Its abilities do not
+        /// function yet, so it alone is not an observer of this event. `None` for
+        /// every other roll. CR 603.2 + CR 603.10: the roll's observers are collected
+        /// when it is rolled, with the battlefield as it is then, and placed with its
+        /// entry; every other scan refuses a stamped roll.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pre_entry_source: Option<ObjectId>,
     },
     /// CR 706.6: A die roll ignored by a replacement (Barbarian Class, Pixie
     /// Guide, Wyll) — the NATURAL value, before any modifier (modifiers never

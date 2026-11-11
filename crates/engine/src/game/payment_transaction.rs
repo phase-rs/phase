@@ -220,7 +220,7 @@ fn replay(
 /// Collect them once while their claims and typed retention owners are live.
 fn collect_initial_payment_events(state: &mut GameState, events: &[GameEvent]) {
     let mut retained = engine_priority::retained_logical_zone_events(state);
-    retained.extend(state.deferred_entry_events.iter().cloned());
+    retained.extend(state.parked_entry_events().cloned());
     retained.extend(engine_priority::retained_cost_events(state));
     let claims = &state.consumed_before_priority_trigger_events;
     let ordinary = triggers::filter_already_collected_trigger_events_from(state, events, 0, claims);

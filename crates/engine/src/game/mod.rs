@@ -148,6 +148,7 @@ pub mod planechase;
 mod planechase_tests;
 pub mod planeswalker;
 pub mod players;
+pub(crate) mod pre_entry_view;
 pub(crate) mod precast_copy_shortcut;
 pub use precast_copy_shortcut::normalize_untrusted_restore;
 pub use precast_copy_shortcut::rekey_after_trusted_restore;
