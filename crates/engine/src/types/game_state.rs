@@ -35290,8 +35290,7 @@ impl GameState {
                 );
         }
         // CR 104.4b: stored Epic snapshots compare raw. Clearing their trigger
-        // identity would let a twice-normalized state (a ring prior the
-        // resource projection normalizes again) build the stack rename's table
+        // identity would let a twice-normalized state build the stack rename's table
         // from cleared snapshots and merge handles a once-normalized state
         // keeps apart; entries are append-only and immutable, so two samples
         // of one game hold equal entries at every common position anyway.

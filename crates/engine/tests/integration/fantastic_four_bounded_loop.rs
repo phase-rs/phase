@@ -27,18 +27,6 @@
 //! mechanism is measured and pinned by
 //! [`r1b_the_published_point_set_is_exactly_what_the_retained_window_announces`].
 //!
-//! ⚠ **THE PREVIOUS PARAGRAPH SAID THE OPPOSITE, AND IT WAS A MEASUREMENT OF A BLIND SPOT, NOT
-//! OF THE BOARD.** The CR 732.2a ring sampler used to fire only at `Priority { player ==
-//! active_player }` after a non-shrinking resolution, so on this board the retained frames
-//! alternated strictly between the `404` and `402` stack entries; `certified_period_touch`'s
-//! `announced` set is "entries in a frame's stack that were absent from the previous frame's",
-//! which made the `403` and `401` entries structurally invisible to conjunct (6) and to
-//! `bounded_cycle_pin_slots_for_window`. Torch and Reed resolve ACROSS a forced pre-priority
-//! window, and that window is exactly what the old site could not see. The second sampling site
-//! records a frame at the beat such a window is **ANSWERED**, so those two entries are now
-//! announced like the other two — a widening of what the offer can publish, not a change to
-//! what the board does.
-//!
 //! CONSEQUENCE, also measured and pinned
 //! ([`r2a_an_accepted_declaration_commits_exactly_n_cycles_because_reeds_may_is_announced`]): an
 //! accepted `Fixed(n)` declaration carrying the full published pin set now **commits exactly
@@ -663,7 +651,7 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 ///   commits **exactly `n`**, run at `n = 1` and `n = 3` so the two outcomes are
 ///   distinguishable — not zero;
 /// * the row that measured zero was `r2_an_accepted_declaration_commits_zero_cycles_…`, and it
-///   NO LONGER EXISTS. This branch RENAMED it to `r2a_…` once the answer-beat sampler announced
+///   NO LONGER EXISTS. This branch RENAMED it to `r2a_…` once the recorded period announced
 ///   the frame Reed's entry sits on, which removed the unannounced `may` the zero-commit was
 ///   fail-closing on. Any surviving cross-reference to `r2` resolves to nothing.
 ///
@@ -1878,7 +1866,7 @@ fn u6_the_declare_owner_firewall_holds_on_the_real_f4_offer() {
 ///
 /// CR 704.5a (a seat at 0 or less life has lost) + CR 732.2a (a shortcut describes a sequence
 /// that "may be legally taken", so every legal declaration must fit the bound, not only the one
-/// the window watched). Once the answer-beat sampling site announces Torch's CR 608.2b
+/// the window watched). Once the recorded period announces Torch's CR 608.2b
 /// `Targets` entry, `victim_slot` is non-empty and EVERY seat that slot can be re-aimed onto is
 /// charged its magnitude — including seats carrying no observed loss of their own, which is
 /// where the term is load-bearing and nothing else narrows.
@@ -2443,7 +2431,7 @@ fn m1_the_users_stored_auto_choice_board_offers_and_the_grant_commits_on_every_a
 /// that did not cover every per-iteration choice and cycle 0 aborted on the first uncovered
 /// one.
 ///
-/// With the answer-beat sampling site the announced set contains all three choices, so the
+/// The recorded period's announced set contains all three choices, so the
 /// published set covers the cycle and the grant commits. The row is the fix bar for this
 /// change: it asserts a commit on ALL FOUR axes and `n = 1` vs `n = 3` DISTINGUISHABLE.
 ///
@@ -2451,10 +2439,6 @@ fn m1_the_users_stored_auto_choice_board_offers_and_the_grant_commits_on_every_a
 ///   MODE1's field inverted — the two captures are one axis apart;
 /// * all three sources are asserted PUBLISHED, naming the cause of the commit;
 /// * every axis is asserted exactly, against the offer's own published per-cycle signature.
-///
-/// REVERT-PROBE: ablate the answer-beat sampling site ⇒ Reed's and Torch's entries are never
-/// announced ⇒ the published set shrinks ⇒ cycle 0 aborts on the uncovered `may` ⇒ every axis
-/// delta collapses to 0 ⇒ both the exact-axis assertions and the scaling arm FLIP.
 #[test]
 fn a1_the_users_accept_committed_nothing_board_now_commits_on_every_axis() {
     let identity = load_mode2();

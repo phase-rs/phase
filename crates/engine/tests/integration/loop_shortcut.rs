@@ -10989,7 +10989,7 @@ fn r5_reach_offer() -> (GameRunner, DecisionSlot, ObjectId, ObjectId, Vec<i32>) 
     };
     assert_eq!(proposer, P0, "P0 has priority and proposes the shortcut");
     // SHAPE PIN, re-derived: the Bond's `target opponent` trigger resolves across a
-    // `TriggerTargetSelection` window, so the answer-beat sampling site announces its entry
+    // `TriggerTargetSelection` window, so the recorded period announces its entry
     // and the offer publishes exactly ONE CR 608.2b `Targets` point for the Bond's own slot.
     // A drift here means the announced set changed shape and the callers must be re-derived,
     // not relaxed.
@@ -11439,8 +11439,8 @@ fn r28_a_declared_template_owning_another_seat_is_refused_at_declare() {
 /// the owner axis this row varies would not be the operative one.
 ///
 /// ⚠ **DISCLOSED REACHABILITY DOWNGRADE.** This arm used to run on the R5 offer's OWN empty
-/// schema — the empty-schema path was reached NATURALLY. It no longer is: the answer-beat
-/// sampling site announces the Bond's trigger entry, so the LIVE schema now publishes one
+/// schema — the empty-schema path was reached NATURALLY. It no longer is: the recorded period
+/// announces the Bond's trigger entry, so the LIVE schema now publishes one
 /// `Targets` point (`r5_reach_offer` pins that shape). BOTH arms below therefore STAGE the
 /// empty schema through `r28_empty_schema_offer`, the same idiom `r28_nonempty_schema_offer`
 /// uses in the other direction. What survives the downgrade: `offer.proposer` — the firewall's
@@ -11760,7 +11760,7 @@ fn an_over_cap_count_is_refused_at_consumption() {
 /// not.
 ///
 /// The R5 offer is exactly the board that MOVED: it used to publish nothing (so the `Fixed`
-/// candidate was emitted), and the answer-beat sampling site now announces the Bond's trigger
+/// candidate was emitted), and the recorded period now announces the Bond's trigger
 /// entry, so it publishes one `Targets` point. This row is the pin for that transition.
 ///
 /// * **arm (a), the live board:** one published point, and the offer carries the engine's own
@@ -12026,8 +12026,6 @@ fn d7_a_pre_declaration_save_decodes_with_no_declaration() {
          {decoded:?}"
     );
 }
-
-// ───── PR #7005 maintainer item: the answer-beat sampler records the SYNCHRONIZED window ─────
 
 // ───── #7023 maintainer item: a beat's minted frames are a MEMBERSHIP set, not a length delta ─────
 

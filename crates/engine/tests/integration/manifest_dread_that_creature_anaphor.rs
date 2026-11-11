@@ -1163,8 +1163,8 @@ fn stolen_uniform(flicker: bool) -> (GameRunner, ObjectId, ObjectId, Vec<GameEve
     let equipment = scenario
         .add_artifact_from_oracle(
             P0,
-            "Plain Sword",
-            "Equipped creature gets +1/+1.\nEquip {1}",
+            "Short Sword",
+            "Equipped creature gets +1/+1.\nEquip {1} ({1}: Attach to target creature you control. Equip only as a sorcery.)",
         )
         .with_subtypes(vec!["Equipment"])
         .id();

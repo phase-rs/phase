@@ -5,12 +5,9 @@
 //! growing charge is a PRESERVED counter, the constant-depth
 //! `loop_states_equal_modulo_resources` disjunct FAILS on this fixture.
 //!
-//! The live proliferate loop (Pentad Prism cast + Kilo/Freed/Relic) is NOT sampled by
-//! construction — a `ProliferateChoice` beat every cycle hits the sampler's ring-CLEAR
-//! arm (see `loop_shortcut.rs` docs). That acceptance path is covered OFFLINE by
-//! `drive_offline_pentad_prism` in `corpus_tests.rs`. This file uses the sampler-visible
-//! shape: a self-refilling trigger cascade whose per-cycle charge-put resolves with no
-//! prompt.
+//! The live proliferate loop (Pentad Prism cast + Kilo/Freed/Relic) is covered OFFLINE by
+//! `drive_offline_pentad_prism` in `corpus_tests.rs`. This file uses a self-refilling trigger
+//! cascade whose per-cycle charge-put resolves with no prompt.
 
 use engine::game::derived_views::{CounterRowView, DisplayMagnitude, ObjectCounterDisplay};
 use engine::game::scenario::{GameRunner, GameScenario};
@@ -29,9 +26,7 @@ const P0: PlayerId = PlayerId(0);
 /// A SINGLE self-refilling trigger that both grows a `Generic` charge counter and
 /// re-gains life in ONE resolution. The trailing "You gain 1 life." re-triggers the
 /// same ability (like `SELF_LIFE_ENGINE`), so the stack stays NON-SHRINKING across the
-/// resolution — the shape the live loop-detect sampler records. A separate leaf
-/// charge-put trigger would shrink the stack on resolution and hit the sampler's
-/// ring-CLEAR arm, so the counter-put must ride the self-refilling resolution itself.
+/// resolution.
 const CHARGE_LIFE_ENGINE: &str =
     "Whenever you gain life, put a charge counter on this creature. You gain 1 life.";
 const KICKOFF: &str = "You gain 1 life.";
@@ -49,7 +44,7 @@ fn charge_of(runner: &GameRunner, id: ObjectId) -> u32 {
 /// 2-player OPTIONAL beneficial cascade controlled by P0 that grows a `Generic` charge
 /// counter each cycle. One creature carries `CHARGE_LIFE_ENGINE` (a single self-refilling
 /// trigger that puts a charge counter AND re-gains life in one resolution — the
-/// sampler-visible non-shrinking shape). P1 holds a castable Bolt off an untapped Mountain
+/// non-shrinking shape). P1 holds a castable Bolt off an untapped Mountain
 /// (a meaningful priority action) so the loop is OPTIONAL (`mandatory == false`) ⇒ Path C,
 /// not the Path-B draw. Nobody loses life ⇒ Path A finds no faller. Returns runner +
 /// (kickoff sorcery id, engine creature id — the charge-counter bearer).
@@ -172,7 +167,7 @@ fn an_out_only_charge_growth_loop_is_offered_not_marked() {
     );
 }
 
-/// Under `LoopDetectionMode::Off` the charge-growth fixture is neither marked nor offered and never ends, because the sampler records nothing under Off.
+/// Under `LoopDetectionMode::Off` the charge-growth fixture is neither marked nor offered and never ends, because the play trace records nothing under Off.
 #[test]
 fn live_charge_growth_off_never_marks() {
     let (mut runner, kickoff, rider) = setup_2p_optional_charge_growth(LoopDetectionMode::Off);
