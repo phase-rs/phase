@@ -25,8 +25,8 @@
 //! ("Whenever an ability of equipped creature is activated, if it isn't a mana
 //! ability, copy that ability.") copying such an untap.
 //!
-//! What keeps the pass: a stunned source (CR 122.1d), a source whose only mana
-//! ability removes it, an untap of another permanent (Arbor Elf, Freed from the Real), an
+//! What keeps the pass: a stunned source (CR 122.1d), a phased-out source
+//! (CR 702.26b), a source whose only mana ability removes it, an untap of another permanent (Arbor Elf, Freed from the Real), an
 //! ability that does more than untap (Eater of the Dead, Harsh Deceiver), and
 //! a trigger (Wilderness Reclamation: "At the beginning of your end step, untap
 //! all lands you control."), which goes on the stack with no player act.
@@ -815,7 +815,7 @@ fn a_costed_source_is_read_without_running_it() {
             "Prism: {prism}: no copy of the game"
         );
         assert_eq!(
-            perf_counters::ability_mana_auto_tap_probe_snapshot().state_clones,
+            perf_counters::bounded_reader_snapshot().state_clones,
             0,
             "Prism: {prism}: no auto-payment run"
         );
@@ -838,9 +838,9 @@ fn welder_drum_hold_work(
     crowded: bool,
 ) -> (
     bool,
-    perf_counters::AbilityManaAutoTapProbeCounters,
+    perf_counters::BoundedReaderCounters,
     perf_counters::PerfCounterSnapshot,
-    perf_counters::AbilityManaAutoTapProbeCounters,
+    perf_counters::BoundedReaderCounters,
 ) {
     let mut scenario = main_phase_scenario();
     let welder = scenario.add_real_card(P0, "Myr Welder", Zone::Battlefield, db);
@@ -869,12 +869,12 @@ fn welder_drum_hold_work(
     let actions = legal_actions(state);
     perf_counters::reset();
     let holds = !auto_pass_recommended_for_viewer(state, P0, &actions);
-    let hold_probe = perf_counters::ability_mana_auto_tap_probe_snapshot();
+    let hold_probe = perf_counters::bounded_reader_snapshot();
     let hold_work = perf_counters::snapshot();
     // The reach control: the live listing checks the borrowed Drum's cost.
     perf_counters::reset();
     let _ = mana_action(&runner, welder);
-    let listing_probe = perf_counters::ability_mana_auto_tap_probe_snapshot();
+    let listing_probe = perf_counters::bounded_reader_snapshot();
     (holds, hold_probe, hold_work, listing_probe)
 }
 
@@ -935,6 +935,7 @@ fn a_phased_out_source_keeps_the_pass() {
     }
     let untap = untap_ability_index(&runner, monolith);
     activate(&mut runner, monolith, untap, &[]);
+    assert!(mana_action(&runner, monolith).is_some());
     assert!(!viewer_recommends_pass(&runner), "the window holds first");
 
     runner.cast(protection).commit();

@@ -130,7 +130,7 @@ pub struct DeclaredLifeChargeCounters {
 /// [`PerfCounterSnapshot`] for the same reason as the counter sets above.
 #[cfg(feature = "test-support")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct AbilityManaAutoTapProbeCounters {
+pub struct BoundedReaderCounters {
     pub state_clones: u64,
     pub tap_creature_cost_visits: u64,
 }
@@ -561,8 +561,8 @@ thread_local! {
         Cell::new(DeclaredLifeChargeCounters { reads: 0 })
     };
     #[cfg(feature = "test-support")]
-    static ABILITY_MANA_AUTO_TAP_PROBE_COUNTERS: Cell<AbilityManaAutoTapProbeCounters> = const {
-        Cell::new(AbilityManaAutoTapProbeCounters {
+    static BOUNDED_READER_COUNTERS: Cell<BoundedReaderCounters> = const {
+        Cell::new(BoundedReaderCounters {
             state_clones: 0,
             tap_creature_cost_visits: 0,
         })
@@ -770,7 +770,7 @@ pub fn record_declared_life_charge_read() {
 /// Recorded once per game copy the ability-mana affordability probe takes.
 #[cfg(feature = "test-support")]
 pub fn record_ability_mana_auto_tap_probe_clone() {
-    ABILITY_MANA_AUTO_TAP_PROBE_COUNTERS.with(|cell| {
+    BOUNDED_READER_COUNTERS.with(|cell| {
         let mut counters = cell.get();
         counters.state_clones += 1;
         cell.set(counters);
@@ -781,7 +781,7 @@ pub fn record_ability_mana_auto_tap_probe_clone() {
 /// visits.
 #[cfg(feature = "test-support")]
 pub fn record_tap_creature_cost_visit() {
-    ABILITY_MANA_AUTO_TAP_PROBE_COUNTERS.with(|cell| {
+    BOUNDED_READER_COUNTERS.with(|cell| {
         let mut counters = cell.get();
         counters.tap_creature_cost_visits += 1;
         cell.set(counters);
@@ -1059,8 +1059,8 @@ pub fn declared_life_charge_snapshot() -> DeclaredLifeChargeCounters {
 }
 
 #[cfg(feature = "test-support")]
-pub fn ability_mana_auto_tap_probe_snapshot() -> AbilityManaAutoTapProbeCounters {
-    ABILITY_MANA_AUTO_TAP_PROBE_COUNTERS.with(Cell::get)
+pub fn bounded_reader_snapshot() -> BoundedReaderCounters {
+    BOUNDED_READER_COUNTERS.with(Cell::get)
 }
 
 /// One targeted-cast offer witness run: its spend, and whether it certified.
@@ -1404,8 +1404,7 @@ pub fn reset() {
     #[cfg(feature = "test-support")]
     reset_declared_life_charge_counters();
     #[cfg(feature = "test-support")]
-    ABILITY_MANA_AUTO_TAP_PROBE_COUNTERS
-        .with(|counters| counters.set(AbilityManaAutoTapProbeCounters::default()));
+    BOUNDED_READER_COUNTERS.with(|counters| counters.set(BoundedReaderCounters::default()));
     #[cfg(feature = "test-support")]
     ATTACK_DECLARATION_SOLVER_COUNTERS
         .with(|counters| counters.set(AttackDeclarationSolverCounters::default()));
