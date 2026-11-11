@@ -5504,8 +5504,8 @@ fn parse_enters_with_keyword_rider_candidate(input: &str) -> OracleResult<'_, &s
 /// Quote-aware throughout: the sentence clip runs on the length-preserving
 /// quote mask, so a granted ability's own period ("…Regenerate this
 /// creature.\"") does not end the entering sentence. A marker with no closing
-/// quote, a span that classifies to nothing, or a quoted span that is not a
-/// rider at all fails closed (`EntersWithGap::Clause`) rather than dropping
+/// quote, a span that classifies to nothing, or an unconsumed span inside the
+/// rider region fails closed (`EntersWithGap::Clause`) rather than dropping
 /// printed text — the counters-only claim was the defect this function exists
 /// to fix.
 ///
@@ -5513,6 +5513,13 @@ fn parse_enters_with_keyword_rider_candidate(input: &str) -> OracleResult<'_, &s
 /// authority verbatim (mana symbols, descriptions), and both its self-reference
 /// forms ("this creature" in direct calls, `~` once `parse_oracle_text` has
 /// normalized) classify identically.
+///
+/// Only the rider region — at and after the first ` and with ` — is rider
+/// text this scan owns. A quoted span inside the counter clause itself
+/// (`Baron Von Count enters with a doom counter on "5."`) belongs to the
+/// counter readers; policing it here fails closed a line the counter clause
+/// reads fine. No rider marker, no riders: the scan returns before the span
+/// count so a non-rider span can never trip the guard.
 fn parse_enters_with_quoted_riders(
     text: &str,
 ) -> Result<Vec<ContinuousModification>, EntersWithGap> {
@@ -5522,9 +5529,15 @@ fn parse_enters_with_quoted_riders(
         return Ok(Vec::new());
     }
     let sentence = enters_with_quoted_rider_sentence(text);
+    let region = match take_until::<_, _, OracleError<'_>>(ENTERS_WITH_KEYWORD_RIDER_MARKER)
+        .parse(sentence)
+    {
+        Ok((region, _)) => region,
+        Err(_) => return Ok(Vec::new()),
+    };
     let mut modifications = Vec::new();
     let mut consumed_spans = 0usize;
-    let mut remaining = sentence;
+    let mut remaining = region;
     while let Ok((after_marker, _)) = preceded(
         take_until::<_, _, OracleError<'_>>(ENTERS_WITH_QUOTED_RIDER_MARKER),
         tag::<_, _, OracleError<'_>>(ENTERS_WITH_QUOTED_RIDER_MARKER),
@@ -5548,10 +5561,11 @@ fn parse_enters_with_quoted_riders(
         consumed_spans += 1;
         remaining = after_span;
     }
-    // CR 614.1c: every quoted span in the entering sentence is rider text or a
+    // CR 614.1c: every quoted span in the RIDER REGION is rider text or a
     // gap — a span the marker loop did not consume would otherwise be dropped
-    // while the line reads supported.
-    if count_double_quoted_spans(sentence) != consumed_spans {
+    // while the line reads supported. Spans before the first rider marker are
+    // counter-clause text (Baron Von Count's "5."), owned by other readers.
+    if count_double_quoted_spans(region) != consumed_spans {
         return Err(EntersWithGap::Clause);
     }
     Ok(modifications)
@@ -33906,7 +33920,7 @@ mod tests {
 
     /// CR 614.1c: a quoted rider the extractor cannot read fails the clause
     /// closed — the counters-only claim must not come back through a malformed
-    /// span, an empty span, or a span that is not a rider.
+    /// span, an empty span, or a stray span inside the rider region.
     #[test]
     fn enters_with_quoted_rider_unread_fails_closed() {
         // `~`-normalized: the typed outcome takes normalized input, like every
@@ -33917,8 +33931,8 @@ mod tests {
             "If ~ was kicked, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate ~.",
             // Empty span classifies to nothing.
             "If ~ was kicked, it enters with a +1/+1 counter on it and with \"\".",
-            // A quoted span that is not a rider at all.
-            "~ enters with a +1/+1 counter on it \"mysterious words\".",
+            // A stray span inside the rider region the marker loop never consumes.
+            "If ~ was kicked, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate ~.\" \"stray words\".",
         ] {
             assert_eq!(
                 enters_with_counters_outcome(&line.to_lowercase(), line).err(),
@@ -33942,6 +33956,38 @@ mod tests {
             "Test Creature"
         )
         .is_some());
+    }
+
+    /// CR 614.1c: a quoted span inside the counter clause is not a rider.
+    /// Baron Von Count's verbatim line carries `"5."` (the doom counter's
+    /// numeral) with no rider marker; the quoted scan must return no riders
+    /// and leave the line claimed with its doom counter — the span-count
+    /// guard's first version failed this line closed (PR #10722 regression).
+    #[test]
+    fn baron_von_count_counter_clause_quote_is_not_a_rider() {
+        assert_eq!(
+            parse_enters_with_quoted_riders("Baron Von Count enters with a doom counter on \"5.\"")
+                .expect("no rider marker, no riders"),
+            Vec::new()
+        );
+        let def = parse_replacement_line(
+            "Baron Von Count enters with a doom counter on \"5.\"",
+            "Baron Von Count",
+        )
+        .expect("the counter-clause quote must not fail the line closed");
+        assert_eq!(
+            put_counters_in_chain(&def),
+            vec![(
+                CounterType::Generic("doom".to_string()),
+                QuantityExpr::Fixed { value: 1 }
+            )],
+            "doom counter half"
+        );
+        assert!(
+            quoted_entry_grants(&def).is_empty(),
+            "no riders: got {:?}",
+            quoted_entry_grants(&def)
+        );
     }
 
     /// Helper level: the quoted scan lifts every ` and with "<ability>"` rider
