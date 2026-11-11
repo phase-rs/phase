@@ -55,6 +55,7 @@ const ARCHELOS: &str = "Archelos, Lagoon Mystic";
 const IMPOSING_SOVEREIGN: &str = "Imposing Sovereign";
 const GRUMGULLY: &str = "Grumgully, the Generous";
 const PARALLEL_LIVES: &str = "Parallel Lives";
+const DOUBLING_SEASON: &str = "Doubling Season";
 const CHATTERFANG: &str = "Chatterfang, Squirrel General";
 const TRISKELION: &str = "Triskelion";
 const BEARS: &str = "Grizzly Bears";
@@ -72,7 +73,7 @@ const SETUP_FIRST: &[&str] = &[QUICKSILVER_GARGANTUAN];
 /// the +1), Imposing Sovereign first, then Grumgully.
 const PREFERENCE: &[&str] = &[HARDENED_SCALES, IMPOSING_SOVEREIGN, GRUMGULLY];
 
-/// The answer bound: the most prompts a measured board raises is eight.
+/// The answer bound: the most prompts a measured board raises is fifteen (R12c).
 const MAX_PROMPTS: usize = 24;
 
 /// Twinflame {1}{R}, plus Strive {2}{R} per target beyond the first.
@@ -865,6 +866,81 @@ fn r12_parallel_lives_doubled_liminal_batches_under_entry_ordering() {
     );
     assert_eq!(sorted(last_created), sorted(tokens));
     assert_referent_is_every_token(&driven);
+    assert_end_step_exiles_every_token(driven);
+}
+
+/// R12c: Parallel Lives and Doubling Season quadruple three liminal Bears
+/// batches (twelve copies), and every entry pauses on the Archelos / Imposing
+/// Sovereign ordering, so each batch resumes repeatedly with a growing ledger.
+/// Twinflame ruling: "you'll exile each of them." At every prompt the owner's
+/// list holds each copy so far exactly once, in creation order.
+#[test]
+fn r12c_doubled_twice_liminal_batches_resume_repeatedly_without_duplicates() {
+    let board = [
+        (P0, PARALLEL_LIVES),
+        (P0, DOUBLING_SEASON),
+        (P0, ARCHELOS),
+        (P1, IMPOSING_SOVEREIGN),
+    ];
+    // The owner's list at every prompt answered while it is parked.
+    let mut owner_snapshots: Vec<Vec<ObjectId>> = Vec::new();
+    let driven = cast_twinflame_with(&[BEARS, BEARS, BEARS], &board, |waiting, driven| {
+        if let Some(ids) = copy_token_owner_ids(&driven.runner) {
+            owner_snapshots.push(ids);
+        }
+        default_answer(waiting, driven)
+    });
+    let Some(driven) = driven else {
+        return;
+    };
+    let tokens = driven.created_tokens();
+    assert_eq!(
+        tokens.len(),
+        12,
+        "REACH-GUARD: Parallel Lives and Doubling Season must each double all three copies"
+    );
+    let entry_orderings = driven
+        .orderings
+        .iter()
+        .filter(|names| {
+            let mut names: Vec<&str> = names.iter().map(String::as_str).collect();
+            names.sort_unstable();
+            names == [ARCHELOS, IMPOSING_SOVEREIGN]
+        })
+        .count();
+    assert!(
+        entry_orderings >= tokens.len(),
+        "REACH-GUARD: at least one entry ordering per token, saw {entry_orderings}"
+    );
+    assert!(
+        owner_snapshots
+            .iter()
+            .any(|ids| ids.len() > 4 && ids.len() % 4 != 0),
+        "REACH-GUARD: a later batch must resume while the owner lists an earlier batch and \
+         part of its own, saw {owner_snapshots:?}"
+    );
+    for snapshot in &owner_snapshots {
+        assert_eq!(
+            Some(snapshot.as_slice()),
+            tokens.get(..snapshot.len()),
+            "every resume leaves the owner listing each copy so far once, in creation order"
+        );
+    }
+    assert_eq!(
+        driven.runner.state().last_created_token_ids,
+        tokens,
+        "LastCreated must list all twelve copies in creation order, once"
+    );
+    let members = assert_referent_is_every_token(&driven);
+    assert_eq!(
+        members.iter().collect::<HashSet<_>>().len(),
+        members.len(),
+        "the referent lists each copy once"
+    );
+    assert_eq!(
+        members, tokens,
+        "the referent lists the copies in creation order"
+    );
     assert_end_step_exiles_every_token(driven);
 }
 
