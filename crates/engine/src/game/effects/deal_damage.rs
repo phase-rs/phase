@@ -1102,7 +1102,7 @@ fn record_player_damage_at_counter_pause(
 
 /// CR 120.1: push the `DamageDealt` event and record the damage for "was
 /// dealt damage by" condition queries. `dealt_amount` gates recording (a
-/// nonzero amount actually dealt per CR 120.3/120.6); `record_amount` /
+/// nonzero amount actually dealt per CR 120.3 / CR 120.4b); `record_amount` /
 /// `record_excess` are the lethal-split figures the record carries. Shared by
 /// the synchronous path, the post-loss resume drain, and the combat batch
 /// remnant resume so a paused-then-resumed leg emits and records exactly what
@@ -1284,8 +1284,8 @@ pub(crate) fn emit_damage_dealt_and_record(
 /// dealt combat damage yet" protection, e.g. hexproof per CR 702.11b, drops
 /// rather than staying undeserved for the rest of the game); it writes no new
 /// state. Pre-field saves (records without `source_incarnation`) therefore
-/// lose the a2 exactness ("entered this turn, noncombat only, stays
-/// hexproof") and fall to policy A. `DamageKindFilter::Any` readers consult
+/// lose the exactness of the "entered this turn, noncombat only: stays
+/// hexproof" case and fall to policy A. `DamageKindFilter::Any` readers consult
 /// only the Any set, so they are unaffected.
 ///
 /// The direct `GameState` serde path (`GameStateDecodeMode::DirectCurrentRaw`)

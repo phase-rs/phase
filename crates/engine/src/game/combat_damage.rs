@@ -364,8 +364,9 @@ pub(crate) fn resume_pending_combat_lifelink(
         .extend_from_slice(&events[action_event_start..]);
     let owed_from = record.batch_events.len();
     let sub_step = record.sub_step;
-    // CR 510.2 + CR 616.1: a batch parked on a LEG's life-loss pause completes
-    // its Phase C tail before the lifelink drain runs. The paused leg's loss
+    // CR 510.2 + CR 616.1: a batch parked on a LEG's life-loss pause or
+    // poison-counter result pause completes its Phase C tail before the
+    // lifelink drain runs. The paused leg's loss
     // fully settled (the funnel only resumes here once the batch drain retires
     // with no re-park). A re-pause re-parks with the batch so far, mirroring
     // the lifelink arm below.
@@ -1827,9 +1828,11 @@ fn complete_combat_phase_c_remnant(
 ) -> RemnantOutcome {
     // The paused leg's lifelink share and bookkeeping folded eagerly at park
     // time; only its event + record were deferred (sync order: after the loss
-    // settles). A missing stash is unreachable — the funnel skips combat
-    // stashes, so nothing else consumes it — but continuing with the remaining
-    // legs (rather than panicking) keeps a corrupt save resumable.
+    // settles). A missing stash is expected when the paused leg paused on its
+    // poison-counter result (infect/toxic stash nothing; the damage fact was
+    // recorded at the pause). Otherwise it is unreachable, because the funnel
+    // skips combat stashes. Continuing with the remaining legs (rather than
+    // panicking) keeps a corrupt save resumable.
     if let Some(stashed) = state
         .pending_damage_post_loss
         .take_if(|stashed| stashed.is_combat)

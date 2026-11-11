@@ -20134,8 +20134,10 @@ pub type PerPlayerCombatDamage = (PlayerId, Vec<(ObjectId, u32)>, u32);
 
 /// CR 510.2 + CR 616.1: the unfinished Phase C tail of a combat-damage batch
 /// whose leg paused on a life-loss replacement choice (the Horde damage→mill
-/// redirect parking a mill/batch choice, or co-applicable loss replacements).
-/// The paused leg itself rides `pending_damage_post_loss` (combat-flagged);
+/// redirect parking a mill/batch choice, or co-applicable loss replacements)
+/// or on a poison-counter result choice (infect/toxic: no stash — the damage
+/// fact was recorded at the pause).
+/// A life-loss pause's leg rides `pending_damage_post_loss` (combat-flagged);
 /// its lifelink share and combat bookkeeping were folded into the accumulators
 /// below at park time (amounts are post-replacement and order-free), so the
 /// resume only owes its `DamageDealt` event + CR 120.1 record (sync order:
@@ -20199,8 +20201,10 @@ pub struct PendingCombatLifelink {
     /// `combat.first_strike_done` mutates during the resume.
     pub sub_step: CombatDamageSubStep,
     /// CR 510.2 + CR 616.1: the unfinished Phase C tail, present only when
-    /// the batch parked on a LEG's life-loss pause (rather than a lifelink
-    /// gain's). The resume completes it before draining `remaining`.
+    /// the batch parked on a LEG's life-loss pause or poison-counter result
+    /// pause (infect/toxic; no stash — the damage fact was recorded at the
+    /// pause) rather than a lifelink gain's. The resume completes it before
+    /// draining `remaining`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase_c_remnant: Option<PendingCombatPhaseCRemnant>,
 }
