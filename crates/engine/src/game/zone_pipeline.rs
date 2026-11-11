@@ -2043,16 +2043,11 @@ fn mark_staged_member_preempted(owner: &mut PendingBatchDeliveries, index: usize
     let Some(member) = staged.members.get_mut(index) else {
         return;
     };
-    let identity = member.identity;
     member.state = StagedBatchMemberState::Abandoned;
     member.approved_event = None;
     member.pending_outcome = None;
     member.terminal = None;
     member.approved_post_replacement = None;
-    owner
-        .logical_zone_change_group
-        .record_preempted(identity)
-        .expect("the preempted member owns a pending logical slot");
 }
 
 /// CR 616.1: consult one member. Approval never delivers: an
@@ -3164,7 +3159,7 @@ fn deliver_staged_batch_entry(
         StagedStop::Delivered => {
             // The caller completes the logical group; record every terminal
             // first so `validate_complete` never sees a Pending slot.
-            record_staged_terminals_for_settlement(&mut owner);
+            record_staged_terminals_for_settlement(&mut owner, events.iter());
             BatchDeliveryResult::Done(Box::new(owner.logical_zone_change_group))
         }
     }
@@ -3213,7 +3208,7 @@ pub(crate) fn deliver_staged_destroy_batch(
             StagedFamilyOutcome::Paused
         }
         StagedStop::Delivered => {
-            record_staged_terminals_for_settlement(&mut owner);
+            record_staged_terminals_for_settlement(&mut owner, &events[event_start..]);
             let deferred_events = owner.deferred_events.clone();
             // CR 608.2c + CR 603.2c: settle only this Destroy instruction's
             // newly emitted slice. Settling the shared action buffer would
@@ -3289,7 +3284,7 @@ pub(crate) fn deliver_staged_change_zone_batch(
                 retired,
                 "a synchronously delivered staged ChangeZone retires its marker"
             );
-            record_staged_terminals_for_settlement(&mut owner);
+            record_staged_terminals_for_settlement(&mut owner, &events[event_start..]);
             let mut group = owner.logical_zone_change_group;
             let members = owner
                 .staged
@@ -3944,33 +3939,59 @@ fn reconcile_staged_owner(
 /// group's final collection. `Moved` is recorded by `append_delivery_events`
 /// from the actual `ZoneChanged`; a slot that already carries a terminal (a
 /// resumed delivery pause) is never recorded twice.
-fn record_staged_terminals_for_settlement(pending: &mut PendingBatchDeliveries) {
+/// CR 603.10a: finalize each staged member's battlefield slot from what
+/// actually happened. A member whose object moved inside this logical action
+/// (its occurrence is in the final segment, or was retained at an earlier
+/// pause) is finalized by that occurrence, never by the staged `Remained` or
+/// `Preempted` record; only a still-pending slot with no occurrence takes the
+/// staged terminal. Members with no battlefield slot have nothing to record.
+fn record_staged_terminals_for_settlement<'e>(
+    pending: &mut PendingBatchDeliveries,
+    final_events: impl IntoIterator<Item = &'e GameEvent>,
+) {
     let Some(staged) = pending.staged.as_ref() else {
         return;
     };
-    let terminals: Vec<(ObjectIncarnationRef, ZoneMoveCompletion)> = staged
+    let occurred: HashSet<ObjectIncarnationRef> = final_events
+        .into_iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged { record, .. } => record
+                .trigger_source_context()
+                .map(|context| context.identity.reference),
+            _ => None,
+        })
+        .collect();
+    let terminals: Vec<(ObjectIncarnationRef, Option<ZoneMoveCompletion>)> = staged
         .members
         .iter()
-        .filter_map(|member| member.terminal.map(|terminal| (member.identity, terminal)))
+        .filter_map(|member| match (member.state, member.terminal) {
+            (_, Some(terminal)) => Some((member.identity, Some(terminal))),
+            // CR 400.7 + CR 603.7c: preempted before consultation.
+            (StagedBatchMemberState::Abandoned, None) => Some((member.identity, None)),
+            _ => None,
+        })
         .collect();
+    let group = &mut pending.logical_zone_change_group;
     for (identity, terminal) in terminals {
-        let Some(index) = pending
-            .logical_zone_change_group
+        let Some(index) = group
             .prospective_battlefield_members
             .iter()
             .position(|candidate| candidate.identity == identity)
         else {
             continue;
         };
-        if matches!(
-            pending.logical_zone_change_group.terminal_outcomes[index],
+        if !matches!(
+            group.terminal_outcomes[index],
             crate::types::game_state::LogicalZoneChangeTerminalOutcome::Pending
-        ) {
-            pending
-                .logical_zone_change_group
-                .record_delivery_completion(identity.object_id, terminal)
-                .expect("staged settlement records a pending terminal");
+        ) || occurred.contains(&identity)
+        {
+            continue;
         }
+        match terminal {
+            Some(terminal) => group.record_delivery_completion(identity.object_id, terminal),
+            None => group.record_preempted(identity),
+        }
+        .expect("staged settlement records a pending terminal");
     }
 }
 
@@ -3985,7 +4006,10 @@ fn settle_batch_owner(
     let component_delivery_parent = pending.component_delivery_parent.clone();
     let paused_current = pending.paused_current.clone();
     let completion = pending.completion.clone();
-    record_staged_terminals_for_settlement(&mut pending);
+    record_staged_terminals_for_settlement(
+        &mut pending,
+        deferred_events.iter().chain(events.iter()),
+    );
     crate::game::triggers::complete_logical_zone_trigger_collection(
         state,
         &mut pending.logical_zone_change_group,

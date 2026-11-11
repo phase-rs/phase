@@ -3233,3 +3233,74 @@ fn resolve_to_first_replacement_choice(runner: &mut GameRunner) {
     panic!("the destruction never reached a replacement choice");
 }
 
+const AKROMAS_VENGEANCE: &str =
+    "Destroy all artifacts, creatures, and enchantments.\nCycling {3} ({3}, Discard this card: Draw a card.)";
+
+/// CR 702.89a + CR 701.8a + CR 603.10a: Akroma's Vengeance destroys the
+/// creature and its Hyena Umbra at once. The Umbra's armor replaces the
+/// creature's destruction by destroying the Aura, so the Aura's own slot has
+/// exactly one occurrence (it is put into the graveyard once) whether the Aura
+/// is consulted before or after the creature it protects.
+#[test]
+fn akromas_vengeance_umbra_member_gets_one_terminal_in_either_order() {
+    for aura_first in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let add_umbra = |scenario: &mut GameScenario| {
+            scenario
+                .add_enchantment_from_oracle(P1, "Hyena Umbra", HYENA_UMBRA)
+                .with_subtypes(vec!["Aura"])
+                .id()
+        };
+        let (umbra, host) = if aura_first {
+            let umbra = add_umbra(&mut scenario);
+            (umbra, scenario.add_creature(P1, "Grizzly Bears", 2, 2).id())
+        } else {
+            let host = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+            (add_umbra(&mut scenario), host)
+        };
+        let bystander = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+        let vengeance = zero_cost_spell(&mut scenario, "Akroma's Vengeance", AKROMAS_VENGEANCE);
+        let mut runner = scenario.build();
+        // Infrastructure exception: preattach the full-Oracle Aura instead of
+        // casting it; the destruction population is produced by the public cast.
+        engine::game::effects::attach::attach_to(runner.state_mut(), umbra, host);
+        engine::game::layers::flush_layers(runner.state_mut());
+
+        let outcome = runner.cast(vengeance).resolve();
+        let state = runner.state();
+        assert_eq!(
+            state.objects[&host].zone,
+            Zone::Battlefield,
+            "aura_first={aura_first}"
+        );
+        assert_eq!(
+            state.objects[&umbra].zone,
+            Zone::Graveyard,
+            "aura_first={aura_first}"
+        );
+        assert_eq!(state.objects[&bystander].zone, Zone::Graveyard);
+        assert_eq!(
+            outcome
+                .events()
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::ZoneChanged { object_id, .. } if *object_id == umbra
+                ))
+                .count(),
+            1,
+            "aura_first={aura_first}: the Aura is put into the graveyard once"
+        );
+        assert!(!outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::CreatureDestroyed { object_id, .. } if *object_id == host
+        )));
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolution_stack.is_empty());
+        state
+            .resolution_stack
+            .validate_at_rest(&state.waiting_for)
+            .expect("the population settles");
+    }
+}

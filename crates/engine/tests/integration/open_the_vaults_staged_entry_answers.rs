@@ -439,3 +439,57 @@ fn fu7_foreign_owned_mox_does_not_reassign_departed_beacon_payer() {
     assert!(!runner.state().replacement_may_cost_paused);
     assert_settled(&runner);
 }
+
+/// CR 400.7 + CR 603.7c: a graveyard member that left while an earlier member's
+/// entry ordering was pending is never returned, and it has no battlefield
+/// occurrence slot to finalize. Open the Vaults returns both Ornithopters from
+/// P0's graveyard; Root Maze and Archelos make each entry an ordering choice.
+#[test]
+fn open_the_vaults_skips_a_graveyard_member_that_left_during_the_first_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let [first, later] = [0, 1].map(|_| {
+        scenario
+            .add_creature_to_graveyard(P0, "Ornithopter", 0, 2)
+            .as_artifact_creature()
+            .from_oracle_text("Flying")
+            .id()
+    });
+    let root_maze = scenario
+        .add_enchantment_from_oracle(P0, "Root Maze", ROOT_MAZE)
+        .id();
+    scenario.add_creature_from_oracle(P1, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS);
+    let vaults = scenario
+        .add_spell_to_hand_from_oracle(P0, "Open the Vaults", false, VAULTS)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(vaults).resolve();
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| pending.proposed.affected_object_id()),
+        Some(first),
+        "the first Ornithopter's entry ordering is live"
+    );
+    assert_eq!(runner.state().objects[&later].zone, Zone::Graveyard);
+
+    // Stand-in for another effect exiling the not-yet-consulted member while
+    // the first Ornithopter's ordering is pending.
+    engine::game::zones::move_to_zone(runner.state_mut(), later, Zone::Exile, &mut Vec::new());
+
+    choose_source(&mut runner, root_maze, 2);
+    assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&later].zone,
+        Zone::Exile,
+        "the member that left is not returned"
+    );
+    assert_settled(&runner);
+    runner
+        .state()
+        .resolution_stack
+        .validate_at_rest(&runner.state().waiting_for)
+        .expect("the population settles");
+}
