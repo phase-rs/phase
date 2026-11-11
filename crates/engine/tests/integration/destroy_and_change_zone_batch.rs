@@ -3514,7 +3514,9 @@ fn vengeance_never_asks_two_players_out_of_apnap_order() {
         "reversed seats: no choice is asked out of APNAP order"
     );
     for creature in creatures {
-        assert_ne!(runner.state().objects[&creature].zone, Zone::Battlefield);
+        // The merge base, on this board: no choice asked, both creatures in
+        // their owners' graveyards (Dauthi is destroyed before them).
+        assert_eq!(runner.state().objects[&creature].zone, Zone::Graveyard);
     }
     assert!(runner.state().resolution_stack.is_empty());
 
