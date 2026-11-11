@@ -11760,10 +11760,10 @@ fn forged_target_fact(
         lki: Box::new(object.snapshot_public_characteristics()),
         zone: engine::types::game_state::AnnouncedTargetZone::Known(Zone::Battlefield),
         // CR 601.2c: this fixture forges a TARGETED fact to exercise the declared-target
-        // contradiction, so it states no token bit — `Unknown` is exactly what a payload
-        // written before the field existed decodes to, and the guard under test reads the
-        // id list, not the bit.
-        token: engine::types::game_state::CapturedTokenBit::Unknown,
+        // contradiction, and must be well formed in every other respect — its token bit is
+        // the object's real one, not `Unknown`, so the restored-payload gate cannot be what
+        // refuses it. The guard under test reads the id list, not the bit.
+        token: engine::types::game_state::CapturedTokenBit::Known(object.is_token),
     }
 }
 
