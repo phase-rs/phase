@@ -24074,7 +24074,7 @@ declare_game_state! {
 
     /// CR 603.6a + CR 611.3c: completed battlefield-entry events of an entering
     /// instruction whose action has not settled (it stopped on a co-entrant's
-    /// CR 616.1f ordering or CR 614.12a entry choice). All permanents, newcomers
+    /// CR 616.1 ordering or CR 614.12a entry choice). All permanents, newcomers
     /// included, are checked against the event once it has finished, so these
     /// wait unmatched. `triggers::settle_entry_batch_scan` is the only writer:
     /// it releases them to the first observer scan that runs after the

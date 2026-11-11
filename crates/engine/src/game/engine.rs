@@ -1756,8 +1756,7 @@ fn apply_action_boundary_core(
     // entering instruction still held by `triggers::settle_entry_batch_scan`:
     // a handler that settled without reaching the pipeline has not had them
     // checked, and they are checked before any player receives priority.
-    let settled_entry_batch = matches!(result.waiting_for, WaitingFor::Priority { .. })
-        && triggers::settled_entry_batch_awaits_scan(state);
+    let settled_entry_batch = settled_entry_batch_is_due(state, &result);
     // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
     // completed on a route that never reached the pipeline (a spell cast during
     // a resolution, CR 608.2g, finishes its announcement here): the resolving
@@ -1814,6 +1813,20 @@ fn apply_action_boundary_core(
         preserve_interaction,
         lifecycle,
     })
+}
+
+/// CR 117.5 + CR 603.3b: a Priority result still holds entries of a completed
+/// entering instruction whose observers have not been checked. The state's wait
+/// is synchronized first, as for [`owed_spell_final_part_is_due`], because the
+/// entry gate reads it and the state's copy is only synchronized at
+/// `finish_action_boundary`.
+fn settled_entry_batch_is_due(state: &mut GameState, result: &ActionResult) -> bool {
+    let holds_entries = matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && !state.unsettled_entry_batch_events.is_empty();
+    if holds_entries {
+        sync_waiting_for(state, &result.waiting_for);
+    }
+    holds_entries && triggers::settled_entry_batch_awaits_scan(state)
 }
 
 /// CR 608.2c + CR 608.2n: whether the action's result leaves a Priority window

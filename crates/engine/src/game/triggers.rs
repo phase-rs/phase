@@ -9668,7 +9668,7 @@ fn battlefield_entry_is_observed(state: &GameState, event: &GameEvent) -> bool {
 /// enters triggers that match it (CR 603.6a), with the continuous effects that
 /// exist once the permanents are there (CR 603.6b + CR 611.3c). One entering
 /// instruction can span several actions: each entrant's replacement choices are
-/// made before it enters (CR 614.12a + CR 616.1f), so an entrant can be on the
+/// made before it enters (CR 614.12a + CR 616.1), so an entrant can be on the
 /// battlefield while a co-entrant's prompt is open. Matching it then would read
 /// a battlefield the event has not finished building: a later co-entrant's
 /// trigger suppression or characteristic-changing static would be missed, and a
@@ -9682,10 +9682,14 @@ fn battlefield_entry_is_observed(state: &GameState, event: &GameEvent) -> bool {
 /// matches the whole event in one scan against the completed state, so batched
 /// ("one or more", CR 603.2c) definitions and firing limits see it once.
 ///
-/// Every collector that runs as an action pauses or settles routes through
-/// here: the post-action scan, and [`collect_action_end_triggers_into_deferred`]
-/// for the paused-observer helpers and the resolution-choice answers. Entries a
-/// logical zone-change owner still retains stay with that owner.
+/// The collectors that run as an action pauses or settles route through here:
+/// the post-action scan, and [`collect_action_end_triggers_into_deferred`] for
+/// the paused-observer helpers (the replacement and copy-choice answers among
+/// them) and the resolution-choice answers. Two existing owners of entries keep
+/// their own timing and do not pass through: a logical zone-change group's
+/// segment collection (an entry it retains is passed through unheld here), and
+/// the replay of an entry parked for its own mid-entry choice
+/// (`engine_replacement::collect_deferred_entry_replay`).
 pub(crate) fn settle_entry_batch_scan(
     state: &mut GameState,
     candidates: Vec<GameEvent>,

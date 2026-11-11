@@ -1529,7 +1529,7 @@ mod feldon_tokens {
     /// The board every later-co-entrant row shares. Feldon targets a Body Double
     /// card in the graveyard; Doubling Season makes two tokens of it, and with
     /// Hardened Scales a first copy that enters with +1/+1 counters stops on a
-    /// CR 616.1f ordering choice. Its answer puts that token onto the battlefield
+    /// CR 616.1 ordering choice. Its answer puts that token onto the battlefield
     /// and then stops again on the second token's copy offer, so the first
     /// entrant is on the battlefield while its co-entrant is still entering.
     struct BodyDoubleBoard {
@@ -1845,8 +1845,8 @@ mod feldon_tokens {
         );
     }
 
-    /// CR 603.2c + CR 603.6a: a "triggers only once each turn" ability is spent
-    /// by an event that triggers it, and the suppressed entry event triggers
+    /// CR 603.6a: a "triggers only once each turn" ability is spent only by an
+    /// event that triggers it, and the suppressed entry event triggers
     /// nothing. Moon Girl and Devil Dinosaur ("Whenever an artifact you control
     /// enters, draw a card. This ability triggers only once each turn.") must
     /// not draw for Feldon's artifact tokens when the second is Hushbringer,
@@ -1994,7 +1994,7 @@ mod feldon_tokens {
     /// so Mister Fantastic ("Whenever one or more tokens you control enter, you
     /// may draw a card.") triggers once for it. Metallic Mimic naming Elephant
     /// gives only the Elephant an entry counter; Hardened Scales and Branching
-    /// Evolution make that a CR 616.1f ordering choice, so the resolving spell
+    /// Evolution make that a CR 616.1 ordering choice, so the resolving spell
     /// itself puts the Snake and the Wolf onto the battlefield and then stops.
     #[test]
     fn resolving_spell_that_stops_on_its_last_token_matches_the_event_once() {
@@ -2022,6 +2022,8 @@ mod feldon_tokens {
             .add_spell_to_hand_from_oracle(P0, "Bestial Menace", false, BESTIAL_MENACE)
             .id();
         let mut runner = scenario.build();
+        // Board setup: Metallic Mimic is already on the battlefield, so its
+        // as-enters choice (Elephant) is written as the value it recorded then.
         runner
             .state_mut()
             .objects

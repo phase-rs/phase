@@ -2847,7 +2847,7 @@ fn handle_copy_token_source_choice(
     Ok(state.waiting_for.clone())
 }
 
-/// CR 707.9 + CR 603.6a: the copy-choice answer, plus the same entry park as
+/// CR 707.5 + CR 603.6a: the copy-choice answer, plus the same entry park as
 /// [`handle_replacement_choice`]. Answering can publish the entrant and then
 /// stop on a co-entrant's prompt; that entry leaves with this answer's buffer.
 pub(super) fn handle_copy_target_choice(

@@ -4144,7 +4144,8 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `SagaChapterAbilityResolved` events held as a stack or resolving entry's
 /// `trigger_event`, in `stack_trigger_event_batches`, `current_trigger_event(s)`,
 /// `pending_trigger_event_batch`, `pending_attack_trigger_events`,
-/// `consumed_before_priority_trigger_events`, `deferred_entry_events`, a paused
+/// `consumed_before_priority_trigger_events`, `deferred_entry_events`,
+/// `unsettled_entry_batch_events`, a paused
 /// player-scope sacrifice's `deferred_events`, the pending trigger's `trigger_event`, a
 /// deferred or ordering trigger context's `trigger_event` and `trigger_events`, the
 /// `trigger_event` of the `TriggerTargetSelection` (with its `trigger_events`),
@@ -5913,6 +5914,7 @@ mod tests {
         state.pending_trigger_event_batch = all_events.clone();
         state.pending_attack_trigger_events = all_events.clone();
         state.deferred_entry_events = vec![event.clone()];
+        state.unsettled_entry_batch_events = vec![event.clone()];
         state.consumed_before_priority_trigger_events =
             vec![crate::game::triggers::ConsumedTriggerEventOccurrence {
                 event: event.clone(),
@@ -6177,6 +6179,10 @@ mod tests {
                     &state.pending_attack_trigger_events,
                 ),
                 ("deferred_entry_events", &state.deferred_entry_events),
+                (
+                    "unsettled_entry_batch_events",
+                    &state.unsettled_entry_batch_events,
+                ),
             ] {
                 for event in events {
                     push(label, &from_event(event));
@@ -6316,6 +6322,7 @@ mod tests {
             "pending_attack_trigger_events",
             "consumed_before_priority_trigger_events",
             "deferred_entry_events",
+            "unsettled_entry_batch_events",
             "pending_player_scope_sacrifice_choice",
             "transient_continuous_effects duration_event_source",
             "departed 1 object",
@@ -6419,6 +6426,7 @@ mod tests {
             "/pending_trigger_event_batch/",
             "/pending_attack_trigger_events/",
             "/deferred_entry_events/",
+            "/unsettled_entry_batch_events/",
             "/consumed_before_priority_trigger_events/",
             "/pending_player_scope_sacrifice_choice/",
             "/waiting_for/",
