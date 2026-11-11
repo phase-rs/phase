@@ -11685,9 +11685,11 @@ mod tests {
     /// CR 115.1d + CR 601.2c: `EachDealsDamageEqualToPower` is enumerated as its
     /// recipient only, while production announces the sources first. It is safe
     /// only because every construction site stamps `multi_target`, which the
-    /// probe declines. Printed Graceful Takedown (review 8) and a printed
-    /// up-to-two analogue (Allies at Last's shape) pin both halves: the
-    /// enumerator yields ONE role, and the clause carries `multi_target`.
+    /// probe declines. Printed Graceful Takedown (review 8) and a synthetic
+    /// up-to-two row (nearest printed card: Allies at Last, whose recipient is
+    /// "target creature an opponent controls") pin both halves: the enumerator
+    /// yields ONE role, and the clause carries `multi_target`. The suffix is
+    /// synthetic (nearest printed card: Skulking Killer).
     #[test]
     fn each_deals_damage_declines_through_multi_target() {
         let object = "its controller controls no creatures";
@@ -11733,7 +11735,9 @@ mod tests {
 
     /// CR 608.2c: a head that production gives a clause scope after the suffix
     /// strip (optional prefix, "for each" repeat, repeat count) declines; each
-    /// row would otherwise read as one Stack-timed object role.
+    /// row would otherwise read as one Stack-timed object role. Synthetic rows;
+    /// each is a printed scope prefix or suffix on a printed instruction, under
+    /// a Skulking Killer-style suffix (nearest printed card: Skulking Killer).
     #[test]
     fn head_clause_scope_declines() {
         let object = "its controller controls no creatures";
@@ -11756,7 +11760,8 @@ mod tests {
 
     /// CR 601.2c + CR 603.3d: a printed announcer override ("that player chooses
     /// target creature") is a typed `target_chooser` the head clause does not
-    /// carry; the probe reads it from the parse context.
+    /// carry; the probe reads it from the parse context. Synthetic rows under a
+    /// Skulking Killer-style suffix (nearest printed card: Skulking Killer).
     #[test]
     fn target_chooser_override_declines() {
         let object = "its controller controls no creatures";
@@ -11774,7 +11779,9 @@ mod tests {
 
     /// CR 608.2c + CR 115.1: a primary filter scoped to a resolution-time chosen
     /// player announces no slot (the enumerator's chosen-player gate), so the
-    /// probe sees zero roles and declines instead of binding.
+    /// probe sees zero roles and declines instead of binding. Synthetic text
+    /// under a Skulking Killer-style suffix (nearest printed card: Skulking
+    /// Killer).
     #[test]
     fn chosen_player_scoped_filter_declines() {
         let ctx = ParseContext {
@@ -11806,7 +11813,9 @@ mod tests {
     /// CR 115.1d + CR 115.10a: an enchanted-creature host written without the
     /// word "target" is re-timed to Resolution by production after the probe's
     /// view, so the literal-"target " gate must keep it from binding. Without
-    /// the gate the probe reads one Stack-timed object role.
+    /// the gate the probe reads one Stack-timed object role. Synthetic text;
+    /// nearest printed shape: Predator's Gambit's "its controller controls no
+    /// other creatures" on an enchanted-creature host.
     #[test]
     fn host_written_without_target_declines() {
         let effect = "Destroy enchanted creature";
