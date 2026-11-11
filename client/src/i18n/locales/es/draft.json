@@ -615,6 +615,9 @@
     "roundComplete": "Ronda completada",
     "waitingNextRound": "Esperando a que el anfitrión inicie la siguiente ronda...",
     "nextRoundShortly": "La siguiente ronda empezará en breve...",
+    "editDeck": "Editar mazo",
+    "backToStandings": "Volver a la clasificación",
+    "editDeckHint": "Pod casual: puedes cambiar tu mazo antes de que empiece la siguiente ronda.",
     "pauseReason": {
       "PlayerDisconnected": "Draft en pausa — un jugador está desconectado.",
       "PausedByHost": "Draft pausado por el anfitrión.",
@@ -625,7 +628,8 @@
     "title": "¿Enviar este mazo?",
     "confirm": "Confirmar envío",
     "competitive": "Este es un pod competitivo: el mazo que envíes es definitivo para todas las rondas. Aún puedes usar el banquillo entre partidas de un enfrentamiento Bo3.",
-    "casual": "Aún puedes cambiar tu mazo entre rondas."
+    "casual": "Aún puedes cambiar tu mazo entre rondas.",
+    "final": "El mazo que envíes es definitivo."
   },
   "betweenGames": {
     "game": "Partida {{number}}",

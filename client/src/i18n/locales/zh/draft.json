@@ -59,7 +59,8 @@
     "title": "提交这副套牌？",
     "confirm": "确认提交",
     "competitive": "这是竞技牌桌：你提交的套牌在所有轮次中均为最终版本。在三局两胜比赛的各局之间仍可替换备牌。",
-    "casual": "你仍可在轮次之间修改套牌。"
+    "casual": "你仍可在轮次之间修改套牌。",
+    "final": "你提交的套牌为最终版本。"
   },
   "formatPicker": {
     "bo3": {
@@ -347,7 +348,10 @@
     "pairing": "配对中"
   },
   "podPhaseView": {
+    "backToStandings": "返回积分榜",
     "connectingOpponent": "正在连接对手…",
+    "editDeck": "编辑套牌",
+    "editDeckHint": "休闲牌桌：你可以在下一轮开始前修改套牌。",
     "hidePool": "隐藏牌池",
     "matchesInProgress": "进行中的对局",
     "nextRoundShortly": "下一轮即将开始…",

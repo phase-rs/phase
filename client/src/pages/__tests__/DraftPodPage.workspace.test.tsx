@@ -85,6 +85,7 @@ const store = vi.hoisted(() => {
     draft_set_codes: ["TST"],
     timer_remaining_ms: null, standings: [], current_round: 0,
     tournament_format: "Swiss", pod_policy: "Casual", pairings: [], match_config: { match_type: "Bo1" },
+    post_draft_play: "TournamentPairings" as string | undefined,
   };
   const state = {
     role: "host",
@@ -311,6 +312,7 @@ describe("DraftPodPage workspace", () => {
     store.state.view.kind = "Premier";
     store.state.view.commanders_required = 0;
     store.state.view.pod_policy = "Casual";
+    store.state.view.post_draft_play = "TournamentPairings";
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1440 });
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 900 });
     usePreferencesStore.setState({ draftCardPreviewMode: "none", draftDoubleClickConfirmPick: true });
@@ -428,6 +430,57 @@ describe("DraftPodPage workspace", () => {
     await vi.waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
     expect(store.state.submitDeck).not.toHaveBeenCalled();
     expect(screen.getByTestId("deckbuilder")).toBeInTheDocument();
+  });
+
+  /**
+   * A pod that plays no in-session rounds (`CompleteImmediately`, Commander
+   * Draft) — or an older host that omits the procedure fact — is told its deck
+   * is final, even under the Casual policy whose wording would promise
+   * between-round changes.
+   */
+  it.each([
+    ["CompleteImmediately", "CompleteImmediately"],
+    ["absent (older host)", undefined],
+  ])("words a %s pod's submission as final under the Casual policy", async (_label, postDraftPlay) => {
+    store.state.phase = "deckbuilding";
+    store.state.view.post_draft_play = postDraftPlay;
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const deckbuilder = captured.deckbuilder;
+    if (!isEditableDeckBuilderController(deckbuilder)) {
+      throw new Error("editable deck builder controller not installed");
+    }
+
+    act(() => {
+      void deckbuilder.onSubmitDeck([]);
+    });
+    const dialog = await screen.findByRole("alertdialog", { name: "Submit this deck?" });
+    expect(dialog).toHaveAccessibleDescription("Your submitted deck is final.");
+  });
+
+  /**
+   * `ConfirmDialog` exits through `AnimatePresence`, which keeps the exiting
+   * buttons mounted with their previous handlers. A second Confirm click in
+   * that window must not submit the deck again.
+   */
+  it("submits once when Confirm is clicked twice before the dialog leaves", async () => {
+    store.state.phase = "deckbuilding";
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const deckbuilder = captured.deckbuilder;
+    if (!isEditableDeckBuilderController(deckbuilder)) {
+      throw new Error("editable deck builder controller not installed");
+    }
+
+    let submission: Promise<void> | void = undefined;
+    act(() => {
+      submission = deckbuilder.onSubmitDeck([]);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm Submission" }));
+    // Reach guard: the exiting dialog's button is still in the DOM.
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Submission" }));
+    await submission;
+
+    expect(store.state.submitDeck).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
   });
 
   it("rejects the deck builder's submission with the store's refusal after confirming", async () => {

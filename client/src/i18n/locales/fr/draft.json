@@ -615,6 +615,9 @@
     "roundComplete": "Manche terminée",
     "waitingNextRound": "En attente que l'hôte démarre la manche suivante...",
     "nextRoundShortly": "La manche suivante commence bientôt...",
+    "editDeck": "Modifier le deck",
+    "backToStandings": "Retour au classement",
+    "editDeckHint": "Pod décontracté : vous pouvez modifier votre deck avant le début de la manche suivante.",
     "pauseReason": {
       "PlayerDisconnected": "Draft paused — a player disconnected.",
       "PausedByHost": "Draft paused by host.",
@@ -625,7 +628,8 @@
     "title": "Soumettre ce deck ?",
     "confirm": "Confirmer la soumission",
     "competitive": "Ce pod est compétitif : le deck soumis est définitif pour toutes les manches. Vous pouvez toujours utiliser la réserve entre les parties d'un match Bo3.",
-    "casual": "Vous pourrez encore modifier votre deck entre les manches."
+    "casual": "Vous pourrez encore modifier votre deck entre les manches.",
+    "final": "Le deck soumis est définitif."
   },
   "betweenGames": {
     "game": "Partie {{number}}",

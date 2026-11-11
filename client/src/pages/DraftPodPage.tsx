@@ -849,9 +849,33 @@ function MatchInProgressView() {
   );
 }
 
-function RoundCompleteView() {
+function RoundCompleteView({ responsiveLayout }: { responsiveLayout: ResponsiveDraftLayout }) {
   const { t } = useTranslation("draft");
   const podPolicy = useMultiplayerDraftStore((s) => s.view?.pod_policy);
+  // Engine-published (MTR 7.3): true only where this pod may revise a deck
+  // between rounds. Absent from older hosts, so nothing new renders there.
+  const deckSubmissionOpen = useMultiplayerDraftStore((s) => s.view?.deck_submission_open === true);
+  const [editing, setEditing] = useState(false);
+
+  if (deckSubmissionOpen && editing) {
+    return (
+      <div className="flex w-full flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-2">
+          <p className="text-sm text-white/60">{t("podPhaseView.editDeckHint")}</p>
+          <button
+            onClick={() => setEditing(false)}
+            className={menuButtonClass({ tone: "neutral", size: "sm" })}
+          >
+            {t("podPhaseView.backToStandings")}
+          </button>
+        </div>
+        <PodDeckBuilder
+          responsiveLayout={responsiveLayout}
+          mode={{ kind: "betweenRounds", onSubmitted: () => setEditing(false) }}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
@@ -865,6 +889,14 @@ function RoundCompleteView() {
           ? t("podPhaseView.waitingNextRound")
           : t("podPhaseView.nextRoundShortly")}
       </p>
+      {deckSubmissionOpen && (
+        <button
+          onClick={() => setEditing(true)}
+          className={menuButtonClass({ tone: "emerald", size: "md", className: "self-center" })}
+        >
+          {t("podPhaseView.editDeck")}
+        </button>
+      )}
     </div>
   );
 }
@@ -1357,7 +1389,23 @@ interface PendingDeckSubmission {
   reject: (error: unknown) => void;
 }
 
-function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraftLayout }) {
+/**
+ * The context `PodDeckBuilder` is rendered in, chosen by its caller. Land
+ * suggestion is deckbuilding-only on both seams (the store's
+ * `autoSuggestLands` and the host's `suggestLandsForSeatInner`), so the
+ * between-rounds editor turns the builder's suggestion control off.
+ */
+type PodDeckBuilderMode =
+  | { kind: "deckbuilding" }
+  | { kind: "betweenRounds"; onSubmitted: () => void };
+
+function PodDeckBuilder({
+  responsiveLayout,
+  mode,
+}: {
+  responsiveLayout: ResponsiveDraftLayout;
+  mode: PodDeckBuilderMode;
+}) {
   const { t } = useTranslation("draft");
   const view = useMultiplayerDraftStore((s) => s.view);
   const workspace = useMultiplayerDraftStore((s) => s.workspaceState);
@@ -1366,7 +1414,12 @@ function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraf
   const autoSuggestLands = useMultiplayerDraftStore((s) => s.autoSuggestLands);
   const submissionError = useMultiplayerDraftStore((s) => s.error);
   const [preferences, setPreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
-  const [pendingSubmission, setPendingSubmission] = useState<PendingDeckSubmission | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  // Single-use: `ConfirmDialog` exits through `AnimatePresence`, which keeps
+  // the exiting buttons clickable with their previous handlers. Each handler
+  // takes and clears this ref, so a second click during the exit finds
+  // nothing and the deck is submitted at most once.
+  const pendingSubmission = useRef<PendingDeckSubmission | null>(null);
   const handlePreferencesChange = useCallback((next: DraftWorkspacePreferences) => {
     setPreferences(next);
     saveDraftWorkspacePreferences(next);
@@ -1378,15 +1431,34 @@ function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraf
   // display stay in force until the player answers the dialog: Confirm settles
   // it with the store submission's outcome, Cancel resolves it unsubmitted.
   const confirmSubmitDeck = (commanders: string[] = []) =>
-    new Promise<void>((resolve, reject) => setPendingSubmission({ commanders, resolve, reject }));
-  const handleConfirmSubmit = () => {
-    if (!pendingSubmission) return;
-    setPendingSubmission(null);
-    submitDeck(pendingSubmission.commanders).then(pendingSubmission.resolve, pendingSubmission.reject);
+    new Promise<void>((resolve, reject) => {
+      pendingSubmission.current = { commanders, resolve, reject };
+      setConfirmOpen(true);
+    });
+  const takePendingSubmission = () => {
+    const pending = pendingSubmission.current;
+    pendingSubmission.current = null;
+    setConfirmOpen(false);
+    return pending;
   };
-  const handleCancelSubmit = () => {
-    pendingSubmission?.resolve();
-    setPendingSubmission(null);
+  const handleConfirmSubmit = () => {
+    const pending = takePendingSubmission();
+    if (!pending) return;
+    submitDeck(pending.commanders).then(() => {
+      if (mode.kind === "betweenRounds") mode.onSubmitted();
+      pending.resolve();
+    }, pending.reject);
+  };
+  const handleCancelSubmit = () => takePendingSubmission()?.resolve();
+
+  // Worded from engine-published facts only. A pod that plays no in-session
+  // rounds (`CompleteImmediately`, e.g. Commander Draft) — or an older host
+  // that omits `post_draft_play` — gets the wording that promises nothing.
+  const confirmMessage = () => {
+    if (view.post_draft_play !== "TournamentPairings") return t("deckSubmitConfirm.final");
+    return view.pod_policy === "Competitive"
+      ? t("deckSubmitConfirm.competitive")
+      : t("deckSubmitConfirm.casual");
   };
 
   return (
@@ -1397,7 +1469,7 @@ function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraf
           workspace,
           preferences,
           interactionLocked,
-          capabilities: { kind: "editable-pool", suggestions: true },
+          capabilities: { kind: "editable-pool", suggestions: mode.kind === "deckbuilding" },
           onWorkspaceChange: (next) => useMultiplayerDraftStore.getState().setWorkspaceState(next),
           onPreferencesChange: handlePreferencesChange,
           onAddBasicLand: (name) => useMultiplayerDraftStore.getState().addBasicLand(name),
@@ -1410,14 +1482,10 @@ function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraf
         responsiveLayout={responsiveLayout}
       />
       <ConfirmDialog
-        open={pendingSubmission !== null}
+        open={confirmOpen}
         tone="primary"
         title={t("deckSubmitConfirm.title")}
-        message={
-          view.pod_policy === "Competitive"
-            ? t("deckSubmitConfirm.competitive")
-            : t("deckSubmitConfirm.casual")
-        }
+        message={confirmMessage()}
         confirmLabel={t("deckSubmitConfirm.confirm")}
         onConfirm={handleConfirmSubmit}
         onCancel={handleCancelSubmit}
@@ -1644,7 +1712,7 @@ function phaseContent(
         />
       );
     case "deckbuilding":
-      return <PodDeckBuilder responsiveLayout={responsiveLayout} />;
+      return <PodDeckBuilder responsiveLayout={responsiveLayout} mode={{ kind: "deckbuilding" }} />;
     case "betweenGames":
       return <BetweenGamesView responsiveLayout={responsiveLayout} fillEmbeddedHeight={fillEmbeddedHeight} onDismiss={onDismissOverlay} />;
     case "pairing":
@@ -1652,7 +1720,7 @@ function phaseContent(
     case "matchInProgress":
       return <MatchInProgressView />;
     case "roundComplete":
-      return <RoundCompleteView />;
+      return <RoundCompleteView responsiveLayout={responsiveLayout} />;
     case "complete":
       return <CompleteView onLeave={onLeave} />;
     case "error":

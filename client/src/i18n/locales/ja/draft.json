@@ -676,6 +676,9 @@
     "roundComplete": "ラウンド完了",
     "waitingNextRound": "ホストが次のラウンドを開始するのを待っています…",
     "nextRoundShortly": "まもなく次のラウンドが始まります…",
+    "editDeck": "デッキを編集",
+    "backToStandings": "順位に戻る",
+    "editDeckHint": "カジュアルの卓です。次のラウンドが始まる前にデッキを変更できます。",
     "pauseReason": {
       "PlayerDisconnected": "プレイヤーの切断によりドラフトを一時停止しています。",
       "PausedByHost": "ホストがドラフトを一時停止しました。",
@@ -685,8 +688,9 @@
   "deckSubmitConfirm": {
     "title": "このデッキを提出しますか？",
     "confirm": "提出を確定",
-    "competitive": "競技向けポッドです。提出したデッキはすべてのラウンドで確定となります。Bo3マッチのゲーム間ではサイドボードを入れ替えられます。",
-    "casual": "ラウンド間にデッキを変更できます。"
+    "competitive": "競技向けの卓です。提出したデッキはすべてのラウンドで確定となります。Bo3マッチのゲーム間ではサイドボードを入れ替えられます。",
+    "casual": "ラウンド間にデッキを変更できます。",
+    "final": "提出したデッキは確定となります。"
   },
   "betweenGames": {
     "game": "ゲーム{{number}}",

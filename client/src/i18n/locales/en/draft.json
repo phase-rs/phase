@@ -623,6 +623,9 @@
     "roundComplete": "Round Complete",
     "waitingNextRound": "Waiting for host to start next round...",
     "nextRoundShortly": "Next round starting shortly...",
+    "editDeck": "Edit Deck",
+    "backToStandings": "Back to Standings",
+    "editDeckHint": "Casual pod: you can change your deck before the next round starts.",
     "pauseReason": {
       "PlayerDisconnected": "Draft paused — a player disconnected.",
       "PausedByHost": "Draft paused by host.",
@@ -633,7 +636,8 @@
     "title": "Submit this deck?",
     "confirm": "Confirm Submission",
     "competitive": "This is a Competitive pod: your submitted deck is final for every round. You can still sideboard between games of a best-of-three match.",
-    "casual": "You can still change your deck between rounds."
+    "casual": "You can still change your deck between rounds.",
+    "final": "Your submitted deck is final."
   },
   "betweenGames": {
     "game": "Game {{number}}",

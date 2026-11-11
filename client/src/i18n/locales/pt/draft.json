@@ -615,6 +615,9 @@
     "roundComplete": "Rodada Concluída",
     "waitingNextRound": "Aguardando o anfitrião iniciar a próxima rodada...",
     "nextRoundShortly": "A próxima rodada começará em breve...",
+    "editDeck": "Editar Deck",
+    "backToStandings": "Voltar à Classificação",
+    "editDeckHint": "Pod casual: você pode alterar seu deck antes do início da próxima rodada.",
     "pauseReason": {
       "PlayerDisconnected": "Draft paused — a player disconnected.",
       "PausedByHost": "Draft paused by host.",
@@ -625,7 +628,8 @@
     "title": "Enviar este deck?",
     "confirm": "Confirmar Envio",
     "competitive": "Este é um pod competitivo: o deck enviado é definitivo para todas as rodadas. Você ainda pode usar o sideboard entre os jogos de uma partida Bo3.",
-    "casual": "Você ainda pode alterar seu deck entre as rodadas."
+    "casual": "Você ainda pode alterar seu deck entre as rodadas.",
+    "final": "O deck enviado é definitivo."
   },
   "betweenGames": {
     "game": "Jogo {{number}}",
