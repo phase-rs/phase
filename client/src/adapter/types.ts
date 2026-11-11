@@ -72,6 +72,18 @@ export interface DungeonPreview {
   room_count: number;
 }
 
+// Mirrors `engine::game::players::PoisonLossScope` — whose poison counters a
+// poison loss is measured on.
+export type PoisonLossScope = "Player" | "Team";
+
+// Mirrors `engine::game::derived_views::PoisonLossView`, delivered on
+// `GameState.derived.poison_loss`.
+export interface PoisonLossView {
+  scope: PoisonLossScope;
+  threshold: number;
+  near_lethal: boolean;
+}
+
 // Mirrors `engine::game::derived_views::DungeonRoomView` — where one player's
 // venture marker currently sits, named. Delivered on
 // `GameState.derived.dungeon_rooms`, not on `dungeon_progress`, which carries
@@ -290,6 +302,9 @@ export interface StructuralRules {
   team_based: boolean;
   sideboard_policy: SideboardPolicy;
   default_deck_copy_limit: DeckCopyLimit;
+  /** CR 704.5c individual poison threshold. Optional because it postdates the
+   *  Axis-A save path; absent means ten (the engine's serde default). */
+  poison_counter_threshold?: number;
 }
 
 /** `legal_sets: null` means unrestricted; a list restricts to exactly it. */
@@ -543,6 +558,10 @@ export interface FormatConfig {
   singleton: boolean;
   command_zone: boolean;
   commander_damage_threshold: number | null;
+  /** CR 704.5c: the poison-counter count at which an individual player loses
+   *  (a host-adjustable house-rule dial). `null` for the Two-Headed Giant
+   *  family, which ignores CR 704.5c and loses to team poison instead. */
+  poison_counter_threshold: number | null;
   range_of_influence: RangeOfInfluenceConfig | null;
   team_based: boolean;
   /** Engine-authoritative sideboard policy. This must be sent with every
@@ -4574,6 +4593,14 @@ export interface DerivedViews {
    * `engine::game::derived_views::DerivedViews::dungeon_rooms`.
    */
   dungeon_rooms?: Record<string, DungeonRoomView>;
+  /**
+   * CR 704.5c / CR 704.6b: the poison-loss rule each poisoned player is
+   * measured against (scope, threshold, near-lethal), keyed by
+   * PlayerId-as-string — the threshold the SBA actually uses, so the HUD never
+   * hard-codes ten. Omitted when nobody is poisoned. Mirrors
+   * `engine::game::derived_views::DerivedViews::poison_loss`.
+   */
+  poison_loss?: Record<string, PoisonLossView>;
   /**
    * Engine-authored coalesced view of the stack. Empty (and omitted from
    * the wire payload) when the stack is empty. StackDisplay consumes this

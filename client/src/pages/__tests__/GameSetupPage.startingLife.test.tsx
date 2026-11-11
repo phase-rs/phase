@@ -174,3 +174,36 @@ describe("GameSetupPage — commander damage", () => {
     expect(screen.queryByLabelText("Commander Damage")).not.toBeInTheDocument();
   });
 });
+
+describe("GameSetupPage — poison counters", () => {
+  it("hands an edited poison-counter threshold to the game it starts", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    const poisonInput = await screen.findByLabelText("Poison Counters");
+    await user.clear(poisonInput);
+    await user.type(poisonInput, "15");
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    const navState = JSON.parse(screen.getByTestId("nav-state").textContent!);
+    expect(navState.formatConfig.poison_counter_threshold).toBe(15);
+
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.poison_counter_threshold).toBe(15);
+  });
+
+  it("keeps the last valid poison-counter threshold when the field is left empty", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    expect(await screen.findByLabelText("Starting Life")).toBeInTheDocument();
+    const poisonInput = screen.getByLabelText("Poison Counters");
+    await user.clear(poisonInput);
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.poison_counter_threshold).toBe(10);
+  });
+});

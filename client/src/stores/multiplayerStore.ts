@@ -2415,6 +2415,11 @@ function normalizeBuiltInHostConfig(
     && isU8(storedFormatConfig.commander_damage_threshold)
       ? storedFormatConfig.commander_damage_threshold
       : defaults.commander_damage_threshold;
+  const poisonCounterThreshold =
+    defaults.poison_counter_threshold !== null
+    && isU8(storedFormatConfig.poison_counter_threshold)
+      ? storedFormatConfig.poison_counter_threshold
+      : defaults.poison_counter_threshold;
   const formatConfig: FormatConfig = {
     ...defaults,
     deck_size: deckSize,
@@ -2422,6 +2427,7 @@ function normalizeBuiltInHostConfig(
       ? storedFormatConfig.starting_life
       : defaults.starting_life,
     commander_damage_threshold: commanderDamageThreshold,
+    poison_counter_threshold: poisonCounterThreshold,
     allow_debug_actions: typeof storedFormatConfig.allow_debug_actions === "boolean"
       ? storedFormatConfig.allow_debug_actions
       : defaults.allow_debug_actions,

@@ -600,6 +600,20 @@ export function GameSetupPage() {
                     </label>
                   )}
 
+                  {formatConfig.poison_counter_threshold != null && (
+                    <label className="flex items-center justify-between">
+                      <span className="text-xs text-slate-400">{t("gameSetup.config.poisonCounters")}</span>
+                      <IntegerField
+                        value={formatConfig.poison_counter_threshold}
+                        min={1}
+                        onCommit={(poison_counter_threshold) =>
+                          setFormatConfig({ ...formatConfig, poison_counter_threshold })
+                        }
+                        className="w-16 rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1 text-right text-sm text-white"
+                      />
+                    </label>
+                  )}
+
                   {!formatConfig.team_based && formatConfig.max_players > 2 && (
                     <label className="flex flex-col gap-1">
                       <div className="flex items-center justify-between">

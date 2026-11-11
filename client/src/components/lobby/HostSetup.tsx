@@ -1291,6 +1291,24 @@ export function HostSetup({
             </Field>
           )}
 
+          {/* Individual poison-loss threshold (CR 704.5c; absent in Two-Headed Giant) */}
+          {formatConfig.poison_counter_threshold != null && (
+            <Field label={t("hostSetup.poisonCounters")} htmlFor="host-setup-poison">
+              <IntegerField
+                id="host-setup-poison"
+                value={formatConfig.poison_counter_threshold}
+                min={1}
+                onCommit={(poison_counter_threshold) =>
+                  setLocalFormatConfig((prev) => ({
+                    ...prev,
+                    poison_counter_threshold,
+                  }))
+                }
+                className={inp}
+              />
+            </Field>
+          )}
+
           <div className="border-t border-hairline-strong" />
 
           {/* Axis A — save the current setup as a reusable custom format, and
