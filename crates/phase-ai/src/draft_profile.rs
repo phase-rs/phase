@@ -2273,6 +2273,11 @@ mod tests {
         assert!(p.bonus_for_name(elder_card.name) >= PREMIUM_THREAT_THRESHOLD);
         assert!(classify(&elder).contains(&CardClass::ManaFixing));
         assert!(!p.is_threat(&elder_card));
+        // The Elder keeps its full pick-quality bonus; only threat status is
+        // withheld, so it earns no threat-need bonus even from an empty pool.
+        let elder_score = score15(p, &elder_card, &[], 0.0, 0.0).unwrap();
+        assert_eq!(elder_score.card_bonus, 2.0);
+        assert_eq!(elder_score.threat_need, 0.0);
 
         let kodama = oracle_face(serde_json::json!({
             "name": "Kodama of the North Tree",
