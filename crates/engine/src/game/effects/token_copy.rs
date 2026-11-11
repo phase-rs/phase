@@ -677,7 +677,9 @@ pub(crate) fn publish_committed_copy_tokens<R>(
 /// event's earlier positions) already created. The resolution's tokens are the published
 /// ones while its owner frame is off the resolution stack, otherwise the innermost parked
 /// `CopyToken` frame's (an outer resolution's frame is never read while one is published).
-/// Deduplicated, in order, without `entrant`.
+/// Deduplicated, in order, without `entrant`. Linear in the resolution's tokens plus
+/// `batch_prefix`: membership is a hash-set probe, so a token-multiplied batch whose every
+/// entrant asks for its co-entrants costs quadratic, not cubic, time overall.
 pub(crate) fn copy_token_co_entrants(
     state: &GameState,
     entrant: ObjectId,
@@ -697,9 +699,11 @@ pub(crate) fn copy_token_co_entrants(
             .last()
             .unwrap_or_default(),
     };
-    let mut co_entrants: Vec<ObjectId> = Vec::new();
+    let capacity = resolution.len() + batch_prefix.len();
+    let mut seen: HashSet<ObjectId> = HashSet::with_capacity(capacity);
+    let mut co_entrants: Vec<ObjectId> = Vec::with_capacity(capacity);
     for id in resolution.iter().chain(batch_prefix) {
-        if *id != entrant && !co_entrants.contains(id) {
+        if *id != entrant && seen.insert(*id) {
             co_entrants.push(*id);
         }
     }
@@ -7140,5 +7144,79 @@ mod tests {
                 "{offered:?} owner resumed over the ledger {ledger:?}"
             );
         }
+    }
+
+    fn parked_copy_token_owner(created_ids: Vec<ObjectId>) -> PendingCopyTokenResolution {
+        PendingCopyTokenResolution {
+            created_ids,
+            remaining: VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id: ObjectId(900),
+            referent_set: None,
+            offered_batch: OfferedBatchCustody::Settled,
+        }
+    }
+
+    /// CR 614.12 + CR 111.1: the published resolution tokens and the batch prefix overlap;
+    /// the co-entrants keep first-seen order, list each token once, and leave out the
+    /// entrant itself.
+    #[test]
+    fn copy_token_co_entrants_dedups_published_tokens_and_batch_prefix_in_order() {
+        let mut state = GameState::new_two_player(42);
+        state.active_copy_token_resolution_tokens =
+            Some(vec![ObjectId(1), ObjectId(2), ObjectId(3)]);
+        assert_eq!(
+            copy_token_co_entrants(
+                &state,
+                ObjectId(2),
+                &[ObjectId(3), ObjectId(4), ObjectId(4)]
+            ),
+            vec![ObjectId(1), ObjectId(3), ObjectId(4)]
+        );
+    }
+
+    /// With no published slot the innermost parked `CopyToken` frame's tokens are the
+    /// resolution's; an outer frame's are not read.
+    #[test]
+    fn copy_token_co_entrants_reads_the_innermost_parked_frame_without_a_published_slot() {
+        let mut state = GameState::new_two_player(42);
+        state.push_copy_token(parked_copy_token_owner(vec![ObjectId(10), ObjectId(11)]));
+        state.push_copy_token(parked_copy_token_owner(vec![ObjectId(20), ObjectId(21)]));
+        assert!(
+            state.active_copy_token_resolution_tokens.is_none(),
+            "REACH-GUARD: no published slot, so the frame fallback runs"
+        );
+        assert_eq!(
+            copy_token_co_entrants(&state, ObjectId(21), &[ObjectId(22), ObjectId(20)]),
+            vec![ObjectId(20), ObjectId(22)]
+        );
+    }
+
+    /// A published slot wins over a parked frame (an outer resolution's frame is never read
+    /// while one is published), and the entrant is excluded from both sources.
+    #[test]
+    fn copy_token_co_entrants_prefers_the_published_slot_and_excludes_the_entrant() {
+        let mut state = GameState::new_two_player(42);
+        state.push_copy_token(parked_copy_token_owner(vec![ObjectId(10)]));
+        state.active_copy_token_resolution_tokens = Some(vec![ObjectId(5), ObjectId(6)]);
+        assert_eq!(
+            copy_token_co_entrants(&state, ObjectId(5), &[ObjectId(5), ObjectId(7)]),
+            vec![ObjectId(6), ObjectId(7)]
+        );
+    }
+
+    /// No published slot, no parked frame, and no batch prefix: nothing co-enters.
+    #[test]
+    fn copy_token_co_entrants_is_empty_without_any_source() {
+        let state = GameState::new_two_player(42);
+        assert!(copy_token_co_entrants(&state, ObjectId(1), &[]).is_empty());
+
+        let mut published_empty = GameState::new_two_player(42);
+        published_empty.active_copy_token_resolution_tokens = Some(Vec::new());
+        published_empty.push_copy_token(parked_copy_token_owner(vec![ObjectId(10)]));
+        assert!(
+            copy_token_co_entrants(&published_empty, ObjectId(1), &[]).is_empty(),
+            "an empty published slot still shadows the parked frame"
+        );
     }
 }
