@@ -1654,11 +1654,11 @@ fn do_eliminate(
     // complete so its CR 603.3b triggers fire. Per-entry, mirroring
     // `abandon_pending_casts`, never a blanket null.
     //
-    // CR 800.4j: when the seat that left is the ACTIVE player, the turn still
-    // continues to its completion, so the batch DOES complete — `auto_advance_once`
-    // discharges it through `resume_pending_combat_lifelink` before the CR 800.4
-    // turn skip. (An earlier revision of this comment claimed the batch "can no
-    // longer complete at all" and that `turns::enter_phase` owned that case; both
+    // CR 800.4j: when the seat that left was the active player and no player of its side
+    // remains, the turn continues to its completion without an active player, so the batch
+    // DOES complete — `auto_advance_once` discharges it through
+    // `resume_pending_combat_lifelink`. (An earlier revision of this comment claimed the batch
+    // "can no longer complete at all" and that `turns::enter_phase` owned that case; both
     // halves are false now that the discharge exists.)
     if let Some(record) = state.pending_combat_lifelink.as_mut() {
         record.remaining.retain(|gain| gain.controller != player);
@@ -1713,6 +1713,14 @@ fn do_eliminate(
     crate::game::planechase::finish_player_left_game_handoff(state, planar_handoff, events);
 
     state.auto_pass.remove(&player);
+    // CR 805.4a + CR 805.9: the active team's turn keeps an active player while one of its
+    // players remains.
+    if state.active_player == player {
+        let member = super::topology::normalize_shared_turn_recipient(state, player);
+        if players::is_alive(state, member) {
+            state.active_player = member;
+        }
+    }
     // CR 800.4a + CR 117.4 + CR 805.5b: a player who has left is not among the players who pass
     // in succession; a side still in the game keeps its pass under its living representative.
     if state.priority_passes.remove(&player) {

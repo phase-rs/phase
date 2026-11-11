@@ -480,7 +480,7 @@ pub(crate) fn normalize_shared_turn_recipient(state: &GameState, player: PlayerI
     }
 
     // LOTR "Two Towers" (Reading B): the Horde side's representative is its ACTIVE
-    // commander — the current `active_player` during a Horde turn, else the
+    // commander — the current living `active_player` during a Horde turn, else the
     // scheduled next commander (which rotates each Horde turn). Every Horde-side
     // member normalizes to it, so the turn recipient, priority, and APNAP all agree
     // on which commander is driving the Horde. The survivor side (and any other
@@ -499,11 +499,12 @@ pub(crate) fn normalize_shared_turn_recipient(state: &GameState, player: PlayerI
 
 /// The Horde side's active commander for turn/priority purposes in a two-Horde
 /// (LOTR "Two Towers") game: the current `active_player` when it is a Horde seat
-/// (the Horde's own turn), otherwise the commander scheduled to drive the next
+/// still in the game, otherwise the commander scheduled to drive the next
 /// Horde turn. `None` outside a two-Horde game.
 fn active_horde_seat_now_or_next(state: &GameState) -> Option<PlayerId> {
     let hordes = two_horde_seats(state)?;
-    if hordes.contains(&state.active_player) {
+    if hordes.contains(&state.active_player) && super::players::is_alive(state, state.active_player)
+    {
         return Some(state.active_player);
     }
     scheduled_active_horde(state)
@@ -512,8 +513,7 @@ fn active_horde_seat_now_or_next(state: &GameState) -> Option<PlayerId> {
 /// The Horde commander scheduled to drive the NEXT Horde turn — Reading B has the
 /// two commanders alternate, so this is `horde_seats[active_horde_index % living]`
 /// in seat order (advanced once per Horde turn in `horde::begin_wave`). `None`
-/// outside a two-Horde game. Horde seats have no life total so all stay alive; the
-/// alive filter keeps it robust regardless.
+/// outside a two-Horde game.
 fn scheduled_active_horde(state: &GameState) -> Option<PlayerId> {
     let living: Vec<PlayerId> = two_horde_seats(state)?
         .iter()

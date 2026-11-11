@@ -1189,8 +1189,7 @@ fn conceding_active_attacker_does_not_skip_the_next_turns_combat_damage() {
     // performs the CR 800.4a departure and reconciles priority (the phase is
     // still `CombatDamage` and `active_player` is still the departed seat when
     // that action returns). The assertion is therefore made once the concede has
-    // settled through `skip_eliminated_active_turn` -> `advance_phase_once` ->
-    // `start_next_turn` -> `enter_phase`, exactly as the plan's H3 specifies.
+    // settled through the turn's remaining steps -> `start_next_turn` -> `enter_phase`.
 
     // (ii) the FOLLOWING turn's combat damage must actually be dealt.
     for _ in 0..64 {

@@ -9043,8 +9043,7 @@ pub fn find_applicable_replacements(
         // begin. Decided only at its first step, so a combat in progress can't be
         // skipped. Skips with the same duration are interchangeable, so one of them
         // stands for all and CR 616.1 has no choice to offer between them. CR 800.4j:
-        // a turn without an active player has no one to choose among these, and it
-        // runs out through `turns::skip_eliminated_active_turn`.
+        // a turn without an active player has no one whose combat phase is skipped.
         if *phase == crate::types::phase::Phase::BeginCombat
             && super::players::is_alive(state, *player_id)
         {
