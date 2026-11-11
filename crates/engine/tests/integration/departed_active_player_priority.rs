@@ -710,6 +710,46 @@ fn a_remaining_defender_declares_blockers_after_a_defender_leaves_at_its_prompt(
     }
 }
 
+/// CR 509.1 + CR 509.2a + CR 117.3a: when the last defending player leaves at its declare-blockers
+/// prompt, the step's declaration completes: Giant Badger's ("Whenever this creature blocks, it
+/// gets +2/+2 until end of turn.") block trigger goes on the stack and the active player, not the
+/// next seat, receives priority.
+#[test]
+fn the_active_player_receives_priority_after_the_last_defender_leaves_at_its_prompt() {
+    for leaves in [false, true] {
+        let db = shared_card_db().expect("card db");
+        let mut scenario = free_for_all();
+        let at_p1 = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+        let at_p2 = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+        let badger = scenario.add_real_card(P1, "Giant Badger", Zone::Battlefield, db);
+        scenario.add_real_card(P2, "Grizzly Bears", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        runner.state_mut().turn_number = 3;
+        pass_to_prompt(&mut runner);
+        declare_attacks(&mut runner, &[(at_p1, P1), (at_p2, P2)], vec![]);
+        pass_to_prompt(&mut runner);
+        declare_blocks(&mut runner, vec![(badger, at_p1)]);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::DeclareBlockers { player: P2, .. }
+            ),
+            "reach: P2 is the last defender to declare: {:?}",
+            runner.state().waiting_for
+        );
+        if leaves {
+            concede(&mut runner, P2);
+        } else {
+            declare_blocks(&mut runner, vec![]);
+        }
+        assert_eq!(
+            (priority_seat(&runner), runner.stack_names()),
+            (Some(P0), vec!["Giant Badger".to_string()]),
+            "leaves={leaves}"
+        );
+    }
+}
+
 /// CR 510.1c + CR 510.2 + CR 805.10f: when the active player leaves while dividing its
 /// attacker's combat damage, its teammate divides its own attacker's damage before any is dealt.
 #[test]

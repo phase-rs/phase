@@ -974,7 +974,7 @@ pub(super) fn handle_empty_blockers(
     next_blocker_or_finish_declaration(state, events)
 }
 
-fn next_blocker_or_finish_declaration(
+pub(super) fn next_blocker_or_finish_declaration(
     state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
