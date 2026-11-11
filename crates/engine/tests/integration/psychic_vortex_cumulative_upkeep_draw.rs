@@ -24,7 +24,7 @@ use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, PendingCostMoveResume, PersistedGameState, UnpaidCostRemainder,
+    CastPaymentMode, GameState, PendingCostMoveResume, PersistedGameState, UnpaidCostRemainder,
     UnpaidCostSuffix, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
@@ -1786,8 +1786,8 @@ fn declining_every_skip_offers_each_prompt_pays_then_loses() {
 
 /// CR 702.24a + CR 121.4: a 2^31 age count on a three-card library draws three
 /// cards, attempts one empty draw, and settles the remaining identical attempts
-/// at once. The journal grows by the four draws, not by 2^31 entries, and the
-/// empty-library edit it keeps replays as the identity on the final state.
+/// at once. The journal grows by the four draws, not by 2^31 entries, and
+/// replaying the kept draw edits reproduces the final draw ledger.
 #[test]
 fn a_huge_age_count_on_a_short_library_is_bounded_and_replayable() {
     const AGE: u32 = 1 << 31;
@@ -1801,7 +1801,8 @@ fn a_huge_age_count_on_a_short_library_is_bounded_and_replayable() {
         );
     };
     assert_eq!(*repeat, Some(AGE));
-    let journal_start = runner.state().resolved_rules_journal.entries().len();
+    let before_payment = runner.state().clone();
+    let journal_start = before_payment.resolved_rules_journal.entries().len();
     let result = runner
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("choosing the draw cost is legal");
@@ -1815,7 +1816,9 @@ fn a_huge_age_count_on_a_short_library_is_bounded_and_replayable() {
         result
             .events
             .iter()
-            .filter(|event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == P0))
+            .filter(
+                |event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == P0)
+            )
             .count(),
         3,
         "the three library cards are drawn"
@@ -1824,36 +1827,43 @@ fn a_huge_age_count_on_a_short_library_is_bounded_and_replayable() {
         upkeep_ability_resolved(&result.events, vortex),
         "the upkeep is paid"
     );
-    // The journal replay contract: the kept empty-library edit, replayed on the
-    // final state, is the identity, so the attempts it stands for are too.
-    let edit = runner
+    // The journal replay contract: replaying the kept draw edits in order on
+    // the pre-payment state reproduces the final draw ledger, so the skipped
+    // identical attempts are not needed to rebuild the game.
+    let edits: Vec<ResolvedLedgerEditCommand> = runner
         .state()
         .resolved_rules_journal
         .entries()
         .iter()
         .skip(journal_start)
-        .find_map(|entry| match &entry.command {
+        .filter_map(|entry| match &entry.command {
             Some(ResolvedRulesCommand::LedgerEdit(command))
-                if matches!(
-                    command.edit,
-                    ResolvedLedgerEdit::CardsDrawn {
-                        attempted_empty_library: true,
-                        ..
-                    }
-                ) =>
+                if matches!(command.edit, ResolvedLedgerEdit::CardsDrawn { player, .. } if player == P0) =>
             {
                 Some(command.clone())
             }
             _ => None,
         })
-        .expect("the empty-library edit is journaled");
-    let mut replayed = runner.state().clone();
-    apply_resolved_ledger_edit(&mut replayed, &edit)
-        .expect("a repeated empty-library attempt replays on the settled ledger");
+        .collect();
+    assert_eq!(edits.len(), 4, "three draws and one empty-library attempt");
+    let mut replayed = before_payment;
+    for edit in &edits {
+        apply_resolved_ledger_edit(&mut replayed, edit)
+            .expect("each kept draw edit replays on the ledger the previous one left");
+    }
+    let ledger = |state: &GameState| {
+        let player = &state.players[P0.0 as usize];
+        (
+            player.has_drawn_this_turn,
+            player.cards_drawn_this_turn,
+            player.cards_drawn_this_step,
+            player.drew_from_empty_library,
+        )
+    };
     assert_eq!(
-        replayed.players[P0.0 as usize],
-        runner.state().players[P0.0 as usize],
-        "a further empty-library attempt changes nothing"
+        ledger(&replayed),
+        ledger(runner.state()),
+        "the kept journal reproduces the final draw ledger"
     );
 }
 
@@ -2006,20 +2016,31 @@ fn accepting_dredge_then_a_synchronous_suffix_counts_each_trigger_once() {
             index: APPLY_REPLACEMENT,
         })
         .expect("accepting Dredge is legal");
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "the rest of the payment is synchronous: {:?}",
-        runner.state().waiting_for
-    );
+    // CR 603.3b: the payment finished synchronously; P0 now orders the
+    // triggers of two sources, each listed exactly once per occurrence.
+    let WaitingFor::OrderTriggers { player, triggers } = &runner.state().waiting_for else {
+        panic!(
+            "the rest of the payment is synchronous and its triggers wait to be ordered: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    let from = |source: ObjectId| {
+        triggers
+            .iter()
+            .filter(|trigger| trigger.source_id == source)
+            .count()
+    };
     assert_eq!(
-        queued_triggers_from(&runner, crawler),
+        from(crawler),
         (AGE - 1) as usize,
         "one trigger per card drawn after the dredged instruction"
     );
-    assert_eq!(
-        queued_triggers_from(&runner, tomb),
-        1,
-        "the Imp left the graveyard once"
+    assert_eq!(from(tomb), 1, "the Imp left the graveyard once");
+    assert_eq!(triggers.len(), AGE as usize, "nothing else was collected");
+    assert!(
+        runner.state().pending_cost_move_resume.is_none(),
+        "the payment completed"
     );
     assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
 }
