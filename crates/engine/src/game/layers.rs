@@ -56,7 +56,9 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{Keyword, ProtectionTarget};
-use crate::types::layers::{ActiveContinuousEffect, Layer};
+use crate::types::layers::{
+    ActiveContinuousEffect, Layer, ProtectionRiderDefinition, ProtectionRiderGrant,
+};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
@@ -8401,35 +8403,33 @@ fn active_continuous_effects_from_static_definitions(
             // original static effects until layer 6. Earlier layers may change
             // provider membership, and other layer-6 effects may change the
             // abilities they donate before this effect applies.
-            let effect =
-                ActiveContinuousEffect {
-                    source_id,
-                    controller,
-                    def_index: Some(def_idx),
-                    transient_id: None,
-                    trigger_producer_origin,
-                    expanded_trigger_provider: None,
-                    mod_index,
-                    layer: modification.layer(),
-                    timestamp,
-                    modification: modification.clone(),
-                    affected_filter: affected_filter.clone(),
-                    condition: retained_condition.clone(),
-                    mode: def.mode.clone(),
-                    characteristic_defining: def.characteristic_defining,
-                    granter: def.granting_object,
-                    // CR 702.16n + CR 702.16p: this static is the source's own.
-                    protection_rider: def.protection_does_not_remove.clone().map(
-                        |does_not_remove| crate::types::layers::ProtectionRiderGrant {
-                            source: source_id,
-                            definition: crate::types::layers::ProtectionRiderDefinition::Live(
-                                def_idx,
-                            ),
-                            mod_index,
-                            does_not_remove,
-                        },
-                    ),
-                };
+            let effect = ActiveContinuousEffect {
+                source_id,
+                controller,
+                def_index: Some(def_idx),
+                transient_id: None,
+                trigger_producer_origin,
+                expanded_trigger_provider: None,
+                mod_index,
+                layer: modification.layer(),
+                timestamp,
+                modification: modification.clone(),
+                affected_filter: affected_filter.clone(),
+                condition: retained_condition.clone(),
+                mode: def.mode.clone(),
+                characteristic_defining: def.characteristic_defining,
+                granter: def.granting_object,
+                // CR 702.16n + CR 702.16p: this static is the source's own.
+                protection_rider: def
+                    .protection_does_not_remove
+                    .clone()
+                    .map(|does_not_remove| ProtectionRiderGrant {
+                        source: source_id,
+                        definition: ProtectionRiderDefinition::Live(def_idx),
+                        mod_index,
+                        does_not_remove,
+                    }),
+            };
             // CR 113.3d + CR 604.1 + CR 611.2c: A `GrantStaticAbility` modification
             // installs the inner static onto every recipient in the host's live
             // affected set. The recipient is the granted-static's *source*
@@ -8544,9 +8544,7 @@ fn expand_granted_static_effects(
         .protection_does_not_remove
         .clone()
         .map(|does_not_remove| {
-            let definition = crate::types::layers::ProtectionRiderDefinition::Granted(
-                std::sync::Arc::new(inner.as_ref().clone()),
-            );
+            let definition = ProtectionRiderDefinition::Granted(Arc::new(inner.as_ref().clone()));
             (definition, does_not_remove)
         });
     let mut out = Vec::new();
@@ -8604,7 +8602,7 @@ fn expand_granted_static_effects(
                 // static, whose source is this recipient; it does not depend on
                 // how the parent was produced (printed, transient or late).
                 protection_rider: rider.as_ref().map(|(definition, does_not_remove)| {
-                    crate::types::layers::ProtectionRiderGrant {
+                    ProtectionRiderGrant {
                         source: recipient_id,
                         definition: definition.clone(),
                         mod_index,
