@@ -771,7 +771,13 @@ fn proposed_events(
             })
             .chain(moves(&[Zone::Graveyard]))
             .collect(),
-        Effect::ChangeZone { destination, .. } => moves(&[*destination]),
+        // CR 608.2c: a scalar move and the selected-object library move are
+        // classified by the one authority the AI's removal readers share.
+        Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. } => {
+            super::bound_object_move_destination(&bound.effect)
+                .map(|destination| moves(&[destination]))
+                .unwrap_or_default()
+        }
         Effect::Bounce { destination, .. } => moves(&[destination.unwrap_or(Zone::Hand)]),
         Effect::Counter { .. } => moves(&[Zone::Graveyard, Zone::Exile, Zone::Hand, Zone::Library]),
         Effect::DiscardCard { .. } => objects
@@ -922,6 +928,16 @@ fn node_acted_on(
             objects(crate::game::merge::expand_returned_merge_components(
                 state, bound, ids, &filter,
             ))
+        }
+        // CR 608.2b + CR 608.2c: "the owner of target permanent shuffles it into
+        // their library" (Chaos Warp) moves the declared selection its resolver
+        // binds; an illegal or stale target is not part of it.
+        Effect::ChangeZoneAll { .. } => {
+            super::change_zone::selected_owner_move_objects(state, bound)
+                .ok()
+                .flatten()
+                .map(objects)
+                .unwrap_or_default()
         }
         Effect::SetTapState {
             scope: EffectScope::Single,

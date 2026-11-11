@@ -306,6 +306,7 @@ mod loop_shortcut_shortening;
 mod love_on_the_battlefield_combat_counters;
 mod mandatory_loop_draws;
 mod omnath_unspent_green_mana_2887;
+mod pr10635_selected_owner_stack_reach;
 mod pr10635_source_owner_contracts;
 mod pr10635_target_and_source_activation;
 mod swords_target_legality_recheck;

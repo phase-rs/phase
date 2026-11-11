@@ -2564,6 +2564,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             mut moved_count,
             face_down_profile,
             library_placement,
+            library_shuffle,
             enter_attached_to,
             effect_kind,
         } = pending;
@@ -2640,6 +2641,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 // `enter_transformed`/`enters_under_player` carry-through.
                 face_down_profile: face_down_profile.clone(),
                 library_placement: library_placement.clone(),
+                library_shuffle,
                 enter_attached_to,
             };
             let before_zone = state.objects.get(obj_id).map(|object| object.zone);
@@ -2728,6 +2730,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // across a further pause so resumed members stay face down.
                             face_down_profile: ctx.face_down_profile.clone(),
                             library_placement: ctx.library_placement.clone(),
+                            library_shuffle: ctx.library_shuffle,
                             enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
                         },
@@ -2782,6 +2785,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // across a further pause so resumed members stay face down.
                             face_down_profile: ctx.face_down_profile.clone(),
                             library_placement: ctx.library_placement.clone(),
+                            library_shuffle: ctx.library_shuffle,
                             enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
                         },
@@ -15692,9 +15696,21 @@ fn is_owner_library_shuffle_scope(scope: &PlayerFilter) -> bool {
 
 /// CR 608.2c: the selected-object move publishes its own owner population,
 /// including an empty population, before its immediate terminal shuffle.
-fn is_selected_owner_library_shuffle_operation(ability: &ResolvedAbility) -> bool {
+pub(crate) fn is_selected_owner_library_shuffle_operation(ability: &ResolvedAbility) -> bool {
+    is_selected_object_library_move(&ability.effect)
+        && ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(is_owner_library_shuffle_consumer)
+}
+
+/// CR 608.2c + CR 701.24a: the move node of "the owner of [selected object]
+/// shuffles it into their library" (Chaos Warp, Oblation, Riftsweeper): a
+/// `TargetOnly` declaration followed by a `ChangeZoneAll` bound to that
+/// selection rather than to a zone population.
+pub fn is_selected_object_library_move(effect: &Effect) -> bool {
     matches!(
-        &ability.effect,
+        effect,
         Effect::ChangeZoneAll {
             origin: None,
             destination: Zone::Library,
@@ -15707,10 +15723,20 @@ fn is_selected_owner_library_shuffle_operation(ability: &ResolvedAbility) -> boo
             random_order: false,
             ..
         }
-    ) && ability
-        .sub_ability
-        .as_deref()
-        .is_some_and(is_owner_library_shuffle_consumer)
+    )
+}
+
+/// CR 608.2c: the zone a node moves the object(s) it acts on to, when its
+/// population is the bound object(s) rather than a zone scan: a scalar
+/// `ChangeZone`, or the selected-object library move
+/// ([`is_selected_object_library_move`]). The single classification stack
+/// readers use to recognize a node as a zone move of what it acts on.
+pub fn bound_object_move_destination(effect: &Effect) -> Option<Zone> {
+    match effect {
+        Effect::ChangeZone { destination, .. } => Some(*destination),
+        effect if is_selected_object_library_move(effect) => Some(Zone::Library),
+        _ => None,
+    }
 }
 
 fn first_tracked_set_consumer_mode(
