@@ -229,7 +229,7 @@ fn resolve_reveal(
     });
 
     // Store revealed IDs for downstream reference.
-    state.last_revealed_ids = all_revealed.clone();
+    super::record_revealed_result(state, all_revealed.clone());
     // CR 608.2c + CR 701.20a: "[quantity] revealed this way" names the cards this
     // reveal revealed — every card looked at until the until-condition was met,
     // matching or not. Publish them as the chain's tracked set so a downstream
@@ -638,7 +638,7 @@ fn resolve_choose_any_number(
         card_ids: revealed.clone(),
         card_names,
     });
-    state.last_revealed_ids = revealed.clone();
+    super::record_revealed_result(state, revealed.clone());
 
     // CR 608.2c: nothing was revealed (count 0 or an empty library) — the
     // disposition has no cards to act on; resolve cleanly with no interaction.

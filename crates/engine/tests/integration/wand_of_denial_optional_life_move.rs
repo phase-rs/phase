@@ -12,7 +12,8 @@
 //! look's result carried through the payment, not the inherited player target.
 
 use engine::types::ability::{
-    AbilityCondition, AbilityCost, Effect, EffectOutcomeSignal, QuantityExpr, TargetFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, Effect, EffectOutcomeSignal,
+    QuantityExpr, SubAbilityLink, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -263,7 +264,7 @@ fn wand_of_denial_parses_as_look_then_optional_life_then_move() {
         .expect("the payment chains to the move");
     assert_eq!(
         mv.sub_link,
-        engine::types::ability::SubAbilityLink::SequentialSibling,
+        SubAbilityLink::SequentialSibling,
         "the move is a later instruction, not part of the payment"
     );
     match &*mv.effect {
@@ -288,4 +289,178 @@ fn wand_of_denial_parses_as_look_then_optional_life_then_move() {
         }),
         "the move happens only if the 2 life was paid"
     );
+}
+
+/// Wand of Denial's printed payment, parsed from its Oracle text: the optional
+/// 2-life `PayCost` with its "If you do, put it into that player's graveyard"
+/// move. A `SequentialSibling` guard (the controller loses 1 life) follows the
+/// move, so a run that drops the move still proves the chain kept resolving.
+fn wand_payment_then_move_then_guard() -> AbilityDefinition {
+    let parsed = engine::parser::oracle::parse_oracle_text(
+        WAND_OF_DENIAL,
+        "Wand of Denial",
+        &[],
+        &[String::from("Artifact")],
+        &[],
+    );
+    let mut pay = *parsed.abilities[0]
+        .sub_ability
+        .clone()
+        .expect("the look chains to the optional payment");
+    let mut guard = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: Some(TargetFilter::Controller),
+        },
+    );
+    guard.sub_link = SubAbilityLink::SequentialSibling;
+    pay.sub_ability
+        .as_mut()
+        .expect("the payment chains to the move")
+        .sub_ability = Some(Box::new(guard));
+    pay
+}
+
+/// Activates `probe`'s `{T}` ability (optionally targeting `target`) and
+/// accepts the optional 2-life payment, which must be offered to P0.
+fn activate_probe_and_pay(runner: &mut GameRunner, probe: ObjectId, target: Option<ObjectId>) {
+    let activation = runner.activate(probe, 0);
+    let activation = match target {
+        Some(target) => activation.target_object(target),
+        None => activation,
+    };
+    activation.stop_at_optional().resolve();
+    match runner.state().waiting_for {
+        WaitingFor::OptionalEffectChoice { player, .. } => {
+            assert_eq!(player, P0, "the controller answers the payment")
+        }
+        ref other => panic!("expected the optional 2-life payment, got {other:?}"),
+    }
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accept the optional 2-life payment");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the activation must resolve back to priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty(), "the activation resolved");
+}
+
+/// CR 608.2c + CR 609.3: "it" is what the instruction immediately before the
+/// payment produced, and an instruction that produced nothing leaves "it" with
+/// no referent, even while an earlier reveal's card is still in the reveal
+/// ledger. Chain: reveal P0's top card A -> turn the (already face-up) source
+/// face up, which produces nothing -> Wand's paid move. Only the payment and
+/// the guard happen; A stays on top of the library.
+#[test]
+fn payment_after_an_empty_producer_moves_nothing_despite_an_earlier_reveal() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let earlier = scenario.add_card_to_library_top(P0, "Earlier Reveal");
+    let mut turn_up = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::TurnFaceUp {
+            target: TargetFilter::SelfRef,
+        },
+    );
+    turn_up.sub_ability = Some(Box::new(wand_payment_then_move_then_guard()));
+    let mut ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::RevealTop {
+            player: TargetFilter::Controller,
+            count: 1,
+        },
+    )
+    .cost(AbilityCost::Tap);
+    ability.sub_ability = Some(Box::new(turn_up));
+    let probe = {
+        let mut builder = scenario.add_artifact_from_oracle(P0, "Probe", "");
+        builder.with_ability_definition(ability);
+        builder.id()
+    };
+    let mut runner = scenario.build();
+    assert!(
+        !runner.state().objects[&probe].face_down,
+        "precondition: the source is already face up, so turning it up produces nothing"
+    );
+
+    activate_probe_and_pay(&mut runner, probe, None);
+
+    let state = runner.state();
+    assert_eq!(
+        state.last_revealed_ids,
+        vec![earlier],
+        "reach guard: the earlier reveal's card is still in the ledger"
+    );
+    assert_eq!(
+        state.players[P0.0 as usize].life, 17,
+        "P0 paid 2 life and the trailing guard took 1"
+    );
+    assert_eq!(
+        state.objects[&earlier].zone,
+        Zone::Library,
+        "the earlier revealed card must not move"
+    );
+    assert_eq!(state.players[P0.0 as usize].library.front(), Some(&earlier));
+    assert!(state.players[P0.0 as usize].graveyard.is_empty());
+    assert_eq!(state.objects[&probe].zone, Zone::Battlefield);
+}
+
+/// CR 608.2c + CR 400.7: the payment carries the producer's exact result, not
+/// an object target the producer merely inherited. Chain: target creature A ->
+/// reveal the source B ("reveal ~", which names the source, not A) -> Wand's
+/// paid move. Only B moves to the graveyard; A stays on the battlefield.
+#[test]
+fn payment_moves_only_the_producers_object_not_an_inherited_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let inherited = scenario.add_creature(P1, "Inherited Target", 2, 2).id();
+    let mut reveal = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Reveal {
+            target: TargetFilter::SelfRef,
+        },
+    );
+    reveal.sub_ability = Some(Box::new(wand_payment_then_move_then_guard()));
+    let mut ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+        },
+    )
+    .cost(AbilityCost::Tap);
+    ability.sub_ability = Some(Box::new(reveal));
+    let probe = {
+        let mut builder = scenario.add_artifact_from_oracle(P0, "Probe", "");
+        builder.with_ability_definition(ability);
+        builder.id()
+    };
+    let mut runner = scenario.build();
+
+    activate_probe_and_pay(&mut runner, probe, Some(inherited));
+
+    let state = runner.state();
+    assert_eq!(
+        state.last_revealed_ids,
+        vec![probe],
+        "reach guard: the reveal produced the source"
+    );
+    assert_eq!(
+        state.players[P0.0 as usize].life, 17,
+        "P0 paid 2 life and the trailing guard took 1"
+    );
+    assert_eq!(
+        state.objects[&probe].zone,
+        Zone::Graveyard,
+        "the revealed source moved"
+    );
+    assert!(state.players[P0.0 as usize].graveyard.contains(&probe));
+    assert_eq!(
+        state.objects[&inherited].zone,
+        Zone::Battlefield,
+        "the inherited target is not the payment's result and must not move"
+    );
+    assert!(state.players[P1.0 as usize].graveyard.is_empty());
 }

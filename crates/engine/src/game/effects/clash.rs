@@ -103,13 +103,10 @@ pub(crate) fn perform_clash(
     };
 
     // Add revealed cards for visibility.
-    state.last_revealed_ids.clear();
-    if let Some(id) = controller_top {
-        state.last_revealed_ids.push(id);
-    }
-    if let Some(id) = opponent_top {
-        state.last_revealed_ids.push(id);
-    }
+    super::record_revealed_result(
+        state,
+        controller_top.into_iter().chain(opponent_top).collect(),
+    );
 
     events.push(GameEvent::Clash {
         controller,

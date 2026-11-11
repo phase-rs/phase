@@ -25003,6 +25003,15 @@ declare_game_state! {
     /// Used by AbilityCondition::RevealedHasCardType and sub_ability target injection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub last_revealed_ids: Vec<ObjectId>,
+    /// CR 608.2c: how many times a look/reveal instruction has published its
+    /// result into `last_revealed_ids` (`effects::record_revealed_result`).
+    /// A resolving instruction compares the count before and after its own
+    /// step to tell its exact result, an empty one included, apart from an
+    /// earlier producer's entry still in the ledger. Only ever compared within
+    /// one synchronous step, so it is never serialized and is not part of
+    /// state equality (a monotonic tally would break AI-search dedup).
+    #[serde(skip)]
+    pub(crate) revealed_publications: u64,
 
     /// CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Set when the most
     /// recently resolved `Dig`/`RevealTop`/`ChooseFromZone`/`RevealHand` reveal-choice/
@@ -32834,6 +32843,7 @@ impl GameState {
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
+            revealed_publications: 0,
             last_parent_target_missing_reason: None,
             private_look_ids: Vec::new(),
             private_look_player: None,
@@ -36633,6 +36643,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         log_player_names: _,
         last_created_token_ids: _,
         last_revealed_ids: _,
+        revealed_publications: _,
         last_parent_target_missing_reason: _,
         private_look_ids: _,
         private_look_player: _,
