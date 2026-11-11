@@ -15392,19 +15392,13 @@ fn kaerveks_spite_sacrifice_park() -> (GameRunner, ObjectId) {
 #[test]
 fn restore_validates_the_sacrifice_completion_by_its_variant() {
     let (runner, spell) = kaerveks_spite_sacrifice_park();
-    // The recipient the payment actually left behind — the journal's own key for this cast.
-    let recipient = runner
-        .state()
-        .resolved_rules_journal
-        .spent_mana()
-        .iter()
-        .find(|spent| {
-            matches!(&spent.recipient,
-                engine::types::resolved_commands::ManaPaymentRecipient::Object(r)
-                    if r.object_id == spell)
-        })
-        .map(|spent| spent.recipient.clone())
-        .expect("the journal recorded this cast's spend");
+    // CR 118.3a: the recipient the production guard builds — the live spell's own
+    // incarnation — so this test asks the journal exactly what the restore boundary asks.
+    let recipient = engine::types::resolved_commands::ManaPaymentRecipient::Object(
+        engine::game::game_object::ObjectIncarnationRefExt::from_object(
+            &runner.state().objects[&spell],
+        ),
+    );
     // CR 702.51a: the same projection the production guard uses — no convoke/exile unit.
     let settled_units = runner
         .state()
