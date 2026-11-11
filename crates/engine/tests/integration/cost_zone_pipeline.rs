@@ -11763,7 +11763,7 @@ fn forged_target_fact(
         // contradiction, so it states no token bit — `Unknown` is exactly what a payload
         // written before the field existed decodes to, and the guard under test reads the
         // id list, not the bit.
-        token: engine::types::game_state::AnnouncedTargetToken::Unknown,
+        token: engine::types::game_state::CapturedTokenBit::Unknown,
     }
 }
 
