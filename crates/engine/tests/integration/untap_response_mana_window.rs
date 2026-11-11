@@ -817,11 +817,86 @@ fn a_costed_source_is_read_without_running_it() {
             "Prism: {prism}: no copy of the game"
         );
         assert_eq!(
-            perf_counters::ability_mana_auto_tap_probe_snapshot().state_clones,
+            perf_counters::priority_hold_probe_snapshot().state_clones,
             0,
             "Prism: {prism}: no auto-payment run"
         );
     }
+}
+
+/// Springleaf Drum, verbatim.
+const SPRINGLEAF_DRUM: &str =
+    "{T}, Tap an untapped creature you control: Add one mana of any color.";
+/// The Immortal Sun, verbatim.
+const THE_IMMORTAL_SUN: &str = "Players can't activate planeswalkers' loyalty abilities.\nAt the beginning of your draw step, draw an additional card.\nSpells you cast cost {1} less to cast.\nCreatures you control get +1/+1.";
+
+/// Myr Welder with Soliton and Springleaf Drum exiled with it, Soliton's "{U}:
+/// Untap this creature." on the stack. `crowded` adds The Immortal Sun and
+/// thirty creatures. Returns whether the recommendation P0's client receives
+/// holds, the hold's own reads and the engine's counters for that read.
+fn welder_drum_hold_work(
+    db: &CardDatabase,
+    crowded: bool,
+) -> (
+    bool,
+    usize,
+    perf_counters::PriorityHoldProbeCounters,
+    perf_counters::PerfCounterSnapshot,
+) {
+    let mut scenario = main_phase_scenario();
+    let welder = scenario.add_real_card(P0, "Myr Welder", Zone::Battlefield, db);
+    let exiled = [
+        scenario
+            .add_creature_to_hand_from_oracle(P0, "Soliton", 3, 4, SOLITON)
+            .id(),
+        scenario
+            .add_artifact_to_hand_from_oracle(P0, "Springleaf Drum", SPRINGLEAF_DRUM)
+            .id(),
+    ];
+    let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+    if crowded {
+        scenario.add_artifact_from_oracle(P0, "The Immortal Sun", THE_IMMORTAL_SUN);
+        for _ in 0..30 {
+            scenario.add_creature(P0, "Bear", 2, 2);
+        }
+    }
+    let mut runner = scenario.build();
+    lend_to_welder(&mut runner, welder, &exiled);
+    tap_for_mana(&mut runner, island);
+    let untap = untap_ability_index(&runner, welder);
+    activate(&mut runner, welder, untap, &[]);
+    assert_eq!(top_source_name(&runner).as_deref(), Some("Myr Welder"));
+    let state = runner.state();
+    let abilities = state.objects[&welder].abilities.len();
+    let actions = legal_actions(state);
+    perf_counters::reset();
+    let holds = !auto_pass_recommended_for_viewer(state, P0, &actions);
+    (
+        holds,
+        abilities,
+        perf_counters::priority_hold_probe_snapshot(),
+        perf_counters::snapshot(),
+    )
+}
+
+/// The hold reads only its source. Through the recommendation P0's client
+/// receives, Myr Welder borrowing Springleaf Drum's "Tap an untapped creature
+/// you control" holds, with The Immortal Sun's loyalty prohibition and thirty
+/// creatures on the battlefield or without them. Either way the hold reads the
+/// Welder's own abilities and nothing else, takes no auto-payment copy, and
+/// every engine counter for the read matches the bare board's.
+#[test]
+fn the_hold_reads_only_its_source_on_a_crowded_board() {
+    let Some(db) = shared_card_db() else { return };
+    let (bare_holds, bare_abilities, bare_probe, bare) = welder_drum_hold_work(db, false);
+    let (crowded_holds, crowded_abilities, crowded_probe, crowded) =
+        welder_drum_hold_work(db, true);
+    assert!(bare_holds && crowded_holds, "the window holds");
+    assert_eq!(bare_abilities, crowded_abilities);
+    assert!(crowded_probe.untap_hold_ability_reads as usize <= crowded_abilities);
+    assert_eq!(crowded_probe, bare_probe, "the hold's own reads");
+    assert_eq!(crowded_probe.state_clones, 0, "no auto-payment run");
+    assert_eq!(crowded, bare, "the board adds no work to the read");
 }
 
 /// The engine's own auto-pass reads the same hold. P0 taps Staff of Compleation

@@ -448,17 +448,18 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
 }
 
 /// CR 605.3a + CR 701.26b + CR 122.1d: whether untapping `object` gives `player`
-/// its mana a second time, read from public facts about `object` only, with
-/// nothing activated, paid or copied. `object` needs a {T} mana ability
-/// `player` could activate now: its readiness gates pass (untapped, not
-/// summoning sick, no activation prohibition) with its non-mana costs payable,
-/// and its cost doesn't move it off the battlefield (Treasure, Lotus Petal,
-/// Mirrored Lotus); or, as a land, the intrinsic "{T}: Add" of a basic land
-/// type (CR 305.6). A stun counter means the untap removes it instead. A mana
-/// part of the cost (Celestial Prism's {2}) isn't settled here, because that
-/// would run the auto-payment; it reads as payable, so the hold errs toward
-/// stopping: it can stop once where a use turns out impossible, the first (no
-/// mana floating for the Prism) or the second, and never passes a real one.
+/// its mana a second time, a priority hint read from `object` alone: its zone,
+/// controller, tap state, counters, types and own ability definitions, with no
+/// other object, static or cost leg consulted and nothing activated, paid or
+/// copied. `object` must be untapped with no stun counter (an untap would
+/// remove the counter instead), and have a {T} mana ability whose cost doesn't
+/// move it off the battlefield (Treasure, Lotus Petal, Mirrored Lotus), or be a
+/// land with a basic land type's intrinsic "{T}: Add" (CR 305.6). Whatever that
+/// leaves unchecked (summoning sickness, an activation prohibition or
+/// restriction, a cost leg such as Celestial Prism's {2} or Springleaf Drum's
+/// creature to tap) counts toward holding, so the hold can stop once where a
+/// use turns out impossible, and never passes a real one. The live activation
+/// stays the authority on what can actually be activated.
 pub(crate) fn untap_would_repeat_mana(
     state: &GameState,
     player: PlayerId,
@@ -469,6 +470,7 @@ pub(crate) fn untap_would_repeat_mana(
     };
     if source.zone != Zone::Battlefield
         || source.controller != player
+        || source.tapped
         || source
             .counters
             .get(&crate::types::counter::CounterType::Stun)
@@ -476,57 +478,30 @@ pub(crate) fn untap_would_repeat_mana(
     {
         return false;
     }
-    let gates = mana_abilities::ManaActivationGates::compute(state);
-    let has_explicit_mana_ability = source
-        .abilities
-        .iter()
-        .any(|ability| matches!(*ability.effect, Effect::Mana { .. }));
     let intrinsic_land_mana = source.card_types.core_types.contains(&CoreType::Land)
-        && !has_explicit_mana_ability
         && source
             .card_types
             .subtypes
             .iter()
-            .filter_map(|subtype| super::mana_payment::land_subtype_to_mana_type(subtype))
-            .filter_map(mana_type_to_color)
-            .any(|color| {
-                !mana_abilities::intrinsic_land_mana_ability_blocked(
-                    state,
-                    player,
-                    object,
-                    color,
-                    Some(&gates),
-                )
-            });
+            .any(|subtype| super::mana_payment::land_subtype_to_mana_type(subtype).is_some());
     intrinsic_land_mana
-        || source
-            .abilities
-            .iter()
-            .enumerate()
-            .any(|(ability_index, ability)| {
-                ability.kind == AbilityKind::Activated
-                    && mana_abilities::is_mana_ability(ability)
-                    && has_tap_component(&ability.cost)
-                    && mana_abilities::is_renewable_mana_ability(ability)
-                    && !cost_has_component(&ability.cost, |component| {
-                        matches!(
-                            component,
-                            AbilityCost::Exile {
-                                filter: Some(TargetFilter::SelfRef),
-                                ..
-                            }
-                        )
-                    })
-                    && mana_abilities::mana_ability_ready_without_simulation_gated(
-                        state,
-                        player,
-                        object,
-                        ability_index,
-                        ability,
-                        ManaPayabilityMode::Planning,
-                        &gates,
+        || source.abilities.iter().any(|ability| {
+            #[cfg(feature = "test-support")]
+            crate::game::perf_counters::record_untap_hold_ability_read();
+            ability.kind == AbilityKind::Activated
+                && mana_abilities::is_mana_ability(ability)
+                && has_tap_component(&ability.cost)
+                && mana_abilities::is_renewable_mana_ability(ability)
+                && !cost_has_component(&ability.cost, |component| {
+                    matches!(
+                        component,
+                        AbilityCost::Exile {
+                            filter: Some(TargetFilter::SelfRef),
+                            ..
+                        }
                     )
-            })
+                })
+        })
 }
 
 /// The `TapLandForMana` rows [`activatable_mana_actions_for_player`] emits for
