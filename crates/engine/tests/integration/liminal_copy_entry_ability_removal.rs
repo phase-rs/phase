@@ -557,9 +557,9 @@ fn littjara(humility: bool) -> (GameRunner, ObjectId) {
     (runner, land)
 }
 
-/// T5 (R11, C6): Littjara's "enters with an additional +1/+1 counter" is an exception that
-/// is an additional effect, not an ability of the token (CR 707.9e), so Humility leaves it;
-/// the copied Triskelion ability goes. With no remover both apply.
+/// T5 (R11, C6): Littjara's "enters with an additional +1/+1 counter" is part of the creating
+/// effect, not an ability of the token, so no ability remover touches it (CR 614.12 reads only
+/// the token's own abilities); the copied Triskelion ability goes. With no remover both apply.
 #[test]
 fn littjara_copy_under_humility_keeps_only_the_exception_counter() {
     for (humility, counters, pt) in [
