@@ -1645,3 +1645,116 @@ fn planar_controller_concession_collects_the_handoff_planeswalk_once() {
         "the planeswalk-to trigger from {arriving_id:?} is collected exactly once"
     );
 }
+
+/// CR 311.7 + CR 205.3 + CR 301.7 + CR 611.2a: New New York as the active
+/// plane, parsed from its printed text: "At the beginning of combat on your
+/// turn, until end of turn, noncreature artifacts you control become 3/3
+/// Vehicles in addition to their other types and gain flying, haste, and crew
+/// 1." and "Whenever chaos ensues, create a Treasure token and a 2/2 white
+/// Alien creature token." The printed plural "Vehicles" is the Vehicle subtype.
+#[test]
+fn new_new_york_animates_noncreature_artifacts_and_rewards_chaos() {
+    use crate::game::game_object::GameObject;
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::WaitingFor;
+    use crate::types::keywords::Keyword;
+
+    const NEW_NEW_YORK: &str = "At the beginning of combat on your turn, until end of turn, noncreature artifacts you control become 3/3 Vehicles in addition to their other types and gain flying, haste, and crew 1.\nWhenever chaos ensues, create a Treasure token and a 2/2 white Alien creature token.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        NEW_NEW_YORK,
+        "New New York",
+        &[],
+        &["Plane".to_string()],
+        &["New Earth".to_string()],
+    );
+    let face = synthesized_planar_face(CoreType::Plane, parsed.triggers, parsed.statics);
+
+    let p0 = PlayerId(0);
+    let p1 = PlayerId(1);
+    let mut state = GameState::new_two_player(7);
+    state.active_player = p0;
+    state.priority_player = p0;
+    state.phase = Phase::BeginCombat;
+    state.waiting_for = WaitingFor::Priority { player: p0 };
+    setup_planechase(&mut state, p0, ("New New York", &face), &[]);
+    let mut artifact = |state: &mut GameState, owner: PlayerId, name: &str| {
+        let id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut object =
+            GameObject::new(id, CardId(id.0), owner, name.to_string(), Zone::Battlefield);
+        object.card_types.core_types.push(CoreType::Artifact);
+        state.objects.insert(id, object);
+        state.battlefield.push_back(id);
+        id
+    };
+    let relic = artifact(&mut state, p0, "Relic");
+    let foreign = artifact(&mut state, p1, "Foreign Relic");
+
+    let resolve_stack = |state: &mut GameState| {
+        for _ in 0..8 {
+            if state.stack.is_empty() {
+                return;
+            }
+            crate::game::engine::apply_as_current(state, GameAction::PassPriority)
+                .expect("priority passes");
+        }
+        panic!("the stack did not resolve");
+    };
+
+    process_triggers(
+        &mut state,
+        &[GameEvent::PhaseChanged {
+            phase: Phase::BeginCombat,
+        }],
+    );
+    resolve_stack(&mut state);
+    crate::game::layers::evaluate_layers(&mut state);
+    let animated = &state.objects[&relic];
+    assert!(animated.card_types.core_types.contains(&CoreType::Creature));
+    assert!(animated.card_types.core_types.contains(&CoreType::Artifact));
+    assert!(
+        animated
+            .card_types
+            .subtypes
+            .iter()
+            .any(|subtype| subtype == "Vehicle"),
+        "{:?}",
+        animated.card_types.subtypes
+    );
+    assert_eq!((animated.power, animated.toughness), (Some(3), Some(3)));
+    assert!(animated.has_keyword(&Keyword::Flying));
+    assert!(animated.has_keyword(&Keyword::Haste));
+    assert!(animated
+        .keywords
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Crew { power: 1, .. })));
+    assert!(
+        !state.objects[&foreign]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "only artifacts the planar controller controls"
+    );
+
+    let tokens_before = state.battlefield.len();
+    let mut events = Vec::new();
+    chaos_ensues(&mut state, &mut events);
+    process_triggers(&mut state, &events);
+    resolve_stack(&mut state);
+    let created: Vec<&GameObject> = state
+        .battlefield
+        .iter()
+        .skip(tokens_before)
+        .map(|id| &state.objects[id])
+        .collect();
+    assert_eq!(created.len(), 2, "a Treasure and an Alien");
+    assert!(created
+        .iter()
+        .all(|token| token.is_token && token.controller == p0));
+    assert!(created.iter().any(|token| token.name == "Treasure"));
+    assert!(created.iter().any(
+        |token| token.card_types.subtypes.iter().any(|s| s == "Alien")
+            && token.power == Some(2)
+            && token.toughness == Some(2)
+    ));
+}

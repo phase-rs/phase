@@ -165,6 +165,7 @@ mod eyetwitch_learn_decline_lesson;
 mod face_down_cast_offer;
 mod face_down_cause_marker;
 mod face_down_spell_cost_filter;
+mod face_up_exile_and_two_other_target_witnesses;
 mod fact_or_fiction_pile_separation;
 mod fall_from_favor_monarch_untap;
 mod fallaji_archaeologist_up_to_may_put;
