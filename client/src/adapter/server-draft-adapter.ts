@@ -28,6 +28,7 @@ import {
   type PhaseSocket,
   type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
+import { SetupConfirmation, type SetupConfirmationOutcome } from "../services/setupConfirmation";
 import { isValidWebSocketUrl } from "../services/serverDetection";
 import { captureSubmissionArtPreferences, submitDeckList } from "../services/deckSubmission";
 import type {
@@ -1078,11 +1079,11 @@ export class ServerDraftAdapter implements EngineAdapter {
   /**
    * The server replaces a seat's sender on `ReconnectDraft` and never closes
    * the predecessor, so after that frame is written the incumbent no longer
-   * receives the seat's broadcasts. A candidate cancelled or closed past that
-   * point must not leave the incumbent as the current socket: it stops being
-   * current and is released unless it still owes a reply (the same contract a
-   * replaced socket has after a successful adoption). Create and Join attach a
-   * different seat and leave the incumbent's seat untouched.
+   * receives the seat's broadcasts. A candidate that is cancelled, closes or
+   * times out before its positive bootstrap must not leave the incumbent as the
+   * current socket: the incumbent stops being current, the work it owns is
+   * settled and it is released. Create and Join attach a different seat and
+   * leave the incumbent's seat untouched.
    */
   private retireSwappedIncumbent(candidate: PhaseSocketTransport, owner: AttachmentOwner): void {
     if (owner.type !== "init" || owner.init.kind !== "reconnect") return;
@@ -1094,7 +1095,12 @@ export class ServerDraftAdapter implements EngineAdapter {
       this.pingInterval = null;
     }
     this.stateCodec.clearRecovery();
-    this.retireIdleSockets();
+    // Its seat sender is gone: nothing it was owed can arrive, so settle it.
+    try {
+      this.settleSocketClose(incumbent);
+    } finally {
+      this.releaseSocket(incumbent);
+    }
   }
 
   private abandonSocket(socket: PhaseSocket): void {
@@ -1175,7 +1181,14 @@ export class ServerDraftAdapter implements EngineAdapter {
       // Raw transports can synchronously reenter during send; retain those
       // messages until both setup ordering and attachment ownership are safe.
       const setupMessages: Parameters<NonNullable<PhaseSocketTransport["onmessage"]>>[0][] = [];
-      sourceSocket.onmessage = (event) => { setupMessages.push(event); };
+      // The uncertain interval of a reattach (setup sent, bootstrap not yet
+      // received) has one owner; Create and Join attach a different seat.
+      const confirmation = initOwner?.kind === "reconnect" ? new SetupConfirmation() : null;
+      sourceSocket.onmessage = (event) => {
+        setupMessages.push(event);
+        // The candidate's first frame is its positive response.
+        confirmation?.confirm();
+      };
       const handleMessage: NonNullable<PhaseSocketTransport["onmessage"]> = (event) => {
         if (!this.sockets.has(sourceSocket)) return;
         try {
@@ -1223,6 +1236,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         }
       };
       sourceSocket.onclose = () => {
+        confirmation?.closed();
         if (!this.sockets.has(sourceSocket)) return;
         const current = this.ws === sourceSocket;
         // The transport already observed raw death; do not close the raw socket again.
@@ -1265,10 +1279,50 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.stateCodec.consumeFailure(bootstrap);
       }
       // Address the local candidate, not the still-current previous socket.
-      if (!(await writeSetupFrame(
-        sourceSocket, setupFrame, attachment.controller.signal, (frame, target) => this.send(frame, target),
-      ))) {
+      let written: boolean;
+      // Why the interval after the write did not end in a positive bootstrap.
+      let unconfirmed: SetupConfirmationOutcome | null = null;
+      try {
+        const write = writeSetupFrame(
+          sourceSocket, setupFrame, attachment.controller.signal, (frame, target) => this.send(frame, target),
+        );
+        if (confirmation === null) {
+          written = await write;
+        } else {
+          // A receipt that never settles is bounded by the same owner.
+          const first = await Promise.race([write, confirmation.settled]);
+          if (typeof first === "boolean") {
+            written = first;
+          } else if (first === "confirmed") {
+            written = await write;
+          } else {
+            written = true;
+            unconfirmed = first;
+          }
+          if (written && unconfirmed === null) {
+            confirmation.watchAbort(attachment.controller.signal);
+            const outcome = await confirmation.settled;
+            if (outcome !== "confirmed") unconfirmed = outcome;
+          }
+        }
+      } finally {
+        confirmation?.dispose();
+      }
+      if (!written) {
         throw new AdapterError("WS_CLOSED", "Failed to send setup frame", true);
+      }
+      if (unconfirmed !== null) {
+        // Ownership of the seat is unknown: retire the incumbent (settling its
+        // work) and the candidate. A close or an abort has already settled the
+        // initialization; a timeout settles it here. The caller owns the retry.
+        this.retireSwappedIncumbent(sourceSocket, attachment.owner);
+        if (unconfirmed === "timeout") {
+          this.rejectAttachment(attachment.owner, new AdapterError(
+            "WS_CLOSED", "Reconnect was not confirmed in time", true,
+          ));
+        }
+        this.abandonSocket(socket);
+        return;
       }
       if (!this.ownsAttachment(attachment) || !this.sockets.has(sourceSocket)) {
         // The frame is on the wire: a ReconnectDraft has already moved the

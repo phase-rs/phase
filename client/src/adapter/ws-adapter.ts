@@ -44,6 +44,7 @@ import {
   type PhaseSocketFactory,
   type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
+import { SetupConfirmation, type SetupConfirmationOutcome } from "../services/setupConfirmation";
 import { isValidWebSocketUrl, mixedContentBlockReason } from "../services/serverDetection";
 import type { FullSessionKey, WsSessionData } from "../services/multiplayerSession";
 import {
@@ -2476,6 +2477,14 @@ export class WebSocketAdapter implements EngineAdapter {
         closeSocket();
       }
     };
+    // The uncertain interval of a reconnect (setup sent, bootstrap not yet
+    // received) has one owner. The native sidecar keeps its own attach contract.
+    // An initial fallback's own deadline already bounds its replacement.
+    const confirmation = !this.isNativeSocket()
+      && !this.initialFallbackActive()
+      && (setupFrame as { type?: unknown }).type === "Reconnect"
+      ? new SetupConfirmation()
+      : null;
     // Until setup completes, this continuation owns cleanup even if a public
     // listener throws, disposes the adapter, or starts another attachment.
     let retained = false;
@@ -2536,6 +2545,8 @@ export class WebSocketAdapter implements EngineAdapter {
       // entire drain: their synchronous replies follow already-admitted frames.
       socket.ws.onmessage = (event) => {
         (setupMessages ??= []).push(event);
+        // The candidate's first frame is its positive response.
+        confirmation?.confirm();
       };
 
       socket.ws.onerror = () => {
@@ -2559,6 +2570,7 @@ export class WebSocketAdapter implements EngineAdapter {
         // A natural close already released the wrapper's resources; later
         // disposal must not request another physical close.
         closed = true;
+        confirmation?.closed();
         if (this.ws !== socket.ws) return;
         this.ws = null;
         this.closeSocket = null;
@@ -2641,12 +2653,35 @@ export class WebSocketAdapter implements EngineAdapter {
       }
       this.setupWritePreparation = preparation;
       let written: boolean;
+      // Why the interval after the write did not end in a positive bootstrap.
+      let unconfirmed: SetupConfirmationOutcome | null = null;
       try {
-        written = await writeSetupFrame(
+        const write = writeSetupFrame(
           socket.ws, setupFrame, preparation.signal, (frame, target) => this.send(frame, target),
         );
+        if (confirmation === null) {
+          written = await write;
+        } else {
+          // A receipt that never settles is bounded by the same owner: a close
+          // or timeout first leaves the frame's fate unknown.
+          const first = await Promise.race([write, confirmation.settled]);
+          if (typeof first === "boolean") {
+            written = first;
+          } else if (first === "confirmed") {
+            written = await write;
+          } else {
+            written = true;
+            unconfirmed = first;
+          }
+          if (written && unconfirmed === null) {
+            confirmation.watchAbort(preparation.signal);
+            const outcome = await confirmation.settled;
+            if (outcome !== "confirmed") unconfirmed = outcome;
+          }
+        }
       } finally {
         if (this.setupWritePreparation === preparation) this.setupWritePreparation = null;
+        confirmation?.dispose();
       }
       if (!written) {
         if (this.disposed || this.stateCodecPreparation !== preparation) return;
@@ -2695,6 +2730,23 @@ export class WebSocketAdapter implements EngineAdapter {
       };
       // Disposal already retired the incumbent and every owned request.
       if (this.disposed) return;
+      if (unconfirmed !== null) {
+        // Ownership of the seat is unknown: retire the incumbent (and settle
+        // its requests); the candidate is retired by the `finally` below. A
+        // cancelled attachment leaves the episode to its successor; a close or
+        // timeout hands the retry to the one retry owner.
+        retireSwappedIncumbent();
+        if (unconfirmed === "aborted" || this.stateCodecPreparation !== preparation) return;
+        this.rejectInitialization(new AdapterError(
+          "WS_CLOSED",
+          unconfirmed === "timeout"
+            ? "Reconnect was not confirmed in time"
+            : "Connection closed before the reconnect was confirmed",
+          true,
+        ));
+        if (this.reconnectInFlight) this.attemptReconnect();
+        return;
+      }
       if (this.stateCodecPreparation !== preparation || preparation.signal.aborted) {
         // A newer attachment (or the end of an initial fallback) cancelled
         // this one. It owns the episode, so no retry is scheduled from here:

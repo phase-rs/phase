@@ -1,0 +1,80 @@
+/**
+ * The uncertain interval of a reconnect: from the moment a candidate's setup
+ * frame is sent until its positive bootstrap arrives.
+ *
+ * The server replaces a seat's sender when it handles `Reconnect` /
+ * `ReconnectDraft` and never closes the predecessor, so once the frame is sent
+ * neither the incumbent nor the candidate is known to own the seat. The
+ * candidate is adopted only on its positive bootstrap; a close, timeout or
+ * abort first retires both sockets.
+ *
+ * `SetupConfirmation` is the single owner of that interval for both server
+ * adapters. It settles exactly once, with whichever of these happens first:
+ *
+ *  - `confirmed`: the candidate delivered its first post-setup frame;
+ *  - `closed`: the candidate closed;
+ *  - `timeout`: the bounded wait elapsed (this also bounds a setup write whose
+ *    receipt never settles);
+ *  - `aborted`: the attachment was cancelled (only once {@link watchAbort} is
+ *    armed, because before the frame is written an abort is delivered to the
+ *    transport through the write's own signal).
+ */
+export const SETUP_CONFIRMATION_TIMEOUT_MS = 5_000;
+
+export type SetupConfirmationOutcome = "confirmed" | "closed" | "timeout" | "aborted";
+
+export class SetupConfirmation {
+  /** Resolves once, with the first outcome. Never rejects. */
+  readonly settled: Promise<SetupConfirmationOutcome>;
+  private resolve!: (outcome: SetupConfirmationOutcome) => void;
+  private outcome: SetupConfirmationOutcome | null = null;
+  private timer: ReturnType<typeof setTimeout> | null;
+  private abortSignal: AbortSignal | null = null;
+  private readonly onAbort = () => this.finish("aborted");
+
+  constructor(timeoutMs: number = SETUP_CONFIRMATION_TIMEOUT_MS) {
+    this.settled = new Promise((resolve) => { this.resolve = resolve; });
+    this.timer = setTimeout(() => this.finish("timeout"), timeoutMs);
+  }
+
+  /** The candidate delivered its first post-setup frame. */
+  confirm(): void {
+    this.finish("confirmed");
+  }
+
+  /** The candidate closed. */
+  closed(): void {
+    this.finish("closed");
+  }
+
+  /** From now on an abort of `signal` settles this confirmation. */
+  watchAbort(signal: AbortSignal): void {
+    if (this.outcome !== null) return;
+    if (signal.aborted) {
+      this.finish("aborted");
+      return;
+    }
+    this.abortSignal = signal;
+    signal.addEventListener("abort", this.onAbort, { once: true });
+  }
+
+  /** The outcome so far, or null while the interval is still open. */
+  get current(): SetupConfirmationOutcome | null {
+    return this.outcome;
+  }
+
+  /** Releases the timer and the abort listener; idempotent. */
+  dispose(): void {
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    this.abortSignal?.removeEventListener("abort", this.onAbort);
+    this.abortSignal = null;
+  }
+
+  private finish(outcome: SetupConfirmationOutcome): void {
+    if (this.outcome !== null) return;
+    this.outcome = outcome;
+    this.dispose();
+    this.resolve(outcome);
+  }
+}
