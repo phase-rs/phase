@@ -7206,8 +7206,12 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         .collect();
 
     for (key, face) in card_db.face_iter() {
-        let coverage =
-            compute_card_face_coverage(face, &trigger_registry, &static_registry, &valid_subtypes);
+        let coverage = compute_card_face_coverage_for_report(
+            face,
+            &trigger_registry,
+            &static_registry,
+            &valid_subtypes,
+        );
         let supported = coverage.is_supported();
         let gap_details = public_gap_details(&coverage.gaps);
         let gap_count = gap_details.len();
@@ -7663,11 +7667,16 @@ impl CardFaceCoverage {
 /// The single canonical per-face coverage computation shared between
 /// `analyze_coverage` (for coverage-report and CI gates) and `card_face_gaps`
 /// (for deck validation and runtime deck building).
+///
+/// When `include_entry_projection` is true, the entry-projection check (deck-only
+/// policy) is included. The report uses `false` to preserve the existing policy;
+/// deck validation uses `true`.
 pub fn compute_card_face_coverage(
     face: &CardFace,
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
     static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
     valid_subtypes: &HashSet<String>,
+    include_entry_projection: bool,
 ) -> CardFaceCoverage {
     let mut missing = Vec::new();
 
@@ -7704,7 +7713,9 @@ pub fn compute_card_face_coverage(
     );
     check_shared_source_graveyard_slot(face, &mut missing);
     check_confirmed_misparse(face, &mut missing);
-    check_entry_projection(face, &mut missing);
+    if include_entry_projection {
+        check_entry_projection(face, &mut missing);
+    }
     check_subtype_lexicon(face, valid_subtypes, &mut missing);
     check_resolver_features(face, &mut missing);
     check_silent_drops(&face.oracle_text, &face.name, &parse_details, &mut missing);
@@ -7725,6 +7736,23 @@ pub fn compute_card_face_coverage(
     }
 }
 
+/// Coverage computation for the published report (coverage-report and CI gates).
+/// Excludes the deck-only entry-projection check to preserve existing policy.
+fn compute_card_face_coverage_for_report(
+    face: &CardFace,
+    trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
+    static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
+    valid_subtypes: &HashSet<String>,
+) -> CardFaceCoverage {
+    compute_card_face_coverage(
+        face,
+        trigger_registry,
+        static_registry,
+        valid_subtypes,
+        false,
+    )
+}
+
 /// Compute full coverage information for a single card face against the engine's
 /// global registries and the default subtype lexicon.
 pub fn card_face_coverage(face: &CardFace) -> CardFaceCoverage {
@@ -7733,11 +7761,18 @@ pub fn card_face_coverage(face: &CardFace) -> CardFaceCoverage {
 
 /// Like [`card_face_coverage`], but against a caller-supplied subtype lexicon
 /// (see [`collect_valid_subtypes`]) so the verdict matches `analyze_coverage`.
+/// Includes the deck-only entry-projection check for deck validation.
 pub fn card_face_coverage_with_subtypes(
     face: &CardFace,
     valid_subtypes: &HashSet<String>,
 ) -> CardFaceCoverage {
-    compute_card_face_coverage(face, trigger_registry(), static_registry(), valid_subtypes)
+    compute_card_face_coverage(
+        face,
+        trigger_registry(),
+        static_registry(),
+        valid_subtypes,
+        true,
+    )
 }
 
 /// Returns the list of unsupported handler labels for a card face (e.g.
@@ -26315,7 +26350,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         assert_eq!(slot1, "total mana value of that card (slot 1)");
     }
 
-    /// CR 100.2a: Deck coverage (card_face_gaps) and CI coverage (analyze_coverage)
+    /// Deck coverage (card_face_gaps) and CI coverage (analyze_coverage)
     /// must share the per-face gap computation (issue #9972).
     #[test]
     fn card_face_gaps_reports_parse_warnings_matching_coverage_report() {
