@@ -1,7 +1,7 @@
 use crate::game::combat::{AttackTarget, CombatState, DamageAssignment, DamageTarget, TrampleKind};
 use crate::game::effects::deal_damage::{
-    apply_damage_after_replacement, emit_damage_dealt_and_record, pre_replacement_damage_gate,
-    DamageContext, DamageResult,
+    apply_damage_after_replacement, pre_replacement_damage_gate,
+    settle_parked_player_damage_results, DamageContext, DamagePostLossDrainOutcome, DamageResult,
 };
 use crate::game::effects::life::ReplacementDeferred;
 use crate::game::game_object::GameObject;
@@ -1608,10 +1608,12 @@ struct PhaseCAccumulators {
 enum PhaseCRunOutcome {
     Complete,
     /// Leg `index` paused on a CR 616.1 replacement choice over its results:
-    /// its life loss (a combat-flagged stash is parked) or its poison counters
-    /// (infect/toxic; no stash — the damage fact was already recorded at the
-    /// pause). The leg's lifelink share and bookkeeping are already folded into
-    /// the accumulators; legs after `index` never applied.
+    /// its life loss or its poison counters (infect/toxic). Its remaining
+    /// results ride a combat stash when any are owed (a loss pause always; an
+    /// infect pause when toxic is owed); a stashless pause is a toxic or an
+    /// owed-nothing infect pause whose fact was already recorded. The leg's
+    /// lifelink share and bookkeeping are already folded into the
+    /// accumulators; legs after `index` never applied.
     PausedOnReplacement {
         index: usize,
     },
@@ -1708,11 +1710,51 @@ fn fold_combat_leg_amount(
     }
 }
 
+/// CR 510.2 + CR 616.1 + CR 101.4: order the simultaneous Phase C legs so the
+/// choices their results need are made in APNAP order. CR 616.1 gives a
+/// result's replacement choice to the affected player, and players choosing at
+/// the same time choose in APNAP order (CR 101.4). Phase B swallows choices,
+/// so only Phase C prompts, and it applies each leg's SURVIVOR event: a leg
+/// whose survivor deals damage to a player can pause on that player's choice
+/// (keyed by `apnap_team_rank` of that player — not the attacker's
+/// controller, the actor, nor the assignment's target, which a redirection
+/// shield can change). Legs whose survivor is `None` (fully prevented, applied
+/// as 0) or damages an object keep their slots; the player legs are
+/// stable-sorted among their own slots, so equal ranks (one player, or one
+/// shared-turn team) keep declaration order and 2-player / creature-only
+/// batches are unchanged.
+fn order_phase_c_legs_by_apnap(state: &GameState, legs: &mut [PendingCombatLeg]) {
+    let player_slots: Vec<(usize, usize)> = legs
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, leg)| match &leg.survivor {
+            Some(ProposedEvent::Damage {
+                target: TargetRef::Player(player),
+                ..
+            }) => Some((slot, crate::game::topology::apnap_team_rank(state, *player))),
+            _ => None,
+        })
+        .collect();
+    if player_slots.len() < 2 {
+        return;
+    }
+    let mut ordered: Vec<(usize, usize)> = player_slots.clone();
+    ordered.sort_by_key(|&(_, rank)| rank);
+    let ordered_legs: Vec<PendingCombatLeg> = ordered
+        .iter()
+        .map(|&(slot, _)| legs[slot].clone())
+        .collect();
+    for (&(slot, _), leg) in player_slots.iter().zip(ordered_legs) {
+        legs[slot] = leg;
+    }
+}
+
 /// CR 510.2 + CR 120.3 + CR 616.1: apply Phase C legs in batch order —
 /// shared by the fresh batch and the remnant resume. A leg whose life loss
-/// pauses (a combat-flagged stash that was absent before this leg) or whose
-/// poison counters pause (infect/toxic stash nothing) folds eagerly and parks
-/// the tail so the prompt surfaces; `None` survivors apply as 0 with
+/// or infect result pauses with results still owed (a combat-flagged stash
+/// that was absent before this leg) or whose poison counters pause with
+/// nothing owed (no stash) folds eagerly and parks the tail so the prompt
+/// surfaces; `None` survivors apply as 0 with
 /// bookkeeping, exactly as the never-paused path would.
 fn run_phase_c_legs(
     state: &mut GameState,
@@ -1725,9 +1767,11 @@ fn run_phase_c_legs(
             // CR 120.3 + CR 120.4b: Apply the post-replacement event WITHOUT
             // re-running the replacement pipeline.
             Some(survivor_event) => {
-                // Snapshot BEFORE applying: the loss branch is the only
-                // combat path that stashes, so a combat-flagged stash that
-                // appears here identifies THIS leg's loss pause.
+                // Snapshot BEFORE applying: a combat-flagged stash that
+                // appears here identifies THIS leg's pause with results
+                // parked (a loss pause, or an infect pause that owes toxic).
+                // Both fold `stashed.actual_amount`, which equals the
+                // survivor's `dealt_amount` (players have no excess).
                 let had_stash = state.pending_damage_post_loss.is_some();
                 // CR 120.4b: the post-replacement amount this leg deals, read
                 // before the apply consumes the event (a counter pause leaves
@@ -1753,12 +1797,15 @@ fn run_phase_c_legs(
                             return PhaseCRunOutcome::PausedOnReplacement { index };
                         }
                         // CR 120.4c + CR 616.1: no fresh stash means the leg
-                        // paused on its poison-counter result (infect/toxic).
+                        // paused on its poison-counter result with nothing
+                        // owed behind it (a toxic pause, or an infect pause
+                        // without toxic).
                         // That identification holds because the combat ctx has
                         // `has_lifelink` forced off (lifelink folds per source
                         // in `apply_combat_damage`) and no `excess_recipient`,
-                        // so the loss pause is the only stashing combat
-                        // `NeedsChoice`. The damage fact was recorded at the
+                        // so every other combat `NeedsChoice` is a stashing
+                        // one (the loss pause, or an infect pause owing
+                        // toxic). The damage fact was recorded at the
                         // pause; fold the dealt amount like an unpaused leg and
                         // park the tail so the ordering prompt surfaces and the
                         // counter answer resumes the batch. A future combat
@@ -1815,40 +1862,37 @@ fn build_combat_damage_to_players_aggregate(
         .collect()
 }
 
-/// CR 510.2 + CR 616.1: complete a parked Phase C tail — consume the paused
-/// leg's combat stash into its deferred `DamageDealt` event + CR 120.1
-/// record, apply the remaining legs, then build the aggregate and the
-/// per-source lifelink gains onto the record. Only called once the paused
-/// loss fully settles (the funnel resumes combat solely after the batch drain
-/// retires with no re-park).
+/// CR 510.2 + CR 616.1: complete a parked Phase C tail — settle the paused
+/// leg's parked results (its toxic poison, then its deferred `DamageDealt`
+/// event + CR 120.1 record when still owed), apply the remaining legs, then
+/// build the aggregate and the per-source lifelink gains onto the record.
+/// Only called once the paused result fully settles (the wrapper resumes
+/// combat solely on a Priority return, Execute or Prevented). A parked result
+/// that pauses again (the toxic poison meeting its own CR 616.1 choice)
+/// re-parks the remnant UNCHANGED: its `remaining` legs have not run, and the
+/// paused leg's amounts folded eagerly at park time.
 fn complete_combat_phase_c_remnant(
     state: &mut GameState,
     remnant: PendingCombatPhaseCRemnant,
     record: &mut PendingCombatLifelink,
 ) -> RemnantOutcome {
     // The paused leg's lifelink share and bookkeeping folded eagerly at park
-    // time; only its event + record were deferred (sync order: after the loss
-    // settles). A missing stash is expected when the paused leg paused on its
-    // poison-counter result (infect/toxic stash nothing; the damage fact was
-    // recorded at the pause). Otherwise it is unreachable, because the funnel
-    // skips combat stashes. Continuing with the remaining legs (rather than
-    // panicking) keeps a corrupt save resumable.
+    // time; only its parked results were deferred (sync order: after the
+    // paused result settles). A missing stash is expected when the paused leg
+    // paused on a poison-counter result that owed nothing more (a toxic pause,
+    // or an infect pause without toxic: the damage fact was recorded at the
+    // pause). Otherwise it is unreachable, because the funnel skips combat
+    // stashes. Continuing with the remaining legs (rather than panicking)
+    // keeps a corrupt save resumable.
     if let Some(stashed) = state
         .pending_damage_post_loss
         .take_if(|stashed| stashed.is_combat)
     {
-        emit_damage_dealt_and_record(
-            state,
-            stashed.source_id,
-            stashed.source_incarnation,
-            stashed.controller,
-            &TargetRef::Player(stashed.target),
-            stashed.actual_amount,
-            stashed.actual_amount,
-            0,
-            true,
-            &mut record.batch_events,
-        );
+        if settle_parked_player_damage_results(state, *stashed, &mut record.batch_events)
+            == DamagePostLossDrainOutcome::PausedForReplacement
+        {
+            return RemnantOutcome::Repaused { remnant };
+        }
     }
     let PendingCombatPhaseCRemnant {
         remaining,
@@ -1991,7 +2035,7 @@ pub(crate) fn apply_combat_damage(
         survivors.len(),
         "batch survivor count must align with collected entries"
     );
-    let legs: Vec<PendingCombatLeg> = entries
+    let mut legs: Vec<PendingCombatLeg> = entries
         .iter()
         .zip(survivors)
         .map(|(entry, survivor)| PendingCombatLeg {
@@ -2005,6 +2049,10 @@ pub(crate) fn apply_combat_damage(
             survivor,
         })
         .collect();
+    // CR 616.1 + CR 101.4: decisions of different affected players are made
+    // in APNAP order. Sorted once here; the remnant keeps the ordered tail, so
+    // a resume continues in the same order.
+    order_phase_c_legs_by_apnap(state, &mut legs);
     let mut accums = PhaseCAccumulators {
         lifelink_by_source: Vec::new(),
         combat_damage_to_players: Vec::new(),
@@ -2013,8 +2061,8 @@ pub(crate) fn apply_combat_damage(
     if let PhaseCRunOutcome::PausedOnReplacement { index } =
         run_phase_c_legs(state, &legs, &mut accums, &mut events)
     {
-        // CR 510.2 + CR 616.1: a leg's life loss paused — park the unapplied
-        // tail (the paused leg's post-loss work rides its combat stash) and
+        // CR 510.2 + CR 616.1: a leg's result paused — park the unapplied
+        // tail (the paused leg's owed results ride its combat stash) and
         // surface the prompt WITHOUT completing the sub-step, so the turn
         // framework never advances over an open choice.
         let batch_events = events.clone();
@@ -2300,6 +2348,121 @@ mod tests {
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
     use std::sync::Arc;
+
+    /// B5-7 - CR 616.1 + CR 101.4: `order_phase_c_legs_by_apnap` keys each leg
+    /// by its SURVIVOR's damaged player, not by the assignment's target, and
+    /// sorts only player-survivor legs among their own slots (stable).
+    #[test]
+    fn order_phase_c_legs_by_apnap_keys_by_survivor_player() {
+        fn leg(source: u64, target: TargetRef, survivor: Option<TargetRef>) -> PendingCombatLeg {
+            let ctx = DamageContext::fallback(ObjectId(source), PlayerId(0));
+            PendingCombatLeg {
+                ctx: DamageContextSnapshot::from(&ctx),
+                source_is_commander: false,
+                target,
+                lifelink_controller: None,
+                survivor: survivor.map(|target| ProposedEvent::Damage {
+                    source_id: ObjectId(source),
+                    target,
+                    amount: 1,
+                    is_combat: true,
+                    applied: Default::default(),
+                }),
+            }
+        }
+        fn sources(legs: &[PendingCombatLeg]) -> Vec<u64> {
+            legs.iter().map(|leg| leg.ctx.source_id.0).collect()
+        }
+        let p = |n: u8| TargetRef::Player(PlayerId(n));
+        let creature = TargetRef::Object(ObjectId(900));
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.active_player = PlayerId(0);
+
+        // (a) player legs reorder among their slots: P2, P1 -> P1, P2; the
+        // creature leg between them keeps slot 1.
+        let mut legs = vec![
+            leg(1, p(2), Some(p(2))),
+            leg(2, creature.clone(), Some(creature.clone())),
+            leg(3, p(1), Some(p(1))),
+        ];
+        order_phase_c_legs_by_apnap(&state, &mut legs);
+        assert_eq!(
+            sources(&legs),
+            vec![3, 2, 1],
+            "(a) reordered (input was [1, 2, 3])"
+        );
+
+        // (b) assignment at a creature, survivor redirected to P1: ordered by
+        // P1 (ahead of the P2 leg). (c) assignment at P1, survivor at an
+        // object: keeps its slot.
+        let mut legs = vec![
+            leg(10, p(2), Some(p(2))),
+            leg(11, p(1), Some(creature.clone())),
+            leg(12, creature.clone(), Some(p(1))),
+        ];
+        order_phase_c_legs_by_apnap(&state, &mut legs);
+        assert_eq!(
+            sources(&legs),
+            vec![12, 11, 10],
+            "(b) the redirected survivor sorts by P1; (c) the object survivor stays in slot 1"
+        );
+
+        // (d) a `None` survivor (fully prevented) keeps its slot even though
+        // its assignment targets the earliest APNAP player.
+        let mut legs = vec![
+            leg(20, p(2), Some(p(2))),
+            leg(21, p(0), None),
+            leg(22, p(1), Some(p(1))),
+        ];
+        order_phase_c_legs_by_apnap(&state, &mut legs);
+        assert_eq!(sources(&legs), vec![22, 21, 20], "(d)");
+
+        // (f) an eliminated player and an unknown player sort last; the
+        // living P2 goes first, then the two last-rank legs in declaration
+        // order.
+        let mut eliminated = state.clone();
+        eliminated
+            .players
+            .iter_mut()
+            .find(|player| player.id == PlayerId(1))
+            .unwrap()
+            .is_eliminated = true;
+        let mut legs = vec![
+            leg(30, p(1), Some(p(1))),
+            leg(31, p(9), Some(p(9))),
+            leg(32, p(2), Some(p(2))),
+        ];
+        order_phase_c_legs_by_apnap(&eliminated, &mut legs);
+        assert_eq!(sources(&legs), vec![32, 30, 31], "(f)");
+
+        // (e) equal ranks keep declaration order: two teammates of one
+        // shared-turn team (CR 805) share an APNAP choice group.
+        let mut team = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        team.active_player = PlayerId(0);
+        let rank = |n: u8| crate::game::topology::apnap_team_rank(&team, PlayerId(n));
+        let mate = (1..4)
+            .find(|&n| rank(n) == rank(0))
+            .expect("reach-guard: P0 has a teammate sharing its APNAP rank");
+        let other = (1..4)
+            .find(|&n| rank(n) > rank(0))
+            .expect("reach-guard: an opposing seat ranks after P0's team");
+        let mut legs = vec![
+            leg(40, p(mate), Some(p(mate))),
+            leg(41, p(other), Some(p(other))),
+            leg(42, p(0), Some(p(0))),
+        ];
+        order_phase_c_legs_by_apnap(&team, &mut legs);
+        assert_eq!(
+            sources(&legs),
+            vec![40, 42, 41],
+            "(e) the teammates keep declaration order; the other team moves last"
+        );
+    }
 
     fn setup() -> GameState {
         let mut state = GameState::new_two_player(42);

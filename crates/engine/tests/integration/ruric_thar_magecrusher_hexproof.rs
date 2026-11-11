@@ -34,12 +34,16 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::{apply_resolved_zone_change, move_to_zone};
 use engine::types::ability::{ContinuousModification, StaticCondition, StaticDefinition};
 use engine::types::ability::{DamageKindFilter, TargetRef};
+use engine::types::ability::{
+    QuantityModification, ReplacementDefinition, ReplacementMode, ReplacementPlayerScope,
+};
 use engine::types::actions::GameAction;
 use engine::types::card::PrintedCardRef;
+use engine::types::card_type::Supertype;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::format::{ChallengeDeck, FormatConfig};
-use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, DamagePostLossStage, GameState, WaitingFor};
 use engine::types::game_state::{DamageRecord, PersistedGameState, PersistedRestoreFinalization};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, ProtectionTarget};
@@ -47,6 +51,7 @@ use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::proposed_event::{CounterPlacement, ProposedEvent};
+use engine::types::replacements::ReplacementEvent;
 use engine::types::resolved_commands::{
     ResolvedRulesCommand, ResolvedZoneChangeCommand, ResolvedZoneChangeReplayInvariantError,
 };
@@ -826,15 +831,26 @@ fn drive_combat(
     runner: &mut GameRunner,
     attackers: &[ObjectId],
     blocks: &[(ObjectId, ObjectId)],
-    mut on_prompt: impl FnMut(&mut GameRunner, usize) -> usize,
+    on_prompt: impl FnMut(&mut GameRunner, usize) -> usize,
 ) -> CombatDrive {
-    runner.advance_to_combat();
     let attacks: Vec<_> = attackers
         .iter()
         .map(|&a| (a, AttackTarget::Player(P1)))
         .collect();
+    drive_combat_at(runner, &attacks, blocks, on_prompt)
+}
+
+/// `drive_combat` with explicit attack targets (multiplayer rows): the active
+/// player declares `attacks` in the given order.
+fn drive_combat_at(
+    runner: &mut GameRunner,
+    attacks: &[(ObjectId, AttackTarget)],
+    blocks: &[(ObjectId, ObjectId)],
+    mut on_prompt: impl FnMut(&mut GameRunner, usize) -> usize,
+) -> CombatDrive {
+    runner.advance_to_combat();
     let mut events = runner
-        .declare_attackers(&attacks)
+        .declare_attackers(attacks)
         .expect("attack declaration must succeed")
         .events;
     let mut prompts = 0;
@@ -2298,9 +2314,11 @@ fn old_static_save(pre: &GameState, id: ObjectId) -> (Value, usize) {
 /// S10 - the reapply half end to end: an old save carries the OLD
 /// `Unrecognized` static (evaluated true) and no latch. Restore replaces the
 /// static with the current printed one and reads it against the recovered
-/// latch: hexproof FALSE. Reverting either the recovery or the reapply leaves
-/// hexproof TRUE. Control: with no damage history the current static is still
-/// installed and hexproof is TRUE.
+/// latch: hexproof FALSE. Reverting the recovery leaves hexproof TRUE; the
+/// decode migration (B6) rewrites the saved condition before the reapply, so
+/// the reapply and the migration each install the current condition here.
+/// Control: with no damage history the current static is still installed and
+/// hexproof is TRUE.
 #[test]
 fn s10_old_static_is_reapplied_and_read_against_the_recovered_latch() {
     let db = ruric_face_db();
@@ -2311,8 +2329,9 @@ fn s10_old_static_is_reapplied_and_read_against_the_recovered_latch() {
     let restored = restore(json, &db);
     assert_restore_ran(&pre, &restored, ruric);
     let obj = &restored.objects[&ruric];
-    // Checked first: reverting the recovery (empty latch) or the reapply (the
-    // saved `Unrecognized` evaluates true) each leaves hexproof TRUE here.
+    // Checked first: reverting the recovery (empty latch) leaves hexproof TRUE
+    // here; the saved `Unrecognized` is replaced by both the decode migration
+    // and the reapply.
     assert!(
         !has_hexproof(obj),
         "the current static read against the recovered combat latch ends hexproof"
@@ -2344,4 +2363,1102 @@ fn s10_old_static_is_reapplied_and_read_against_the_recovered_latch() {
     assert!(restored.objects_that_dealt_damage.is_empty());
     assert!(has_hexproof(obj));
     assert!(!opponent_can_target(restored, ruric, opp_bolt));
+}
+
+// ---------------------------------------------------------------------------
+// B4: a player-damage leg's remaining results survive a paused result.
+// CR 120.3f and CR 120.3g (702.164c): lifelink and toxic each happen in
+// addition to the damage's other results; CR 120.3a/b give the life loss or
+// poison result; CR 120.4c: the dealt damage is processed into its results,
+// as modified by replacement effects that interact with them. Expected values
+// are derived from those rules per chosen CR 616.1 order, never copied from a
+// base run.
+// ---------------------------------------------------------------------------
+
+/// Verbatim Oracle text of Necrogen Communion (Aura).
+const NECROGEN_COMMUNION_ORACLE_TEXT: &str = "Enchant creature you control\nEnchanted creature has toxic 2. (Players dealt combat damage by it also get two poison counters.)\nWhen enchanted creature dies, return that card to the battlefield under your control.";
+
+/// Verbatim Oracle text of Plague Stinger.
+const PLAGUE_STINGER_ORACLE_TEXT: &str = "Flying\nInfect (This creature deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)";
+
+/// A printed Necrogen Communion Aura for P0 (verbatim Oracle; the curated
+/// card fixture does not carry it, so it is built like `add_phyresis`).
+fn add_necrogen_communion(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_enchantment_from_oracle(P0, "Necrogen Communion", NECROGEN_COMMUNION_ORACLE_TEXT)
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(&["Enchant"], NECROGEN_COMMUNION_ORACLE_TEXT)
+        .id()
+}
+
+/// Attach Necrogen Communion through the production attach authority and
+/// prove the host has toxic 2 (CR 613.1f) before any damage is dealt.
+fn attach_necrogen_communion(runner: &mut GameRunner, aura: ObjectId, host: ObjectId) {
+    attach_to(runner.state_mut(), aura, host);
+    flush_layers(runner.state_mut());
+    assert!(
+        runner.state().objects[&host]
+            .keywords
+            .contains(&Keyword::Toxic(2)),
+        "reach-guard: Necrogen Communion grants toxic 2 to the enchanted creature"
+    );
+}
+
+/// The open poison-counter replacement choice: (chooser, actor, receiver,
+/// count, candidate_count).
+fn poison_prompt(runner: &GameRunner) -> (PlayerId, PlayerId, PlayerId, u32, usize) {
+    let state = runner.state();
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidate_count,
+        ..
+    } = state.waiting_for
+    else {
+        panic!("expected a ReplacementChoice, got {:?}", state.waiting_for);
+    };
+    let pending = state.pending_replacement.as_ref().expect("pending choice");
+    let ProposedEvent::AddCounter {
+        placement:
+            CounterPlacement::Player {
+                actor,
+                player_id,
+                counter_kind: PlayerCounterKind::Poison,
+            },
+        count,
+        ..
+    } = pending.proposed
+    else {
+        panic!("expected a poison AddCounter, got {:?}", pending.proposed);
+    };
+    (player, actor, player_id, count, candidate_count)
+}
+
+/// Positive life changes of `player` in `events`.
+fn gains_of(events: &[GameEvent], player: PlayerId) -> Vec<i32> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::LifeChanged {
+                player_id, amount, ..
+            } if *player_id == player && *amount > 0 => Some(*amount),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `DamageDealt` events as comparable tuples (source, target, amount, combat).
+fn damage_tuples(events: &[GameEvent]) -> Vec<(ObjectId, TargetRef, u32, bool)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                source_id,
+                target,
+                amount,
+                is_combat,
+                ..
+            } => Some((*source_id, target.clone(), *amount, *is_combat)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Ruric (power 5) enchanted with Phyresis (infect) and Necrogen Communion
+/// (toxic 2), optionally with one Vorinclex per player.
+fn infect_toxic_ruric(pair: bool) -> (GameRunner, ObjectId, Option<(ObjectId, ObjectId)>) {
+    let mut scenario = base_scenario();
+    let ruric = add_ruric(&mut scenario, P0, 5);
+    let phyresis = add_phyresis(&mut scenario);
+    let communion = add_necrogen_communion(&mut scenario);
+    let vorinclex = pair.then(|| add_two_vorinclex(&mut scenario));
+    let mut runner = scenario.build();
+    attach_phyresis(&mut runner, phyresis, ruric);
+    attach_necrogen_communion(&mut runner, communion, ruric);
+    assert!(runner.state().objects[&ruric]
+        .keywords
+        .contains(&Keyword::Infect));
+    (runner, ruric, vorinclex)
+}
+
+/// B4-1 / B4-2 - CR 120.3b + CR 120.3g + CR 616.1: Phyresis + Necrogen
+/// Communion Ruric (infect, toxic 2) attacks P1 under the Vorinclex pair. The
+/// infect poison result pauses; the toxic result is parked with the occurrence
+/// and, after the answer, proposed as its own poison event (a second prompt).
+/// Derived per order: infect 5 doubled-then-halved 5, halved-then-doubled
+/// floor(5/2)*2 = 4; toxic 2 either way (2*2/2 = 2, floor(2/2)*2 = 2). The
+/// damage fact is recorded once, at the infect pause (CR 120.4b).
+#[test]
+fn b4_1_infect_pause_keeps_the_toxic_result() {
+    for infect_double_first in [true, false] {
+        for toxic_double_first in [true, false] {
+            let label = format!(
+                "infect_double_first={infect_double_first} toxic_double_first={toxic_double_first}"
+            );
+            let (mut runner, ruric, vorinclex) = infect_toxic_ruric(true);
+            let (doubler, halver) = vorinclex.unwrap();
+            let infect_result = if infect_double_first { 5 } else { 4 };
+            let drive = drive_combat(&mut runner, &[ruric], &[], |runner, n| {
+                let (chooser, actor, receiver, count, candidates) = poison_prompt(runner);
+                assert_eq!(
+                    (chooser, actor, receiver, candidates),
+                    (P1, P0, P1, 2),
+                    "{label}"
+                );
+                let state = runner.state();
+                let double_first = match n {
+                    1 => {
+                        assert_eq!(count, 5, "{label}: prompt 1 is the infect result");
+                        let stash = state
+                            .pending_damage_post_loss
+                            .as_ref()
+                            .expect("the infect pause parks the owed toxic result");
+                        assert!(stash.is_combat);
+                        assert_eq!(stash.stage, DamagePostLossStage::LifelinkGain);
+                        assert_eq!(stash.toxic_poison, 2);
+                        assert_eq!(stash.actual_amount, 5);
+                        assert_eq!(stash.source_id, ruric);
+                        assert!(!stash.has_lifelink);
+                        assert_eq!(state.players[1].poison_counters, 0);
+                        infect_double_first
+                    }
+                    2 => {
+                        assert_eq!(count, 2, "{label}: prompt 2 is the toxic result");
+                        assert!(state.pending_damage_post_loss.is_none());
+                        assert_eq!(state.players[1].poison_counters, infect_result);
+                        // B4-2: recorded once, before the toxic answer.
+                        assert_eq!(records_from(state, ruric), 1);
+                        assert!(state.objects[&ruric]
+                            .dealt_damage_kinds
+                            .has(DamageKindFilter::CombatOnly));
+                        assert!(!hexproof_now(state, ruric));
+                        toxic_double_first
+                    }
+                    other => panic!("{label}: unexpected prompt {other}"),
+                };
+                candidate_from(runner, if double_first { doubler } else { halver })
+            });
+            assert_eq!(drive.prompts, 2, "{label}: the toxic result was proposed");
+            assert_eq!(
+                runner.state().players[1].poison_counters,
+                infect_result + 2,
+                "{label}: infect result + toxic result"
+            );
+            assert_eq!(
+                runner.state().players[1].life,
+                20,
+                "{label}: infect causes no loss"
+            );
+            assert!(runner.state().pending_damage_post_loss.is_none());
+            // B4-2 / B4-3: the same fact tuple as the unpaused run.
+            assert_eq!(
+                fact_snapshot(&runner, &drive, ruric),
+                (1, 1, true, true, false, false),
+                "{label}"
+            );
+        }
+    }
+}
+
+/// B4-3 - unpaused parity: the same Ruric and Auras without Vorinclex. CR
+/// 120.3b gives 5 poison, CR 120.3g 2 more in addition: 7 poison, no loss.
+#[test]
+fn b4_3_unpaused_infect_toxic_parity() {
+    let (mut runner, ruric, _) = infect_toxic_ruric(false);
+    let drive = drive_combat(&mut runner, &[ruric], &[], |_, _| {
+        panic!("no replacement choice without Vorinclex")
+    });
+    assert_eq!(drive.prompts, 0);
+    assert_eq!(runner.state().players[1].poison_counters, 7);
+    assert_eq!(runner.state().players[1].life, 20);
+    assert_eq!(
+        fact_snapshot(&runner, &drive, ruric),
+        (1, 1, true, true, false, false)
+    );
+}
+
+/// B4-4 / B4-5 driver: R10's Horde board (Rest in Peace + Leyline of the Void
+/// turn the survivor's combat damage into a mill whose graveyard moves each
+/// need an ordering), Ruric power 3 with optional `Toxic(2)`, optional
+/// Vorinclex pair (SURVIVOR doubles, HORDE halves). Returns (prompts, loss
+/// prompts, toxic prompts, Horde poison, records, combat latch).
+fn horde_loss_then_toxic(toxic: bool, pair: bool) -> (usize, usize, usize, u32, usize, bool) {
+    let db = shared_card_db().expect("integration card fixture must be available");
+    let mut scenario = horde_scenario();
+    scenario.add_real_card(SURVIVOR, "Rest in Peace", Zone::Battlefield, db);
+    scenario.add_real_card(SURVIVOR, "Leyline of the Void", Zone::Battlefield, db);
+    let extra: Vec<Keyword> = if toxic {
+        vec![Keyword::Toxic(2)]
+    } else {
+        vec![]
+    };
+    let ruric = add_ruric_with(&mut scenario, SURVIVOR, 3, &extra);
+    if pair {
+        scenario.add_real_card(SURVIVOR, VORINCLEX, Zone::Battlefield, db);
+        scenario.add_real_card(HORDE, VORINCLEX, Zone::Battlefield, db);
+    }
+    for _ in 0..10 {
+        scenario.add_real_card(HORDE, "Lightning Bolt", Zone::Library, db);
+    }
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    park_survivor_priority(&mut runner);
+    flush_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&ruric]
+            .keywords
+            .contains(&Keyword::Toxic(2)),
+        toxic,
+        "reach-guard: the toxic keyword is present exactly when requested"
+    );
+    let label = format!("toxic={toxic} pair={pair}");
+
+    runner.pass_both_players();
+    runner
+        .declare_attackers(&[(ruric, AttackTarget::Player(HORDE))])
+        .expect("Ruric must be able to attack the Horde");
+    let (mut prompts, mut loss_prompts, mut toxic_prompts) = (0, 0, 0);
+    for _ in 0..60 {
+        if runner.state().phase == Phase::PostCombatMain {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            WaitingFor::DeclareBlockers { .. } => {
+                runner.declare_blockers(&[]).expect("no blocks");
+            }
+            WaitingFor::ReplacementChoice { .. } => {
+                prompts += 1;
+                let state = runner.state();
+                let proposed = &state.pending_replacement.as_ref().unwrap().proposed;
+                match proposed {
+                    ProposedEvent::ZoneChange { .. } => {
+                        loss_prompts += 1;
+                        assert_eq!(
+                            toxic_prompts, 0,
+                            "{label}: every loss prompt precedes toxic"
+                        );
+                        // Reach-guard: the paused loss parked the leg's owed
+                        // results, toxic included.
+                        let stash = state
+                            .pending_damage_post_loss
+                            .as_ref()
+                            .expect("the paused loss parks the leg's results");
+                        assert!(stash.is_combat, "{label}");
+                        assert_eq!(stash.stage, DamagePostLossStage::EmitAndRecord, "{label}");
+                        assert_eq!(stash.toxic_poison, if toxic { 2 } else { 0 }, "{label}");
+                        assert_eq!(stash.actual_amount, 3, "{label}");
+                        assert_eq!(stash.source_id, ruric);
+                        assert_eq!(records_from(state, ruric), 0, "{label}: not yet recorded");
+                    }
+                    ProposedEvent::AddCounter {
+                        placement:
+                            CounterPlacement::Player {
+                                actor,
+                                player_id,
+                                counter_kind: PlayerCounterKind::Poison,
+                            },
+                        count,
+                        ..
+                    } => {
+                        toxic_prompts += 1;
+                        assert_eq!(
+                            (*actor, *player_id, *count),
+                            (SURVIVOR, HORDE, 2),
+                            "{label}"
+                        );
+                        // B4-5: the stage was EmitAndRecord, so the fact is
+                        // written at the toxic pause, once.
+                        assert!(state.pending_damage_post_loss.is_none(), "{label}");
+                        assert_eq!(records_from(state, ruric), 1, "{label}");
+                        assert!(state.objects[&ruric]
+                            .dealt_damage_kinds
+                            .has(DamageKindFilter::CombatOnly));
+                        assert_eq!(state.players[HORDE.0 as usize].poison_counters, 0);
+                    }
+                    other => panic!("{label}: unexpected prompt {other:?}"),
+                }
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("answer the CR 616.1 ordering prompt");
+            }
+            other => panic!("{label}: unexpected window during combat: {other:?}"),
+        }
+    }
+    let state = runner.state();
+    assert_eq!(
+        state.phase,
+        Phase::PostCombatMain,
+        "{label}: combat completes"
+    );
+    assert!(
+        state.pending_damage_post_loss.is_none(),
+        "{label}: nothing orphaned"
+    );
+    assert!(state.pending_replacement.is_none(), "{label}");
+    assert!(state.pending_combat_lifelink.is_none(), "{label}");
+    (
+        prompts,
+        loss_prompts,
+        toxic_prompts,
+        state.players[HORDE.0 as usize].poison_counters,
+        records_from(state, ruric),
+        state.objects[&ruric]
+            .dealt_damage_kinds
+            .has(DamageKindFilter::CombatOnly),
+    )
+}
+
+/// B4-4 - CR 120.3g: the maintainer's scenario. The Horde damage→mill redirect
+/// pauses Ruric's loss result three times; after the last answer the toxic 2
+/// still owed by the parked occurrence is given (2 poison), the fact is
+/// recorded once. Control without `Toxic`: identical loss behaviour, no
+/// poison.
+#[test]
+fn b4_4_loss_pause_then_toxic() {
+    assert_eq!(
+        horde_loss_then_toxic(true, false),
+        (3, 3, 0, 2, 1, true),
+        "toxic 2 is given after the paused loss"
+    );
+    assert_eq!(
+        horde_loss_then_toxic(false, false),
+        (3, 3, 0, 0, 1, true),
+        "control: no toxic, same loss behaviour"
+    );
+}
+
+/// B4-5 - loss pause, then a toxic pause under the Vorinclex pair: a 4th
+/// prompt is the toxic ordering (asked of the Horde, the affected player), the
+/// fact is written once at that toxic pause, and the answer gives 2 poison
+/// (double-then-half 2, half-then-double 1*2 = 2). Combat completes with
+/// nothing orphaned.
+#[test]
+fn b4_5_loss_pause_then_toxic_pause_records_once() {
+    assert_eq!(horde_loss_then_toxic(true, true), (4, 3, 1, 2, 1, true));
+}
+
+/// B4-6 - CR 120.3f: a NONcombat infect + lifelink ping whose poison result
+/// pauses parks the owed lifelink with the occurrence; after the answer P0
+/// gains the 1 damage dealt, once. Sibling: without lifelink nothing is owed,
+/// so nothing parks and no life changes.
+#[test]
+fn b4_6_noncombat_infect_pause_keeps_lifelink() {
+    for lifelink in [true, false] {
+        let mut scenario = base_scenario();
+        let pinger = {
+            let mut builder = scenario.add_creature(P0, "Infect Pinger", 1, 1);
+            builder.from_oracle_text(PRODIGAL_PYROMANCER);
+            builder.with_keyword(Keyword::Infect);
+            if lifelink {
+                builder.with_keyword(Keyword::Lifelink);
+            }
+            builder.id()
+        };
+        let (doubler, halver) = add_two_vorinclex(&mut scenario);
+        let mut runner = scenario.build();
+        let life = runner.state().players[0].life;
+
+        let outcome = runner.activate(pinger, 0).target_player(P1).resolve();
+        let mut events = outcome.events().to_vec();
+        assert_poison_ordering_prompt(&runner, doubler, halver);
+        let stash = runner.state().pending_damage_post_loss.clone();
+        if lifelink {
+            let stash = stash.expect("the infect pause parks the owed lifelink");
+            assert!(!stash.is_combat);
+            assert_eq!(stash.stage, DamagePostLossStage::LifelinkGain);
+            assert!(stash.has_lifelink);
+            assert_eq!(stash.toxic_poison, 0);
+            assert_eq!(stash.actual_amount, 1);
+        } else {
+            assert!(stash.is_none(), "nothing owed parks nothing");
+        }
+        assert_eq!(
+            runner.state().players[0].life,
+            life,
+            "nothing gained before the answer"
+        );
+        let index = candidate_from(&runner, doubler);
+        let result = runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("answer the poison ordering");
+        events.extend(result.events);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().pending_damage_post_loss.is_none());
+        assert_eq!(runner.state().players[1].poison_counters, 1);
+        let expected_gain = i32::from(lifelink);
+        assert_eq!(
+            runner.state().players[0].life,
+            life + expected_gain,
+            "lifelink={lifelink}: CR 120.3f gains the damage dealt"
+        );
+        assert_eq!(gains_of(&events, P0).len(), usize::from(lifelink));
+        assert_eq!(records_from(runner.state(), pinger), 1);
+        assert_eq!(damage_events(&events, pinger, false), 1);
+    }
+}
+
+/// B4-7 - multi-leg: two infect + toxic 2 attackers and a plain attacker, all
+/// at P1, under the Vorinclex pair (doubler chosen first each time). Prompts:
+/// leg 1 infect (3), leg 1 toxic (2), leg 2 infect (2), leg 2 toxic (2).
+/// Poison 3 + 2 + 2 + 2 = 9; the plain attacker's loss applies once (20 - 2).
+#[test]
+fn b4_7_multi_leg_parked_tail_and_remnant() {
+    let mut scenario = base_scenario();
+    let ruric = add_ruric_with(&mut scenario, P0, 3, &[Keyword::Infect, Keyword::Toxic(2)]);
+    let second = {
+        let mut builder = scenario.add_creature(P0, "Toxic Infector", 2, 2);
+        builder.with_keyword(Keyword::Infect);
+        builder.with_keyword(Keyword::Toxic(2));
+        builder.id()
+    };
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let (doubler, _halver) = add_two_vorinclex(&mut scenario);
+    let mut runner = scenario.build();
+
+    let mut seen = Vec::new();
+    let drive = drive_combat(&mut runner, &[ruric, second, bear], &[], |runner, _| {
+        let (chooser, _, receiver, count, candidates) = poison_prompt(runner);
+        assert_eq!((chooser, receiver, candidates), (P1, P1, 2));
+        let stash_source = runner
+            .state()
+            .pending_damage_post_loss
+            .as_ref()
+            .map(|stash| (stash.source_id, stash.toxic_poison));
+        seen.push((count, stash_source));
+        candidate_from(runner, doubler)
+    });
+    assert_eq!(
+        seen,
+        vec![
+            (3, Some((ruric, 2))),
+            (2, None),
+            (2, Some((second, 2))),
+            (2, None)
+        ],
+        "each leg's infect pause parks its toxic; each toxic prompt follows its leg"
+    );
+    assert_eq!(drive.prompts, 4);
+    let state = runner.state();
+    assert_eq!(state.players[1].poison_counters, 9);
+    assert_eq!(state.players[1].life, 18, "the plain attacker's loss, once");
+    for id in [ruric, second, bear] {
+        assert_eq!(records_from(state, id), 1);
+        assert_eq!(damage_events(&drive.events, id, true), 1);
+    }
+}
+
+/// B4-10 - CR 120.3f + CR 120.3b + CR 120.3g: a lifelink + infect + toxic 2
+/// Ruric (power 5) under the pair. Both poison results prompt; lifelink gains
+/// the damage dealt (5), once, exactly as the unpaused control does, and the
+/// poison total is 5 + 2 = 7 for the doubler-first orders.
+#[test]
+fn b4_10_lifelink_infect_toxic_under_the_pair() {
+    let run = |pair: bool| {
+        let mut scenario = base_scenario();
+        let ruric = add_ruric_with(
+            &mut scenario,
+            P0,
+            5,
+            &[Keyword::Infect, Keyword::Toxic(2), Keyword::Lifelink],
+        );
+        let vorinclex = pair.then(|| add_two_vorinclex(&mut scenario));
+        let mut runner = scenario.build();
+        let life = runner.state().players[0].life;
+        let mut counts = Vec::new();
+        let drive = drive_combat(&mut runner, &[ruric], &[], |runner, _| {
+            let (chooser, actor, receiver, count, _) = poison_prompt(runner);
+            assert_eq!((chooser, actor, receiver), (P1, P0, P1));
+            counts.push(count);
+            candidate_from(runner, vorinclex.expect("prompts only with the pair").0)
+        });
+        let state = runner.state();
+        (
+            drive.prompts,
+            counts,
+            state.players[1].poison_counters,
+            state.players[0].life - life,
+            gains_of(&drive.events, P0),
+            damage_tuples(&drive.events),
+        )
+    };
+    let paused = run(true);
+    assert_eq!(paused.0, 2, "both poison results prompted");
+    assert_eq!(paused.1, vec![5, 2], "infect 5, then toxic 2");
+    assert_eq!(paused.2, 7);
+    assert_eq!(
+        paused.3, 5,
+        "lifelink gains the damage dealt, not the poison"
+    );
+    assert_eq!(paused.4, vec![5], "one gain event");
+    assert_eq!(paused.5.len(), 1, "one combat DamageDealt");
+    let unpaused = run(false);
+    assert_eq!((unpaused.0, unpaused.2, unpaused.3), (0, 7, 5));
+    assert_eq!(
+        unpaused.4, paused.4,
+        "the gain multiset matches the control"
+    );
+    assert_eq!(unpaused.5, paused.5, "the damage events match the control");
+}
+
+/// A test-built optional prevention of any counter placement on any player
+/// (the typed shape `ReplacementMode::Optional` + `QuantityModification::Prevent`
+/// that the mandatory CR 614.17c pre-check skips), on a P1 creature.
+fn add_optional_counter_shield(scenario: &mut GameScenario) -> ObjectId {
+    let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter);
+    def.mode = ReplacementMode::Optional { decline: None };
+    def.quantity_modification = Some(QuantityModification::Prevent);
+    def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+    let mut builder = scenario.add_creature(P1, "Optional Counter Shield", 1, 1);
+    builder.with_replacement_definition(def);
+    builder.id()
+}
+
+/// B4-11 - CR 120.3f + CR 120.4b + CR 614.6: a non-combat infect + lifelink
+/// ping whose poison ordering is answered with the optional shield, which is
+/// then accepted, ends `Prevented`. The poison result was prevented, but the
+/// damage was dealt, so the lifelink parked with the occurrence still gains 1
+/// (derived from CR 120.3f, not copied from a base run; the base dropped it
+/// and stranded the stash). Nothing is gained twice afterwards.
+#[test]
+fn b4_11_prevented_answer_still_settles_the_noncombat_stash() {
+    let mut scenario = base_scenario();
+    let pinger = {
+        let mut builder = scenario.add_creature(P0, "Infect Pinger", 1, 1);
+        builder.from_oracle_text(PRODIGAL_PYROMANCER);
+        builder.with_keyword(Keyword::Infect);
+        builder.with_keyword(Keyword::Lifelink);
+        builder.id()
+    };
+    add_two_vorinclex(&mut scenario);
+    let shield = add_optional_counter_shield(&mut scenario);
+    let mut runner = scenario.build();
+    let life = runner.state().players[0].life;
+
+    let outcome = runner.activate(pinger, 0).target_player(P1).resolve();
+    let mut events = outcome.events().to_vec();
+    let (chooser, actor, receiver, count, candidates) = poison_prompt(&runner);
+    assert_eq!(
+        (chooser, actor, receiver, count, candidates),
+        (P1, P0, P1, 1, 3)
+    );
+    let stash = runner
+        .state()
+        .pending_damage_post_loss
+        .clone()
+        .expect("reach-guard: the infect pause parked the owed lifelink");
+    assert!(!stash.is_combat);
+    assert_eq!(stash.stage, DamagePostLossStage::LifelinkGain);
+    assert!(stash.has_lifelink);
+    assert_eq!(stash.toxic_poison, 0);
+    let index = candidate_from(&runner, shield);
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("pick the shield")
+            .events,
+    );
+    // Reach-guard: the shield's own accept prompt, so the answer ends through
+    // the Prevented arm and not the Execute arm.
+    assert!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|pending| pending.is_optional),
+        "the optional shield asks to be accepted, got {:?}",
+        runner.state().waiting_for
+    );
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("accept the shield")
+            .events,
+    );
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_replacement.is_none());
+    assert_eq!(
+        state.players[1].poison_counters, 0,
+        "the poison result was prevented"
+    );
+    assert!(
+        state.pending_damage_post_loss.is_none(),
+        "the stash settled"
+    );
+    assert_eq!(
+        state.players[0].life,
+        life + 1,
+        "CR 120.3f: lifelink for the damage dealt"
+    );
+    assert_eq!(gains_of(&events, P0), vec![1]);
+    assert_eq!(records_from(state, pinger), 1);
+    assert_eq!(damage_events(&events, pinger, false), 1);
+
+    // No phantom gain on a later action.
+    runner.act(GameAction::PassPriority).expect("pass priority");
+    assert_eq!(runner.state().players[0].life, life + 1);
+    assert!(runner.state().pending_damage_post_loss.is_none());
+}
+
+/// B4-11 control (passes at base too): Solemnity is a MANDATORY prevention,
+/// so the CR 614.17c pre-check prevents the poison before any ordering: no
+/// prompt, nothing parked, lifelink still gains 1.
+#[test]
+fn b4_11_control_mandatory_prevention_parks_nothing() {
+    let db = shared_card_db().expect("integration card fixture must be available");
+    let mut scenario = base_scenario();
+    let pinger = {
+        let mut builder = scenario.add_creature(P0, "Infect Pinger", 1, 1);
+        builder.from_oracle_text(PRODIGAL_PYROMANCER);
+        builder.with_keyword(Keyword::Infect);
+        builder.with_keyword(Keyword::Lifelink);
+        builder.id()
+    };
+    add_two_vorinclex(&mut scenario);
+    scenario.add_real_card(P1, "Solemnity", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    let life = runner.state().players[0].life;
+    let outcome = runner.activate(pinger, 0).target_player(P1).resolve();
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    let state = runner.state();
+    assert!(state.pending_damage_post_loss.is_none());
+    assert_eq!(state.players[1].poison_counters, 0);
+    assert_eq!(state.players[0].life, life + 1);
+    assert_eq!(records_from(state, pinger), 1);
+}
+
+/// B4-12 - CR 120.3b + CR 120.3g + CR 614.6: in combat, Ruric (power 5,
+/// infect, toxic 2) under the pair and the optional shield. Picking and
+/// accepting the shield prevents the infect result; toxic is owed in addition,
+/// so a second poison event is proposed with its own ordering (3 candidates)
+/// and accept prompts, and is prevented too: 4 prompts, 0 poison, one record
+/// (derived from CR 120.3g/614.6, not copied from a base run; the base never
+/// proposed the toxic event).
+#[test]
+fn b4_12_prevented_infect_answer_still_owes_toxic() {
+    let mut scenario = base_scenario();
+    let ruric = add_ruric_with(&mut scenario, P0, 5, &[Keyword::Infect, Keyword::Toxic(2)]);
+    add_two_vorinclex(&mut scenario);
+    let shield = add_optional_counter_shield(&mut scenario);
+    let mut runner = scenario.build();
+    let mut seen = Vec::new();
+    let drive = drive_combat(&mut runner, &[ruric], &[], |runner, _| {
+        let pending = runner.state().pending_replacement.as_ref().unwrap();
+        let optional = pending.is_optional;
+        let (_, _, receiver, count, candidates) = poison_prompt(runner);
+        assert_eq!(receiver, P1);
+        seen.push((count, if optional { 0 } else { candidates }, optional));
+        if optional {
+            0
+        } else {
+            candidate_from(runner, shield)
+        }
+    });
+    assert_eq!(
+        seen,
+        vec![(5, 3, false), (5, 0, true), (2, 3, false), (2, 0, true)],
+        "the toxic event (count 2, 3 candidates) is proposed after the prevented infect"
+    );
+    assert_eq!(drive.prompts, 4);
+    let state = runner.state();
+    assert_eq!(state.players[1].poison_counters, 0);
+    assert!(state.pending_damage_post_loss.is_none());
+    assert_eq!(records_from(state, ruric), 1);
+    assert_eq!(damage_events(&drive.events, ruric, true), 1);
+}
+
+/// B4-12 sibling - the prompts are not hard-coded to the shield: pick the
+/// doubler first, then the halver, then DECLINE the shield at its accept prompt
+/// (the test-built shield is `ReplacementMode::Optional`, so it can be
+/// declined). Derived per CR 616.1 order: infect 5 -> 10 -> 5, toxic
+/// 2 -> 4 -> 2: 7 poison.
+#[test]
+fn b4_12_sibling_declined_shield_applies_the_chosen_orders() {
+    let mut scenario = base_scenario();
+    let ruric = add_ruric_with(&mut scenario, P0, 5, &[Keyword::Infect, Keyword::Toxic(2)]);
+    let (doubler, halver) = add_two_vorinclex(&mut scenario);
+    add_optional_counter_shield(&mut scenario);
+    let mut runner = scenario.build();
+    let mut seen = Vec::new();
+    let drive = drive_combat(&mut runner, &[ruric], &[], |runner, _| {
+        let pending = runner.state().pending_replacement.as_ref().unwrap();
+        let sources: Vec<ObjectId> = pending.candidates.iter().map(|c| c.source).collect();
+        let (_, _, _, count, candidate_count) = poison_prompt(runner);
+        seen.push((count, candidate_count, pending.is_optional));
+        if pending.is_optional {
+            1
+        } else if sources.contains(&doubler) {
+            candidate_from(runner, doubler)
+        } else {
+            candidate_from(runner, halver)
+        }
+    });
+    assert_eq!(
+        seen,
+        vec![
+            (5, 3, false),
+            (10, 2, false),
+            (5, 2, true),
+            (2, 3, false),
+            (4, 2, false),
+            (2, 2, true)
+        ],
+        "each poison event: ordering, ordering, then the declinable shield"
+    );
+    assert_eq!(drive.prompts, 6);
+    assert_eq!(runner.state().players[1].poison_counters, 7);
+    assert_eq!(records_from(runner.state(), ruric), 1);
+    assert!(runner.state().pending_damage_post_loss.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// B5: simultaneous combat-damage results needing choices of different
+// players are decided in APNAP order (CR 510.2 + CR 616.1 + CR 101.4).
+// ---------------------------------------------------------------------------
+
+/// A 3-player game at `active`'s precombat main.
+fn three_player_scenario() -> GameScenario {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+}
+
+/// Rotate the turn to `active` (as `park_survivor_priority` does).
+fn park_active_priority(runner: &mut GameRunner, active: PlayerId) {
+    let state = runner.state_mut();
+    state.turn_number = 4;
+    state.active_player = active;
+    state.phase = Phase::PreCombatMain;
+    state.priority_player = active;
+    state.waiting_for = WaitingFor::Priority { player: active };
+}
+
+/// The prompted player of each poison choice, asserting each prompt's shape:
+/// a 2-candidate poison ordering whose chooser is the receiver (CR 616.1,
+/// the affected player) and whose actor is `attacker_controller`.
+fn drive_apnap_combat(
+    runner: &mut GameRunner,
+    attacks: &[(ObjectId, AttackTarget)],
+    attacker_controller: PlayerId,
+    doubler: ObjectId,
+) -> (Vec<PlayerId>, CombatDrive) {
+    let mut order = Vec::new();
+    let drive = drive_combat_at(runner, attacks, &[], |runner, _| {
+        let (chooser, actor, receiver, _, candidates) = poison_prompt(runner);
+        assert_eq!(candidates, 2, "reach-guard: both Vorinclex apply");
+        assert_eq!(chooser, receiver, "CR 616.1: the affected player chooses");
+        assert_eq!(actor, attacker_controller);
+        // B5-2: never the attackers' controller.
+        assert_ne!(chooser, attacker_controller);
+        order.push(chooser);
+        candidate_from(runner, doubler)
+    });
+    (order, drive)
+}
+
+/// B5-1 / B5-2 / B5-4 - P0 active in a 3-player game: Ruric (infect) is
+/// declared first at P2, Plague Stinger second at P1, and a plain Bear third
+/// at P2. With Vorinclex for P0 and P1 both defenders' poison events need a
+/// choice; APNAP from P0 is P1 then P2, so P1 is asked first although P2's
+/// attacker was declared first. The resume continues in that order and
+/// completes: the Bear's damage lands once, both defenders get a
+/// `CombatDamageDealtToPlayer`. Control: declaring P1's attacker first gives
+/// the same order.
+#[test]
+fn b5_1_earlier_apnap_defender_chooses_first() {
+    for p1_first in [false, true] {
+        let mut scenario = three_player_scenario();
+        let ruric = add_ruric_with(&mut scenario, P0, 3, &[Keyword::Infect]);
+        let stinger = scenario
+            .add_creature(P0, "Plague Stinger", 1, 1)
+            .from_oracle_text_with_keywords(&["Flying", "Infect"], PLAGUE_STINGER_ORACLE_TEXT)
+            .id();
+        let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+        let (doubler, _) = add_two_vorinclex(&mut scenario);
+        let mut runner = scenario.build();
+        flush_layers(runner.state_mut());
+        assert!(
+            runner.state().objects[&stinger]
+                .keywords
+                .contains(&Keyword::Infect),
+            "reach-guard: Plague Stinger has infect"
+        );
+        let p2 = PlayerId(2);
+        let mut attacks = vec![
+            (ruric, AttackTarget::Player(p2)),
+            (stinger, AttackTarget::Player(P1)),
+            (bear, AttackTarget::Player(p2)),
+        ];
+        if p1_first {
+            attacks.swap(0, 1);
+        }
+        let (order, drive) = drive_apnap_combat(&mut runner, &attacks, P0, doubler);
+        assert_eq!(order, vec![P1, p2], "p1_first={p1_first}: APNAP P1 then P2");
+        let state = runner.state();
+        assert_eq!(state.players[1].poison_counters, 1, "1 doubled then halved");
+        assert_eq!(state.players[2].poison_counters, 3);
+        assert_eq!(state.players[2].life, 18, "B5-4: the Bear's damage, once");
+        assert_eq!(damage_events(&drive.events, bear, true), 1);
+        for player in [P1, p2] {
+            assert!(
+                drive.events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::CombatDamageDealtToPlayer { player_id, .. } if *player_id == player
+                )),
+                "B5-4: {player:?} has its combat-damage aggregate"
+            );
+        }
+    }
+}
+
+/// B5-3 - APNAP follows the active player, not seat index: P1 is active, its
+/// infect attackers are declared at P0 first and P2 second; Vorinclex doubles
+/// for P1 and halves for P0 (an opponent's counters on P0 and on P2). APNAP
+/// from P1 is P2 then P0, so P2 is asked first (a seat-index sort would ask
+/// P0 first).
+#[test]
+fn b5_3_apnap_follows_the_active_player() {
+    let db = shared_card_db().expect("integration card fixture must be available");
+    let mut scenario = three_player_scenario();
+    let first = add_ruric_with(&mut scenario, P1, 3, &[Keyword::Infect]);
+    let second = {
+        let mut builder = scenario.add_creature(P1, "Infector", 2, 2);
+        builder.with_keyword(Keyword::Infect);
+        builder.id()
+    };
+    let doubler = scenario.add_real_card(P1, VORINCLEX, Zone::Battlefield, db);
+    scenario.add_real_card(P0, VORINCLEX, Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    park_active_priority(&mut runner, P1);
+    let p2 = PlayerId(2);
+    let attacks = [
+        (first, AttackTarget::Player(P0)),
+        (second, AttackTarget::Player(p2)),
+    ];
+    let (order, _) = drive_apnap_combat(&mut runner, &attacks, P1, doubler);
+    assert_eq!(
+        runner.state().active_player,
+        P1,
+        "reach-guard: P1 is active"
+    );
+    assert_eq!(order, vec![p2, P0], "APNAP from P1: P2 then P0");
+    assert!(runner.state().players[0].poison_counters > 0);
+    assert!(runner.state().players[2].poison_counters > 0);
+}
+
+// ---------------------------------------------------------------------------
+// B6: a saved copy/token of Ruric carrying the legacy `Unrecognized`
+// condition is migrated at decode, without reapplying the printed face
+// (CR 707.2 + CR 707.9b: a token copy keeps its copiable values, e.g. "isn't
+// legendary").
+// ---------------------------------------------------------------------------
+
+/// The printed-line description of Ruric's hexproof static, as the parser
+/// writes it (the migration keys on it).
+const RURIC_HEXPROOF_DESCRIPTION: &str =
+    "~ has hexproof as long as they haven't dealt combat damage yet.";
+
+/// Ruric (card-backed, current parse) equipped with the real Helm of the Host;
+/// the production beginning-of-combat trigger creates the nonlegendary haste
+/// token copy, which attacks P1 alone when `attack`. Returns the pre-save
+/// state (Priority, layers flushed), the card-backed Ruric, the token and the
+/// opponent's bolt.
+fn helm_token_fixture(
+    db: &CardDatabase,
+    attack: bool,
+) -> (GameState, ObjectId, ObjectId, ObjectId) {
+    let shared = shared_card_db().expect("integration card fixture must be available");
+    let mut scenario = base_scenario();
+    let ruric = scenario.add_real_card(P0, RURIC_NAME, Zone::Battlefield, db);
+    let helm = scenario.add_real_card(P0, "Helm of the Host", Zone::Battlefield, shared);
+    let opp_bolt = scenario.add_bolt_to_hand(P1);
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), helm, ruric);
+    flush_layers(runner.state_mut());
+    runner.advance_to_combat();
+    let token = {
+        let state = runner.state();
+        let tokens: Vec<ObjectId> = state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| state.objects[id].is_token)
+            .collect();
+        assert_eq!(
+            tokens.len(),
+            1,
+            "reach-guard: the Helm trigger made one token"
+        );
+        let token = tokens[0];
+        let obj = &state.objects[&token];
+        assert_eq!(obj.name, RURIC_NAME);
+        assert!(
+            !obj.card_types.supertypes.contains(&Supertype::Legendary),
+            "reach-guard: the token copy is not legendary"
+        );
+        assert_eq!(obj.printed_ref, state.objects[&ruric].printed_ref);
+        assert!(obj.keywords.contains(&Keyword::Haste));
+        assert_eq!(
+            hexproof_conditions(obj.static_definitions.0.iter()),
+            vec![Some(current_ruric_condition())]
+        );
+        assert!(obj
+            .static_definitions
+            .0
+            .iter()
+            .any(|d| d.description.as_deref() == Some(RURIC_HEXPROOF_DESCRIPTION)));
+        token
+    };
+    let attacks: Vec<_> = if attack {
+        vec![(token, AttackTarget::Player(P1))]
+    } else {
+        Vec::new()
+    };
+    runner
+        .declare_attackers(&attacks)
+        .expect("attack declaration must succeed");
+    for _ in 0..40 {
+        if runner.state().phase == Phase::PostCombatMain {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                runner.declare_blockers(&[]).expect("no blocks");
+            }
+            other => panic!("unexpected window during combat: {other:?}"),
+        }
+    }
+    assert_eq!(runner.state().phase, Phase::PostCombatMain);
+    assert_eq!(
+        runner.state().players[1].life,
+        if attack { 13 } else { 20 },
+        "reach-guard: the token dealt 7 combat damage exactly when it attacked"
+    );
+    flush_layers(runner.state_mut());
+    let pre = runner.state().clone();
+    assert_eq!(kinds(&pre, token), (attack, false));
+    assert_eq!(has_hexproof(&pre.objects[&token]), !attack);
+    (pre, ruric, token, opp_bolt)
+}
+
+/// Sets (or removes, for `None`) `key` on every serialized object map of `id`.
+fn set_object_key(value: &mut Value, id: ObjectId, key: &str, new: Option<&Value>) -> usize {
+    match value {
+        Value::Object(map) => {
+            let mut changed = 0;
+            if map.get("id") == Some(&json!(id)) && map.contains_key("static_definitions") {
+                match new {
+                    Some(new) => {
+                        map.insert(key.to_string(), new.clone());
+                    }
+                    None => {
+                        map.remove(key);
+                    }
+                }
+                changed += 1;
+            }
+            for child in map.values_mut() {
+                changed += set_object_key(child, id, key, new);
+            }
+            changed
+        }
+        Value::Array(items) => items
+            .iter_mut()
+            .map(|item| set_object_key(item, id, key, new))
+            .sum(),
+        _ => 0,
+    }
+}
+
+/// Asserts the restored token stayed a nonlegendary copy and reads the
+/// migrated (current) condition.
+fn assert_token_migrated(restored: &GameState, token: ObjectId) {
+    let obj = &restored.objects[&token];
+    assert!(obj.is_token);
+    assert!(
+        !obj.card_types.supertypes.contains(&Supertype::Legendary),
+        "the printed (legendary) face was not reapplied over the token copy"
+    );
+    assert_eq!(
+        hexproof_conditions(obj.static_definitions.0.iter()),
+        vec![Some(current_ruric_condition())],
+        "the legacy Unrecognized condition was migrated"
+    );
+    assert_eq!(
+        hexproof_conditions(obj.base_static_definitions.iter()),
+        vec![Some(current_ruric_condition())]
+    );
+}
+
+/// B6-1 / B6-5 - CR 611.3a + CR 707.2: a Helm of the Host token copy of Ruric
+/// that dealt combat damage, saved in the predecessor shape (no latch, legacy
+/// `Unrecognized` static), restores without hexproof: the decode migration
+/// rewrites the condition (the token is never re-derived from its printed
+/// face), the recovery rebuilds the latch, and the token stays nonlegendary.
+/// B6-5: the migrated condition equals what the current parser emits for the
+/// card-backed Ruric. Control: a token that dealt no damage keeps hexproof.
+#[test]
+fn b6_1_helm_token_legacy_static_migrates_without_face_reapply() {
+    let db = ruric_face_db();
+    let (pre, ruric, token, opp_bolt) = helm_token_fixture(&db, true);
+    let (json, stripped) = old_static_save(&pre, token);
+    assert_eq!(stripped, 1, "only the token's latch is stripped");
+    let restored = restore(json, &db);
+    assert_restore_ran(&pre, &restored, token);
+    assert_token_migrated(&restored, token);
+    assert_eq!(
+        restored.objects[&token].printed_ref,
+        pre.objects[&token].printed_ref
+    );
+    // B6-5 parity: the parser's condition for the same printed line.
+    assert_eq!(
+        hexproof_conditions(restored.objects[&token].static_definitions.0.iter()),
+        hexproof_conditions(restored.objects[&ruric].static_definitions.0.iter())
+    );
+    assert_eq!(kinds(&restored, token), (true, false));
+    assert!(
+        !has_hexproof(&restored.objects[&token]),
+        "the migrated condition read against the recovered latch ends hexproof"
+    );
+    assert!(opponent_can_target(restored, token, opp_bolt));
+
+    // Control: no damage history, still migrated, hexproof stays.
+    let (pre, _, token, opp_bolt) = helm_token_fixture(&db, false);
+    let (json, stripped) = old_static_save(&pre, token);
+    assert_eq!(stripped, 0);
+    let restored = restore(json, &db);
+    assert_token_migrated(&restored, token);
+    assert!(restored.objects[&token].dealt_damage_kinds.is_empty());
+    assert!(has_hexproof(&restored.objects[&token]));
+    assert!(!opponent_can_target(restored, token, opp_bolt));
+}
+
+/// B6-2 - the migration never consults the card database: the same token with
+/// its `printed_ref` removed, or pointing at an unrelated face, migrates too.
+#[test]
+fn b6_2_migration_ignores_the_printed_ref() {
+    let db = ruric_face_db();
+    let (pre, _, token, opp_bolt) = helm_token_fixture(&db, true);
+    let unrelated = serde_json::to_value(PrintedCardRef {
+        oracle_id: "unrelated-oracle".to_string(),
+        face_name: "Lightning Bolt".to_string(),
+    })
+    .unwrap();
+    for printed_ref in [None, Some(&unrelated)] {
+        let (mut json, _) = old_static_save(&pre, token);
+        assert!(set_object_key(&mut json, token, "printed_ref", printed_ref) > 0);
+        let restored = restore(json, &db);
+        assert_token_migrated(&restored, token);
+        assert!(!has_hexproof(&restored.objects[&token]));
+        assert!(opponent_can_target(restored, token, opp_bolt));
+    }
 }

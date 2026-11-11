@@ -2746,22 +2746,32 @@ pub struct ExploitRecord {
     pub sacrificed_incarnation: Option<u64>,
 }
 
-/// CR 120.3f + CR 120.1 + CR 616.1: post-loss work a player-damage leg
-/// still owes after its life loss paused (the Horde damage→mill redirect
-/// parking a mill/batch choice, or co-applicable life-loss replacements).
-/// Stashed by `apply_damage_after_replacement` on the deferral. A non-combat
-/// leg drains through `drain_pending_damage_post_loss` once the loss fully
-/// settles; a combat leg (`is_combat`) instead rides the combat batch's
+/// CR 120.3f + CR 120.3g + CR 120.1 + CR 616.1: the results a player-damage
+/// leg still owes after one of its results paused on a CR 616.1 choice. Two
+/// pauses park here, both from `apply_damage_after_replacement`'s player arm:
+/// the life-loss pause (the Horde damage→mill redirect parking a mill/batch
+/// choice, or co-applicable life-loss replacements; stage `EmitAndRecord`)
+/// and the infect poison-counter pause when a result is still owed behind it
+/// (stage `LifelinkGain`: the damage fact was recorded at that pause). A
+/// toxic pause, and an infect pause that owes nothing more, park nothing.
+///
+/// Reachable shapes: a combat leg (`is_combat`) never owes lifelink here
+/// (combat lifelink folds per source in `apply_combat_damage`) and may owe
+/// `toxic_poison`; a non-combat leg never owes toxic (CR 120.3g is combat
+/// damage only) and may owe lifelink. A non-combat stash drains through
+/// `drain_pending_damage_post_loss` once the paused result settles (Execute
+/// or Prevented answer); a combat stash instead rides the combat batch's
 /// Phase C remnant — the combat resume consumes it, so the post-replacement
-/// funnel never drains it directly. Creature damage cannot pause here (only
-/// the player life-loss call defers), so the target is always a player and
-/// toxic never applies.
+/// funnel never drains it directly. Creature damage cannot pause here (the
+/// excess-redirect leg carries its lifelink in `lifelink_bonus`), so the
+/// target is always a player. The type keeps its historical name: it no
+/// longer parks only post-loss work.
 ///
 /// The staged cursor runs each step exactly once: `EmitAndRecord` is
-/// infallible (event push + record push), while a `LifelinkGain` drain that
-/// parks hands the gain to `pending_replacement` and consumes the stash —
-/// the LifeGain arm settles it, so the next answer never re-proposes it
-/// (mirroring `PendingCombatLifelink`'s deliberately-absent paused source).
+/// infallible (event push + record push), while a toxic or lifelink result
+/// that parks hands that result to `pending_replacement` and consumes the
+/// stash — the answer arm settles it, so the next answer never re-proposes
+/// it (mirroring `PendingCombatLifelink`'s deliberately-absent paused source).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDamagePostLoss {
     pub source_id: ObjectId,
@@ -2780,20 +2790,29 @@ pub struct PendingDamagePostLoss {
     #[serde(default)]
     pub lifelink_bonus: u32,
     pub stage: DamagePostLossStage,
-    /// CR 510.2: a combat leg's post-loss work, owned by the batch remnant
+    /// CR 510.2: a combat leg's owed results, owned by the batch remnant
     /// rather than the shared drain (see the struct docs).
     #[serde(default)]
     pub is_combat: bool,
+    /// CR 120.3g + CR 702.164c + CR 400.7: the toxic poison count this combat
+    /// leg still owes, snapshotted from the damage context at damage time
+    /// (like `lifelink_bonus`). `0` for every non-combat stash and for a
+    /// source without toxic; elided when zero, so older saves decode to 0.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub toxic_poison: u32,
 }
 
-/// Cursor for [`PendingDamagePostLoss`]: which post-loss step still owes work.
+/// Cursor for [`PendingDamagePostLoss`]: which owed step still has work.
+/// Toxic (`toxic_poison`) is not a stage: it settles first in either stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DamagePostLossStage {
     /// Push the `DamageDealt` event and the CR 120.1 record, then advance.
     EmitAndRecord,
-    /// Apply the lifelink gain. A park here consumes the stash (the pending
-    /// replacement owns the gain); the value survives only for in-flight
-    /// records, never for a re-stash.
+    /// The damage fact is already recorded (after the emit stage, or at an
+    /// earlier infect poison-counter pause); only toxic (combat) or the
+    /// lifelink gain (non-combat) remain. A park here consumes the stash (the
+    /// pending replacement owns the parked result); the value survives only
+    /// for in-flight records, never for a re-stash.
     LifelinkGain,
 }
 
@@ -13055,6 +13074,220 @@ fn migrate_legacy_batched_zone_change_trigger_fired(
     Ok(())
 }
 
+/// One legacy placeholder condition a pre-typing parser wrote into a
+/// serialized static, and the typed condition the current parser produces for
+/// the same printed line.
+struct LegacyStaticCondition {
+    /// The static's full printed-line `description`, which is what makes the
+    /// match exact (a same-text compound-subject line does not match).
+    description: &'static str,
+    /// The `Unrecognized { text }` the legacy parser wrote.
+    legacy_text: &'static str,
+    /// The current typed condition (built from the typed value, so its
+    /// serialization always follows the current shape).
+    current: fn() -> crate::types::ability::StaticCondition,
+}
+
+/// CR 611.3a + CR 613.1f: legacy `Unrecognized` static conditions with a known
+/// typed successor. `layers.rs` evaluates `Unrecognized` as true, so a saved
+/// copy, token or snapshot that is never re-derived from its printed face
+/// would keep the effect forever. One row per legacy shape.
+const LEGACY_UNRECOGNIZED_STATIC_CONDITIONS: &[LegacyStaticCondition] = &[LegacyStaticCondition {
+    // Ruric Thar, Magecrusher (CR 702.11b hexproof, CR 120.2a combat damage).
+    description: "~ has hexproof as long as they haven't dealt combat damage yet.",
+    legacy_text: "they haven't dealt combat damage yet",
+    current: || crate::types::ability::StaticCondition::Not {
+        condition: Box::new(
+            crate::types::ability::StaticCondition::SourceHasDealtDamage {
+                kind: crate::types::ability::DamageKindFilter::CombatOnly,
+            },
+        ),
+    },
+}];
+
+/// Whether `object` is exactly the serialized legacy twin of `row`: a
+/// self-referencing continuous hexproof grant with the row's description and
+/// the row's `Unrecognized` condition.
+fn is_legacy_static_twin(
+    object: &serde_json::Map<String, serde_json::Value>,
+    row: &LegacyStaticCondition,
+) -> bool {
+    object.get("mode") == Some(&serde_json::json!("Continuous"))
+        && object.get("affected") == Some(&serde_json::json!({"type": "SelfRef"}))
+        && object.get("modifications")
+            == Some(&serde_json::json!([{"type": "AddKeyword", "keyword": "Hexproof"}]))
+        && object.get("description") == Some(&serde_json::json!(row.description))
+        && object.get("condition")
+            == Some(&serde_json::json!({"type": "Unrecognized", "text": row.legacy_text}))
+}
+
+/// CR 611.3a + CR 613.1f + CR 707.2: rewrites, in place and anywhere in a
+/// persisted state's JSON, exactly the `condition` of each legacy static twin
+/// listed in [`LEGACY_UNRECOGNIZED_STATIC_CONDITIONS`] to its current typed
+/// condition. Runs on the raw JSON at the decode chokepoint, so it reaches
+/// every container holding a static (object statics and base statics, back
+/// faces, copy-effect copiable values, LKI) and never consults the card
+/// database: a token copy keeps its copiable values (e.g. "isn't legendary";
+/// CR 707.2 + CR 707.9b) because nothing but the condition changes.
+/// Idempotent: a typed condition never matches. Returns the number of
+/// rewritten statics.
+pub(crate) fn migrate_legacy_unrecognized_static_conditions(
+    value: &mut serde_json::Value,
+) -> usize {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut rewritten = 0;
+            if let Some(row) = LEGACY_UNRECOGNIZED_STATIC_CONDITIONS
+                .iter()
+                .find(|row| is_legacy_static_twin(map, row))
+            {
+                if let Ok(current) = serde_json::to_value((row.current)()) {
+                    map.insert("condition".to_string(), current);
+                    rewritten += 1;
+                }
+            }
+            for child in map.values_mut() {
+                rewritten += migrate_legacy_unrecognized_static_conditions(child);
+            }
+            rewritten
+        }
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .map(migrate_legacy_unrecognized_static_conditions)
+            .sum(),
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod legacy_unrecognized_static_condition_tests {
+    use super::migrate_legacy_unrecognized_static_conditions;
+    use serde_json::{json, Value};
+
+    const DESCRIPTION: &str = "~ has hexproof as long as they haven't dealt combat damage yet.";
+    const LEGACY_TEXT: &str = "they haven't dealt combat damage yet";
+
+    /// The exact legacy twin the pre-PR parser exported for Ruric.
+    fn legacy_twin() -> Value {
+        json!({
+            "mode": "Continuous",
+            "affected": {"type": "SelfRef"},
+            "modifications": [{"type": "AddKeyword", "keyword": "Hexproof"}],
+            "condition": {"type": "Unrecognized", "text": LEGACY_TEXT},
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": DESCRIPTION
+        })
+    }
+
+    fn current_condition() -> Value {
+        serde_json::to_value(crate::types::ability::StaticCondition::Not {
+            condition: Box::new(
+                crate::types::ability::StaticCondition::SourceHasDealtDamage {
+                    kind: crate::types::ability::DamageKindFilter::CombatOnly,
+                },
+            ),
+        })
+        .unwrap()
+    }
+
+    /// B6-3: every container shape is reached (object statics and base
+    /// statics, a copy-effect `CopiableValues`-shaped snapshot, a back face,
+    /// an LKI entry, nested arrays), and only the `condition` changes.
+    #[test]
+    fn migrates_every_nested_occurrence_and_only_the_condition() {
+        let mut value = json!({
+            "objects": {"7": {
+                "static_definitions": [legacy_twin()],
+                "base_static_definitions": [legacy_twin()],
+                "back_face": {"static_definitions": [legacy_twin()]},
+                "card_types": {"supertypes": [], "core_types": ["Creature"]}
+            }},
+            "copy_effects": [{"copiable_values": {"static_definitions": [[legacy_twin()]]}}],
+            "lki_cache": {"7": {"static_definitions": [legacy_twin()]}}
+        });
+        let count = migrate_legacy_unrecognized_static_conditions(&mut value);
+        assert_eq!(count, 5, "positive: every occurrence is rewritten");
+        let mut expected = legacy_twin();
+        expected["condition"] = current_condition();
+        assert_eq!(value["objects"]["7"]["static_definitions"][0], expected);
+        assert_eq!(
+            value["objects"]["7"]["base_static_definitions"][0],
+            expected
+        );
+        assert_eq!(
+            value["objects"]["7"]["back_face"]["static_definitions"][0],
+            expected
+        );
+        assert_eq!(
+            value["copy_effects"][0]["copiable_values"]["static_definitions"][0][0],
+            expected
+        );
+        assert_eq!(value["lki_cache"]["7"]["static_definitions"][0], expected);
+        assert_eq!(
+            value["objects"]["7"]["card_types"],
+            json!({"supertypes": [], "core_types": ["Creature"]}),
+            "characteristics are untouched"
+        );
+        assert!(!value.to_string().contains("Unrecognized"));
+    }
+
+    /// B6-4: nothing but the exact legacy twin migrates; each negative is
+    /// paired with the exact twin in the same JSON, which IS rewritten.
+    #[test]
+    fn negative_controls_are_left_byte_identical() {
+        let mut compound = legacy_twin();
+        compound["description"] =
+            json!("~ and Henry has hexproof as long as they haven't dealt combat damage yet.");
+        let mut other_modification = legacy_twin();
+        other_modification["modifications"] = json!([{"type": "AddKeyword", "keyword": "Shroud"}]);
+        let mut other_affected = legacy_twin();
+        other_affected["affected"] = json!({"type": "EnchantedBy"});
+        let mut other_text = legacy_twin();
+        other_text["condition"] =
+            json!({"type": "Unrecognized", "text": "they haven't attacked yet"});
+        let mut typed = legacy_twin();
+        typed["condition"] = current_condition();
+        let mut any_sibling = legacy_twin();
+        any_sibling["condition"] =
+            json!({"type": "Not", "condition": {"type": "SourceHasDealtDamage"}});
+        let non_static = json!({
+            "log": LEGACY_TEXT,
+            "trigger": {"description": DESCRIPTION, "condition": {"type": "Unrecognized", "text": LEGACY_TEXT}}
+        });
+        let negatives = [
+            ("(a) compound-subject description", compound),
+            ("(b) other modifications", other_modification),
+            ("(c) other affected", other_affected),
+            ("(d) other Unrecognized text", other_text),
+            ("(e) already typed", typed),
+            ("(f) Any sibling without kind", any_sibling),
+            ("(g) non-static object", non_static),
+        ];
+        for (label, negative) in negatives {
+            let before = negative.clone();
+            let mut value = json!({"statics": [negative, legacy_twin()]});
+            assert_eq!(
+                migrate_legacy_unrecognized_static_conditions(&mut value),
+                1,
+                "{label}: only the paired exact twin is rewritten"
+            );
+            assert_eq!(value["statics"][0], before, "{label}: byte-identical");
+            assert_eq!(
+                value["statics"][1]["condition"],
+                current_condition(),
+                "{label}"
+            );
+            // Idempotence: a second pass rewrites nothing.
+            let after_first = value.clone();
+            assert_eq!(migrate_legacy_unrecognized_static_conditions(&mut value), 0);
+            assert_eq!(value, after_first);
+        }
+    }
+}
+
 /// CR 400.7 + CR 603.10a: zone-change triggers use the exact source at the
 /// event, rather than a same-id object from a later zone change. Promotes
 /// legacy payload-only trigger lists carried by persisted zone-change snapshots
@@ -20135,14 +20368,15 @@ pub type PerPlayerCombatDamage = (PlayerId, Vec<(ObjectId, u32)>, u32);
 /// CR 510.2 + CR 616.1: the unfinished Phase C tail of a combat-damage batch
 /// whose leg paused on a life-loss replacement choice (the Horde damage→mill
 /// redirect parking a mill/batch choice, or co-applicable loss replacements)
-/// or on a poison-counter result choice (infect/toxic: no stash — the damage
-/// fact was recorded at the pause).
-/// A life-loss pause's leg rides `pending_damage_post_loss` (combat-flagged);
-/// its lifelink share and combat bookkeeping were folded into the accumulators
-/// below at park time (amounts are post-replacement and order-free), so the
-/// resume only owes its `DamageDealt` event + CR 120.1 record (sync order:
-/// after the loss settles), then the remaining legs, then the aggregate and
-/// the lifelink drain. `Eq` is absent (see `PendingCombatLeg`).
+/// or on a poison-counter result choice (infect/toxic; the damage fact was
+/// recorded at a counter pause).
+/// A life-loss pause's leg, and an infect pause that still owes toxic, ride
+/// `pending_damage_post_loss` (combat-flagged); the leg's lifelink share and
+/// combat bookkeeping were folded into the accumulators below at park time
+/// (amounts are post-replacement and order-free), so the resume only owes
+/// the parked results (toxic, then the `DamageDealt` event + CR 120.1 record
+/// when still owed: sync order), then the remaining legs, then the aggregate
+/// and the lifelink drain. `Eq` is absent (see `PendingCombatLeg`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingCombatPhaseCRemnant {
     /// Legs never applied, in batch order.
@@ -25680,11 +25914,13 @@ declare_game_state! {
     /// re-invokes the wave after the choice resolves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_horde_reveal: Option<Box<PendingHordeReveal>>,
-    /// CR 120.3f + CR 120.1 + CR 616.1: post-loss work a non-combat
-    /// player-damage leg still owes after its life loss paused. Boxed like
-    /// its `pending_horde_reveal` sibling — populated only during the pause;
-    /// drained by `deal_damage::drain_pending_damage_post_loss` through the
-    /// post-replacement funnel once the loss fully settles.
+    /// CR 120.3f + CR 120.3g + CR 120.1 + CR 616.1: the results a
+    /// player-damage leg still owes after its life loss or its infect poison
+    /// result paused (see [`PendingDamagePostLoss`]). Boxed like its
+    /// `pending_horde_reveal` sibling — populated only during the pause; a
+    /// non-combat stash is drained by `deal_damage::drain_pending_damage_post_loss`
+    /// through the post-replacement funnel once the paused result settles, a
+    /// combat stash by the combat Phase C remnant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_damage_post_loss: Option<Box<PendingDamagePostLoss>>,
     /// CR 701.9a + CR 614.6: a frameless single-card effect discard (connive,
@@ -28282,6 +28518,7 @@ impl GameStateDecode {
             }
         }
         migrate_legacy_batched_zone_change_trigger_fired(&mut value)?;
+        migrate_legacy_unrecognized_static_conditions(&mut value);
         // Defaults must not turn unknown old attack authority into a recorded
         // ended relation. Preserve these input-presence facts through decoding.
         let attack_map_present = value

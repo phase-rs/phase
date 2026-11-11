@@ -811,6 +811,31 @@ pub(crate) fn apply_damage_after_replacement(
                         is_combat,
                         events,
                     );
+                    // CR 120.3f and CR 120.3g (702.164c): lifelink and toxic
+                    // each happen in addition to the damage's other results;
+                    // CR 120.3a/b give the life loss or poison result; CR
+                    // 120.4c: the dealt damage is processed into its results,
+                    // as modified by replacement effects that interact with
+                    // them. The order below (loss or infect, toxic, record,
+                    // lifelink) is the engine's existing synchronous order,
+                    // preserved across the pause. The fact is recorded above
+                    // (CR 120.4b), so only toxic (combat) or lifelink
+                    // (non-combat) can still be owed; park them with the
+                    // occurrence when any is (CR 616.1: the answer settles the
+                    // poison result first). Nothing owed parks nothing.
+                    let toxic_poison = owed_toxic_poison(ctx, actual_amount, is_combat);
+                    let lifelink_owed = ctx.has_lifelink && actual_amount + ctx.lifelink_bonus > 0;
+                    if toxic_poison > 0 || lifelink_owed {
+                        park_player_damage_results(
+                            state,
+                            ctx,
+                            *player_id,
+                            actual_amount,
+                            is_combat,
+                            crate::types::game_state::DamagePostLossStage::LifelinkGain,
+                            toxic_poison,
+                        );
+                    }
                     return DamageResult::NeedsChoice;
                 }
             } else {
@@ -820,50 +845,38 @@ pub(crate) fn apply_damage_after_replacement(
                 {
                     // CR 616.1: the loss paused — co-applicable life-loss
                     // replacements, or the Horde damage→mill redirect parking a
-                    // mill/batch choice. The loss, the damage event, and any
-                    // lifelink for this target are deferred until the resume.
-                    // Both combat and non-combat legs stash their post-loss work
-                    // (combat-flagged for the batch remnant, which the combat
-                    // resume consumes; the shared drain skips combat stashes).
-                    // Counter-addition pauses (infect/toxic) record the damage
-                    // fact at the pause and return NeedsChoice WITHOUT stashing,
-                    // so the stash's presence after this call identifies a loss
-                    // pause (the combat Phase C runner relies on this).
-                    state.pending_damage_post_loss =
-                        Some(Box::new(crate::types::game_state::PendingDamagePostLoss {
-                            source_id: ctx.source_id,
-                            source_incarnation: ctx.source_incarnation,
-                            controller: ctx.controller,
-                            target: *player_id,
-                            actual_amount,
-                            has_lifelink: ctx.has_lifelink,
-                            lifelink_bonus: ctx.lifelink_bonus,
-                            stage: crate::types::game_state::DamagePostLossStage::EmitAndRecord,
-                            is_combat,
-                        }));
+                    // mill/batch choice. The damage event, the record, any toxic
+                    // (combat) and any lifelink for this target are deferred
+                    // until the resume. Both combat and non-combat legs park
+                    // their owed results (combat-flagged for the batch remnant,
+                    // which the combat resume consumes; the shared drain skips
+                    // combat stashes). An infect counter pause parks only when
+                    // a result is still owed behind it; a toxic counter pause
+                    // never parks (the combat Phase C runner relies on a fresh
+                    // stash meaning "results parked", folding the same amount).
+                    park_player_damage_results(
+                        state,
+                        ctx,
+                        *player_id,
+                        actual_amount,
+                        is_combat,
+                        crate::types::game_state::DamagePostLossStage::EmitAndRecord,
+                        owed_toxic_poison(ctx, actual_amount, is_combat),
+                    );
                     return DamageResult::NeedsChoice;
                 }
             }
-            if is_combat
-                && actual_amount > 0
-                && ctx.source_is_creature
-                && ctx.combat_damage_poison > 0
-            {
-                // CR 120.3g + CR 702.164c + CR 614.17: Toxic adds poison counters
-                // when a creature deals combat damage to a player. Route through
-                // the player-counter replacement pipeline (prevention/doublers);
-                // the actor is the source's controller.
-                if player_counter::add_player_counter_with_replacement(
-                    state,
-                    ctx.controller,
-                    *player_id,
-                    PlayerCounterKind::Poison,
-                    ctx.combat_damage_poison,
-                    events,
-                ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
+            let toxic_poison = owed_toxic_poison(ctx, actual_amount, is_combat);
+            if toxic_poison > 0 {
+                if give_toxic_poison(state, ctx.controller, *player_id, toxic_poison, events)
+                    == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
                 {
-                    // The life loss above already ran synchronously; only the
-                    // poison result is parked, so the fact is recorded once here.
+                    // The loss or infect result above already ran
+                    // synchronously; only the toxic poison result is parked
+                    // (owned by the pending replacement), so the fact is
+                    // recorded once here. Nothing else is owed: toxic is
+                    // combat-only and a combat leg owes no lifelink here, so
+                    // nothing is stashed behind this pause.
                     record_player_damage_at_counter_pause(
                         state,
                         ctx,
@@ -1096,6 +1109,96 @@ fn record_player_damage_at_counter_pause(
         actual_amount,
         0,
         is_combat,
+        events,
+    );
+}
+
+/// CR 120.3g + CR 702.164c: the toxic poison count a player-damage leg owes —
+/// the source's snapshotted toxic total when a creature dealt nonzero combat
+/// damage, else 0. The single predicate shared by the synchronous toxic step
+/// and the park sites, so a parked leg owes exactly what the unpaused leg
+/// would give.
+fn owed_toxic_poison(ctx: &DamageContext, actual_amount: u32, is_combat: bool) -> u32 {
+    if is_combat && actual_amount > 0 && ctx.source_is_creature {
+        ctx.combat_damage_poison
+    } else {
+        0
+    }
+}
+
+/// CR 120.3g + CR 702.164c + CR 614.17: toxic gives the damaged player poison
+/// counters in addition to the damage's other results. Routed through the
+/// player-counter replacement pipeline (prevention/doublers); the actor is the
+/// source's controller. Shared by the synchronous path and the parked-results
+/// settle.
+fn give_toxic_poison(
+    state: &mut GameState,
+    controller: PlayerId,
+    target: PlayerId,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> player_counter::PlayerCounterAdditionOutcome {
+    player_counter::add_player_counter_with_replacement(
+        state,
+        controller,
+        target,
+        PlayerCounterKind::Poison,
+        count,
+        events,
+    )
+}
+
+/// CR 616.1 + CR 400.7: park the results a player-damage leg still owes after
+/// one of its results paused, with the context captured at damage time (see
+/// [`crate::types::game_state::PendingDamagePostLoss`]). Exactly one leg can be
+/// paused at a time, so the slot must be empty.
+fn park_player_damage_results(
+    state: &mut GameState,
+    ctx: &DamageContext,
+    target: PlayerId,
+    actual_amount: u32,
+    is_combat: bool,
+    stage: crate::types::game_state::DamagePostLossStage,
+    toxic_poison: u32,
+) {
+    debug_assert!(
+        state.pending_damage_post_loss.is_none(),
+        "a player-damage leg parked its results over another parked leg"
+    );
+    state.pending_damage_post_loss =
+        Some(Box::new(crate::types::game_state::PendingDamagePostLoss {
+            source_id: ctx.source_id,
+            source_incarnation: ctx.source_incarnation,
+            controller: ctx.controller,
+            target,
+            actual_amount,
+            has_lifelink: ctx.has_lifelink,
+            lifelink_bonus: ctx.lifelink_bonus,
+            stage,
+            is_combat,
+            toxic_poison,
+        }));
+}
+
+/// CR 120.1: the parked leg's `DamageDealt` event and record. Players have no
+/// excess and the excess-redirect rider is creature-only, so the dealt,
+/// recorded, and excess figures are the post-replacement amount, that same
+/// amount, and zero.
+fn emit_parked_player_damage(
+    state: &mut GameState,
+    stashed: &crate::types::game_state::PendingDamagePostLoss,
+    events: &mut Vec<GameEvent>,
+) {
+    emit_damage_dealt_and_record(
+        state,
+        stashed.source_id,
+        stashed.source_incarnation,
+        stashed.controller,
+        &TargetRef::Player(stashed.target),
+        stashed.actual_amount,
+        stashed.actual_amount,
+        0,
+        stashed.is_combat,
         events,
     );
 }
@@ -1346,50 +1449,84 @@ fn gain_lifelink_for_damage_leg(
         && super::life::apply_life_gain(state, controller, lifelink_amount, events).is_err()
 }
 
-/// Outcome of [`drain_pending_damage_post_loss`].
+/// Outcome of [`settle_parked_player_damage_results`] (and
+/// [`drain_pending_damage_post_loss`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DamagePostLossDrainOutcome {
     /// The stashed work fully settled (or nothing was stashed).
     Settled,
-    /// The lifelink gain parked on a life-gain replacement choice. Nothing is
-    /// re-stashed: the gain is owned by `state.pending_replacement` and the
-    /// LifeGain arm settles it — re-stashing would re-propose a second gain on
-    /// the next answer.
+    /// A counter or gain result parked the rest: the toxic poison or the
+    /// lifelink gain parked on a replacement choice. Nothing is re-stashed:
+    /// the parked result is owned by `state.pending_replacement` and its answer
+    /// arm settles it — re-stashing would re-propose it on the next answer.
     PausedForReplacement,
 }
 
-/// CR 120.3f + CR 120.1 + CR 616.1: run a non-combat player-damage leg's
-/// stashed post-loss work (the `DamageDealt` event, the CR 120.1 record, the
-/// lifelink gain) once its life loss fully settles. Called from the
-/// post-replacement funnel after the batch drain retires with no re-park.
-/// `EmitAndRecord` is infallible; a lifelink gain that parks hands ownership
-/// to the pending replacement (matching `PendingCombatLifelink`, whose paused
-/// source is deliberately absent from `remaining`) instead of re-stashing, so
-/// the answering drain never proposes the gain twice.
+/// CR 120.3f + CR 120.3g + CR 120.1 + CR 616.1: run a non-combat
+/// player-damage leg's parked results once the paused result settles. Called
+/// from the post-replacement funnel (and the Prevented answer) after the batch
+/// drain retires with no re-park; delegates to
+/// [`settle_parked_player_damage_results`].
 pub(crate) fn drain_pending_damage_post_loss(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> DamagePostLossDrainOutcome {
-    use crate::types::game_state::DamagePostLossStage;
     let Some(stashed) = state.pending_damage_post_loss.take() else {
         return DamagePostLossDrainOutcome::Settled;
     };
-    if matches!(stashed.stage, DamagePostLossStage::EmitAndRecord) {
-        // Players have no excess and the excess-redirect rider is
-        // creature-only, so the dealt, recorded, and excess figures are the
-        // post-replacement amount, that same amount, and zero.
-        emit_damage_dealt_and_record(
+    settle_parked_player_damage_results(state, *stashed, events)
+}
+
+/// CR 120.3f and CR 120.3g (702.164c): lifelink and toxic each happen in
+/// addition to the damage's other results; CR 120.3a/b give the life loss or
+/// poison result; CR 120.4c: the dealt damage is processed into its results,
+/// as modified by replacement effects that interact with them. The order
+/// below (loss or infect, toxic, record, lifelink) is the engine's existing
+/// synchronous order, preserved across the pause; the loss or infect result
+/// was already settled by the answered choice (CR 616.1). The stash is
+/// already taken by the caller (the non-combat drain or the combat Phase C
+/// remnant), and the context it carries was captured at damage time
+/// (CR 400.7).
+///
+/// A toxic or lifelink result that parks on its own replacement choice hands
+/// ownership to the pending replacement (matching `PendingCombatLifelink`,
+/// whose paused source is deliberately absent from `remaining`) instead of
+/// re-stashing, so the answer never proposes it twice.
+pub(crate) fn settle_parked_player_damage_results(
+    state: &mut GameState,
+    stashed: crate::types::game_state::PendingDamagePostLoss,
+    events: &mut Vec<GameEvent>,
+) -> DamagePostLossDrainOutcome {
+    use crate::types::game_state::DamagePostLossStage;
+    debug_assert!(
+        !stashed.is_combat || !stashed.has_lifelink,
+        "combat lifelink folds per source; a combat stash never owes lifelink"
+    );
+    debug_assert!(
+        stashed.is_combat || stashed.toxic_poison == 0,
+        "toxic is combat damage only; a non-combat stash never owes toxic"
+    );
+    let record_owed = matches!(stashed.stage, DamagePostLossStage::EmitAndRecord);
+    if stashed.toxic_poison > 0
+        && give_toxic_poison(
             state,
-            stashed.source_id,
-            stashed.source_incarnation,
             stashed.controller,
-            &TargetRef::Player(stashed.target),
-            stashed.actual_amount,
-            stashed.actual_amount,
-            0,
-            false,
+            stashed.target,
+            stashed.toxic_poison,
             events,
-        );
+        ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
+    {
+        // CR 120.4b + CR 120.4c: the damage is already dealt; only its toxic
+        // result is being processed, so write the fact now if still owed. A
+        // toxic stash is combat and owes no lifelink, so nothing follows; the
+        // pending replacement owns the poison result.
+        if record_owed {
+            emit_parked_player_damage(state, &stashed, events);
+        }
+        return DamagePostLossDrainOutcome::PausedForReplacement;
+    }
+    if record_owed {
+        emit_parked_player_damage(state, &stashed, events);
     }
     if gain_lifelink_for_damage_leg(
         state,
@@ -1399,7 +1536,7 @@ pub(crate) fn drain_pending_damage_post_loss(
         events,
     ) {
         // CR 616.1: the gaining player must choose which replacement applies
-        // first. Nothing was applied for this leg. `state.pending_replacement`
+        // first. Nothing was applied for this gain. `state.pending_replacement`
         // is left populated ON PURPOSE — it is the resume's authority, and
         // this leg is deliberately NOT re-stashed (that would gain the life
         // twice) — mirroring `drain_combat_lifelink`'s handoff.
@@ -5696,9 +5833,10 @@ mod tests {
                 has_lifelink: false,
                 lifelink_bonus: 0,
                 stage,
-                // The shared drain hardcodes noncombat (combat stashes are
-                // owned by the batch remnant).
+                // The shared drain takes the kind from the stash; combat
+                // stashes are owned by the batch remnant.
                 is_combat: false,
+                toxic_poison: 0,
             }))
         };
 
@@ -5724,6 +5862,194 @@ mod tests {
         assert!(state.damage_dealt_this_turn.is_empty());
         assert_eq!(sticky_kinds(&state, source), (false, false, false));
         assert!(state.objects_that_dealt_damage.is_empty());
+    }
+
+    /// A production-reachable parked stash (B4-8 / B4-9 fixtures): the sticky
+    /// source (controlled by P1) dealt `actual_amount` to P0.
+    fn parked_stash(
+        source: ObjectId,
+        stage: crate::types::game_state::DamagePostLossStage,
+        is_combat: bool,
+        has_lifelink: bool,
+        toxic_poison: u32,
+    ) -> crate::types::game_state::PendingDamagePostLoss {
+        crate::types::game_state::PendingDamagePostLoss {
+            source_id: source,
+            source_incarnation: None,
+            controller: PlayerId(1),
+            target: PlayerId(0),
+            actual_amount: 3,
+            has_lifelink,
+            lifelink_bonus: 0,
+            stage,
+            is_combat,
+            toxic_poison,
+        }
+    }
+
+    /// Two mandatory, non-commuting AddCounter modifiers (double; plus one)
+    /// that apply to any player: a poison event meeting both needs a CR 616.1
+    /// ordering choice.
+    fn add_two_counter_modifiers(state: &mut GameState) {
+        use crate::types::ability::{
+            QuantityModification, ReplacementDefinition, ReplacementPlayerScope,
+        };
+        use crate::types::replacements::ReplacementEvent;
+        for (card, modification) in [
+            (9701, QuantityModification::DOUBLE),
+            (9702, QuantityModification::Plus { value: 1 }),
+        ] {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                "Counter Modifier".to_string(),
+                Zone::Battlefield,
+            );
+            let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(modification);
+            def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+            state.objects.get_mut(&id).unwrap().replacement_definitions = vec![def].into();
+        }
+    }
+
+    /// B4-8 - CR 120.3g + CR 120.3f + CR 120.4c: the settle function on the
+    /// production-reachable stash shapes only (a combat stash never owes
+    /// lifelink; a non-combat stash never owes toxic).
+    #[test]
+    fn settle_parked_player_damage_results_reachable_shapes() {
+        use crate::types::game_state::DamagePostLossStage;
+
+        // (1) combat loss pause {EmitAndRecord, toxic 2}: toxic, then one
+        // combat event + record.
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9601, Zone::Battlefield);
+        let mut events = Vec::new();
+        let outcome = settle_parked_player_damage_results(
+            &mut state,
+            parked_stash(source, DamagePostLossStage::EmitAndRecord, true, false, 2),
+            &mut events,
+        );
+        assert_eq!(outcome, DamagePostLossDrainOutcome::Settled);
+        assert_eq!(state.players[0].poison_counters, 2, "the owed toxic landed");
+        assert_eq!(state.damage_dealt_this_turn.len(), 1);
+        assert!(state.damage_dealt_this_turn[0].is_combat);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    GameEvent::DamageDealt {
+                        is_combat: true,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(sticky_kinds(&state, source), (true, true, false));
+
+        // (1, paused) the same stash with two co-applicable counter modifiers:
+        // the toxic result parks, the fact is written at that pause, and
+        // nothing is re-parked (the pending replacement owns the poison).
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9602, Zone::Battlefield);
+        add_two_counter_modifiers(&mut state);
+        let mut events = Vec::new();
+        let outcome = settle_parked_player_damage_results(
+            &mut state,
+            parked_stash(source, DamagePostLossStage::EmitAndRecord, true, false, 2),
+            &mut events,
+        );
+        assert_eq!(outcome, DamagePostLossDrainOutcome::PausedForReplacement);
+        assert_eq!(state.players[0].poison_counters, 0);
+        assert_eq!(
+            state.damage_dealt_this_turn.len(),
+            1,
+            "recorded at the toxic pause"
+        );
+        assert!(
+            state.pending_damage_post_loss.is_none(),
+            "nothing re-parked"
+        );
+        assert!(matches!(
+            state.pending_replacement.as_ref().map(|p| &p.proposed),
+            Some(ProposedEvent::AddCounter { count: 2, .. })
+        ));
+
+        // (2) combat infect pause {LifelinkGain, toxic 2}: poison only; the
+        // fact was recorded at the infect pause, so nothing is re-recorded.
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9603, Zone::Battlefield);
+        let mut events = Vec::new();
+        let outcome = settle_parked_player_damage_results(
+            &mut state,
+            parked_stash(source, DamagePostLossStage::LifelinkGain, true, false, 2),
+            &mut events,
+        );
+        assert_eq!(outcome, DamagePostLossDrainOutcome::Settled);
+        assert_eq!(state.players[0].poison_counters, 2);
+        assert!(state.damage_dealt_this_turn.is_empty());
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, GameEvent::DamageDealt { .. })));
+
+        // (3) non-combat infect pause {LifelinkGain, has_lifelink}: one gain
+        // for the damage dealt (CR 120.3f), no record.
+        let mut state = GameState::new_two_player(42);
+        let source = sticky_damage_source(&mut state, 9604, Zone::Battlefield);
+        let life = state.players[1].life;
+        let mut events = Vec::new();
+        let outcome = settle_parked_player_damage_results(
+            &mut state,
+            parked_stash(source, DamagePostLossStage::LifelinkGain, false, true, 0),
+            &mut events,
+        );
+        assert_eq!(outcome, DamagePostLossDrainOutcome::Settled);
+        assert_eq!(
+            state.players[1].life,
+            life + 3,
+            "lifelink gains the damage dealt"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::LifeChanged { amount, .. } if *amount > 0))
+                .count(),
+            1
+        );
+        assert!(state.damage_dealt_this_turn.is_empty());
+        assert_eq!(state.players[0].poison_counters, 0);
+    }
+
+    /// B4-9 - wire shape: `toxic_poison` is elided at zero, a stash JSON
+    /// without the key decodes to 0, and a nonzero count round-trips.
+    #[test]
+    fn pending_damage_post_loss_toxic_poison_wire_shape() {
+        use crate::types::game_state::{DamagePostLossStage, PendingDamagePostLoss};
+        let zero = parked_stash(
+            ObjectId(7),
+            DamagePostLossStage::EmitAndRecord,
+            false,
+            true,
+            0,
+        );
+        let json = serde_json::to_value(&zero).unwrap();
+        assert!(json.get("toxic_poison").is_none(), "zero is elided");
+        let decoded: PendingDamagePostLoss = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, zero, "a stash without the key decodes to 0");
+
+        let owed = parked_stash(
+            ObjectId(7),
+            DamagePostLossStage::LifelinkGain,
+            true,
+            false,
+            2,
+        );
+        let json = serde_json::to_value(&owed).unwrap();
+        assert_eq!(json["toxic_poison"], serde_json::json!(2));
+        let decoded: PendingDamagePostLoss = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, owed);
     }
 
     #[test]
