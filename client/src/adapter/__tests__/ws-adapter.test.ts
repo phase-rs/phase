@@ -5987,6 +5987,7 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
   });
 
   it("does not let a stale retry timer settle a successor's unfinished handshake", async () => {
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
     const codec = scriptedCodec();
     const provider = vi.fn(() => Promise.resolve(codec.session));
     const { adapter, raw, events } = await establishCodecAdapter(provider);
@@ -6016,15 +6017,18 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       // The successor fails before hello; the episode must still own a retry.
       successor.readyState = 3;
       successor.dispatchSynthetic("close");
-      await vi.advanceTimersByTimeAsync(1000);
+      // The retry delay is 1600 ms at random()=0; the maximum is 2000 ms.
+      await vi.advanceTimersByTimeAsync(2000);
       await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(successor));
     } finally {
+      random.mockRestore();
       void initialization.current;
       adapter.dispose();
     }
   });
 
   it("keeps a successor's retry alive when it fails before the obsolete timer fires", async () => {
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
     const codec = scriptedCodec();
     const provider = vi.fn(() => Promise.resolve(codec.session));
     const { adapter, raw, events } = await establishCodecAdapter(provider);
@@ -6045,9 +6049,11 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       // The successor fails before the obsolete retry timer fires.
       successor.readyState = 3;
       successor.dispatchSynthetic("close");
-      await vi.advanceTimersByTimeAsync(1000);
+      // The retry delay is 1600 ms at random()=0; the maximum is 2000 ms.
+      await vi.advanceTimersByTimeAsync(2000);
       await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(successor));
     } finally {
+      random.mockRestore();
       void successorInitialization;
       adapter.dispose();
     }
