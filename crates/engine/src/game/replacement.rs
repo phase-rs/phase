@@ -10340,8 +10340,10 @@ pub(crate) fn draw_replacement_performs_work(state: &GameState, player: PlayerId
 }
 
 /// Positions in `pending.candidates` the replacement authority can execute,
-/// in stored order. The options of the prompt, and the candidate an answer
-/// index selects, are these.
+/// in stored order. They are the options of a step-end mana prompt
+/// ([`pending_replacement_option_count`]); every other prompt counts and
+/// indexes its stored candidates, and an answer to a prompt with a stale one
+/// re-proposes the event ([`pending_candidates_are_current`]).
 pub(crate) fn executable_candidate_positions(
     state: &GameState,
     pending: &PendingReplacement,

@@ -632,12 +632,14 @@ fn settle_recovered_outcome(
     )
 }
 
-/// The stored checkpoint never carries the descriptor or transient replay flags.
+/// The stored checkpoint never carries the descriptor, the transient replay
+/// flags or the storing action's ingress window.
 fn checkpoint_state(shadow: &GameState) -> GameState {
     let mut checkpoint = shadow.clone();
     checkpoint.payment_transaction = None;
     checkpoint.payment_transaction_replay = false;
     checkpoint.payment_transaction_just_handled = false;
+    checkpoint.ingress_life_window = None;
     // CR 701.24a / CR 706.1a: a shuffle or roll sampled on the shadow advances its stream;
     // stamp the serialized high-water so the recorded position travels with
     // the checkpoint even when the resolver did not capture it explicitly.
@@ -815,11 +817,19 @@ fn hydrate_runtime_authorities(shadow: &mut GameState, live: &GameState) {
     shadow.debug_mode = live.debug_mode;
     shadow.debug_permitted = live.debug_permitted.clone();
     shadow.format_config = live.format_config.clone();
-    // The ingress window belongs to the live action, not to the action that
-    // stored the checkpoint: a player-resource change the shadow cannot
-    // represent is recorded where this action's boundary rejects it (a
-    // concession instead retires the payment and keeps the departure).
-    shadow.ingress_life_window = live.ingress_life_window;
+    // The ingress window belongs to the live action: a player-resource change
+    // the shadow cannot represent is recorded where this action's boundary
+    // rejects it (a concession instead retires the payment and keeps the
+    // departure). A failure the shadow already recorded in this action, while
+    // replaying the accepted prefix, is kept; a checkpoint never carries one
+    // (`checkpoint_state`).
+    let recorded = shadow
+        .ingress_life_window
+        .and_then(|window| window.failed_player);
+    shadow.ingress_life_window = live.ingress_life_window.map(|mut window| {
+        window.failed_player = window.failed_player.or(recorded);
+        window
+    });
 }
 
 /// CR 614.17c + CR 616.1f + CR 800.4a: settle a parked replacement prompt the
@@ -1071,6 +1081,45 @@ pub(crate) fn admits(mut probe: GameState, actor: PlayerId, action: &GameAction)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 104.3a + CR 118.12: a payment shadow runs in the live action's
+    /// ingress window, keeps a failure it already recorded in this action
+    /// (replaying the accepted prefix), and a stored checkpoint carries no
+    /// window, so a later action never inherits a stale failure.
+    #[test]
+    fn a_shadow_keeps_its_recorded_failure_in_the_live_ingress_window() {
+        use crate::types::game_state::IngressLifeWindow;
+
+        let mut live = GameState::new_two_player(7);
+        live.ingress_life_window = Some(IngressLifeWindow::default());
+        let mut shadow = live.clone();
+        shadow.ingress_life_window = Some(IngressLifeWindow {
+            failed_player: Some(PlayerId(0)),
+        });
+        hydrate_runtime_authorities(&mut shadow, &live);
+        assert_eq!(
+            shadow
+                .ingress_life_window
+                .and_then(|window| window.failed_player),
+            Some(PlayerId(0)),
+            "the failure recorded while replaying is kept"
+        );
+
+        let mut stale = live.clone();
+        stale.ingress_life_window = None;
+        hydrate_runtime_authorities(&mut stale, &live);
+        assert_eq!(
+            stale.ingress_life_window,
+            Some(IngressLifeWindow::default()),
+            "a shadow without a window runs in the live action's"
+        );
+
+        assert_eq!(
+            checkpoint_state(&shadow).ingress_life_window,
+            None,
+            "a checkpoint does not store the storing action's window"
+        );
+    }
     use crate::game::game_object::ObjectIncarnationRefExt;
 
     use crate::game::deck_loading::DeckEntry;
