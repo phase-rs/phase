@@ -974,7 +974,7 @@ mod feldon_tokens {
     use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::events::GameEvent;
     use engine::types::keywords::Keyword;
-    use engine::types::mana::{ManaType, ManaUnit};
+    use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
     use engine::types::player::PlayerId;
 
     const FELDON: &str = "{2}{R}, {T}: Create a token that's a copy of target creature card in your graveyard, except it's an artifact in addition to its other types. It gains haste. Sacrifice it at the beginning of the next end step.";
@@ -1483,8 +1483,8 @@ mod feldon_tokens {
             "Altar still mills exactly once for each entrant"
         );
         let drawn = runner.state().players[0].hand.len() - hand_before;
-        // CR 603.2c: replacement answers must not split one "one or more" batch.
-        // The settled scan may miss the non-final entrant (pre-existing residual).
+        // CR 603.2c + CR 603.6a: the two entrants are one entry event, so a
+        // "one or more" observer triggers once for it, after the last entrant.
         assert_ne!(drawn, 2, "one batch must not produce two observer draws");
         assert_eq!(
             drawn, 1,
@@ -1509,6 +1509,426 @@ mod feldon_tokens {
                 "four later qualifying entrants do not bypass Welcome's spent turn limit"
             );
         }
+    }
+
+    // Oracle text below is verbatim from the generated card data (MTGJSON).
+    const BODY_DOUBLE: &str =
+        "You may have this creature enter as a copy of any creature card in a graveyard.";
+    const HUSHBRINGER: &str =
+        "Flying, lifelink\nCreatures entering or dying don't cause abilities to trigger.";
+    const SOUL_WARDEN: &str = "Whenever another creature enters, you gain 1 life.";
+    const SERVANT_OF_THE_SCALE: &str = "This creature enters with a +1/+1 counter on it.\nWhen this creature dies, put X +1/+1 counters on target creature you control, where X is the number of +1/+1 counters on this creature.";
+    const ASCENDANT_EVINCAR: &str =
+        "Flying\nOther black creatures get +1/+1.\nNonblack creatures get -1/-1.";
+    const ELEMENTAL_BOND: &str =
+        "Whenever a creature you control with power 3 or greater enters, draw a card.";
+    const MOON_GIRL: &str = "Whenever you draw your second card each turn, until end of turn, Moon Girl and Devil Dinosaur's base power and toughness become 6/6 and they gain trample.\nWhenever an artifact you control enters, draw a card. This ability triggers only once each turn.";
+    const TOCASIAS_WELCOME: &str = "Whenever one or more creatures you control with mana value 3 or less enter, draw a card. This ability triggers only once each turn.";
+
+    /// The board every later-co-entrant row shares. Feldon targets a Body Double
+    /// card in the graveyard; Doubling Season makes two tokens of it, and with
+    /// Hardened Scales a first copy that enters with +1/+1 counters stops on a
+    /// CR 616.1f ordering choice. Its answer puts that token onto the battlefield
+    /// and then stops again on the second token's copy offer, so the first
+    /// entrant is on the battlefield while its co-entrant is still entering.
+    struct BodyDoubleBoard {
+        scenario: GameScenario,
+        feldon: ObjectId,
+        body_double: ObjectId,
+        scales: ObjectId,
+        season: ObjectId,
+    }
+
+    fn body_double_board() -> BodyDoubleBoard {
+        let (mut scenario, feldon) = setup();
+        let body_double = scenario
+            .add_creature_to_graveyard(P0, "Body Double", 0, 0)
+            .with_subtypes(vec!["Shapeshifter"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 4,
+            })
+            .from_oracle_text(BODY_DOUBLE)
+            .id();
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        let season = scenario
+            .add_enchantment_from_oracle(P0, "Doubling Season", SEASON)
+            .id();
+        BodyDoubleBoard {
+            scenario,
+            feldon,
+            body_double,
+            scales,
+            season,
+        }
+    }
+
+    fn graveyard_triskelion(scenario: &mut GameScenario) -> ObjectId {
+        scenario
+            .add_creature_to_graveyard(P0, "Triskelion", 1, 1)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Construct"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![],
+                generic: 6,
+            })
+            .from_oracle_text(TRISKELION)
+            .id()
+    }
+
+    fn graveyard_hushbringer(scenario: &mut GameScenario) -> ObjectId {
+        scenario
+            .add_creature_to_graveyard(P0, "Hushbringer", 1, 2)
+            .with_subtypes(vec!["Faerie"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 1,
+            })
+            .from_oracle_text_with_keywords(&["Flying", "Lifelink"], HUSHBRINGER)
+            .id()
+    }
+
+    fn graveyard_servant_of_the_scale(scenario: &mut GameScenario) -> ObjectId {
+        scenario
+            .add_creature_to_graveyard(P0, "Servant of the Scale", 0, 0)
+            .with_subtypes(vec!["Human", "Soldier"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            })
+            .from_oracle_text(SERVANT_OF_THE_SCALE)
+            .id()
+    }
+
+    /// Activate Feldon and bring the first Body Double token in as a copy of
+    /// `donor`, which enters with +1/+1 counters. Returns that token, on the
+    /// battlefield, with the second token's copy offer open.
+    fn enter_first_copy_before_second_offer(
+        runner: &mut GameRunner,
+        feldon: ObjectId,
+        body_double: ObjectId,
+        donor: ObjectId,
+        first_counter_replacement: ObjectId,
+    ) -> ObjectId {
+        runner
+            .activate(feldon, 0)
+            .target_object(body_double)
+            .resolve();
+        let (first, _) = choose_copy(runner, donor);
+        choose_token_counter_order(runner, first, first_counter_replacement);
+        // Reach guard: the first entrant has entered and the entry event is not
+        // finished. Every row below depends on this exact pause.
+        let entered = &runner.state().objects[&first];
+        assert_eq!(entered.zone, Zone::Battlefield);
+        assert!(entered.is_token);
+        assert_eq!(entered.name, runner.state().objects[&donor].name);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "second entrant's copy offer is open: {:?}",
+            runner.state().waiting_for
+        );
+        first
+    }
+
+    /// Soul Warden's life gain for one activation whose first token copies
+    /// Triskelion and whose second copies `second`. `persist` round-trips the
+    /// game through the persisted wire at the pause between the two entrants.
+    fn warden_life_for_second_copy(second: SecondCopy, persist: bool) -> i32 {
+        let BodyDoubleBoard {
+            mut scenario,
+            feldon,
+            body_double,
+            scales,
+            season,
+        } = body_double_board();
+        let triskelion = graveyard_triskelion(&mut scenario);
+        let hushbringer = graveyard_hushbringer(&mut scenario);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        let first = enter_first_copy_before_second_offer(
+            &mut runner,
+            feldon,
+            body_double,
+            triskelion,
+            scales,
+        );
+        assert_eq!(runner.life(P0), life, "nothing has resolved at the pause");
+        if persist {
+            runner = restore(runner);
+        }
+        let second_token = match second {
+            SecondCopy::Hushbringer => {
+                let (token, _) = choose_copy(&mut runner, hushbringer);
+                token
+            }
+            SecondCopy::Triskelion => {
+                let (token, _) = choose_copy(&mut runner, triskelion);
+                choose_token_counter_order(&mut runner, token, season);
+                token
+            }
+        };
+        assert_ne!(first, second_token, "Season creates two distinct entrants");
+        assert_token_entry_complete(&mut runner);
+        let entered = &runner.state().objects[&second_token];
+        assert_eq!(entered.zone, Zone::Battlefield);
+        assert_eq!(
+            entered.name,
+            match second {
+                SecondCopy::Hushbringer => "Hushbringer",
+                SecondCopy::Triskelion => "Triskelion",
+            }
+        );
+        runner.life(P0) - life
+    }
+
+    #[derive(Clone, Copy)]
+    enum SecondCopy {
+        Hushbringer,
+        Triskelion,
+    }
+
+    /// CR 603.6a: each time an event puts one or more permanents onto the
+    /// battlefield, all permanents on the battlefield, including the newcomers,
+    /// are checked for enters triggers that match the event. Both tokens are one
+    /// event, so Hushbringer ("Creatures entering or dying don't cause abilities
+    /// to trigger.") is on the battlefield for the check and Soul Warden
+    /// ("Whenever another creature enters, you gain 1 life.") triggers for
+    /// neither token, although the Triskelion copy entered an answer earlier.
+    #[test]
+    fn later_co_entrant_suppressor_governs_the_whole_token_entry_event() {
+        assert_eq!(
+            warden_life_for_second_copy(SecondCopy::Triskelion, false),
+            2,
+            "positive control: without a suppressor Soul Warden sees both entrants"
+        );
+        assert_eq!(
+            warden_life_for_second_copy(SecondCopy::Hushbringer, false),
+            0,
+            "the completed entry event includes Hushbringer, so no entrant triggers Soul Warden"
+        );
+    }
+
+    /// The same rows with the game saved and restored at the pause between the
+    /// two entrants: the first entrant's unmatched entry survives the wire and
+    /// is still judged against the completed event.
+    #[test]
+    fn later_co_entrant_suppressor_survives_persisted_restore_at_the_pause() {
+        assert_eq!(
+            warden_life_for_second_copy(SecondCopy::Triskelion, true),
+            2,
+            "positive control: the first entrant's entry is not lost across restore"
+        );
+        assert_eq!(
+            warden_life_for_second_copy(SecondCopy::Hushbringer, true),
+            0,
+            "the restored game still checks the first entrant against the completed event"
+        );
+    }
+
+    /// Cards Elemental Bond draws for one activation whose first token copies
+    /// Servant of the Scale and whose second copies `second`.
+    fn bond_draws_for_second_copy(
+        second: impl FnOnce(&mut GameScenario) -> ObjectId,
+    ) -> (usize, i32) {
+        let BodyDoubleBoard {
+            mut scenario,
+            feldon,
+            body_double,
+            scales: _,
+            season,
+        } = body_double_board();
+        let servant = graveyard_servant_of_the_scale(&mut scenario);
+        let second = second(&mut scenario);
+        scenario.add_enchantment_from_oracle(P0, "Elemental Bond", ELEMENTAL_BOND);
+        let mut runner = scenario.build();
+        let hand = runner.state().players[0].hand.len();
+        // Season first, then Scales: one counter doubled to two, plus one.
+        let first =
+            enter_first_copy_before_second_offer(&mut runner, feldon, body_double, servant, season);
+        assert_eq!(
+            runner.state().objects[&first]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&3)
+        );
+        assert_eq!(runner.state().objects[&first].power, Some(3));
+        choose_copy(&mut runner, second);
+        assert_token_entry_complete(&mut runner);
+        (
+            runner.state().players[0].hand.len() - hand,
+            runner.state().objects[&first]
+                .power
+                .expect("first entrant is still a creature"),
+        )
+    }
+
+    /// CR 603.6b + CR 611.3c: continuous effects that modify a permanent's
+    /// characteristics apply as it enters, before determining whether it causes
+    /// an ability to trigger. Ascendant Evincar ("Nonblack creatures get -1/-1.")
+    /// enters in the same event as the 3/3 Servant of the Scale copy, so that
+    /// copy enters as a 2/2 and Elemental Bond ("Whenever a creature you control
+    /// with power 3 or greater enters, draw a card.") triggers only for the 3/3
+    /// Evincar.
+    #[test]
+    fn later_co_entrant_characteristic_modifier_governs_the_earlier_entrant() {
+        let (draws, first_power) = bond_draws_for_second_copy(|scenario| {
+            scenario
+                .add_creature_to_graveyard(P0, "Hill Giant", 3, 3)
+                .with_subtypes(vec!["Giant"])
+                .with_color(vec![ManaColor::Red])
+                .id()
+        });
+        assert_eq!(first_power, 3);
+        assert_eq!(
+            draws, 2,
+            "positive control: with no modifier both 3-power entrants draw"
+        );
+        let (draws, first_power) = bond_draws_for_second_copy(|scenario| {
+            scenario
+                .add_creature_to_graveyard(P0, "Ascendant Evincar", 3, 3)
+                .as_legendary()
+                .with_subtypes(vec!["Phyrexian", "Vampire", "Noble"])
+                .with_color(vec![ManaColor::Black])
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                    generic: 4,
+                })
+                .from_oracle_text(ASCENDANT_EVINCAR)
+                .id()
+        });
+        assert_eq!(first_power, 2, "Evincar shrinks the nonblack first entrant");
+        assert_eq!(
+            draws, 1,
+            "only Evincar enters with power 3 or greater in the completed event"
+        );
+    }
+
+    /// CR 603.2c + CR 603.6a: a "triggers only once each turn" ability is spent
+    /// by an event that triggers it, and the suppressed entry event triggers
+    /// nothing. Moon Girl and Devil Dinosaur ("Whenever an artifact you control
+    /// enters, draw a card. This ability triggers only once each turn.") must
+    /// not draw for Feldon's artifact tokens when the second is Hushbringer,
+    /// and must still be able to trigger for a later artifact that turn.
+    #[test]
+    fn suppressed_token_entry_event_does_not_spend_a_once_each_turn_limit() {
+        let BodyDoubleBoard {
+            mut scenario,
+            feldon,
+            body_double,
+            scales,
+            season: _,
+        } = body_double_board();
+        let triskelion = graveyard_triskelion(&mut scenario);
+        let hushbringer = graveyard_hushbringer(&mut scenario);
+        scenario
+            .add_creature_from_oracle(P0, "Moon Girl and Devil Dinosaur", 2, 2, MOON_GIRL)
+            .as_legendary();
+        // Hushbringer stops creatures entering from causing triggers; a
+        // noncreature artifact still triggers Moon Girl.
+        let spellbook = scenario
+            .add_artifact_to_hand_from_oracle(P0, "Spellbook", "You have no maximum hand size.")
+            .id();
+        let mut runner = scenario.build();
+        let library = runner.state().players[0].library.len();
+        let first = enter_first_copy_before_second_offer(
+            &mut runner,
+            feldon,
+            body_double,
+            triskelion,
+            scales,
+        );
+        assert!(
+            runner.state().objects[&first]
+                .card_types
+                .core_types
+                .contains(&engine::types::card_type::CoreType::Artifact),
+            "the first entrant is an artifact Moon Girl would see"
+        );
+        choose_copy(&mut runner, hushbringer);
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(
+            runner.state().players[0].library.len(),
+            library,
+            "the suppressed entry event draws nothing"
+        );
+        let outcome = runner.cast(spellbook).resolve();
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(runner.state().objects[&spellbook].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().players[0].library.len(),
+            library - 1,
+            "the once-each-turn trigger was still available for the later artifact"
+        );
+    }
+
+    /// CR 603.2c: a "one or more" ability triggers once for an event with
+    /// several occurrences. Tocasia's Welcome ("Whenever one or more creatures
+    /// you control with mana value 3 or less enter, draw a card. This ability
+    /// triggers only once each turn.") must see the mana value 1 Servant of the
+    /// Scale copy although the entrant that completes the event, a Triskelion
+    /// copy, has mana value 6, and that one trigger spends the turn's limit.
+    #[test]
+    fn one_or_more_observer_sees_a_qualifying_entrant_that_is_not_the_last() {
+        let BodyDoubleBoard {
+            mut scenario,
+            feldon,
+            body_double,
+            scales,
+            season,
+        } = body_double_board();
+        let servant = graveyard_servant_of_the_scale(&mut scenario);
+        let triskelion = graveyard_triskelion(&mut scenario);
+        scenario.add_enchantment_from_oracle(P0, "Tocasia's Welcome", TOCASIAS_WELCOME);
+        let later_entry = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Raise the Alarm",
+                true,
+                "Create two 1/1 white Soldier creature tokens.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let library = runner.state().players[0].library.len();
+        enter_first_copy_before_second_offer(&mut runner, feldon, body_double, servant, scales);
+        let (second, _) = choose_copy(&mut runner, triskelion);
+        choose_token_counter_order(&mut runner, second, season);
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(
+            runner.state().players[0].library.len(),
+            library - 1,
+            "Welcome draws once for the event's qualifying entrant"
+        );
+        let outcome = runner.cast(later_entry).resolve();
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert_token_entry_complete(&mut runner);
+        assert_eq!(
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| object.is_token && object.zone == Zone::Battlefield)
+                .count(),
+            6,
+            "positive reach guard: Raise the Alarm's Season-doubled qualifying tokens entered"
+        );
+        assert_eq!(
+            runner.state().players[0].library.len(),
+            library - 1,
+            "the limit was spent by the completed entry event"
+        );
     }
 
     #[test]
