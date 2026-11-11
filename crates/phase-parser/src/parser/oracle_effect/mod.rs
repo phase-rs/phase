@@ -47678,12 +47678,17 @@ fn parse_effect_chain_ir_body(
             && turn_cond.is_none()
             && target_has_cond.is_none()
         {
-            // CR 608.2c: the clause becomes the chain root only when no
-            // earlier clause of this chain has been pushed.
-            let position = if builder.clauses().is_empty() {
-                conditions::GatedInstructionPosition::ChainRoot
-            } else {
-                conditions::GatedInstructionPosition::AfterInstruction
+            // CR 608.2c + CR 700.2: the clause is the resolved chain root only
+            // when no earlier clause of this chain has been pushed and the body
+            // is a whole ability. A mode is not: the engine appends each later
+            // chosen mode to the earlier one as a sub-ability
+            // (`build_chained_resolved`), and which mode comes first depends on
+            // the choice, so every mode is treated as a later instruction.
+            let position = match (builder.clauses().is_empty(), ctx.body_scope) {
+                (true, BodyScope::WholeAbility) => conditions::GatedInstructionPosition::ChainRoot,
+                (false, _) | (_, BodyScope::ModalMode) => {
+                    conditions::GatedInstructionPosition::AfterInstruction
+                }
             };
             strip_routed_suffix_conditional(&text, ctx, position)
         } else {

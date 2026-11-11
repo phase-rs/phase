@@ -5136,7 +5136,8 @@ fn stack_announced_roles(effect_text: &str, ctx: &ParseContext) -> Option<Announ
     announced_object_roles(&clause)
 }
 
-/// CR 115.1d: the one announced object target of an instruction, owned by the
+/// CR 115.1: the one announced object target of an instruction (a
+/// spell's or a triggered ability's), owned by the
 /// head the condition is attached to, or `None` when the declaration is not
 /// exactly one controller-capable object role. A companion player, a payer, a
 /// child role, or any other second role makes the suffix decline.
@@ -5442,14 +5443,16 @@ fn parse_target_controller_control_condition_prefix(
 /// against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GatedInstructionPosition {
-    /// The first instruction of the chain. The engine evaluates its gate on its
-    /// own resolved node before its effect, so a target-controller read sees the
-    /// targets this instruction announced.
+    /// The first instruction of a whole ability's chain. The engine evaluates
+    /// its gate on its own resolved node before its effect, so a
+    /// target-controller read sees the targets this instruction announced.
     ChainRoot,
-    /// A later instruction, lowered as a sub-ability. The engine evaluates a
-    /// sub-ability's gate in the parent's hand-off against the PARENT's resolved
-    /// node (engine `effects/mod.rs`, the `sub.condition` check before the sub
-    /// is dispatched), so a target-controller read sees the preceding
+    /// A later instruction, lowered as a sub-ability, or any mode of a modal
+    /// body (the engine appends each later chosen mode to the earlier one as a
+    /// sub-ability, CR 700.2). The engine evaluates a sub-ability's gate in
+    /// the parent's hand-off against the PARENT's resolved node (engine
+    /// `effects/mod.rs`, the `sub.condition` check before the sub is
+    /// dispatched), so a target-controller read sees the preceding
     /// instruction's targets, never this instruction's own.
     AfterInstruction,
 }
@@ -12151,6 +12154,68 @@ mod tests {
                 parsed.parse_warnings
             );
         }
+    }
+
+    /// CR 700.2 + CR 608.2c (final review): every mode of a modal body is
+    /// declined. The engine appends each later chosen mode to the earlier one as
+    /// a sub-ability and evaluates its gate against the earlier mode's node, so
+    /// "Choose two" with a tapped creature in mode 1 would read that creature's
+    /// controller. Synthetic text; the gated mode is Skulking Killer's printed
+    /// instruction and the nearest printed modal shape is any "Choose two"
+    /// spell whose modes each target.
+    #[test]
+    fn target_controller_suffix_in_a_mode_is_an_explicit_gap() {
+        let condition = "that opponent controls no other creatures";
+        let gated_effect = "Target creature an opponent controls gets -2/-2 until end of turn";
+        assert_full_strip_binds(gated_effect, condition);
+        let text = format!(
+            "Choose two \u{2014}\n\u{2022} Tap target creature.\n\u{2022} {gated_effect} if \
+             {condition}."
+        );
+        let parsed = parse_oracle_text(&text, "Synthetic", &[], &["Instant".to_owned()], &[]);
+        let modal = parsed
+            .modal
+            .as_ref()
+            .expect("reach guard: the text is modal");
+        assert_eq!(
+            (modal.min_choices, modal.max_choices, modal.mode_count),
+            (2, 2, 2)
+        );
+        let [tap, gated] = parsed.abilities.as_slice() else {
+            panic!("expected one ability per mode, got {:?}", parsed.abilities);
+        };
+        for mode in [tap, gated] {
+            assert!(
+                mode.effect
+                    .target_filter()
+                    .is_some_and(|filter| !filter.is_context_ref()),
+                "reach guard: each mode declares its own target: {:?}",
+                mode.effect
+            );
+            assert_eq!(mode.target_choice_timing, TargetChoiceTiming::Stack);
+            assert_eq!(mode.condition, None, "{:?}", mode.effect);
+            assert!(mode.sub_ability.is_none(), "{:?}", mode.sub_ability);
+        }
+        assert!(
+            matches!(*gated.effect, Effect::Pump { .. }),
+            "{:?}",
+            gated.effect
+        );
+        let gaps: Vec<_> = parsed
+            .parse_warnings
+            .iter()
+            .filter_map(|w| w.gap())
+            .collect();
+        assert_eq!(
+            gaps,
+            vec![
+                &crate::parser::oracle_ir::diagnostic::ClauseGap::Condition {
+                    guard: condition.to_string()
+                }
+            ],
+            "the suffix must be an explicit gap: {:?}",
+            parsed.parse_warnings
+        );
     }
 
     /// CR 608.2d + CR 107.4 + CR 202.1: Omnath, Locus of All — "you may reveal
