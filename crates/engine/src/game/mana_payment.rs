@@ -4726,15 +4726,22 @@ mod tests {
         }
         // CR 702.51a + CR 107.4e: a colored convoke stand-in is eligible
         // for its hybrid half, just like real mana; keep both positive paths.
+        // Hoarding Broodlord grants convoke to spells cast from exile.
         for unit in [
             make_unit(ManaType::Blue),
             ManaUnit::convoke_payment(ManaType::Blue, ObjectId(2)),
         ] {
             HYBRID_ALTERNATIVE_ENTRIES.with(|entries| entries.set(Some(0)));
             let requests = std::cell::Cell::new(0);
+            let reduced_requested = std::cell::Cell::new(false);
             let rejects = |candidate: &ManaCost| {
                 requests.set(requests.get() + 1);
-                assert_eq!(*candidate, residual);
+                // CR 106.4 + CR 107.4e: trials may leave mana unspent;
+                // convoke is also optional (CR 702.51a). Either can pay one hybrid.
+                assert!(*candidate == residual || *candidate == cost);
+                if *candidate == residual {
+                    reduced_requested.set(true);
+                }
                 false
             };
             assert_eq!(
@@ -4749,6 +4756,7 @@ mod tests {
                 residual
             );
             assert!(requests.get() > 0);
+            assert!(reduced_requested.get());
             assert!(
                 HYBRID_ALTERNATIVE_ENTRIES
                     .with(|entries| entries.replace(None))
@@ -4759,6 +4767,11 @@ mod tests {
         // CR 702.51a: a colorless convoke stand-in cannot pay a C symbol.
         HYBRID_ALTERNATIVE_ENTRIES.with(|entries| entries.set(Some(0)));
         let colorless_hybrid = crate::types::mana::parse_mtgjson_mana_cost("{C/U}");
+        let requests = std::cell::Cell::new(0);
+        let rejects = |_: &ManaCost| {
+            requests.set(requests.get() + 1);
+            false
+        };
         assert_eq!(
             reduce_cost_by_pool_with_fundability(
                 &ManaPool::from_units([ManaUnit::convoke_payment(
@@ -4769,10 +4782,11 @@ mod tests {
                 None,
                 None,
                 None,
-                Some(&|_| false)
+                Some(&rejects)
             ),
             colorless_hybrid
         );
+        assert_eq!(requests.get(), 0);
         assert_eq!(
             HYBRID_ALTERNATIVE_ENTRIES.with(|entries| entries.replace(None)),
             Some(0)
