@@ -35,9 +35,53 @@ fn face_down(runner: &mut GameRunner, id: ObjectId) {
     runner.state_mut().objects.get_mut(&id).unwrap().face_down = true;
 }
 
-/// CR 115.1 + CR 602.2b + CR 115.10a: "Untap two other target legendary
-/// creatures" declares exactly two targets, neither of them Ioreth; both
-/// untap, and an untargeted tapped creature stays tapped.
+/// Activate `ability_index` of `source` through the public action, assert the
+/// offered targets exclude the source itself ("other"), choose `targets` in
+/// order and resolve.
+fn activate_two_other_targets(
+    runner: &mut GameRunner,
+    source: ObjectId,
+    ability_index: usize,
+    targets: [ObjectId; 2],
+) {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the ability is activated");
+    for target in targets {
+        let WaitingFor::TargetSelection {
+            target_slots,
+            selection,
+            ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "expected a target slot, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        let legal = &target_slots[selection.current_slot].legal_targets;
+        assert!(
+            !legal.contains(&TargetRef::Object(source)),
+            "\"other\" excludes the source: {legal:?}"
+        );
+        assert!(legal.contains(&TargetRef::Object(target)), "{legal:?}");
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .expect("the target is chosen");
+    }
+    runner.advance_until_stack_empty();
+}
+
+/// CR 115.1 + CR 602.2b: "Untap two other target legendary creatures"
+/// declares exactly two targets, neither of them Ioreth (an untapped legendary
+/// creature, so only "other" keeps it out); both untap, and an untargeted
+/// tapped creature stays tapped.
 #[test]
 fn ioreth_untaps_two_other_target_legendary_creatures() {
     let mut scenario = GameScenario::new();
@@ -61,10 +105,7 @@ fn ioreth_untaps_two_other_target_legendary_creatures() {
         tap(&mut runner, id);
     }
 
-    runner
-        .activate(ioreth, 1)
-        .target_objects(&[first, second])
-        .resolve();
+    activate_two_other_targets(&mut runner, ioreth, 1, [first, second]);
     assert!(tapped(&runner, ioreth), "{{T}} is paid");
     assert!(!tapped(&runner, first));
     assert!(!tapped(&runner, second));
@@ -89,10 +130,7 @@ fn nimbleclaw_adept_untaps_two_other_target_permanents() {
         tap(&mut runner, id);
     }
 
-    runner
-        .activate(adept, 0)
-        .target_objects(&[first, second])
-        .resolve();
+    activate_two_other_targets(&mut runner, adept, 0, [first, second]);
     assert!(tapped(&runner, adept), "{{T}} is paid");
     assert!(!tapped(&runner, first));
     assert!(!tapped(&runner, second));
