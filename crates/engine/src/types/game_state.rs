@@ -7594,19 +7594,9 @@ impl PendingBatchDeliveries {
         staged: &StagedBatchDelivery,
         arrangement: &StagedLibraryArrangement,
     ) -> Result<(), String> {
-        if !matches!(
-            arrangement.position,
-            LibraryPosition::Top
-                | LibraryPosition::Bottom
-                | LibraryPosition::NthFromTop { .. }
-                // CR 401.4 + CR 401.7: "just beneath the top X cards" is a
-                // fixed slot whose owner also arranges the arrivals. This is
-                // the exact set the producer groups; keeping the two in step
-                // makes a parked fixed-depth arrangement a savable state.
-                | LibraryPosition::BeneathTop {
-                    depth: crate::types::ability::QuantityExpr::Fixed { .. },
-                }
-        ) {
+        // CR 401.4 + CR 401.7: the same position contract the producer groups;
+        // one predicate keeps a parked arrangement a savable state.
+        if !arrangement.position.is_owner_arrangeable() {
             return Err("a staged arrangement groups an unsupported library position".to_string());
         }
         if arrangement.batch.arranger.is_some() {

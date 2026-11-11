@@ -2552,18 +2552,10 @@ pub(crate) fn staged_arrangement_groups(
         else {
             continue;
         };
-        match position {
-            LibraryPosition::Top | LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. } => {
-            }
-            // CR 401.4 + CR 401.7: "just beneath the top X cards" is a fixed
-            // slot whose owner also arranges the arrivals; only a static X is
-            // groupable.
-            LibraryPosition::BeneathTop {
-                depth: crate::types::ability::QuantityExpr::Fixed { .. },
-            } => {}
-            LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
-                continue
-            }
+        // CR 401.4 + CR 401.7: one position contract, shared with checked
+        // persistence; only a statically positioned arrival is arrangeable.
+        if !position.is_owner_arrangeable() {
+            continue;
         }
         let key = (member.owner, position.clone());
         match groups.iter_mut().find(|(existing, _)| *existing == key) {
