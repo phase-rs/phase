@@ -169,6 +169,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ("engine/tests/fixtures/exquisite_blood_tenacity_three_opponents_4p.json.gz", "OFFER@restore bounded=true bound=Measured unbounded=[Life(PlayerId(0)), Life(PlayerId(1))] winner=Some(PlayerId(0))"),
     ("engine/tests/fixtures/f4_user_mode1_no_offer_4p.json.gz", "OFFER@19 bounded=true bound=Measured unbounded=[LibraryDelta(PlayerId(0)), Counter(Plus1Plus1, Creature), TokensCreated, Life(PlayerId(1))] winner=None"),
     ("engine/tests/fixtures/f4_user_mode2_accept_commits_nothing_4p.json.gz", "OFFER@24 bounded=true bound=Measured unbounded=[LibraryDelta(PlayerId(0)), Counter(Plus1Plus1, Creature), TokensCreated, Life(PlayerId(1))] winner=None"),
+    ("engine/tests/fixtures/familiar_relic_turn5_2p.json.gz", "OFFER@restore bounded=true bound=Measured unbounded=[Life(PlayerId(0)), Counter(Plus1Plus1, Creature), Life(PlayerId(1))] winner=None"),
     ("engine/tests/fixtures/fantastic_four_bounded_loop_4p.json.gz", "OFFER@24 bounded=true bound=Measured unbounded=[LibraryDelta(PlayerId(0)), Counter(Plus1Plus1, Creature), TokensCreated, Life(PlayerId(1))] winner=None"),
     ("engine/tests/fixtures/integration_cards.json.gz", "RESTOREERR unversioned raw resolution state contains an Exploited trigg"),
     ("engine/tests/fixtures/kilo_freed_relic_pentad_4p.json.gz", "BUDGET Priority"),

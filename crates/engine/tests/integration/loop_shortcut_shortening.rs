@@ -791,12 +791,11 @@ fn a_zero_count_proposal_admits_no_place_while_accept_still_answers() {
     );
 }
 
-/// The engine-driven seat at a window whose range is empty. Its answer has to be one the reducer
-/// takes: `ai_support::candidates` builds a single candidate here and validates it against the
-/// reducer, so a verdict naming a place the proposal admits nowhere is dropped rather than
-/// refused on submit, leaving the polled seat nothing to play. The guard is the same rig at a
-/// count whose range does hold a place, where the seat still names one — so a seat that Accepted
-/// everywhere could not satisfy the row.
+/// The engine-driven seat at a window whose range is empty. The reducer filter drops the issued
+/// `Shorten`, which names a place the proposal admits nowhere, and leaves the `Accept` the reducer
+/// takes. The guard is the same rig at a count whose range does hold a place, where the issued
+/// `Shorten` survives beside the `Accept` — so a builder that issued only `Accept` could not
+/// satisfy the row.
 #[test]
 fn the_engine_driven_seat_can_answer_a_window_whose_range_is_empty() {
     let mut state = rig_window(IterationCount::Fixed(0));
@@ -807,9 +806,11 @@ fn the_engine_driven_seat_can_answer_a_window_whose_range_is_empty() {
     let (responder, _) = window(&state);
     let candidates = legal_actions(&state);
     assert_eq!(
-        candidates.len(),
-        1,
-        "the polled seat holds one candidate against an empty range, got {candidates:?}"
+        candidates,
+        vec![GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept
+        }],
+        "the polled seat holds only the Accept against an empty range"
     );
     apply(&mut state, responder, candidates[0].clone())
         .expect("the generated candidate must be one the reducer accepts");
@@ -824,15 +825,20 @@ fn the_engine_driven_seat_can_answer_a_window_whose_range_is_empty() {
     let guard_candidates = legal_actions(&guard);
     assert_eq!(
         guard_candidates,
-        vec![GameAction::RespondToShortcut {
-            response: ShortcutResponse::Shorten {
-                at_iteration: AI_SHORTEN_PLACE
-            }
-        }],
+        vec![
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept
+            },
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Shorten {
+                    at_iteration: AI_SHORTEN_PLACE
+                }
+            },
+        ],
         "reach-guard: on a range that holds a place this seat, seated there with Relic of \
-         Progenitus to activate, still names one"
+         Progenitus to activate, keeps the issued Shorten"
     );
-    apply(&mut guard, guard_responder, guard_candidates[0].clone())
+    apply(&mut guard, guard_responder, guard_candidates[1].clone())
         .expect("the named place is legal on the proposal that admits it");
 }
 

@@ -898,7 +898,7 @@ fn shortcut_accept_validation_does_not_take_the_shortcut() {
     let WaitingFor::RespondToShortcut {
         player,
         remaining_players,
-        ..
+        proposal,
     } = runner.state().waiting_for.clone()
     else {
         panic!(
@@ -934,13 +934,26 @@ fn shortcut_accept_validation_does_not_take_the_shortcut() {
         validation_clones, 0,
         "deciding whether the Accept is legal must not reach the clone-and-apply probe"
     );
-    // The copies above the one the candidate probe makes are the simulated Accept driving the
-    // shortcut — `GameState::clone` accounts every copy, so the take's snapshots land in this
-    // counter.
-    assert_eq!(
-        during.state_copies, 1,
-        "one copy, the candidate probe's; the legality verdict must not add a take's snapshot"
+    let refusal_before = take_cost_snapshot();
+    let refusal = shorten_refusal(
+        runner.state(),
+        &proposal,
+        P2,
+        engine::ai_support::AI_SHORTEN_PLACE,
     );
+    let refusal_copies = take_cost_snapshot().since(refusal_before).state_copies;
+    assert!(
+        refusal.is_some(),
+        "REACH-GUARD: the issued Shorten is refused, so the Accept above is all that survives"
+    );
+    // Every copy `legal_actions` makes is the issued Shorten's refusal; the Accept adds none. 19 is
+    // that refusal alone: the CR 732.2b admission runs the take to place 1 on a scratch state, and
+    // no cheaper rules-equivalent refusal exists.
+    assert_eq!(
+        during.state_copies, refusal_copies,
+        "the Accept's legality verdict must not add a take's snapshot"
+    );
+    assert_eq!(during.state_copies, 19);
 }
 
 /// CR 732.2a: a shortcut belongs to the player with priority, not necessarily the player whose loop
@@ -2065,115 +2078,6 @@ fn interactive_recurring_poison_is_not_drawn() {
             .iter()
             .any(|e| matches!(e, GameEvent::GameOver { winner: None })),
         "no CR 732.4 draw event may be emitted for a poison-dripping loop"
-    );
-}
-
-/// LOW-2: the AI's `RespondToShortcut` decision self-preserves. Positive: the polled
-/// opponent with a meaningful action (a castable Bolt) Shortens rather than Accepting its
-/// own loss, and applying that response actually hands it a real priority window.
-/// Control: the SAME fixture/flow's second APNAP responder — who holds no meaningful
-/// action — gets Accept from the identical `smart_shortcut_response` call.
-#[test]
-fn low2_smart_shortcut_self_preservation() {
-    // Positive: P1 (has the Bolt) self-preserves via Shorten.
-    let (mut runner, kickoff) = setup_3p_optional_cascade(LoopDetectionMode::Interactive);
-    let _ = runner.cast(kickoff).resolve();
-    let (_events, wf) = drive_collect(&mut runner, 500);
-    let WaitingFor::LoopShortcut { proposer, .. } = wf else {
-        panic!("optional cascade must OFFER a LoopShortcut, got {wf:?}");
-    };
-    assert_eq!(proposer, P0);
-    runner
-        .act(GameAction::DeclareShortcut {
-            count: offered(runner.state()).1,
-            template: None,
-        })
-        .expect("P0 declares");
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::RespondToShortcut { player, .. } if player == P1
-        ),
-        "positive reach-guard: P1 must be prompted before the AI decision is tested"
-    );
-
-    let p1_response = engine::ai_support::smart_shortcut_response(runner.state(), P1);
-    assert_eq!(
-        p1_response,
-        ShortcutResponse::Shorten { at_iteration: 1 },
-        "P1's Lightning Bolt and Mountain survive one repetition, so the take to place 1 seats \
-         P1 with Bolt castable ⇒ smart_shortcut_response self-preserves via Shorten, not Accept \
-         of its own loss"
-    );
-    runner
-        .act(GameAction::RespondToShortcut {
-            response: p1_response,
-        })
-        .expect("apply P1's AI decision");
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::RespondToShortcut { player, .. } if player == P2
-        ),
-        "the shortened proposal is still polled to P2; got {:?}",
-        runner.state().waiting_for
-    );
-    runner
-        .act(GameAction::RespondToShortcut {
-            response: ShortcutResponse::Accept,
-        })
-        .expect("P2 accepts the shortened proposal");
-    assert_eq!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { player: P1 },
-        "the shortened take's ending point is P1's — it survives"
-    );
-    assert!(
-        life(&runner, P1) > 0,
-        "P1 is alive — one repetition does not drain it"
-    );
-
-    // Control: the identical fixture/flow, but P1 Accepts (submitted manually, not via the
-    // AI, so the APNAP queue advances instead of stopping) so the SECOND responder (P2,
-    // who holds no meaningful action) is reached. `smart_shortcut_response` must Accept.
-    let (mut crunner, ckickoff) = setup_3p_optional_cascade(LoopDetectionMode::Interactive);
-    let _ = crunner.cast(ckickoff).resolve();
-    let (_ce, cwf) = drive_collect(&mut crunner, 500);
-    assert!(matches!(cwf, WaitingFor::LoopShortcut { .. }));
-    crunner
-        .act(GameAction::DeclareShortcut {
-            count: offered(crunner.state()).1,
-            template: None,
-        })
-        .expect("declare");
-    assert!(
-        matches!(
-            crunner.state().waiting_for,
-            WaitingFor::RespondToShortcut { player, .. } if player == P1
-        ),
-        "positive reach-guard: P1 is first in APNAP order"
-    );
-    crunner
-        .act(GameAction::RespondToShortcut {
-            response: ShortcutResponse::Accept,
-        })
-        .expect("P1 accepts (manually, to advance the APNAP queue to P2)");
-    assert!(
-        matches!(
-            crunner.state().waiting_for,
-            WaitingFor::RespondToShortcut { player, .. } if player == P2
-        ),
-        "positive reach-guard: P2 is prompted second"
-    );
-
-    let p2_response = engine::ai_support::smart_shortcut_response(crunner.state(), P2);
-    assert_eq!(
-        p2_response,
-        ShortcutResponse::Accept,
-        "control: P2 holds no meaningful action ⇒ smart_shortcut_response must Accept \
-         (revert-failing: an unconditional-Accept revert makes P1's response above Accept \
-         too, which crowns P0's win with P1 still a faller — the Shorten assertion above \
-         would fail first)"
     );
 }
 
@@ -7196,6 +7100,54 @@ fn relic_offer_state() -> Option<(GameState, ObjectId)> {
     Some((state, relic))
 }
 
+/// CR 732.2b + CR 732.2c: the place a shortening responder reaches is past every later responder's
+/// answer. On the 4p Sprout board P1 is polled first with P2 and P3 queued; shortening at one and
+/// both of them accepting seats P1 at its own priority, where the latch is cleared so a pass is
+/// answerable.
+#[test]
+fn the_shortened_place_is_reached_past_every_later_responder() {
+    let Some((offer, _)) = relic_offer_state() else {
+        return;
+    };
+    let mut state = offer;
+    apply(
+        &mut state,
+        P0,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(3),
+            template: None,
+        },
+    )
+    .expect("the proposer declares");
+    let WaitingFor::RespondToShortcut {
+        player,
+        remaining_players,
+        ..
+    } = state.waiting_for.clone()
+    else {
+        panic!("the offer polls a responder, got {:?}", state.waiting_for);
+    };
+    assert_eq!(
+        (player, remaining_players),
+        (P1, vec![P2, P3]),
+        "reach-guard: P1 answers first with two responders queued"
+    );
+
+    let place = engine::ai_support::shortened_priority_state(
+        &state,
+        P1,
+        &GameAction::RespondToShortcut {
+            response: ShortcutResponse::Shorten { at_iteration: 1 },
+        },
+    )
+    .expect("the take seats P1 at the place it named");
+    assert_eq!(place.waiting_for, WaitingFor::Priority { player: P1 });
+    assert!(
+        engine::ai_support::legal_actions(&place).contains(&GameAction::PassPriority),
+        "the cleared latch leaves P1's pass answerable at the place"
+    );
+}
+
 /// Relic of Progenitus ("{T}: Target player exiles a card from their graveyard.") on the
 /// battlefield of every living opponent of the offer's proposer, so each seat the offer polls holds
 /// a game choice at every place it may name (CR 732.2b).
@@ -7526,36 +7478,6 @@ fn a_refused_place_inside_the_published_range_leaves_the_window_to_accept() {
         },
     )
     .expect("P1 accepts in the window the refusal left");
-}
-
-/// The AI responder never shortens at place 0 and never sends a `Shorten` the engine refuses. P1
-/// holds Relic of Progenitus on the real 4p Sprout board: against three repetitions it shortens at
-/// one and the engine admits it, and against one repetition, where no place but 0 is admitted, it
-/// accepts.
-#[test]
-fn the_ai_responder_shortens_only_at_an_admitted_place_past_zero() {
-    let Some((offer, _)) = relic_offer_state() else {
-        return;
-    };
-    for (count, expected) in [
-        (3, ShortcutResponse::Shorten { at_iteration: 1 }),
-        (1, ShortcutResponse::Accept),
-    ] {
-        let mut state = offer.clone();
-        apply(
-            &mut state,
-            P0,
-            GameAction::DeclareShortcut {
-                count: IterationCount::Fixed(count),
-                template: None,
-            },
-        )
-        .expect("the proposer declares");
-        let response = engine::ai_support::smart_shortcut_response(&state, P1);
-        assert_eq!(response, expected, "against Fixed({count})");
-        apply(&mut state, P1, GameAction::RespondToShortcut { response })
-            .expect("the engine admits the AI's answer");
-    }
 }
 
 /// The `LoopCollapse` clamp, on the ingress that outlives the swallow above: a DECODE, not a

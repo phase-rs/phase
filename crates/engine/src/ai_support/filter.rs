@@ -105,6 +105,8 @@ pub trait CandidateFilter {
 /// - CR 601.2: casting/activation announcement steps (mode count, phyrexian
 ///   shard choices, modal bounds, target-set bounds).
 /// - CR 508/509: combat declarations (attackers/blockers must be valid).
+/// - CR 732.2b: a loop-shortcut responder's `Shorten` at a place `shorten_refusal`
+///   refuses.
 ///
 /// This is the current workhorse. A future follow-up should decompose it into
 /// the four named sub-filters originally planned: `ManaAvailabilityFilter`,
@@ -374,8 +376,8 @@ fn pending_spell_root(state: &GameState) -> Option<(SpellRootProvenance, Pending
 /// `phase-ai` projection fast path calls, so neither can drift.
 ///
 /// Skipping the clone-and-apply here is load-bearing: `PassPriority` is enumerated
-/// at every priority window (`candidates::priority_actions_with_probe`) and is never
-/// memoized (`legality_equivalence_key`'s catch-all), so before this hatch it paid a
+/// at every priority window whose pass `pass_priority_legality` admits
+/// (`candidates::priority_actions_with_probe`) and is never memoized (`legality_equivalence_key`'s catch-all), so before this hatch it paid a
 /// full `GameState` clone *per priority window* — plus the nested `boundary_snapshot`
 /// clone inside `apply_action_boundary_core` — to re-derive an O(1) answer.
 ///
@@ -1959,14 +1961,8 @@ mod tests {
         assert!(pass_oracle_accepts(&unblocked, &unblocked_candidate));
     }
 
-    /// T6b. The over-accept direction, at the public `legal_actions` boundary.
-    ///
-    /// This passes on the unfixed tree — today the expensive clone is what
-    /// removes the pass — so it is a no-drift guard, and the most important one
-    /// in the set: it is what goes red if the hatch is written without gate
-    /// (d)'s `blocks_pass` component. That omission is invisible to every
-    /// latch-free fixture, and it would be a live over-accept: `legal_actions`
-    /// would start offering an action the reducer rejects.
+    /// T6b. The over-accept direction, at the public `legal_actions` boundary:
+    /// a pass the CR 732.2c latch blocks is never offered.
     ///
     /// `must_diverge` is `pub(crate)`, so this cannot live in
     /// `tests/integration/` and stays here beside T6.

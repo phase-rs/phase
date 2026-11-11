@@ -6,7 +6,6 @@ mod evoke;
 pub mod filter;
 mod payment_continuation;
 mod prospective_mana;
-mod shortcut_efficacy;
 mod swarm;
 mod targeted_exchange;
 
@@ -461,6 +460,15 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
     };
 
     match (&state.waiting_for, action) {
+        // CR 732.2b: the reducer's own refusal of a responder's place.
+        (
+            WaitingFor::RespondToShortcut {
+                player, proposal, ..
+            },
+            GameAction::RespondToShortcut {
+                response: crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration },
+            },
+        ) => crate::game::engine::shorten_refusal(state, proposal, *player, *at_iteration).is_some(),
         (WaitingFor::Priority { player }, _) if *player != acting_player => true,
         (WaitingFor::Priority { .. }, GameAction::CastSpell { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::Foretell { object_id, .. })
@@ -1670,13 +1678,8 @@ fn has_activatable_sacrifice_for_mana(state: &GameState) -> bool {
 /// The mana activations [`has_activatable_sacrifice_for_mana`] counts, as
 /// items rather than as a yes/no.
 ///
-/// SINGLE AUTHORITY for the predicate. `smart_shortcut_response`'s stage 2 has
-/// to classify exactly the actions stage 1 counted, and stage 1 counts these —
-/// which the flat `legal_actions` list structurally cannot contain (they live
-/// in `legal_actions_by_object` only). Re-testing the same shape at that call
-/// site would be a parallel copy free to drift, so the call site consumes this
-/// iterator and `mana_actions_include_meaningful_sacrifice` is defined as its
-/// emptiness.
+/// SINGLE AUTHORITY for the predicate; `mana_actions_include_meaningful_sacrifice`
+/// is defined as its emptiness.
 fn meaningful_sacrifice_mana_actions<'a>(
     state: &'a GameState,
     object_mana_actions: &'a [GameAction],
@@ -1725,18 +1728,10 @@ pub fn has_meaningful_priority_action(state: &GameState, actions: &[GameAction])
         || has_activatable_sacrifice_for_mana(state)
 }
 
-/// The probe [`smart_shortcut_response`] folds over: `state` re-parked at
-/// `polled_player`'s priority with auto-pass cleared and layers flushed, plus
-/// that state's flat priority actions. Mirrors
+/// `state` re-parked at `polled_player`'s priority with auto-pass cleared and
+/// layers flushed, plus that state's flat priority actions. Mirrors
 /// `game::engine`'s `no_living_player_has_meaningful_priority_action` recipe,
 /// scoped to the single polled player.
-///
-/// Public because the shortcut tests' reach-guards must assert on THIS list and
-/// THIS state. A private copy of the recipe in a test silently starts measuring
-/// a different action set — and a different `has_meaningful_priority_action`
-/// answer, since that predicate's sacrifice-for-mana rung only fires while
-/// `waiting_for` is `Priority`, which is true of the probe state and false of
-/// the `RespondToShortcut` state the caller holds.
 pub fn shortcut_probe(
     state: &GameState,
     polled_player: PlayerId,
@@ -1753,200 +1748,38 @@ pub fn shortcut_probe(
     (probe, actions)
 }
 
-/// The actions [`smart_shortcut_response`]'s stage 2 classifies, given a probe
-/// state and the flat priority list stage 1 read.
-///
-/// COVERAGE INVARIANT — stage 2 must classify every action stage 1 counted as
-/// meaningful. The flat list does not satisfy that on its own:
-/// [`has_meaningful_priority_action`] is a disjunction, and its second rung
-/// ([`has_activatable_sacrifice_for_mana`]) reads `state`, not `actions`, so it
-/// counts sacrifice-for-mana activations that `legal_actions` structurally omits
-/// (they live in `legal_actions_by_object` only — see issue #544). Folding stage
-/// 2 over the flat list alone therefore lets a seat whose ONLY meaningful action
-/// is such an activation Accept BY OMISSION: an action stage 2 never sees
-/// reaches no arm, so `shortcut_efficacy`'s fail-closed `_ => MayInterfere`
-/// default cannot protect it, and a false Accept is the direction the module doc
-/// says can lose a game.
-///
-/// `activatable_object_mana_actions` is gated on `waiting_for` — the probe state
-/// is re-parked at `Priority`, which is the same gate
-/// `has_activatable_sacrifice_for_mana` passes there, so the two stages read the
-/// SAME sweep. The added items come from
-/// [`meaningful_sacrifice_mana_actions`], the single authority stage 1's rung is
-/// also defined in terms of; re-testing the shape here would be a parallel copy
-/// free to drift.
-///
-/// Deliberately does NOT add the whole mana sweep, only the subset stage 1
-/// counts: a plain land tap is not a meaningful priority action to stage 1, and
-/// widening past that would buy `Shorten`s stage 1 never asked for.
-///
-/// Public for the same reason [`shortcut_probe`] is: the shortcut tests'
-/// coverage row must assert on THIS set, and a private copy of the recipe would
-/// silently start measuring a different one.
-pub fn stage_two_action_set(
-    probe_state: &GameState,
-    flat_actions: &[GameAction],
-) -> Vec<GameAction> {
-    let mana_actions = activatable_object_mana_actions(probe_state);
-    flat_actions
-        .iter()
-        .chain(meaningful_sacrifice_mana_actions(
-            probe_state,
-            &mana_actions,
-        ))
-        .cloned()
-        .collect()
-}
-
-/// PR-7 Phase 4c (LOW-2): CR 732.2b/c + CR 104.4b — an AI opponent polled on an
-/// OPTIONAL or bounded loop shortcut. The win is a loss condition for every
-/// polled opponent (CR 104.2a).
-///
-/// SINGLE AUTHORITY, and what it does NOT cover. MEASURED — production (i.e.
-/// non-`#[cfg(test)]`) code under `crates/*/src/` builds a
-/// `GameAction::RespondToShortcut` value at exactly four places:
-///   * `ai_support::candidates::candidate_actions_broad_with_probe`,
-///   * `phase_ai::projection::resolve_choice`,
-///   * `phase_ai::search::fallback_action` — these three are AI seats and all
-///     route here, so the heuristic cannot drift between them; and
-///   * `game::interaction::materialize_shortcut_reply_response`, which turns a
-///     HUMAN player's submitted `InteractionShortcutReply` into the action. That
-///     one is deliberately NOT covered: running a stated human choice through an
-///     AI heuristic would overwrite it. It is also the only site that can emit a
-///     place other than [`AI_SHORTEN_PLACE`], the one every AI site names.
-///
-/// `candidate_actions_broad_with_probe` additionally routes
-/// `WaitingFor::RespondToPrecastCopyShortcut` here and maps the answer onto
-/// `PrecastCopyShortcutResponse`, so this function answers BOTH accept-or-shorten
-/// windows. That is intended: both windows ask the identical question — is a real
-/// priority window worth taking here — so a seat whose only action cannot touch
-/// the loop should decline both. `shorten_efficacy.rs`'s
-/// `v8_precast_window_takes_the_same_efficacy_answer` measures that window rather
-/// than assuming it.
-///
-/// TWO STAGES.
-///
-/// **Stage 1 — POSSIBILITY, byte-identical to the shipped predicate.** Reuses
-/// the exact `no_living_player_has_meaningful_priority_action` probe recipe
-/// (`game::engine`), scoped to the single polled player. No meaningful priority
-/// action ⇒ Accept, exactly as before. `has_meaningful_priority_action` is
-/// wired into the CR 732.5 NON-COMPULSION rule —
-/// "No player can be forced to perform an action that would end a loop other
-/// than actions called for by objects involved in the loop" — and is untouched
-/// here.
-///
-/// **Stage 2 — EFFICACY (AI POLICY, no CR licence claimed).** CR 732.2b grants
-/// an unconditioned accept-or-shorten option and CR 732.2c requires only that a
-/// shortening player's next choice be
-/// *different*, which a fetchland activation already satisfies; nothing in the
-/// Comprehensive Rules states an efficacy criterion. This stage is therefore
-/// policy, and it declines to burn a real priority window on a response that
-/// cannot change the outcome:
-///   - arm (A): the offer's own predicted result already crowns this seat, so
-///     shortening moves the game away from a win it already holds;
-///   - arm (B): every action stage 1 counted as meaningful is confined to this
-///     seat's own resources (`shortcut_efficacy::any_action_may_interfere`), so
-///     no available choice touches the loop. Scoped to what stage 1 counted, not
-///     to "every action this seat could take": the stage-2 set is a SUPERSET of,
-///     and never smaller than, what stage 1 counted — the flat list enters
-///     whole, so it also carries actions the stage-1 fold
-///     (`flat_actions_have_meaningful_priority`) does not count as meaningful,
-///     `PassPriority` and mana-ability activations among them, and extra items
-///     can only push toward `MayInterfere`. See the coverage invariant at the
-///     call below; the wider phrasing would claim coverage of shapes neither
-///     stage enumerates.
-///
-/// Otherwise the seat Shortens at [`AI_SHORTEN_PLACE`] where
-/// `game::engine::shorten_admission` finds the take seats it with a meaningful action there, and
-/// Accepts everywhere else.
-///
-/// READ-ORDER: the proposal is read off the ORIGINAL `state`, before
-/// [`shortcut_probe`] re-parks its clone at `Priority` — the probe state carries
-/// no offer at all, so reading the crown from it would make arm (A) dead code.
-/// That same read supplies the CR 732.2b precondition ahead of both stages: a
-/// proposal admitting no place cannot be answered by naming one, so the seat
-/// Accepts rather than emitting a verdict `apply()` refuses.
-pub fn smart_shortcut_response(
+/// CR 732.2c: the priority state `seat` reaches when the reducer takes `shorten` and every later
+/// responder accepts, with the divergence latch cleared so a pass stays answerable there; `None`
+/// unless the take latches `seat` at its own priority.
+pub fn shortened_priority_state(
     state: &GameState,
-    polled_player: PlayerId,
-) -> crate::analysis::loop_check::ShortcutResponse {
-    // Both accept-or-shorten windows are named, so neither is answered by
-    // accident. The wildcard is not removable — `WaitingFor` has 128 variants and
-    // enumerating 126 `=> None` arms here would be noise, not a guard — and this
-    // two-named-arms + `_` shape is the module's existing idiom for the same
-    // question (`game::precast_copy_shortcut::normalize_untrusted_restore`,
-    // `::rekey_after_trusted_restore`).
-    let (crowned_winner, shortening_places) = match &state.waiting_for {
-        WaitingFor::RespondToShortcut { proposal, .. } => (
-            proposal.predicted_winner,
-            Some(proposal.shortening_places()),
-        ),
-        // STRUCTURAL, not an oversight: `RespondToPrecastCopyShortcut` carries no
-        // proposal summary and therefore neither a `predicted_winner` field nor a
-        // range, so the pre-cast route has no crown to read and arm (A) is
-        // inapplicable rather than skipped, and the precondition below is inert
-        // there. Stage 1 and arm (B) do apply, and both run below.
-        WaitingFor::RespondToPrecastCopyShortcut { .. } => (None, None),
-        _ => (None, None),
-    };
-
-    // CR 732.2b: a shortening responder names "a place where they will make a game
-    // choice that's different than what's been proposed", so the place must be one
-    // the proposal admits. A proposal of zero repetitions proposes no choice, its
-    // range holds no place, and `apply()` refuses every `Shorten` against it, place
-    // 0 included. Accept is then the only answer this seat can give that the reducer
-    // will take: `ai_support::candidates` builds exactly one candidate here and
-    // validates it against the reducer, so a verdict naming an excluded place is
-    // dropped rather than refused on submit, leaving the polled seat no legal action
-    // at all. Reading the range here answers for every ingress that reaches the
-    // window — the declare path's own mint and a restored `WaitingFor` alike.
-    if shortening_places.is_some_and(|places| places.is_empty()) {
-        return crate::analysis::loop_check::ShortcutResponse::Accept;
-    }
-
-    let (probe, actions) = shortcut_probe(state, polled_player);
-    if !has_meaningful_priority_action(probe.state(), &actions) {
-        // CR 732.2c: nothing to do — agree to take the shortcut.
-        return crate::analysis::loop_check::ShortcutResponse::Accept;
-    }
-
-    // Arm (A). Keyed on `predicted_winner`, never `proposer`: CR 732.2a lets a
-    // player propose a shortcut whose outcome crowns someone else, and the
-    // proposer is excluded from the APNAP response queue anyway.
-    if crowned_winner == Some(polled_player) {
-        return crate::analysis::loop_check::ShortcutResponse::Accept;
-    }
-
-    // Arm (B). No bounded/unbounded exemption.
-    //
-    // The fold reads [`stage_two_action_set`], never the bare flat `actions` —
-    // see that function for the coverage invariant and what folding over the
-    // flat list alone would silently Accept.
-    if shortcut_efficacy::any_action_may_interfere(
-        probe.state(),
-        polled_player,
-        &stage_two_action_set(probe.state(), &actions),
-    ) {
-        // CR 732.2b + CR 732.2c: name an earlier stopping point only where the take seats this
-        // seat with an action to take there; a shortening that never seats it buys no window.
-        match &state.waiting_for {
-            WaitingFor::RespondToShortcut { proposal, .. }
-                if crate::game::engine::shorten_admission(
-                    state,
-                    proposal,
-                    polled_player,
-                    AI_SHORTEN_PLACE,
-                ) != Ok(crate::game::engine::AdmittedPlace::Seated) =>
-            {
-                crate::analysis::loop_check::ShortcutResponse::Accept
-            }
-            _ => crate::analysis::loop_check::ShortcutResponse::Shorten {
-                at_iteration: AI_SHORTEN_PLACE,
+    seat: PlayerId,
+    shorten: &GameAction,
+) -> Option<GameState> {
+    let _probe = crate::game::engine::SimulationProbeGuard::enter();
+    let mut scratch = state.clone();
+    let mut answer = shorten.clone();
+    loop {
+        crate::game::engine::apply_as_current(&mut scratch, answer).ok()?;
+        answer = match &scratch.waiting_for {
+            WaitingFor::RespondToShortcut { .. } => GameAction::RespondToShortcut {
+                response: crate::analysis::loop_check::ShortcutResponse::Accept,
             },
-        }
-    } else {
-        crate::analysis::loop_check::ShortcutResponse::Accept
+            WaitingFor::RespondToPrecastCopyShortcut { epoch, .. } => {
+                GameAction::PrecastCopyShortcut {
+                    epoch: *epoch,
+                    response: crate::types::actions::PrecastCopyShortcutResponse::Accept,
+                }
+            }
+            _ => break,
+        };
     }
+    (scratch.precast_shortcut_runtime.must_diverge == Some(seat)
+        && scratch.waiting_for == WaitingFor::Priority { player: seat })
+    .then(|| {
+        scratch.precast_shortcut_runtime.must_diverge = None;
+        scratch
+    })
 }
 
 /// The place an AI responder shortens at: one repetition, so the proposer sees their loop land
@@ -4404,8 +4237,9 @@ mod tests {
             player: PlayerId(0),
         };
 
+        // CR 723.5: the builder issues no pass the reducer's submitter guard refuses.
         let raw_candidates = candidate_actions(&state);
-        assert!(raw_candidates
+        assert!(!raw_candidates
             .iter()
             .any(|candidate| { matches!(candidate.action, GameAction::PassPriority) }));
 

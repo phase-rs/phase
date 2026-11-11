@@ -1829,8 +1829,8 @@ pub fn aims_survive_the_crossings(
 /// * the declare firewall and the human ingress each pass
 ///   `game::engine::shortcut_validated_range(&count, template)` — the range the ACCEPTED COUNT
 ///   will drive;
-/// * the bounded PUBLISHER passes the same helper over the SCHEMA's own `iteration_count` — its
-///   own SUGGESTION, which since the suggestion and the ceiling became separate fields is NOT
+/// * the bounded PUBLISHER passes the same helper to [`declaration_pins_conform`] over the
+///   SCHEMA's own `iteration_count` — its own SUGGESTION, which since the suggestion and the ceiling became separate fields is NOT
 ///   the widest count a declarer may name (that is `deliverable_capacity`). Ranges nest —
 ///   `0..n` re-checks are a superset of `0..m` for `m <= n` — so the publisher's narrower range
 ///   is sound only because the handler re-validates at the count actually named, which it does.
@@ -1838,10 +1838,10 @@ pub fn aims_survive_the_crossings(
 ///
 /// # Returns `bool`, deliberately
 ///
-/// All three callers discard the failure KIND (they already spelled `.is_err() || .is_err()`)
+/// Both callers discard the failure KIND (they already spelled `.is_err() || .is_err()`)
 /// and their dispositions have nothing in common: manual-play handback via
-/// `hand_back_shortcut`, `InteractionReasonCode::ConstraintUnsatisfied`, and "publish
-/// no declaration". A union error type would have no reader. [`predictability_gate`] and
+/// `hand_back_shortcut` and `InteractionReasonCode::ConstraintUnsatisfied`. A union error type
+/// would have no reader. [`predictability_gate`] and
 /// [`validate_pins`] stay public and typed for the rows that assert on the specific violation.
 pub fn declaration_conforms(
     schema: &ShortcutDecisionSchema,

@@ -3988,18 +3988,26 @@ pub fn candidate_actions_broad_with_probe(
             ));
             v
         }
-        // CR 732.2b/c: an opponent answers a loop-shortcut offer. PR-7 Phase 4c (LOW-2):
-        // self-preservation via the single-authority `smart_shortcut_response` — Shorten
-        // when the polled player has a meaningful way to break the loop, else Accept.
-        WaitingFor::RespondToShortcut { player, .. } => {
-            vec![candidate(
+        // CR 732.2b: "Each other player ... may either accept the proposed sequence, or shorten
+        // it"; the reducer filter keeps the answers `apply()` admits.
+        WaitingFor::RespondToShortcut { player, .. } => vec![
+            candidate(
                 GameAction::RespondToShortcut {
-                    response: crate::ai_support::smart_shortcut_response(state, *player),
+                    response: crate::analysis::loop_check::ShortcutResponse::Accept,
+                },
+                TacticalClass::Pass,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::RespondToShortcut {
+                    response: crate::analysis::loop_check::ShortcutResponse::Shorten {
+                        at_iteration: crate::ai_support::AI_SHORTEN_PLACE,
+                    },
                 },
                 TacticalClass::Utility,
                 Some(*player),
-            )]
-        }
+            ),
+        ],
         WaitingFor::PrecastCopyShortcutOffer {
             proposer, epoch, ..
         } => vec![
@@ -4022,36 +4030,36 @@ pub fn candidate_actions_broad_with_probe(
                 Some(*proposer),
             ),
         ],
+        // CR 732.2b: the pre-cast route is accepted, or shortened at a breakpoint issued to this
+        // responder.
         WaitingFor::RespondToPrecastCopyShortcut {
             player,
             epoch,
             breakpoint_ids,
             ..
-        } => {
-            let response = match crate::ai_support::smart_shortcut_response(state, *player) {
-                crate::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
-                    breakpoint_ids.first().map_or(
-                        crate::types::actions::PrecastCopyShortcutResponse::Accept,
-                        |breakpoint_id| {
-                            crate::types::actions::PrecastCopyShortcutResponse::Shorten {
-                                breakpoint_id: *breakpoint_id,
-                            }
-                        },
-                    )
-                }
-                crate::analysis::loop_check::ShortcutResponse::Accept => {
-                    crate::types::actions::PrecastCopyShortcutResponse::Accept
-                }
-            };
-            vec![candidate(
+        } => std::iter::once((
+            crate::types::actions::PrecastCopyShortcutResponse::Accept,
+            TacticalClass::Pass,
+        ))
+        .chain(breakpoint_ids.iter().map(|breakpoint_id| {
+            (
+                crate::types::actions::PrecastCopyShortcutResponse::Shorten {
+                    breakpoint_id: *breakpoint_id,
+                },
+                TacticalClass::Utility,
+            )
+        }))
+        .map(|(response, class)| {
+            candidate(
                 GameAction::PrecastCopyShortcut {
                     epoch: *epoch,
                     response,
                 },
-                TacticalClass::Utility,
+                class,
                 Some(*player),
-            )]
-        }
+            )
+        })
+        .collect(),
     };
 
     actions
@@ -4552,11 +4560,15 @@ pub(crate) fn priority_actions_with_probe(
     player: PlayerId,
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
-    let mut actions = vec![candidate(
-        GameAction::PassPriority,
-        TacticalClass::Pass,
-        Some(player),
-    )];
+    let mut actions = Vec::new();
+    // CR 732.2c + CR 723.5: the pass is issued only where the reducer's own pass guard admits it.
+    if crate::game::priority::pass_priority_legality(state, player).is_ok() {
+        actions.push(candidate(
+            GameAction::PassPriority,
+            TacticalClass::Pass,
+            Some(player),
+        ));
+    }
 
     // CR 702.61a + CR 702.61b: While a spell with split second is on the stack,
     // players can't cast spells or activate non-mana abilities. Special actions

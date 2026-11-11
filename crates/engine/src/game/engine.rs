@@ -7280,15 +7280,6 @@ impl ShortenRefusal {
     }
 }
 
-/// CR 732.2b: a place `seat` may shorten a proposal at, by whether the take seats `seat` there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdmittedPlace {
-    /// The take errs or never arms CR 732.2c's latch for the seat at the place.
-    Unseated,
-    /// The take arms CR 732.2c's latch for the seat, which has a meaningful priority action there.
-    Seated,
-}
-
 /// CR 732.2b: the refusal of `seat` shortening `proposal` at `place`, if any — "a place where they
 /// will make a game choice that's different than what's been proposed". A place is refused as
 /// naming no different choice only when the take there arms CR 732.2c's latch for `seat` and `seat`
@@ -7299,32 +7290,19 @@ pub fn shorten_refusal(
     seat: PlayerId,
     place: u32,
 ) -> Option<ShortenRefusal> {
-    shorten_admission(state, proposal, seat, place).err()
-}
-
-/// [`shorten_refusal`]'s verdict, carrying for an admitted place whether the take seats `seat`.
-pub fn shorten_admission(
-    state: &GameState,
-    proposal: &crate::analysis::loop_check::ShortcutProposal,
-    seat: PlayerId,
-    place: u32,
-) -> Result<AdmittedPlace, ShortenRefusal> {
     if let Some(cause) = proposal.counted_take.refusal(place) {
-        return Err(ShortenRefusal::Unperformable(cause));
+        return Some(ShortenRefusal::Unperformable(cause));
     }
     if !proposal.shortening_places().contains(&place) {
-        return Err(ShortenRefusal::OutsideProposal);
+        return Some(ShortenRefusal::OutsideProposal);
     }
     // Refusing keeps the answer CR 732.2b put in the responder's hands; dropping the shortcut
     // would substitute a decline for it.
     if !shortcut_count_is_drivable(state, proposal, place) {
-        return Err(ShortenRefusal::Undrivable);
+        return Some(ShortenRefusal::Undrivable);
     }
-    match shortened_place_choice(state, proposal, seat, place) {
-        None => Ok(AdmittedPlace::Unseated),
-        Some(true) => Ok(AdmittedPlace::Seated),
-        Some(false) => Err(ShortenRefusal::NoDifferentChoice),
-    }
+    (shortened_place_choice(state, proposal, seat, place) == Some(false))
+        .then_some(ShortenRefusal::NoDifferentChoice)
 }
 
 /// Performs the take to `place` on scratch: `None` unless it arms the CR 732.2c latch for `seat`
@@ -20514,7 +20492,7 @@ mod bounded_declaration_tests {
     /// so the refusal is attributable to the VALUE half, not to coverage. Reachability is NOT
     /// claimed: the disagreement staged here is fixture-made.
     ///
-    /// REVERT-PROBE: delete step (5)'s `declaration_conforms(..)` call (return `Some(template)`)
+    /// REVERT-PROBE: delete step (5)'s `declaration_pins_conform(..)` call (return `Some(template)`)
     /// ⇒ the hostile arm's `is_none()` flips while the control stays green.
     ///
     /// *What wrong implementation would still pass this row?* One that validates COVERAGE only —

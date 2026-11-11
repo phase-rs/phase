@@ -48122,8 +48122,8 @@ fn chain_position_windowed_graveyard_redirect_lowers() {
 ///
 ///   * the mark is written by `lower_clause_ast` and read only by
 ///     `oracle::resolve_guards_in_ability` (plus `assembly`'s field copy and the exhaustive
-///     `unlowered_guard: _` destructurings in `ability_rw` / `ability_scan` / `quantity` /
-///     `shortcut_efficacy`); nothing between them branches on it;
+///     `unlowered_guard: _` destructurings in `ability_rw` / `ability_scan` / `quantity`);
+///     nothing between them branches on it;
 ///   * that reader settles a verdict only for `GuardReading::Event`, and takes-and-discards
 ///     a STATE mark;
 ///   * so for a STATE guard, candidate and non-candidate produce the identical tree.

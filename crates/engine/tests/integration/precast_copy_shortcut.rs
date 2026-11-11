@@ -9,7 +9,7 @@ use engine::game::engine::{apply, apply_as_current};
 use engine::game::game_object::GameObject;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
+use engine::game::zones::{add_to_zone, remove_from_zone};
 use engine::game::EngineError;
 use engine::game::{filter_state_for_viewer, normalize_untrusted_restore};
 use engine::types::ability::{
@@ -17,7 +17,6 @@ use engine::types::ability::{
     QuantityModification, ReplacementDefinition, ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::actions::{GameAction, PrecastCopyShortcutResponse, ResolveAllScope};
-use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{CastPaymentMode, GameState, TrustedGameStateEnvelope, WaitingFor};
@@ -220,62 +219,31 @@ fn precast_shortcut_response_state() -> GameState {
     state.waiting_for = WaitingFor::RespondToPrecastCopyShortcut {
         player: P1,
         epoch: 7,
-        breakpoint_ids: vec![99],
+        breakpoint_ids: vec![99, 100],
         remaining_players: Vec::new(),
     };
     state
 }
 
-/// A responder with no meaningful priority action accepts the engine-proved
-/// route instead of shortening merely because it has a breakpoint.
+/// CR 732.2b: the responder is issued the accept and one shorten per breakpoint issued to it, and
+/// nothing else; which one it answers with is the chooser's decision.
 #[test]
-fn precast_responder_candidate_accepts_without_meaningful_priority_action() {
+fn precast_responder_is_issued_accept_and_each_of_its_breakpoints() {
     let state = precast_shortcut_response_state();
 
-    assert!(engine::ai_support::candidate_actions(&state)
-        .iter()
-        .any(|candidate| {
-            matches!(
-                candidate.action,
-                GameAction::PrecastCopyShortcut {
-                    epoch: 7,
-                    response: PrecastCopyShortcutResponse::Accept,
-                }
-            )
-        }));
-}
-
-/// Only a responder with a meaningful action may shorten, and it may name only
-/// the breakpoint issued to that responder.
-#[test]
-fn precast_responder_candidate_shortens_for_meaningful_priority_action() {
-    let mut state = precast_shortcut_response_state();
-    let land = create_object(
-        &mut state,
-        CardId(999),
-        P1,
-        "Forest".to_string(),
-        Zone::Hand,
+    let issued: Vec<GameAction> = engine::ai_support::candidate_actions(&state)
+        .into_iter()
+        .map(|candidate| candidate.action)
+        .collect();
+    assert_eq!(
+        issued,
+        [
+            PrecastCopyShortcutResponse::Accept,
+            PrecastCopyShortcutResponse::Shorten { breakpoint_id: 99 },
+            PrecastCopyShortcutResponse::Shorten { breakpoint_id: 100 },
+        ]
+        .map(|response| GameAction::PrecastCopyShortcut { epoch: 7, response })
     );
-    state
-        .objects
-        .get_mut(&land)
-        .unwrap()
-        .card_types
-        .core_types
-        .push(CoreType::Land);
-
-    assert!(engine::ai_support::candidate_actions(&state)
-        .iter()
-        .any(|candidate| {
-            matches!(
-                candidate.action,
-                GameAction::PrecastCopyShortcut {
-                    epoch: 7,
-                    response: PrecastCopyShortcutResponse::Shorten { breakpoint_id: 99 },
-                }
-            )
-        }));
 }
 
 /// CR 117.3c: `run_post_action_pipeline_from` leaves the first post-cast
