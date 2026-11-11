@@ -1174,10 +1174,15 @@ fn reaches_opposing_creature(effect: &Effect) -> bool {
         | Effect::Fight { target, .. }
         | Effect::DestroyAll { target, .. }
         | Effect::DamageAll { target, .. } => may_be_opposing_creature(target),
-        // An exile or graveyard move out of another zone (a graveyard, a
-        // library) takes nothing off the battlefield.
+        // An exile or graveyard move from the battlefield (CR 701.19a,
+        // CR 701.20e) removes an opposing creature. A move from another zone
+        // (library, graveyard, hand) — e.g., Gifts Ungiven's "put the chosen
+        // cards into your graveyard" — takes nothing off the battlefield and
+        // is not removal. Only `origin == Some(Zone::Battlefield)` qualifies;
+        // `origin == None` is ambiguous and must not be assumed to be the
+        // battlefield.
         Effect::ChangeZone { origin, target, .. } => {
-            matches!(origin, None | Some(Zone::Battlefield)) && may_be_opposing_creature(target)
+            matches!(origin, Some(Zone::Battlefield)) && may_be_opposing_creature(target)
         }
         _ => true,
     }
@@ -1322,8 +1327,11 @@ fn has_removal_static(face: &CardFace) -> bool {
 /// The shared classifier `is_direct_removal` decides every ordinary effect.
 /// The full reading narrows it to effects that can reach an opposing
 /// creature (see [`reaches_opposing_creature`]) and widens it by toughness
-/// reductions (see [`is_shrink_removal`]) and removal statics (see
-/// [`has_removal_static`]).
+/// reductions (see [`is_shrink_removal`]), removal statics (see
+/// [`has_removal_static`]), and sacrifice effects that can target an
+/// opposing creature (e.g., Exile into Darkness: "Target player sacrifices
+/// a creature", CR 701.21a). Self-sacrifice costs (e.g., Sakura-Tribe Elder)
+/// target `SelfRef` and are excluded by `may_be_opposing_creature`.
 fn is_removal(face: &CardFace, reading: RoleReading) -> bool {
     let effects = collect_face_effects(face);
     match reading {
@@ -1332,6 +1340,12 @@ fn is_removal(face: &CardFace, reading: RoleReading) -> bool {
             effects.into_iter().any(|effect| {
                 (is_direct_removal(effect) && reaches_opposing_creature(effect))
                     || is_shrink_removal(effect)
+                    // Sacrifice that can reach an opposing creature (edicts).
+                    // Self-sacrifice (SelfRef) is excluded by the target check.
+                    || matches!(
+                        effect,
+                        Effect::Sacrifice { target, .. } if may_be_opposing_creature(target)
+                    )
             }) || has_removal_static(face)
         }
     }
@@ -3453,5 +3467,124 @@ mod tests {
                 .modifications(vec![ContinuousModification::AddToughness { value: -1 }]),
         );
         assert!(!has_removal_static(&self_shrink));
+    }
+
+    #[test]
+    fn gifts_ungiven_library_to_graveyard_is_not_removal() {
+        let p = DraftProfile::kamigawa_block();
+        let blue = vec!["U".to_string()];
+        // Gifts Ungiven: "Search your library for up to four cards with different
+        // names and reveal them. Target opponent chooses two of those cards. Put
+        // the chosen cards into your graveyard and the rest into your hand."
+        // The parser emits a ChooseFromZone followed by a ChangeZone with
+        // origin: None (library) -> Graveyard. This must not count as
+        // battlefield removal.
+        let gifts = oracle_face(serde_json::json!({
+            "name": "Gifts Ungiven",
+            "manaCost": "{3}{U}",
+            "manaValue": 4.0,
+            "colors": ["U"],
+            "type": "Instant",
+            "types": ["Instant"],
+            "text": "Search your library for up to four cards with different names and reveal them. Target opponent chooses two of those cards. Put the chosen cards into your graveyard and the rest into your hand.",
+        }));
+        // Positive guard: the effect chain contains a ChangeZone with origin None.
+        let has_lib_to_gy = collect_face_effects(&gifts).iter().any(|e| {
+            matches!(
+                e,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Graveyard,
+                    ..
+                }
+            )
+        });
+        assert!(
+            has_lib_to_gy,
+            "positive guard: Gifts exports library->graveyard move"
+        );
+        // Full reading: not removal because origin is not Battlefield.
+        assert!(!classify(&gifts).contains(&CardClass::Removal));
+        assert!(!roles(&gifts).contains(&DeckRole::Removal));
+        let scored = first_pick(p, &card("Gifts Ungiven", "CHK", &blue, &gifts));
+        assert_eq!(scored.class_bonus, 0.0, "Gifts Ungiven is not removal");
+
+        // Positive control: Doom Blade ("Destroy target nonblack creature") IS removal.
+        let doom_blade = oracle_face(serde_json::json!({
+            "name": "Doom Blade",
+            "manaCost": "{1}{B}",
+            "manaValue": 2.0,
+            "colors": ["B"],
+            "type": "Instant",
+            "types": ["Instant"],
+            "text": "Destroy target nonblack creature.",
+        }));
+        assert!(classify(&doom_blade).contains(&CardClass::Removal));
+        assert!(roles(&doom_blade).contains(&DeckRole::Removal));
+        let db_score = first_pick(
+            p,
+            &card("Doom Blade", "CHK", &vec!["B".to_string()], &doom_blade),
+        );
+        assert_eq!(db_score.class_bonus, 0.9, "Doom Blade is removal");
+        assert_eq!(db_score.deck_need, 2.0, "removal need is empty");
+    }
+
+    #[test]
+    fn exile_into_darkness_opposing_sacrifice_is_removal() {
+        let p = DraftProfile::kamigawa_block();
+        let black = vec!["B".to_string()];
+        // Exile into Darkness: "Target player sacrifices a creature of their
+        // choice with mana value 3 or less." This is an edict — it can reach
+        // an opposing creature and is removal.
+        let exile = oracle_face(serde_json::json!({
+            "name": "Exile into Darkness",
+            "manaCost": "{2}{B}",
+            "manaValue": 3.0,
+            "colors": ["B"],
+            "type": "Instant",
+            "types": ["Instant"],
+            "text": "Target player sacrifices a creature of their choice with mana value 3 or less.",
+        }));
+        // Positive guard: exports a Sacrifice effect with a target that can be opposing.
+        let has_sacrifice = collect_face_effects(&exile).iter().any(
+            |e| matches!(e, Effect::Sacrifice { target, .. } if may_be_opposing_creature(target)),
+        );
+        assert!(
+            has_sacrifice,
+            "positive guard: Exile into Darkness exports opposing sacrifice"
+        );
+        // Full reading: counts as removal because it can target an opposing creature.
+        assert!(classify(&exile).contains(&CardClass::Removal));
+        assert!(roles(&exile).contains(&DeckRole::Removal));
+        let scored = first_pick(p, &card("Exile into Darkness", "SOK", &black, &exile));
+        assert_eq!(scored.class_bonus, 0.85, "SOK removal bonus");
+        assert_eq!(scored.deck_need, 2.0, "removal need is empty");
+
+        // Negative control: Sakura-Tribe Elder's "Sacrifice this creature" is a
+        // self-sacrifice *cost* (SelfRef), NOT an effect. Costs are not in the
+        // effect chain collected by `collect_face_effects`, so the Elder has no
+        // Sacrifice effect and is not classified as removal.
+        let elder = sakura_tribe_elder();
+        let has_self_sacrifice_cost = elder.abilities.iter().any(|a| {
+            matches!(
+                a.cost.as_ref(),
+                Some(engine::types::ability::AbilityCost::Sacrifice(cost))
+                    if matches!(cost.target, TargetFilter::SelfRef)
+            )
+        });
+        assert!(
+            has_self_sacrifice_cost,
+            "positive guard: Elder has self-sacrifice cost"
+        );
+        assert!(!classify(&elder).contains(&CardClass::Removal));
+        assert!(!roles(&elder).contains(&DeckRole::Removal));
+        let elder_score = first_pick(
+            p,
+            &card("Sakura-Tribe Elder", "CHK", &vec!["G".to_string()], &elder),
+        );
+        assert_eq!(
+            elder_score.class_bonus, 0.25,
+            "Elder gets fixing bonus, not removal"
+        );
     }
 }
