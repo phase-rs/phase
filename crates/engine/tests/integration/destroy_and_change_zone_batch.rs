@@ -2940,6 +2940,145 @@ fn two_player_replacement_chooser_concession_keeps_game_over() {
     assert!(state.resolution_stack.is_empty());
 }
 
+const HYENA_UMBRA: &str = "Enchant creature\nEnchanted creature gets +1/+1 and has first strike.\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)";
+
+/// CR 616.1 + CR 800.4a + CR 701.8a: a Destroy member whose outer consultation
+/// paused and was then approved (its chooser left with both Umbras, so nothing
+/// replaces the destruction) still owns the approval cursor: its inner
+/// Battlefield-to-Graveyard consultation runs before the next member is asked.
+/// Day of Judgment says "Destroy all creatures." The first host is P2's creature
+/// under P1's Mind Control wearing two of P1's Hyena Umbras (P1 orders them);
+/// the second is P2's creature wearing two of P2's own Hyena Umbras (P2 orders
+/// them). The batch is saved and reopened at both prompts, so a second member
+/// parked while the first is still mid-consultation fails the staged validator.
+#[test]
+fn approved_outer_destroy_finishes_before_the_next_member_parks() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario.add_creature(p2, "Grizzly Bears", 2, 2).id();
+    let second = scenario.add_creature(p2, "Runeclaw Bear", 2, 2).id();
+    let control = scenario
+        .add_enchantment_from_oracle(
+            P1,
+            "Mind Control",
+            "Enchant creature\nYou control enchanted creature.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let umbras: Vec<ObjectId> = [P1, P1, p2, p2]
+        .into_iter()
+        .map(|owner| {
+            scenario
+                .add_enchantment_from_oracle(owner, "Hyena Umbra", HYENA_UMBRA)
+                .with_subtypes(vec!["Aura"])
+                .id()
+        })
+        .collect();
+    let day = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
+    let mut runner = scenario.build();
+    // Infrastructure exception: preattach the full-Oracle Auras instead of
+    // casting them; the consultations are produced by the public cast.
+    for (aura, host) in [
+        (control, first),
+        (umbras[0], first),
+        (umbras[1], first),
+        (umbras[2], second),
+        (umbras[3], second),
+    ] {
+        engine::game::effects::attach::attach_to(runner.state_mut(), aura, host);
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&first].controller, P1);
+
+    runner.cast(day).commit();
+    resolve_to_first_replacement_choice(&mut runner);
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } => {
+            assert_eq!(
+                *player, P1,
+                "the first member's controller orders its Umbras"
+            );
+            assert_eq!(candidates.len(), 2);
+            assert!(candidates
+                .iter()
+                .all(|candidate| candidate.source_id == umbras[0]
+                    || candidate.source_id == umbras[1]));
+        }
+        other => panic!("expected P1's Umbra order for the first member, got {other:?}"),
+    }
+    round_trip_staged(&mut runner);
+
+    // P1 leaves: Mind Control and both of P1's Umbras leave with it, so the
+    // first member's destruction is approved with nothing left to replace it.
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes at its own prompt");
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } => {
+            assert_eq!(
+                *player, p2,
+                "the second member's controller orders its Umbras"
+            );
+            assert_eq!(candidates.len(), 2);
+            assert!(candidates
+                .iter()
+                .all(|candidate| candidate.source_id == umbras[2]
+                    || candidate.source_id == umbras[3]));
+        }
+        other => panic!("expected P2's Umbra order for the second member, got {other:?}"),
+    }
+    let staged = runner
+        .state()
+        .active_batch_delivery()
+        .and_then(|pending| pending.staged.as_ref())
+        .expect("the staged owner is parked at the second prompt");
+    assert_eq!(
+        staged.members[staged.cursor].identity.object_id, second,
+        "the parked member is the cursor member"
+    );
+    round_trip_staged(&mut runner);
+
+    let chosen = match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { candidates, .. } => candidates
+            .iter()
+            .position(|candidate| candidate.source_id == umbras[2])
+            .expect("P2's first Umbra is offered"),
+        other => panic!("expected the reopened second prompt, got {other:?}"),
+    };
+    let answered = runner
+        .act(GameAction::ChooseReplacement { index: chosen })
+        .expect("P2 applies its first Umbra");
+    let state = runner.state();
+    assert_eq!(state.objects[&first].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&second].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&umbras[2]].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&umbras[3]].zone, Zone::Battlefield);
+    assert_eq!(
+        answered
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::CreatureDestroyed { object_id, .. } if *object_id == first
+            ))
+            .count(),
+        1,
+        "the approved first member is destroyed exactly once"
+    );
+    assert!(!answered.events.iter().any(|event| matches!(
+        event,
+        GameEvent::CreatureDestroyed { object_id, .. } if *object_id == second
+    )));
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_replacement.is_none());
+    assert!(state.resolution_stack.is_empty());
+}
+
 /// CR 400.7 + CR 603.7c: a staged member that changed zone while an earlier
 /// chooser was answering is refused before any replacement is offered for it.
 /// The pause here is a real replacement choice with the second member still
@@ -3052,6 +3191,26 @@ fn add_source_authority_optional_replacement(state: &mut GameState, watcher: Obj
                     },
                 )),
         );
+}
+
+/// Serialize, decode through the checked restore boundary, and reopen.
+fn round_trip_staged(runner: &mut GameRunner) {
+    runner
+        .state()
+        .resolution_stack
+        .validate_at_rest(&runner.state().waiting_for)
+        .expect("the pause validates before the save");
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the pause serializes");
+    let restored = serde_json::from_str::<PersistedGameState>(&saved)
+        .expect("the pause restores")
+        .into_game_state()
+        .expect("the pause finalizes");
+    restored
+        .resolution_stack
+        .validate_at_rest(&restored.waiting_for)
+        .expect("the restored pause validates");
+    *runner.state_mut() = restored;
 }
 
 fn zone_of_state(state: &GameState, id: ObjectId) -> Zone {
