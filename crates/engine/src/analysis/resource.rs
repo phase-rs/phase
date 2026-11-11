@@ -10702,11 +10702,13 @@ mod tests {
     }
 
     /// Innocent Bystander ("Whenever this creature is dealt 3 or more damage, investigate.")
-    /// dealt 2 and 1 damage by two creatures at once: ONE trigger for two simultaneous damage
-    /// events, published as the entry's own event plus its sidecar batch. Investigate reads no
+    /// dealt damage by two creatures at once: ONE trigger for two simultaneous damage events,
+    /// published as the entry's own event plus its sidecar batch. Investigate reads no
     /// recipient. `buried_bystanders` such triggers and `buried_fillers` event-less triggers
     /// sit at the bottom of the stack; the working entry above them is either one more
-    /// Bystander trigger or the fixture's recipient reader ("tap that creature").
+    /// Bystander trigger or the fixture's recipient reader ("tap that creature"). Every
+    /// buried Bystander trigger comes from its own combat (2 and 1 damage, then 3 and 1, ...),
+    /// so no two sidecar batches hold the same events.
     fn bystander_floor_frame(
         buried_bystanders: u64,
         buried_fillers: u64,
@@ -10724,27 +10726,33 @@ mod tests {
         let bystander = battlefield_creature(&mut state, 22, 1);
         let second = battlefield_creature(&mut state, 23, 0);
         let recipient_epoch = state.objects[&bystander].incarnation;
-        let mut events = Vec::new();
-        for (source, amount) in [(first, 2), (second, 1)] {
-            let source_incarnation = Some(state.objects[&source].incarnation);
-            events.push(GameEvent::DamageDealt {
-                source_id: source,
-                source_incarnation,
-                target: TargetRef::Object(bystander),
-                amount,
-                is_combat: true,
-                excess: 0,
-            });
-            state.damage_dealt_this_turn.push_back(DamageRecord {
-                source_id: source,
-                source_incarnation,
-                target: TargetRef::Object(bystander),
-                target_incarnation: Some(recipient_epoch),
-                amount,
-                is_combat: true,
-                ..Default::default()
-            });
-        }
+        // The two simultaneous damage events of one combat in which the first blocker
+        // dealt `heavy` and the second 1, each with its journal row.
+        let hits = |state: &mut GameState, heavy: u32| -> Vec<GameEvent> {
+            [(first, heavy), (second, 1)]
+                .into_iter()
+                .map(|(source, amount)| {
+                    let source_incarnation = Some(state.objects[&source].incarnation);
+                    state.damage_dealt_this_turn.push_back(DamageRecord {
+                        source_id: source,
+                        source_incarnation,
+                        target: TargetRef::Object(bystander),
+                        target_incarnation: Some(recipient_epoch),
+                        amount,
+                        is_combat: true,
+                        ..Default::default()
+                    });
+                    GameEvent::DamageDealt {
+                        source_id: source,
+                        source_incarnation,
+                        target: TargetRef::Object(bystander),
+                        amount,
+                        is_combat: true,
+                        excess: 0,
+                    }
+                })
+                .collect()
+        };
         let trigger = |id: u64, event: Option<GameEvent>| StackEntry {
             id: ObjectId(id),
             source_id: bystander,
@@ -10767,17 +10775,19 @@ mod tests {
             },
         };
         for index in 0..buried_bystanders {
+            let events = hits(&mut state, 2 + index as u32);
             state
                 .stack
                 .push_front(trigger(200 + index, Some(events[0].clone())));
             state
                 .stack_trigger_event_batches
-                .insert(ObjectId(200 + index), events.clone());
+                .insert(ObjectId(200 + index), events);
         }
         for index in 0..buried_fillers {
             state.stack.push_front(trigger(300 + index, None));
         }
         if working_bystander {
+            let events = hits(&mut state, 2);
             state.stack.push_back(trigger(400, Some(events[0].clone())));
             state
                 .stack_trigger_event_batches
@@ -10789,8 +10799,9 @@ mod tests {
     /// CR 405.5 + CR 603.3b: a Bystander batch BELOW the replay floor is buried with its
     /// entry. The two frames differ by one more buried Bystander trigger, so no earlier arm
     /// answers and the pair is covered only by buried `StackGrowth`, which compares the
-    /// frames with the buried entries set aside. An orphaned sidecar would survive that
-    /// (one batch against two) and refuse the cover.
+    /// frames with the buried entries set aside. An orphaned sidecar would survive that:
+    /// its events are still walked as carriers nobody owns, so the newly buried trigger's
+    /// batch would request recipient keys the prior frame never held and refuse the cover.
     #[test]
     fn loop_bystander_batch_below_the_floor_is_buried_with_its_sidecar() {
         let prior = bystander_floor_frame(1, 0, false);
