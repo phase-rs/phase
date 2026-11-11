@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameState gains unsettled_entry_batch_events: completed battlefield-entry events of an entering instruction that is still suspended on a co-entrant prompt, held unmatched until the instruction completes. A reader without the field drops them on restore, so those entries are never checked for enters triggers."
+}
