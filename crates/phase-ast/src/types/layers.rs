@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    ContinuousModification, StaticCondition, TargetFilter, TriggerDefinitionRef,
-    TriggerProducerOrigin,
+    ContinuousModification, ProtectionDoesNotRemove, StaticCondition, TargetFilter,
+    TriggerDefinitionRef, TriggerProducerOrigin,
 };
 use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::player::PlayerId;
@@ -214,6 +214,7 @@ impl ContinuousModification {
 
 /// An active continuous effect targeting a specific layer, collected during evaluation.
 #[derive(Debug, Clone)]
+/// An active continuous effect targeting a specific layer, collected during evaluation.
 pub struct ActiveContinuousEffect {
     pub source_id: ObjectId,
     pub controller: PlayerId,
@@ -254,12 +255,27 @@ pub struct ActiveContinuousEffect {
     pub characteristic_defining: bool,
     /// CR 201.5a: the granter stamped on the static this effect comes from.
     pub granter: Option<ObjectIncarnationRef>,
+    /// CR 702.16n: the rider of the definition that produced this effect.
+    pub protection_rider: Option<ProtectionRiderSpec>,
+}
+
+/// CR 702.16n + CR 702.16p: the rider carried from the exact definition that
+/// produced this effect, including synthesized granted-static children that
+/// have no live `def_index` on the recipient.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectionRiderSpec {
+    pub does_not_remove: ProtectionDoesNotRemove,
+    pub source: ObjectId,
+    pub def_index: usize,
+    pub mod_index: usize,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{CopiableValues, TextSubstitutionSpec, TextWordDomain};
+    use crate::types::ability::{
+        CopiableValues, ProtectionDoesNotRemove, TextSubstitutionSpec, TextWordDomain,
+    };
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
 

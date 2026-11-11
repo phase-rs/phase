@@ -818,7 +818,9 @@ pub struct GameObject {
     /// in `keywords` with no entry for `q` came only from writers that run
     /// before layer 6 (printed, copy layer, stickers), and none of those
     /// carries a rider.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Derived by every layer flush; deserialization starts with layers dirty,
+    /// so this is never read from the wire.
+    #[serde(skip)]
     pub protection_provenance: Vec<ProtectionProvenance>,
     /// CR 702.95b-d: Soulbond pair relationship. Pairing is symmetric:
     /// if `A.paired_with == Some(B)`, then `B.paired_with == Some(A)`.

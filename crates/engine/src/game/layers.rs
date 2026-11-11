@@ -7971,6 +7971,7 @@ fn gather_ring_emblem_continuous_effects(
             mode: StaticMode::Continuous,
             characteristic_defining: false,
             granter: None,
+            protection_rider: None,
         });
     }
 }
@@ -8400,23 +8401,32 @@ fn active_continuous_effects_from_static_definitions(
             // original static effects until layer 6. Earlier layers may change
             // provider membership, and other layer-6 effects may change the
             // abilities they donate before this effect applies.
-            let effect = ActiveContinuousEffect {
-                source_id,
-                controller,
-                def_index: Some(def_idx),
-                transient_id: None,
-                trigger_producer_origin,
-                expanded_trigger_provider: None,
-                mod_index,
-                layer: modification.layer(),
-                timestamp,
-                modification: modification.clone(),
-                affected_filter: affected_filter.clone(),
-                condition: retained_condition.clone(),
-                mode: def.mode.clone(),
-                characteristic_defining: def.characteristic_defining,
-                granter: def.granting_object,
-            };
+            let effect =
+                ActiveContinuousEffect {
+                    source_id,
+                    controller,
+                    def_index: Some(def_idx),
+                    transient_id: None,
+                    trigger_producer_origin,
+                    expanded_trigger_provider: None,
+                    mod_index,
+                    layer: modification.layer(),
+                    timestamp,
+                    modification: modification.clone(),
+                    affected_filter: affected_filter.clone(),
+                    condition: retained_condition.clone(),
+                    mode: def.mode.clone(),
+                    characteristic_defining: def.characteristic_defining,
+                    granter: def.granting_object,
+                    protection_rider: def.protection_does_not_remove.clone().map(
+                        |does_not_remove| crate::types::layers::ProtectionRiderSpec {
+                            does_not_remove,
+                            source: source_id,
+                            def_index: def_idx,
+                            mod_index,
+                        },
+                    ),
+                };
             // CR 113.3d + CR 604.1 + CR 611.2c: A `GrantStaticAbility` modification
             // installs the inner static onto every recipient in the host's live
             // affected set. The recipient is the granted-static's *source*
@@ -8441,6 +8451,7 @@ fn active_continuous_effects_from_static_definitions(
                     timestamp,
                     inner.as_ref(),
                     effect.trigger_producer_origin.clone(),
+                    effect.def_index,
                     state
                         .battlefield
                         .iter()
@@ -8508,6 +8519,7 @@ fn expand_granted_static_effects(
     host_timestamp: u64,
     inner: &StaticDefinition,
     host_origin: Option<TriggerProducerOrigin>,
+    origin_def_index: Option<usize>,
     recipients: impl IntoIterator<Item = ObjectId>,
     admission: ModificationAdmission,
 ) -> Vec<ActiveContinuousEffect> {
@@ -8576,6 +8588,14 @@ fn expand_granted_static_effects(
                 mode: inner.mode.clone(),
                 characteristic_defining: inner.characteristic_defining,
                 granter: inner.granting_object,
+                protection_rider: inner.protection_does_not_remove.clone().and_then(|rider| {
+                    origin_def_index.map(|def_index| crate::types::layers::ProtectionRiderSpec {
+                        does_not_remove: rider,
+                        source: host_source_id,
+                        def_index,
+                        mod_index,
+                    })
+                }),
             });
         }
     }
@@ -9014,6 +9034,7 @@ fn append_late_granted_static_effects(
                 parent.timestamp,
                 inner,
                 parent.trigger_producer_origin.clone(),
+                parent.def_index,
                 candidates,
                 ModificationAdmission::Every,
             )
@@ -9197,6 +9218,7 @@ fn expand_granted_activated_abilities(
                     mode: StaticMode::Continuous,
                     characteristic_defining: false,
                     granter: None,
+                    protection_rider: None,
                 });
                 next_mod_index += 1;
             }
@@ -9307,6 +9329,7 @@ fn expand_granted_triggered_abilities(
                     mode: StaticMode::Continuous,
                     characteristic_defining: false,
                     granter: None,
+                    protection_rider: None,
                 });
                 next_mod_index += 1;
             }
@@ -9469,6 +9492,7 @@ fn gather_transient_continuous_effects_with(
                 mode: StaticMode::Continuous,
                 characteristic_defining: false,
                 granter: tce.granting_object,
+                protection_rider: None,
             };
             // CR 113.3d + CR 604.1 + CR 611.2c: Mirror the printed-static gather
             // path — a transient `GrantStaticAbility` must expand its inner
@@ -9482,6 +9506,7 @@ fn gather_transient_continuous_effects_with(
                     tce.timestamp,
                     inner.as_ref(),
                     effect.trigger_producer_origin.clone(),
+                    effect.def_index,
                     state
                         .battlefield
                         .iter()
@@ -12032,33 +12057,19 @@ fn apply_continuous_effect_filtered(
             Vec::new()
         };
 
-    // CR 702.16n + CR 702.16p: the rider of the printed static that produced
-    // this grant. Transients and granted-static children carry no `def_index`,
-    // so they have no rider. The modification-equality check makes a stale
-    // index fail closed to `None` rather than name the wrong static.
-    let protection_rider: Option<crate::game::game_object::ProtectionRiderGrant> =
-        match (&effect.modification, effect.def_index) {
-            (
-                ContinuousModification::AddKeyword {
-                    keyword: Keyword::Protection(_),
-                },
-                Some(def_index),
-            ) if !affected_ids.is_empty() => state
-                .objects
-                .get(&effect.source_id)
-                .and_then(|source| source.static_definitions.get(def_index))
-                .filter(|def| def.modifications.get(effect.mod_index) == Some(&effect.modification))
-                .and_then(|def| def.protection_does_not_remove.clone())
-                .map(
-                    |does_not_remove| crate::game::game_object::ProtectionRiderGrant {
-                        source: effect.source_id,
-                        def_index,
-                        mod_index: effect.mod_index,
-                        does_not_remove,
-                    },
-                ),
-            _ => None,
-        };
+    // CR 702.16n + CR 702.16p: the rider carried from the exact definition
+    // that produced this effect. Synthesized granted-static children inherit
+    // it from the quoted inner definition, so they no longer depend on a
+    // recipient `def_index`.
+    let protection_rider: Option<crate::game::game_object::ProtectionRiderGrant> = effect
+        .protection_rider
+        .as_ref()
+        .map(|rider| crate::game::game_object::ProtectionRiderGrant {
+            source: rider.source,
+            def_index: rider.def_index,
+            mod_index: rider.mod_index,
+            does_not_remove: rider.does_not_remove.clone(),
+        });
 
     // Pre-read chosen card name from source (avoids borrow conflict in the loop).
     // CR 612.8 + CR 613.1c: `SetChosenName` sets the recipient's name to the
@@ -28346,6 +28357,7 @@ mod tests {
             trigger_producer_origin: None,
             expanded_trigger_provider: None,
             granter: None,
+            protection_rider: None,
             mod_index,
             layer: modification.layer(),
             timestamp,

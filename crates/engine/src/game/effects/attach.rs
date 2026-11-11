@@ -5645,6 +5645,116 @@ mod tests {
     /// the source is controlled by P1, who has no commander (CR 903.4f: no colors).
     /// Another grant's CR 702.16n rider (Flickering Ward, chosen White) exempts only
     /// itself, so the white Aura must still be illegal through the transient grant.
+    /// CR 702.16n: a quoted granted static's protection carries its own
+    /// "doesn't remove Auras" rider through the synthesized child, even though
+    /// the child has no recipient `def_index`.
+    #[test]
+    fn synthesized_granted_protection_keeps_its_auras_rider() {
+        use crate::types::ability::{
+            ContinuousModification, ProtectionDoesNotRemove, StaticDefinition,
+        };
+        use crate::types::keywords::{Keyword, ProtectionTarget};
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        let host = spawn_creature(&mut state, "Black Knight");
+        let aura = create_object(
+            &mut state,
+            CardId(79),
+            PlayerId(1),
+            "Pacifism".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.color.push(ManaColor::White);
+        }
+        attach_to(&mut state, aura, host);
+
+        let source = spawn_grant_source(&mut state, "Spectra Ward analogue", 80);
+        let inner = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: host })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::White)),
+            }])
+            .protection_does_not_remove(ProtectionDoesNotRemove::Auras);
+        let outer = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: host })
+            .modifications(vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(inner),
+            }]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(outer);
+        evaluate_protection_layers(&mut state);
+        assert!(crate::game::keywords::has_keyword(
+            &state.objects[&host],
+            &Keyword::Protection(ProtectionTarget::Color(ManaColor::White))
+        ));
+        assert_eq!(
+            attachment_illegality(&state, aura, host),
+            None,
+            "the synthesized child's Auras rider must exempt the attachment"
+        );
+    }
+
+    /// Baseline for the synthesized-child test: without the rider the same
+    /// quoted protection blocks the Aura.
+    #[test]
+    fn synthesized_granted_protection_without_rider_blocks_aura() {
+        use crate::types::ability::{ContinuousModification, StaticDefinition};
+        use crate::types::keywords::{Keyword, ProtectionTarget};
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        let host = spawn_creature(&mut state, "Black Knight");
+        let aura = create_object(
+            &mut state,
+            CardId(81),
+            PlayerId(1),
+            "Pacifism".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.color.push(ManaColor::White);
+        }
+        attach_to(&mut state, aura, host);
+
+        let source = spawn_grant_source(&mut state, "Spectra Ward analogue", 82);
+        let inner = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: host })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::White)),
+            }]);
+        let outer = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: host })
+            .modifications(vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(inner),
+            }]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(outer);
+        evaluate_protection_layers(&mut state);
+        assert!(crate::game::keywords::has_keyword(
+            &state.objects[&host],
+            &Keyword::Protection(ProtectionTarget::Color(ManaColor::White))
+        ));
+        assert_eq!(
+            attachment_illegality(&state, aura, host),
+            Some(AttachIllegality::Protection),
+            "the riderless baseline must block the Aura"
+        );
+    }
+
     /// CR 702.16m + CR 702.16n: a later chosen-keyword grant of the same
     /// quality is its own surviving instance. With only the ridered grant,
     /// attachment legality allows the Aura; the independent grant changes it.

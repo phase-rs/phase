@@ -1100,14 +1100,18 @@ fn kannushi_pledge_humility_then_flickering_ward_keeps_only_surviving_rider() {
     // still compiles this test and fails it at runtime).
     let wire = serde_json::to_string(runner.state()).unwrap();
     let restored: GameState = serde_json::from_str(&wire).unwrap();
+    // The provenance list is layer-derived, not a wire contract.
+    assert!(restored.objects[&host].protection_provenance.is_empty());
     let mut restored = GameRunner::from_state(restored);
     prepare(&mut restored, P1);
     restored.advance_until_stack_empty();
-    // Attachment legality must consume the same restored surviving-rider state:
-    // a rebuilt layer pass and state-based check keep Ward attached, while the
-    // removed Pledge instance is gone.
+    // The layer pass rebuilds the surviving rider, and attachment legality
+    // consumes it: Ward stays attached while the removed Pledge is gone.
     let mut events = Vec::new();
     engine::game::sba::check_state_based_actions(restored.state_mut(), &mut events);
+    assert!(!restored.state().objects[&host]
+        .protection_provenance
+        .is_empty());
     attached(&restored, ward, host);
     // Reach guard: the restored state really derives the surviving protection,
     // so Pacifism has no legal target on this host.
