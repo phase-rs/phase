@@ -15,9 +15,10 @@ import { useState } from "react";
 import { IntegerField } from "../IntegerField";
 
 /** Mirrors a real call site: the committed value is owned by the parent. */
-function Harness({ initial, min = 1, onCommit }: {
+function Harness({ initial, min = 1, max, onCommit }: {
   initial: number;
   min?: number;
+  max?: number;
   onCommit?: (next: number) => void;
 }) {
   const [value, setValue] = useState(initial);
@@ -25,6 +26,7 @@ function Harness({ initial, min = 1, onCommit }: {
     <IntegerField
       value={value}
       min={min}
+      max={max}
       ariaLabel="Starting Life"
       onCommit={(next) => {
         onCommit?.(next);
@@ -111,5 +113,30 @@ describe("IntegerField", () => {
     await user.type(field, "5");
 
     expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("does not commit a reading above max", async () => {
+    const user = userEvent.setup();
+    const onCommit = vi.fn();
+    render(<Harness initial={21} min={1} max={255} onCommit={onCommit} />);
+
+    const field = screen.getByLabelText("Starting Life");
+    await user.clear(field);
+    await user.click(field);
+    await user.paste("256");
+
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("commits a reading at max", async () => {
+    const user = userEvent.setup();
+    const onCommit = vi.fn();
+    render(<Harness initial={21} min={1} max={255} onCommit={onCommit} />);
+
+    const field = screen.getByLabelText("Starting Life");
+    await user.clear(field);
+    await user.type(field, "255");
+
+    expect(onCommit).toHaveBeenCalledWith(255);
   });
 });

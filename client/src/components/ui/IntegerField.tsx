@@ -27,6 +27,7 @@ export function IntegerField({
   id,
   value,
   min,
+  max,
   onCommit,
   className,
   ariaLabel,
@@ -35,6 +36,8 @@ export function IntegerField({
   /** The committed value. Shown whenever the box is not being edited. */
   value: number;
   min: number;
+  /** When set, readings above `max` are rejected the same way as those below `min`. */
+  max?: number;
   /** Called only for a reading that is a whole number at or above `min`. */
   onCommit: (next: number) => void;
   className?: string;
@@ -49,6 +52,7 @@ export function IntegerField({
       id={id}
       type="number"
       min={min}
+      max={max}
       aria-label={ariaLabel}
       value={draft ?? String(value)}
       onChange={(e) => {
@@ -56,7 +60,11 @@ export function IntegerField({
         // `valueAsNumber` is NaN for an empty or unparseable box, which
         // `isSafeInteger` rejects along with every non-whole reading.
         const reading = e.currentTarget.valueAsNumber;
-        if (Number.isSafeInteger(reading) && reading >= min) {
+        if (
+          Number.isSafeInteger(reading) &&
+          reading >= min &&
+          (max === undefined || reading <= max)
+        ) {
           onCommit(reading);
         }
       }}
