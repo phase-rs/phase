@@ -1439,6 +1439,7 @@
     },
     "config": {
       "startingLife": "Starting Life",
+      "commanderDamage": "Commander Damage",
       "players": "Players",
       "whoGoesFirst": "Who Goes First",
       "firstPlayer": {

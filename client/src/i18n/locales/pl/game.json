@@ -1401,6 +1401,7 @@
     },
     "config": {
       "startingLife": "Życie początkowe",
+      "commanderDamage": "Obrażenia od dowódcy",
       "players": "Gracze",
       "whoGoesFirst": "Kto zaczyna",
       "firstPlayer": {

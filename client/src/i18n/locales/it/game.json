@@ -1401,6 +1401,7 @@
     },
     "config": {
       "startingLife": "Punti vita iniziali",
+      "commanderDamage": "Danno da comandante",
       "players": "Giocatori",
       "whoGoesFirst": "Chi inizia",
       "firstPlayer": {

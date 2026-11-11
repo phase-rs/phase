@@ -1439,6 +1439,7 @@
     },
     "config": {
       "startingLife": "開始時のライフ",
+      "commanderDamage": "統率者ダメージ",
       "players": "プレイヤー",
       "whoGoesFirst": "先攻プレイヤー",
       "firstPlayer": {

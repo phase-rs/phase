@@ -1695,6 +1695,7 @@
     "cedhWarningUntagged": "未标记",
     "commanderNote": "指挥官：100 张单例套牌，指挥官伤害为 {{threshold}}",
     "config": {
+      "commanderDamage": "指挥官伤害",
       "firstPlayer": {
         "draw": "后手",
         "play": "先手",
