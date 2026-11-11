@@ -96,7 +96,7 @@ pub(crate) fn published_suggestion(
         IterationCount::Fixed(n) => n,
         IterationCount::WithoutEnd => panic!(
             "a bounded offer publishes a `Fixed` suggestion; this one measured {:?}",
-            schema.measured_repetition_bound
+            schema.repetition_bound
         ),
     }
 }
@@ -2085,13 +2085,7 @@ fn b5f_the_declared_term_can_suppress_an_otherwise_legal_offer() {
         beta_schema.iteration_count
     );
     assert!(
-        matches!(
-            beta.waiting_for,
-            WaitingFor::LoopShortcut {
-                road: engine::analysis::loop_check::OfferRoad::RecordedPeriod,
-                ..
-            }
-        ),
+        matches!(beta.waiting_for, WaitingFor::LoopShortcut { .. }),
         "(β) the verdict on this very board is the recorded road's OFFER"
     );
 
@@ -4750,8 +4744,11 @@ fn an_allocation_of_the_published_suggestion_commits_its_whole_count() {
         "reach-guard: P3 is in the game at the offer"
     );
     assert_eq!(
-        (schema.measured_repetition_bound, &schema.iteration_count),
-        (Some(89), &IterationCount::Fixed(88)),
+        (schema.repetition_bound, &schema.iteration_count),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            &IterationCount::Fixed(88)
+        ),
         "CR 121.4: P3 is still in the game at P0's library crossing at 89, so that crossing \
          ends the walk, not P2's departure at 77"
     );
@@ -5491,7 +5488,8 @@ fn e5_an_unnarrowed_offer_and_every_respond_window_state_no_ceiling() {
         };
         // Un-narrowing is the ABSENCE, not a budget-valued count: `is_bounded()` reads the
         // measured field, and the capacity is what the picker publishes.
-        hostile_schema.measured_repetition_bound = None;
+        hostile_schema.repetition_bound =
+            engine::analysis::decision_template::RepetitionBound::Unmeasured;
         hostile_schema.deliverable_capacity = MAX_SHORTCUT_CYCLES_MIRROR;
         assert!(
             !hostile_schema.is_bounded(),
@@ -5655,7 +5653,8 @@ fn e7_the_published_bound_is_the_count_pickers_own_ceiling() {
         else {
             panic!("[{label}] the driven beat is the CR 732.2a offer");
         };
-        hostile_schema.measured_repetition_bound = None;
+        hostile_schema.repetition_bound =
+            engine::analysis::decision_template::RepetitionBound::Unmeasured;
         hostile_schema.deliverable_capacity = MAX_SHORTCUT_CYCLES_MIRROR;
         assert_eq!(
             published_ceiling(&unnarrowed, proposer, label),
@@ -7365,26 +7364,19 @@ fn the_near_equal_split_at_the_capacity_commits_its_whole_count() {
 /// the count and leaves the game.
 #[test]
 fn an_offer_holding_no_charged_announcement_delivers_the_re_aiming_count_whole() {
-    use engine::game::engine::bounded_cycle_pin_slots;
-
     // How many of the offer's charged slots have an announcement on the board's own stack, read
-    // through the announcement authority the offer's points are minted from.
+    // off the offer's published lead snapshot.
     let charged_on_stack = |board: &GameState| -> (usize, usize) {
-        let (proposer, certificate, _) = offer_parts(board);
+        let (_, certificate, schema) = offer_parts(board);
         let charged = &certificate
             .per_cycle
             .as_ref()
             .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer publishes its per-period signature")
             .victim_slot;
-        let points = bounded_cycle_pin_slots(board, proposer);
         let on_stack = charged
             .iter()
-            .filter(|(slot, _)| {
-                points.iter().any(|point| {
-                    &point.slot == slot && matches!(point.kind, DecisionPointKind::Targets { .. })
-                })
-            })
+            .filter(|(slot, _)| schema.leading_aims.iter().any(|(lead, _)| lead == slot))
             .count();
         (charged.len(), on_stack)
     };
@@ -8197,8 +8189,8 @@ fn a_period_whose_target_set_shrinks_to_one_performs_past_the_shrink() {
     );
     assert_eq!(schema.iteration_count, IterationCount::Fixed(77));
     assert_eq!(
-        schema.measured_repetition_bound,
-        Some(77),
+        schema.repetition_bound,
+        engine::analysis::decision_template::RepetitionBound::Measured,
         "CR 104.2a: P2 leaving at 77 leaves P0 alone, so P0's library crossing at 89 never comes"
     );
     assert!(

@@ -348,6 +348,14 @@ pub enum PinnedDecision {
     },
 }
 
+/// CR 732.2a: whether an offer's producer measured a repetition threshold.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepetitionBound {
+    Measured,
+    #[default]
+    Unmeasured,
+}
+
 /// CR 732.2a: the READ-side decision schema an interactive loop-shortcut OFFER exposes so the
 /// frontend can render the open choices + collect pins. 1:1 read-side dual of the write-side
 /// `Vec<PinnedDecision>` (the FE picks from each point's legal set → a pin). Every field is
@@ -360,25 +368,19 @@ pub struct ShortcutDecisionSchema {
     /// optional loop, and is the count [`ShortcutDecisionSchema::suggestion`] drives — the count roles are stated on
     /// [`ShortcutDecisionSchema::suggested_declaration`].
     pub iteration_count: IterationCount,
-    /// CR 732.2a: the repetition bound this offer's producer MEASURED — the CR 704 threshold
-    /// crossing, for a turn-cycle period the cleanup hand bound (CR 514.1), or the repetitions
-    /// the counting replay performed (CR 118.3) — a LEGALITY
-    /// CEILING, what SOME legal declaration may specify, never a count every declaration
-    /// reaches. `game::engine::bounded_offer_tail` takes the LARGER of two
-    /// declaration-relative cascades: the cascade's count under the offer's own published
-    /// declaration and the last one under the re-aimed witness. CR 732.2a's "may be legally
-    /// taken" quantifies existentially over declarations, so the maximum is the reduction that
-    /// answers it. `None` means the producer measured none: no axis of the period consumes any
-    /// living seat, so the board licenses no threshold rather than one that happens to be
-    /// large. It wears no implementation ceiling.
+    /// CR 732.2a: whether this offer's producer MEASURED a repetition threshold — the CR 704
+    /// threshold crossing, for a turn-cycle period the cleanup hand bound (CR 514.1), or the
+    /// repetitions the counting replay performed (CR 118.3). `Unmeasured` means no axis of the
+    /// period consumes any living seat, so the board licenses no threshold rather than one that
+    /// happens to be large.
     ///
     /// Read by [`ShortcutDecisionSchema::is_bounded`] — the one question it answers — and by
     /// nothing that publishes or enforces a count, which
     /// [`ShortcutDecisionSchema::deliverable_capacity`] below is the field for.
     #[serde(default)]
-    pub measured_repetition_bound: Option<u32>,
-    /// The highest count an accept may legally SPECIFY against this offer: the measured
-    /// threshold above, or `MAX_SHORTCUT_CYCLES` where none was measured, capped at
+    pub repetition_bound: RepetitionBound,
+    /// The highest count an accept may legally SPECIFY against this offer: the threshold the
+    /// producer measured, or `MAX_SHORTCUT_CYCLES` where none was measured, capped at
     /// `MAX_SHORTCUT_CYCLES` either way. A legality ceiling, not a delivery promise — the
     /// consumption seam re-derives its own bound on the board the drive runs against
     /// (`game::engine::shortcut_consumption_bound`) and may stop the drive short of this.
@@ -433,7 +435,7 @@ pub struct ShortcutDecisionSchema {
 /// answers — and is done by `types::game_state`'s migration chain before serde runs.
 ///
 /// DELIBERATELY NOT MIRRORED in `client/src/adapter/types.ts::ShortcutDecisionSchema`, neither
-/// this capacity nor the measured bound above it: the frontend never reads either, it reads
+/// this capacity nor the bound above it: the frontend never reads either, it reads
 /// the already-clamped ceiling the engine publishes as
 /// `InteractionShortcutCountSpec::Fixed { max }`. Mirroring them would hand the display layer
 /// two numbers it would have to reconcile — exactly the derive-in-the-frontend the layer rule
@@ -449,7 +451,7 @@ impl Default for ShortcutDecisionSchema {
     fn default() -> Self {
         Self {
             iteration_count: IterationCount::Fixed(0),
-            measured_repetition_bound: None,
+            repetition_bound: RepetitionBound::default(),
             deliverable_capacity: default_deliverable_capacity(),
             points: Vec::new(),
             convoke_tappable_count: 0,
@@ -474,13 +476,13 @@ impl ShortcutDecisionSchema {
     /// publishes the absence, so an unnarrowed offer is NOT bounded in this sense.
     ///
     /// The SINGLE AUTHORITY for that question, and the reason it is a method rather than an
-    /// inline test repeated at each caller: it is the only place `measured_repetition_bound` is
-    /// read as a VERDICT — the per-viewer projection in `game::visibility` copies the field
+    /// inline test repeated at each caller: it is the only reader of `repetition_bound` as a
+    /// VERDICT — the per-viewer projection in `game::visibility` copies the field
     /// through unredacted and asks nothing of it — and it crosses the crate boundary:
     /// `phase-ai`'s declare policy asks this question and never inspects the field. The question
     /// is about what was measured, never about the capacity, which every offer carries.
     pub fn is_bounded(&self) -> bool {
-        self.measured_repetition_bound.is_some()
+        self.repetition_bound == RepetitionBound::Measured
     }
 }
 
@@ -1244,7 +1246,7 @@ impl PinnedDecision {
     /// shortcut declaration answers. That ground is now carried by the POINT rather than by
     /// the absence of a slot: an `Order` pin's slot is minted at
     /// [`ChoicePoint::TriggerOrder`], and no PUBLISHED point carries `TriggerOrder`
-    /// (`bounded_cycle_pin_slots` mints only `AnnouncedTarget` and `MayGate`;
+    /// (`bounded_cycle_pin_slots_for_window` mints only `AnnouncedTarget` and `MayGate`;
     /// `pinned_decisions_to_points` mints no point for a `TriggerOrder` pin). So the old
     /// collision — a synthesized `{source, index: 0}` letting one ordering pin cover a
     /// published targeting point — is unrepresentable, `TriggerOrder != AnnouncedTarget`
@@ -2062,7 +2064,7 @@ mod tests {
             // round-trip carrying a default would pass even if that field were dropped from
             // the wire. They are also distinct from EACH OTHER, so a wire that serialized one
             // under both keys cannot pass either.
-            measured_repetition_bound: Some(17),
+            repetition_bound: crate::analysis::decision_template::RepetitionBound::Measured,
             deliverable_capacity: 23,
             points: vec![DecisionPoint {
                 slot: DecisionSlot {
@@ -2084,9 +2086,9 @@ mod tests {
         };
         let json = serde_json::to_value(&schema).expect("serialize");
         assert_eq!(
-            json["measured_repetition_bound"], 17,
-            "the measured CR 704 threshold must reach the wire as a key — a field that is \
-             never serialized would silently decode as UNMEASURED on every reload"
+            json["repetition_bound"], "Measured",
+            "the measured state must reach the wire as a key — a field that is never \
+             serialized would silently decode as UNMEASURED on every reload"
         );
         assert_eq!(
             json["deliverable_capacity"], 23,
@@ -2101,7 +2103,7 @@ mod tests {
                 suggested_declaration: None,
                 leading_aims: Vec::new(),
                 iteration_count: IterationCount::Fixed(0),
-                measured_repetition_bound: None,
+                repetition_bound: crate::analysis::decision_template::RepetitionBound::Unmeasured,
                 deliverable_capacity: crate::game::engine::MAX_SHORTCUT_CYCLES,
                 points: vec![],
                 convoke_tappable_count: 0,
@@ -2115,11 +2117,14 @@ mod tests {
         let fields = legacy
             .as_object_mut()
             .expect("schema serializes as an object");
-        fields.remove("measured_repetition_bound");
+        fields.remove("repetition_bound");
         fields.remove("deliverable_capacity");
         let decoded = serde_json::from_value::<ShortcutDecisionSchema>(legacy)
             .expect("a pre-split snapshot still deserializes");
-        assert_eq!(decoded.measured_repetition_bound, None);
+        assert_eq!(
+            decoded.repetition_bound,
+            crate::analysis::decision_template::RepetitionBound::Unmeasured
+        );
         assert!(!decoded.is_bounded());
         assert_eq!(
             decoded.deliverable_capacity,
@@ -3677,7 +3682,7 @@ mod tests {
             suggested_declaration: None,
             leading_aims: Vec::new(),
             iteration_count: IterationCount::Fixed(1),
-            measured_repetition_bound: Some(1),
+            repetition_bound: crate::analysis::decision_template::RepetitionBound::Measured,
             deliverable_capacity: 1,
             convoke_tappable_count: 0,
             points: vec![point],
@@ -3723,7 +3728,7 @@ mod tests {
             suggested_declaration: None,
             leading_aims: Vec::new(),
             iteration_count: IterationCount::Fixed(1),
-            measured_repetition_bound: Some(1),
+            repetition_bound: crate::analysis::decision_template::RepetitionBound::Measured,
             deliverable_capacity: 1,
             convoke_tappable_count: 0,
             points: vec![point(&giant, 0), point(&duo, 1)],
@@ -3761,7 +3766,7 @@ mod tests {
 
     /// **R9 leg 5 — repetition is ANSWERED under a declared identity, not refused.**
     ///
-    /// CR 732.2a: `bounded_cycle_pin_slots` publishes ONE point per slot, so a declaration
+    /// CR 732.2a: `bounded_cycle_pin_slots_for_window` publishes ONE point per slot, so a declaration
     /// holds one answer per point and that answer applies at EVERY occurrence of the point's
     /// prompt.
     #[test]

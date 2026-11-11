@@ -24,7 +24,6 @@
 //! trigger's exile choice with both other nonland permanents once, and answers every later choice
 //! of that kind with an empty selection.
 
-use engine::analysis::loop_check::OfferRoad;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
@@ -169,9 +168,9 @@ struct DriveReading {
     /// `(choices before, choices after)` taken across each resolution of a triggered ability that
     /// mints no token.
     across_out_of_class: Vec<(Vec<engine::game::TraceEntry>, Vec<engine::game::TraceEntry>)>,
-    /// The first loop-shortcut offer the drive met, as its road and the stack's top triggered
-    /// ability's source at that beat. The drive declines every offer and continues.
-    offered: Option<(OfferRoad, Option<ObjectId>)>,
+    /// The first loop-shortcut offer the drive met, as the stack's top triggered ability's source
+    /// at that beat. The drive declines every offer and continues.
+    offered: Option<Option<ObjectId>>,
 }
 
 /// One beat of a drive at a time, answering by the row's own declared policy.
@@ -194,10 +193,10 @@ fn drive(
 
     for _ in 0..BEAT_CAP {
         let state = runner.state();
-        if let WaitingFor::LoopShortcut { road, .. } = state.waiting_for {
+        if let WaitingFor::LoopShortcut { .. } = state.waiting_for {
             reading
                 .offered
-                .get_or_insert((road, top_trigger(state).map(|(_, source)| source)));
+                .get_or_insert(top_trigger(state).map(|(_, source)| source));
             // Declining clears the trace, so a resolution watched across it is not compared.
             watching = None;
             if runner.act(GameAction::DeclineShortcut).is_err() {
@@ -322,7 +321,7 @@ fn board_a_minting_trigger_resolution_opens_a_period_naming_that_trigger() {
     assert!(
         matches!(
             reading.offered,
-            Some((OfferRoad::RecordedPeriod, top)) if top != Some(board.abdel)
+            Some(top) if top != Some(board.abdel)
         ),
         "the period is offered on the recorded road before Abdel Adrian's trigger stands on top \
          again; got {:?}",

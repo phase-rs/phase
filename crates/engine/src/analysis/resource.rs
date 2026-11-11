@@ -3737,37 +3737,6 @@ fn map_delta<K: Ord + Copy>(
     out
 }
 
-/// The current side of a loop comparison: a raw state, whose projections the comparison derives
-/// itself.
-///
-/// `Copy`: a body reads the state and its projection independently.
-pub(crate) trait CurrentSide<'a>: Copy {
-    /// The unprojected state. Every read outside a projected comparand uses it.
-    fn state(self) -> &'a GameState;
-    /// [`project_out_resources`] of [`CurrentSide::state`].
-    fn projected(self) -> Cow<'a, GameState>;
-    /// [`cover_projection`] of it.
-    fn cover_projected(self) -> Cow<'a, GameState>;
-    /// [`normalized_stack_entries`] of the loop-normalized state, so its ranked
-    /// incarnations meet a normalized prior's.
-    fn cover_stack(self) -> Cow<'a, [(StackEntry, Option<TriggerFiring>)]>;
-}
-
-impl<'a> CurrentSide<'a> for &'a GameState {
-    fn state(self) -> &'a GameState {
-        self
-    }
-    fn projected(self) -> Cow<'a, GameState> {
-        Cow::Owned(project_out_resources(self))
-    }
-    fn cover_projected(self) -> Cow<'a, GameState> {
-        Cow::Owned(cover_projection(self))
-    }
-    fn cover_stack(self) -> Cow<'a, [(StackEntry, Option<TriggerFiring>)]> {
-        Cow::Owned(normalized_stack_entries(&self.normalize_for_loop()))
-    }
-}
-
 /// [`project_out_resources`] with the stack and its stack-entry-indexed firing sidecar
 /// cleared — the single authority for the comparand
 /// [`loop_states_cover_modulo_growth_scoped`]'s gate (1) needs, whose gate (2) compares the
@@ -3785,7 +3754,7 @@ fn cover_projection(state: &GameState) -> GameState {
 /// (CR 732.2a, the shortcut) the question asked here is identity in **board, zones and
 /// tap-state on the PROJECTED feed**: `normalize_for_loop`, then [`project_out_resources`],
 /// then that same strict comparator — plus the hand conjunct at the end of
-/// [`loop_states_equal_modulo_resources_side`], where this gate compensates for an axis the
+/// this function, where this gate compensates for an axis the
 /// strict comparator leaves out: [`loyalty_activation_counts_match`] over the per-object
 /// CR 606.3 count and per-permanent extra-activation grant (distinct from the per-player
 /// `GameState::extra_loyalty_activations_this_turn` map, which
@@ -3808,16 +3777,9 @@ fn cover_projection(state: &GameState) -> GameState {
 /// arm mid-extrapolation; the shipped 2p drain detection depends on this behaviour and is
 /// regression-pinned. [`loop_states_cover_modulo_growth`] closes both surfaces by
 /// construction rather than inheriting the assumption.
+///
+/// The `compares_equal_modulo_resources` tick lives HERE and at no other site.
 pub fn loop_states_equal_modulo_resources(a: &GameState, b: &GameState) -> bool {
-    loop_states_equal_modulo_resources_side(a, b)
-}
-
-/// [`loop_states_equal_modulo_resources`] over a [`CurrentSide`]. The
-/// `compares_equal_modulo_resources` tick lives HERE and at no other site.
-pub(crate) fn loop_states_equal_modulo_resources_side<'a, C: CurrentSide<'a>>(
-    a: &GameState,
-    b: C,
-) -> bool {
     bump_loop_detect_cost(|cost| cost.compares_equal_modulo_resources += 1);
     // CR 601.2f + CR 732.2a: a live cost modifier that reads a projected journal (Blaster
     // Hulk's `EnergyPaidOrLostThisTurn`) prices the next repeat differently even when the
@@ -3825,11 +3787,11 @@ pub(crate) fn loop_states_equal_modulo_resources_side<'a, C: CurrentSide<'a>>(
     // projecting. Check BOTH the prior state and the current state, because a cost modifier
     // (e.g., a spell on the stack) may only be live in the current state at the priority
     // window sample point, not in the prior state.
-    if cost_modifier_reads_changed_projected_resource(a, b.state()) {
+    if cost_modifier_reads_changed_projected_resource(a, b) {
         return false;
     }
     let pa = project_out_resources(a);
-    let pb = b.projected();
+    let pb = project_out_resources(b);
     // CR 606.3: the per-object loyalty-activation count (and the per-permanent
     // extra-activation grant that extends it) is the authoritative
     // once-per-turn-per-permanent gate, but `objects_content_eq` does NOT compare
@@ -4552,13 +4514,10 @@ fn auto_may_answer_for(
 /// constant-depth 2p path ([`loop_states_equal_modulo_resources`]) makes the SAME
 /// extrapolation with NONE of these — that assumption is documented there, not claimed as a
 /// theorem here.
-pub(crate) fn loop_states_cover_modulo_growth<'a, C: CurrentSide<'a>>(
-    prior: &GameState,
-    current: C,
-) -> bool {
+pub(crate) fn loop_states_cover_modulo_growth(prior: &GameState, current: &GameState) -> bool {
     // The zero-proof container: frames = `[current]`, no proposer ⇒ nothing published ⇒ no
     // relief.
-    let mut verdicts = PeriodVerdicts::unproven(current.state());
+    let mut verdicts = PeriodVerdicts::unproven(current);
     loop_states_cover_modulo_growth_scoped(
         prior,
         current,
@@ -4640,9 +4599,9 @@ fn window_cast_card_ids(state: &GameState, proposer: Option<PlayerId>) -> Option
 /// derived LOCALLY from `current`'s own driving sequence ([`window_cast_card_ids`]), and the
 /// `projected_scope` built for that call deliberately holds `pinned: None` — the projected
 /// firewall is a different axis and must not inherit the caller's pins.
-pub(crate) fn loop_states_cover_modulo_growth_scoped<'a, C: CurrentSide<'a>>(
+pub(crate) fn loop_states_cover_modulo_growth_scoped<'a>(
     prior: &GameState,
-    current: C,
+    current: &'a GameState,
     scope: LoopWindowScope<'_>,
     verdicts: &mut PeriodVerdicts<'a>,
 ) -> bool {
@@ -4653,9 +4612,7 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a, C: CurrentSide<'a>>(
     // require full board equality plus loyalty-activation parity plus strict object
     // damage/counter equality. The prior's is cut from the one projection whose stack (2)
     // reads, so both stacks carry the same ranked incarnations as the current side's.
-    let pb = current.cover_projected();
-    let side = current;
-    let current = current.state();
+    let pb = cover_projection(current);
     let mut pa = project_out_resources(prior);
     let prior_stack = normalized_stack_entries(&pa);
     pa.stack.clear();
@@ -4673,7 +4630,7 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a, C: CurrentSide<'a>>(
 
     // (2) Stack coverability: order-preserving bottom-up embedding + strict growth
     // confined to places already occupied in `prior` (CR 608.1 / CR 405.5 LIFO freeze).
-    let cur_stack = side.cover_stack();
+    let cur_stack = normalized_stack_entries(&current.normalize_for_loop());
     if !stack_covers(&prior_stack, &cur_stack) {
         return false;
     }
@@ -9937,6 +9894,21 @@ fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usiz
 mod tests {
     use crate::game::game_object::ObjectIncarnationRefExt;
 
+    /// The window enumerator over `state.stack` alone.
+    fn stack_pin_slots(
+        state: &super::GameState,
+        proposer: super::PlayerId,
+    ) -> Vec<crate::analysis::decision_template::DecisionPoint> {
+        crate::game::engine::bounded_cycle_pin_slots_for_window(
+            &super::certified_period_touch(
+                &[],
+                state,
+                super::PeriodCertification::ResourceSignatureOnly,
+            ),
+            proposer,
+        )
+    }
+
     /// CR 704.3 + CR 704.5a: reading a charge stream one stretch at a time gives the answer of
     /// stepping through it one repetition at a time
     /// (`PeriodicDelta::first_life_crossing_by_stretch` against
@@ -12637,7 +12609,7 @@ mod tests {
     fn a_forced_target_is_not_a_published_decision_point() {
         use crate::analysis::decision_template::DecisionPointKind;
         use crate::game::ability_utils::build_target_slots;
-        use crate::game::engine::{bounded_cycle_pin_slots, entry_publishes_pin_slots};
+        use crate::game::engine::entry_publishes_pin_slots;
 
         let announcement = |state: &GameState| {
             build_target_slots(state, state.stack[2].ability().unwrap())
@@ -12668,7 +12640,7 @@ mod tests {
              drain has no CR 603.5 gate to publish either"
         );
         assert!(
-            bounded_cycle_pin_slots(&c2, PlayerId(0)).is_empty(),
+            stack_pin_slots(&c2, PlayerId(0)).is_empty(),
             "and the point mint carries the withhold through"
         );
 
@@ -12701,7 +12673,7 @@ mod tests {
             !forced_unique_targeting(&c3, c3.stack[2].ability().unwrap()),
             "reach-guard: two opponents ⇒ `auto_select => Ok(None)` ⇒ the player IS asked"
         );
-        let published = bounded_cycle_pin_slots(&c3, PlayerId(0));
+        let published = stack_pin_slots(&c3, PlayerId(0));
         assert_eq!(
             published.len(),
             1,
@@ -12728,7 +12700,7 @@ mod tests {
             pins.legal_targets.is_empty(),
             "no target slot carries no legal set"
         );
-        let may_points = bounded_cycle_pin_slots(&cm, PlayerId(0));
+        let may_points = stack_pin_slots(&cm, PlayerId(0));
         assert_eq!(
             may_points.len(),
             1,
@@ -12822,9 +12794,7 @@ mod tests {
     #[test]
     fn a_withheld_forced_announcement_is_charged_like_a_published_one() {
         use crate::analysis::decision_template::DecisionPointKind;
-        use crate::game::engine::{
-            bounded_cycle_charged_targets_for_window, bounded_cycle_pin_slots,
-        };
+        use crate::game::engine::bounded_cycle_charged_targets_for_window;
         use std::cmp::Ordering;
 
         /// Step (7)'s own derivation, verbatim — the charged announcements, each carrying its
@@ -12846,7 +12816,6 @@ mod tests {
                 &touch,
                 PlayerId(0),
                 delta.worst_seat_life_loss(),
-                crate::analysis::loop_check::OfferRoad::Ring,
             )
         }
 
@@ -12882,13 +12851,13 @@ mod tests {
 
         // ── REACH-GUARDS: the two arms really are the withheld/published pair ────────────
         assert!(
-            bounded_cycle_pin_slots(&forced, PlayerId(0)).is_empty(),
+            stack_pin_slots(&forced, PlayerId(0)).is_empty(),
             "REACH-GUARD: the 2p arm's announcement must still be WITHHELD (CR 732.2a — one \
              legal assignment is no game choice). Without this the row would be satisfied by \
              re-publishing the forced point, which is the change the sibling row forbids"
         );
         assert!(
-            bounded_cycle_pin_slots(&chosen, PlayerId(0))
+            stack_pin_slots(&chosen, PlayerId(0))
                 .iter()
                 .any(|p| matches!(p.kind, DecisionPointKind::Targets { .. })),
             "REACH-GUARD: the 3p arm must PUBLISH its `Targets` point, else 'published' and \
@@ -13172,11 +13141,7 @@ mod tests {
         );
 
         // ── The publication half: ONE point, carrying the WIDE legal set ────────────────
-        let points = bounded_cycle_pin_slots_for_window(
-            &touch,
-            PlayerId(0),
-            crate::analysis::loop_check::OfferRoad::Ring,
-        );
+        let points = bounded_cycle_pin_slots_for_window(&touch, PlayerId(0));
         assert_eq!(
             points.len(),
             1,
@@ -13207,7 +13172,6 @@ mod tests {
             &touch,
             PlayerId(0),
             delta.worst_seat_life_loss(),
-            crate::analysis::loop_check::OfferRoad::Ring,
         );
         assert_eq!(
             charged.len(),
@@ -13278,7 +13242,6 @@ mod tests {
             &divergent_touch,
             PlayerId(0),
             delta.worst_seat_life_loss(),
-            crate::analysis::loop_check::OfferRoad::Ring,
         );
         assert_eq!(
             divergent.len(),
@@ -13333,15 +13296,10 @@ mod tests {
                 &current,
                 PeriodCertification::ResourceSignatureOnly,
             );
-            bounded_cycle_charged_targets_for_window(
-                &touch,
-                PlayerId(0),
-                1,
-                crate::analysis::loop_check::OfferRoad::Ring,
-            )
-            .into_iter()
-            .map(|charge| (charge.reaches, charge.aimed_at))
-            .collect::<Vec<_>>()
+            bounded_cycle_charged_targets_for_window(&touch, PlayerId(0), 1)
+                .into_iter()
+                .map(|charge| (charge.reaches, charge.aimed_at))
+                .collect::<Vec<_>>()
         };
 
         // PAIRED POSITIVE, first: the same one frame aimed INSIDE its own legal set records
@@ -13377,15 +13335,10 @@ mod tests {
                 &current,
                 PeriodCertification::ResourceSignatureOnly,
             );
-            bounded_cycle_charged_targets_for_window(
-                &touch,
-                PlayerId(0),
-                1,
-                crate::analysis::loop_check::OfferRoad::Ring,
-            )
-            .into_iter()
-            .map(|charge| (charge.reaches, charge.aimed_at))
-            .collect::<Vec<_>>()
+            bounded_cycle_charged_targets_for_window(&touch, PlayerId(0), 1)
+                .into_iter()
+                .map(|charge| (charge.reaches, charge.aimed_at))
+                .collect::<Vec<_>>()
         };
 
         assert_eq!(
@@ -13444,8 +13397,7 @@ mod tests {
         use crate::analysis::decision_template::DecisionPointKind;
         use crate::game::ability_utils::build_target_slots;
         use crate::game::engine::{
-            bounded_cycle_charged_targets_for_window, bounded_cycle_pin_slots,
-            entry_publishes_pin_slots,
+            bounded_cycle_charged_targets_for_window, entry_publishes_pin_slots,
         };
         use crate::types::ability::TargetSelectionMode;
 
@@ -13469,12 +13421,7 @@ mod tests {
         let charged_victims = |state: &GameState| {
             let touch =
                 certified_period_touch(&[], state, PeriodCertification::ResourceSignatureOnly);
-            bounded_cycle_charged_targets_for_window(
-                &touch,
-                PlayerId(0),
-                1,
-                crate::analysis::loop_check::OfferRoad::Ring,
-            )
+            bounded_cycle_charged_targets_for_window(&touch, PlayerId(0), 1)
         };
         let announcement_slot = |state: &GameState| {
             build_target_slots(state, state.stack[2].ability().unwrap())
@@ -13489,7 +13436,7 @@ mod tests {
 
         // ── (c) CONTROL first: neither axis, two legal opponents ⇒ PUBLISHED ────────────
         let (_pc, control) = grown_window(3, |id| axis_drain(id, false, false));
-        let control_points = bounded_cycle_pin_slots(&control, PlayerId(0));
+        let control_points = stack_pin_slots(&control, PlayerId(0));
         assert_eq!(control_points.len(), 1, "control: {control_points:?}");
         assert!(
             matches!(control_points[0].kind, DecisionPointKind::Targets { .. }),
@@ -19710,7 +19657,6 @@ mod tests {
             certificate: cert.clone(),
             schema: ShortcutDecisionSchema::default(),
             declaration: None,
-            road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -19732,7 +19678,6 @@ mod tests {
             },
             schema: ShortcutDecisionSchema::default(),
             declaration: None,
-            road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -19902,7 +19847,6 @@ mod tests {
             shortened_by: None,
             published_declaration: None,
             leading_aims: Vec::new(),
-            road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -20532,14 +20476,13 @@ mod tests {
     ///
     /// CR 732.2a + CR 608.1. With NO window frame there is no transition to observe, so the
     /// honest degenerate reading is *"every current entry may announce"* — which is exactly
-    /// what makes `bounded_cycle_pin_slots` a thin alias of the window enumerator rather
-    /// than a second authority.
+    /// what makes the empty-window call of the window enumerator the stack's own slot set
+    /// rather than a second authority.
     ///
     /// ⚠ THE COMPARISON IS AGAINST THE TEST'S OWN INPUT DATA, NEVER AGAINST A SECOND CALL OF
-    /// THE FUNCTION UNDER TEST. `bounded_cycle_pin_slots_for_window(&certified_period_touch(
-    /// &[], state, ..), p)` vs `bounded_cycle_pin_slots(state, p)` is the same function body
-    /// on both sides, so the equality would hold by construction AND a revert-probe would edit
-    /// a dependency BOTH sides call. A captured per-beat frozen point sequence fails
+    /// THE FUNCTION UNDER TEST. A second call is the same function body on both sides, so the
+    /// equality would hold by construction AND a revert-probe would edit a dependency BOTH
+    /// sides call. A captured per-beat frozen point sequence fails
     /// differently: it embeds `ObjectId` literals that a fixture re-dump renumbers. The
     /// PROPERTY against a CONSTRUCTED frame has neither failure mode.
     ///
@@ -20609,11 +20552,7 @@ mod tests {
         // PAIRED POSITIVE REACH-GUARD, and it is what stops the property collapsing into a
         // vacuous truth about a stack nothing publishes on.
         let touch = certified_period_touch(&[], &state, PeriodCertification::ResourceSignatureOnly);
-        let points = bounded_cycle_pin_slots_for_window(
-            &touch,
-            PlayerId(0),
-            crate::analysis::loop_check::OfferRoad::Ring,
-        );
+        let points = bounded_cycle_pin_slots_for_window(&touch, PlayerId(0));
         assert!(
             !points.is_empty(),
             "reach-guard: at least one constructed entry must be ACCEPTED by the mint, or the \

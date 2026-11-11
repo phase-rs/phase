@@ -714,13 +714,12 @@ fn drive_pentad_prism_zero_charge_has_no_counter_axis() {
 ///
 /// DISCRIMINATION: the paired X=0 control below (same driver, only the seed differs)
 /// loses the damage axis, so this `covers` is not vacuously "any cert". The `expect`
-/// flips to a panic if `detect_loop`'s recurrence gate is reverted; the `win_kind` /
-/// `covers` assertions flip if `classify_win_kind`'s damage branch is dropped
-/// (Advantage) — proving the ping actually reached the opponent (a mis-answered
-/// `TargetSelection` prompt would leave no `DamageDealt(P1)` axis and fail `covers`).
+/// flips to a panic if `detect_loop`'s recurrence gate is reverted; `covers` proves the ping
+/// actually reached the opponent (a mis-answered `TargetSelection` prompt would leave no
+/// `DamageDealt(P1)` axis).
 #[test]
 fn drive_kilo_freed_relic_ballista_certificate() {
-    let cert = corpus::drive_offline_kilo_freed_relic_ballista(card_db(), 2).expect(
+    let cert = corpus::drive_offline_kilo_freed_relic_ballista(card_db(), 2, P1, None).expect(
         "Walking Ballista (seeded ≥1 +1/+1) under the proliferate engine must confirm an \
          infinite damage loop: board identical modulo the monotone +1/+1, +1 damage/cycle",
     );
@@ -740,6 +739,49 @@ fn drive_kilo_freed_relic_ballista_certificate() {
     );
 }
 
+/// CR 704.5a + CR 704.5c + CR 702.90b: a loop's win kind is the loss axis its damage reaches,
+/// and only an opponent's loss is a win. Walking Ballista wearing Grafted Exoskeleton has infect,
+/// so its pings give poison instead of life loss.
+#[test]
+fn kilo_freed_relic_ballista_win_kind_follows_the_loss_axis() {
+    for (equipment, victim, expected, loss) in [
+        (
+            Some("Grafted Exoskeleton"),
+            P1,
+            WinKind::PoisonLoss,
+            Some(ResourceAxis::Poison(P1)),
+        ),
+        (Some("Grafted Exoskeleton"), P0, WinKind::Advantage, None),
+        (
+            None,
+            P1,
+            WinKind::LethalDamage,
+            Some(ResourceAxis::Life(P1)),
+        ),
+    ] {
+        let leg = format!("[{equipment:?} → {victim:?}]");
+        let cert = corpus::drive_offline_kilo_freed_relic_ballista(card_db(), 2, victim, equipment)
+            .unwrap_or_else(|| panic!("{leg} the ping loop certifies"));
+        assert!(
+            cert.covers(&[ResourceAxis::DamageDealt(victim)]),
+            "{leg} reach: the ping reached its victim (got {:?})",
+            cert.unbounded
+        );
+        if equipment.is_some() {
+            assert!(
+                cert.covers(&[ResourceAxis::Poison(victim)])
+                    && !cert.covers(&[ResourceAxis::Life(victim)]),
+                "{leg} infect damage gives poison, not life loss (got {:?})",
+                cert.unbounded
+            );
+        }
+        if let Some(loss) = loss {
+            assert!(cert.covers(&[loss]), "{leg} {:?}", cert.unbounded);
+        }
+        assert_eq!(cert.win_kind, Some(expected), "{leg}");
+    }
+}
+
 /// PR-7 54th (X=0 dead-loop CONTROL, paired with the acceptance above): a Walking
 /// Ballista seeded with ZERO +1/+1 counters is a 0/0 that dies to the SBA (CR 704.5f)
 /// with no counter to remove, so the ping activation is rejected and the cycle degrades
@@ -752,7 +794,7 @@ fn drive_kilo_freed_relic_ballista_certificate() {
 /// the driver's `activate_and_resolve` degrades gracefully.
 #[test]
 fn drive_kilo_freed_relic_ballista_x0_no_damage_axis() {
-    let cert = corpus::drive_offline_kilo_freed_relic_ballista(card_db(), 0).expect(
+    let cert = corpus::drive_offline_kilo_freed_relic_ballista(card_db(), 0, P1, None).expect(
         "a 0-counter Ballista still rides the pure Kilo proliferate loop (board identical) \
          and must confirm via the equality path",
     );

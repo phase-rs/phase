@@ -4049,7 +4049,6 @@ pub(crate) mod tests {
                 shortened_by: None,
                 published_declaration: None,
                 leading_aims: Vec::new(),
-                road: engine::analysis::loop_check::OfferRoad::Ring,
                 counted_take: Default::default(),
                 period: Default::default(),
             },

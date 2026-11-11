@@ -2270,7 +2270,6 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         ref certificate,
         ref schema,
         ref declaration,
-        road,
         counted_take,
         period: _,
     } = state.waiting_for
@@ -2375,7 +2374,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                     // (life, poison, library sizes over the living players) and the engine's own
                     // budget, so the pair carries through the per-viewer projection unredacted —
                     // only hidden-info legal targets are rewritten above.
-                    measured_repetition_bound: schema.measured_repetition_bound,
+                    repetition_bound: schema.repetition_bound,
                     deliverable_capacity: schema.deliverable_capacity,
                     points,
                     convoke_tappable_count,
@@ -2389,7 +2388,6 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             predicted_winner,
             certificate: certificate.clone(),
             declaration,
-            road,
             counted_take,
             period: Default::default(),
             schema,
@@ -13934,7 +13932,7 @@ mod tests {
                 suggested_declaration: None,
                 leading_aims: Vec::new(),
                 iteration_count: IterationCount::Fixed(3),
-                measured_repetition_bound: Some(3),
+                repetition_bound: crate::analysis::decision_template::RepetitionBound::Measured,
                 deliverable_capacity: 3,
                 points: vec![DecisionPoint {
                     slot: slot.clone(),
@@ -13955,7 +13953,6 @@ mod tests {
                 },
                 key: DecisionGroupKey::from_sources(&[slot.source], DecisionKind::LoopChoice),
             }),
-            road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -14364,7 +14361,6 @@ mod tests {
                 shortened_by: None,
                 published_declaration: Some(declaration),
                 leading_aims: Vec::new(),
-                road: crate::analysis::loop_check::OfferRoad::Ring,
                 counted_take: Default::default(),
                 period: Default::default(),
             },

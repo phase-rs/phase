@@ -2658,7 +2658,6 @@ fn reconcile_loop_shortcut(state: &mut GameState, result: &mut ActionResult) {
                 certificate: parts.certificate,
                 schema: parts.schema,
                 declaration: parts.declaration,
-                road: crate::analysis::loop_check::OfferRoad::RecordedPeriod,
                 counted_take: crate::analysis::loop_check::CountedTake::Performs,
                 period,
             };
@@ -2840,7 +2839,6 @@ fn offer_draw_without_end(
             None,
         ),
         declaration: None,
-        road: crate::analysis::loop_check::OfferRoad::RecordedPeriod,
         counted_take,
         period,
     };
@@ -2910,7 +2908,6 @@ fn bounded_offer_tail(
     proposer: PlayerId,
 ) -> Option<super::period_confirm::BoundedOfferParts> {
     use crate::analysis::decision_template::{DecisionSlot, IterationCount};
-    use crate::analysis::loop_check::OfferRoad;
     let BoundedFrames {
         prior: cert_prior,
         current,
@@ -2975,22 +2972,18 @@ fn bounded_offer_tail(
         &touch,
         proposer,
         frame_wise.worst_seat_life_loss(),
-        OfferRoad::RecordedPeriod,
     );
     // CR 405.5 + CR 608.1: an announcement left buried while the period repeats charges nothing.
     let resolved: Vec<DecisionSlot> = touch
         .resolved
         .iter()
-        .filter_map(|(frame, _, entry)| {
-            entry_announces(frame, entry, proposer, OfferRoad::RecordedPeriod)
-        })
+        .filter_map(|(frame, _, entry)| entry_announces(frame, entry, proposer))
         .filter_map(|announced| announced.target.map(|target| target.slot))
         .collect();
     charged.retain(|charge| resolved.contains(&charge.slot));
     // CR 601.2c (via CR 603.3d): a recorded period's point at a charged slot is the announcement's
     // own, whose legal set is every target the replay could have named.
-    let window_points =
-        bounded_cycle_pin_slots_for_window(&touch, proposer, OfferRoad::RecordedPeriod);
+    let window_points = bounded_cycle_pin_slots_for_window(&touch, proposer);
     for point in &mut points {
         if !charged.iter().any(|charge| charge.slot == point.slot) {
             continue;
@@ -3825,8 +3818,8 @@ struct EntryAnnouncement {
 /// player-target shape (shape (A): asked of the announcement authority itself,
 /// `ability_utils::build_target_slots` — the function the relief's own
 /// `forced_unique_targeting` rebuilds slots with — rather than of a proxy, plus
-/// [`declares_opponent_player_target`]; on the recorded road, any entry that announced exactly
-/// one player target, whatever its head filter), or NO announcement choice at all (shape (B):
+/// [`declares_opponent_player_target`]; or any entry that announced exactly one player target,
+/// whatever its head filter), or NO announcement choice at all (shape (B):
 /// `targets.is_empty()` and zero built slots); and its source object still exists, so the
 /// slot can re-bind (CR 400.7 incarnation, fail-closed on absence).
 ///
@@ -3848,22 +3841,7 @@ pub(crate) fn entry_publishes_pin_slots(
     entry: &StackEntry,
     proposer: PlayerId,
 ) -> Option<EntryPinSlots> {
-    entry_publishes_pin_slots_on(
-        state,
-        entry,
-        proposer,
-        crate::analysis::loop_check::OfferRoad::Ring,
-    )
-}
-
-/// [`entry_publishes_pin_slots`] on the offer `road` whose announcement authority admits it.
-fn entry_publishes_pin_slots_on(
-    state: &GameState,
-    entry: &StackEntry,
-    proposer: PlayerId,
-    road: crate::analysis::loop_check::OfferRoad,
-) -> Option<EntryPinSlots> {
-    let announced = entry_announces(state, entry, proposer, road)?;
+    let announced = entry_announces(state, entry, proposer)?;
     // CR 732.2a: a shortcut describes "a sequence of game choices", so ONLY a `Chosen`
     // announcement earns a decision point. `NotProposerChoice` is withheld — see
     // [`TargetAnnouncement::NotProposerChoice`] and the shape (A′) block in
@@ -3905,14 +3883,7 @@ pub(crate) fn leading_announcement_aims(
         .stack
         .back()
         .and_then(|entry| {
-            let slot = entry_announces(
-                state,
-                entry,
-                proposer,
-                crate::analysis::loop_check::OfferRoad::Ring,
-            )?
-            .target?
-            .slot;
+            let slot = entry_announces(state, entry, proposer)?.target?.slot;
             let targets = entry
                 .ability()?
                 .targets
@@ -3943,14 +3914,7 @@ pub(crate) fn leading_announcement_pairs(
         .rev()
         .take(depth)
         .filter_map(|entry| {
-            let slot = entry_announces(
-                state,
-                entry,
-                proposer,
-                crate::analysis::loop_check::OfferRoad::RecordedPeriod,
-            )?
-            .target?
-            .slot;
+            let slot = entry_announces(state, entry, proposer)?.target?.slot;
             match entry.ability()?.targets.as_slice() {
                 [TargetRef::Player(seat)] if charged.contains(&slot) => Some((slot, *seat)),
                 _ => None,
@@ -3994,7 +3958,6 @@ fn entry_announces(
     state: &GameState,
     entry: &StackEntry,
     proposer: PlayerId,
-    road: crate::analysis::loop_check::OfferRoad,
 ) -> Option<EntryAnnouncement> {
     use crate::analysis::decision_template::{ChoicePoint, DecisionSlot};
     if entry.controller != proposer {
@@ -4016,7 +3979,7 @@ fn entry_announces(
     // The fourth fact that function rejects on — `pending_trigger_entry == entry.id`,
     // CR 603.3c mid-construction — is deliberately NOT here: it is a property of the
     // COMPARED STATE, not of the offer's schema, and reading it would break this
-    // enumerator's PROMPT-state independence (see [`bounded_cycle_pin_slots`]: it never
+    // enumerator's PROMPT-state independence (see [`bounded_cycle_pin_slots_for_window`]: it never
     // reads `waiting_for`, nor `pending_trigger_entry`, which is set exactly while a prompt
     // is up). NOT a claim of purity over a three-field surface: the CR 603.5 recipient
     // conjunct below resolves a player through `optional_prompt_player` →
@@ -4154,15 +4117,13 @@ fn entry_announces(
         return None;
     }
     let slot = slots.swap_remove(0);
-    // CR 115.1d + CR 115.2 + CR 115.4 + CR 601.2c (via CR 603.3d): on the recorded road, an entry
-    // that announced exactly one player target is a seat aim the replay re-answers, whatever its
-    // head filter; its legal set keeps any objects, and only its players are charged (CR 119.3,
-    // CR 120.3a).
-    let player_aim_on_record = road == crate::analysis::loop_check::OfferRoad::RecordedPeriod
-        && matches!(
-            ability.targets.as_slice(),
-            [crate::types::ability::TargetRef::Player(_)]
-        );
+    // CR 115.1d + CR 115.2 + CR 115.4 + CR 601.2c (via CR 603.3d): an entry that announced
+    // exactly one player target is a seat aim the replay re-answers, whatever its head filter; its
+    // legal set keeps any objects, and only its players are charged (CR 119.3, CR 120.3a).
+    let player_aim_on_record = matches!(
+        ability.targets.as_slice(),
+        [crate::types::ability::TargetRef::Player(_)]
+    );
     if slot.optional
         || (!player_aim_on_record
             && !slot
@@ -4268,15 +4229,23 @@ fn entry_announces(
     })
 }
 
-/// CR 732.2a: the per-iteration decision points a BOUNDED cycle shortcut must publish for
-/// `proposer` — one `Targets` point per proposer-controlled triggered-ability SOURCE that
-/// declares a single *player* target (CR 115.2), plus a `MayChoice` point (CR 603.5) when
-/// that ability is optional.
+/// CR 732.2a: the per-iteration choice slots ONE CERTIFIED PERIOD publishes for `proposer` — one
+/// `Targets` point per proposer-controlled triggered-ability SOURCE that declares a single
+/// *player* target (CR 115.2), plus a `MayChoice` point (CR 603.5) when that ability is optional.
 ///
 /// Only a *published* slot is a "specified choice" in CR 732.2a's sense; an unpublished
-/// per-opponent choice would make the proposal a conditional action. This is the SINGLE
-/// authority for that slot set — the offer's cover call, its schema, the drive's cover call
-/// and the per-cycle `predictability_gate` all read the same list.
+/// per-opponent choice would make the proposal a conditional action.
+///
+/// Maps the single authority [`entry_publishes_pin_slots`] over `touch.announced`, with the
+/// per-slot dedup below — each pair evaluated against ITS OWN carrying frame, which is a live
+/// frame and never a `normalize_for_loop` product: a normalized frame would key the stored-auto-choice refusal on `ObjectId(0)` and
+/// would make `build_target_slots` take its `trigger_source: None` fall-through and publish a
+/// WIDER legal set than the live board admits.
+///
+/// It calls the RAW mint rather than the verdict door on purpose: routing it through the door
+/// would eagerly classify (and charge for) every announced pair at slot-enumeration time,
+/// which is exactly the pre-population pass this design removes. The relief side reads the
+/// CACHED mint through the door instead.
 ///
 /// A function of the BOARD, never of the PROMPT. NOT a purity claim over a three-field
 /// `(state.stack, state.objects, proposer)` surface — that would be false: the CR 603.5
@@ -4321,50 +4290,14 @@ fn entry_announces(
 /// carries one answer whatever its instance ordinal). So the
 /// offer publishes the SET of open choices; one state-independent pin ("always target
 /// P1") specifies every instance of it.
-///
-/// VISIBILITY: `pub` because the integration suite that pins its behaviour links the library.
-pub fn bounded_cycle_pin_slots(
-    state: &GameState,
-    proposer: PlayerId,
-) -> Vec<crate::analysis::decision_template::DecisionPoint> {
-    // The DEGENERATE one-frame case of the window enumerator: with no window frame there is
-    // no transition to observe, so `certified_period_touch`'s `window.is_empty()` branch seeds
-    // `announced` from `state.stack`. The alias holds NO certificate, so
-    // it passes `ResourceSignatureOnly`: the type is never allowed to claim one its caller
-    // does not hold (and the empty-window branch yields `frozen_ids: ∅` on any value).
-    bounded_cycle_pin_slots_for_window(
-        &crate::analysis::resource::certified_period_touch(
-            &[],
-            state,
-            crate::analysis::resource::PeriodCertification::ResourceSignatureOnly,
-        ),
-        proposer,
-        crate::analysis::loop_check::OfferRoad::Ring,
-    )
-}
-
-/// CR 732.2a: the per-iteration choice slots ONE CERTIFIED PERIOD publishes for `proposer`.
-///
-/// Maps the single authority [`entry_publishes_pin_slots`] over `touch.announced`, with the
-/// same per-slot dedup [`bounded_cycle_pin_slots`] applies — each pair evaluated against ITS
-/// OWN carrying frame, which is the ring sample's LIVE half and never a `normalize_for_loop`
-/// product: a normalized frame would key the stored-auto-choice refusal on `ObjectId(0)` and
-/// would make `build_target_slots` take its `trigger_source: None` fall-through and publish a
-/// WIDER legal set than the live board admits.
-///
-/// It calls the RAW mint rather than the verdict door on purpose: routing it through the door
-/// would eagerly classify (and charge for) every announced pair at slot-enumeration time,
-/// which is exactly the pre-population pass this design removes. The relief side reads the
-/// CACHED mint through the door instead.
 pub(crate) fn bounded_cycle_pin_slots_for_window(
     touch: &crate::analysis::resource::PeriodTouch<'_>,
     proposer: PlayerId,
-    road: crate::analysis::loop_check::OfferRoad,
 ) -> Vec<crate::analysis::decision_template::DecisionPoint> {
     use crate::analysis::decision_template::{DecisionPoint, DecisionPointKind};
     let mut points: Vec<DecisionPoint> = Vec::new();
     for (frame, entry) in &touch.announced {
-        let Some(pins) = entry_publishes_pin_slots_on(frame, entry, proposer, road) else {
+        let Some(pins) = entry_publishes_pin_slots(frame, entry, proposer) else {
             continue;
         };
         // CR 601.2c: a `Targets` point only when the entry actually announces a choice.
@@ -4443,7 +4376,7 @@ pub(crate) fn bounded_cycle_pin_slots_for_window(
 /// slot the schema publishes from a WIDER later frame — the schema would offer a pin the bound
 /// never charged, and the MEASURED bound would GROW.
 ///
-/// PER SOURCE, NOT PER ENTRY, for the reason [`bounded_cycle_pin_slots`] documents at
+/// PER SOURCE, NOT PER ENTRY, for the reason [`bounded_cycle_pin_slots_for_window`] documents at
 /// length: one state-independent designation specifies every instance of that source's
 /// announcement, so its slot is charged ONCE however many entries carry it. On a repeat the
 /// victim lists are UNIONED rather than first-wins.
@@ -4502,13 +4435,11 @@ pub(crate) fn bounded_cycle_charged_targets_for_window(
     touch: &crate::analysis::resource::PeriodTouch<'_>,
     proposer: PlayerId,
     magnitude: i64,
-    road: crate::analysis::loop_check::OfferRoad,
 ) -> Vec<crate::analysis::resource::SlotCharge> {
     use crate::analysis::resource::SlotCharge;
     let mut charged: Vec<SlotCharge> = Vec::new();
     for (frame, entry) in &touch.announced {
-        let Some(target) = entry_announces(frame, entry, proposer, road).and_then(|a| a.target)
-        else {
+        let Some(target) = entry_announces(frame, entry, proposer).and_then(|a| a.target) else {
             continue;
         };
         // CR 115.2: an object target is not a seat any CR 704 loss threshold applies to, so
@@ -4545,7 +4476,7 @@ pub(crate) fn bounded_cycle_charged_targets_for_window(
     // CR 608.1 + CR 608.2 + CR 119.3: the aim is read off the announcements that RESOLVED in the
     // window, agree-or-nothing; a slot none of whose announcements resolved measured no loss.
     let slot_of = |frame: &GameState, entry: &StackEntry| {
-        entry_announces(frame, entry, proposer, road)
+        entry_announces(frame, entry, proposer)
             .and_then(|a| a.target)
             .map(|target| target.slot)
     };
@@ -4602,10 +4533,8 @@ pub(crate) fn bounded_cycle_charged_targets_for_window(
 ///
 /// THE ONE PLACE THE ENGINE'S BUDGET IS APPLIED. The reduction measures what the board
 /// licenses; this constructor decides the highest count this engine will ACCEPT, and publishes
-/// both: the
-/// measured threshold verbatim (an absence stays an absence, and a threshold above the budget
-/// stays the threshold, because it is what the rules say about the loop), and the deliverable
-/// capacity, which is that threshold or the budget, whichever is smaller. The capacity wears
+/// whether a threshold was measured, and the deliverable capacity, which is that threshold or
+/// the budget, whichever is smaller. The capacity wears
 /// no CR number — the budget is ours, not the game's, as the declare handler's budget arm
 /// states.
 ///
@@ -4618,14 +4547,9 @@ pub(crate) fn bounded_cycle_charged_targets_for_window(
 fn build_shortcut_schema(
     points: Vec<crate::analysis::decision_template::DecisionPoint>,
     iteration_count: crate::analysis::decision_template::IterationCount,
-    measured_repetition_bound: Option<u32>,
+    threshold: Option<u32>,
 ) -> crate::analysis::decision_template::ShortcutDecisionSchema {
-    build_shortcut_schema_within(
-        points,
-        iteration_count,
-        measured_repetition_bound,
-        MAX_SHORTCUT_CYCLES,
-    )
+    build_shortcut_schema_within(points, iteration_count, threshold, MAX_SHORTCUT_CYCLES)
 }
 
 /// The most repetitions of `delta` every seat's life total stays representable across. An engine
@@ -4651,15 +4575,14 @@ fn repetition_budget(state: &GameState, delta: &crate::analysis::resource::Resou
 fn build_shortcut_schema_within(
     points: Vec<crate::analysis::decision_template::DecisionPoint>,
     iteration_count: crate::analysis::decision_template::IterationCount,
-    measured_repetition_bound: Option<u32>,
+    threshold: Option<u32>,
     budget: u32,
 ) -> crate::analysis::decision_template::ShortcutDecisionSchema {
     use crate::analysis::decision_template::{
-        DecisionPointKind, IterationCount, ShortcutDecisionSchema,
+        DecisionPointKind, IterationCount, RepetitionBound, ShortcutDecisionSchema,
     };
     let ceiling = MAX_SHORTCUT_CYCLES.min(budget);
-    let deliverable_capacity =
-        measured_repetition_bound.map_or(ceiling, |bound| bound.min(ceiling));
+    let deliverable_capacity = threshold.map_or(ceiling, |bound| bound.min(ceiling));
     // Wildcard-free so a third `IterationCount` variant build-breaks here instead of
     // inheriting whichever decision this match happens to make.
     let iteration_count = match iteration_count {
@@ -4680,7 +4603,8 @@ fn build_shortcut_schema_within(
         suggested_declaration: None,
         leading_aims: Vec::new(),
         iteration_count,
-        measured_repetition_bound,
+        repetition_bound: threshold
+            .map_or(RepetitionBound::Unmeasured, |_| RepetitionBound::Measured),
         deliverable_capacity,
         points,
         convoke_tappable_count,
@@ -6971,7 +6895,6 @@ struct LoopShortcutOffer<'a> {
     /// fallback path in `handle_declare_shortcut`, where a `template: None` declaration
     /// resolves against it.
     declaration: Option<&'a crate::analysis::decision_template::DecisionTemplate>,
-    road: crate::analysis::loop_check::OfferRoad,
     counted_take: crate::analysis::loop_check::CountedTake,
     period: &'a super::period_confirm::ConfirmedPeriod,
 }
@@ -7277,7 +7200,6 @@ fn handle_declare_shortcut(
         // to the consumption seam that reads it.
         published_declaration: offer.declaration.cloned(),
         leading_aims: offer.schema.leading_aims.clone(),
-        road: offer.road,
         counted_take: offer.counted_take,
         period: offer.period.clone(),
     };
@@ -12856,7 +12778,6 @@ fn apply_non_priority_pass_action(
                 // `ai_support::candidates` (which reads this identical field) declare the SAME
                 // proposal against the SAME offer.
                 declaration,
-                road,
                 counted_take,
                 period,
             },
@@ -12870,7 +12791,6 @@ fn apply_non_priority_pass_action(
                     certificate,
                     schema,
                     declaration: declaration.as_ref(),
-                    road: *road,
                     counted_take: *counted_take,
                     period,
                 },
@@ -20780,11 +20700,25 @@ mod stage2_injector_tests {
         }
     }
 
-    /// Park a test offer with the shared certificate and caller-provided schema and road.
+    /// The window enumerator over `state.stack` alone.
+    fn stack_pin_slots(
+        state: &GameState,
+        proposer: PlayerId,
+    ) -> Vec<crate::analysis::decision_template::DecisionPoint> {
+        bounded_cycle_pin_slots_for_window(
+            &crate::analysis::resource::certified_period_touch(
+                &[],
+                state,
+                crate::analysis::resource::PeriodCertification::ResourceSignatureOnly,
+            ),
+            proposer,
+        )
+    }
+
+    /// Park a test offer with the shared certificate and caller-provided schema.
     fn park_on_shortcut_offer(
         state: &mut GameState,
         schema: crate::analysis::decision_template::ShortcutDecisionSchema,
-        road: crate::analysis::loop_check::OfferRoad,
     ) {
         use crate::analysis::loop_check::{LoopCertificate, WinKind};
         use crate::analysis::resource::BoardDelta;
@@ -20803,7 +20737,6 @@ mod stage2_injector_tests {
             },
             schema,
             declaration: None,
-            road,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -20891,7 +20824,7 @@ mod stage2_injector_tests {
         );
     }
 
-    /// CR 732.2a + CR 603.5: `bounded_cycle_pin_slots` publishes the per-iteration TARGET
+    /// CR 732.2a + CR 603.5: `bounded_cycle_pin_slots_for_window` publishes the per-iteration TARGET
     /// choice for a proposer-controlled player-targeting trigger, plus a second `MayChoice`
     /// point (disambiguated by `slot.point`) when that trigger is optional.
     ///
@@ -20951,7 +20884,7 @@ mod stage2_injector_tests {
 
         // Mandatory: exactly one point, the target choice.
         state.stack.push_back(entry(920, P0, false));
-        let mandatory = bounded_cycle_pin_slots(&state, P0);
+        let mandatory = stack_pin_slots(&state, P0);
         assert_eq!(
             mandatory.len(),
             1,
@@ -20974,14 +20907,14 @@ mod stage2_injector_tests {
         // Bystander proposer: the same board publishes nothing for a seat that controls
         // none of the entries (CR 732.2a — the proposer specifies their OWN choices).
         assert!(
-            bounded_cycle_pin_slots(&state, P1).is_empty(),
+            stack_pin_slots(&state, P1).is_empty(),
             "a bystander proposer controls none of these choices"
         );
 
         // Optional: the SAME entry with one field flipped publishes the CR 603.5 gate too.
         state.stack.clear();
         state.stack.push_back(entry(921, P0, true));
-        let optional = bounded_cycle_pin_slots(&state, P0);
+        let optional = stack_pin_slots(&state, P0);
         assert_eq!(
             optional.len(),
             2,
@@ -21066,7 +20999,7 @@ mod stage2_injector_tests {
         // Fail-closed: no source object ⇒ no point (never a slot that cannot re-bind).
         state.objects.remove(&src);
         assert!(
-            bounded_cycle_pin_slots(&state, P0).is_empty(),
+            stack_pin_slots(&state, P0).is_empty(),
             "an absent source emits nothing rather than an unbindable slot"
         );
     }
@@ -21157,7 +21090,7 @@ mod stage2_injector_tests {
 
         // POSITIVE CONTROL, same row: the accepted "target opponent" shape publishes.
         assert_eq!(
-            bounded_cycle_pin_slots(&board(head_only(accepted.clone())), P0).len(),
+            stack_pin_slots(&board(head_only(accepted.clone())), P0).len(),
             1,
             "the accepted CR 115.2 player shape must publish — otherwise the three zeros \
              below are vacuous"
@@ -21214,7 +21147,7 @@ mod stage2_injector_tests {
                  PLAYER — so the cardinality and all-`Player` conjuncts both PASS on this \
                  board and the head-shape conjunct under test is the SOLE rejector"
             );
-            if !bounded_cycle_pin_slots(&state, P0).is_empty() {
+            if !stack_pin_slots(&state, P0).is_empty() {
                 still_published.push(label);
             }
         }
@@ -21259,12 +21192,112 @@ mod stage2_injector_tests {
                 let mut state = board(head_only(accepted.clone()));
                 mutate(&mut state);
                 assert!(
-                    bounded_cycle_pin_slots(&state, P0).is_empty(),
+                    stack_pin_slots(&state, P0).is_empty(),
                     "{label}: announcement-time ordering input NO published slot specifies \
                      ⇒ the mint must not publish"
                 );
             }
         }
+    }
+
+    /// CR 601.2c (via CR 603.3d) + CR 115.1d: the lead the declare and consumption seams read is
+    /// the lead the mint reads. Blood Artist ("Whenever this creature or another creature dies,
+    /// target player loses 1 life and you gain 1 life.") latched at P1 leads with P1 on both
+    /// readers, as the "target opponent" head does; a bystander proposer, or Blood Artist's entry
+    /// unlatched, leads with nothing on either.
+    #[test]
+    fn a_latched_player_aim_leads_alike_for_the_mint_and_the_declare_seams() {
+        use crate::analysis::decision_template::{ConcreteDecision, ConcreteTarget};
+        use crate::types::ability::{
+            ControllerRef, Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+            TypedFilter,
+        };
+
+        let mut base = GameScenario::new_n_player(3, 7).build().state().clone();
+        let src = place(&mut base, 940, crate::types::zones::Zone::Battlefield);
+        let slot = DecisionSlot::first(
+            YieldTarget::ThisObject {
+                source_id: src,
+                incarnation: Some(base.objects[&src].incarnation),
+                trigger_description: None,
+            },
+            ChoicePoint::AnnouncedTarget,
+        );
+        let board = |head: TargetFilter, targets: Vec<TargetRef>| {
+            let mut ability = ResolvedAbility::new(
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: Some(head),
+                },
+                targets,
+                src,
+                P0,
+            );
+            ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                src,
+                P0,
+            )));
+            let mut state = base.clone();
+            state.stack.push_back(StackEntry {
+                id: ObjectId(950),
+                source_id: src,
+                controller: P0,
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: src,
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: None,
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            state
+        };
+        let readers = |state: &GameState, proposer: PlayerId| {
+            (
+                leading_announcement_aims(state, proposer),
+                lead_decisions(&leading_announcement_pairs(
+                    state,
+                    proposer,
+                    1,
+                    std::slice::from_ref(&slot),
+                )),
+            )
+        };
+        let opponent = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: Some(ControllerRef::Opponent),
+            properties: vec![],
+        });
+        let led = vec![ConcreteDecision::Targets {
+            slot: slot.clone(),
+            targets: vec![ConcreteTarget::Player(P1)],
+        }];
+        for (label, head) in [
+            ("target player", TargetFilter::Player),
+            ("target opponent", opponent),
+        ] {
+            let latched = board(head.clone(), vec![TargetRef::Player(P1)]);
+            assert_eq!(readers(&latched, P0), (led.clone(), led.clone()), "{label}");
+            assert_eq!(
+                readers(&latched, P1),
+                (vec![], vec![]),
+                "{label}: bystander"
+            );
+        }
+        assert_eq!(
+            readers(&board(TargetFilter::Player, vec![]), P0),
+            (vec![], vec![]),
+            "target player: unlatched"
+        );
     }
 
     /// The real 4p acceptance board (dump B): a CR 114.2 emblem in the COMMAND zone
@@ -21341,6 +21374,57 @@ mod stage2_injector_tests {
             target_slots,
             "the restored dump's slots must equal what the announcement authority builds"
         );
+
+        // CR 732.2a + CR 114.2: the window enumerator publishes the command-zone emblem's
+        // `target opponent` point, the same with the prompt up and at `Priority`, and nothing for
+        // a bystander proposer.
+        use crate::analysis::decision_template::DecisionPointKind;
+        const P3: PlayerId = PlayerId(3);
+        let emblem = &state.objects[&EMBLEM];
+        assert_eq!(emblem.zone, crate::types::zones::Zone::Command);
+        assert_eq!(
+            state.stack.iter().filter(|e| e.source_id == EMBLEM).count(),
+            1,
+            "reach: one emblem entry"
+        );
+        let expected = (
+            DecisionSlot {
+                source: YieldTarget::ThisObject {
+                    source_id: EMBLEM,
+                    incarnation: Some(emblem.incarnation),
+                    trigger_description: None,
+                },
+                point: ChoicePoint::AnnouncedTarget,
+                index: 0,
+            },
+            DecisionPointKind::Targets {
+                legal_targets: vec![
+                    TargetRef::Player(P1),
+                    TargetRef::Player(P2),
+                    TargetRef::Player(P3),
+                ],
+                min_targets: 1,
+                max_targets: 1,
+                ordered: false,
+            },
+        );
+        let with_prompt = stack_pin_slots(&state, P0);
+        let targets: Vec<_> = with_prompt
+            .iter()
+            .filter(|p| matches!(p.kind, DecisionPointKind::Targets { .. }))
+            .map(|p| (p.slot.clone(), p.kind.clone()))
+            .collect();
+        assert_eq!(targets, vec![expected]);
+        let mut at_priority = state.clone();
+        at_priority.waiting_for = WaitingFor::Priority { player: P0 };
+        assert_eq!(stack_pin_slots(&at_priority, P0), with_prompt);
+        assert!(at_priority.stack.iter().all(|e| e.controller == P0));
+        for bystander in [P1, P2, P3] {
+            assert!(
+                stack_pin_slots(&at_priority, bystander).is_empty(),
+                "{bystander:?}"
+            );
+        }
     }
 
     /// CR 732.2a: the offer publishes the SET of open per-iteration choices — one point per
@@ -21370,7 +21454,7 @@ mod stage2_injector_tests {
             .find(|e| e.source_id == EMBLEM)
             .expect("reach-guard: the dump carries the emblem's trigger")
             .clone();
-        let single = bounded_cycle_pin_slots(&state, P0);
+        let single = stack_pin_slots(&state, P0);
         // Reach-guard, re-derived from the loaded board rather than from a literal: the
         // mint qualifies FOUR sources here — the CR 115.2 emblem target (541) plus three
         // shape-(B) CR 603.5 may-only sources (126, 208, 274). 126 and 208 carry 34 stack
@@ -21403,7 +21487,7 @@ mod stage2_injector_tests {
         );
 
         assert_eq!(
-            bounded_cycle_pin_slots(&state, P0),
+            stack_pin_slots(&state, P0),
             single,
             "a second entry from the SAME source is the same open choice — one published \
              point, byte-identical to the one-entry board's"
@@ -21551,7 +21635,7 @@ mod stage2_injector_tests {
 
         // The published pair also reaches the point mint as ONE `MayChoice` point.
         state.stack.push_back(positive);
-        let points = bounded_cycle_pin_slots(&state, P0);
+        let points = stack_pin_slots(&state, P0);
         assert_eq!(
             points.len(),
             1,
@@ -22337,7 +22421,6 @@ mod stage2_injector_tests {
                 }],
                 ..ShortcutDecisionSchema::default()
             },
-            crate::analysis::loop_check::OfferRoad::RecordedPeriod,
         );
     }
 

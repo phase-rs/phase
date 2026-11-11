@@ -833,7 +833,6 @@ export const loopShortcutWaitingForFactory = LoopShortcutWaitingForFactory.defin
       points: [],
       convoke_tappable_count: 0,
     },
-    road: "Ring",
   },
 }));
 
@@ -876,7 +875,6 @@ export const respondToShortcutWaitingForFactory =
         count: "WithoutEnd",
         unbounded: [{ DamageDealt: 1 }],
         win_kind: "LethalDamage",
-        road: "Ring",
       },
     },
   }));

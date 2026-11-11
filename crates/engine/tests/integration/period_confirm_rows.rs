@@ -1,7 +1,7 @@
 //! CR 732.2a: the confirmer's replay of a trace candidate, and the cover it certifies on.
 
 use engine::analysis::decision_template::{IterationCount, PinnedDecision, ReplayMode};
-use engine::analysis::loop_check::{LoopCertificate, OfferRoad, ShortcutResponse, WinKind};
+use engine::analysis::loop_check::{LoopCertificate, ShortcutResponse, WinKind};
 use engine::analysis::loop_states_equal_modulo_resources;
 use engine::analysis::resource::{
     history_covers_for_tests, FodderCoverRefusal, ObjectGrowthVerdict, RecurrenceCover,
@@ -471,7 +471,7 @@ fn an_altar_loop_growing_foods_is_offered() {
         .filter(|id| state.objects[id].name == "Food")
         .count();
     assert_eq!(foods, 1, "reach: Gravecrawler's entry made a Food");
-    assert_eq!(road(state), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }));
 }
 
 /// CR 121.1 + CR 732.2a: Phyrexian Altar ("Sacrifice a creature: Add one mana of any color.")
@@ -503,7 +503,10 @@ fn an_altar_loop_growing_foods_and_drawing_passes_the_cover() {
         );
     }
     drive_altar_offers(&mut runner, (altar, gravecrawler), 3, |_| false);
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
 }
 
 /// CR 121.1 + CR 701.17a: beside Liliana the Repentant ("Whenever another creature or
@@ -535,7 +538,10 @@ fn a_draw_after_a_mill_passes_the_cover() {
         );
     }
     drive_altar_offers(&mut runner, (altar, gravecrawler), 3, |_| false);
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
 }
 
 /// Kiki-Jiki copying Deceiver Exarch, three cycles after the first: three priority frames.
@@ -947,13 +953,6 @@ pub(crate) fn board_c_offered(member: BoardCMember) -> Option<food_chain_board::
     Some(board)
 }
 
-fn road(state: &GameState) -> Option<OfferRoad> {
-    match &state.waiting_for {
-        WaitingFor::LoopShortcut { road, .. } => Some(*road),
-        _ => None,
-    }
-}
-
 fn performance(state: &GameState) -> Option<PeriodPerformance> {
     match &state.waiting_for {
         WaitingFor::LoopShortcut { period, .. } => period.performance(),
@@ -976,9 +975,11 @@ fn board_c_members_are_offered_on_the_recorded_road_and_taken() {
         let Some(mut board) = board_c_offered(member) else {
             return;
         };
-        assert_eq!(
-            road(board.runner.state()),
-            Some(OfferRoad::RecordedPeriod),
+        assert!(
+            matches!(
+                board.runner.state().waiting_for,
+                WaitingFor::LoopShortcut { .. }
+            ),
             "{member:?}"
         );
         let before = incarnations(board.runner.state(), &[board.creature]);
@@ -1073,7 +1074,10 @@ fn kiki_jiki_is_refused_at_its_first_span_then_offered_and_taken() {
         Err(OfferRefusal::UnanswerablePrompt)
     );
     kiki_activates(&mut runner, kiki, &score);
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
     let before = tokens(runner.state(), P0);
     take_to_step_end(&mut runner, 2);
     let state = runner.state();
@@ -1434,7 +1438,10 @@ fn grand_architect_pili_pala_is_offered_only_once_pili_pala_is_blue() {
 
     let (mut runner, _, offered) = grand_architect_pili_pala(db, true);
     assert!(offered, "reach: the recolored board offers");
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
     let pool = |state: &GameState| state.players[0].mana_pool.units().count();
     let before = pool(runner.state());
     take(&mut runner, 3);
@@ -1486,7 +1493,10 @@ fn griffin_board_is_refused_at_its_first_window_and_offered_at_the_next() {
         Err(OfferRefusal::NoRecurrence)
     );
     cast_paying_with_food_chain(&mut runner, scourge, griffin);
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
     let before = incarnations(runner.state(), &[griffin, scourge]);
     take(&mut runner, 2);
     let after = incarnations(runner.state(), &[griffin, scourge]);
@@ -1599,10 +1609,9 @@ fn a_moldervine_altar_of_the_brood_period_with_one_card_left_is_offered_one_repe
         [1, 2],
         "reach: the offer's libraries"
     );
-    let WaitingFor::LoopShortcut { schema, road, .. } = &state.waiting_for else {
+    let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
         panic!("an offer");
     };
-    assert_eq!(*road, OfferRoad::RecordedPeriod);
     assert_eq!(schema.iteration_count, IterationCount::Fixed(1));
     let after = taken(state, 1);
     assert_eq!(after.players[0].library.len(), 0);
@@ -1688,7 +1697,10 @@ fn a_period_refused_for_no_axis_is_offered_once_it_nets_life() {
         refused_for_no_axis,
         "reach: the period was refused while it cost life"
     );
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
 }
 
 /// Cycles the Altar + Gravecrawler period at most `cycles` times, declining each offer `declines`
@@ -1737,7 +1749,10 @@ fn an_altar_of_the_brood_period_is_offered_and_taken() {
     let (mut runner, altar, gravecrawler) = altar_board(Some("Altar of the Brood"), db);
     let offers = drive_altar_offers(&mut runner, (altar, gravecrawler), 3, |_| false);
     let (library, certificate) = offers.last().expect("an offer");
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
     assert_eq!(certificate.unbounded, [ResourceAxis::LibraryDelta(P1)]);
     assert_eq!(certificate.win_kind, Some(WinKind::Advantage));
     take(&mut runner, 2);
@@ -1791,7 +1806,10 @@ fn an_altar_gravecrawler_period_is_offered_once_the_milled_library_is_empty() {
     assert_eq!(*library, 0);
     assert_eq!(last.unbounded, [ResourceAxis::Life(P0)]);
     assert_eq!(last.win_kind, Some(WinKind::Advantage));
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
 }
 
 /// CR 701.17b + CR 732.2c: on the Soul Warden board, a take of the offer made at P1's last card
@@ -2114,7 +2132,10 @@ fn a_sprout_swarm_ramp_up_is_offered_once_its_forests_are_spent() {
         settle(&mut runner, &|_| 0);
     }
     assert_eq!(saprolings(runner.state()), 3, "reach: each cast resolved");
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
     assert_eq!(
         performance(runner.state()),
         Some(PeriodPerformance::UsesTheStack)
@@ -2214,7 +2235,10 @@ fn a_replay_refused_for_want_of_red_mana_is_asked_again_once_food_chain_makes_re
         "reach: the green cycle was refused by its replay"
     );
     exile_for(&mut runner, ManaType::Red);
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
 }
 
 const P2: PlayerId = PlayerId(2);
@@ -2314,13 +2338,11 @@ fn bounded_recorded_offer(state: &GameState, count: u32) -> &LoopCertificate {
     let WaitingFor::LoopShortcut {
         certificate,
         schema,
-        road,
         ..
     } = &state.waiting_for
     else {
         panic!("no offer: {:?}", latest_verdict(state));
     };
-    assert_eq!(*road, OfferRoad::RecordedPeriod);
     assert_eq!(schema.iteration_count, IterationCount::Fixed(count));
     assert_eq!(schema.deliverable_capacity, count);
     assert_eq!(certificate.win_kind, Some(WinKind::LethalDamage));
@@ -2649,7 +2671,7 @@ fn a_single_player_death_trigger_on_four_seats_re_aims_at_each_seat_left() {
             payoffs.len(),
             frame,
             count,
-            Some(count),
+            Some(engine::analysis::decision_template::RepetitionBound::Measured),
             own,
             end,
         );
@@ -2780,7 +2802,7 @@ fn replacement_places(
 
 /// Asserts the offer standing in `runner` (`label`) at its frame — `stack` triggers, lives `frame`
 /// — publishes `count` with P0 winning beside its own declaration's `own`, with `bound` as its
-/// measured repetition bound where given, and that taking its suggestion at `count` ends the game
+/// repetition bound where given, and that taking its suggestion at `count` ends the game
 /// once with P0 the winner at lives `end`.
 #[allow(clippy::too_many_arguments)]
 fn assert_suggestion_wins(
@@ -2789,7 +2811,7 @@ fn assert_suggestion_wins(
     stack: usize,
     frame: [i32; 4],
     count: u32,
-    bound: Option<u32>,
+    bound: Option<engine::analysis::decision_template::RepetitionBound>,
     own: u32,
     end: [i32; 4],
 ) {
@@ -2814,7 +2836,7 @@ fn assert_suggestion_wins(
         "{label}"
     );
     if let Some(bound) = bound {
-        assert_eq!(schema.measured_repetition_bound, Some(bound), "{label}");
+        assert_eq!(schema.repetition_bound, bound, "{label}");
     }
     bounded_recorded_offer(&offered, count);
     assert_eq!(
@@ -3322,7 +3344,7 @@ fn a_zero_that_moves_when_its_controller_leaves_follows_it() {
             2,
             frame,
             count,
-            Some(count),
+            Some(engine::analysis::decision_template::RepetitionBound::Measured),
             own,
             end,
         );
@@ -3353,7 +3375,7 @@ fn a_recorded_order_a_repetition_never_asks_does_not_stop_it() {
         2,
         [21, 19, 20, 20],
         59,
-        Some(59),
+        Some(engine::analysis::decision_template::RepetitionBound::Measured),
         19,
         [80, 0, 0, 0],
     );
@@ -3395,10 +3417,14 @@ fn a_segment_its_seat_leaves_before_the_slot_resolves_there_is_dropped() {
     assert_eq!(
         (
             &schema.iteration_count,
-            schema.measured_repetition_bound,
+            schema.repetition_bound,
             *predicted_winner
         ),
-        (&IterationCount::Fixed(20), Some(20), Some(P0))
+        (
+            &IterationCount::Fixed(20),
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            Some(P0)
+        )
     );
     assert_eq!(
         declaration.as_ref().map(|own| own.replay.clone()),
@@ -3574,25 +3600,6 @@ pub(super) fn shortcut_schema(
         })
 }
 
-/// Each ingress refuses `state` for carrying a confirmed period on the ring road.
-fn assert_refused_on_reload(state: &GameState) {
-    for restored in reload_both(state) {
-        let message = restored.expect_err("a ring-road period is refused");
-        assert!(message.contains("confirmed period"), "{message}");
-    }
-}
-
-/// `state` with its offer's or proposal's road set to the ring road.
-fn on_the_ring_road(state: &GameState) -> GameState {
-    let mut state = state.clone();
-    match &mut state.waiting_for {
-        WaitingFor::LoopShortcut { road, .. } => *road = OfferRoad::Ring,
-        WaitingFor::RespondToShortcut { proposal, .. } => proposal.road = OfferRoad::Ring,
-        other => panic!("no offer or proposal: {other:?}"),
-    }
-    state
-}
-
 /// The Altar–Zulaport board standing on its bounded recorded-period offer, which carries its period.
 fn bounded_recorded_offer_with_period(db: &CardDatabase) -> GameState {
     let (mut runner, altar, gravecrawler) = altar_board(Some("Zulaport Cutthroat"), db);
@@ -3606,8 +3613,8 @@ fn bounded_recorded_offer_with_period(db: &CardDatabase) -> GameState {
     offered
 }
 
-/// `state` after the standing offer is declared at `count`, asserted to carry the offer's road and
-/// period onto the proposal.
+/// `state` after the standing offer is declared at `count`, asserted to carry the offer's period
+/// onto the proposal.
 fn proposed(state: GameState, count: u32) -> GameState {
     let mut runner = GameRunner::from_state(state);
     act(
@@ -3620,7 +3627,6 @@ fn proposed(state: GameState, count: u32) -> GameState {
     let WaitingFor::RespondToShortcut { proposal, .. } = &runner.state().waiting_for else {
         panic!("no proposal: {:?}", runner.state().waiting_for);
     };
-    assert_eq!(proposal.road, OfferRoad::RecordedPeriod);
     assert!(
         !proposal.period.is_empty(),
         "the proposal carries the period"
@@ -3650,14 +3656,81 @@ fn a_bounded_recorded_offer_and_its_proposal_survive_a_reload() {
     }
 }
 
-/// The same bounded offer, and the proposal declared against it, on the ring road: its take is the
-/// ring drain, so the period it carries is refused at both ingresses.
+/// `state` reloaded through both ingresses with `"road": stamp` spliced into the `waiting_for`
+/// carrier at the JSON pointer `carrier`, once per ingress.
+fn reload_with_road(
+    state: &GameState,
+    carrier: &str,
+    stamp: Option<&str>,
+) -> [Result<GameState, String>; 2] {
+    fn splice(value: &mut serde_json::Value, carrier: &str, stamp: &str) -> usize {
+        let here = value
+            .get_mut("waiting_for")
+            .and_then(|waiting_for| waiting_for.pointer_mut(carrier))
+            .and_then(serde_json::Value::as_object_mut)
+            .map(|carrier| carrier.insert("road".to_string(), stamp.into()))
+            .is_some();
+        usize::from(here)
+            + match value {
+                serde_json::Value::Object(object) => object
+                    .values_mut()
+                    .map(|child| splice(child, carrier, stamp))
+                    .sum(),
+                serde_json::Value::Array(array) => array
+                    .iter_mut()
+                    .map(|child| splice(child, carrier, stamp))
+                    .sum(),
+                _ => 0,
+            }
+    }
+    let mut persisted =
+        serde_json::to_value(PersistedGameState::capture(state.clone())).expect("saves");
+    let mut bare = serde_json::to_value(state).expect("saves");
+    if let Some(stamp) = stamp {
+        for saved in [&mut persisted, &mut bare] {
+            assert_eq!(
+                splice(saved, carrier, stamp),
+                1,
+                "reach: one {carrier} carrier"
+            );
+        }
+    }
+    let persisted = serde_json::from_value::<PersistedGameState>(persisted)
+        .map_err(|error| error.to_string())
+        .and_then(|saved| saved.into_game_state().map_err(|error| error.to_string()));
+    let bare = serde_json::from_value::<GameState>(bare).map_err(|error| error.to_string());
+    [persisted, bare]
+}
+
+/// CR 732.2a: a saved offer or proposal carrying a `road` key decodes as the unspliced one, and
+/// the spliced proposal's take is the take of the offer's period.
 #[test]
-fn a_bounded_offer_or_proposal_on_the_ring_road_with_a_period_is_refused_on_reload() {
+fn a_saved_offer_or_proposal_carrying_a_road_loads_and_takes_its_period() {
     let Some(db) = shared_card_db() else { return };
     let offered = bounded_recorded_offer_with_period(db);
-    assert_refused_on_reload(&on_the_ring_road(&offered));
-    assert_refused_on_reload(&on_the_ring_road(&proposed(offered, 3)));
+    let expected = serde_json::to_value(taken(&offered, 3)).expect("saves");
+    let proposal = proposed(offered.clone(), 3);
+    for stamp in [Some("Ring"), Some("RecordedPeriod"), None] {
+        for (state, carrier) in [(&offered, "/data"), (&proposal, "/data/proposal")] {
+            for restored in reload_with_road(state, carrier, stamp) {
+                let restored =
+                    restored.unwrap_or_else(|error| panic!("[{stamp:?} {carrier}] {error}"));
+                assert_eq!(
+                    restored.waiting_for, state.waiting_for,
+                    "[{stamp:?} {carrier}]"
+                );
+                if matches!(restored.waiting_for, WaitingFor::RespondToShortcut { .. }) {
+                    let mut runner = GameRunner::from_state(restored);
+                    accept(&mut runner);
+                    assert_eq!(
+                        serde_json::to_value(runner.state()).expect("saves"),
+                        expected,
+                        "[{stamp:?}]"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Whether `seat` has a play in the trace at `state`.
@@ -4572,10 +4645,14 @@ fn a_hellkite_charger_period_beside_moraug_on_three_seats_attacks_the_last_defen
     assert_eq!(
         (
             schema.iteration_count.clone(),
-            schema.measured_repetition_bound,
+            schema.repetition_bound,
             *predicted_winner
         ),
-        (IterationCount::Fixed(21), Some(21), Some(P0))
+        (
+            IterationCount::Fixed(21),
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            Some(P0)
+        )
     );
 
     let events = take(&mut runner, 21);
@@ -5945,7 +6022,10 @@ fn carried_combat_offer(state: &GameState, case: &str) -> u32 {
         ),
         "{case}"
     );
-    assert_eq!(road(state), Some(OfferRoad::RecordedPeriod), "{case}");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }),
+        "{case}"
+    );
     fixed(&count)
 }
 
@@ -6146,7 +6226,10 @@ fn carried_offer(state: &GameState, case: &str) -> (NamedSpan, OfferMoment) {
         matches!(span.source, SpanSource::Carried(_)),
         "{case}: {span:?}"
     );
-    assert_eq!(road(state), Some(OfferRoad::RecordedPeriod), "{case}");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }),
+        "{case}"
+    );
     let moment = (
         combats_begun(state),
         state.phase,
@@ -8294,7 +8377,10 @@ fn a_liliana_self_mill_period_is_offered_without_end() {
             "library {library}"
         );
     }
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
     act(&mut runner, GameAction::DeclineShortcut);
     settle(&mut runner, &|action| 2 * names(&[gravecrawler])(action));
     for cycle in 0..2 {
@@ -8504,7 +8590,7 @@ fn dockside_and_sabertooth_are_offered() {
         6,
         "reach: Dockside's entry made a Treasure per Ornithopter"
     );
-    assert_eq!(road(state), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }));
 }
 
 /// Magda, Brazen Outlaw ("Other Dwarves you control get +1/+0. / Whenever a Dwarf you control
@@ -8682,7 +8768,10 @@ fn an_altar_of_the_brood_period_resolved_all_is_offered() {
             [ResourceAxis::LibraryDelta(P1)],
             "{scope:?}"
         );
-        assert_eq!(road(state), Some(OfferRoad::RecordedPeriod), "{scope:?}");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }),
+            "{scope:?}"
+        );
     }
 }
 
@@ -8730,7 +8819,10 @@ fn a_period_whose_replay_ends_the_game_for_its_holder_is_counted() {
     ));
     assert_eq!(certificate.win_kind, Some(WinKind::LethalDamage));
     assert_eq!(certificate.win_kind_at, Some(2));
-    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::LoopShortcut { .. }
+    ));
     let events = take_recorded(runner.state_mut(), 2).events;
     assert_eq!(markers(&events).len(), 2);
     assert!(matches!(

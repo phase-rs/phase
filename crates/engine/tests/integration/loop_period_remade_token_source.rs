@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use engine::analysis::decision_template::{IterationCount, ShortcutDecisionSchema};
-use engine::analysis::loop_check::{LoopCertificate, OfferRoad, ShortcutResponse};
+use engine::analysis::loop_check::{LoopCertificate, ShortcutResponse};
 use engine::analysis::resource::{
     history_covers_for_tests, loop_states_equal_modulo_resources, CounterClass, FodderCoverRefusal,
     ObjectClass, ObjectGrowthVerdict, RecurrenceCover, ResourceAxis,
@@ -223,13 +223,11 @@ fn offer(state: &GameState) -> (&LoopCertificate, &ShortcutDecisionSchema) {
     let WaitingFor::LoopShortcut {
         certificate,
         schema,
-        road,
         ..
     } = &state.waiting_for
     else {
         panic!("no offer at {:?}", state.waiting_for);
     };
-    assert_eq!(*road, OfferRoad::RecordedPeriod);
     (certificate, schema)
 }
 
@@ -917,7 +915,14 @@ fn bats_capture_offered_and_taken(pick: fn(&[ObjectId]) -> Option<&ObjectId>) {
     assert!(tokens(&live, "Treasure").len() > 1, "{mode:?}");
     cycle(&mut live);
     let (_, schema) = offer(&live);
-    assert_eq!(schema.measured_repetition_bound, Some(bound), "{mode:?}");
+    assert_eq!(
+        (schema.repetition_bound, schema.deliverable_capacity),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            bound
+        ),
+        "{mode:?}"
+    );
 
     for (count, reference) in &references {
         let mut taken = live.clone();
@@ -972,7 +977,13 @@ fn a_take_of_the_bats_capture_keeps_each_seat_that_leaves_in_an_elided_repetitio
     let mut offered = in_mode(&board, LoopDetectionMode::Interactive);
     treasure_cycle(&mut offered, &answers);
     let (_, schema) = offer(&offered);
-    assert_eq!(schema.measured_repetition_bound, Some(BOUND));
+    assert_eq!(
+        (schema.repetition_bound, schema.deliverable_capacity),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            BOUND
+        )
+    );
     let life = |state: &GameState, seat: PlayerId| state.players[seat.0 as usize].life;
     assert_eq!((life(&offered, P2), life(&offered, P3)), (23, 32));
 
@@ -1318,8 +1329,11 @@ fn two_treasures_sacrificed_before_the_stack_empties_are_offered_and_taken() {
     cycle(&mut reference);
     let (_, schema) = offer(&live);
     assert_eq!(
-        schema.measured_repetition_bound,
-        Some(cycles_to_the_last_loss(&live, 4)),
+        (schema.repetition_bound, schema.deliverable_capacity),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            cycles_to_the_last_loss(&live, 4)
+        ),
         "{mode:?}"
     );
     let before = reading(&reference, smaug);
@@ -1428,7 +1442,14 @@ fn a_treasure_remade_after_paying_for_a_cast_is_offered_and_taken(payment: CastP
         [ResourceAxis::Life(PlayerId(1))],
         "{mode:?}"
     );
-    assert_eq!(schema.measured_repetition_bound, Some(19), "{mode:?}");
+    assert_eq!(
+        (schema.repetition_bound, schema.deliverable_capacity),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            19
+        ),
+        "{mode:?}"
+    );
     take(&mut live, 3);
     assert_eq!(
         reading(&live, trader),
@@ -1560,8 +1581,11 @@ fn the_chained_smaug_play_is_offered_under_its_triggers_and_taken() {
         "{context}"
     );
     assert_eq!(
-        schema.measured_repetition_bound,
-        Some(cycles_to_the_last_loss(&live, 2)),
+        (schema.repetition_bound, schema.deliverable_capacity),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            cycles_to_the_last_loss(&live, 2)
+        ),
         "{context}"
     );
     assert_eq!(cause(&live), NamingCause::Repeat, "{context}");
@@ -2166,8 +2190,11 @@ fn a_shield_left_unused_each_period_keeps_its_offer_and_take() {
         "{context}"
     );
     assert_eq!(
-        schema.measured_repetition_bound,
-        Some(cycles_to_the_last_loss(&live, 1)),
+        (schema.repetition_bound, schema.deliverable_capacity),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            cycles_to_the_last_loss(&live, 1)
+        ),
         "{context}"
     );
     assert_eq!(floating(&live), [SHIELD], "{context}");
@@ -2336,8 +2363,11 @@ fn a_sliver_period_beside_floating_effects_is_offered_and_taken(
         "{context}"
     );
     assert_eq!(
-        schema.measured_repetition_bound,
-        Some(cycles_to_the_last_loss(&live, per_cycle)),
+        (schema.repetition_bound, schema.deliverable_capacity),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            cycles_to_the_last_loss(&live, per_cycle)
+        ),
         "{context}"
     );
     assert_eq!(floating(&live), stored(0), "{context}");

@@ -1602,7 +1602,7 @@ mod tests {
     use crate::ai_support::{candidate_actions, structurally_valid_named_choice_answer as hatch};
     use crate::analysis::decision_template::IterationCount;
     use crate::analysis::loop_check::{
-        CountedTake, OfferRoad, ShortcutProposal, ShortcutResponse, UnperformableCause,
+        CountedTake, ShortcutProposal, ShortcutResponse, UnperformableCause,
     };
     use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::layers::evaluate_layers;
@@ -3564,7 +3564,6 @@ mod tests {
                     shortened_by: None,
                     published_declaration: None,
                     leading_aims: Vec::new(),
-                    road: OfferRoad::Ring,
                     counted_take: Default::default(),
                     period: Default::default(),
                 },
@@ -3640,7 +3639,6 @@ mod tests {
                     shortened_by: None,
                     published_declaration: None,
                     leading_aims: Vec::new(),
-                    road: OfferRoad::Ring,
                     counted_take,
                     period: Default::default(),
                 },

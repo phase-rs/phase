@@ -10,7 +10,7 @@ use engine::analysis::decision_template::{
     declaration_conforms, validate_recorded_answers, AimContext, ChoicePoint, DecisionSlot,
     DecisionTemplate, IterationCount, MayChoiceOption, PinValidation, PinnedDecision, TargetPin,
 };
-use engine::analysis::loop_check::{OfferRoad, ShortcutResponse};
+use engine::analysis::loop_check::ShortcutResponse;
 use engine::analysis::resource::{loop_detect_cost, reset_loop_detect_cost, LoopDetectCost};
 use engine::game::scenario::{GameRunner, P0};
 use engine::game::NamingCause;
@@ -304,7 +304,7 @@ fn offered(board: Board) -> Option<(Drive, Vec<Apply>)> {
     assert!(
         matches!(
             state.waiting_for,
-            WaitingFor::LoopShortcut { proposer, road: OfferRoad::RecordedPeriod, .. }
+            WaitingFor::LoopShortcut { proposer, .. }
                 if proposer == P0
         ),
         "{board:?}: the window after {windows} recurrence windows is a recorded-period offer to \
@@ -394,13 +394,7 @@ fn a_trigger_driven_period_is_offered_at_its_first_recurrence_window_and_taken()
     .into_game_state()
     .expect("the live offer restores");
     assert!(
-        matches!(
-            restored.waiting_for,
-            WaitingFor::LoopShortcut {
-                road: OfferRoad::RecordedPeriod,
-                ..
-            }
-        ),
+        matches!(restored.waiting_for, WaitingFor::LoopShortcut { .. }),
         "live control: a priority-driven recorded-period offer restores as one"
     );
 }
@@ -449,7 +443,7 @@ fn an_accumulating_stack_beneath_the_recurrence_is_offered_and_taken() {
     assert!(
         matches!(
             state.waiting_for,
-            WaitingFor::LoopShortcut { proposer, road: OfferRoad::RecordedPeriod, .. }
+            WaitingFor::LoopShortcut { proposer, .. }
                 if proposer == P0
         ),
         "the offer is a recorded-period offer to P0"
@@ -947,7 +941,6 @@ fn public_recorded_period_replay_rejects_later_life_counter_overflow_atomically(
             &control_offer.waiting_for,
             WaitingFor::LoopShortcut {
                 proposer,
-                road: OfferRoad::RecordedPeriod,
                 period,
                 ..
             } if *proposer == P0 && !period.is_empty()
@@ -986,7 +979,6 @@ fn public_recorded_period_replay_rejects_later_life_counter_overflow_atomically(
         matches!(
             &hostile_offer.waiting_for,
             WaitingFor::LoopShortcut {
-                road: OfferRoad::RecordedPeriod,
                 period,
                 ..
             } if !period.is_empty()
@@ -1166,6 +1158,23 @@ fn a_recorded_offers_may_is_fixed_at_the_interaction_ingress() {
     let Some((drive, _)) = offered(Board::B) else {
         return;
     };
+    assert_recorded_mays_are_fixed_at_the_interaction_ingress(drive);
+}
+
+/// CR 732.2a + CR 603.5: Soul's Attendant's "you may gain 1 life", outside Board B's
+/// recurrence, is stated as the confirmed period's answer at the interaction ingress, and a pin
+/// against it is refused.
+#[test]
+fn a_recorded_may_outside_the_recurrence_is_fixed_at_the_interaction_ingress() {
+    let Some((drive, _)) = offered(Board::BAttendant) else {
+        return;
+    };
+    assert!(
+        attendant_answers(drive.state())
+            .iter()
+            .any(|(_, take)| *take == MayChoiceOption::Take),
+        "reach guard: the period recorded Soul's Attendant's taken \"may\""
+    );
     assert_recorded_mays_are_fixed_at_the_interaction_ingress(drive);
 }
 

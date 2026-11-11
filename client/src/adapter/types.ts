@@ -3143,7 +3143,7 @@ export type WaitingFor =
   | { type: "ResolutionOptionalPaymentChoice"; data: { player: PlayerId; source_id: ObjectId; costs: Array<{ index: number; cost: SerializedAbilityCost }> } }
   | { type: "PairChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[] } }
   | { type: "OpponentMayChoice"; data: { player: PlayerId; decision_subject_id?: ObjectId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
-  | { type: "LoopShortcut"; data: { proposer: PlayerId; predicted_winner: PlayerId | null; certificate: LoopCertificate; schema: ShortcutDecisionSchema; road: OfferRoad } }
+  | { type: "LoopShortcut"; data: { proposer: PlayerId; predicted_winner: PlayerId | null; certificate: LoopCertificate; schema: ShortcutDecisionSchema } }
   | { type: "RespondToShortcut"; data: { player: PlayerId; remaining_players?: PlayerId[]; proposal: ShortcutProposal } }
   | { type: "PrecastCopyShortcutOffer"; data: { proposer: PlayerId; epoch: number; route_count: number } }
   | { type: "RespondToPrecastCopyShortcut"; data: { player: PlayerId; epoch: number; breakpoint_ids?: number[]; remaining_players?: PlayerId[] } }
@@ -4389,9 +4389,6 @@ export type DecisionSource =
  */
 export type DecisionTemplate = Record<string, unknown>;
 
-/** Mirrors `engine::analysis::loop_check::OfferRoad`: which producer minted a loop-shortcut offer. */
-export type OfferRoad = "Ring" | "RecordedPeriod";
-
 /**
  * Mirrors `engine::analysis::loop_check::ShortcutProposal`, less the optional fields the frontend
  * never reads. `shortened_by` is the responder whose named place is the proposal's current ending
@@ -4408,7 +4405,6 @@ export interface ShortcutProposal {
   win_kind?: WinKind;
   win_kind_at?: number;
   shortened_by?: PlayerId;
-  road: OfferRoad;
 }
 
 /**

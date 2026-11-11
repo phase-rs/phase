@@ -403,24 +403,17 @@ fn printed_energy_activation_period_reaches_the_recorded_offer_and_replays_each_
     let mut offered_after = 0;
     for cycle in 1..=3 {
         energy_activation_period(&mut control, line, index);
-        if let WaitingFor::LoopShortcut {
-            road,
-            schema,
-            period,
-            ..
-        } = &control.waiting_for
-        {
-            assert_eq!(
-                *road,
-                engine::analysis::loop_check::OfferRoad::RecordedPeriod
-            );
+        if let WaitingFor::LoopShortcut { schema, period, .. } = &control.waiting_for {
             assert!(
                 !period.is_empty(),
                 "the offer must carry the confirmed period"
             );
             assert_eq!(
-                schema.measured_repetition_bound,
-                Some((BANKED_ENERGY - 3 * cycle) / 3),
+                (schema.repetition_bound, schema.deliverable_capacity),
+                (
+                    engine::analysis::decision_template::RepetitionBound::Measured,
+                    (BANKED_ENERGY - 3 * cycle) / 3
+                ),
                 "the counting replay bounds the spend by the reserve left at the offer"
             );
             offered_after = cycle;
@@ -531,25 +524,16 @@ fn printed_refunding_energy_period_replays_the_journal_at_the_accepted_take() {
             break;
         }
     }
-    let WaitingFor::LoopShortcut {
-        road,
-        schema,
-        period,
-        ..
-    } = &state.waiting_for
-    else {
+    let WaitingFor::LoopShortcut { schema, period, .. } = &state.waiting_for else {
         panic!(
             "the refunding printed period must reach its offer: {:?}",
             state.waiting_for
         );
     };
-    assert_eq!(
-        *road,
-        engine::analysis::loop_check::OfferRoad::RecordedPeriod
-    );
     assert!(!period.is_empty());
     assert_eq!(
-        schema.measured_repetition_bound, None,
+        schema.repetition_bound,
+        engine::analysis::decision_template::RepetitionBound::Unmeasured,
         "reach guard: refunds leave no net spend bound on this offer"
     );
     let journal = state.players[P0.0 as usize].energy_paid_or_lost_this_turn;
@@ -998,14 +982,14 @@ fn interactive_offer_separates_priority_proposer_from_predicted_winner() {
         (
             *proposer,
             schema.iteration_count.clone(),
-            schema.measured_repetition_bound,
+            schema.repetition_bound,
             *predicted_winner,
             seat_lives(runner.state()),
         ),
         (
             P1,
             IterationCount::Fixed(18),
-            Some(19),
+            engine::analysis::decision_template::RepetitionBound::Measured,
             None,
             vec![(P0, 26), (P1, 19)],
         )
@@ -1354,7 +1338,6 @@ fn loop_shortcut_acting_player_reads_proposer() {
         certificate: cert.clone(),
         schema: ShortcutDecisionSchema::default(),
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -1364,7 +1347,6 @@ fn loop_shortcut_acting_player_reads_proposer() {
         certificate: cert.clone(),
         schema: ShortcutDecisionSchema::default(),
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -1385,7 +1367,6 @@ fn loop_shortcut_acting_player_reads_proposer() {
         shortened_by: None,
         published_declaration: None,
         leading_aims: Vec::new(),
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -1409,7 +1390,6 @@ fn loop_shortcut_acting_player_reads_proposer() {
         certificate: cert.clone(),
         schema: ShortcutDecisionSchema::default(),
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -1782,7 +1762,7 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
         iteration_count: IterationCount::Fixed(1),
         // This producer measured no CR 704 threshold — `Default` carries the absence and a
         // capacity at the global cap.
-        measured_repetition_bound: None,
+        repetition_bound: engine::analysis::decision_template::RepetitionBound::Unmeasured,
         deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
         points: vec![DecisionPoint {
             slot: slot.clone(),
@@ -1818,7 +1798,6 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
         certificate: synthetic_lethal_cert(),
         schema: schema.clone(),
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -1842,7 +1821,6 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
         certificate: synthetic_lethal_cert(),
         schema,
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -3571,7 +3549,7 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
         iteration_count: IterationCount::Fixed(1),
         // This producer measured no CR 704 threshold — `Default` carries the absence and a
         // capacity at the global cap.
-        measured_repetition_bound: None,
+        repetition_bound: engine::analysis::decision_template::RepetitionBound::Unmeasured,
         deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
         points: vec![DecisionPoint {
             slot,
@@ -3603,7 +3581,6 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
         certificate: cert,
         schema,
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -3738,7 +3715,6 @@ fn respond_to_shortcut_template_redacts_a_hidden_pin_for_non_proposers() {
                 shortened_by: None,
                 published_declaration: None,
                 leading_aims: Vec::new(),
-                road: engine::analysis::loop_check::OfferRoad::Ring,
                 counted_take: Default::default(),
                 period: Default::default(),
             },
@@ -5218,7 +5194,10 @@ fn a_wire_zero_shortcut_bound_fails_the_load_and_a_wire_five_does_not() {
     let WaitingFor::LoopShortcut { schema, .. } = &five.waiting_for else {
         panic!("the restored capture must still be parked on its offer");
     };
-    assert_eq!(schema.measured_repetition_bound, Some(5));
+    assert_eq!(
+        schema.repetition_bound,
+        engine::analysis::decision_template::RepetitionBound::Measured
+    );
     assert_eq!(schema.deliverable_capacity, 5);
     assert!(schema.is_bounded());
 
@@ -5236,7 +5215,8 @@ fn a_wire_zero_shortcut_bound_fails_the_load_and_a_wire_five_does_not() {
         panic!("the restored capture must still be parked on its offer");
     };
     assert_eq!(
-        schema.measured_repetition_bound, None,
+        schema.repetition_bound,
+        engine::analysis::decision_template::RepetitionBound::Unmeasured,
         "the budget was the OLD encoding's 'measured nothing', so nothing was measured"
     );
     assert!(!schema.is_bounded());
@@ -5282,177 +5262,11 @@ fn a_wire_zero_shortcut_bound_fails_the_load_and_a_wire_five_does_not() {
     let WaitingFor::LoopShortcut { schema, .. } = &bare_five.waiting_for else {
         panic!("the restored capture must still be parked on its offer");
     };
-    assert_eq!(schema.measured_repetition_bound, Some(5));
-    assert_eq!(schema.deliverable_capacity, 5);
-}
-
-/// R0e — a persisted `LoopShortcut` offer on the ring road carrying a confirmed period fails the
-/// load whatever its bound; the recorded road's offer carrying its period loads, bounded or not. The period is a production-serialized value taken from a live
-/// offer.
-#[test]
-fn a_wire_ring_road_offer_carrying_a_period_fails_the_load() {
-    let Some(db) = super::support::shared_card_db() else {
-        return;
-    };
-    let mut rig = super::loop_shortcut_mana_engine::setup(
-        true,
-        engine::types::game_state::LoopDetectionMode::Interactive,
-        db,
-    );
-    let mana = super::loop_shortcut_mana_engine::mana_ability_index(rig.runner.state(), rig.basalt)
-        .expect("Basalt publishes its mana ability");
-    let untap =
-        super::loop_shortcut_mana_engine::untap_ability_index(rig.runner.state(), rig.basalt)
-            .expect("Basalt publishes its untap ability");
-    super::loop_shortcut_mana_engine::drive_one_period(&mut rig, mana, untap);
-    let WaitingFor::LoopShortcut { period, .. } = &rig.runner.state().waiting_for else {
-        panic!(
-            "REACH-GUARD: the mana engine offers, got {:?}",
-            rig.runner.state().waiting_for
-        );
-    };
-    let donor_period = serde_json::to_value(period).expect("a period serializes");
-    assert!(
-        donor_period["items"]
-            .as_array()
-            .is_some_and(|items| !items.is_empty()),
-        "REACH-GUARD: the donated period is non-empty, or every period arm is vacuous"
-    );
-
-    let json = gunzip_dump(include_bytes!(
-        "../fixtures/tenacity_exquisite_blood_4p.json.gz"
-    ));
-    let envelope: serde_json::Value =
-        serde_json::from_str(&json).expect("dump envelope parses as JSON");
-    let base = envelope["gameState"].clone();
     assert_eq!(
-        base["waiting_for"]["type"].as_str(),
-        Some("LoopShortcut"),
-        "the invariant is scoped to the one variant that carries a schema AND a period"
+        schema.repetition_bound,
+        engine::analysis::decision_template::RepetitionBound::Measured
     );
-    assert!(
-        base["waiting_for"]["data"]["schema"]
-            .get("deliverable_capacity")
-            .is_some()
-            && base["waiting_for"]["data"].get("period").is_some(),
-        "the save carries a bound and a period, so each splice REPLACES the key it tests"
-    );
-
-    let spliced = |mut v: serde_json::Value,
-                   road: &str,
-                   bound: Option<u64>,
-                   period: Option<&serde_json::Value>| {
-        let data = v["waiting_for"]["data"]
-            .as_object_mut()
-            .expect("the offer carries its data");
-        data.remove("period");
-        let schema = data["schema"]
-            .as_object_mut()
-            .expect("the offer carries a schema object");
-        schema.remove("measured_repetition_bound");
-        schema.remove("deliverable_capacity");
-        v["waiting_for"]["data"]["road"] = serde_json::json!(road);
-        if let Some(n) = bound {
-            v["waiting_for"]["data"]["schema"]["max_iterations"] = serde_json::json!(n);
-        }
-        if let Some(period) = period {
-            v["waiting_for"]["data"]["period"] = period.clone();
-        }
-        v
-    };
-    let decode_persisted = |value: serde_json::Value| {
-        serde_json::from_value::<engine::types::game_state::PersistedGameState>(value)
-    };
-
-    // ── A1 — THE GUARD FIRES on a bounded ring offer.
-    let message = decode_persisted(spliced(base.clone(), "Ring", Some(5), Some(&donor_period)))
-        .expect_err("a ring offer carrying a confirmed period must fail the load")
-        .to_string();
-    assert!(
-        message.contains("ring road carries a confirmed period"),
-        "the rejection must NAME the invariant it enforces and must not be either sibling zero \
-         guard firing instead, got: {message}"
-    );
-
-    // ── A6 — ORDERING PROBE: a legacy zero migrates to a measured zero, so the zero check must
-    // keep answering first.
-    let message = decode_persisted(spliced(base.clone(), "Ring", Some(0), Some(&donor_period)))
-        .expect_err("a zero bound must still fail the load when a period rides with it")
-        .to_string();
-    assert!(
-        message.contains("deliverable_capacity 0"),
-        "ORDERING: hoisting the period check above the zero-bound check relabels a corrupt zero \
-         with the wrong invariant, got: {message}"
-    );
-
-    // ── A2 — THE PERIOD CONJUNCT: a bounded ring offer with no period is the bounded mint.
-    assert!(
-        decode_persisted(spliced(base.clone(), "Ring", Some(5), None)).is_ok(),
-        "a narrowed bound with no period is exactly what the bounded mint publishes"
-    );
-
-    // ── A3 — THE ROAD, NOT THE BOUND, keys the refusal.
-    assert!(
-        decode_persisted(spliced(base.clone(), "Ring", None, Some(&donor_period))).is_err(),
-        "an unbounded ring offer carrying a period routes away from the drain too"
-    );
-    for bound in [None, Some(5)] {
-        assert!(
-            decode_persisted(spliced(
-                base.clone(),
-                "RecordedPeriod",
-                bound,
-                Some(&donor_period)
-            ))
-            .is_ok(),
-            "a recorded offer carrying its period must load, bound {bound:?}"
-        );
-    }
-
-    // ── A4 — ANY SEAT: the take routes on the period whoever made its plays.
-    let foreign_period = {
-        let mut period = donor_period.clone();
-        for item in period["items"]
-            .as_array_mut()
-            .expect("a period lists its items")
-        {
-            item["seat"] = serde_json::json!(1);
-        }
-        period
-    };
-    assert!(
-        decode_persisted(spliced(
-            base.clone(),
-            "Ring",
-            Some(5),
-            Some(&foreign_period)
-        ))
-        .is_err(),
-        "a period of another seat routes the agreed cycles away from the drain too"
-    );
-
-    // ── A5 — THE OTHER GUARDED INGRESS: `GameStateDecode::decode` through
-    // `impl Deserialize for GameState`, on the same save's bare state.
-    assert!(
-        serde_json::from_value::<GameState>(spliced(
-            base.clone(),
-            "Ring",
-            Some(5),
-            Some(&donor_period)
-        ))
-        .is_err(),
-        "the bare ingress refuses the pair too"
-    );
-    assert!(
-        serde_json::from_value::<GameState>(spliced(
-            base,
-            "RecordedPeriod",
-            Some(5),
-            Some(&donor_period)
-        ))
-        .is_ok(),
-        "and loads the bounded recorded offer carrying its period"
-    );
+    assert_eq!(schema.deliverable_capacity, 5);
 }
 
 /// Opponents the ENGINE considers living. `Player::is_eliminated` is the authority the
@@ -5560,7 +5374,10 @@ fn committed_saves_decode_to_the_boundedness_verdict_their_raw_json_states() {
         let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
             panic!("[{label}] the save restores at its offer");
         };
-        assert_eq!(schema.measured_repetition_bound, Some(measured));
+        assert_eq!(
+            schema.repetition_bound,
+            engine::analysis::decision_template::RepetitionBound::Measured
+        );
         assert!(schema.is_bounded(), "[{label}] and the verdict is BOUNDED");
         assert_eq!(
             raw_schema["deliverable_capacity"].as_u64(),
@@ -5598,7 +5415,11 @@ fn committed_saves_decode_to_the_boundedness_verdict_their_raw_json_states() {
         let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
             panic!("[{label}] the tenacity save restores at its offer");
         };
-        assert_eq!(schema.measured_repetition_bound, None, "[{label}]");
+        assert_eq!(
+            schema.repetition_bound,
+            engine::analysis::decision_template::RepetitionBound::Unmeasured,
+            "[{label}]"
+        );
         assert!(!schema.is_bounded(), "[{label}]");
         assert_eq!(schema.deliverable_capacity, mirror, "[{label}]");
         // A restored save may carry ANY suggestion against ANY capacity: agreement is an
@@ -5744,181 +5565,15 @@ fn dump_drive_one_beat(
         .map_err(|e| format!("apply err ({action:?}): {e:?}"))
 }
 
-/// PR-7 Phase 5a — CR 732.2a per-iteration pin enumeration, on a REAL 4p board.
-///
-/// `bounded_cycle_pin_slots` is the single authority for the choice slots a bounded cycle
-/// offer must publish. Dump B is the acceptance population: obj **541** is a CR 114.2
-/// emblem (command zone, "both owned and controlled by that player") whose triggered
-/// ability drains `target opponent`, i.e. the
-/// `Typed{type_filters: [], controller: Opponent, properties: []}` player shape.
-///
-/// **TWO ARMS, and the pairing is the whole point.** The dump ships with the prompt UP
-/// (`TriggerTargetSelection` carrying already-materialized `legal_targets`), so arm ⓐ alone
-/// would pass against a prompt-READING implementation — which returns ZERO slots at the
-/// real offer beat, where `waiting_for` is `Priority`. Arm ⓑ is the identical state with
-/// exactly one field reassigned.
-///
-/// REVERT-PROBES (both must flip):
-/// * ⓘ narrow the AST predicate so `Typed{[], Opponent, []}` is rejected ⇒ BOTH arms return
-///   zero ⇒ FAILS.
-/// * ⓙ re-implement the enumerator to read `state.waiting_for`'s
-///   `target_slots[..].legal_targets` ⇒ arm ⓐ still passes, arm ⓑ returns zero ⇒ FAILS.
-/// * ⓐ' delete the `entry.controller != proposer` filter ⇒ the bystander-proposer
-///   assertion FAILS. (On THIS board every one of the 152 stack entries is P0-controlled —
-///   measured — so the honest form of that probe is a bystander proposer, not a rising
-///   count for P0.)
-///
-/// MUST-NOT-FLIP: `bounded_cycle_pin_slots(..).is_empty()` on the shipped
-/// `b3_materialize_stop_short` offer board — asserted, not assumed. That zero is the
-/// byte-identity pin for every shipped `Fixed(N)` drive, and pairing it with dump B's
-/// non-zero in the SAME row proves the instrument returns both values.
+/// CR 732.2a: the untargeted `each opponent loses 1 life` drain reifies no per-iteration player
+/// choice, so its real offer publishes no decision point.
 #[test]
-fn bounded_cycle_pin_slots_enumerates_the_emblem_slot() {
-    use engine::game::engine::bounded_cycle_pin_slots;
-    use engine::types::zones::Zone;
-
-    const EMBLEM: ObjectId = ObjectId(541);
-    const P3: PlayerId = PlayerId(3);
-
-    let mut state = restore_dump(&gunzip_dump(include_bytes!(
-        "../fixtures/dellian_emblem_conqueror_4p.json.gz"
-    )));
-
-    // ── reach guards, all derived from the loaded board, none from the predicate ──
-    let emblem = state
-        .objects
-        .get(&EMBLEM)
-        .expect("reach-guard: dump B carries the emblem object");
-    assert_eq!(
-        emblem.zone,
-        Zone::Command,
-        "reach-guard: CR 114.2 puts the emblem in the command zone — the whole reason this \
-         row exists (a battlefield-only slot builder would be untested by it)"
-    );
-    let emblem_incarnation = emblem.incarnation;
-    let emblem_entries = state.stack.iter().filter(|e| e.source_id == EMBLEM).count();
-    assert_eq!(
-        emblem_entries, 1,
-        "reach-guard, measured off the loaded 152-deep stack: the emblem has exactly one \
-         live entry here, so this row's COUNT carries no claim about the per-SOURCE dedupe \
-         — that is \
-         `bounded_cycle_pin_slots_publishes_one_point_per_source_not_per_entry`'s job"
-    );
-    assert_eq!(
-        engine_live_opponents(&state, P0),
-        vec![P1, P2, P3],
-        "reach-guard: three living opponents, so the per-iteration choice is REAL"
-    );
-
-    let expected_slot = DecisionSlot {
-        source: YieldTarget::ThisObject {
-            source_id: EMBLEM,
-            incarnation: Some(emblem_incarnation),
-            trigger_description: None,
-        },
-        point: ChoicePoint::AnnouncedTarget,
-        index: 0,
-    };
-    let expected_legal = vec![
-        TargetRef::Player(P1),
-        TargetRef::Player(P2),
-        TargetRef::Player(P3),
-    ];
-
-    // ── arm ⓐ: the shipped board, prompt UP ──
-    assert!(
-        matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. }),
-        "arm ⓐ precondition: the dump ships AT the prompt; got {:?}",
-        state.waiting_for
-    );
-    let with_prompt = bounded_cycle_pin_slots(&state, P0);
-    // The CR 115.2 TARGETS half — this row's subject. Filtered rather than counted whole
-    // because the mint also admits shape (B) (may-only, no announcement choice), whose
-    // points are asserted separately below; before shape (B) existed the two coincided.
-    let targets: Vec<_> = with_prompt
-        .iter()
-        .filter(|p| matches!(p.kind, DecisionPointKind::Targets { .. }))
-        .collect();
-    assert_eq!(
-        targets.len(),
-        emblem_entries,
-        "one TARGETS point per qualifying SOURCE; on this board that count coincides with \
-         the emblem's single entry, which is asserted above rather than assumed"
-    );
-    for point in &targets {
-        assert_eq!(
-            point.slot, expected_slot,
-            "the slot names the CR 114.2 command-zone emblem at its CR 400.7 incarnation"
-        );
-        assert_eq!(
-            point.kind,
-            DecisionPointKind::Targets {
-                legal_targets: expected_legal.clone(),
-                min_targets: 1,
-                max_targets: 1,
-                ordered: false,
-            },
-            "the legal set is `find_legal_targets`' native output (CR 115.2), not a \
-             declaration echo"
-        );
-    }
-    // ── the shape-(B) half, measured on the SAME board rather than asserted elsewhere ──
-    // CR 603.5: three P0-controlled optional no-target triggers (sources 126, 208, 274)
-    // publish a `MayChoice` gate each. 126 and 208 carry 34 stack entries apiece here, so
-    // this count is ALSO the per-source dedupe on a real board: without it the shipped
-    // dump would publish 69 may points, not 3.
-    let may_sources: Vec<_> = with_prompt
-        .iter()
-        .filter(|p| p.kind == DecisionPointKind::MayChoice)
-        .map(|p| match &p.slot.source {
-            YieldTarget::ThisObject { source_id, .. } => *source_id,
-            other => panic!("a mint slot names an object source; got {other:?}"),
-        })
-        .collect();
-    assert_eq!(
-        may_sources,
-        vec![ObjectId(126), ObjectId(208), ObjectId(274)],
-        "CR 603.5: the may-only (shape (B)) sources this board publishes, deduped per \
-         SOURCE across their 34/34/1 stack entries"
-    );
-    for src in [ObjectId(126), ObjectId(208)] {
-        assert!(
-            state.stack.iter().filter(|e| e.source_id == src).count() > 1,
-            "reach-guard: {src:?} must carry MORE than one entry, or the dedupe assertion \
-             above is vacuous"
-        );
-    }
-
-    // ── arm ⓑ: the SAME state at the real offer beat — one field reassigned ──
-    state.waiting_for = WaitingFor::Priority { player: P0 };
-    assert_eq!(
-        bounded_cycle_pin_slots(&state, P0),
-        with_prompt,
-        "arm ⓑ: byte-for-byte the same slot set with NO prompt to read. Both production \
-         call sites run at `WaitingFor::Priority`, so an implementation that reads \
-         `target_slots[..].legal_targets` publishes nothing when it matters"
-    );
-
-    // ── ⓐ': a bystander proposer specifies none of these choices (CR 732.2a) ──
-    assert!(
-        state.stack.iter().all(|e| e.controller == P0),
-        "measured: every dump-B stack entry is P0-controlled, so the controller filter is \
-         probed from the PROPOSER side"
-    );
-    for bystander in [P1, P2, P3] {
-        assert!(
-            bounded_cycle_pin_slots(&state, bystander).is_empty(),
-            "a bystander ({bystander:?}) controls none of these entries"
-        );
-    }
-
-    // ── must-NOT-flip: the shipped Fixed(N) drive board publishes NOTHING ──
+fn the_untargeted_drain_offer_publishes_no_decision_point() {
     let (shipped, _l0, _cleric) = reach_2p_optional_drain_offer();
-    assert!(
-        bounded_cycle_pin_slots(shipped.state(), P0).is_empty(),
-        "the untargeted `each opponent loses 1 life` drain reifies no per-iteration player \
-         choice — every shipped Fixed(N) drive must stay byte-identical"
-    );
+    let WaitingFor::LoopShortcut { schema, .. } = &shipped.state().waiting_for else {
+        unreachable!("reach_2p_optional_drain_offer stands on the offer")
+    };
+    assert!(schema.points.is_empty(), "{:?}", schema.points);
 }
 
 /// Phase 1b crown-safety row: a window that crowns must still crown after the pause-retention
@@ -6053,7 +5708,7 @@ fn template_none_against_a_pin_consuming_schema_falls_back_to_manual_play() {
         suggested_declaration: None,
         leading_aims: Vec::new(),
         iteration_count: IterationCount::Fixed(1),
-        measured_repetition_bound: None,
+        repetition_bound: engine::analysis::decision_template::RepetitionBound::Unmeasured,
         deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
         points: vec![DecisionPoint {
             slot: DecisionSlot::first(source, ChoicePoint::AnnouncedTarget),
@@ -6076,7 +5731,6 @@ fn template_none_against_a_pin_consuming_schema_falls_back_to_manual_play() {
                 certificate: synthetic_lethal_cert(),
                 schema: schema.clone(),
                 declaration: None,
-                road: engine::analysis::loop_check::OfferRoad::Ring,
                 counted_take: Default::default(),
                 period,
             };
@@ -8025,7 +7679,6 @@ fn bounded_offer_parts(
             certificate,
             schema,
             declaration: _,
-            road: _,
             counted_take: _,
             period: _,
         } => (*proposer, certificate, schema),
@@ -8174,8 +7827,8 @@ fn dina_untargeted_drain_4p_offers_at_three_live_opponents() {
         i64::from(crate::fantastic_four_bounded_loop::MAX_SHORTCUT_CYCLES_MIRROR),
     );
     assert_eq!(
-        schema.measured_repetition_bound.map(i64::from),
-        Some(expected_bound),
+        i64::from(schema.deliverable_capacity),
+        expected_bound,
         "CR 704.5a: the published bound spans the WHOLE cascade this period drives — the last \
          repetition at which a living seat crosses, not the first. Recomputed here from the \
          offer-beat board {losses:?} at beat {beat}"
@@ -8211,7 +7864,7 @@ fn dina_untargeted_drain_4p_offers_at_three_live_opponents() {
         schema.is_bounded(),
         "the whole claim of this producer is that it MEASURED a repetition threshold; \
          measured bound = {:?}",
-        schema.measured_repetition_bound
+        schema.repetition_bound
     );
 
     // ── siblings: nothing terminal happened, and no unbounded mark was written ──
@@ -8488,48 +8141,11 @@ fn multiplayer_pure_life_drain_offers_at_three_and_four_players() {
              {beat}"
         );
 
-        // The bound, RECOMPUTED from the offer-beat board.
-        let strict: Vec<i64> = state
-            .players
-            .iter()
-            .filter(|p| !p.is_eliminated)
-            .filter_map(|p| {
-                let loss = -per_cycle.delta.life.get(&p.id).copied().unwrap_or(0);
-                (loss > 0).then(|| (p.life as i64 - 1) / loss)
-            })
-            .collect();
-        assert!(
-            !strict.is_empty(),
-            "{seats}p: at least one seat is losing life, asserted above"
-        );
-        let proposer_strict = {
-            let loss = -per_cycle.delta.life.get(&proposer).copied().unwrap_or(0);
-            let life = state
-                .players
-                .iter()
-                .find(|p| p.id == proposer)
-                .expect("the proposer is on the board")
-                .life as i64;
-            (loss > 0).then(|| (life - 1) / loss)
-        };
-        let expected_bound = crate::loop_shortcut_drain_boards::cascade_count_from_strict(
-            &strict,
-            proposer_strict,
-            i64::from(crate::fantastic_four_bounded_loop::MAX_SHORTCUT_CYCLES_MIRROR),
-        );
-        assert_eq!(
-            schema.measured_repetition_bound.map(i64::from),
-            Some(expected_bound),
-            "{seats}p: CR 704.5a — the published bound spans the whole cascade: the LAST \
-             repetition at which a living seat crosses. The staggered life totals are what make \
-             that a different number from the first crossing; recomputed here from the \
-             offer-beat board"
-        );
         assert!(
             schema.is_bounded(),
             "{seats}p: this producer's whole claim is that it NARROWED the bound; \
              measured bound = {:?}",
-            schema.measured_repetition_bound
+            schema.repetition_bound
         );
     }
 }
@@ -8675,10 +8291,14 @@ fn bloodloop_mandatory_draw_cascade_offers_at_2p_3p_and_4p() {
         assert_eq!(
             (
                 &schema.iteration_count,
-                schema.measured_repetition_bound,
+                schema.repetition_bound,
                 offered(&state).2
             ),
-            (&IterationCount::Fixed(19), Some(19), Some(P0)),
+            (
+                &IterationCount::Fixed(19),
+                engine::analysis::decision_template::RepetitionBound::Measured,
+                Some(P0)
+            ),
             "{players}p: CR 704.3 + CR 104.2a: every opponent, at 19, leaves together at 19, so \
              P0's library crossing never comes"
         );
@@ -9599,7 +9219,6 @@ fn restored_proposal(
         shortened_by: None,
         published_declaration: None,
         leading_aims: Vec::new(),
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     }
@@ -11121,7 +10740,7 @@ fn g1_declare_verdict(
         iteration_count: count.clone(),
         // This producer measured no CR 704 threshold — `Default` carries the absence and a
         // capacity at the global cap.
-        measured_repetition_bound: None,
+        repetition_bound: engine::analysis::decision_template::RepetitionBound::Unmeasured,
         deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
         points: vec![DecisionPoint {
             slot: slot.clone(),
@@ -11157,7 +10776,6 @@ fn g1_declare_verdict(
         certificate: synthetic_lethal_cert(),
         schema,
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -11728,7 +11346,6 @@ fn r28_empty_schema_offer(runner: &mut GameRunner) {
         certificate,
         schema,
         declaration: _,
-        road,
         counted_take: _,
         period: _,
     } = runner.state().waiting_for.clone()
@@ -11750,7 +11367,6 @@ fn r28_empty_schema_offer(runner: &mut GameRunner) {
         // declaration-free — and it would contradict the invariant that an empty schema
         // publishes no declaration, at the very fixture that stages an empty schema.
         declaration: None,
-        road,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -11769,7 +11385,6 @@ fn r28_nonempty_schema_offer(runner: &mut GameRunner, slot: DecisionSlot) {
         certificate,
         schema,
         declaration: _,
-        road,
         counted_take: _,
         period: _,
     } = runner.state().waiting_for.clone()
@@ -11800,7 +11415,6 @@ fn r28_nonempty_schema_offer(runner: &mut GameRunner, slot: DecisionSlot) {
         // and NOTHING else, so the two must keep differing in exactly one field. Staging a live
         // `Some` here would add a second axis to a pair whose whole value is being one apart.
         declaration: None,
-        road,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -12437,7 +12051,7 @@ fn d7_a_pre_declaration_save_decodes_with_no_declaration() {
             suggested_declaration: None,
             leading_aims: Vec::new(),
             iteration_count: IterationCount::Fixed(3),
-            measured_repetition_bound: Some(3),
+            repetition_bound: engine::analysis::decision_template::RepetitionBound::Measured,
             deliverable_capacity: 3,
             points: vec![DecisionPoint {
                 slot: slot.clone(),
@@ -12461,7 +12075,6 @@ fn d7_a_pre_declaration_save_decodes_with_no_declaration() {
             },
             key: DecisionGroupKey::from_sources(&[slot.source], DecisionKind::LoopChoice),
         }),
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -13376,9 +12989,9 @@ fn a_drain_whose_last_opponents_fall_together_is_offered_and_won() {
     }
 }
 
-fn offered_bound(state: &GameState) -> Option<u32> {
+fn offered_bound(state: &GameState) -> engine::analysis::decision_template::RepetitionBound {
     match &state.waiting_for {
-        WaitingFor::LoopShortcut { schema, .. } => schema.measured_repetition_bound,
+        WaitingFor::LoopShortcut { schema, .. } => schema.repetition_bound,
         other => panic!("expected a loop-shortcut offer, got {other:?}"),
     }
 }
@@ -13417,7 +13030,7 @@ fn a_departure_sanguine_bond_retargets_to_the_last_opponent() {
         (offered(&state), offered_bound(&state), seat_lives(&state)),
         (
             (P0, IterationCount::Fixed(7), Some(P0)),
-            Some(7),
+            engine::analysis::decision_template::RepetitionBound::Measured,
             vec![(P0, 22), (P1, 2), (P2, 5)]
         )
     );
@@ -13444,7 +13057,7 @@ fn a_departure_vito_aimed_at_one_opponent_counts_one_loss_per_repetition() {
         (offered(&state), offered_bound(&state), seat_lives(&state)),
         (
             (P0, IterationCount::Fixed(7), Some(P0)),
-            Some(7),
+            engine::analysis::decision_template::RepetitionBound::Measured,
             vec![(P0, 22), (P1, 2), (P2, 5)]
         )
     );
@@ -13471,7 +13084,7 @@ fn a_departure_sanguine_bond_over_a_buried_blight_priest_counts_one_loss_per_rep
         (offered(&state), offered_bound(&state), seat_lives(&state)),
         (
             (P0, IterationCount::Fixed(11), Some(P0)),
-            Some(11),
+            engine::analysis::decision_template::RepetitionBound::Measured,
             vec![(P0, 22), (P1, 2), (P2, 9)]
         )
     );
@@ -13526,7 +13139,7 @@ fn a_departure_vito_with_alternating_aims_charges_only_resolved_announcements() 
         (offered(&state), offered_bound(&state), seat_lives(&state)),
         (
             (P0, IterationCount::Fixed(7), Some(P0)),
-            Some(7),
+            engine::analysis::decision_template::RepetitionBound::Measured,
             vec![(P0, 22), (P1, 3), (P2, 4)]
         )
     );

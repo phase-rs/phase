@@ -3113,7 +3113,7 @@ mod recorded_niv_table {
         AnnouncementSubject, DecisionPointKind, DecisionSlot, DecisionTemplate, IterationCount,
         PinnedDecision, Ranking, ReplayMode, TargetPin, TargetSchedule,
     };
-    use engine::analysis::loop_check::{OfferRoad, ShortcutResponse};
+    use engine::analysis::loop_check::ShortcutResponse;
     use engine::types::events::GameEvent;
 
     const P2: PlayerId = PlayerId(2);
@@ -3331,7 +3331,6 @@ mod recorded_niv_table {
         assert_eq!(lives(state), [20, 29, 25, 25]);
         assert_eq!(offer_count(state), IterationCount::Fixed(40));
         let WaitingFor::LoopShortcut {
-            road,
             predicted_winner,
             declaration,
             certificate,
@@ -3341,7 +3340,6 @@ mod recorded_niv_table {
         else {
             unreachable!()
         };
-        assert_eq!(*road, OfferRoad::RecordedPeriod);
         assert_eq!(*predicted_winner, Some(P0));
         assert_eq!(
             declaration.as_ref().map(|own| own.replay.clone()),

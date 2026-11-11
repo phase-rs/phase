@@ -70,8 +70,8 @@ use serde::{Deserialize, Serialize};
 /// name string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WinKind {
-    /// CR 704.5a: an opponent's life is driven to 0 or less — unbounded damage to
-    /// or unbounded life loss from an opponent (burn pings, drains, lifeloss).
+    /// CR 704.5a: an opponent's life is driven to 0 or less — unbounded life loss
+    /// from an opponent (damage without infect, CR 120.3a, or a drain).
     LethalDamage,
     /// CR 704.5c: an opponent accrues 10+ poison counters — an unbounded poison
     /// (infect/proliferate-poison) loop.
@@ -149,14 +149,6 @@ impl LoopCertificate {
     pub fn covers(&self, expected: &[ResourceAxis]) -> bool {
         expected.iter().all(|e| self.unbounded.contains(e))
     }
-}
-
-/// Which producer minted a loop-shortcut offer: the ring sampler, or the priority holder's
-/// recorded period.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OfferRoad {
-    Ring,
-    RecordedPeriod,
 }
 
 /// CR 732.2a: whether a counted take of an offer performs, or why none does.
@@ -279,8 +271,6 @@ pub struct ShortcutProposal {
     /// A seat identity is public board state, so this carries no redaction seam of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shortened_by: Option<PlayerId>,
-    /// The producer that minted the offer this proposal was declared against, copied off it.
-    pub road: OfferRoad,
     /// The counted take of the offer this proposal was declared against, copied off it.
     #[serde(default, skip_serializing_if = "CountedTake::is_performs")]
     pub counted_take: CountedTake,
@@ -557,7 +547,7 @@ pub(crate) fn live_mandatory_loop_winner(
     }
     // Scope the live shortcut to a determinate loss axis — CR 704.5a life drain
     // (`LethalDamage`) or CR 704.5c poison (`PoisonLoss`) — never a pure advantage
-    // engine or mill. classify's branch order (damage → opp-life<0 → poison>0 → …)
+    // engine or mill. classify's branch order (opp-life<0 → opp-poison>0 → …)
     // reaches the poison branch before the Advantage fallthrough, so the winner's own
     // lifegain does not mask a rising-poison loss.
     if !matches!(
@@ -665,13 +655,13 @@ pub(crate) fn fallers_lives_pairwise_equal(frames: &[&GameState], fallers: &[Pla
 /// Derive the [`WinKind`] from the measured per-cycle delta.
 ///
 /// Classification is by the **most decisive** unbounded axis, in CR loss-priority
-/// order: an opponent-lethal axis (damage/life-loss → CR 704.5a, poison → CR
+/// order: an opponent-lethal axis (life loss → CR 704.5a, poison → CR
 /// 704.5c, decking → CR 104.3c/121.4, extra turns → CR 500.7) outranks a pure
 /// advantage engine (mana/tokens/draw/…). A loop that pumps several axes is named
 /// by the first loss condition it satisfies; if none, it is [`WinKind::Advantage`].
 ///
-/// `controller` distinguishes "an opponent" from the loop's controller: damage to
-/// / life loss from / mill on a player who is *not* the loop's controller is an
+/// `controller` distinguishes "an opponent" from the loop's controller: life loss from
+/// / poison on / mill on a player who is *not* the loop's controller is an
 /// opponent loss condition; the corpus rows are two-player, so any non-controller
 /// player is the opponent.
 ///
@@ -682,17 +672,6 @@ pub(crate) fn classify_win_kind(
     delta: &ResourceVector,
     state: Option<&GameState>,
 ) -> WinKind {
-    // CR 704.5a: a player at 0 life loses — so unbounded damage is a WIN only when
-    // the damaged player is an OPPONENT (a non-controller). Damage to the loop's
-    // own controller (self-ping offset by lifegain) is an advantage engine, not a
-    // win; mirror the life/decking branches' opponent-victim discrimination.
-    if delta
-        .damage_dealt
-        .iter()
-        .any(|(pid, &n)| n > 0 && *pid != controller)
-    {
-        return WinKind::LethalDamage;
-    }
     // CR 704.5a: unbounded life *loss* from an opponent (drain loops report a
     // negative life delta on the victim) is lethal. A life *gain* on the
     // controller is advantage, not a win, so require a strictly-negative life
@@ -704,8 +683,12 @@ pub(crate) fn classify_win_kind(
     {
         return WinKind::LethalDamage;
     }
-    // CR 704.5c: unbounded poison counters on any player.
-    if delta.poison.values().any(|&n| n > 0) {
+    // CR 704.5c: unbounded poison counters on an opponent.
+    if delta
+        .poison
+        .iter()
+        .any(|(pid, &n)| n > 0 && *pid != controller)
+    {
         return WinKind::PoisonLoss;
     }
     // CR 104.3c / CR 121.4: an unbounded *downward* library delta on a player
@@ -864,6 +847,7 @@ mod tests {
 
         let mut delta = ResourceVector::default();
         delta.damage_dealt.insert(pid(1), 1); // 1 damage to opponent
+        delta.life.insert(pid(1), -1); // CR 120.3a: the damage is life loss
         delta.life.insert(pid(0), 1); // 1 life gained (lifelink)
 
         let cert =
@@ -1285,14 +1269,6 @@ mod tests {
     /// opponent; it is an advantage engine, mirroring self-mill (`Advantage`, not
     /// `Decking`) and self-life-loss (`Advantage`, not `LethalDamage`).
     ///
-    /// DISCRIMINATING: the pre-fix damage branch was
-    /// `delta.damage_dealt.values().any(|&n| n > 0)` — controller-blind — so it
-    /// classified controller-only damage as `LethalDamage`. The first assertion
-    /// (`controller == victim => Advantage`) therefore FAILS against pre-fix code
-    /// and PASSES against the fixed `*pid != controller` predicate. The second
-    /// assertion (`opponent victim => LethalDamage`) is unchanged by the fix,
-    /// proving the change is surgical: it flips only the controller-victim case.
-    ///
     /// WELL-FORMEDNESS: `unbounded_components` still surfaces
     /// `DamageDealt(controller)`, so `detect_loop` returns a `Some` certificate
     /// naming >=1 axis with `win_kind == Advantage` (a beneficial CR 732.2a loop),
@@ -1312,6 +1288,7 @@ mod tests {
         // Parallel opponent case (P0 controls, P1 is damaged) => still LethalDamage.
         let mut opp_dmg = ResourceVector::default();
         opp_dmg.damage_dealt.insert(pid(1), 1);
+        opp_dmg.life.insert(pid(1), -1); // CR 120.3a: the damage is life loss
         assert_eq!(
             classify_win_kind(pid(0), &opp_dmg, None),
             WinKind::LethalDamage,

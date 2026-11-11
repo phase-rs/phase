@@ -3434,7 +3434,6 @@ fn loop_shortcut_zero_deliverable_capacity_is_rejected_not_clamped() {
                 ..Default::default()
             },
             declaration: None,
-            road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -3498,12 +3497,11 @@ fn loop_shortcut_narrowed_capacity_bounds_the_picker() {
             // A NARROWED offer, i.e. what a producer that measured a threshold on a real board
             // publishes: the measured threshold and the capacity derived from it.
             iteration_count: engine::analysis::decision_template::IterationCount::Fixed(9),
-            measured_repetition_bound: Some(3),
+            repetition_bound: engine::analysis::decision_template::RepetitionBound::Measured,
             deliverable_capacity: 3,
             ..Default::default()
         },
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -3557,7 +3555,6 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
             ..Default::default()
         },
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -3660,7 +3657,10 @@ fn preview_offer_with_points(
         },
         schema: ShortcutDecisionSchema {
             iteration_count,
-            measured_repetition_bound: measured,
+            repetition_bound: measured.map_or(
+                engine::analysis::decision_template::RepetitionBound::Unmeasured,
+                |_| engine::analysis::decision_template::RepetitionBound::Measured,
+            ),
             deliverable_capacity: measured.map_or(
                 ShortcutDecisionSchema::default().deliverable_capacity,
                 |m| m.min(ShortcutDecisionSchema::default().deliverable_capacity),
@@ -3669,7 +3669,6 @@ fn preview_offer_with_points(
             ..Default::default()
         },
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -4379,7 +4378,6 @@ fn respond_window_on(
             shortened_by: None,
             published_declaration: None,
             leading_aims: Vec::new(),
-            road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         },
@@ -6956,9 +6954,10 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         card_id: CardId(9001),
         trigger_description: None,
     };
-    // Six distinct choice points on ONE source. The parameter names WHICH CHOICE, which is
-    // this row's subject stated directly: before the typed point the six were told apart only
-    // by six ordinals, and the number carried the kind half.
+    // Five distinct choice points on ONE source. The parameter names WHICH CHOICE, which is
+    // this row's subject stated directly: before the typed point they were told apart only
+    // by ordinals, and the number carried the kind half. A `MayChoice` point states the
+    // confirmed period's answer, which a synthetic offer cannot carry.
     let slot = |point| DecisionSlot::first(source.clone(), point);
     runner.state_mut().waiting_for = WaitingFor::LoopShortcut {
         proposer: P0,
@@ -6978,7 +6977,7 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
             iteration_count: IterationCount::Fixed(2),
             // This producer measured no CR 704 threshold — `Default` carries the absence and
             // a capacity at the global cap.
-            measured_repetition_bound: None,
+            repetition_bound: engine::analysis::decision_template::RepetitionBound::Unmeasured,
             deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
             points: vec![
                 DecisionPoint {
@@ -7006,10 +7005,6 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
                     },
                 },
                 DecisionPoint {
-                    slot: slot(ChoicePoint::MayGate),
-                    kind: DecisionPointKind::MayChoice,
-                },
-                DecisionPoint {
                     slot: slot(ChoicePoint::UnlessBreak),
                     kind: DecisionPointKind::UnlessBreak,
                 },
@@ -7023,13 +7018,12 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
             convoke_tappable_count: 1,
         },
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
     bind(runner.state_mut(), "loop-point-kinds");
 
-    // ── R9 leg 6: six choice points on ONE source stay six, and the POINT is what says so.
+    // ── R9 leg 6: five choice points on ONE source stay five, and the POINT is what says so.
     //    Re-grounded from the ordinal: the slots must be pairwise distinct, each slot's
     //    `point` must be the one its own `kind` names, and every one of them is instance `0`
     //    — its original subject stated directly instead of through a number.
@@ -7039,14 +7033,14 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
     let published: Vec<&DecisionSlot> = schema.points.iter().map(|point| &point.slot).collect();
     assert_eq!(
         published.len(),
-        6,
-        "reach-guard: six points publish, so 'pairwise distinct' is a claim about six slots"
+        5,
+        "reach-guard: five points publish, so 'pairwise distinct' is a claim about five slots"
     );
     let distinct: std::collections::BTreeSet<&DecisionSlot> = published.iter().copied().collect();
     assert_eq!(
         distinct.len(),
         published.len(),
-        "six choice points on one source are six distinct slots: {published:?}"
+        "five choice points on one source are five distinct slots: {published:?}"
     );
     for point in &schema.points {
         assert_eq!(
@@ -7077,7 +7071,6 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
             InteractionShortcutPointKind::Targets,
             InteractionShortcutPointKind::ConvokeTaps,
             InteractionShortcutPointKind::Mode,
-            InteractionShortcutPointKind::MayChoice,
             InteractionShortcutPointKind::UnlessBreak,
             InteractionShortcutPointKind::ManaColor,
         ]
@@ -7087,10 +7080,10 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         (1, 2, true)
     );
     assert!(points[1].read_only);
-    assert!(points[5].read_only);
-    assert_eq!(candidates.len(), 10);
+    assert!(points[4].read_only);
+    assert_eq!(candidates.len(), 8);
 
-    let selected_pins = [0usize, 2, 3, 4]
+    let selected_pins = [0usize, 2, 3]
         .into_iter()
         .map(|group| InteractionShortcutPin {
             group: group as u32,
@@ -7215,7 +7208,7 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
             suggested_declaration: None,
             leading_aims: Vec::new(),
             iteration_count: IterationCount::Fixed(2),
-            measured_repetition_bound: None,
+            repetition_bound: engine::analysis::decision_template::RepetitionBound::Unmeasured,
             deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
             points: vec![DecisionPoint {
                 slot: slot.clone(),
@@ -7230,7 +7223,6 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
             convoke_tappable_count: 0,
         },
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -8552,7 +8544,10 @@ fn stage_sequenced_offer(
             leading_aims: Vec::new(),
             iteration_count,
             // The pair a producer publishes: `None` is an offer that measured nothing.
-            measured_repetition_bound: measured,
+            repetition_bound: measured.map_or(
+                engine::analysis::decision_template::RepetitionBound::Unmeasured,
+                |_| engine::analysis::decision_template::RepetitionBound::Measured,
+            ),
             deliverable_capacity: measured.map_or(
                 ShortcutDecisionSchema::default().deliverable_capacity,
                 |m| m.min(ShortcutDecisionSchema::default().deliverable_capacity),
@@ -8566,7 +8561,6 @@ fn stage_sequenced_offer(
             convoke_tappable_count: 0,
         },
         declaration: None,
-        road: engine::analysis::loop_check::OfferRoad::Ring,
         counted_take: Default::default(),
         period: Default::default(),
     };
@@ -8658,22 +8652,30 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
         AnnouncementSubject, PinnedDecision, Ranking, TargetPin, TargetSchedule,
     };
 
-    // ── A `Fixed` offer publishing a single-position Targets point AND a MayChoice point ──
+    // ── A `Fixed` offer publishing a single-position Targets point AND an UnlessBreak point ──
     let (runner, slots) = stage_sequenced_offer(
         "p4-coherence-fixed",
         IterationCount::Fixed(6),
         Some(6),
-        vec![victims_point(1, 1), DecisionPointKind::MayChoice],
+        vec![victims_point(1, 1), DecisionPointKind::UnlessBreak],
     );
     let view = priority_view(runner.state());
     let points = shortcut_points(&view);
     assert_eq!(
-        (points.len(), points[0].max, points[0].candidate_ids.len()),
-        (2, 1, 3),
+        (
+            points.len(),
+            points[0].max,
+            points[0].candidate_ids.len(),
+            points[1].kind,
+            points[1].candidate_ids.len(),
+            points[1].read_only
+        ),
+        (2, 1, 3, InteractionShortcutPointKind::UnlessBreak, 2, false),
         "reach-guard: a single-position Targets point over three candidates, beside a \
-         non-Targets point — the two shapes every leg below distinguishes"
+         non-Targets point publishing its two candidates — the two shapes every leg below \
+         distinguishes"
     );
-    let may_pin = InteractionShortcutPin {
+    let unless_pin = InteractionShortcutPin {
         group: points[1].group,
         choice_ids: vec![points[1].candidate_ids[0].clone()],
         amounts: Vec::new(),
@@ -8691,7 +8693,7 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
                 choice_ids: vec![points[0].candidate_ids[0].clone()],
                 amounts: Vec::new(),
             },
-            may_pin.clone(),
+            unless_pin.clone(),
         ],
     )
     .expect("a flat in-window pin with empty amounts still decodes");
@@ -8721,7 +8723,7 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
             runner.state(),
             &view,
             fixed,
-            vec![conforming.clone(), may_pin.clone()]
+            vec![conforming.clone(), unless_pin.clone()]
         )
         .is_ok(),
         "paired positive: the conforming allocation is ACCEPTED, so every refusal below is \
@@ -8729,8 +8731,8 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
     );
 
     // 1 — `amounts` non-empty on a point whose kind is not `Targets` ⇒ the sequenced gate.
-    let mut amounts_on_may = may_pin.clone();
-    amounts_on_may.amounts = vec![AmountAssignment {
+    let mut amounts_on_unless = unless_pin.clone();
+    amounts_on_unless.amounts = vec![AmountAssignment {
         choice_id: points[1].candidate_ids[0].clone(),
         amount: 6,
     }];
@@ -8745,7 +8747,7 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
                     choice_ids: vec![points[0].candidate_ids[0].clone()],
                     amounts: Vec::new(),
                 },
-                amounts_on_may
+                amounts_on_unless
             ]
         )
         .is_err(),
@@ -8761,7 +8763,7 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
             runner.state(),
             &view,
             fixed,
-            vec![short_amounts, may_pin.clone()]
+            vec![short_amounts, unless_pin.clone()]
         )
         .is_err(),
         "one amount per announced subject, positionally"
@@ -8776,7 +8778,7 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
             runner.state(),
             &view,
             fixed,
-            vec![transposed, may_pin.clone()]
+            vec![transposed, unless_pin.clone()]
         )
         .is_err(),
         "the positional compare: an allocation whose amounts are attached to the wrong \
@@ -8794,7 +8796,7 @@ fn p4_row_3_the_sequenced_pin_coherence_relation_refuses_each_incoherent_shape()
             runner.state(),
             &view,
             fixed,
-            vec![amount_free, may_pin.clone()]
+            vec![amount_free, unless_pin.clone()]
         )
         .is_err(),
         "an amount-free sequence cannot partition a declared count"
@@ -11176,7 +11178,6 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
             shortened_by: None,
             published_declaration: None,
             leading_aims: Vec::new(),
-            road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         },

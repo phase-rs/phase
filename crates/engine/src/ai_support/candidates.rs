@@ -7843,7 +7843,6 @@ mod tests {
             },
             schema: crate::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
-            road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -10806,7 +10805,7 @@ mod tests {
                 suggested_declaration: None,
                 leading_aims: Vec::new(),
                 iteration_count: IterationCount::Fixed(5),
-                measured_repetition_bound: Some(5),
+                repetition_bound: crate::analysis::decision_template::RepetitionBound::Measured,
                 deliverable_capacity: 5,
                 points: vec![DecisionPoint {
                     slot: DecisionSlot::first(d6n_source(), ChoicePoint::AnnouncedTarget),
@@ -10820,7 +10819,6 @@ mod tests {
                 convoke_tappable_count: 0,
             },
             declaration,
-            road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };

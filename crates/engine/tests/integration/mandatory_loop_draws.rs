@@ -1104,8 +1104,11 @@ fn assert_may_offer<'a>(run: &'a Run, proposer: PlayerId, leg: &str) -> &'a Game
         } => {
             assert_eq!(*offered_by, proposer, "{leg}");
             assert_eq!(
-                (&schema.iteration_count, schema.measured_repetition_bound),
-                (&IterationCount::Fixed(MAX_SHORTCUT_CYCLES_MIRROR), None),
+                (&schema.iteration_count, schema.repetition_bound),
+                (
+                    &IterationCount::Fixed(MAX_SHORTCUT_CYCLES_MIRROR),
+                    engine::analysis::decision_template::RepetitionBound::Unmeasured
+                ),
                 "{leg}: no threshold bounds the period, so the count is the repetition budget"
             );
         }
@@ -2841,7 +2844,11 @@ fn mandatory_poison_loop_is_offered_short_of_ten_poison(drive: Drive) {
                 predicted_winner: None,
                 mandatory: false
             },
-            (IterationCount::Fixed(8), 8, Some(9)),
+            (
+                IterationCount::Fixed(8),
+                8,
+                engine::analysis::decision_template::RepetitionBound::Measured
+            ),
             1,
             1
         ),
@@ -2888,7 +2895,11 @@ fn a_poison_loop_one_repetition_short_of_the_proposers_tenth_counter_is_offered_
                 predicted_winner: None,
                 mandatory: false
             },
-            (IterationCount::Fixed(1), 2, Some(2)),
+            (
+                IterationCount::Fixed(1),
+                2,
+                engine::analysis::decision_template::RepetitionBound::Measured
+            ),
             8,
             1
         )
@@ -5074,7 +5085,13 @@ fn a_drain_whose_holder_leaves_in_its_second_repetition_is_offered_the_first() {
 }
 
 /// The offer's count, deliverable capacity and measured repetition bound.
-fn offer_schema(state: &GameState) -> (IterationCount, u32, Option<u32>) {
+fn offer_schema(
+    state: &GameState,
+) -> (
+    IterationCount,
+    u32,
+    engine::analysis::decision_template::RepetitionBound,
+) {
     let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
         panic!(
             "expected a loop-shortcut offer, got {:?}",
@@ -5084,7 +5101,7 @@ fn offer_schema(state: &GameState) -> (IterationCount, u32, Option<u32>) {
     (
         schema.iteration_count.clone(),
         schema.deliverable_capacity,
-        schema.measured_repetition_bound,
+        schema.repetition_bound,
     )
 }
 

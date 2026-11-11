@@ -2025,9 +2025,14 @@ pub(crate) fn drive_offline_pentad_prism_seeded(
 /// `WinKind::Advantage` and NO damage axis. Standalone (not in `DRIVERS`, no `CORPUS`
 /// row) — mirrors `drive_offline_pentad_prism_seeded`; the Damage/`LethalDamage` family
 /// is already the corpus's row 0 (Heliod+Ballista), so no new row is warranted.
+///
+/// `victim` is the ping's target; `equipment` names a card installed for P0 and attached to
+/// Ballista.
 pub(crate) fn drive_offline_kilo_freed_relic_ballista(
     db: &CardDatabase,
     seed_counters: u32,
+    victim: PlayerId,
+    equipment: Option<&str>,
 ) -> Option<LoopCertificate> {
     use crate::types::ability::{AbilityCost, Effect};
 
@@ -2049,6 +2054,10 @@ pub(crate) fn drive_offline_kilo_freed_relic_ballista(
                     seed_counters,
                 );
             }
+        }
+        if let Some(name) = equipment {
+            let equipment = install_on_battlefield(state, db, name, P0)?;
+            attach_aura(state, equipment, ballista);
         }
         settle_layers(state);
     }
@@ -2077,7 +2086,12 @@ pub(crate) fn drive_offline_kilo_freed_relic_ballista(
             Some(TargetRef::Object(kilo)),
         );
         activate_and_resolve(probe, freed, freed_untap, Some(TargetRef::Object(kilo)));
-        activate_and_resolve(probe, ballista, ballista_ping, Some(TargetRef::Player(P1)));
+        activate_and_resolve(
+            probe,
+            ballista,
+            ballista_ping,
+            Some(TargetRef::Player(victim)),
+        );
     })
 }
 

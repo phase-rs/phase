@@ -132,7 +132,6 @@ impl TacticalPolicy for LoopShortcutPolicy {
             schema,
             certificate,
             declaration,
-            road: _,
             counted_take: _,
             period,
         } = &ctx.state.waiting_for
@@ -527,7 +526,6 @@ mod tests {
             certificate: cert(),
             schema,
             declaration: None,
-            road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -712,12 +710,11 @@ mod tests {
                 // BOTH halves: a fixture setting only the capacity measures nothing, so
                 // `is_bounded()` would be FALSE and every bounded row below would silently take
                 // the unbounded branch instead of its own subject.
-                measured_repetition_bound: Some(bound),
+                repetition_bound: engine::analysis::decision_template::RepetitionBound::Measured,
                 deliverable_capacity: bound,
                 ..Default::default()
             },
             declaration: None,
-            road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -755,13 +752,12 @@ mod tests {
                 ..cert()
             },
             schema: ShortcutDecisionSchema {
-                measured_repetition_bound: Some(bound),
+                repetition_bound: engine::analysis::decision_template::RepetitionBound::Measured,
                 deliverable_capacity: bound,
                 points,
                 ..Default::default()
             },
             declaration,
-            road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -858,7 +854,7 @@ mod tests {
         assert!(
             schema_of(&state).is_bounded(),
             "REACH-GUARD: the arm under test is bounded-only; measured bound = {:?}",
-            schema_of(&state).measured_repetition_bound
+            schema_of(&state).repetition_bound
         );
         assert!(
             certificate_of(&state).per_cycle.is_some(),
@@ -931,7 +927,7 @@ mod tests {
         assert!(
             schema_of(&state).is_bounded(),
             "REACH-GUARD: the arm under test is bounded-only; measured bound = {:?}",
-            schema_of(&state).measured_repetition_bound
+            schema_of(&state).repetition_bound
         );
         assert!(
             certificate_of(&state).per_cycle.is_some(),
@@ -1147,7 +1143,7 @@ mod tests {
         assert!(
             schema_of(&state).is_bounded(),
             "REACH-GUARD: the arm under test is bounded-only; measured bound = {:?}",
-            schema_of(&state).measured_repetition_bound
+            schema_of(&state).repetition_bound
         );
         let period = certificate_of(&state)
             .per_cycle
@@ -1395,7 +1391,7 @@ mod tests {
             schema_of(&state).is_bounded(),
             "REACH-GUARD: every assertion below is vacuous unless the in-test schema really is \
              bounded; measured bound = {:?}",
-            schema_of(&state).measured_repetition_bound
+            schema_of(&state).repetition_bound
         );
 
         // (i) within the bound.
@@ -1490,7 +1486,7 @@ mod tests {
                 !schema_of(&state).is_bounded(),
                 "REACH-GUARD: this row is about the UNBOUNDED schema — the bounded row above \
                  already covers the other half; measured bound {:?}",
-                schema_of(&state).measured_repetition_bound
+                schema_of(&state).repetition_bound
             );
             let zero = verdict_for(&state, &declare(IterationCount::Fixed(0)));
             assert!(
@@ -1529,7 +1525,7 @@ mod tests {
                 "REACH-GUARD: this row asserts the UNBOUNDED branch, so the default schema must \
                  read unbounded — `ShortcutDecisionSchema::default()` carries \
                  no measured threshold; measured {:?}",
-                schema_of(&state).measured_repetition_bound
+                schema_of(&state).repetition_bound
             );
             let v = verdict_for(&state, &declare(IterationCount::Fixed(4)));
             assert_eq!(

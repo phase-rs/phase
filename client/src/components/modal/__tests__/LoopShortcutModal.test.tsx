@@ -2699,7 +2699,6 @@ const WITHOUT_END_OFFER: WaitingFor = {
     predicted_winner: null,
     certificate: { unbounded: [], mandatory: false, residual_board_delta: { added: [], removed: [] } },
     schema: { iteration_count: "WithoutEnd", points: [], convoke_tappable_count: 0 },
-    road: "Ring",
   },
 };
 const WITHOUT_END_OFFER_VIEW: ViewerInteraction = {
@@ -2732,7 +2731,7 @@ const WITHOUT_END_REPLY: WaitingFor = {
   type: "RespondToShortcut",
   data: {
     player: 1,
-    proposal: { proposer: 0, predicted_winner: null, count: "WithoutEnd", unbounded: [], road: "Ring" },
+    proposal: { proposer: 0, predicted_winner: null, count: "WithoutEnd", unbounded: [] },
   },
 };
 const WITHOUT_END_REPLY_VIEW: ViewerInteraction = {

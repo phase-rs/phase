@@ -3591,12 +3591,7 @@ fn measure_seat_takes(
             crate::analysis::resource::PeriodCertification::BoardCovered,
         );
         Some(
-            crate::game::engine::bounded_cycle_charged_targets_for_window(
-                &touch,
-                holder,
-                i64::MAX,
-                crate::analysis::loop_check::OfferRoad::RecordedPeriod,
-            ),
+            crate::game::engine::bounded_cycle_charged_targets_for_window(&touch, holder, i64::MAX),
         )
     };
     let Some(recorded) = charges(frames) else {
@@ -3813,7 +3808,8 @@ fn perform_published(
         parts.schema.deliverable_capacity = record.reach;
         // CR 800.4a: a performance that went on past a departure measured the bound itself.
         if record.reach > n {
-            parts.schema.measured_repetition_bound = Some(record.reach);
+            parts.schema.repetition_bound =
+                crate::analysis::decision_template::RepetitionBound::Measured;
         }
         parts.predicted_winner = record.winner;
     }

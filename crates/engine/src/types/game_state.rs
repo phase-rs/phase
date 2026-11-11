@@ -16017,26 +16017,25 @@ fn migrate_legacy_dungeon_choice_previews(value: &mut serde_json::Value) -> Resu
     Ok(())
 }
 
-/// Maps the pre-split loop-shortcut offer wire shape onto the two fields that replaced its one
-/// count. The old key answered two questions at once — *what CR 704 threshold did the producer
-/// measure* and *how many repetitions will this engine deliver* — by writing the engine's budget
-/// to mean "measured nothing", so a pre-split save's BOUNDEDNESS is recoverable only from that
-/// value. A `#[serde(default)]` cannot do it: it sees one field at a time and cannot read a
-/// sibling key to decide the other's value.
+/// Maps a legacy loop-shortcut offer bound onto `repetition_bound`, on a `LoopShortcut` schema
+/// that carries no `repetition_bound` key:
+///
+/// * a `measured_repetition_bound` key is removed: a number becomes `"Measured"`, `null`
+///   becomes `"Unmeasured"`, anything else is a hard error;
+/// * else a pre-split `max_iterations` key with no `deliverable_capacity` is removed: a value
+///   below the budget was a measured threshold and becomes `"Measured"`, a value at or above it
+///   meant "measured nothing" and becomes `"Unmeasured"`, and the capacity becomes the value
+///   clamped to the budget, the ceiling that encoding published; a value that is not a `u32` is
+///   a hard error;
+/// * else nothing: an absent key decodes `Unmeasured` through `#[serde(default)]`.
+///
+/// Idempotent because each arm removes the key it reads.
 ///
 /// THE RECEIVER IS NAMED, NOT THE KEY. The rewrite happens only inside an adjacently-tagged
 /// `WaitingFor` object whose `"type"` is `LoopShortcut`, at its `data.schema`. The key name has
 /// unrelated carriers — `RepeatContinuation::WhileCondition` spells it for its own iteration
 /// ceiling, and committed dumps carry several — and a name-keyed walk would turn a bounded
 /// while-condition into an unbounded one.
-///
-/// The inverse of the old encoding: a legacy value below the budget was a measured threshold and
-/// becomes one; a value at or above the budget meant "measured nothing" and becomes the absence;
-/// the capacity becomes the legacy value clamped to the budget, which is the ceiling that
-/// encoding actually published. A legacy value that is not a `u32` is a hard error — corrupt
-/// state, not a migratable shape — matching both siblings. Idempotent because the rewrite removes
-/// the legacy key, and scoped to a schema carrying NEITHER new key so a current save is never
-/// rewritten from a stray legacy one.
 fn migrate_legacy_shortcut_repetition_bound(value: &mut serde_json::Value) -> Result<(), String> {
     match value {
         serde_json::Value::Array(values) => {
@@ -16050,10 +16049,23 @@ fn migrate_legacy_shortcut_repetition_bound(value: &mut serde_json::Value) -> Re
                     .get_mut("data")
                     .and_then(|data| data.get_mut("schema"))
                     .and_then(serde_json::Value::as_object_mut)
+                    .filter(|schema| !schema.contains_key("repetition_bound"))
                 {
-                    let already_split = schema.contains_key("measured_repetition_bound")
-                        || schema.contains_key("deliverable_capacity");
-                    if !already_split {
+                    let measured = |yes: bool| {
+                        serde_json::Value::from(if yes { "Measured" } else { "Unmeasured" })
+                    };
+                    if let Some(legacy) = schema.remove("measured_repetition_bound") {
+                        let bound = match legacy {
+                            serde_json::Value::Number(_) => measured(true),
+                            serde_json::Value::Null => measured(false),
+                            _ => {
+                                return Err("legacy LoopShortcut schema \
+                                            measured_repetition_bound must be a number or null"
+                                    .to_string())
+                            }
+                        };
+                        schema.insert("repetition_bound".to_string(), bound);
+                    } else if !schema.contains_key("deliverable_capacity") {
                         if let Some(legacy) = schema.remove("max_iterations") {
                             let legacy = legacy
                                 .as_u64()
@@ -16062,17 +16074,12 @@ fn migrate_legacy_shortcut_repetition_bound(value: &mut serde_json::Value) -> Re
                                     "legacy LoopShortcut schema max_iterations must be a u32"
                                         .to_string()
                                 })?;
-                            let measured = if legacy < crate::game::engine::MAX_SHORTCUT_CYCLES {
-                                serde_json::Value::from(legacy)
-                            } else {
-                                serde_json::Value::Null
-                            };
-                            schema.insert("measured_repetition_bound".to_string(), measured);
+                            let budget = crate::game::engine::MAX_SHORTCUT_CYCLES;
+                            schema
+                                .insert("repetition_bound".to_string(), measured(legacy < budget));
                             schema.insert(
                                 "deliverable_capacity".to_string(),
-                                serde_json::Value::from(
-                                    legacy.min(crate::game::engine::MAX_SHORTCUT_CYCLES),
-                                ),
+                                serde_json::Value::from(legacy.min(budget)),
                             );
                         }
                     }
@@ -16085,45 +16092,6 @@ fn migrate_legacy_shortcut_repetition_bound(value: &mut serde_json::Value) -> Re
         _ => {}
     }
     Ok(())
-}
-
-/// Stamps the minting road onto a stamp-less `LoopShortcut` offer and `RespondToShortcut`
-/// proposal. Exact over the three mints that predate the stamp: the ring road's Path A publishes a
-/// winner and its Path D a per-cycle signature, while the recorded-period mint publishes neither.
-fn migrate_legacy_offer_road(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Array(values) => values.iter_mut().for_each(migrate_legacy_offer_road),
-        serde_json::Value::Object(object) => {
-            let carrier = match object.get("type").and_then(serde_json::Value::as_str) {
-                Some("LoopShortcut") => object
-                    .get_mut("data")
-                    .and_then(serde_json::Value::as_object_mut)
-                    .map(|data| (data, Some("certificate"))),
-                Some("RespondToShortcut") => object
-                    .get_mut("data")
-                    .and_then(|data| data.get_mut("proposal"))
-                    .and_then(serde_json::Value::as_object_mut)
-                    .map(|proposal| (proposal, None)),
-                _ => None,
-            };
-            if let Some((carrier, per_cycle_host)) = carrier {
-                if !carrier.contains_key("road") {
-                    let per_cycle = match per_cycle_host {
-                        Some(host) => carrier.get(host).and_then(|host| host.get("per_cycle")),
-                        None => carrier.get("per_cycle"),
-                    };
-                    let ring = carrier
-                        .get("predicted_winner")
-                        .is_some_and(|winner| !winner.is_null())
-                        || per_cycle.is_some_and(|per_cycle| !per_cycle.is_null());
-                    let road = if ring { "Ring" } else { "RecordedPeriod" };
-                    carrier.insert("road".to_string(), serde_json::Value::from(road));
-                }
-            }
-            object.values_mut().for_each(migrate_legacy_offer_road);
-        }
-        _ => {}
-    }
 }
 
 fn delayed_trigger_install_command(
@@ -16142,23 +16110,6 @@ fn delayed_trigger_install_command_mut(
         .get_mut("command")?
         .get_mut("DelayedTriggerInstall")?
         .as_object_mut()
-}
-
-/// A ring-road offer or proposal carries no confirmed period; a recorded-road offer, bounded or
-/// not, carries the period it confirmed. Shared so the offer and the proposal
-/// declared against it refuse the same pair.
-fn reject_period_on_the_ring_road(
-    road: crate::analysis::loop_check::OfferRoad,
-    period: &crate::game::period_confirm::ConfirmedPeriod,
-    host: &str,
-) -> Result<(), String> {
-    if road == crate::analysis::loop_check::OfferRoad::Ring && !period.is_empty() {
-        return Err(format!(
-            "persisted {host} minted on the ring road carries a confirmed period, which routes \
-             the agreed cycles away from the ring drain"
-        ));
-    }
-    Ok(())
 }
 
 /// CR 732.2a: a shortcut proposal describes "a sequence of game choices ... that may be
@@ -16192,13 +16143,7 @@ fn reject_period_on_the_ring_road(
 /// `#[serde(default)]`, while a save written in the pre-split shape has its single legacy count
 /// mapped onto both fields by `migrate_legacy_shortcut_repetition_bound` before serde runs.
 fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
-    if let WaitingFor::LoopShortcut {
-        schema,
-        road,
-        period,
-        ..
-    } = &state.waiting_for
-    {
+    if let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for {
         if schema.deliverable_capacity == 0 {
             return Err(
                 "persisted LoopShortcut offer states deliverable_capacity 0, which CR 732.2a \
@@ -16206,16 +16151,6 @@ fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
                     .to_string(),
             );
         }
-        // After the zero-capacity check, so a corrupt zero bound carrying a period is refused as
-        // the zero it is.
-        reject_period_on_the_ring_road(*road, period, "LoopShortcut offer")?;
-    }
-    if let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for {
-        reject_period_on_the_ring_road(
-            proposal.road,
-            &proposal.period,
-            "RespondToShortcut proposal",
-        )?;
     }
     Ok(())
 }
@@ -18844,8 +18779,6 @@ pub enum WaitingFor {
         /// adds a path around them.
         #[serde(default)]
         declaration: Option<crate::analysis::decision_template::DecisionTemplate>,
-        /// The producer that minted this offer; `game::engine`'s route authority reads it.
-        road: crate::analysis::loop_check::OfferRoad,
         /// Whether a counted take of this offer performs.
         #[serde(
             default,
@@ -27990,7 +27923,6 @@ impl GameStateDecode {
         migrate_legacy_spell_cost_elections(&mut value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(&mut value)?;
         migrate_legacy_shortcut_repetition_bound(&mut value)?;
-        migrate_legacy_offer_road(&mut value);
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
@@ -28059,7 +27991,6 @@ impl GameStateDecode {
         migrate_legacy_spell_cost_elections(value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(value)?;
         migrate_legacy_shortcut_repetition_bound(value)?;
-        migrate_legacy_offer_road(value);
         Ok(())
     }
 
@@ -41187,64 +41118,56 @@ mod tests {
         assert!(legacy["zero_x"]["TurnFaceUp"].get("cost_had_x").is_none());
     }
 
-    /// The pre-split count maps onto the pair, at the receiver and nowhere else, idempotently.
-    ///
-    /// Every value class in one walk: below the budget is a measured threshold, AT the budget was
-    /// the old "measured nothing" encoding and becomes the absence, zero re-encodes to a zero
-    /// capacity the load guard then refuses, and a `WhileCondition` carrier of the same key is
-    /// left alone. Re-running the walk changes nothing, because the rewrite removes the key.
-    ///
-    /// REVERT-PROBE: move the legacy value into the measured field unconditionally ⇒ the
-    /// at-budget arm mints a threshold for a save whose producer measured none ⇒ FLIPS. Key the
-    /// walk on the name instead of `"type" == "LoopShortcut"` ⇒ the foreign carrier's ceiling is
-    /// rewritten ⇒ FLIPS.
+    /// CR 732.2a: every legacy bound shape maps onto `repetition_bound` at the receiver and
+    /// nowhere else, idempotently: a number measured, `null` unmeasured, a pre-split count below
+    /// the budget measured, at the budget unmeasured, zero measured at a zero capacity the load
+    /// guard refuses; a schema with no bound key and a current one are left alone, as is a
+    /// `WhileCondition` carrier of the pre-split key; a non-number legacy bound is an error.
     #[test]
-    fn legacy_shortcut_repetition_bound_splits_at_its_receiver_only() {
+    fn legacy_shortcut_repetition_bound_maps_to_two_states_at_its_receiver_only() {
         let budget = crate::game::engine::MAX_SHORTCUT_CYCLES;
-        let offer = |count: serde_json::Value| {
-            serde_json::json!({
-                "type": "LoopShortcut",
-                "data": { "schema": { "max_iterations": count, "points": [] } }
-            })
-        };
+        let offer = |schema: serde_json::Value| serde_json::json!({ "type": "LoopShortcut", "data": { "schema": schema } });
         let mut tree = serde_json::json!({
-            "narrowed": offer(serde_json::json!(7)),
-            "at_budget": offer(serde_json::json!(budget)),
-            "zero": offer(serde_json::json!(0)),
-            // The same key on a DIFFERENT receiver: a repeat continuation's own ceiling.
+            "measured": offer(serde_json::json!({ "measured_repetition_bound": 17, "deliverable_capacity": 17 })),
+            "unmeasured": offer(serde_json::json!({ "measured_repetition_bound": null })),
+            "narrowed": offer(serde_json::json!({ "max_iterations": 7 })),
+            "at_budget": offer(serde_json::json!({ "max_iterations": budget })),
+            "zero": offer(serde_json::json!({ "max_iterations": 0 })),
+            "no_key": offer(serde_json::json!({ "points": [] })),
+            "current": offer(serde_json::json!({ "repetition_bound": "Measured" })),
             "foreign": {
                 "type": "WhileCondition",
                 "data": { "max_iterations": 3, "condition": serde_json::Value::Null }
             },
         });
 
-        migrate_legacy_shortcut_repetition_bound(&mut tree).expect("the legacy shape migrates");
+        migrate_legacy_shortcut_repetition_bound(&mut tree).expect("the legacy shapes migrate");
 
         let schema = |key: &str| tree[key]["data"]["schema"].clone();
-        assert_eq!(schema("narrowed")["measured_repetition_bound"], 7);
-        assert_eq!(schema("narrowed")["deliverable_capacity"], 7);
-        assert_eq!(
-            schema("at_budget")["measured_repetition_bound"],
-            serde_json::Value::Null,
-            "the budget WAS the old 'no axis narrowed' encoding, so nothing was measured"
-        );
-        assert_eq!(schema("at_budget")["deliverable_capacity"], budget);
-        assert_eq!(schema("zero")["measured_repetition_bound"], 0);
-        assert_eq!(
-            schema("zero")["deliverable_capacity"],
-            0,
-            "a legacy zero re-encodes to a zero capacity, which the load guard refuses"
-        );
-        for key in ["narrowed", "at_budget", "zero"] {
+        for (key, bound, capacity) in [
+            ("measured", "Measured", Some(17)),
+            ("unmeasured", "Unmeasured", None),
+            ("narrowed", "Measured", Some(7)),
+            ("at_budget", "Unmeasured", Some(budget)),
+            ("zero", "Measured", Some(0)),
+            ("current", "Measured", None),
+        ] {
+            assert_eq!(schema(key)["repetition_bound"], bound, "[{key}]");
+            assert_eq!(
+                schema(key)
+                    .get("deliverable_capacity")
+                    .and_then(serde_json::Value::as_u64),
+                capacity.map(u64::from),
+                "[{key}]"
+            );
             assert!(
-                schema(key).get("max_iterations").is_none(),
-                "[{key}] the rewrite REMOVES the legacy key, which is what makes it idempotent"
+                schema(key).get("measured_repetition_bound").is_none()
+                    && schema(key).get("max_iterations").is_none(),
+                "[{key}] the legacy key is removed"
             );
         }
-        assert_eq!(
-            tree["foreign"]["data"]["max_iterations"], 3,
-            "the walk names the LoopShortcut receiver, so a foreign carrier keeps its ceiling"
-        );
+        assert_eq!(schema("no_key"), serde_json::json!({ "points": [] }));
+        assert_eq!(tree["foreign"]["data"]["max_iterations"], 3);
 
         let once = tree.clone();
         migrate_legacy_shortcut_repetition_bound(&mut tree).expect("a second run is a no-op");
@@ -41252,68 +41175,16 @@ mod tests {
             tree, once,
             "idempotent: the second walk finds no legacy key"
         );
-    }
 
-    /// A stamp-less offer or proposal takes the road its published shape proves, idempotently.
-    #[test]
-    fn legacy_offer_road_is_derived_from_the_mint_shape() {
-        let offer = |winner: serde_json::Value, per_cycle: serde_json::Value| {
-            serde_json::json!({
-                "type": "LoopShortcut",
-                "data": { "predicted_winner": winner, "certificate": { "per_cycle": per_cycle } }
-            })
-        };
-        let proposal = |winner: serde_json::Value, per_cycle: serde_json::Value| {
-            serde_json::json!({
-                "type": "RespondToShortcut",
-                "data": { "proposal": { "predicted_winner": winner, "per_cycle": per_cycle } }
-            })
-        };
-        let null = serde_json::Value::Null;
-        let mut tree = serde_json::json!({
-            "offer_path_a": offer(serde_json::json!(1), null.clone()),
-            "offer_path_d": offer(null.clone(), serde_json::json!({ "frames": 2 })),
-            "offer_recorded": offer(null.clone(), null.clone()),
-            "proposal_path_a": proposal(serde_json::json!(1), null.clone()),
-            "proposal_path_d": proposal(null.clone(), serde_json::json!({ "frames": 2 })),
-            "proposal_recorded": proposal(null.clone(), null.clone()),
-            "stamped": {
-                "type": "LoopShortcut",
-                "data": { "predicted_winner": null, "certificate": {}, "road": "Ring" }
-            },
-        });
-
-        migrate_legacy_offer_road(&mut tree);
-
-        for (key, road) in [
-            ("offer_path_a", "Ring"),
-            ("offer_path_d", "Ring"),
-            ("offer_recorded", "RecordedPeriod"),
-            ("stamped", "Ring"),
-        ] {
-            assert_eq!(tree[key]["data"]["road"], road, "[{key}]");
-        }
-        for (key, road) in [
-            ("proposal_path_a", "Ring"),
-            ("proposal_path_d", "Ring"),
-            ("proposal_recorded", "RecordedPeriod"),
-        ] {
-            assert_eq!(tree[key]["data"]["proposal"]["road"], road, "[{key}]");
-        }
-
-        let once = tree.clone();
-        migrate_legacy_offer_road(&mut tree);
-        assert_eq!(tree, once, "idempotent: every carrier already has its road");
+        let mut corrupt = offer(serde_json::json!({ "measured_repetition_bound": "x" }));
+        assert!(migrate_legacy_shortcut_repetition_bound(&mut corrupt).is_err());
     }
 
     /// A carrier saved without a counted take decodes as one that performs, one that performs is
-    /// saved without the field, and one that does not round-trips; the ring road still refuses a
-    /// confirmed period whatever take rides beside it.
+    /// saved without the field, and one that does not round-trips.
     #[test]
     fn a_counted_take_decodes_to_performs_and_rides_its_carriers() {
-        use crate::analysis::loop_check::{
-            CountedTake, OfferRoad, ShortcutProposal, UnperformableCause,
-        };
+        use crate::analysis::loop_check::{CountedTake, ShortcutProposal, UnperformableCause};
         use std::io::Read;
         let unperformable = CountedTake::Unperformable(UnperformableCause::UncontainedChoice);
 
@@ -41326,17 +41197,17 @@ mod tests {
         let mut envelope: serde_json::Value = serde_json::from_str(&json).expect("the dump parses");
         // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
         record_captured_onsets(&mut envelope);
-        let mut board = envelope.get("gameState").unwrap_or(&envelope).clone();
+        let board = envelope.get("gameState").unwrap_or(&envelope).clone();
         assert!(board["waiting_for"]["data"].get("counted_take").is_none());
         let restored = serde_json::from_value::<PersistedGameState>(board.clone())
             .expect("the dump deserializes")
             .into_game_state()
             .expect("the dump restores");
-        let offer = serde_json::to_value(&restored.waiting_for).expect("the offer encodes");
-        assert_eq!(
-            offer["data"]["road"], "RecordedPeriod",
-            "reach: a recorded-road offer"
+        assert!(
+            matches!(restored.waiting_for, WaitingFor::LoopShortcut { .. }),
+            "reach: an offer"
         );
+        let offer = serde_json::to_value(&restored.waiting_for).expect("the offer encodes");
         assert!(
             offer["data"].get("counted_take").is_none(),
             "an offer saved without the field performs and is saved without it"
@@ -41361,7 +41232,6 @@ mod tests {
             shortened_by: None,
             published_declaration: None,
             leading_aims: Vec::new(),
-            road: OfferRoad::Ring,
             counted_take,
             period: Default::default(),
         };
@@ -41384,30 +41254,6 @@ mod tests {
             .unwrap()
             .get("counted_take")
             .is_none());
-
-        let mut with_period = |period: serde_json::Value| {
-            board["waiting_for"] = carried.clone();
-            board["waiting_for"]["data"]["road"] = serde_json::Value::from("Ring");
-            board["waiting_for"]["data"]["period"] = period;
-            serde_json::from_value::<PersistedGameState>(board.clone())
-                .map(drop)
-                .map_err(|error| error.to_string())
-        };
-        with_period(serde_json::json!({ "items": [] }))
-            .expect("reach: the offer restores with no period");
-        assert!(with_period(serde_json::json!({
-            "items": [{
-                "seat": PlayerId(0),
-                "action": crate::types::actions::GameAction::PassPriority,
-                "play": null,
-                "mandatory_answer": false,
-                "next_object_id": 0,
-                "minted_since": 0,
-                "cost_move": null,
-            }],
-        }))
-        .expect_err("a ring offer carrying a confirmed period fails the load")
-        .contains("ring road carries a confirmed period"));
     }
 
     #[test]

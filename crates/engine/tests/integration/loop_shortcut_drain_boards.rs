@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use engine::analysis::decision_template::{
     AnnouncementSubject, ChoicePoint, DecisionPoint, DecisionPointKind, DecisionSlot,
-    IterationCount, PinnedDecision, TargetPin, TargetSchedule,
+    IterationCount, PinnedDecision, RepetitionBound, TargetPin, TargetSchedule,
 };
 use engine::game::engine::apply;
 use engine::types::ability::TargetRef;
@@ -64,6 +64,25 @@ pub(crate) fn lethal_lifegain_loss_board() -> GameState {
 
 pub(crate) fn weird_drain_board() -> GameState {
     restore(include_bytes!("../fixtures/weird_drain_4p.json.gz"))
+}
+
+/// CR 732.2a: a committed save whose offer carries a numeric `measured_repetition_bound` restores
+/// bounded, and the views publish its capacity.
+#[test]
+fn a_committed_legacy_bound_restores_measured_through_the_production_seam() {
+    let state = weird_drain_board();
+    let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
+        panic!(
+            "reach: the save restores at its offer, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(schema.repetition_bound, RepetitionBound::Measured);
+    assert!(schema.is_bounded());
+    assert_eq!(
+        engine::game::derived_views::derive_views(&state, None).bounded_loop_max_repetitions,
+        Some(schema.deliverable_capacity)
+    );
 }
 
 fn submit(state: &mut GameState, who: PlayerId, action: GameAction) {
@@ -192,7 +211,7 @@ pub(crate) fn drive_to_live_declarable_offer(state: &mut GameState) -> LiveOffer
     );
 }
 
-/// CR 704.5a: re-derive a live offer's `measured_repetition_bound` from PUBLISHED data alone — the
+/// CR 704.5a: re-derive a live offer's repetition bound from PUBLISHED data alone — the
 /// certificate's `per_cycle` delta, its `victim_slot` magnitudes and its `declarable_victims`,
 /// plus the live board's lives and libraries — and the seat the caller's own drive aimed at.
 ///
@@ -480,7 +499,7 @@ fn assert_live_offer_is_self_consistent(state: &GameState, offer: LiveOffer) {
     // DIVISOR (`rederive_live_offer_bound`) answers a third question, the FIRST crossing under any
     // declaration, which is why it is neither published field.
     let bound = schema.deliverable_capacity;
-    assert_eq!(schema.measured_repetition_bound, Some(bound));
+    assert_eq!(schema.repetition_bound, RepetitionBound::Measured);
 
     let entries = crate::loop_shortcut::cascade_from(
         state,

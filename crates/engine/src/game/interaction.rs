@@ -4031,7 +4031,6 @@ fn loop_shortcut_projection(
     let WaitingFor::LoopShortcut {
         schema,
         certificate,
-        road,
         ..
     } = waiting_for
     else {
@@ -4198,25 +4197,13 @@ fn loop_shortcut_projection(
             DecisionPointKind::MayChoice => {
                 // CR 732.2a: a recorded take performs the confirmed period's own answer, so its
                 // "may" is stated as fixed and neither answer is offered.
-                let fixed = *road == crate::analysis::loop_check::OfferRoad::RecordedPeriod;
-                if !fixed {
-                    candidates.extend([
-                        LoopShortcutCandidateValue::May(
-                            crate::analysis::decision_template::MayChoiceOption::Take,
-                        ),
-                        LoopShortcutCandidateValue::May(
-                            crate::analysis::decision_template::MayChoiceOption::Decline,
-                        ),
-                    ]);
-                }
-                let answers = u32::from(!fixed);
                 (
                     InteractionShortcutPointKind::MayChoice,
-                    answers,
-                    answers,
+                    0,
+                    0,
                     true,
                     false,
-                    fixed,
+                    true,
                 )
             }
             DecisionPointKind::UnlessBreak => {
@@ -11230,20 +11217,6 @@ fn materialize_loop_shortcut_response(
                     indices,
                 });
             }
-            InteractionShortcutPointKind::MayChoice => {
-                let [candidate_index] = candidate_indices.as_slice() else {
-                    return Err(InteractionReasonCode::ConstraintUnsatisfied);
-                };
-                let LoopShortcutCandidateValue::May(take) =
-                    &projection.candidates[*candidate_index]
-                else {
-                    return Err(InteractionReasonCode::InvalidAuthorityState);
-                };
-                decisions.push(PinnedDecision::MayChoice {
-                    slot: point.slot.clone(),
-                    take: *take,
-                });
-            }
             InteractionShortcutPointKind::UnlessBreak => {
                 let [candidate_index] = candidate_indices.as_slice() else {
                     return Err(InteractionReasonCode::ConstraintUnsatisfied);
@@ -11260,6 +11233,7 @@ fn materialize_loop_shortcut_response(
             }
             InteractionShortcutPointKind::ConvokeTaps
             | InteractionShortcutPointKind::ManaColor
+            | InteractionShortcutPointKind::MayChoice
             | InteractionShortcutPointKind::Order => {
                 return Err(InteractionReasonCode::InvalidAuthorityState);
             }
@@ -12609,13 +12583,12 @@ mod tests {
     ///   measures no threshold and still publishes a finite ceiling, so the two are not the same
     ///   question.
     ///
-    /// REVERT-PROBE: read `measured_repetition_bound` in place of `deliverable_capacity` ⇒ ⓐ's
-    /// `max` is the measurement and FAILS, while ⓑ stays green under the `.min(..)`. Key ⓒ's arm
-    /// on `is_bounded()` instead of on the variant ⇒ ⓒ publishes a finite ceiling and FAILS.
+    /// REVERT-PROBE: key ⓒ's arm on `is_bounded()` instead of on the variant ⇒ ⓒ publishes a
+    /// finite ceiling and FAILS.
     #[test]
     fn the_picker_publishes_the_deliverable_capacity_and_never_the_measured_threshold() {
-        use crate::analysis::decision_template::ShortcutDecisionSchema;
-        use crate::analysis::loop_check::{LoopCertificate, OfferRoad, WinKind};
+        use crate::analysis::decision_template::{RepetitionBound, ShortcutDecisionSchema};
+        use crate::analysis::loop_check::{LoopCertificate, WinKind};
         use crate::analysis::resource::BoardDelta;
 
         let viewer = PlayerId(0);
@@ -12635,12 +12608,12 @@ mod tests {
                 },
                 schema: ShortcutDecisionSchema {
                     iteration_count,
-                    measured_repetition_bound: measured,
+                    repetition_bound: measured
+                        .map_or(RepetitionBound::Unmeasured, |_| RepetitionBound::Measured),
                     deliverable_capacity: capacity,
                     ..Default::default()
                 },
                 declaration: None,
-                road: OfferRoad::Ring,
                 counted_take: Default::default(),
                 period: Default::default(),
             };
