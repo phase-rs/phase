@@ -450,7 +450,7 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
 /// CR 605.3a + CR 701.26b + CR 122.1d: whether untapping `source` gives `player`
 /// its mana a second time, a priority hint read from `source` alone (it takes
 /// no game state): whether it is a phased-in permanent, its controller, tap
-/// state, counters, types and own ability definitions, with no other object,
+/// state, counters and effective abilities, with no other object,
 /// static or cost leg consulted and nothing activated, paid or copied. `source`
 /// must be untapped with no stun counter (an untap would remove the counter
 /// instead), and have, among its effective abilities, a {T} mana ability whose

@@ -11000,8 +11000,8 @@ fn stack_resolution_session_priority_decision(
 /// top of the stack is held for a wasted untap on its own mana source. Another
 /// player's consent to resolve the stack doesn't pass it: the meaningful-action
 /// check never counts a mana activation, so it can't see that window. Only the
-/// bounded untap reason is asked (`priority::own_top_wastes_an_untap`); the
-/// departure reason keeps main's behavior here.
+/// bounded untap reason is asked (`priority::own_top_wastes_an_untap`): the
+/// departure reason's board read isn't run for another player's consent.
 fn window_held_for_mana(state: &GameState, player: PlayerId) -> bool {
     state
         .stack
@@ -11025,8 +11025,9 @@ fn stack_resolution_session_participant_authorizes_pass(
         // A representative consented to the session. A non-representative's
         // skipped windows are not rechecked for a meaningful action (only its
         // live window is, in `stack_resolution_session_priority_decision`).
-        // CR 117.1: Full Control is the one window consent doesn't cover, so the
-        // standing-pass ladder, whose `Held` reasons read the board, isn't read.
+        // CR 117.1: Full Control is the one skipped window consent doesn't cover
+        // (an activated ability, the untap reason's entry, is never skipped), so
+        // the standing-pass ladder isn't read.
         StackResolutionPolicy::Committed => !priority::holds_full_control(state, participant),
         // A verified AI pass authorizes later windows in this exact fenced
         // cohort; CR 117.3d + CR 732.2b: a representative's standing pass over

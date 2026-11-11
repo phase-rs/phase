@@ -26,7 +26,8 @@
 //! ability, copy that ability.") copying such an untap.
 //!
 //! What keeps the pass: a stunned source (CR 122.1d), a phased-out source
-//! (CR 702.26b), a source whose only mana ability removes it, an untap of another permanent (Arbor Elf, Freed from the Real), an
+//! (CR 702.26b), a source whose only mana ability removes it or was removed
+//! from it (Humble), an untap of another permanent (Arbor Elf, Freed from the Real), an
 //! ability that does more than untap (Eater of the Dead, Harsh Deceiver), and
 //! a trigger (Wilderness Reclamation: "At the beginning of your end step, untap
 //! all lands you control."), which goes on the stack with no player act.
@@ -962,71 +963,90 @@ const INSPIRATION: &str = "Target player draws two cards.";
 
 /// The opponent's Resolve All asks only the untap question. P0 plays Guildless
 /// Commons ("When this land enters, return a land you control to its owner's
-/// hand.") beside an untapped Forest and passes; P1 casts Inspiration above the
-/// trigger and asks to resolve the stack. The trigger's own window would be held
-/// for the Forest by the departure reason, which another player's Resolve All
-/// doesn't read, as on main: the trigger resolves, and P0 is asked which land
-/// to return.
+/// hand.") beside an untapped Forest; P0's own recommendation over the trigger
+/// is to hold, for the Forest, by the departure reason. P0 passes anyway, P1
+/// casts Inspiration above the trigger and asks to resolve the stack, through
+/// the public action (a session P0 isn't part of) or as a stored request with
+/// no session. Another player's Resolve All doesn't read the departure reason:
+/// the trigger resolves without stopping at P0's window.
 #[test]
 fn another_players_resolve_all_reads_no_departure_hold() {
     let Some(db) = shared_card_db() else { return };
-    let mut scenario = main_phase_scenario();
-    scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
-    let commons = scenario
-        .add_land_from_oracle(P0, "Guildless Commons", GUILDLESS_COMMONS)
-        .id();
-    let inspiration = scenario
-        .add_spell_to_hand_from_oracle(P1, "Inspiration", true, INSPIRATION)
-        .with_mana_cost(ManaCost::zero())
-        .id();
-    for _ in 0..2 {
-        scenario.add_real_card(P1, "Island", Zone::Library, db);
-    }
-    let mut runner = scenario.build();
-    move_to_zone(runner.state_mut(), commons, Zone::Hand, &mut Vec::new());
-    let card_id = runner.state().objects[&commons].card_id;
-    runner
-        .act(GameAction::PlayLand {
-            object_id: commons,
-            card_id,
-        })
-        .expect("P0 plays Guildless Commons");
-    assert_eq!(
-        top_source_name(&runner).as_deref(),
-        Some("Guildless Commons")
-    );
-    runner.act(GameAction::PassPriority).expect("P0 passes");
-    assert_eq!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { player: P1 }
-    );
-    runner.cast(inspiration).target_player(P1).commit();
-    assert_eq!(runner.state().stack.len(), 2);
-    runner
-        .act(GameAction::SetAutoPass {
-            mode: AutoPassRequest::UntilStackEmpty,
-        })
-        .expect("P1 asks to resolve the stack");
+    for stored in [false, true] {
+        let mut scenario = main_phase_scenario();
+        scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+        let commons = scenario
+            .add_land_from_oracle(P0, "Guildless Commons", GUILDLESS_COMMONS)
+            .id();
+        let inspiration = scenario
+            .add_spell_to_hand_from_oracle(P1, "Inspiration", true, INSPIRATION)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        for _ in 0..2 {
+            scenario.add_real_card(P1, "Island", Zone::Library, db);
+        }
+        let mut runner = scenario.build();
+        move_to_zone(runner.state_mut(), commons, Zone::Hand, &mut Vec::new());
+        let card_id = runner.state().objects[&commons].card_id;
+        runner
+            .act(GameAction::PlayLand {
+                object_id: commons,
+                card_id,
+            })
+            .expect("P0 plays Guildless Commons");
+        assert_eq!(
+            top_source_name(&runner).as_deref(),
+            Some("Guildless Commons")
+        );
+        assert!(
+            !recommends_pass(&runner),
+            "reach: P0's own window over the trigger is held for the Forest"
+        );
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+        assert_eq!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        );
+        runner.cast(inspiration).target_player(P1).commit();
+        assert_eq!(runner.state().stack.len(), 2);
+        if stored {
+            runner.state_mut().auto_pass.insert(
+                P1,
+                AutoPassMode::UntilStackEmpty {
+                    initial_stack_len: 2,
+                    policy: StackResolutionPolicy::Committed,
+                },
+            );
+            runner.act(GameAction::PassPriority).expect("P1 passes");
+        } else {
+            runner
+                .act(GameAction::SetAutoPass {
+                    mode: AutoPassRequest::UntilStackEmpty,
+                })
+                .expect("P1 asks to resolve the stack");
+        }
 
-    assert!(
-        !runner.state().stack.iter().any(|entry| runner
-            .state()
-            .objects
-            .get(&entry.source_id)
-            .is_some_and(|o| o.name == "Guildless Commons")),
-        "the Commons trigger resolved under P1's Resolve All"
-    );
+        assert!(
+            !runner.state().stack.iter().any(|entry| runner
+                .state()
+                .objects
+                .get(&entry.source_id)
+                .is_some_and(|o| o.name == "Guildless Commons")),
+            "stored: {stored}: the Commons trigger resolved under P1's Resolve All"
+        );
+    }
 }
 
 /// Humble, verbatim.
 const HUMBLE: &str =
     "Until end of turn, target creature loses all abilities and has base power and toughness 0/1.";
 
-/// CR 613.1f + CR 113.7a: Soliton is a Forest under Ashaya, so it has the
-/// intrinsic "{T}: Add {G}", and its own "{U}: Untap this creature." on the
-/// stack holds. Humble resolving above the untap removes that mana ability,
-/// while the untap on the stack survives: the source has no mana to give
-/// again, and the pass stays.
+/// CR 305.6 + CR 613.1f + CR 113.7a: Soliton is a Forest under Ashaya, so it
+/// has the intrinsic "{T}: Add {G}", and its own "{U}: Untap this creature." on
+/// the stack holds. Humble resolving above the untap removes that mana ability
+/// in layer 6, while the untap on the stack survives: the source has no mana to
+/// give again, and the pass stays. (The live listing still offers the {G} after
+/// Humble through an older subtype fallback, filed separately.)
 #[test]
 fn an_ability_removed_by_a_layer_keeps_the_pass() {
     let Some(db) = shared_card_db() else { return };
@@ -1073,20 +1093,23 @@ fn an_ability_removed_by_a_layer_keeps_the_pass() {
     }
 }
 
+/// Mirrored Lotus, verbatim.
+const MIRRORED_LOTUS: &str = "Reflect {0} (As this enters, each opponent may pay {0}. When they do, they create a token copy of this except it lacks this ability.)\n{T}, Exile Mirrored Lotus: Add three mana of any one color.";
 /// Lotus Petal, verbatim.
 const LOTUS_PETAL: &str = "{T}, Sacrifice this artifact: Add one mana of any color.";
 /// Sol Ring, verbatim.
 const SOL_RING: &str = "{T}: Add {C}{C}.";
 
 /// CR 701.21a: Myr Welder with Soliton and Lotus Petal exiled with it can tap
-/// for mana by sacrificing itself, which leaves nothing for Soliton's untap to
-/// untap, so the pass stays. With Sol Ring instead, the same untap holds. The
+/// for mana by sacrificing itself, and with Mirrored Lotus by exiling itself,
+/// which leaves nothing for Soliton's untap to untap, so the pass stays. With Sol Ring instead, the same untap holds. The
 /// borrowed mana action is offered either way.
 #[test]
 fn a_mana_ability_that_consumes_its_source_keeps_the_pass() {
     let Some(db) = shared_card_db() else { return };
     for (name, text, holds) in [
         ("Lotus Petal", LOTUS_PETAL, false),
+        ("Mirrored Lotus", MIRRORED_LOTUS, false),
         ("Sol Ring", SOL_RING, true),
     ] {
         let mut scenario = main_phase_scenario();
