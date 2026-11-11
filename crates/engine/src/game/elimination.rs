@@ -5554,9 +5554,10 @@ mod r4b_staged_elimination_tests {
     use crate::types::ability::{DigRestSplitScope, ExileConcealment, LibraryPosition};
     use crate::types::game_state::{
         BatchDeliveryStage, MassLibraryOrderBatch, MassLibraryOrderMember, PendingBatchDeliveries,
-        PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest, StagedArrangementStatus,
-        StagedBatchDelivery, StagedBatchMember, StagedBatchMemberState, StagedLibraryArrangement,
-        StagedMemberOperation, WaitingFor, ZoneDeliveryExileTracking,
+        PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest, PendingComponentDeliveryParent,
+        PendingZoneChangeDelivery, StagedArrangementStatus, StagedBatchDelivery, StagedBatchMember,
+        StagedBatchMemberState, StagedLibraryArrangement, StagedMemberOperation, WaitingFor,
+        ZoneDeliveryExileTracking,
     };
     use crate::types::identifiers::{
         CardId, LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef,
@@ -5613,7 +5614,6 @@ mod r4b_staged_elimination_tests {
     /// parent's submitted order and the child's live/copied order before save.
     #[test]
     fn a_departed_inherited_entry_keeps_child_copy_coherent() {
-        use crate::types::game_state::{PendingComponentDeliveryParent, PendingZoneChangeDelivery};
         let mut state = GameState::new_two_player(42);
         let host = create_object(
             &mut state,

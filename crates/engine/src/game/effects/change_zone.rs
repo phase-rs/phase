@@ -14607,12 +14607,6 @@ mod tests {
     /// retains its terminal-shuffle placement through every resume. The member
     /// moves must not auto-shuffle, leaving exactly the one terminal Shuffle.
     fn paused_terminal_mass_library_shuffle_events(cant_shuffle: bool) -> Vec<GameEvent> {
-        use crate::types::ability::{
-            AbilityDefinition, AbilityKind, LibraryShuffleMode, ReplacementDefinition,
-            ReplacementMode,
-        };
-        use crate::types::replacements::ReplacementEvent;
-
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
