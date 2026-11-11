@@ -1928,52 +1928,6 @@ fn replacement_order_choice_player(
     }
 }
 
-/// CR 616.1 + CR 101.4c: the player who will be asked for the next replacement
-/// decision on this proposed event, or `None` when it resolves without a
-/// choice. A simultaneous population must schedule its consults in this
-/// player's APNAP order, which is not always the affected object's controller
-/// (a commander's owner answers under CR 903.9b; a source-authority
-/// replacement is answered by the source's controller).
-pub fn proposed_event_decision_player(
-    state: &mut GameState,
-    proposed: &ProposedEvent,
-) -> Option<PlayerId> {
-    // The candidate id space is the index the pipeline builds for this event;
-    // without it the ids do not map back to the live definitions, and the
-    // chooser would be read from the wrong authority.
-    prepare_replacement_index_for_pipeline(state);
-    let player = proposed_event_decision_player_indexed(state, proposed);
-    clear_replacement_index_pipeline(state);
-    player
-}
-
-fn proposed_event_decision_player_indexed(
-    state: &GameState,
-    proposed: &ProposedEvent,
-) -> Option<PlayerId> {
-    let registry = replacement_registry();
-    let candidates = find_applicable_replacements(state, proposed, registry);
-    if candidates.is_empty() {
-        return None;
-    }
-    let candidates = choosable_replacement_candidates(state, proposed, candidates);
-    if candidates.is_empty() {
-        return None;
-    }
-    // Mirror the pipeline's own decision shapes: a multi-candidate set is the
-    // CR 616.1 ordering decision, answered by the affected player; a single
-    // optional replacement is answered by the authority its definition names
-    // (a commander's owner, or the replacement source's controller).
-    if candidates.len() > 1 {
-        return replacement_order_choice_player(state, proposed);
-    }
-    let rid = *candidates.first()?;
-    if !replacement_is_optional(state, rid) {
-        return None;
-    }
-    replacement_choice_player(state, proposed, rid)
-}
-
 pub(crate) fn pending_replacement_cost_payer(
     state: &GameState,
     pending: &PendingReplacement,

@@ -1824,7 +1824,6 @@ fn new_staged_batch(
                 terminal: None,
                 operation: StagedMemberOperation::ZoneMove,
                 approved_post_replacement: None,
-                pending_chooser: None,
             }
         })
         .collect();
@@ -1834,8 +1833,6 @@ fn new_staged_batch(
         cursor: 0,
         arrangements,
         arrangement_cursor: 0,
-        consult_order: Vec::new(),
-        consult_pos: 0,
         population_devour_snapshot: None,
     }
 }
@@ -1983,26 +1980,9 @@ fn run_staged_batch(
         };
         match stage {
             BatchDeliveryStage::Approving => {
-                // CR 616.1 + CR 101.4d: schedule (or reschedule after a pause)
-                // by the players who actually choose, before the first ask.
-                if owner
-                    .staged
-                    .as_ref()
-                    .is_some_and(|staged| staged.consult_order.is_empty())
-                {
-                    if let Some(mut staged) = owner.staged.take() {
-                        schedule_staged_consult_order(state, &mut staged);
-                        owner.staged = Some(staged);
-                    }
-                }
                 match consult_next_staged_member(state, owner, events) {
                     StagedConsult::Continue => continue,
                     StagedConsult::Paused => {
-                        // A resolved pause may expose new decisions (CR 616.2 /
-                        // CR 101.4d); the next entry rebuilds this order.
-                        if let Some(staged) = owner.staged.as_mut() {
-                            staged.consult_order.clear();
-                        }
                         // A paused batch is a savable state: project the
                         // compatibility view once, at this boundary, instead of
                         // on every member transition.
@@ -2050,95 +2030,12 @@ fn staged_member_is_consultable(
     )
 }
 
-/// CR 616.1 + CR 101.4c + CR 101.4d: schedule the approval loop by the player
-/// each member's next outstanding decision will actually ask.
-///
-/// Physical delivery order is untouched (announcement order through the
-/// delivery cursor). This order only decides who is asked first: a commander's
-/// owner answers under CR 903.9b, a `SourceController` replacement is answered
-/// by its source's controller, and a member with no decision falls back to the
-/// affected player CR 616.1 would name, so it never jumps ahead of a real
-/// choice. Rebuilt at entry and whenever a pause resolves, because an applied
-/// replacement can expose a new decision (CR 616.2 / CR 101.4d).
-fn schedule_staged_consult_order(state: &mut GameState, staged: &mut StagedBatchDelivery) {
-    let apnap = crate::game::players::apnap_order(state);
-    let rank = |player: PlayerId| {
-        apnap
-            .iter()
-            .position(|candidate| *candidate == player)
-            .unwrap_or(usize::MAX)
-    };
-    let mut decisions: Vec<(usize, u32)> = Vec::new();
-    for member in &mut staged.members {
-        member.pending_chooser = (member.state == StagedBatchMemberState::Unconsulted)
-            .then(|| staged_member_next_chooser(state, member))
-            .flatten();
-        if member.state != StagedBatchMemberState::Unconsulted {
-            continue;
-        }
-        let player = member.pending_chooser.or_else(|| {
-            state
-                .objects
-                .get(&member.identity.object_id)
-                .map(|object| object.controller)
-        });
-        decisions.push((
-            player.map(rank).unwrap_or(usize::MAX),
-            member.announcement_index,
-        ));
-    }
-    decisions.sort_unstable();
-    staged.consult_order = decisions.into_iter().map(|(_, index)| index).collect();
-    staged.consult_pos = 0;
-}
-
-/// The player the member's next replacement decision will ask, or `None` when
-/// the member resolves without one. Destroy members ask their destruction
-/// event and then the resulting move; ordinary members ask their move.
-fn staged_member_next_chooser(
-    state: &mut GameState,
-    member: &crate::types::game_state::StagedBatchMember,
-) -> Option<PlayerId> {
-    let source = match &member.operation {
-        StagedMemberOperation::Destroy(operation) => {
-            let outer = crate::types::proposed_event::ProposedEvent::Destroy {
-                object_id: member.identity.object_id,
-                source: Some(operation.source),
-                cant_regenerate: operation.cant_regenerate,
-                applied: HashSet::new(),
-            };
-            if let Some(player) =
-                crate::game::replacement::proposed_event_decision_player(state, &outer)
-            {
-                return Some(player);
-            }
-            Some(operation.source)
-        }
-        StagedMemberOperation::ZoneMove => None,
-    };
-    let request = ZoneMoveRequest::from_pending(member.request.clone());
-    let inner = match prepared_batch_member_event(state, &request) {
-        Some(prepared) => prepared.proposed,
-        None => {
-            return source.and_then(|source| {
-                crate::game::replacement::proposed_event_decision_player(
-                    state,
-                    &crate::types::proposed_event::ProposedEvent::zone_change(
-                        member.identity.object_id,
-                        Zone::Battlefield,
-                        request.to,
-                        Some(source),
-                    ),
-                )
-            })
-        }
-    };
-    crate::game::replacement::proposed_event_decision_player(state, &inner)
-}
-
 /// CR 400.7 + CR 603.7c: retire a staged member whose object left before the
-/// batch consulted it. The member contributes no occurrence and no post-event
-/// source context to the original logical action.
+/// batch consulted it. The member is never consulted or delivered. Its
+/// battlefield slot, if it has one, is finalized at settlement from the actual
+/// occurrences: an earlier member's replacement may have moved it inside this
+/// same logical action (CR 702.89a: an Umbra's armor destroys the Aura), and an
+/// off-battlefield member has no battlefield slot at all.
 fn mark_staged_member_preempted(owner: &mut PendingBatchDeliveries, index: usize) {
     let Some(staged) = owner.staged.as_mut() else {
         return;
@@ -2166,44 +2063,17 @@ fn consult_next_staged_member(
     owner: &mut PendingBatchDeliveries,
     events: &mut Vec<GameEvent>,
 ) -> StagedConsult {
-    // CR 616.1 + CR 101.4c: the approval loop asks in the scheduled APNAP order
-    // of the players who actually choose; delivery order stays untouched.
-    let scheduled = owner.staged.as_ref().and_then(|staged| {
-        staged
-            .consult_order
-            .get(staged.consult_pos)
-            .and_then(|index| staged.members.get(*index as usize))
-            .cloned()
-    });
-    let Some(member) = scheduled.or_else(|| {
-        let staged = owner.staged.as_ref()?;
-        // A member still holding a live child must be revisited by the same
-        // match arms that park it; only a fully settled batch is done.
-        let pending = staged.members.iter().find(|member| {
-            matches!(
-                member.state,
-                StagedBatchMemberState::Unconsulted
-                    | StagedBatchMemberState::OuterConsulting
-                    | StagedBatchMemberState::InnerConsulting
-                    | StagedBatchMemberState::PreventedWithChild
-            )
-        });
-        pending.cloned()
-    }) else {
-        return StagedConsult::AllConsulted;
-    };
-    if owner
+    // The approval cursor IS the member being asked, exactly as before the
+    // choice scheduler was introduced: consultation and delivery walk the same
+    // announcement order, so every park/answer/restore site can key on `cursor`.
+    let Some(member) = owner
         .staged
         .as_ref()
-        .is_some_and(|staged| staged.consult_pos >= staged.consult_order.len())
-    {
-        // CR 101.4d: a pause may have exposed new decisions among the members
-        // that are still unconsulted; rebuild the order before asking again.
-        if let Some(mut staged) = owner.staged.take() {
-            schedule_staged_consult_order(state, &mut staged);
-            owner.staged = Some(staged);
-        }
-    }
+        .and_then(|staged| staged.members.get(staged.cursor))
+        .cloned()
+    else {
+        return StagedConsult::AllConsulted;
+    };
     // CR 400.7 + CR 603.7c: a later member that changed zone or incarnation
     // while an earlier chooser was answering cannot undergo this move. The
     // ordinary path refuses it before proposing; a staged member must not open
@@ -2223,19 +2093,11 @@ fn consult_next_staged_member(
         StagedMemberOperation::Destroy(operation) => Some(operation),
         StagedMemberOperation::ZoneMove => None,
     };
-    if let Some(staged) = owner.staged.as_mut() {
-        if staged
-            .consult_order
-            .get(staged.consult_pos)
-            .is_some_and(|index| *index == member.announcement_index)
-        {
-            staged.consult_pos += 1;
-        }
-    }
     match (destroy_operation, member.state) {
         (_, StagedBatchMemberState::Terminal | StagedBatchMemberState::Abandoned) => {
             // CR 800.4a: a later member may have left while an earlier chooser
             // was answering. Its frozen slot is finished, not a live pause.
+            advance_staged_cursor(owner, member.announcement_index as usize);
             return StagedConsult::Continue;
         }
         (Some(operation), StagedBatchMemberState::Unconsulted) => {
@@ -12436,7 +12298,6 @@ mod staged_batch_tests {
             terminal: None,
             operation: StagedMemberOperation::ZoneMove,
             approved_post_replacement: None,
-            pending_chooser: None,
         }
     }
 
@@ -12493,8 +12354,6 @@ mod staged_batch_tests {
             members,
             arrangements: Vec::new(),
             arrangement_cursor: 0,
-            consult_order: Vec::new(),
-            consult_pos: 0,
             population_devour_snapshot: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
@@ -13713,8 +13572,6 @@ mod staged_batch_tests {
             members,
             arrangements: Vec::new(),
             arrangement_cursor: 0,
-            consult_order: Vec::new(),
-            consult_pos: 0,
             population_devour_snapshot: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {

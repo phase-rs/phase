@@ -7793,17 +7793,11 @@ pub struct StagedBatchDelivery {
     /// Original membership in announcement order; fixed length after entry.
     pub members: Vec<StagedBatchMember>,
     /// Next member to consult (`Approving`) or deliver (`Delivering`).
+    /// Consultation walks the members in announcement order, as the
+    /// per-member producers did before staging, so while `Approving` the
+    /// member at the cursor is the one being asked and the only one a pause
+    /// can park.
     pub cursor: usize,
-    /// CR 616.1 + CR 101.4c + CR 101.4d: announcement indices in the order the
-    /// approval loop asks for them — APNAP by the player each member's next
-    /// decision will ask, then announcement order. Physical delivery stays in
-    /// announcement order through `cursor`; this order only schedules choices,
-    /// and is rebuilt whenever a pause resolves and new choices may exist.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub consult_order: Vec<u32>,
-    /// Position in `consult_order` while `Approving`.
-    #[serde(default)]
-    pub consult_pos: usize,
     /// Owner/position groups derived from final approvals, in prompt order.
     pub arrangements: Vec<StagedLibraryArrangement>,
     /// Next arrangement group to prompt (`Arranging`).
@@ -7889,11 +7883,6 @@ pub struct StagedBatchMember {
     /// CR 616.1: approved replacement work retained until member delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_post_replacement: Option<PostReplacementDrainStack>,
-    /// CR 616.1 + CR 101.4c: the player the next outstanding decision for this
-    /// member will actually ask, cached when the approval order is scheduled.
-    /// `None` means the member has no decision and only needs delivery order.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_chooser: Option<PlayerId>,
 }
 
 /// The current-member consultation and delivery states. The Destroy adapter
@@ -54708,7 +54697,6 @@ mod tests {
                 outer: StagedDestroyOuterApproval::Approved,
             }),
             approved_post_replacement: None,
-            pending_chooser: None,
         };
         PendingBatchDeliveries::validate_staged_member(&member)
             .expect("concession-pruned destroy member with its outer approval is legal");
@@ -54760,7 +54748,6 @@ mod tests {
             terminal,
             operation: StagedMemberOperation::ZoneMove,
             approved_post_replacement: None,
-            pending_chooser: None,
         }
     }
 
@@ -54953,8 +54940,6 @@ mod tests {
                 cursor,
                 arrangements: Vec::new(),
                 arrangement_cursor: 0,
-                consult_order: Vec::new(),
-                consult_pos: 0,
                 population_devour_snapshot: None,
             }),
         }

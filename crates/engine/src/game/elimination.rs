@@ -5606,7 +5606,6 @@ mod r4b_staged_elimination_tests {
             terminal: None,
             operation: StagedMemberOperation::ZoneMove,
             approved_post_replacement: None,
-            pending_chooser: None,
         }
     }
 
@@ -5695,8 +5694,6 @@ mod r4b_staged_elimination_tests {
                 members,
                 arrangements: arrangements.clone(),
                 arrangement_cursor: 1,
-                consult_order: Vec::new(),
-                consult_pos: 0,
                 population_devour_snapshot: None,
             }),
         };
@@ -5780,8 +5777,6 @@ mod r4b_staged_elimination_tests {
             members,
             arrangements,
             arrangement_cursor: 0,
-            consult_order: Vec::new(),
-            consult_pos: 0,
             population_devour_snapshot: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
@@ -5926,8 +5921,6 @@ mod r4b_staged_elimination_tests {
                 members,
                 arrangements,
                 arrangement_cursor: 0,
-                consult_order: Vec::new(),
-                consult_pos: 0,
                 population_devour_snapshot: None,
             }),
         });

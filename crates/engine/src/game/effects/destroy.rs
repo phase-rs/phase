@@ -11,55 +11,8 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
-
-/// CR 616.1 + CR 101.4: order a simultaneous destruction population by the
-/// APNAP rank of the player who will actually be asked, preserving the
-/// announced order within one chooser (Rust's sort is stable).
-///
-/// The chooser comes from the replacement pipeline
-/// ([`replacement::proposed_event_decision_player`]) because it is not always
-/// the object's controller: CR 903.9b makes a commander's owner answer for it,
-/// and a source-authority replacement is answered by the source's controller.
-/// Members that resolve without a decision sort last, keeping the announced
-/// order; elimination already removes the object, so an unknown object sorts
-/// last rather than being dropped.
-fn apnap_ordered_members(
-    state: &mut GameState,
-    members: &[ObjectId],
-    source: Option<ObjectId>,
-    cant_regenerate: bool,
-) -> Vec<ObjectId> {
-    let rank: std::collections::HashMap<PlayerId, usize> = crate::game::players::apnap_order(state)
-        .into_iter()
-        .enumerate()
-        .map(|(index, player)| (player, index))
-        .collect();
-    let mut ordered = members.to_vec();
-    ordered.sort_by_key(|id| {
-        // The first decision for a destroyed member is normally the inner
-        // Battlefield -> Graveyard move (an umbra-style "would be destroyed"
-        // replacement is offered there), so ask both events in pipeline order.
-        let outer = ProposedEvent::Destroy {
-            object_id: *id,
-            source,
-            cant_regenerate,
-            applied: HashSet::new(),
-        };
-        let inner = ProposedEvent::zone_change(*id, Zone::Battlefield, Zone::Graveyard, source);
-        // A member with no replacement decision is still delivered in APNAP
-        // order, so it falls back to the player CR 616.1 would name for it: the
-        // affected object's controller.
-        replacement::proposed_event_decision_player(state, &outer)
-            .or_else(|| replacement::proposed_event_decision_player(state, &inner))
-            .or_else(|| state.objects.get(id).map(|object| object.controller))
-            .and_then(|player| rank.get(&player).copied())
-            .unwrap_or(usize::MAX)
-    });
-    ordered
-}
 
 /// CR 701.8a + CR 614: Apply an accepted Destroy proposed event.
 ///
@@ -254,15 +207,6 @@ pub fn resolve(
             }
         }
     }
-    // CR 616.1: the announced targets are one simultaneous destruction, so the
-    // replacement choices they trigger follow the choosers' APNAP order, not
-    // the announcement order; equal choosers keep the announced order.
-    let unique_targets = apnap_ordered_members(
-        state,
-        &unique_targets,
-        Some(ability.source_id),
-        cant_regenerate,
-    );
     if unique_targets.len() >= 2 {
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(state, &unique_targets);
@@ -462,11 +406,6 @@ pub fn resolve_all(
     // CR 701.8a: the whole guarded mass population is one announced
     // simultaneous destruction. A pause must not lose the unprocessed suffix.
     if matching.len() >= 2 {
-        // CR 616.1: when several players must choose replacement order for the
-        // same simultaneous event, the choices are made in APNAP order; within
-        // one player the announced battlefield order is retained.
-        let matching =
-            apnap_ordered_members(state, &matching, Some(ability.source_id), cant_regenerate);
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(state, &matching);
         let requests = matching
@@ -546,24 +485,6 @@ mod tests {
     use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
-    /// CR 616.1 + CR 101.4: simultaneous destroys order their replacement
-    /// choices by APNAP of the affected objects' controllers, keeping the
-    /// announced order inside one player.
-    #[test]
-    fn staged_destroy_members_follow_apnap_order_not_battlefield_order() {
-        use crate::game::scenario::{GameScenario, P0, P1};
-        let mut scenario = GameScenario::new();
-        let first_nap = scenario.add_creature(P1, "Nap first", 2, 2).id();
-        let active = scenario.add_creature(P0, "Active", 2, 2).id();
-        let second_nap = scenario.add_creature(P1, "Nap second", 2, 2).id();
-        let mut state = scenario.state.clone();
-        assert_eq!(
-            apnap_ordered_members(&mut state, &[first_nap, active, second_nap], None, false),
-            vec![active, first_nap, second_nap],
-            "the active player's object is consulted first; NAP order is preserved"
-        );
-    }
-
     use crate::types::player::PlayerId;
 
     #[test]
