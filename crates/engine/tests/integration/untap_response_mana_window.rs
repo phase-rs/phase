@@ -831,15 +831,16 @@ const THE_IMMORTAL_SUN: &str = "Players can't activate planeswalkers' loyalty ab
 /// Myr Welder with Soliton and Springleaf Drum exiled with it, Soliton's "{U}:
 /// Untap this creature." on the stack. `crowded` adds The Immortal Sun and
 /// thirty creatures. Returns whether the recommendation P0's client receives
-/// holds, the hold's own reads and the engine's counters for that read.
+/// holds, the probe counters and the engine's counters for that read, and the
+/// probe counters for the live listing of the Welder's mana actions.
 fn welder_drum_hold_work(
     db: &CardDatabase,
     crowded: bool,
 ) -> (
     bool,
-    usize,
     perf_counters::AbilityManaAutoTapProbeCounters,
     perf_counters::PerfCounterSnapshot,
+    perf_counters::AbilityManaAutoTapProbeCounters,
 ) {
     let mut scenario = main_phase_scenario();
     let welder = scenario.add_real_card(P0, "Myr Welder", Zone::Battlefield, db);
@@ -865,38 +866,92 @@ fn welder_drum_hold_work(
     activate(&mut runner, welder, untap, &[]);
     assert_eq!(top_source_name(&runner).as_deref(), Some("Myr Welder"));
     let state = runner.state();
-    let abilities = state.objects[&welder].abilities.len();
     let actions = legal_actions(state);
     perf_counters::reset();
     let holds = !auto_pass_recommended_for_viewer(state, P0, &actions);
-    (
-        holds,
-        abilities,
-        perf_counters::ability_mana_auto_tap_probe_snapshot(),
-        perf_counters::snapshot(),
-    )
+    let hold_probe = perf_counters::ability_mana_auto_tap_probe_snapshot();
+    let hold_work = perf_counters::snapshot();
+    // The reach control: the live listing checks the borrowed Drum's cost.
+    perf_counters::reset();
+    let _ = mana_action(&runner, welder);
+    let listing_probe = perf_counters::ability_mana_auto_tap_probe_snapshot();
+    (holds, hold_probe, hold_work, listing_probe)
 }
 
 /// The hold reads only its source: `untap_would_repeat_mana` takes the source
 /// object, not the game. Through the recommendation P0's client receives, Myr
 /// Welder borrowing Springleaf Drum's "Tap an untapped creature you control"
 /// holds, with The Immortal Sun's loyalty prohibition and thirty creatures on
-/// the battlefield or without them, takes no auto-payment copy, and every
-/// engine counter for the read matches the bare board's.
+/// the battlefield or without them. The read takes no auto-payment copy, visits
+/// no object for the Drum's "tap an untapped creature" cost, and every engine
+/// counter matches the bare board's. The live listing of the Welder's mana
+/// actions does visit the battlefield for that cost, so the counter reaches it.
 #[test]
 fn the_hold_reads_only_its_source_on_a_crowded_board() {
     let Some(db) = shared_card_db() else { return };
-    let (bare_holds, bare_abilities, bare_probe, bare) = welder_drum_hold_work(db, false);
-    let (crowded_holds, crowded_abilities, crowded_probe, crowded) =
-        welder_drum_hold_work(db, true);
+    let (bare_holds, bare_probe, bare, _) = welder_drum_hold_work(db, false);
+    let (crowded_holds, crowded_probe, crowded, crowded_listing) = welder_drum_hold_work(db, true);
     assert!(bare_holds && crowded_holds, "the window holds");
-    assert_eq!(bare_abilities, crowded_abilities);
     assert_eq!(
-        (bare_probe.state_clones, crowded_probe.state_clones),
-        (0, 0),
-        "no auto-payment run"
+        (
+            bare_probe.state_clones,
+            crowded_probe.state_clones,
+            bare_probe.tap_creature_cost_visits,
+            crowded_probe.tap_creature_cost_visits,
+        ),
+        (0, 0, 0, 0),
+        "no auto-payment run and no creature-cost scan"
     );
     assert_eq!(crowded, bare, "the board adds no work to the read");
+    assert!(
+        crowded_listing.tap_creature_cost_visits > 30,
+        "reach: the live listing walks the battlefield for the Drum's cost"
+    );
+}
+
+/// CR 702.26b: Teferi's Protection ("All permanents you control phase out.")
+/// resolves above Basalt Monolith's untap, with Monolith untapped. Monolith is
+/// treated as though it doesn't exist, so it offers no mana action, and the
+/// recommendation P0's client receives is to pass, with the untap still on the
+/// stack.
+#[test]
+fn a_phased_out_source_keeps_the_pass() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = main_phase_scenario();
+    let monolith = scenario.add_real_card(P0, "Basalt Monolith", Zone::Battlefield, db);
+    let protection = scenario.add_real_card(P0, "Teferi's Protection", Zone::Hand, db);
+    let mountains: Vec<_> = (0..3)
+        .map(|_| scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db))
+        .collect();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&protection)
+        .expect("Teferi's Protection is in hand")
+        .mana_cost = ManaCost::zero();
+    for mountain in mountains {
+        tap_for_mana(&mut runner, mountain);
+    }
+    let untap = untap_ability_index(&runner, monolith);
+    activate(&mut runner, monolith, untap, &[]);
+    assert!(!viewer_recommends_pass(&runner), "the window holds first");
+
+    runner.cast(protection).commit();
+    for _ in 0..4 {
+        if runner.state().stack.len() == 1 {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+    assert_eq!(
+        top_source_name(&runner).as_deref(),
+        Some("Basalt Monolith"),
+        "the untap is still on the stack"
+    );
+    assert!(runner.state().objects[&monolith].is_phased_out());
+    assert!(mana_action(&runner, monolith).is_none());
+    assert!(viewer_recommends_pass(&runner));
 }
 
 /// The engine's own auto-pass reads the same hold. P0 taps Staff of Compleation

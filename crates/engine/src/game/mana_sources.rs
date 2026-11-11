@@ -449,22 +449,24 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
 
 /// CR 605.3a + CR 701.26b + CR 122.1d: whether untapping `source` gives `player`
 /// its mana a second time, a priority hint read from `source` alone (it takes
-/// no game state): its zone, controller, tap state, counters, types and own
-/// ability definitions, with no other object, static or cost leg consulted and
-/// nothing activated, paid or copied. `source` must be untapped with no stun counter (an untap would
-/// remove the counter instead), and have a {T} mana ability whose cost doesn't
-/// move it off the battlefield (Treasure, Lotus Petal, Mirrored Lotus), or be a
-/// land with a basic land type's intrinsic "{T}: Add" (CR 305.6). Whatever that
-/// leaves unchecked (summoning sickness, an activation prohibition or
-/// restriction, a cost leg such as Celestial Prism's {2} or Springleaf Drum's
-/// creature to tap) counts toward holding, so the hold can stop once where a
-/// use turns out impossible, and never passes a real one. The live activation
-/// stays the authority on what can actually be activated.
+/// no game state): whether it is a phased-in permanent, its controller, tap
+/// state, counters, types and own ability definitions, with no other object,
+/// static or cost leg consulted and nothing activated, paid or copied. `source`
+/// must be untapped with no stun counter (an untap would remove the counter
+/// instead), and have a {T} mana ability whose cost doesn't move it off the
+/// battlefield (Treasure, Lotus Petal, Mirrored Lotus), or be a land with a
+/// basic land type's intrinsic "{T}: Add" (CR 305.6). Whatever that leaves
+/// unchecked (summoning sickness, an activation prohibition or restriction, a
+/// cost leg such as Celestial Prism's {2} or Springleaf Drum's creature to tap)
+/// counts toward holding, so the hold can stop once where a use turns out
+/// impossible, and never passes one the source's own mana ability allows. The
+/// live activation stays the authority on what can actually be activated.
 pub(crate) fn untap_would_repeat_mana(
     source: &crate::game::game_object::GameObject,
     player: PlayerId,
 ) -> bool {
-    if source.zone != Zone::Battlefield
+    // CR 702.26b: a phased-out permanent is treated as though it doesn't exist.
+    if !source.is_phased_in_permanent()
         || source.controller != player
         || source.tapped
         || source

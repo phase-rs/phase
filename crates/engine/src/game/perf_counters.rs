@@ -122,15 +122,17 @@ pub struct DeclaredLifeChargeCounters {
     pub reads: u64,
 }
 
-/// Test-only counter for the ability-mana affordability probe
-/// (`casting::can_pay_ability_mana_cost_after_auto_tap_excluding`): the game
-/// copies it takes to run an auto-payment. It pins readers that must not run a
-/// payment, such as the untap priority hold. Kept out of [`PerfCounterSnapshot`]
-/// for the same reason as the counter sets above.
+/// Test-only counters for work a bounded reader, such as the untap priority
+/// hold, must never reach: the game copies the ability-mana affordability probe
+/// (`casting::can_pay_ability_mana_cost_after_auto_tap_excluding`) takes to run
+/// an auto-payment, and the battlefield objects the "tap untapped creatures"
+/// cost check (`cost_payability::has_enough_tap_creatures`) visits. Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above.
 #[cfg(feature = "test-support")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AbilityManaAutoTapProbeCounters {
     pub state_clones: u64,
+    pub tap_creature_cost_visits: u64,
 }
 
 /// Test-only counters for the CR 601.2f + CR 602.2b activation cost-determination
@@ -560,7 +562,10 @@ thread_local! {
     };
     #[cfg(feature = "test-support")]
     static ABILITY_MANA_AUTO_TAP_PROBE_COUNTERS: Cell<AbilityManaAutoTapProbeCounters> = const {
-        Cell::new(AbilityManaAutoTapProbeCounters { state_clones: 0 })
+        Cell::new(AbilityManaAutoTapProbeCounters {
+            state_clones: 0,
+            tap_creature_cost_visits: 0,
+        })
     };
     #[cfg(feature = "test-support")]
     static ATTACK_DECLARATION_SOLVER_COUNTERS: Cell<AttackDeclarationSolverCounters> = const {
@@ -768,6 +773,17 @@ pub fn record_ability_mana_auto_tap_probe_clone() {
     ABILITY_MANA_AUTO_TAP_PROBE_COUNTERS.with(|cell| {
         let mut counters = cell.get();
         counters.state_clones += 1;
+        cell.set(counters);
+    });
+}
+
+/// Recorded once per battlefield object the "tap untapped creatures" cost check
+/// visits.
+#[cfg(feature = "test-support")]
+pub fn record_tap_creature_cost_visit() {
+    ABILITY_MANA_AUTO_TAP_PROBE_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.tap_creature_cost_visits += 1;
         cell.set(counters);
     });
 }
