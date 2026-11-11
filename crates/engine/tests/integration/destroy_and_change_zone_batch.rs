@@ -2940,6 +2940,58 @@ fn two_player_replacement_chooser_concession_keeps_game_over() {
     assert!(state.resolution_stack.is_empty());
 }
 
+/// CR 400.7 + CR 603.7c: the later member returns to the battlefield as a NEW
+/// object, with a live replacement ready to ask for that new object. It is still
+/// never offered: the staged population froze the old incarnation, so the guard
+/// preempts the slot instead of consulting the replacement.
+#[test]
+fn later_member_returned_as_a_new_incarnation_is_never_offered() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario.add_creature(P0, "Watcher of P0", 1, 1).id();
+    let first = scenario.add_creature(P1, "First Bear", 2, 2).id();
+    let later = scenario.add_creature(P1, "Later Bear", 2, 2).id();
+    let day = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
+
+    let mut runner = scenario.build();
+    add_source_authority_optional_replacement(runner.state_mut(), watcher, "First Bear");
+    runner.cast(day).commit();
+    resolve_to_first_replacement_choice(&mut runner);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+
+    // The later member leaves and returns as a new incarnation, carrying a live
+    // replacement that WOULD prompt if it were consulted as itself.
+    let mut moved = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), later, Zone::Hand, &mut moved);
+    engine::game::zones::move_to_zone(runner.state_mut(), later, Zone::Battlefield, &mut moved);
+    add_source_authority_optional_replacement(runner.state_mut(), watcher, "Later Bear");
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("P0 declines the first member's replacement");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the new incarnation is never offered: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        zone_of_state(runner.state(), later),
+        Zone::Battlefield,
+        "the returned object is untouched by the frozen population"
+    );
+    assert_eq!(zone_of_state(runner.state(), first), Zone::Graveyard);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
 const HYENA_UMBRA: &str = "Enchant creature\nEnchanted creature gets +1/+1 and has first strike.\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)";
 
 /// CR 616.1 + CR 800.4a + CR 701.8a: a Destroy member whose outer consultation
@@ -3149,9 +3201,12 @@ fn staged_member_that_left_during_a_pause_is_not_consulted() {
     ));
 }
 
-/// Attach an optional replacement answered by the definition source's
-/// controller ("the source's controller chooses") for the named creature's
-/// move, standing in for a printed source-authority replacement.
+/// Test fixture only: no printed card has this exact shape (an optional
+/// `Moved` replacement whose chooser is the granting source's controller).
+/// Nearest printed analogue: Battletide Alchemist ("If a source an opponent
+/// controls would deal damage to a player, you may prevent that damage"),
+/// where the choice authority is the replacement source's controller under
+/// CR 616.1. Used here to park a real replacement choice, not to test ordering.
 fn add_source_authority_optional_replacement(state: &mut GameState, watcher: ObjectId, card: &str) {
     state
         .objects
