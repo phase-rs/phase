@@ -204,6 +204,14 @@
         "label": "ラベル",
         "fallback": "選択"
       }
+    },
+    "attacking": {
+      "you": "あなたを攻撃中",
+      "player": "{{player}}を攻撃中",
+      "yourPlaneswalker": "あなたのプレインズウォーカー{{name}}を攻撃中",
+      "planeswalker": "{{player}}のプレインズウォーカー{{name}}を攻撃中",
+      "battle": "バトル{{name}}を攻撃中",
+      "nothing": "攻撃中（プレイヤー、プレインズウォーカー、バトルのいずれも攻撃していない）"
     }
   },
   "actionButton": {
@@ -469,7 +477,12 @@
     "assignRemaining_other": "あと{{count}}体を割り当て",
     "confirmDistribute_one": "攻撃クリーチャー{{count}}体を宣言",
     "confirmDistribute_other": "攻撃クリーチャー{{count}}体を宣言",
-    "noCommonTarget": "共通の対象がありません — 分配に切り替えて各攻撃クリーチャーの対象を指定してください。"
+    "noCommonTarget": "共通の対象がありません — 分配に切り替えて各攻撃クリーチャーの対象を指定してください。",
+    "totalsHeading": "攻撃の合計",
+    "targetTotal_few": "攻撃クリーチャー{{count}}体 · {{damage}}点",
+    "targetTotal_many": "攻撃クリーチャー{{count}}体 · {{damage}}点",
+    "targetTotal_one": "攻撃クリーチャー{{count}}体 · {{damage}}点",
+    "targetTotal_other": "攻撃クリーチャー{{count}}体 · {{damage}}点"
   },
   "fullControl": {
     "label": "コントロール",
@@ -855,7 +868,12 @@
     "lethalBadge": "致死",
     "planeswalkerLoyalty": "プレインズウォーカー（忠誠度: {{loyalty}}）",
     "defendingPlayerTrample": "防御プレイヤー（トランプル）",
-    "pwControllerTrample": "PWコントローラー（PW越しのトランプル）"
+    "pwControllerTrample": "PWコントローラー（PW越しのトランプル）",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "残り{{count}}点のダメージを{{target}}に割り振る",
+    "assignRemainingTo_many": "残り{{count}}点のダメージを{{target}}に割り振る",
+    "assignRemainingTo_one": "残り{{count}}点のダメージを{{target}}に割り振る",
+    "assignRemainingTo_other": "残り{{count}}点のダメージを{{target}}に割り振る"
   },
   "cardTextReference": {
     "title": "日本語カード本文（参考）",

@@ -204,6 +204,14 @@
         "label": "Etichetta",
         "fallback": "Scelta"
       }
+    },
+    "attacking": {
+      "you": "Ti sta attaccando",
+      "player": "Sta attaccando {{player}}",
+      "yourPlaneswalker": "Sta attaccando il tuo planeswalker {{name}}",
+      "planeswalker": "Sta attaccando il planeswalker {{name}} di {{player}}",
+      "battle": "Sta attaccando la battaglia {{name}}",
+      "nothing": "Sta attaccando, ma nessun giocatore, planeswalker o battaglia"
     }
   },
   "actionButton": {
@@ -436,7 +444,12 @@
     "assignRemaining_other": "Assegna ancora {{count}}",
     "confirmDistribute_one": "Dichiara {{count}} attaccante",
     "confirmDistribute_other": "Dichiara {{count}} attaccanti",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Totali d'attacco",
+    "targetTotal_few": "{{count}} attaccanti · {{damage}} danni",
+    "targetTotal_many": "{{count}} attaccanti · {{damage}} danni",
+    "targetTotal_one": "{{count}} attaccante · {{damage}} danni",
+    "targetTotal_other": "{{count}} attaccanti · {{damage}} danni"
   },
   "fullControl": {
     "label": "Controllo",
@@ -822,7 +835,12 @@
     "lethalBadge": "Letale",
     "planeswalkerLoyalty": "Planeswalker (lealtà: {{loyalty}})",
     "defendingPlayerTrample": "Giocatore in difesa (Travolgere)",
-    "pwControllerTrample": "Controllore del PW (Travolgere sul PW)"
+    "pwControllerTrample": "Controllore del PW (Travolgere sul PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Assegna i {{count}} danni rimanenti a {{target}}",
+    "assignRemainingTo_many": "Assegna i {{count}} danni rimanenti a {{target}}",
+    "assignRemainingTo_one": "Assegna {{count}} danno rimanente a {{target}}",
+    "assignRemainingTo_other": "Assegna i {{count}} danni rimanenti a {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
