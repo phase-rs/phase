@@ -4973,13 +4973,13 @@ fn try_parse_choose_object_and_player(
     if min != 1 || max != Some(1) {
         return None;
     }
-    // CR 608.2d + CR 115.10a: the choice is made while the effect is applied, but
-    // TargetOnly's resolution chooser prompts only the controller, so a
-    // non-controller subject's choice keeps stack timing (the same gate the
-    // bare-choose producer applies).
-    if choice_ctx.clause_subject_chooser.is_none() {
-        choice_ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
-    }
+    // CR 608.2d + CR 115.10a: the object and player are chosen while the effect is
+    // applied. Declared for every subject, exactly as before the bare-choice
+    // timing change: a non-controller subject's choice is still prompted to the
+    // controller by TargetOnly's resolution chooser (an existing third-party
+    // chooser limitation), and this producer deliberately leaves that behavior
+    // unchanged rather than moving it.
+    choice_ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
     choice_ctx.relative_player_scope = Some(ControllerRef::ChosenPlayer {
         index: choice_ctx.chosen_player_count,
     });
@@ -5185,12 +5185,11 @@ pub(super) fn parse_choose_ast(
             // a/an gate. Peeled actor scopes and random selections are not
             // controller choices. The engine's TargetOnly exemption in
             // `defers_conditional_target_selection` keeps later announced targets.
-            if ctx.clause_opponent_may_scope.is_some() {
-                // The accepting-player timing fallback also retimes described
-                // objects. TargetOnly cannot prompt that chooser, so override
-                // the fallback rather than merely withholding Resolution.
-                ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Stack);
-            } else if remainder.trim().is_empty()
+            // A peeled opponent-may scope is not a controller choice and declares
+            // nothing here, so the accepting-player timing fallback keeps the
+            // timing it had before this producer existed.
+            if ctx.clause_opponent_may_scope.is_none()
+                && remainder.trim().is_empty()
                 && nom_primitives::parse_article(rest_lower.trim_start()).is_ok()
                 && ctx.target_selection_mode == TargetSelectionMode::Chosen
                 && ctx.clause_player_scope.is_none()

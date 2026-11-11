@@ -80016,9 +80016,6 @@ fn bare_choose_non_controller_subject_keeps_stack_timing() {
         "Target opponent chooses a permanent you control other than this creature.",
         "Each opponent chooses a permanent you control.",
         "Each opponent may choose a permanent you control.",
-        "Any opponent may choose a permanent you control.",
-        "Any player may choose a permanent you control.",
-        "Any other player may choose a permanent you control.",
     ] {
         let def = parse_effect_chain(text, AbilityKind::Spell);
         assert!(
@@ -80116,13 +80113,16 @@ fn bare_choose_compound_child_inherits_non_controller_subject_timing() {
     }
 }
 
-/// SHAPE: a non-controller subject's object-and-player choice keeps stack timing,
-/// because TargetOnly's resolution chooser only prompts the controller.
+/// SHAPE: a non-controller subject's object-and-player choice keeps the timing it
+/// had before the bare-choice change: `Resolution`, declared for every subject.
+/// TargetOnly's resolution chooser only prompts the controller, an existing
+/// third-party chooser limitation this producer deliberately leaves unchanged
+/// (the value is pinned as the unchanged baseline, not as a rules claim).
 /// Synthetic Oracle: no printed card puts a third-party subject on this clause; the
 /// nearest printed card is Risky Move ("... choose a creature you control and an
 /// opponent."), the matched controller control.
 #[test]
-fn compound_choice_non_controller_subject_object_and_player_keeps_stack_timing() {
+fn compound_choice_non_controller_subject_object_and_player_keeps_base_resolution_timing() {
     let timing = |text: &str| {
         let def = parse_effect_chain(text, AbilityKind::Spell);
         assert!(
@@ -80138,8 +80138,8 @@ fn compound_choice_non_controller_subject_object_and_player_keeps_stack_timing()
     );
     assert_eq!(
         timing("An opponent chooses a creature you control and an opponent."),
-        TargetChoiceTiming::Stack,
-        "the controller must not choose the object for the third-party subject"
+        TargetChoiceTiming::Resolution,
+        "the producer's base timing is kept for the third-party subject"
     );
 }
 
@@ -80294,26 +80294,125 @@ fn bare_choose_after_sentence_boundary_keeps_resolution_timing() {
     assert_eq!(chain, vec![TargetChoiceTiming::Resolution], "{text}");
 }
 
-/// SHAPE: an inherited non-controller subject's object-and-player choice. Unlike the
-/// bare choice above, the base declared Resolution here unconditionally; the
-/// `clause_subject_chooser` gate on this producer applies to printed subjects. This
-/// row extends that withdrawal to the inherited subject, matching
-/// `compound_choice_non_controller_subject_object_and_player_keeps_stack_timing`
-/// ("An opponent chooses a creature you control and an opponent." -> Stack). It is a
-/// deliberate departure from the base and pins no rules claim: the target opponent
-/// should make both choices, which `TargetOnly` cannot express (third-party chooser
-/// limitation). Synthetic Oracle: no printed card reaches the shape; the nearest
-/// printed card for the choice is Risky Move ("choose a creature you control and an
-/// opponent").
+/// SHAPE: an inherited non-controller subject's object-and-player choice keeps the
+/// timing the producer declared before the bare-choice change: `Resolution`, for
+/// every subject, matching
+/// `compound_choice_non_controller_subject_object_and_player_keeps_base_resolution_timing`.
+/// The carried-subject seed therefore changes nothing for this producer; it only
+/// keeps the bare-choice producer (above) from declaring `Resolution` for a carried
+/// third-party chooser, which is also the base timing. The target opponent should
+/// make both choices, which `TargetOnly` cannot express (an existing third-party
+/// chooser limitation, pinned as the unchanged baseline and not as a rules claim).
+/// Synthetic Oracle: no printed card reaches the shape; the nearest printed card for
+/// the choice is Risky Move ("choose a creature you control and an opponent").
 #[test]
-fn compound_choice_inherited_non_controller_subject_object_and_player_departs_to_stack_timing() {
+fn compound_choice_inherited_non_controller_subject_object_and_player_keeps_base_resolution_timing()
+{
     let text = "Target opponent draws a card, then chooses a creature you control and an opponent.";
     let (declared, chain) = head_then_choice_timings(text, &target_opponent_head());
     assert_eq!(
-        declared, None,
-        "{text}: the inherited subject owns the object-and-player choice"
+        declared,
+        Some(TargetChoiceTiming::Resolution),
+        "{text}: the producer's base declaration is kept for the inherited subject"
     );
-    assert_eq!(chain, vec![TargetChoiceTiming::Stack], "{text}");
+    assert_eq!(chain, vec![TargetChoiceTiming::Resolution], "{text}");
+}
+
+/// SHAPE: a peeled accepting-player scope ("Any opponent may choose ...") declares
+/// nothing in the bare-choice producer, so the accepting-player timing fallback
+/// keeps the `Resolution` timing it produced before the producer existed (CR 115.10a;
+/// CR 608.2d). TargetOnly's resolution chooser still prompts the controller, an
+/// existing third-party chooser limitation pinned here as the unchanged baseline
+/// and not as a rules claim. The `None` declaration discriminates: a producer that
+/// writes `Stack` here moves the timing off its baseline and asks the caster for the
+/// permanent before the opponent receives the offer. Synthetic Oracle: no printed
+/// card has "<opponent or player> may choose a <object> you control"; the nearest
+/// printed card with an accepting-player body is Druid of Purification ("each
+/// player may choose an artifact or enchantment you don't control").
+#[test]
+fn bare_choose_opponent_may_scope_keeps_base_resolution_timing() {
+    for text in [
+        "Any opponent may choose a permanent you control.",
+        "Any opponent may choose a creature you control.",
+        "Any player may choose a permanent you control.",
+        "Any other player may choose a permanent you control.",
+    ] {
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        assert!(
+            matches!(ir.clauses[0].parsed.effect, Effect::TargetOnly { .. }),
+            "{text}: the accepting-player choice must reach TargetOnly: {ir:#?}"
+        );
+        assert_eq!(
+            ir.clauses[0].declared_target_choice_timing, None,
+            "{text}: the producer declares nothing for a peeled accepting-player scope"
+        );
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(
+            def.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "{text}"
+        );
+    }
+}
+
+/// SHAPE: a bare choice whose follow-up prints "target" but is bound to the chosen
+/// object keeps the timing it had before the producer existed (CR 601.2c). The
+/// anaphora rewrite collapses Crush Underfoot's printed "target creature" into the
+/// chosen object, so moving the Giant choice to resolution would remove the last
+/// announcement slot (upstream issue #10688 tracks the binding). Printed card:
+/// Crush Underfoot. The reach guard pins the rewritten shape the rule keys on; the
+/// matched controls keep `Resolution` where the printed target retains its own slot
+/// (a typed "target creature you don't control" recipient, or a "Target creature"
+/// effect that does not read the chosen object).
+#[test]
+fn bare_choose_feeding_a_printed_target_through_the_chosen_object_keeps_stack_timing() {
+    let parsed = parse_oracle_text(
+        "Choose a Giant creature you control. It deals damage equal to its power to target creature.",
+        "Crush Underfoot",
+        &[],
+        &["Kindred".to_string(), "Instant".to_string()],
+        &["Giant".to_string()],
+    );
+    let head = &parsed.abilities[0];
+    assert!(
+        matches!(head.effect.as_ref(), Effect::TargetOnly { .. }),
+        "Crush Underfoot must reach the bare-choice producer: {head:#?}"
+    );
+    let damage = head
+        .sub_ability
+        .as_deref()
+        .expect("Crush Underfoot's damage instruction");
+    assert!(
+        matches!(
+            damage.effect.as_ref(),
+            Effect::DealDamage {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "reach guard: the rewrite must bind the printed recipient to the chosen object: {damage:#?}"
+    );
+    assert_eq!(
+        head.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "the Giant choice must stay announced at cast"
+    );
+
+    for text in [
+        "Choose a creature you control. It deals damage equal to its power to target creature you don't control.",
+        "Choose a creature you control. Target creature gets +1/+1 until end of turn.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(def.effect.as_ref(), Effect::TargetOnly { .. }),
+            "{text}: control must reach the bare-choice producer: {def:#?}"
+        );
+        assert_eq!(
+            def.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "{text}: the printed target keeps its own announcement slot"
+        );
+    }
 }
 
 /// SHAPE: the controller's object-and-player choice keeps Resolution under the same

@@ -29366,6 +29366,33 @@ fn announced_target_antecedent(
         )
 }
 
+/// CR 601.2c + CR 115.10a + CR 608.2d: a bare object choice moves to resolution
+/// only when no later instruction of the ability still needs its announcement.
+/// A later clause that prints "target" but whose effect the anaphora rewrite has
+/// bound to the chosen object (`ParentTarget`) lost its own announcement slot, so
+/// moving the choice to resolution would let the spell be cast with no legal
+/// recipient (Crush Underfoot: "Choose a Giant creature you control. It deals
+/// damage equal to its power to target creature."; upstream issue #10688). Such
+/// a choice keeps the timing it had before the producer existed.
+fn withhold_resolution_timing_from_choices_feeding_printed_targets(clauses: &mut [ClauseIr]) {
+    for choice in 0..clauses.len() {
+        if clauses[choice].declared_target_choice_timing != Some(TargetChoiceTiming::Resolution)
+            || !matches!(clauses[choice].parsed.effect, Effect::TargetOnly { .. })
+        {
+            continue;
+        }
+        let feeds_printed_target = clauses[choice + 1..].iter().any(|later| {
+            later.parsed.effect.target_filter() == Some(&TargetFilter::ParentTarget)
+                && later.source.fragment().is_some_and(|fragment| {
+                    scan_contains_phrase(&fragment.to_ascii_lowercase(), "target ")
+                })
+        });
+        if feeds_printed_target {
+            clauses[choice].declared_target_choice_timing = None;
+        }
+    }
+}
+
 /// CR 608.2c + CR 115.10a + CR 701.23a: a later instruction's definite anaphor
 /// ("that creature", "that creature's controller") names the object an earlier
 /// instruction announced as its target. It does not name an object that a
@@ -51446,6 +51473,7 @@ fn parse_effect_chain_ir_body(
     // CR 608.2c: after player tagging, so a producer's player group is final and
     // the object-group stamp cannot suppress it.
     bind_anaphors_across_resolution_choices(builder.clauses_mut(), ctx.body_scope);
+    withhold_resolution_timing_from_choices_feeding_printed_targets(builder.clauses_mut());
 
     // CR 608.2c + CR 603.7: resolve delayed-payload placement over the finished clause sequence.
     // Must stay ABOVE `builder.finish()`: `try_fold_loses_other_sibling` removes a clause and the

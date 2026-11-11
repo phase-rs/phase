@@ -769,13 +769,18 @@ pub struct ParseContext {
     /// engine's `TargetOnly` exemption in `defers_conditional_target_selection`
     /// keeps later announced targets.
     /// Partial and quantified choices leave this unset.
-    /// A peeled opponent-may chunk's own bare choice declares `Stack` so the
-    /// accepting-player timing fallback cannot reintroduce `Resolution` on it;
-    /// a compound continuation's sub-link in such a chunk is still re-timed by
+    /// A peeled opponent-may chunk's own bare choice declares nothing, so the
+    /// accepting-player timing fallback keeps the timing it always produced for
+    /// it; a compound continuation's sub-link in such a chunk is still re-timed by
     /// `target_choice_timing_for_clause_sub`. A non-controller subject, printed or
     /// inherited by a conjugated continuation (`clause_subject_chooser`), keeps
-    /// the producer from declaring `Resolution` on its own clause and on the
-    /// compound continuations it owns.
+    /// the bare-choice producer from declaring `Resolution` on its own clause and
+    /// on the compound continuations it owns, which is the timing those clauses had
+    /// before the producer existed. The object-and-player producer declares
+    /// `Resolution` for every subject, as it always did. A `Resolution`
+    /// declaration is withdrawn after the chain is built when a later clause's
+    /// printed "target" was bound to the chosen object
+    /// (`withhold_resolution_timing_from_choices_feeding_printed_targets`).
     ///
     /// Set and consumed within a single chunk parse; never serialized. A
     /// speculative sub-parse that discards its cloned context discards this too.

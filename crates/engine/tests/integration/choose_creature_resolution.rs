@@ -1370,3 +1370,112 @@ fn canoptek_wraith_declined_payment_gives_no_land_choice_and_paid_payment_offers
     assert_eq!(runner.state().objects[&wraith].zone, Zone::Graveyard);
     assert_resolution_settled(&runner, "Canoptek Wraith paid");
 }
+
+// ---------------------------------------------------------------------------
+// Crush Underfoot: the printed "target creature" recipient is the spell's only
+// cast-time announcement (CR 601.2c). The parser rewrites the bare "it deals
+// damage" recipient to the chosen object (upstream issue #10688), so moving the
+// Giant choice to resolution would remove the last announcement slot and let the
+// spell be cast with no legal recipient. The choice therefore keeps the timing it
+// had before the bare-choice change.
+// ---------------------------------------------------------------------------
+
+const CRUSH_UNDERFOOT: &str =
+    "Choose a Giant creature you control. It deals damage equal to its power to target creature.";
+
+/// Casts the printed Crush Underfoot ({1}{R} Kindred Instant) against a board of
+/// P0 Giants, other P0 creatures and P1 creatures.
+fn cast_crush_underfoot(
+    giants: &[&str],
+    other_p0: &[&str],
+    other_p1: &[&str],
+) -> (GameRunner, ObjectId, Vec<ObjectId>, Result<(), String>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let giant_ids: Vec<ObjectId> = giants
+        .iter()
+        .map(|name| {
+            scenario
+                .add_creature(P0, name, 4, 8)
+                .with_subtypes(vec!["Giant"])
+                .id()
+        })
+        .collect();
+    for name in other_p0 {
+        scenario.add_creature(P0, name, 1, 8);
+    }
+    for name in other_p1 {
+        scenario.add_creature(P1, name, 1, 8);
+    }
+    scenario.add_basic_land(P0, ManaColor::Red);
+    scenario.add_basic_land(P0, ManaColor::Red);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Crush Underfoot", true, CRUSH_UNDERFOOT)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{R}"))
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .map(|_| ())
+        .map_err(|error| format!("{error:?}"));
+    (runner, spell, giant_ids, result)
+}
+
+/// CR 601.2c: with no creature on the battlefield the spell has no legal
+/// recipient, so it cannot be cast. A Giant choice moved to resolution would let
+/// it be cast on an empty board. Reach guard: the same text is castable once a
+/// Giant is present (`crush_underfoot_announces_its_giant_at_cast`).
+#[test]
+fn crush_underfoot_is_rejected_at_cast_with_no_creature_to_announce() {
+    let (runner, spell, _, result) = cast_crush_underfoot(&[], &[], &[]);
+    let error = result.expect_err("no creature on the battlefield: no legal recipient");
+    assert!(error.contains("No legal targets available"), "{error}");
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+    assert!(runner.state().stack.is_empty());
+
+    // Today's behavior, pinned as the unchanged baseline: the Giant choice is still
+    // announced at cast, so a battlefield of only non-Giant creatures is rejected
+    // as well (rules-wise only the "target creature" recipient is required to
+    // exist at cast; #10688 tracks the recipient and Giant-source binding).
+    let (runner, spell, _, result) = cast_crush_underfoot(&[], &["Bear"], &["Opposing creature"]);
+    let error = result.expect_err("today the Giant choice is announced at cast");
+    assert!(error.contains("No legal targets available"), "{error}");
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+}
+
+/// What the Giant choice does today: it keeps the stack-time timing it had before
+/// the bare-choice change, is announced at cast (the only Giant is the one legal
+/// pick), and is not deferred to a resolution-time prompt.
+#[test]
+fn crush_underfoot_announces_its_giant_at_cast() {
+    let (runner, spell, giants, result) =
+        cast_crush_underfoot(&["Giant"], &[], &["Opposing creature"]);
+    result.expect("a Giant on the battlefield makes the spell castable");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().stack.len(), 1);
+    let entry = &runner.state().stack[0];
+    assert_eq!(entry.source_id, spell);
+    let head = entry
+        .ability()
+        .expect("Crush Underfoot must be on the stack");
+    assert!(matches!(head.effect, Effect::TargetOnly { .. }));
+    assert_eq!(
+        head.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "the Giant choice must not move to resolution while its follow-up has no announcement slot of its own"
+    );
+    assert_eq!(
+        head.targets,
+        vec![TargetRef::Object(giants[0])],
+        "the Giant is announced at cast"
+    );
+}
