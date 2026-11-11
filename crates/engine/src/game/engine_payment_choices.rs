@@ -2150,6 +2150,10 @@ fn pay_repeated_draw_unless_cost(
                     effect_description,
                     remaining,
                 } = payment;
+                debug_assert!(
+                    state.pending_cost_move_resume.is_none(),
+                    "an unless payment parks over a live cost-move root"
+                );
                 state.pending_cost_move_resume =
                     Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
                         cost,
@@ -2189,16 +2193,23 @@ fn pay_repeated_draw_unless_cost(
 /// whose resumed events the paused-exit collector queues; other unless
 /// payments are not.
 pub(crate) fn paused_in_draw_payment(state: &GameState) -> bool {
-    let parked = matches!(
-        &state.pending_cost_move_resume,
-        Some(PendingCostMoveResume::CounterAdditionUnlessPayment { cost, .. })
-            if costs::cost_includes_draw(cost)
-    );
     let prompted = matches!(
         &state.waiting_for,
         WaitingFor::UnlessPayment { cost, .. } if costs::cost_includes_draw(cost)
     );
-    parked || prompted
+    draw_payment_is_parked(state) || prompted
+}
+
+/// CR 117.2e + CR 121.4: an unless payment of draws parked between its legs on
+/// a replacement choice. Its payer is still paying inside a resolution, so a
+/// draw from an empty library loses only at the next priority, after the
+/// payment's later prompts.
+pub(crate) fn draw_payment_is_parked(state: &GameState) -> bool {
+    matches!(
+        &state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::CounterAdditionUnlessPayment { cost, .. })
+            if costs::cost_includes_draw(cost)
+    )
 }
 
 /// CR 121.4 + CR 121.6a + CR 614.17c: whether every further instruction of a

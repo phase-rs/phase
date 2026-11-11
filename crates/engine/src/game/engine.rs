@@ -1371,6 +1371,9 @@ struct RawActionApplication {
     lifecycle: super::lifecycle::ActionLifecycleGuard,
     /// CR 104.3a: the departure a concession committed at this boundary.
     committed_departure: Option<CommittedDeparture>,
+    /// CR 104.3a: the failure that ended a committed concession's follow-up in
+    /// the core; finalization publishes the committed departure instead.
+    follow_up_failure: Option<EngineError>,
 }
 
 /// Receipt-relevant observations from one prospective action. The lifecycle
@@ -1579,6 +1582,7 @@ fn apply_action_boundary_core(
             preserve_interaction,
             lifecycle,
             committed_departure: None,
+            follow_up_failure: None,
         });
     }
     // A player-resource change this action resolves must be representable: open
@@ -1719,6 +1723,7 @@ fn apply_action_boundary_core(
             preserve_interaction,
             lifecycle,
             committed_departure: None,
+            follow_up_failure: None,
         });
     }
     if let Some((mirror_action, mirror_actor)) = mirror_source {
@@ -1730,8 +1735,8 @@ fn apply_action_boundary_core(
     // follow-up restores this state and publishes these events.
     let committed_departure = independent_cast_action
         .as_ref()
-        .is_some_and(|(_, _, action)| matches!(action, GameAction::Concede { .. }))
-        .then(|| CommittedDeparture::capture(state, &result));
+        .filter(|(_, _, action)| matches!(action, GameAction::Concede { .. }))
+        .map(|concession| CommittedDeparture::capture(state, &result, concession.clone()));
     // CR 400.7 + CR 403.3 + CR 614.12a: an as-enters choice (and any continuation it raises) can
     // span an arbitrary number of client round-trips of ANY `WaitingFor` shape, so realization of a
     // parked token battlefield entry is keyed on the action having SETTLED, not on prompt shape.
@@ -1749,81 +1754,83 @@ fn apply_action_boundary_core(
     // cannot have them collected a second time. Inert on every other route: the flush returns
     // `false` when nothing was parked or an earlier convergence point already consumed it
     // (`Option::take_if`).
-    let scan_from = result.events.len();
-    // CR 601.2h + CR 602.2b + CR 605.3b: a parked counter-cost root's subtree is
-    // finished and the root resumed before the action returns; when that made
-    // progress, its events join the convergence pass below.
-    let resumed_parked_root =
-        match resume_parked_counter_cost_root_at_action_boundary(
-            state,
-            &result.waiting_for,
-            &mut result.events,
-        ) {
-            Ok(Some(waiting_for)) => {
-                result.waiting_for = waiting_for;
-                true
-            }
-            Ok(None) => false,
-            Err(err) => {
-                let Some(departure) = committed_departure.as_ref() else {
+    // CR 104.3a: a concession's follow-up that fails stops here; finalization
+    // publishes the committed departure (`reject_or_publish_departure`).
+    let follow_up_failure =
+        'follow_up: {
+            let scan_from = result.events.len();
+            // CR 601.2h + CR 602.2b + CR 605.3b: a parked counter-cost root's subtree is
+            // finished and the root resumed before the action returns; when that made
+            // progress, its events join the convergence pass below.
+            let resumed_parked_root = match resume_parked_counter_cost_root_at_action_boundary(
+                state,
+                &result.waiting_for,
+                &mut result.events,
+            ) {
+                Ok(Some(waiting_for)) => {
+                    result.waiting_for = waiting_for;
+                    true
+                }
+                Ok(None) => false,
+                Err(err) => {
+                    if committed_departure.is_some() {
+                        break 'follow_up Some(err);
+                    }
                     let failure = boundary_life_change_failure(state);
                     lifecycle.discard();
                     *state = cast_undo_boundary.restore(boundary_snapshot);
                     return Err(failure.map_or(err, |player| {
                         EngineError::LifeChangeUnrepresentable { player }
                     }));
-                };
-                departure.restore(state, &mut result, &err);
-                false
+                }
+            };
+            let realized_token_entry =
+                effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
+            // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
+            // completed on a route that never reached the pipeline (a spell cast during
+            // a resolution, CR 608.2g, finishes its announcement here): the resolving
+            // instant or sorcery still owes its final part — leaving the stack — and the
+            // pipeline's top runs it (`run_spell_final_part_if_due`) and collects its
+            // triggers. A token realization and an owed final part on the same action
+            // share one pass.
+            let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
+            if (resumed_parked_root && matches!(result.waiting_for, WaitingFor::Priority { .. }))
+                || realized_token_entry
+                || owed_spell_final_part_is_due
+            {
+                if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
+                    if committed_departure.is_some() {
+                        break 'follow_up Some(err);
+                    }
+                    let failure = boundary_life_change_failure(state);
+                    lifecycle.discard();
+                    *state = cast_undo_boundary.restore(boundary_snapshot);
+                    return Err(failure.map_or(err, |player| {
+                        EngineError::LifeChangeUnrepresentable { player }
+                    }));
+                }
             }
-        };
-    let realized_token_entry =
-        effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
-    // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
-    // completed on a route that never reached the pipeline (a spell cast during
-    // a resolution, CR 608.2g, finishes its announcement here): the resolving
-    // instant or sorcery still owes its final part — leaving the stack — and the
-    // pipeline's top runs it (`run_spell_final_part_if_due`) and collects its
-    // triggers. A token realization and an owed final part on the same action
-    // share one pass.
-    let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
-    if (resumed_parked_root && matches!(result.waiting_for, WaitingFor::Priority { .. }))
-        || realized_token_entry
-        || owed_spell_final_part_is_due
-    {
-        if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
-            let Some(departure) = committed_departure.as_ref() else {
-                let failure = boundary_life_change_failure(state);
+            // CR 603.2 + CR 603.3: events this action emitted while the announcement
+            // stays paused are staged into its carrier; a spell's carrier returns to
+            // whichever owner now holds the announcement. A reducer arm can return a
+            // prompt carrying the announcement without having written it to the state
+            // yet, so the result's wait is the one the custody authority inspects; the
+            // state's own wait is left exactly as the reducer left it.
+            let reducer_wait =
+                std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
+            super::announcement_triggers::end_action(state, &result.events);
+            result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
+            if let Some(player) = boundary_life_change_failure(state) {
+                let error = EngineError::LifeChangeUnrepresentable { player };
+                if committed_departure.is_some() {
+                    break 'follow_up Some(error);
+                }
                 lifecycle.discard();
                 *state = cast_undo_boundary.restore(boundary_snapshot);
-                return Err(
-                    failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                        player,
-                    }),
-                );
-            };
-            departure.restore(state, &mut result, &err);
-        }
-    }
-    // CR 603.2 + CR 603.3: events this action emitted while the announcement
-    // stays paused are staged into its carrier; a spell's carrier returns to
-    // whichever owner now holds the announcement. A reducer arm can return a
-    // prompt carrying the announcement without having written it to the state
-    // yet, so the result's wait is the one the custody authority inspects; the
-    // state's own wait is left exactly as the reducer left it.
-    let reducer_wait = std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
-    super::announcement_triggers::end_action(state, &result.events);
-    result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
-    if let Some(player) = boundary_life_change_failure(state) {
-        let error = EngineError::LifeChangeUnrepresentable { player };
-        let Some(departure) = committed_departure.as_ref() else {
-            lifecycle.discard();
-            *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(error);
+                return Err(error);
+            }
+            None
         };
-        departure.restore(state, &mut result, &error);
-        super::announcement_triggers::end_action(state, &result.events);
-    }
     // Do not carry the core's window into finalization: that pass owns its own
     // scope over convergence, auto-pass, and re-convergence.
     state.ingress_life_window = None;
@@ -1842,6 +1849,7 @@ fn apply_action_boundary_core(
         preserve_interaction,
         lifecycle,
         committed_departure,
+        follow_up_failure,
     })
 }
 
@@ -2333,25 +2341,22 @@ fn settle_deferred_triggers_after_persisted_restore(
 struct CommittedDeparture {
     state: std::sync::Arc<GameState>,
     result: ActionResult,
+    /// The authenticated concession `(actor, owner, action)`, recorded over any
+    /// cast-undo descriptor when the departure is published.
+    concession: (PlayerId, PlayerId, GameAction),
 }
 
 impl CommittedDeparture {
-    fn capture(state: &GameState, result: &ActionResult) -> Self {
+    fn capture(
+        state: &GameState,
+        result: &ActionResult,
+        concession: (PlayerId, PlayerId, GameAction),
+    ) -> Self {
         Self {
             state: std::sync::Arc::new(state.clone()),
             result: result.clone(),
+            concession,
         }
-    }
-
-    /// Discard the failed follow-up of this action: the committed departure and
-    /// its events are the action's outcome.
-    fn restore(&self, state: &mut GameState, result: &mut ActionResult, error: &EngineError) {
-        tracing::debug!(
-            ?error,
-            "a concession's follow-up failed; the committed departure stands"
-        );
-        *state = self.state.as_ref().clone();
-        *result = self.result.clone();
     }
 }
 
@@ -2388,12 +2393,32 @@ fn reject_or_publish_departure(
         *state = std::sync::Arc::unwrap_or_clone(snapshot);
         return Err(error);
     };
-    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
-    departure.restore(state, &mut result, &error);
+    tracing::debug!(
+        ?error,
+        "a concession's follow-up failed; the committed departure stands"
+    );
+    let CommittedDeparture {
+        state: committed_state,
+        mut result,
+        concession: (actor, owner, action),
+    } = departure;
+    *state = std::sync::Arc::unwrap_or_clone(committed_state);
     // The committed state was taken inside the core's ingress window and
     // announcement scope; close both as the core does.
     state.ingress_life_window = None;
+    let reducer_wait = std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
     super::announcement_triggers::end_action(state, &result.events);
+    result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
+    // CR 733.1: the departure is recorded over a live cast's undo descriptor,
+    // as on the ordinary path; one that cannot be rebased is retired rather
+    // than left able to restore pre-departure values.
+    if super::engine_casting::preserve_independent_cast_action(
+        state, &snapshot, actor, owner, action,
+    )
+    .is_err()
+    {
+        state.spell_cast_reversal = None;
+    }
     // CR 104.2a: a concession that left one player ends the game here too.
     settle_finished_game(state, &mut result);
     bump_state_revision(state);
@@ -2463,12 +2488,24 @@ fn finish_action_boundary_with_lifecycle(
         preserve_interaction,
         lifecycle,
         committed_departure,
+        follow_up_failure,
     } = raw;
     let interaction_handoff = || InteractionHandoff {
         previous_waiting: previous_interaction_waiting.clone(),
         previous_slots: previous_interaction_slots.clone(),
         submitted_owner: submitted_interaction_owner,
     };
+    if let Some(error) = follow_up_failure {
+        return reject_or_publish_departure(
+            state,
+            lifecycle,
+            boundary_snapshot,
+            committed_departure,
+            interaction_handoff(),
+            mode,
+            error,
+        );
+    }
     // Finalization owns the remainder of the action (convergence, auto-pass,
     // reconvergence), so it needs its own ingress window: the core boundary
     // closed its window before handing the raw application over.
@@ -2745,8 +2782,13 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     // (CR 119.4), so the 0-life check waits until that process ends and a
     // player would next receive priority. Until then that player is still in
     // the game, so waiting on their choices is not the #962 softlock; prompts
-    // owned by a resolution keep the net.
-    if sba::has_pending_player_loss_sba(state) && !state.withholds_priority() {
+    // owned by a resolution keep the net. CR 117.2e + CR 121.4: one exception is
+    // a parked unless payment of draws: a draw from an empty library loses at the
+    // next priority, after the payment's later replacement prompts.
+    if sba::has_pending_player_loss_sba(state)
+        && !state.withholds_priority()
+        && !engine_payment_choices::draw_payment_is_parked(state)
+    {
         sba::check_state_based_actions(state, &mut result.events);
         // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
         // the next living player). Sync the result.
@@ -12843,17 +12885,18 @@ fn apply_action(
         // CR 800.4a + CR 118.12: a surviving staged payment re-materializes on
         // the base the departure changed (`settle_after_outside_action`). CR
         // 104.3a: the departure itself must survive a fallible payment recovery,
-        // so a failed recovery returns to the departure and retires the payment.
+        // so a recovery that fails, or records an unrepresentable life change,
+        // returns to the departure and retires the payment.
         let departed = pre_action.as_ref().map(|_| state.clone());
         let settled = match payment_transaction::settle_after_outside_action(
             state,
             pre_action.as_ref(),
             player_id,
         ) {
-            Ok(settled) => settled,
-            Err(error) => {
+            Ok(settled) if boundary_life_change_failure(state).is_none() => settled,
+            outcome => {
                 tracing::debug!(
-                    ?error,
+                    error = ?outcome.err(),
                     "staged payment recovery failed after a concession; the departure stands"
                 );
                 if let Some(departed) = departed {

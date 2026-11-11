@@ -249,6 +249,19 @@ pub(crate) fn eliminate_players(
         None
     };
 
+    // CR 800.4a: a parked unless payment is owed by its payer; when that player
+    // leaves, the legs or instructions still owed leave with them instead of
+    // resuming for a player who is no longer in the game.
+    if matches!(
+        &state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+            unpaid_suffix: Some(suffix),
+            ..
+        }) if leaving_set.contains(&suffix.payer)
+    ) {
+        state.pending_cost_move_resume = None;
+    }
+
     // CR 800.4a: elimination can remove frozen stack entries and a session's
     // canonical representative. Restore the pre-overlay preferences before
     // `do_eliminate` removes the departing player's own state, so teardown

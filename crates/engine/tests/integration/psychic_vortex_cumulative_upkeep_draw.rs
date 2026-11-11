@@ -721,6 +721,7 @@ fn a_skip_inside_an_instruction_finishes_it_before_the_next_instruction() {
     assert_eq!(ZoneSizes::of(&runner, P0).library, before.library);
 
     let mut events = Vec::new();
+    let mut declines = 0;
     for _ in 0..8 {
         if !matches!(
             runner.state().waiting_for,
@@ -728,6 +729,7 @@ fn a_skip_inside_an_instruction_finishes_it_before_the_next_instruction() {
         ) {
             break;
         }
+        declines += 1;
         let result = runner
             .act(GameAction::ChooseReplacement {
                 index: DECLINE_REPLACEMENT,
@@ -735,6 +737,10 @@ fn a_skip_inside_an_instruction_finishes_it_before_the_next_instruction() {
             .expect("drawing normally is legal");
         events.extend(result.events);
     }
+    assert_eq!(
+        declines, 3,
+        "each of the three remaining draws offers its own skip"
+    );
 
     // First instruction: its second draw (hand 1). Second instruction: hand 1
     // is still "one or fewer", so Quantum Riddler makes it two draws (hand 3).
@@ -833,20 +839,19 @@ fn a_cant_draw_effect_arriving_mid_payment_does_not_unpay_the_chosen_upkeep() {
 
     // Maralen arrives after the choice to pay was made.
     engine::game::zones::move_to_zone(runner.state_mut(), maralen, Zone::Battlefield, &mut events);
-    for _ in 0..3 {
-        if !matches!(
-            runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { .. }
-        ) {
-            break;
-        }
-        let result = runner
-            .act(GameAction::ChooseReplacement {
-                index: DECLINE_REPLACEMENT,
-            })
-            .expect("declining Dredge is legal");
-        settled_events.extend(result.events);
-    }
+    // CR 614.17c: the open choice is answered once; the later draw can't
+    // happen, so no Dredge is offered for it and the payment completes.
+    let result = runner
+        .act(GameAction::ChooseReplacement {
+            index: DECLINE_REPLACEMENT,
+        })
+        .expect("declining Dredge is legal");
+    settled_events.extend(result.events);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "no further replacement prompt: {:?}",
+        runner.state().waiting_for
+    );
 
     assert_eq!(
         zone_of(&runner, vortex),
@@ -1868,8 +1873,8 @@ fn a_huge_age_count_on_a_short_library_is_bounded_and_replayable() {
 }
 
 /// CR 702.24a + CR 118.12: a payment parked between instructions survives a
-/// checked save and restore with its remaining count, and the restored game
-/// answers the open choice and continues.
+/// save and the production restore with its remaining count, and the restored
+/// game answers the open choice and continues.
 #[test]
 fn a_parked_repeated_payment_survives_a_checked_restore() {
     const AGE: u32 = 5;
@@ -1890,7 +1895,7 @@ fn a_parked_repeated_payment_survives_a_checked_restore() {
     *runner.state_mut() = serde_json::from_str::<PersistedGameState>(&saved)
         .expect("the save decodes")
         .into_game_state()
-        .expect("the parked payment passes checked restore");
+        .expect("the parked payment restores through the production chokepoint");
     assert_parked_with_owed(&runner, AGE - 1, "the restored payment owes the rest");
     for instruction in 1..=AGE {
         assert_parked_with_owed(
@@ -2043,4 +2048,62 @@ fn accepting_dredge_then_a_synchronous_suffix_counts_each_trigger_once() {
         "the payment completed"
     );
     assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+}
+
+/// CR 800.4a: when the payer of a parked repeated draw payment leaves the
+/// game, the instructions still owed leave with them. The parked payment is
+/// retired, nothing is drawn for the departed player, and a living player
+/// gets priority and can act.
+#[test]
+fn a_departing_payer_takes_the_owed_instructions_with_them() {
+    const AGE: u32 = 5;
+    let names = library_names(20);
+    let library: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::Untap);
+    scenario.with_library_top(P0, &library);
+    let vortex = scenario
+        .add_enchantment_from_oracle(P0, "Psychic Vortex", PSYCHIC_VORTEX_ORACLE)
+        .id();
+    scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&vortex)
+        .expect("Psychic Vortex exists")
+        .counters
+        .insert(CounterType::Age, AGE - 1);
+    advance_through_upkeep(&mut runner);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    assert_parked_with_owed(&runner, AGE - 1, "the first draw offers Dredge");
+
+    let departure = runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("CR 104.3a: a player can concede at any time");
+    assert!(
+        !departure.events.iter().any(|event| matches!(
+            event,
+            GameEvent::CardDrawn { player_id, .. } if *player_id == P0
+        )),
+        "nothing more is drawn for the departed player"
+    );
+
+    let state = runner.state();
+    assert!(state.players[P0.0 as usize].is_eliminated);
+    assert!(
+        state.pending_cost_move_resume.is_none(),
+        "the departed payer's owed instructions are retired"
+    );
+    let WaitingFor::Priority { player } = state.waiting_for else {
+        panic!("a living player receives priority: {:?}", state.waiting_for);
+    };
+    assert_ne!(player, P0);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the game goes on for the living players");
 }

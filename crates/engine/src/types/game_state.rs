@@ -9790,11 +9790,6 @@ impl PendingCostMoveResume {
             // CR 116.2h: foretelling is a special action; its {2} is paid before
             // its exile move, which can then pause on a replacement.
             PendingCostMoveResume::Foretell { .. } => true,
-            // CR 117.2e + CR 121.4: an unless payment of draws or counters is
-            // part of a resolution, during which no player has priority, so a
-            // draw from an empty library loses at the next priority — after the
-            // payment's later replacement prompts, not before them.
-            PendingCostMoveResume::CounterAdditionUnlessPayment { .. } => true,
             // Cast and activation payments keep their announcement; an
             // optional payment made during a resolution does not.
             PendingCostMoveResume::SacrificeForCost { pending, .. } => pending.is_some(),
@@ -9810,6 +9805,7 @@ impl PendingCostMoveResume {
             | PendingCostMoveResume::ReplacementMayCost { .. }
             | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => false,
         }
     }
@@ -16659,10 +16655,10 @@ impl GameState {
 
     /// CR 614.17a + CR 118.12: a recovery checkpoint is a second persisted
     /// executable state. It describes this game at this transcript cursor (the
-    /// same seats, departures and prompt, and no descriptor of its own), passes
-    /// the same structural refusals as the outer state, and its prompt has an
-    /// answer the admission authority accepts on the hydrated checkpoint
-    /// (`payment_transaction::admits`, which also admits live answers).
+    /// same seats, departures and prompt, and no descriptor of its own) and
+    /// passes the same structural refusals as the outer state. Its prompt's
+    /// answer is checked after rehydration
+    /// (`validate_recovered_prompt_answerable`).
     fn validate_recovery_checkpoint(
         &self,
         transaction: &ResolutionPaymentTransaction,
@@ -16702,7 +16698,22 @@ impl GameState {
         nested
             .refuse_unresolvable_persisted_stack()
             .and_then(|()| nested.refuse_ownerless_post_replacement_dispatch())
-            .map_err(|error| format!("recovery checkpoint: {error}"))?;
+            .map_err(|error| format!("recovery checkpoint: {error}"))
+    }
+
+    /// CR 118.12 + CR 616.1: a restored recovery checkpoint's prompt has an
+    /// answer the admission authority (`payment_transaction::admits`, which
+    /// also admits live answers) accepts on the checkpoint as replay prepares
+    /// it. Runs after runtime rehydration, so the probe sees the same card
+    /// database and registries a live answer would.
+    fn validate_recovered_prompt_answerable(&self) -> Result<(), String> {
+        let Some(checkpoint) = self
+            .payment_transaction
+            .as_deref()
+            .and_then(|transaction| transaction.recovered.as_deref())
+        else {
+            return Ok(());
+        };
         let probe = crate::game::payment_transaction::hydrated_checkpoint(self, checkpoint);
         let Some(owner) = probe.waiting_for.acting_players().first().copied() else {
             return Err("recovery checkpoint prompt has no acting player".to_string());
@@ -16912,6 +16923,9 @@ impl PreparedPersistedGameState {
     ) -> Result<GameState, PersistedRestoreError> {
         let mut state = self.state;
         rehydrate(&mut state).map_err(PersistedRestoreError::RehydrationFailed)?;
+        state
+            .validate_recovered_prompt_answerable()
+            .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
         crate::game::engine::finalize_persisted_restore(&mut state, self.recovered_terminal_rest)?;
         Ok(state)
     }
@@ -17038,6 +17052,15 @@ impl PersistedGameState {
         // the repair — a legacy save restored through either one would
         // otherwise present an optional or search-found prompt as an ordering.
         state.migrate_restored_replacement_choice_kind();
+        // The recovery checkpoint nested in a staged payment is restored state
+        // too; its parked replacement prompt gets the same repair.
+        if let Some(checkpoint) = state
+            .payment_transaction
+            .as_deref_mut()
+            .and_then(|transaction| transaction.recovered.as_deref_mut())
+        {
+            checkpoint.state.migrate_restored_replacement_choice_kind();
+        }
         // `pending_trigger_event_batch` is a construction carrier for the
         // corresponding `pending_trigger`. A historical save can retain the
         // carrier after its trigger was dropped; it cannot represent live
@@ -30496,13 +30519,10 @@ impl GameState {
     ///   paying a cost;
     /// - **a triggered mana ability** (CR 605.4a), which "resolves immediately
     ///   after the mana ability that triggered it, without waiting for
-    ///   priority";
-    /// - **an unless payment of draws or counters paused between its legs**
-    ///   (CR 117.2e + CR 121.4): its payer loses at the next priority, after
-    ///   the payment's later replacement prompts.
+    ///   priority".
     ///
-    /// Other prompts owned by a resolution are deliberately not counted, so
-    /// the #962 safety net still ends a game stuck waiting on a player who has
+    /// Prompts owned by a resolution are deliberately not counted, so the
+    /// #962 safety net still ends a game stuck waiting on a player who has
     /// already lost. Wider than [`WaitingFor::has_pending_cast`], the display
     /// and `CancelCast` predicate.
     pub fn withholds_priority(&self) -> bool {

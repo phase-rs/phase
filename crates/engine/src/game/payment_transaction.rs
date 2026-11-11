@@ -640,7 +640,7 @@ fn checkpoint_state(shadow: &GameState) -> GameState {
     checkpoint.payment_transaction = None;
     checkpoint.payment_transaction_replay = false;
     checkpoint.payment_transaction_just_handled = false;
-    // CR 706.1a: a roll or shuffle sampled on the shadow advances its stream;
+    // CR 701.24a / CR 706.1a: a shuffle or roll sampled on the shadow advances its stream;
     // stamp the serialized high-water so the recorded position travels with
     // the checkpoint even when the resolver did not capture it explicitly.
     let sampled = checkpoint.rng.get_word_pos();
@@ -778,7 +778,7 @@ fn hydrate_runtime_authorities(shadow: &mut GameState, live: &GameState) {
     shadow.booster_shelf = live.booster_shelf.clone();
     shadow.all_card_names = live.all_card_names.clone();
     shadow.log_player_names = live.log_player_names.clone();
-    // CR 706.1a + CR 118.12: the accepted prefix's outcomes (including any
+    // CR 701.24a + CR 706.1a + CR 118.12: the accepted prefix's outcomes (including any
     // recorded shuffle permutation) are already in the shadow's state; the
     // future stream belongs to the restored host, whose fresh reseed must not
     // be overwritten by the checkpoint's older cursor. If the action consumed
