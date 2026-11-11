@@ -1873,11 +1873,16 @@ fn a_target_trigger_from_an_activated_mode_choice_survives_its_cost_prompt() {
 
 /// Stage a full prevention of the parked counter removal. No RemoveCounter
 /// applier yields `Prevented` today (`remove_counter_applier` always modifies
-/// the event), so the parked choice is re-pointed at a skip-turn definition on
-/// the same holder, whose applier prevents its event outright. This mirrors the
-/// staged regeneration-shield producer of the CR 608.3e prevented-entry test in
-/// `engine_replacement.rs`. The parked event is still the RemoveCounter, and the
-/// resume runs through the real `GameAction::ChooseReplacement` entry.
+/// the event), so the parked choice is re-pointed at a floating skip-turn
+/// effect (the `ObjectId(0)` effect list a resolved spell's shields use),
+/// whose applier prevents its event outright. A floating effect has no source
+/// zone and is judged current while it exists; a definition on the holder for
+/// an event it never matches is not one the replacement authority would still
+/// offer (CR 616.1f), so an answer to it re-proposes the event. This mirrors
+/// the staged regeneration-shield producer of the CR 608.3e prevented-entry
+/// test in `engine_replacement.rs`. The parked event is still the
+/// RemoveCounter, and the resume runs through the real
+/// `GameAction::ChooseReplacement` entry.
 fn stage_prevented_counter_removal(runner: &mut GameRunner) {
     stage_prevented_pending_event(runner, |proposed| {
         matches!(proposed, ProposedEvent::RemoveCounter { .. })
@@ -1886,10 +1891,12 @@ fn stage_prevented_counter_removal(runner: &mut GameRunner) {
 
 /// `stage_prevented_counter_removal` for any parked event `expected` accepts.
 fn stage_prevented_pending_event(runner: &mut GameRunner, expected: fn(&ProposedEvent) -> bool) {
-    let prevention = install_replacement_on_steward(
-        runner,
-        ReplacementDefinition::new(ReplacementEvent::BeginTurn),
-    );
+    let floating = &mut runner.state_mut().pending_damage_replacements;
+    let prevention = ReplacementId {
+        source: ObjectId(0),
+        index: floating.len(),
+    };
+    floating.push(ReplacementDefinition::new(ReplacementEvent::BeginTurn));
     let pending = runner
         .state_mut()
         .pending_replacement
