@@ -9668,9 +9668,13 @@ pub(crate) fn battlefield_entry_in_progress(state: &GameState) -> bool {
 /// CR 614.12a + CR 614.1c + CR 616.1: does a parked replacement modify a
 /// battlefield entry still being made? The entry itself (a zone change to the
 /// battlefield, a token's creation or entry), or an event on an object whose
-/// entry has not been recorded yet (the counters it enters with). An event on
-/// a permanent that has already entered (counters put on it afterwards, as
-/// Amass does to the Army it has just created) is not part of any entry.
+/// entry has not been recorded yet (a token's counters it enters with, placed
+/// before its entry record). An event on a permanent that has already entered
+/// (counters put on it afterwards, as Amass does to the Army it has just
+/// created) is not part of any entry. A card's enters-with counters are placed
+/// after its zone-change record, so they do not count here; a card entering
+/// with co-entrants is delivered by a logical zone-change group, whose entries
+/// this gate passes through unheld (see [`settle_entry_batch_scan`]).
 fn parked_replacement_modifies_an_entry(
     state: &GameState,
     proposed: &crate::types::proposed_event::ProposedEvent,
@@ -46239,7 +46243,9 @@ pub mod tests {
     }
 
     /// A "whenever a creature enters" observer and one battlefield entry it
-    /// matches, paused the way `observer_helper_fixture` pauses.
+    /// matches, paused the way `observer_helper_fixture` pauses. Synthetic
+    /// building block; the nearest printed observer is Soul Warden ("Whenever
+    /// another creature enters, you gain 1 life."), which excludes itself.
     fn entry_observer_fixture() -> (GameState, Vec<GameEvent>) {
         let (mut state, _) = observer_helper_fixture(false);
         let observer = make_creature(&mut state, PlayerId(0), "Entry observer", 1, 1);
