@@ -9,8 +9,8 @@
 //! sources, so it cannot isolate the rider.
 
 use super::tests::{
-    apply_protection_grant, evaluate_protection_layers, protection_snapshot_ids, spawn_equipment,
-    spawn_grant_source,
+    apply_protection_grant, evaluate_protection_layers, printed_snapshot_ids,
+    protection_snapshot_ids, spawn_equipment, spawn_grant_source,
 };
 use super::*;
 use crate::database::card_db::CardDatabase;
@@ -26,7 +26,7 @@ use crate::types::card_type::CoreType;
 use crate::types::game_state::WaitingFor;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{Keyword, ProtectionTarget};
-use crate::types::layers::ProtectionRiderDefinition;
+use crate::types::layers::ProtectionGrantOccurrence;
 use crate::types::mana::{ManaColor, ManaType, ManaUnit};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -238,7 +238,7 @@ fn cr_702_16p_snapshot_survives_later_ability_removal() {
     attached(&runner, pacifism, host);
     attached(&runner, blessing, host);
     let def_index = ridered_static_index(runner.state(), blessing);
-    let snapshot = protection_snapshot_ids(runner.state(), blessing, def_index, 0, host);
+    let snapshot = printed_snapshot_ids(runner.state(), blessing, def_index, 0, host);
     assert!(
         snapshot.contains(&pacifism),
         "reach guard: the white Aura P0 already controlled is snapshotted at effect start"
@@ -261,7 +261,7 @@ fn cr_702_16p_snapshot_survives_later_ability_removal() {
         "the surviving layer result carries no protection instance"
     );
     assert_eq!(
-        protection_snapshot_ids(runner.state(), blessing, def_index, 0, host),
+        printed_snapshot_ids(runner.state(), blessing, def_index, 0, host),
         snapshot,
         "the effect never stopped applying, so its start snapshot must survive"
     );
@@ -396,9 +396,10 @@ struct RiderBoard {
 /// Grizzly Bears enchanted first by an opponent's Pacifism, then by two
 /// synthetic white Auras and a synthetic white Equipment of P0, all attached
 /// before the grant starts. The recipient carries its own synthetic static
-/// first, so the granted copy installs at its index 1 while the granter's
-/// static is at its index 0. `path` grants the recipient the synthetic quoted
-/// static "Grizzly Bears has protection from white" with `rider`.
+/// first, so the granted copy's slot on the recipient differs from the
+/// granter's static's slot; the snapshot follows neither, only the grant
+/// occurrence. `path` grants the recipient the synthetic quoted static
+/// "Grizzly Bears has protection from white" with `rider`.
 fn granted_rider_board(
     path: GrantPath,
     rider: ProtectionDoesNotRemove,
@@ -516,13 +517,23 @@ fn assert_granted_rider_identity(path: GrantPath) {
             ProtectionDoesNotRemove::Source => [None, protection, protection, protection],
             // Every Aura, including the opponent's Pacifism, but no Equipment.
             ProtectionDoesNotRemove::Auras => [None, None, protection, None],
-            // The start snapshot written for the recipient's installed copy:
-            // what its controller (P0) had attached, not P1's Pacifism.
+            // The recipient's start snapshot for this grant occurrence: what
+            // its controller (P0) had attached, not P1's Pacifism.
             ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached => {
+                assert!(
+                    matches!(grant.occurrence, ProtectionGrantOccurrence::Granted { .. }),
+                    "{path:?}: a granted static is identified by its grant occurrence"
+                );
                 assert_eq!(
-                    protection_snapshot_ids(state, board.recipient, 1, 0, board.host),
+                    protection_snapshot_ids(
+                        state,
+                        board.recipient,
+                        grant.occurrence.clone(),
+                        grant.mod_index,
+                        board.host
+                    ),
                     vec![board.recipient, board.granter, board.equipment],
-                    "{path:?}: the snapshot is the recipient's installed copy's"
+                    "{path:?}: the recipient holds the grant's start snapshot"
                 );
                 [None, None, None, protection]
             }
@@ -591,7 +602,12 @@ fn own_static_rider_uses_its_own_identity() {
         assert_eq!(riders.len(), 1, "{rider:?}: one instance");
         let grant = riders[0].as_ref().expect("the rider survives");
         assert_eq!(grant.source, host);
-        assert_eq!(grant.definition, ProtectionRiderDefinition::Live(0));
+        assert_eq!(
+            grant.occurrence,
+            ProtectionGrantOccurrence::Static {
+                definition_index: 0
+            }
+        );
         let expected = match &rider {
             ProtectionDoesNotRemove::Source => [protection, protection],
             ProtectionDoesNotRemove::Auras => [None, protection],
@@ -766,4 +782,461 @@ fn chosen_grant_changes_rider_only_attachment_legality() {
         Some(AttachIllegality::Protection),
         "the independent instance changes attachment legality"
     );
+}
+
+/// The objects of [`start_identity_board`].
+struct StartIdentityBoard {
+    host: ObjectId,
+    recipient: ObjectId,
+    white_equipment: ObjectId,
+    later_white_equipment: ObjectId,
+}
+
+/// Grizzly Bears with two synthetic Equipment of P0 attached: one white, one
+/// colorless (it turns white only after a grant starts), and a synthetic
+/// recipient that later grants carry their quoted statics to.
+fn start_identity_board() -> (GameRunner, StartIdentityBoard) {
+    let mut s = scenario();
+    let host = grizzly_bears(&mut s, P0);
+    let mut runner = s.build();
+    let state = runner.state_mut();
+    let white_equipment = spawn_synthetic_white_equipment(state, 110);
+    let later_white_equipment = spawn_equipment(state, "Synthetic colorless Equipment", 111);
+    for equipment in [white_equipment, later_white_equipment] {
+        attach_to(state, equipment, host);
+    }
+    let recipient = spawn_grant_source(state, "Synthetic recipient", 112);
+    (
+        runner,
+        StartIdentityBoard {
+            host,
+            recipient,
+            white_equipment,
+            later_white_equipment,
+        },
+    )
+}
+
+/// A synthetic granter whose static gives `board.recipient` the synthetic
+/// quoted Benevolent Blessing analogue: "Grizzly Bears has protection from
+/// white. This effect doesn't remove Auras and Equipment you control that are
+/// already attached to it."
+fn start_blessing_grant(state: &mut GameState, board: &StartIdentityBoard, card_id: u64) {
+    let granter = spawn_grant_source(state, "Synthetic granting source", card_id);
+    grant_static_to(
+        state,
+        granter,
+        TargetFilter::SpecificObject {
+            id: board.recipient,
+        },
+        quoted_white_protection(
+            board.host,
+            ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached,
+        ),
+    );
+}
+
+/// A synthetic static with no protection: `recipient` gets +1/+0.
+fn unrelated_static(recipient: ObjectId) -> StaticDefinition {
+    StaticDefinition::continuous()
+        .affected(TargetFilter::SpecificObject { id: recipient })
+        .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+}
+
+/// Synthetic stand-in for an effect that changes an attachment's color after
+/// a grant started (the case `cr_702_16p_does_not_exempt_attachment_that_becomes_matching_after_grant_start`
+/// covers for a fixed slot).
+fn turn_white(state: &mut GameState, object: ObjectId) {
+    let obj = state.objects.get_mut(&object).unwrap();
+    obj.base_color = vec![ManaColor::White];
+    obj.color = vec![ManaColor::White];
+}
+
+/// The grant occurrences of the "already attached" protection on `host`.
+fn already_attached_occurrences(
+    state: &GameState,
+    host: ObjectId,
+) -> Vec<ProtectionGrantOccurrence> {
+    white_riders(state, host)
+        .into_iter()
+        .flatten()
+        .filter(|rider| {
+            rider.does_not_remove == ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached
+        })
+        .map(|rider| rider.occurrence)
+        .collect()
+}
+
+/// The slot the ridered protection static occupies on `recipient`.
+fn ridered_slot(state: &GameState, recipient: ObjectId) -> usize {
+    ridered_static_index(state, recipient)
+}
+
+/// CR 702.16p ("when the protection effect starts to apply"): an unrelated
+/// grant that installed on the recipient first ends, so the ridered static
+/// moves to a lower slot. The effect never stopped applying, so it keeps its
+/// start snapshot and does not exempt an Equipment that turned white later.
+/// Constructed control (synthetic): the unrelated grant is a static on an
+/// older source, removed directly to stand in for the grant ending; the printed
+/// Benevolent Blessing (`cr_702_16p_snapshot_survives_later_ability_removal`)
+/// and the fixed-slot witness (`cr_702_16p_does_not_exempt_attachment_that_becomes_matching_after_grant_start`)
+/// sit beside it.
+#[test]
+fn earlier_grant_ending_keeps_the_start_snapshot() {
+    let (mut runner, board) = start_identity_board();
+    let state = runner.state_mut();
+    let older = spawn_grant_source(state, "Synthetic older source", 121);
+    grant_static_to(
+        state,
+        older,
+        TargetFilter::SpecificObject {
+            id: board.recipient,
+        },
+        unrelated_static(board.recipient),
+    );
+    start_blessing_grant(state, &board, 113);
+    evaluate_protection_layers(state);
+    assert_eq!(
+        ridered_slot(state, board.recipient),
+        1,
+        "reach guard: shifted slot"
+    );
+    let [occurrence] = <[_; 1]>::try_from(already_attached_occurrences(state, board.host))
+        .expect("one ridered grant");
+    let start = protection_snapshot_ids(state, board.recipient, occurrence.clone(), 0, board.host);
+    assert_eq!(start, vec![board.white_equipment]);
+    turn_white(state, board.later_white_equipment);
+    evaluate_protection_layers(state);
+    assert_eq!(
+        attachment_illegality(state, board.later_white_equipment, board.host),
+        Some(AttachIllegality::Protection),
+        "reach guard: white only after the effect started"
+    );
+
+    let older = state.objects.get_mut(&older).unwrap();
+    older.static_definitions = Vec::new().into();
+    older.base_static_definitions = std::sync::Arc::new(Vec::new());
+    evaluate_protection_layers(state);
+    assert_eq!(
+        ridered_slot(state, board.recipient),
+        0,
+        "reach guard: the slot moved"
+    );
+    assert_eq!(
+        protection_snapshot_ids(state, board.recipient, occurrence, 0, board.host),
+        start,
+        "the start snapshot is kept across the slot move"
+    );
+    assert_eq!(
+        attachment_illegality(state, board.later_white_equipment, board.host),
+        Some(AttachIllegality::Protection)
+    );
+    assert_eq!(
+        attachment_illegality(state, board.white_equipment, board.host),
+        None
+    );
+}
+
+/// CR 702.16p: an unrelated grant from an older source starts and installs on
+/// the recipient first, so the ridered static moves to a higher slot. The
+/// effect keeps its start snapshot. Constructed control (synthetic), the
+/// mirror of `earlier_grant_ending_keeps_the_start_snapshot`.
+#[test]
+fn earlier_grant_starting_keeps_the_start_snapshot() {
+    let (mut runner, board) = start_identity_board();
+    let state = runner.state_mut();
+    let older = spawn_grant_source(state, "Synthetic older source", 114);
+    start_blessing_grant(state, &board, 115);
+    evaluate_protection_layers(state);
+    assert_eq!(
+        ridered_slot(state, board.recipient),
+        0,
+        "reach guard: first slot"
+    );
+    let [occurrence] = <[_; 1]>::try_from(already_attached_occurrences(state, board.host))
+        .expect("one ridered grant");
+    let start = protection_snapshot_ids(state, board.recipient, occurrence.clone(), 0, board.host);
+    assert_eq!(start, vec![board.white_equipment]);
+    turn_white(state, board.later_white_equipment);
+
+    grant_static_to(
+        state,
+        older,
+        TargetFilter::SpecificObject {
+            id: board.recipient,
+        },
+        unrelated_static(board.recipient),
+    );
+    evaluate_protection_layers(state);
+    assert_eq!(
+        ridered_slot(state, board.recipient),
+        1,
+        "reach guard: the slot moved"
+    );
+    assert_eq!(
+        protection_snapshot_ids(state, board.recipient, occurrence, 0, board.host),
+        start,
+        "the start snapshot is kept across the slot move"
+    );
+    assert_eq!(
+        attachment_illegality(state, board.later_white_equipment, board.host),
+        Some(AttachIllegality::Protection)
+    );
+}
+
+/// CR 702.16p + CR 113.2c: two sources grant the recipient byte-identical
+/// ridered statics, so layer 6 installs one copy. Each grant is its own effect
+/// with its own start: the second started after an Equipment turned white, so
+/// only the second exempts it, and the first instance still blocks it
+/// (CR 702.16n). Constructed (synthetic): no printed card grants this static.
+#[test]
+fn identical_grants_from_different_sources_keep_separate_snapshots() {
+    let (mut runner, board) = start_identity_board();
+    let state = runner.state_mut();
+    start_blessing_grant(state, &board, 116);
+    evaluate_protection_layers(state);
+    turn_white(state, board.later_white_equipment);
+    evaluate_protection_layers(state);
+    start_blessing_grant(state, &board, 117);
+    evaluate_protection_layers(state);
+
+    assert_eq!(
+        state.objects[&board.recipient]
+            .static_definitions
+            .iter_all()
+            .filter(|def| def.protection_does_not_remove.is_some())
+            .count(),
+        1,
+        "reach guard: one installed copy for both grants"
+    );
+    let [first, second] = <[_; 2]>::try_from(already_attached_occurrences(state, board.host))
+        .expect("two ridered grants");
+    assert_ne!(first, second);
+    let mut snapshots = [first, second].map(|occurrence| {
+        protection_snapshot_ids(state, board.recipient, occurrence, 0, board.host)
+    });
+    snapshots.sort();
+    assert_eq!(
+        snapshots,
+        [
+            vec![board.white_equipment],
+            vec![board.white_equipment, board.later_white_equipment],
+        ]
+    );
+    assert_eq!(
+        attachment_illegality(state, board.white_equipment, board.host),
+        None
+    );
+    assert_eq!(
+        attachment_illegality(state, board.later_white_equipment, board.host),
+        Some(AttachIllegality::Protection)
+    );
+}
+
+/// CR 400.7 + CR 702.16p: a host that leaves and returns is a new object, so
+/// the grant starts applying to it anew and takes a new snapshot. Constructed
+/// control (synthetic): the incarnation is bumped and the Equipment unattached
+/// directly, standing in for the host leaving and returning between two layer
+/// passes; then the white Equipment is attached to the new object.
+#[test]
+fn host_reentering_starts_a_new_snapshot() {
+    let (mut runner, board) = start_identity_board();
+    let state = runner.state_mut();
+    start_blessing_grant(state, &board, 118);
+    evaluate_protection_layers(state);
+    let [occurrence] = <[_; 1]>::try_from(already_attached_occurrences(state, board.host))
+        .expect("one ridered grant");
+    assert_eq!(
+        protection_snapshot_ids(state, board.recipient, occurrence.clone(), 0, board.host),
+        vec![board.white_equipment],
+        "reach guard: the first incarnation's snapshot"
+    );
+
+    for equipment in [board.white_equipment, board.later_white_equipment] {
+        state.objects.get_mut(&equipment).unwrap().attached_to = None;
+    }
+    let host = state.objects.get_mut(&board.host).unwrap();
+    host.attachments.clear();
+    host.bump_incarnation();
+    let incarnation = host.incarnation;
+    evaluate_protection_layers(state);
+    assert!(
+        state.objects[&board.recipient]
+            .protection_start_snapshots
+            .keys()
+            .all(|key| key.host.incarnation == incarnation),
+        "the departed incarnation's snapshot is pruned"
+    );
+    assert_eq!(
+        protection_snapshot_ids(state, board.recipient, occurrence, 0, board.host),
+        Vec::<ObjectId>::new(),
+        "nothing was attached when the effect started on the new object"
+    );
+
+    state
+        .objects
+        .get_mut(&board.white_equipment)
+        .unwrap()
+        .attached_to = Some(board.host.into());
+    state
+        .objects
+        .get_mut(&board.host)
+        .unwrap()
+        .attachments
+        .push(board.white_equipment);
+    assert_eq!(
+        attachment_illegality(state, board.white_equipment, board.host),
+        Some(AttachIllegality::Protection)
+    );
+}
+
+/// CR 702.16p: the start snapshot is game state that cannot be re-derived, so
+/// it is saved, and a restore keeps it under the same identity. Printed
+/// Benevolent Blessing (white chosen) joins P0's Pacifism on Grizzly Bears;
+/// after a persisted restore (immediate and deferred), Blessing holds the same
+/// snapshot and Pacifism stays legal. A save written with the older slot key
+/// restores the same way: its entry is migrated by the restore's layer flush.
+#[test]
+fn persisted_restore_keeps_the_start_snapshot_identity() {
+    use crate::types::game_state::{PersistedGameState, PersistedRestoreFinalization};
+
+    let mut s = scenario();
+    let host = grizzly_bears(&mut s, P0);
+    let pacifism = s.add_real_card(P0, "Pacifism", Zone::Hand, db());
+    let blessing = s.add_real_card(P0, "Benevolent Blessing", Zone::Hand, db());
+    let mut runner = s.build();
+    cast(&mut runner, P0, pacifism, Some(host), None);
+    cast(&mut runner, P0, blessing, Some(host), Some("white"));
+    let state = runner.state();
+    let snapshots = state.objects[&blessing].protection_start_snapshots.clone();
+    let def_index = ridered_static_index(state, blessing);
+    assert!(
+        printed_snapshot_ids(state, blessing, def_index, 0, host).contains(&pacifism),
+        "reach guard: Pacifism is in Blessing's start snapshot"
+    );
+
+    let restore = |wire: serde_json::Value, policy| {
+        let prepared = serde_json::from_value::<PersistedGameState>(wire)
+            .unwrap()
+            .prepare_for_restore(policy)
+            .unwrap();
+        match policy {
+            PersistedRestoreFinalization::Immediate => prepared.finalize_immediately(),
+            PersistedRestoreFinalization::DeferUntilRehydrated => {
+                prepared.finalize_after_rehydration(|_| Ok(()))
+            }
+        }
+        .unwrap()
+    };
+    for policy in [
+        PersistedRestoreFinalization::Immediate,
+        PersistedRestoreFinalization::DeferUntilRehydrated,
+    ] {
+        let wire = serde_json::to_value(PersistedGameState::capture(state.clone())).unwrap();
+        let restored = restore(wire, policy);
+        assert_eq!(
+            restored.objects[&blessing].protection_start_snapshots, snapshots,
+            "{policy:?}: the snapshot keeps its identity"
+        );
+        assert_eq!(attachment_illegality(&restored, pacifism, host), None);
+    }
+
+    // The same game saved with the older slot key.
+    let mut legacy =
+        serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone()))).unwrap();
+    let root = if legacy.get("state").is_some() {
+        &mut legacy["state"]
+    } else {
+        &mut legacy
+    };
+    let object = &mut root["objects"][blessing.0.to_string()];
+    let entries = object
+        .as_object_mut()
+        .unwrap()
+        .remove("protection_start_snapshots")
+        .expect("reach guard: the snapshot is saved");
+    let [entry] = entries.as_array().unwrap().as_slice() else {
+        panic!("one snapshot");
+    };
+    object["protection_start_exempt_attachments"] =
+        serde_json::json!([[[def_index, 0, host.0], entry[1].clone()]]);
+    let restored = restore(legacy, PersistedRestoreFinalization::Immediate);
+    assert_eq!(
+        restored.objects[&blessing].protection_start_snapshots, snapshots,
+        "the older slot key migrates to the same identity"
+    );
+    assert!(restored.objects[&blessing]
+        .legacy_protection_start_exempt_attachments
+        .is_empty());
+    assert_eq!(attachment_illegality(&restored, pacifism, host), None);
+}
+
+/// CR 707.2 + CR 702.16p: a copy of Benevolent Blessing has the ridered static
+/// as its own, so its effect, start snapshot and identity are the copy's. The
+/// copy effect is synthetic (the printed analogue is an enchantment entering as
+/// a copy, e.g. Copy Enchantment), and the copy records its own as-enters
+/// color. It snapshots the white Aura its controller had on its own Grizzly
+/// Bears, keeping that Aura legal; the original's snapshot is separate.
+#[test]
+fn copy_of_benevolent_blessing_takes_its_own_start_snapshot() {
+    let mut s = scenario();
+    let original_host = grizzly_bears(&mut s, P0);
+    let copy_host = grizzly_bears(&mut s, P0);
+    let blessing = s.add_real_card(P0, "Benevolent Blessing", Zone::Hand, db());
+    let mut runner = s.build();
+    cast(
+        &mut runner,
+        P0,
+        blessing,
+        Some(original_host),
+        Some("white"),
+    );
+
+    let state = runner.state_mut();
+    let earlier_aura = spawn_synthetic_white_aura(state, "Synthetic white Aura", 119, P0);
+    attach_to(state, earlier_aura, copy_host);
+    let blessing_values =
+        crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&blessing]);
+    let copy = spawn_synthetic_white_aura(state, "Synthetic copy", 120, P0);
+    attach_to(state, copy, copy_host);
+    state
+        .objects
+        .get_mut(&copy)
+        .unwrap()
+        .chosen_attributes
+        .push(ChosenAttribute::Color(ManaColor::White));
+    state
+        .add_transient_continuous_effect(
+            copy,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: copy },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(blessing_values),
+                display: Default::default(),
+            }],
+            None,
+        )
+        .expect("copy effect must register");
+    evaluate_protection_layers(state);
+
+    assert_eq!(
+        state.objects[&copy].name, "Benevolent Blessing",
+        "reach guard"
+    );
+    let [occurrence] = <[_; 1]>::try_from(already_attached_occurrences(state, copy_host))
+        .expect("the copy's own ridered grant");
+    let def_index = ridered_static_index(state, copy);
+    assert_eq!(
+        occurrence,
+        ProtectionGrantOccurrence::Static {
+            definition_index: def_index
+        }
+    );
+    assert!(
+        printed_snapshot_ids(state, copy, def_index, 0, copy_host).contains(&earlier_aura),
+        "the copy holds its own start snapshot"
+    );
+    assert!(printed_snapshot_ids(state, blessing, def_index, 0, copy_host).is_empty());
+    assert_eq!(attachment_illegality(state, earlier_aura, copy_host), None);
 }

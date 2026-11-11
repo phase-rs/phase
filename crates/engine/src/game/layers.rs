@@ -57,7 +57,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::layers::{
-    ActiveContinuousEffect, Layer, ProtectionRiderDefinition, ProtectionRiderGrant,
+    ActiveContinuousEffect, Layer, ProtectionGrantOccurrence, ProtectionRiderGrant,
 };
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -8425,7 +8425,9 @@ fn active_continuous_effects_from_static_definitions(
                     .clone()
                     .map(|does_not_remove| ProtectionRiderGrant {
                         source: source_id,
-                        definition: ProtectionRiderDefinition::Live(def_idx),
+                        occurrence: ProtectionGrantOccurrence::Static {
+                            definition_index: def_idx,
+                        },
                         mod_index,
                         does_not_remove,
                     }),
@@ -8538,14 +8540,19 @@ fn expand_granted_static_effects(
         _ => std::borrow::Cow::Borrowed(inner),
     };
     let inner_affected = inner.affected.clone().unwrap_or(TargetFilter::Any);
-    // CR 702.16n + CR 613.1f: a ridered granted static is identified on each
-    // recipient by the definition layer 6 installs there (the stamped `inner`).
+    // CR 702.16n + CR 702.16p + CR 613.1f: a ridered granted static is
+    // identified on each recipient by the exact grant occurrence that produced
+    // it, never by the slot layer 6 installs it in. A grant with no live origin
+    // (its source is gone) carries no rider, which fails closed.
     let rider = inner
         .protection_does_not_remove
         .clone()
-        .map(|does_not_remove| {
-            let definition = ProtectionRiderDefinition::Granted(Arc::new(inner.as_ref().clone()));
-            (definition, does_not_remove)
+        .zip(host_origin.clone())
+        .map(|(does_not_remove, origin)| {
+            (
+                ProtectionGrantOccurrence::Granted { origin },
+                does_not_remove,
+            )
         });
     let mut out = Vec::new();
     for recipient_id in recipients {
@@ -8601,10 +8608,10 @@ fn expand_granted_static_effects(
                 // CR 702.16n + CR 113.7: the rider belongs to the granted
                 // static, whose source is this recipient; it does not depend on
                 // how the parent was produced (printed, transient or late).
-                protection_rider: rider.as_ref().map(|(definition, does_not_remove)| {
+                protection_rider: rider.as_ref().map(|(occurrence, does_not_remove)| {
                     ProtectionRiderGrant {
                         source: recipient_id,
-                        definition: definition.clone(),
+                        occurrence: occurrence.clone(),
                         mod_index,
                         does_not_remove: does_not_remove.clone(),
                     }
@@ -11262,6 +11269,50 @@ fn trigger_origin(effect: &ActiveContinuousEffect) -> TriggerProducerOrigin {
         .expect("trigger-producing continuous effect must carry an exact origin")
 }
 
+/// CR 702.16p: note that `effect`, a protection grant with the "already
+/// attached" rider, applied to `obj` in this pass, so the post-pass refresh can
+/// take its start snapshot. Recorded at application, not on the surviving
+/// keyword: a later removal of the protection does not end the effect. The
+/// rider exists only on Benevolent Blessing, a single chosen quality, and the
+/// snapshot keys one quality per effect and host, so a color-set grant
+/// (CR 702.16i: one protection ability per member) records nothing and its
+/// protections apply normally.
+fn record_protection_start_grant(
+    obj: &mut crate::game::game_object::GameObject,
+    effect: &ActiveContinuousEffect,
+    granted: &crate::types::keywords::ProtectionTarget,
+    resolved: &[crate::types::keywords::ProtectionTarget],
+) {
+    let Some(rider) = effect.protection_rider.as_ref().filter(|rider| {
+        rider.does_not_remove
+            == crate::types::ability::ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached
+    }) else {
+        return;
+    };
+    if matches!(
+        granted,
+        crate::types::keywords::ProtectionTarget::EachColor(_)
+    ) {
+        return;
+    }
+    let [resolved_quality] = resolved else {
+        return;
+    };
+    let grant = crate::game::game_object::ProtectionStartGrant {
+        source: rider.source,
+        key: crate::game::game_object::ProtectionStartKey {
+            occurrence: rider.occurrence.clone(),
+            mod_index: rider.mod_index,
+            host: ObjectIncarnationRef::from_object(obj),
+        },
+        resolved_quality: resolved_quality.clone(),
+        controller: effect.controller,
+    };
+    if !obj.protection_start_grants.contains(&grant) {
+        obj.protection_start_grants.push(grant);
+    }
+}
+
 /// CR 702.16 + CR 613.7: record a surviving protection instance's provenance,
 /// with the CR 702.16n rider of the exact definition that produced `effect`,
 /// then grant the keyword through the shared dedup policy.
@@ -12381,7 +12432,8 @@ fn apply_continuous_effect_filtered(
                 // set. One protection ability per resolved quality, so the keyword
                 // is self-contained on the recipient and `source_matches_*`
                 // enforces CR 702.16b/d/e/f. An unresolved quality grants nothing.
-                crate::types::keywords::Keyword::Protection(_) => {
+                crate::types::keywords::Keyword::Protection(granted) => {
+                    record_protection_start_grant(obj, effect, granted, &granted_protection);
                     for (keyword_output_index, quality) in granted_protection.iter().enumerate() {
                         grant_protection_instance(
                             obj,

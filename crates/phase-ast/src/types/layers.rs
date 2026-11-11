@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    ContinuousModification, ProtectionDoesNotRemove, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerDefinitionRef, TriggerProducerOrigin,
+    ContinuousModification, ProtectionDoesNotRemove, StaticCondition, TargetFilter,
+    TriggerDefinitionRef, TriggerProducerOrigin,
 };
 use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::player::PlayerId;
@@ -269,22 +267,28 @@ pub struct ActiveContinuousEffect {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtectionRiderGrant {
     pub source: ObjectId,
-    pub definition: ProtectionRiderDefinition,
+    pub occurrence: ProtectionGrantOccurrence,
     /// Index of the protection modification within that static.
     pub mod_index: usize,
     pub does_not_remove: ProtectionDoesNotRemove,
 }
 
-/// Which of `ProtectionRiderGrant::source`'s statics produced the grant.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProtectionRiderDefinition {
-    /// The static at this live `static_definitions` index on the source.
-    Live(usize),
-    /// CR 613.1f: a static granted to the source (a synthesized
-    /// `GrantStaticAbility` child). Layer 6 installs it on the source after
-    /// gather, deduplicated by structural equality, so its live index exists
-    /// only once the pass has run and is found by that same equality.
-    Granted(Arc<StaticDefinition>),
+/// CR 702.16p: which effect occurrence on `ProtectionRiderGrant::source`
+/// produced a protection grant. It names the effect, never the slot a granted
+/// static happens to occupy after a layer pass, so an unrelated grant starting
+/// or ending on the same object cannot make the effect look newly started.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ProtectionGrantOccurrence {
+    /// The source's own printed or copiable static at this index. These
+    /// precede every granted static in `static_definitions`, so grants coming
+    /// and going never move them.
+    Static { definition_index: usize },
+    /// CR 613.1f: a static granted to the source by this exact layer grant
+    /// occurrence (the producing `GrantStaticAbility`), whichever slot layer 6
+    /// installs it in. Byte-identical grants from different producers stay
+    /// distinct (CR 113.2c).
+    Granted { origin: TriggerProducerOrigin },
 }
 
 #[cfg(test)]

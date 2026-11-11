@@ -28,6 +28,23 @@ use engine::types::game_state::GameState;
 use engine::types::identifiers::CardId;
 use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::ManaColor;
+
+/// CR 702.16p: the start-snapshot key of the grant source's printed static 0,
+/// modification `mod_index`, for `host`'s current incarnation.
+fn printed_start_key(
+    state: &GameState,
+    mod_index: usize,
+    host: engine::types::identifiers::ObjectId,
+) -> engine::game::game_object::ProtectionStartKey {
+    use engine::game::game_object::ObjectIncarnationRefExt;
+    engine::game::game_object::ProtectionStartKey {
+        occurrence: engine::types::layers::ProtectionGrantOccurrence::Static {
+            definition_index: 0,
+        },
+        mod_index,
+        host: engine::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&host]),
+    }
+}
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
@@ -328,22 +345,22 @@ fn cr_702_16p_two_qualities_in_one_static_each_modification_snapshots_independen
         .objects
         .get(&grant_source)
         .unwrap()
-        .protection_start_exempt_attachments;
+        .protection_start_snapshots;
     assert!(
         snapshots
-            .get(&(0, 0, host))
+            .get(&printed_start_key(&state, 0, host))
             .is_some_and(|snapshot| snapshot.attachment_ids.contains(&red_equipment)),
         "red protection modification must snapshot the red Equipment at effect start"
     );
     assert!(
         snapshots
-            .get(&(0, 1, host))
+            .get(&printed_start_key(&state, 1, host))
             .is_some_and(|snapshot| snapshot.attachment_ids.contains(&blue_equipment)),
         "blue protection modification must snapshot the blue Equipment at effect start"
     );
     assert!(
         !snapshots
-            .get(&(0, 0, host))
+            .get(&printed_start_key(&state, 0, host))
             .is_some_and(|snapshot| snapshot.attachment_ids.contains(&blue_equipment)),
         "red snapshot must not absorb the blue Equipment"
     );
@@ -424,8 +441,8 @@ fn cr_702_16p_snapshots_matching_controlled_attachment_at_grant_start() {
             .objects
             .get(&grant_source)
             .unwrap()
-            .protection_start_exempt_attachments
-            .get(&(0, 0, host))
+            .protection_start_snapshots
+            .get(&printed_start_key(&state, 0, host))
             .is_some_and(|snapshot| snapshot.attachment_ids.contains(&equipment)),
         "CR 702.16p: white Equipment already attached when the grant starts must be snapshotted"
     );
@@ -644,8 +661,8 @@ fn cr_702_16p_same_source_second_effect_does_not_inherit_first_snapshot() {
         .objects
         .get(&grant_source)
         .unwrap()
-        .protection_start_exempt_attachments
-        .get(&(0, 0, host))
+        .protection_start_snapshots
+        .get(&printed_start_key(&state, 0, host))
         .is_some_and(|snapshot| snapshot.attachment_ids.contains(&equipment)));
 
     {
@@ -668,8 +685,8 @@ fn cr_702_16p_same_source_second_effect_does_not_inherit_first_snapshot() {
             .objects
             .get(&grant_source)
             .unwrap()
-            .protection_start_exempt_attachments
-            .get(&(0, 0, host))
+            .protection_start_snapshots
+            .get(&printed_start_key(&state, 0, host))
             .is_some_and(|snapshot| snapshot.attachment_ids.contains(&equipment)),
         "white rider must not inherit blue-rider snapshot at the same effect slot"
     );
@@ -749,8 +766,8 @@ fn cr_702_16p_opponent_controlled_matching_attachment_not_exempt() {
             .objects
             .get(&grant_source)
             .unwrap()
-            .protection_start_exempt_attachments
-            .get(&(0, 0, host))
+            .protection_start_snapshots
+            .get(&printed_start_key(&state, 0, host))
             .is_some_and(|snapshot| snapshot.attachment_ids.contains(&equipment)),
         "702.16p only exempts controlled attachments at effect start"
     );

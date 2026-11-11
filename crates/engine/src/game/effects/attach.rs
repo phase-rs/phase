@@ -2269,23 +2269,6 @@ fn protection_blocks_attachment(
     })
 }
 
-/// Composite key for one protection modification on a host:
-/// `(static_definitions index, modifications index, host object id)`.
-use crate::game::game_object::ProtectionEffectHostKey;
-
-/// Live `static_definitions` index for an active static returned by
-/// `battlefield_active_statics`.
-fn live_static_def_index(
-    source: &crate::game::game_object::GameObject,
-    def: &crate::types::ability::StaticDefinition,
-) -> usize {
-    source
-        .static_definitions
-        .iter_all()
-        .position(|d| std::ptr::eq(d, def))
-        .expect("active static definition must index live static_definitions")
-}
-
 /// CR 702.16p: Capture attachment IDs matching `resolved_pt` that are already
 /// on `host_id` and controlled by `grant_controller` at protection-start time.
 fn capture_protection_start_attachment_snapshot(
@@ -2323,156 +2306,133 @@ fn capture_protection_start_attachment_snapshot(
 
 /// CR 702.16p: When a continuous protection grant with the already-attached
 /// rider starts applying to a host, snapshot the matching controlled
-/// attachments once; consult that per-grant map in
-/// [`protection_grant_exempts_attachment`]. Prune entries when the grant stops
-/// applying to a host or the source leaves the battlefield.
+/// attachments once; consult that snapshot in
+/// [`protection_grant_exempts_attachment`]. The grants come from the layer pass
+/// that just ran (`GameObject::protection_start_grants`), each keyed by its
+/// grant occurrence and host incarnation, so a grant keeps its snapshot while it
+/// keeps applying, whatever slot its static occupies. Prune entries when the
+/// grant stops applying to a host or the source leaves the battlefield.
 pub(crate) fn refresh_protection_start_attachment_snapshots(state: &mut GameState) {
-    use crate::types::ability::ContinuousModification;
-    use crate::types::ability::ProtectionDoesNotRemove;
-    use crate::types::keywords::Keyword;
-    use crate::types::statics::StaticMode;
+    use crate::game::game_object::{ProtectionStartGrant, ProtectionStartKey};
     use std::collections::{HashMap, HashSet};
 
-    struct ActiveGrant {
-        def_index: usize,
-        mod_index: usize,
-        host_id: ObjectId,
-        resolved_pt: crate::types::keywords::ProtectionTarget,
-        controller: PlayerId,
-    }
+    migrate_legacy_protection_start_snapshots(state);
 
-    let mut active_by_source: HashMap<ObjectId, Vec<ActiveGrant>> = HashMap::new();
-
-    for (source_obj, def) in crate::game::functioning_abilities::battlefield_active_statics(state) {
-        if !matches!(def.mode, StaticMode::Continuous) {
-            continue;
-        }
-        if def.protection_does_not_remove
-            != Some(ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached)
-        {
-            continue;
-        }
-        let source_id = source_obj.id;
-        let def_index = live_static_def_index(source_obj, def);
-        let affected = def.affected.clone().unwrap_or(TargetFilter::Any);
-        let ctx = FilterContext::from_source(state, source_id);
-        // CR 109.5: "you" in a static ability is its source's current controller.
-        let you = crate::game::layers::condition_controller(
-            state,
-            None,
-            source_obj.controller,
-            source_id,
-        );
-        for (mod_index, modification) in def.modifications.iter().enumerate() {
-            let ContinuousModification::AddKeyword {
-                keyword: Keyword::Protection(pt),
-            } = modification
-            else {
-                continue;
-            };
-            // CR 702.16p: the already-attached rider exists only on Benevolent
-            // Blessing, a single chosen quality. `ProtectionStartSnapshot` keys one
-            // quality per (def, mod, host), so a color-set grant (CR 702.16i: one
-            // protection ability per member) is never snapshotted, whatever its
-            // member count, and therefore exempts nothing: its protections apply
-            // normally.
-            if matches!(pt, crate::types::keywords::ProtectionTarget::EachColor(_)) {
-                continue;
-            }
-            let resolved =
-                crate::game::keywords::resolve_granted_protection(state, pt, source_id, you);
-            let resolved_pt = match resolved.as_slice() {
-                [] => continue,
-                [single] => single.clone(),
-                // Only a set quality resolves to more than one entry, and set
-                // grants were skipped above.
-                [_, _, ..] => continue,
-            };
-            for &host_id in &state.battlefield {
-                if !matches_target_filter(state, host_id, &affected, &ctx) {
-                    continue;
-                }
-                active_by_source
-                    .entry(source_id)
-                    .or_default()
-                    .push(ActiveGrant {
-                        def_index,
-                        mod_index,
-                        host_id,
-                        resolved_pt: resolved_pt.clone(),
-                        controller: source_obj.controller,
-                    });
-            }
-        }
-    }
-
-    let active_sources: HashSet<ObjectId> = active_by_source.keys().copied().collect();
-
-    for &source_id in &state.battlefield {
-        let Some(source) = state.objects.get(&source_id) else {
+    let mut active_by_source: HashMap<ObjectId, Vec<ProtectionStartGrant>> = HashMap::new();
+    for host_id in &state.battlefield {
+        let Some(host) = state.objects.get(host_id) else {
             continue;
         };
-        if source.protection_start_exempt_attachments.is_empty() {
-            continue;
-        }
-        let active_keys = active_by_source
-            .get(&source_id)
-            .map(|grants| {
-                grants
-                    .iter()
-                    .map(|g| (g.def_index, g.mod_index, g.host_id))
-                    .collect::<HashSet<ProtectionEffectHostKey>>()
-            })
-            .unwrap_or_default();
-        if active_sources.contains(&source_id) {
-            state
-                .objects
-                .get_mut(&source_id)
-                .expect("battlefield object")
-                .protection_start_exempt_attachments
-                .retain(|key, _| active_keys.contains(key));
-        } else {
-            state
-                .objects
-                .get_mut(&source_id)
-                .expect("battlefield object")
-                .protection_start_exempt_attachments
-                .clear();
+        for grant in &host.protection_start_grants {
+            active_by_source
+                .entry(grant.source)
+                .or_default()
+                .push(grant.clone());
         }
     }
 
-    let mut to_capture = Vec::new();
+    for &source_id in &state.battlefield {
+        let Some(source) = state.objects.get_mut(&source_id) else {
+            continue;
+        };
+        if source.protection_start_snapshots.is_empty() {
+            continue;
+        }
+        let active_keys: HashSet<&ProtectionStartKey> = active_by_source
+            .get(&source_id)
+            .into_iter()
+            .flatten()
+            .map(|grant| &grant.key)
+            .collect();
+        source
+            .protection_start_snapshots
+            .retain(|key, _| active_keys.contains(key));
+    }
+
     for (source_id, grants) in active_by_source {
         for grant in grants {
-            let key = (grant.def_index, grant.mod_index, grant.host_id);
             let already_snapshotted = state.objects.get(&source_id).is_some_and(|source| {
                 source
-                    .protection_start_exempt_attachments
-                    .get(&key)
-                    .is_some_and(|entry| entry.resolved_quality == grant.resolved_pt)
+                    .protection_start_snapshots
+                    .get(&grant.key)
+                    .is_some_and(|entry| entry.resolved_quality == grant.resolved_quality)
             });
             if already_snapshotted {
                 continue;
             }
-            to_capture.push((source_id, key, grant.resolved_pt, grant.controller));
-        }
-    }
-
-    for (source_id, key, resolved_pt, controller) in to_capture {
-        let snapshot =
-            capture_protection_start_attachment_snapshot(state, key.2, controller, &resolved_pt);
-        state
-            .objects
-            .get_mut(&source_id)
-            .expect("grant source must exist")
-            .protection_start_exempt_attachments
-            .insert(
-                key,
+            let snapshot = capture_protection_start_attachment_snapshot(
+                state,
+                grant.key.host.object_id,
+                grant.controller,
+                &grant.resolved_quality,
+            );
+            let Some(source) = state.objects.get_mut(&source_id) else {
+                continue;
+            };
+            source.protection_start_snapshots.insert(
+                grant.key,
                 crate::game::game_object::ProtectionStartSnapshot {
-                    resolved_quality: resolved_pt,
+                    resolved_quality: grant.resolved_quality,
                     attachment_ids: snapshot,
                 },
             );
+        }
+    }
+}
+
+/// CR 702.16p: move snapshots an older save stored under slot keys to the
+/// occurrence keys. A slot key could only name the source's own static at that
+/// index (no granted static ever matched one), so it migrates to
+/// `ProtectionGrantOccurrence::Static` with the host's current incarnation.
+/// Entries whose host is gone are dropped; the refresh then prunes any that no
+/// active grant claims.
+fn migrate_legacy_protection_start_snapshots(state: &mut GameState) {
+    use crate::game::game_object::ProtectionStartKey;
+    use crate::types::layers::ProtectionGrantOccurrence;
+
+    let sources: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| !obj.legacy_protection_start_exempt_attachments.is_empty())
+        })
+        .collect();
+    for source_id in sources {
+        let legacy = std::mem::take(
+            &mut state
+                .objects
+                .get_mut(&source_id)
+                .expect("battlefield object")
+                .legacy_protection_start_exempt_attachments,
+        );
+        let migrated: Vec<_> = legacy
+            .into_iter()
+            .filter_map(|((definition_index, mod_index, host_id), snapshot)| {
+                let host = state.objects.get(&host_id)?;
+                Some((
+                    ProtectionStartKey {
+                        occurrence: ProtectionGrantOccurrence::Static { definition_index },
+                        mod_index,
+                        host: ObjectIncarnationRef::from_object(host),
+                    },
+                    snapshot,
+                ))
+            })
+            .collect();
+        let source = state
+            .objects
+            .get_mut(&source_id)
+            .expect("battlefield object");
+        for (key, snapshot) in migrated {
+            source
+                .protection_start_snapshots
+                .entry(key)
+                .or_insert(snapshot);
+        }
     }
 }
 
@@ -2486,7 +2446,6 @@ fn protection_grant_exempts_attachment(
     resolved_pt: &crate::types::keywords::ProtectionTarget,
 ) -> bool {
     use crate::types::ability::ProtectionDoesNotRemove;
-    use crate::types::layers::ProtectionRiderDefinition;
 
     let Some(attachment) = state.objects.get(&attachment_id) else {
         return false;
@@ -2501,29 +2460,23 @@ fn protection_grant_exempts_attachment(
             .subtypes
             .iter()
             .any(|s| s.eq_ignore_ascii_case("Aura")),
-        // CR 702.16p: only attachments snapshotted for this specific protection
-        // modification and host when it started applying. The snapshot is
-        // keyed by the static's live index on its source; a granted static's
-        // index is where layer 6 installed it (structural-equality dedup).
+        // CR 702.16p: only attachments snapshotted for this protection effect
+        // occurrence and this host incarnation when the effect started applying.
         ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached => {
-            let Some(source) = state.objects.get(&rider.source) else {
+            let (Some(source), Some(host)) = (
+                state.objects.get(&rider.source),
+                state.objects.get(&host_id),
+            ) else {
                 return false;
             };
-            let def_index = match &rider.definition {
-                ProtectionRiderDefinition::Live(def_index) => Some(*def_index),
-                ProtectionRiderDefinition::Granted(definition) => source
-                    .static_definitions
-                    .iter_all()
-                    .position(|installed| installed == definition.as_ref()),
+            let key = crate::game::game_object::ProtectionStartKey {
+                occurrence: rider.occurrence.clone(),
+                mod_index: rider.mod_index,
+                host: ObjectIncarnationRef::from_object(host),
             };
-            def_index
-                .and_then(|def_index| {
-                    source.protection_start_exempt_attachments.get(&(
-                        def_index,
-                        rider.mod_index,
-                        host_id,
-                    ))
-                })
+            source
+                .protection_start_snapshots
+                .get(&key)
                 .is_some_and(|entry| {
                     entry.resolved_quality == *resolved_pt
                         && entry.attachment_ids.contains(&attachment_id)
@@ -5406,23 +5359,45 @@ mod tests {
         crate::game::layers::evaluate_layers(state);
     }
 
+    /// The CR 702.16p start snapshot `source_id` holds for `occurrence`'s
+    /// modification `mod_index` on `host_id`'s current incarnation.
     pub(super) fn protection_snapshot_ids(
+        state: &GameState,
+        source_id: ObjectId,
+        occurrence: crate::types::layers::ProtectionGrantOccurrence,
+        mod_index: usize,
+        host_id: ObjectId,
+    ) -> Vec<ObjectId> {
+        let key = crate::game::game_object::ProtectionStartKey {
+            occurrence,
+            mod_index,
+            host: ObjectIncarnationRef::from_object(&state.objects[&host_id]),
+        };
+        state
+            .objects
+            .get(&source_id)
+            .and_then(|source| source.protection_start_snapshots.get(&key))
+            .map(|entry| entry.attachment_ids.clone())
+            .unwrap_or_default()
+    }
+
+    /// [`protection_snapshot_ids`] for the source's own static `def_index`.
+    pub(super) fn printed_snapshot_ids(
         state: &GameState,
         source_id: ObjectId,
         def_index: usize,
         mod_index: usize,
         host_id: ObjectId,
     ) -> Vec<ObjectId> {
-        state
-            .objects
-            .get(&source_id)
-            .and_then(|source| {
-                source
-                    .protection_start_exempt_attachments
-                    .get(&(def_index, mod_index, host_id))
-            })
-            .map(|entry| entry.attachment_ids.clone())
-            .unwrap_or_default()
+        protection_snapshot_ids(
+            state,
+            source_id,
+            crate::types::layers::ProtectionGrantOccurrence::Static {
+                definition_index: def_index,
+            },
+            mod_index,
+            host_id,
+        )
     }
 
     fn replace_source_protection_statics(state: &mut GameState, source_id: ObjectId) {
@@ -5458,7 +5433,7 @@ mod tests {
         );
         evaluate_protection_layers(&mut state);
 
-        let snapshot = protection_snapshot_ids(&state, grant_source, 0, 0, host);
+        let snapshot = printed_snapshot_ids(&state, grant_source, 0, 0, host);
         assert!(
             snapshot.contains(&equipment),
             "CR 702.16p: matching controlled attachment at grant start must be snapshotted"
@@ -5584,7 +5559,7 @@ mod tests {
         evaluate_protection_layers(&mut state);
 
         assert!(
-            !protection_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
+            !printed_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
             "colorless Equipment must not enter the start-time snapshot"
         );
 
@@ -5689,7 +5664,7 @@ mod tests {
         );
         evaluate_protection_layers(&mut state);
         assert!(
-            protection_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
+            printed_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
             "blue rider must snapshot the blue Equipment at effect start"
         );
 
@@ -5703,7 +5678,7 @@ mod tests {
         );
         evaluate_protection_layers(&mut state);
         assert!(
-            !protection_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
+            !printed_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
             "white rider must not inherit the prior blue snapshot at the same def_index"
         );
 
@@ -5758,7 +5733,7 @@ mod tests {
         evaluate_protection_layers(&mut state);
 
         assert!(
-            !protection_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
+            !printed_snapshot_ids(&state, grant_source, 0, 0, host).contains(&equipment),
             "702.16p only exempts attachments you control at effect start"
         );
         assert_eq!(
