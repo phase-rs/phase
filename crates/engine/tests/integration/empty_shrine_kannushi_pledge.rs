@@ -1095,23 +1095,32 @@ fn kannushi_pledge_humility_then_flickering_ward_keeps_only_surviving_rider() {
     attached(&runner, ward, host);
     assert_eq!(colors(&runner, host), vec![ManaColor::White]);
     assert_eq!(runner.state().objects[&pledge].zone, Zone::Graveyard);
-    // Serialization keeps the surviving ridered grant, observed through the
-    // public state rather than the provenance type (so a production revert
-    // still compiles this test and fails it at runtime).
+    // The provenance list is layer-derived and not serialized: a raw decode
+    // carries none, and the first layer flush rebuilds it from the grants that
+    // survive.
     let wire = serde_json::to_string(runner.state()).unwrap();
     let restored: GameState = serde_json::from_str(&wire).unwrap();
-    // The provenance list is layer-derived, not a wire contract.
     assert!(restored.objects[&host].protection_provenance.is_empty());
     let mut restored = GameRunner::from_state(restored);
     prepare(&mut restored, P1);
     restored.advance_until_stack_empty();
-    // The layer pass rebuilds the surviving rider, and attachment legality
-    // consumes it: Ward stays attached while the removed Pledge is gone.
+    // The SBA flush rebuilds the surviving rider, and attachment legality
+    // consumes it: Ward stays attached while the removed Pledge is gone. The
+    // only white instance is Ward's, carrying Ward's own "this Aura" rider.
     let mut events = Vec::new();
     engine::game::sba::check_state_based_actions(restored.state_mut(), &mut events);
-    assert!(!restored.state().objects[&host]
+    let white: Vec<_> = restored.state().objects[&host]
         .protection_provenance
-        .is_empty());
+        .iter()
+        .filter(|entry| entry.quality == ProtectionTarget::Color(ManaColor::White))
+        .collect();
+    assert_eq!(white.len(), 1, "only Ward's protection survives");
+    let rider = white[0].rider.as_ref().expect("Ward's rider must survive");
+    assert_eq!(rider.source, ward);
+    assert!(matches!(
+        rider.does_not_remove,
+        engine::types::ability::ProtectionDoesNotRemove::Source
+    ));
     attached(&restored, ward, host);
     // Reach guard: the restored state really derives the surviving protection,
     // so Pacifism has no legal target on this host.
