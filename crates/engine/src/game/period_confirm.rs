@@ -2448,13 +2448,13 @@ fn replay_period(frame: &GameState, span: NamedSpan) -> Result<ReplayedPeriod, O
     #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_variables))]
     let performed = match (lead_in, pinned) {
         (Ok(performed), None) => performed,
-        // CR 104.2a + CR 732.2a: a first repetition its holder won in, under no drawn outcome, is
-        // a shortcut of one repetition.
+        // CR 104.2a + CR 732.2a: a won first repetition that drew no outcome offers one repetition.
         (Err(refusal), None)
-            if matches!(
-                stopped(&replay, holder, &end.seats, refusal.clone()),
-                CycleEnd::HolderWon(_)
-            ) =>
+            if replay.rng.outcome_draws() == s_n.rng.outcome_draws()
+                && matches!(
+                    stopped(&replay, holder, &end.seats, refusal.clone()),
+                    CycleEnd::HolderWon(_)
+                ) =>
         {
             Vec::new()
         }

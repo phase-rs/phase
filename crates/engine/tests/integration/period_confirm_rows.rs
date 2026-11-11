@@ -9375,3 +9375,103 @@ fn a_period_its_first_replayed_repetition_wins_is_offered_one_repetition() {
     );
     assert_eq!(lives(runner.state()), vec![22, 0]);
 }
+
+/// CR 705.1 + CR 732.2a: Goblin Bangchuckers ("{T}: Flip a coin. If you win the flip, this
+/// creature deals 2 damage to any target. …") untapped by Freed from the Real ("{U}: Untap enchanted
+/// creature.") with P1 at 2: its next repetition wins only on a won flip, so it is refused as
+/// random, though this seed's next flip wins.
+#[test]
+fn a_repetition_that_wins_on_a_flip_is_refused_as_random() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = GameScenario::new_n_player(2, 2);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P1, 4);
+    scenario.with_mana_pool(
+        P0,
+        (0..8)
+            .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    for seat in [P0, P1] {
+        for _ in 0..10 {
+            scenario.add_real_card(seat, "Island", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    let goblin = place(runner.state_mut(), P0, "Goblin Bangchuckers", db);
+    let freed = place(runner.state_mut(), P0, "Freed from the Real", db);
+    attach_to(runner.state_mut(), freed, goblin);
+    runner.state_mut().layers_dirty.mark_full();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let tap = ability(runner.state(), goblin, false);
+    let untap = runner.state().objects[&freed]
+        .abilities
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.kind == AbilityKind::Activated)
+        .map(|(index, _)| index)
+        .nth(1)
+        .expect("Freed from the Real's untap ability");
+    let at_p1 =
+        |action: &GameAction| i32::from(format!("{action:?}").contains("Player(PlayerId(1))"));
+    activate(&mut runner, goblin, tap);
+    settle(&mut runner, &at_p1);
+    assert_eq!(
+        lives(runner.state()),
+        vec![20, 2],
+        "reach: the first flip won"
+    );
+    activate(&mut runner, freed, untap);
+    settle(&mut runner, &at_p1);
+    assert!(
+        !is_offer(runner.state()),
+        "a repetition winning on a flip was offered"
+    );
+    assert_eq!(
+        latest_verdict(runner.state()),
+        Err(OfferRefusal::Randomness)
+    );
+    activate(&mut runner, goblin, tap);
+    settle(&mut runner, &at_p1);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) },
+        "reach: the next flip wins"
+    );
+}
+
+/// CR 800.4a + CR 104.2a + CR 732.2a: the Altar + Gravecrawler + Zulaport Cutthroat period on
+/// three seats, P1 at 1 and P2 at 4 after one hand-made cycle: its next repetition eliminates P1
+/// but wins no game.
+#[test]
+fn a_repetition_eliminating_one_of_two_opponents_is_not_offered_as_won() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board_at("Zulaport Cutthroat", &[20, 2, 5], db);
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
+    };
+    cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+    settle(&mut runner, &score);
+    let index = ability(runner.state(), altar, true);
+    activate(&mut runner, altar, index);
+    settle(&mut runner, &score);
+    assert_eq!(lives(runner.state()), vec![21, 1, 4]);
+    assert!(!is_offer(runner.state()));
+    assert_eq!(
+        latest_verdict(runner.state()),
+        Err(OfferRefusal::NoRecurrence)
+    );
+    cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+    settle(&mut runner, &score);
+    let index = ability(runner.state(), altar, true);
+    activate(&mut runner, altar, index);
+    settle(&mut runner, &score);
+    assert_eq!(
+        (
+            eliminated(runner.state()),
+            runner.state().game_end.is_none()
+        ),
+        (vec![P1], true),
+        "reach: the next repetition eliminates P1 and ends no game"
+    );
+}
