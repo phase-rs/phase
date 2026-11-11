@@ -29865,6 +29865,14 @@ pub struct PendingReplacement {
     /// gained on resume. `0` for every parked event that is not such a leg.
     #[serde(default)]
     pub lifelink_bonus: u32,
+    /// CR 400.7: the incarnation of the damage source captured when it dealt
+    /// the parked damage. The resume in `handle_replacement_choice` rebuilds
+    /// the `DamageContext` from the live object, which may be a new object
+    /// after a zone change, so it restores this onto the ctx and the
+    /// damage-history writes stay with the incarnation that dealt the damage.
+    /// `None` for every parked event that is not a damage hit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_incarnation: Option<u64>,
     /// CR 614.12a: set when an optional `MayCost` accept already paid its cost
     /// but the payment paused for an interactive sub-choice (e.g. Mox Diamond's
     /// "discard a land card" with more than one eligible land surfaces a
@@ -58167,6 +58175,7 @@ mod tests {
             exile_tracking: ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -58203,6 +58212,34 @@ mod tests {
         assert_eq!(
             legacy.unrepresentable_life_change,
             UnrepresentablePolicy::IgnoreImpossible
+        );
+    }
+
+    /// CR 400.7: wire shape of the parked damage source incarnation: elided
+    /// when `None`, absent in older payloads (deserializes to `None`), and a
+    /// captured incarnation round-trips and takes part in record equality.
+    #[test]
+    fn pending_replacement_source_incarnation_wire_shape() {
+        let plain = pending_life_gain_replacement(UnrepresentablePolicy::IgnoreImpossible);
+        let json = serde_json::to_value(&plain).expect("record must serialize");
+        assert!(
+            json.get("source_incarnation").is_none(),
+            "a `None` incarnation must be omitted from the wire: {json}"
+        );
+        let legacy: PendingReplacement =
+            serde_json::from_value(json).expect("legacy record must deserialize");
+        assert_eq!(legacy.source_incarnation, None);
+
+        let mut captured = plain.clone();
+        captured.source_incarnation = Some(3);
+        let json = serde_json::to_value(&captured).expect("record must serialize");
+        assert_eq!(json.get("source_incarnation"), Some(&serde_json::json!(3)));
+        let round_trip: PendingReplacement =
+            serde_json::from_value(json).expect("record must deserialize");
+        assert_eq!(round_trip, captured);
+        assert_ne!(
+            round_trip, plain,
+            "the captured incarnation is part of the record's equality"
         );
     }
 

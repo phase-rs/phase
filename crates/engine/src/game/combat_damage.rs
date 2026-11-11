@@ -2935,6 +2935,135 @@ mod tests {
         }
     }
 
+    /// CR 616.1 + CR 101.4 + CR 805.6: Two-Headed Giant through
+    /// `run_phase_c_legs`. P0 (active) and its teammate share one APNAP rank;
+    /// the opposing team ranks after. The teammate's lifelink gain can prompt
+    /// (two competing gain replacements), and P0's infect leg can prompt
+    /// wherever it lands (P0's Vorinclex doubles, the opposing Vorinclex
+    /// halves). (a) a leg at the opposing team: the run pauses on the
+    /// teammate's gain before the leg; (b) a leg at P0's own team (equal rank):
+    /// no early gain, the leg itself runs and pauses on its poison choice, and
+    /// the gain stays with the leg for the tail; (c) the tail queue orders the
+    /// choice-capable gains by team rank, teammates keeping their input order.
+    #[test]
+    fn two_headed_giant_phase_c_settles_only_other_team_legs_early() {
+        let p = |n: u8| TargetRef::Player(PlayerId(n));
+        let creature = TargetRef::Object(ObjectId(900));
+        let mut team = GameScenario::new_with_format(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        team.state.active_player = P0;
+        let rank_of =
+            |state: &GameState, n: u8| crate::game::topology::apnap_team_rank(state, PlayerId(n));
+        let mate = (1..4)
+            .find(|&n| rank_of(&team.state, n) == rank_of(&team.state, 0))
+            .expect("reach-guard: P0 has a teammate sharing its APNAP rank");
+        let other = (1..4)
+            .find(|&n| rank_of(&team.state, n) > rank_of(&team.state, 0))
+            .expect("reach-guard: an opposing seat ranks after P0's team");
+        add_competing_gain_replacements(&mut team, P0);
+        add_competing_gain_replacements(&mut team, PlayerId(mate));
+        add_competing_gain_replacements(&mut team, PlayerId(other));
+        for owner in [P0, PlayerId(other)] {
+            team.add_creature(owner, "Vorinclex, Monstrous Raider", 6, 6)
+                .from_oracle_text_with_keywords(&["Trample", "Haste"], VORINCLEX_TEXT);
+        }
+        let runner = team.build();
+        let legs_at = |leg_player: u8| {
+            vec![
+                phase_c_leg(50, P0, p(leg_player), Some(p(leg_player)), 3, None, true),
+                phase_c_leg(
+                    51,
+                    PlayerId(mate),
+                    creature.clone(),
+                    Some(creature.clone()),
+                    2,
+                    Some(PlayerId(mate)),
+                    false,
+                ),
+            ]
+        };
+        {
+            let state = runner.state();
+            assert!(crate::game::effects::life::life_gain_may_prompt(
+                state,
+                PlayerId(mate),
+                2
+            ));
+            for leg_player in [other, 0] {
+                assert!(
+                    combat_leg_may_prompt(state, &legs_at(leg_player)[0]),
+                    "reach-guard: the infect leg at P{leg_player} can prompt"
+                );
+            }
+        }
+
+        // (a) other-team leg: the teammate's gain is settled first and pauses.
+        let mut state = runner.state().clone();
+        let mut legs = legs_at(other);
+        let mut accums = empty_accums();
+        let mut events = Vec::new();
+        let outcome = run_phase_c_legs(&mut state, &mut legs, &mut accums, &mut events);
+        assert!(
+            matches!(outcome, PhaseCRunOutcome::PausedOnGain { index: 0 }),
+            "(a) early gain pause before the leg"
+        );
+        assert_eq!(paused_gain(&state), Some((PlayerId(mate), 2)), "(a)");
+        assert_eq!(legs[1].lifelink_controller, None, "(a) settled source");
+        assert_eq!(state.players[other as usize].poison_counters, 0);
+
+        // (b) own-team leg (equal rank): no early gain; the leg runs first.
+        let mut state = runner.state().clone();
+        let mut legs = legs_at(0);
+        let mut accums = empty_accums();
+        let mut events = Vec::new();
+        let outcome = run_phase_c_legs(&mut state, &mut legs, &mut accums, &mut events);
+        assert!(
+            matches!(outcome, PhaseCRunOutcome::PausedOnReplacement { index: 0 }),
+            "(b) the leg's own poison choice"
+        );
+        assert_eq!(paused_gain(&state), None, "(b) no early gain");
+        assert!(matches!(
+            state.pending_replacement.as_ref().map(|p| &p.proposed),
+            Some(ProposedEvent::AddCounter { .. })
+        ));
+        assert_eq!(
+            legs[1].lifelink_controller,
+            Some(PlayerId(mate)),
+            "(b) the gain stays with its leg for the tail"
+        );
+
+        // (c) tail order: the opposing team's gain goes last; the two
+        // teammates (equal rank) keep their input order either way round.
+        let state = runner.state();
+        let order = |input: Vec<(ObjectId, PlayerId, u32)>| -> Vec<PlayerId> {
+            planned_gain_queue(state, input)
+                .iter()
+                .map(|gain| gain.controller)
+                .collect()
+        };
+        assert_eq!(
+            order(vec![
+                (ObjectId(1), PlayerId(other), 2),
+                (ObjectId(2), PlayerId(mate), 2),
+                (ObjectId(3), P0, 2),
+            ]),
+            vec![PlayerId(mate), P0, PlayerId(other)],
+            "(c)"
+        );
+        assert_eq!(
+            order(vec![
+                (ObjectId(3), P0, 2),
+                (ObjectId(1), PlayerId(other), 2),
+                (ObjectId(2), PlayerId(mate), 2),
+            ]),
+            vec![P0, PlayerId(mate), PlayerId(other)],
+            "(c) reversed teammates"
+        );
+    }
+
     /// CR 616.1 + CR 101.4: the tail gain queue reorders only the gains whose
     /// own pipeline can open a choice, by the gaining player's APNAP rank;
     /// a gain that cannot prompt keeps its slot.

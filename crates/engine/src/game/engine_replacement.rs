@@ -388,6 +388,12 @@ fn handle_replacement_choice_inner(
         .as_ref()
         .map(|pending| pending.lifelink_bonus)
         .unwrap_or(0);
+    // CR 400.7: the damage source's incarnation captured when it dealt the
+    // parked damage, read before `continue_replacement` consumes the record.
+    let parked_source_incarnation = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.source_incarnation);
     // The player-resource policy the parked record was stamped with, captured
     // with the file's other `parked_*` reads before `continue_replacement`
     // consumes it.
@@ -723,6 +729,11 @@ fn handle_replacement_choice_inner(
                     // leg still gains the combined lifelink total.
                     ctx.excess_recipient = parked_excess_recipient;
                     ctx.lifelink_bonus = parked_lifelink_bonus;
+                    // CR 400.7: the rebuild read the LIVE object's incarnation; a
+                    // source that left and returned since dealing the damage is a
+                    // new object, so restore the captured one (`None`, a record
+                    // saved before the field, keeps the history guard's zone check).
+                    ctx.source_incarnation = parked_source_incarnation;
                     if matches!(
                         apply_damage_after_replacement(state, &ctx, damage, is_combat, events),
                         DamageResult::NeedsChoice
@@ -1835,6 +1846,10 @@ fn handle_replacement_choice_inner(
                 if pending.lifelink_bonus == 0 {
                     pending.lifelink_bonus = parked_lifelink_bonus;
                 }
+                // CR 400.7: and the captured source incarnation.
+                if pending.source_incarnation.is_none() {
+                    pending.source_incarnation = parked_source_incarnation;
+                }
                 if let Some(provenance) = parked_sacrifice_provenance {
                     if pending.proposed.affected_object_id() == Some(provenance.object_id) {
                         pending.sacrifice_provenance = Some(provenance);
@@ -2169,6 +2184,11 @@ fn handle_replacement_choice_inner(
             // the next resume's epilogue to drain; on a pause, surface the
             // parked prompt (its resume delivers the chosen event through the
             // ZoneChange arm above).
+            //
+            // This clear is pre-existing and unconditional: after a prevented
+            // resumed damage hit it also drops the remaining recipients of a
+            // damage effect's continuation (e.g. the rest of a `DamageAll`), so
+            // no damage-chain continuation survives to the resume below.
             if state.active_ability_continuation().is_some() {
                 let _ = state
                     .clear_active_ability_continuation()
@@ -2226,16 +2246,7 @@ fn handle_replacement_choice_inner(
             state.waiting_for = WaitingFor::Priority {
                 player: state.active_player,
             };
-            let damage_chain = damage_parent_continuation_pending(state);
             super::engine::resume_pending_continuation_if_priority(state, events)?;
-            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                defer_damage_chain_observers_at_pause(
-                    state,
-                    damage_chain,
-                    events,
-                    replacement_action_event_start,
-                );
-            }
             Ok(state.waiting_for.clone())
         }
     }
@@ -5253,6 +5264,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -5932,6 +5944,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,

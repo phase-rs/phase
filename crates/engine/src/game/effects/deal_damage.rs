@@ -662,6 +662,10 @@ pub(crate) fn apply_damage_to_target(
             if let Some(pending) = state.pending_replacement.as_mut() {
                 pending.excess_recipient = ctx.excess_recipient;
                 pending.lifelink_bonus = ctx.lifelink_bonus;
+                // CR 400.7: and the source incarnation that dealt the damage,
+                // which the source-derived rebuild would read from the live
+                // (possibly new) object.
+                pending.source_incarnation = ctx.source_incarnation;
             }
             Ok(DamageResult::NeedsChoice)
         }
@@ -1134,8 +1138,10 @@ fn owed_toxic_poison(ctx: &DamageContext, actual_amount: u32, is_combat: bool) -
 /// poison `AddCounter` (CR 120.3g). True on the same pair of causes the
 /// lifelink gain reads (`ReplacementPromptCauses::may_open_player_choice`).
 /// Objects, phased-out players and `0` amounts have no player result and
-/// answer false. "May", not "will": the candidate authority is consulted, not
-/// the answer.
+/// answer false. Not probed: the per-card `Moved` choices a Horde mill raises
+/// later (CR 614.6, e.g. Rest in Peace with Leyline of the Void); a leg whose
+/// only prompt is one of those does not settle an earlier player's gain first.
+/// "May", not "will": the candidate authority is consulted, not the answer.
 pub(crate) fn combat_leg_may_prompt(
     state: &GameState,
     ctx: &DamageContext,

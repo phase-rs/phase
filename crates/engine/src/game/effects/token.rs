@@ -3266,9 +3266,7 @@ fn token_creation_needs_choice(
     // can set a non-priority `waiting_for`, so taking it would be a real
     // token-batching change; it is left to its own change rather than smuggled
     // into this delegation.
-    let causes = replacement::proposed_event_prompt_cause(state, &proposed, registry);
-    causes.contains(replacement::ReplacementPromptCause::OptionalCandidate)
-        || causes.contains(replacement::ReplacementPromptCause::OrderingMaterial)
+    replacement::proposed_event_prompt_cause(state, &proposed, registry).may_open_player_choice()
 }
 
 /// CR 205: Extract the concrete `CoreType` set a `TypeFilter` counts, for the

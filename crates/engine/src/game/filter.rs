@@ -27753,6 +27753,7 @@ mod entry_projection_tests {
             exile_tracking: Default::default(),
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,

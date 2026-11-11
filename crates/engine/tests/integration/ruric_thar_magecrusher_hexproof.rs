@@ -4081,12 +4081,14 @@ fn drive_waits(
 /// The B8 board: a red Prodigal Pyromancer with Loxodon Warhammer (lifelink),
 /// optionally Phyresis (infect), Furnace of Rath and Torbran, and optionally
 /// the Vorinclex pair, Leyline + Boon on P0 and Curiosity on the Pyromancer.
+/// P1 controls a vanilla 0/8 `wall`, a creature target that survives a 6.
 struct B8Board {
     runner: GameRunner,
     pyro: ObjectId,
     torbran: ObjectId,
     doubler: Option<ObjectId>,
     boon: Option<ObjectId>,
+    wall: ObjectId,
 }
 
 fn b8_board(infect: bool, pair: bool, gain_pair: bool, curiosity: bool) -> B8Board {
@@ -4112,6 +4114,7 @@ fn b8_board(infect: bool, pair: bool, gain_pair: bool, curiosity: bool) -> B8Boa
         .id();
     let boon = gain_pair.then(|| add_leyline_and_boon(&mut scenario, P0).1);
     let doubler = pair.then(|| add_two_vorinclex(&mut scenario).0);
+    let wall = scenario.add_vanilla(P1, 0, 8);
     let mut runner = scenario.build();
     if let Some(phyresis) = phyresis {
         attach_phyresis(&mut runner, phyresis, pyro);
@@ -4133,6 +4136,7 @@ fn b8_board(infect: bool, pair: bool, gain_pair: bool, curiosity: bool) -> B8Boa
         torbran,
         doubler,
         boon,
+        wall,
     }
 }
 
@@ -4277,6 +4281,65 @@ fn b8_3_resumed_damage_keeps_the_nested_gain_choice() {
     assert_eq!(state.players[0].life, life0 + 13);
     assert_eq!(gains_of(&events, P0), vec![13]);
     assert!(state.pending_replacement.is_none());
+}
+
+/// B8-3c - the creature-target twin of B8-3: the Pyromancer pings P1's 0/8.
+/// Torbran applies to a permanent an opponent controls, so Torbran first:
+/// (1 + 2) * 2 = 6 damage marked on the 0/8 (it survives). The resumed hit's
+/// lifelink gain (CR 702.15b) opens P0's own choice (Leyline + Boon), which
+/// must stay the wait with nothing gained yet. Boon first: 6 -> 12 -> 13,
+/// gained exactly once.
+#[test]
+fn b8_3c_resumed_creature_damage_keeps_the_nested_gain_choice() {
+    let mut board = b8_board(false, false, true, false);
+    let (runner, pyro, wall) = (&mut board.runner, board.pyro, board.wall);
+    let life0 = runner.state().players[0].life;
+    let life1 = runner.state().players[1].life;
+    let mut events = runner
+        .activate(pyro, 0)
+        .target_object(wall)
+        .resolve()
+        .events()
+        .to_vec();
+    assert_eq!(choice_kind(runner), (P1, "damage"), "reach-guard: prompt 1");
+    let index = candidate_from(runner, board.torbran);
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("answer")
+            .events,
+    );
+    assert_eq!(
+        choice_kind(runner),
+        (P0, "gain"),
+        "the nested gain choice is the wait"
+    );
+    assert_eq!(
+        runner.state().objects[&wall].damage_marked,
+        6,
+        "the damage was dealt to the creature"
+    );
+    assert_eq!(runner.state().players[0].life, life0, "nothing gained yet");
+    assert!(gains_of(&events, P0).is_empty());
+    let index = candidate_from(runner, board.boon.unwrap());
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("answer the gain ordering")
+            .events,
+    );
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(state.players[0].life, life0 + 13);
+    assert_eq!(gains_of(&events, P0), vec![13], "gained exactly once");
+    assert_eq!(
+        state.players[1].life, life1,
+        "the creature, not P1, was hit"
+    );
+    assert_eq!(state.objects[&wall].zone, Zone::Battlefield);
+    assert_eq!(damage_events(&events, pyro, false), 1);
+    assert!(state.pending_replacement.is_none());
+    assert!(state.pending_damage_post_loss.is_none());
 }
 
 /// B10-2 - CR 603.2 + CR 603.3b + CR 120.4b: the B8-1 board with Curiosity on
@@ -4614,6 +4677,115 @@ fn b9_1_blinked_source_keeps_its_new_incarnations_history_clean() {
             GameEvent::DamageDealt { source_id, source_incarnation, .. }
                 if *source_id == guardian && *source_incarnation == Some(old)
         )));
+        let stale = blink;
+        assert_eq!(state.objects_that_dealt_damage.contains(&guardian), !stale);
+        assert_eq!(
+            state.objects[&guardian].dealt_damage_kinds.is_empty(),
+            stale
+        );
+        assert_eq!(hexproof_now(state, guardian), stale);
+        let legal = bolt_legal_targets(&mut runner, P1, opp_bolt);
+        assert_eq!(
+            can_target(&legal, guardian, P0),
+            !stale,
+            "blink={blink}: an opponent can target only the damage-dealt incarnation"
+        );
+    }
+}
+
+/// B9-2 - CR 400.7 + CR 616.1: the B9-1 board with a red Guardian, Furnace of
+/// Rath and Torbran, so Fury's X = 2 damage meets a replacement ORDER prompt
+/// (P1 chooses, CR 616.1). The answer resumes the damage through a context
+/// rebuilt from the live object; the incarnation captured when the old
+/// Guardian dealt it must survive that pause. Torbran first: (2 + 2) * 2 = 8.
+/// With the blink, the occurrence carries the old incarnation and neither
+/// sticky store is written for the returned Guardian, which keeps hexproof.
+/// Control (no blink): both stores are written and hexproof is gone.
+#[test]
+fn b9_2_blinked_source_history_survives_a_damage_ordering_prompt() {
+    for blink in [true, false] {
+        let db = shared_card_db().expect("integration card fixture must be available");
+        let mut scenario = base_scenario();
+        let guardian = {
+            let mut builder = scenario.add_creature(P0, "Karakyk Guardian", 6, 6);
+            builder.from_oracle_text_with_keywords(
+                &["Flying", "Vigilance", "Trample"],
+                KARAKYK_ORACLE_TEXT,
+            );
+            builder.with_color(vec![ManaColor::Red]);
+            builder.id()
+        };
+        let fury = scenario.add_real_card(P0, "Unquenchable Fury", Zone::Battlefield, db);
+        let cloudshift = scenario.add_real_card(P0, "Cloudshift", Zone::Hand, db);
+        scenario.add_basic_land(P0, ManaColor::White);
+        scenario.add_real_card(P0, "Furnace of Rath", Zone::Battlefield, db);
+        let torbran = scenario
+            .add_creature(P0, "Torbran, Thane of Red Fell", 2, 4)
+            .from_oracle_text(TORBRAN_ORACLE_TEXT)
+            .id();
+        let opp_bolt = scenario.add_bolt_to_hand(P1);
+        scenario.add_card_to_hand(P1, "Filler");
+        let mut runner = scenario.build();
+        attach_to(runner.state_mut(), fury, guardian);
+        flush_layers(runner.state_mut());
+        assert!(hexproof_now(runner.state(), guardian), "premise: hexproof");
+        runner.advance_to_combat();
+        let mut events = runner
+            .declare_attackers(&[(guardian, AttackTarget::Player(P1))])
+            .expect("attack")
+            .events;
+        if let WaitingFor::TriggerTargetSelection { .. } = runner.state().waiting_for {
+            events.extend(
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Player(P1)],
+                    })
+                    .expect("select the defending player")
+                    .events,
+            );
+        }
+        assert!(
+            !runner.state().stack.is_empty(),
+            "reach-guard: Fury's trigger waits"
+        );
+        let old = runner.state().objects[&guardian].incarnation;
+        if blink {
+            events.extend(
+                runner
+                    .cast(cloudshift)
+                    .target_object(guardian)
+                    .resolve()
+                    .events()
+                    .to_vec(),
+            );
+            assert_ne!(
+                runner.state().objects[&guardian].incarnation,
+                old,
+                "reach-guard: CR 400.7 new object"
+            );
+            assert_eq!(runner.state().objects[&guardian].zone, Zone::Battlefield);
+        }
+        let (prompts, _) = drive_waits(&mut runner, &mut events, |runner| {
+            candidate_from(runner, torbran)
+        });
+        assert_eq!(
+            prompts,
+            vec![(P1, "damage", false)],
+            "blink={blink}: reach-guard: the damage ordering prompt occurred"
+        );
+        let state = runner.state();
+        assert_eq!(state.players[1].life, 12, "Torbran first: (2 + 2) * 2");
+        let records: Vec<_> = state
+            .damage_dealt_this_turn
+            .iter()
+            .filter(|record| record.source_id == guardian)
+            .map(|record| (record.source_incarnation, record.amount))
+            .collect();
+        assert_eq!(
+            records,
+            vec![(Some(old), 8)],
+            "blink={blink}: the occurrence keeps the dealing incarnation"
+        );
         let stale = blink;
         assert_eq!(state.objects_that_dealt_damage.contains(&guardian), !stale);
         assert_eq!(
