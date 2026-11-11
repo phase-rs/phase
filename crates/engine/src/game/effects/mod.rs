@@ -17175,9 +17175,8 @@ pub(crate) fn upfront_optional_gate(
 
 /// CR 603.5: is that gate ALREADY ANSWERED by a stored "don't ask again" preference?
 ///
-/// The CONSUMER half of [`upfront_optional_gate`], so the mint's suppression, the analysis's
-/// relief and production's own early return can no longer disagree about which mays are
-/// answered. `None` ⇒ the gate will PROMPT, or there is no gate, or the ability carries no
+/// The CONSUMER half of [`upfront_optional_gate`], so the mint's suppression and production's
+/// own early return can no longer disagree about which mays are answered. `None` ⇒ the gate will PROMPT, or there is no gate, or the ability carries no
 /// `may_trigger_origin` for a preference to key on — all three are unspecified windows, which
 /// is the fail-closed direction for every consumer.
 ///

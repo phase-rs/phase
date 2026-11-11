@@ -808,3 +808,124 @@ fn a_remaining_teammate_divides_blocker_damage_after_its_active_player_leaves_mi
         assert!(!battlefield.contains(&blocker));
     }
 }
+
+/// Four players, P0 active at its precombat main phase with Legion Warboss and P2 with {R}
+/// floating, held as the main phase ends on the first of `choosers`' orders of Omnath, Locus of
+/// Mana and Horizon Stone, each chooser controlling both with {G}{G} floating.
+fn held_on_mana_order(choosers: &[PlayerId]) -> GameRunner {
+    let db = shared_card_db().expect("card db");
+    let mut scenario = free_for_all();
+    scenario.add_real_card(P0, "Legion Warboss", Zone::Battlefield, db);
+    for &chooser in choosers {
+        scenario.add_real_card(chooser, "Omnath, Locus of Mana", Zone::Battlefield, db);
+        scenario.add_real_card(chooser, "Horizon Stone", Zone::Battlefield, db);
+        scenario.with_mana_pool(chooser, mana(&[ManaType::Green, ManaType::Green]));
+    }
+    scenario.with_mana_pool(P2, mana(&[ManaType::Red]));
+    let mut runner = scenario.build();
+    pass_to_prompt(&mut runner);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player, .. } if player == choosers[0]
+    ));
+    runner
+}
+
+/// The step the game rests in, who holds priority there, P2's unspent mana and the stack; then
+/// the Goblins P0 controls once that stack has resolved.
+fn first_priority_and_goblins(
+    runner: &mut GameRunner,
+) -> ((Phase, Option<PlayerId>, usize, Vec<String>), usize) {
+    let state = runner.state();
+    let first = (
+        state.phase,
+        priority_seat(runner),
+        state.players[2].mana_pool.total(),
+        runner.stack_names(),
+    );
+    for _ in 0..8 {
+        if runner.state().stack.is_empty() || priority_seat(runner).is_none() {
+            break;
+        }
+        pass(runner);
+    }
+    let state = runner.state();
+    let goblins = state
+        .battlefield
+        .iter()
+        .filter(|id| state.objects[*id].name == "Goblin" && state.objects[*id].controller == P0)
+        .count();
+    (first, goblins)
+}
+
+/// CR 500.5 + CR 117.3a + CR 800.4a: when a player leaves while ordering the replacements that
+/// apply to their emptying mana, the other players' mana still empties as the main phase ends,
+/// and Legion Warboss's beginning-of-combat trigger is put on the stack before the active player
+/// receives priority.
+#[test]
+fn a_departed_players_unanswered_mana_order_still_begins_combat() {
+    for leaves in [false, true] {
+        let mut runner = held_on_mana_order(&[P1]);
+        if leaves {
+            concede(&mut runner, P1);
+        } else {
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .expect("CR 616.1: the affected player chooses");
+        }
+        assert_eq!(
+            first_priority_and_goblins(&mut runner),
+            (
+                (
+                    Phase::BeginCombat,
+                    Some(P0),
+                    0,
+                    vec!["Legion Warboss".to_string()]
+                ),
+                1
+            ),
+            "leaves={leaves}"
+        );
+    }
+}
+
+/// CR 800.4j + CR 500.5: when the active player leaves while ordering its mana replacements, the
+/// other players' mana still empties, and the next player in turn order receives priority in the
+/// beginning of combat step.
+#[test]
+fn a_departed_active_players_unanswered_mana_order_still_empties_the_other_pools() {
+    let mut runner = held_on_mana_order(&[P0]);
+    concede(&mut runner, P0);
+    assert_eq!(
+        first_priority_and_goblins(&mut runner),
+        ((Phase::BeginCombat, Some(P1), 0, Vec::new()), 0)
+    );
+}
+
+/// CR 500.5 + CR 616.1 + CR 800.4a: when a player leaves while ordering their mana replacements
+/// and a later player in turn order has their own to order, that player orders theirs, and combat
+/// then begins with Legion Warboss's trigger before the active player receives priority.
+#[test]
+fn a_departed_players_unanswered_mana_order_passes_to_the_next_ordering_player() {
+    let mut runner = held_on_mana_order(&[P1, P3]);
+    concede(&mut runner, P1);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P3, .. }
+    ));
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("CR 616.1: the affected player chooses");
+    assert_eq!(
+        first_priority_and_goblins(&mut runner),
+        (
+            (
+                Phase::BeginCombat,
+                Some(P0),
+                0,
+                vec!["Legion Warboss".to_string()]
+            ),
+            1
+        )
+    );
+}

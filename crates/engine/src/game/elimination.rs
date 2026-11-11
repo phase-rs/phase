@@ -564,9 +564,9 @@ pub(crate) fn eliminate_players(
                 .expect("departed optional sacrifice payer must follow the canonical decline path");
         }
 
-        // CR 800.4j: a step begin held on a departed player's choice is resumed for the
-        // players still in the game before the triggers below are put on the stack.
-        super::turns::resume_abandoned_phase_begin_choice(state, events);
+        // CR 800.4j: a phase transition held on a departed player's choice is resumed for
+        // the players still in the game before the triggers below are put on the stack.
+        super::turns::resume_abandoned_phase_transition(state, events);
 
         // CR 603.3b: If prune collapsed an ordering pass into
         // `deferred_triggers` while `waiting_for` is Priority, dispatch now so
@@ -1622,16 +1622,13 @@ fn do_eliminate(
     // continuation slots (`replacement_may_cost_paused`, `post_replacement_*`,
     // the stack-owned Connive re-entry). The resume drain also touches OTHER resolution
     // slots on a normal answer (e.g. `pending_phase_transition_progress`,
-    // `pending_team_draw_step`, `pending_continuation`); those are intentionally
-    // NOT cleared here. Stranding some of them is its own PRE-EXISTING soft-lock
-    // (PPT gates `auto_advance`; `pending_continuation` gates the deferred-trigger
-    // drain) that predates this PR and is NOT the reported regression; repairing
-    // them correctly requires resuming the interrupted APNAP queue for the
-    // remaining players (not field-nulling), tracked as a separate follow-up. This
-    // fix deliberately addresses only the CR 704.4 SBA-freeze introduced by the
-    // `pending_replacement` guard. A player-scope sacrifice batch parked on this
-    // choice is the exception: `settle_player_scope_sacrifice_after_departure`
-    // resumes it for the remaining players once every departure has settled.
+    // `pending_team_draw_step`, `pending_continuation`); those are NOT cleared here.
+    // CR 500.5 + CR 117.3a + CR 800.4a: a phase transition parked on this choice must
+    // be resumed, not dropped — left standing, the next step begins without the other
+    // pools emptying, its beginning triggers, or the active player's priority — and
+    // `turns::resume_abandoned_phase_transition` resumes it once every departure has
+    // settled, as `settle_player_scope_sacrifice_after_departure` does a player-scope
+    // sacrifice batch parked on this choice.
     // CR 800.4a: Tear down choices and continuations owned by the leaving player.
     // CR 616.1: SearchFound owns an outer per-card batch, and a replacement-
     // selected zone move may own a nested batch completion. The

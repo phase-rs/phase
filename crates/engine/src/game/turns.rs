@@ -472,32 +472,47 @@ pub(super) fn resume_phase_begin_choice(
     resume_deferred_step_triggers(state, events).unwrap_or_else(|| state.waiting_for.clone())
 }
 
-/// CR 800.4a + CR 800.4j: the affected player left with their choice unanswered
-/// and the turn continues, so the step the held transition reached is proposed
-/// again to the players still in the game and, unless one of them must choose, begins
-/// as an answered choice's does.
-pub(super) fn resume_abandoned_phase_begin_choice(
+/// CR 800.4a + CR 800.4j: the player whose choice held a phase transition left with
+/// it unanswered and the turn continues, so the transition resumes for the players
+/// still in the game as an answered choice's would.
+pub(super) fn resume_abandoned_phase_transition(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) {
-    let Some(next) = state
-        .pending_phase_transition_progress
-        .as_ref()
-        .filter(|progress| {
-            progress.drain_state
-                == crate::types::game_state::PhaseTransitionDrainState::AwaitingBeginChoice
-                && state.pending_replacement.is_none()
-        })
-        .map(|progress| progress.next_phase)
-    else {
+    use crate::types::game_state::PhaseTransitionDrainState;
+
+    if state.pending_replacement.is_some() {
+        return;
+    }
+    let Some(progress) = state.pending_phase_transition_progress.as_ref() else {
         return;
     };
-    state.waiting_for = match propose_step_begin(state, next, events) {
-        ReplacementResult::NeedsChoice(player) => {
-            replacement::replacement_choice_waiting_for(player, state)
+    match progress.drain_state {
+        // The step the held transition reached is proposed again and, unless a
+        // remaining player must choose, begins.
+        PhaseTransitionDrainState::AwaitingBeginChoice => {
+            let next = progress.next_phase;
+            state.waiting_for = match propose_step_begin(state, next, events) {
+                ReplacementResult::NeedsChoice(player) => {
+                    replacement::replacement_choice_waiting_for(player, state)
+                }
+                result => resume_phase_begin_choice(state, result, events),
+            };
         }
-        result => resume_phase_begin_choice(state, result, events),
-    };
+        // CR 500.5 + CR 117.3a: the remaining players' pools empty, then the step
+        // begins and its beginning triggers are put on the stack before the
+        // active player receives priority.
+        PhaseTransitionDrainState::Ready => {
+            state.waiting_for = WaitingFor::Priority {
+                player: state.active_player,
+            };
+            drain_pending_phase_transition_progress(state, events);
+            if let Some(resumed) = resume_deferred_step_triggers(state, events) {
+                state.waiting_for = resumed;
+            }
+        }
+        PhaseTransitionDrainState::AwaitingPostReplacementContinuation => {}
+    }
 }
 
 /// CR 104.1: a finished game owes no transition a parked choice held.
