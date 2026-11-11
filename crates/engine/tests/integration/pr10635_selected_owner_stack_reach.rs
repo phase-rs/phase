@@ -62,9 +62,12 @@ fn all_reached_objects(state: &GameState, entry: ObjectId) -> Vec<ObjectId> {
 }
 
 /// Chaos Warp on the stack names its live target as the object its library
-/// move acts on. After the target is blinked in response (CR 400.7: a new
-/// object), the declared target is illegal (CR 608.2b) and nothing on the
-/// stack reaches the returned creature.
+/// move acts on; this half fails without the shared binding and
+/// classification. After the target is blinked in response (CR 400.7: a new
+/// object), the declared target is illegal (CR 608.2b). The stack reader
+/// answers nothing for an entry with an illegal declared target
+/// (`resolution_board`, which predates this branch), so the stale half
+/// documents that short-circuit rather than the selected-object binding.
 #[test]
 fn unresolved_chaos_warp_reaches_its_live_target_and_not_a_blinked_one() {
     let mut scenario = GameScenario::new();
@@ -98,8 +101,8 @@ fn unresolved_chaos_warp_reaches_its_live_target_and_not_a_blinked_one() {
     assert_eq!(state.stack.len(), 1, "only Chaos Warp remains");
     assert_eq!(state.objects[&bear].zone, Zone::Battlefield);
     assert!(
-        !all_reached_objects(state, warp_entry).contains(&bear),
-        "the returned creature is a new object; the stale target is not reached"
+        all_reached_objects(state, warp_entry).is_empty(),
+        "the returned creature is a new object; an entry with an illegal declared target reaches nothing"
     );
 }
 
