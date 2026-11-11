@@ -4889,9 +4889,7 @@ mod tests {
     use crate::types::proposed_event::{ProposedEvent, ReplacementId};
     use crate::types::replacements::ReplacementEvent;
 
-    /// Helper: install an Optional replacement on a battlefield object so the
-    /// matching proposed event pauses for a player choice.
-    /// B4-13 - CR 120.3f + CR 614.6: the shared drain helper on a non-combat
+    /// CR 120.3f + CR 614.6: the shared drain helper on a non-combat
     /// loss-pause stash (no printed card reaches its Prevented route: no
     /// printed LifeLoss `Prevent` replacement exists). Settled: the parked
     /// event, record and lifelink gain run once and the stash is consumed.
@@ -4982,6 +4980,8 @@ mod tests {
         assert!(state.damage_dealt_this_turn.is_empty());
     }
 
+    /// Helper: install an Optional replacement on a battlefield object so the
+    /// matching proposed event pauses for a player choice.
     fn install_optional_replacement(state: &mut GameState, event: ReplacementEvent) -> ObjectId {
         let id = ObjectId(state.next_object_id);
         state.next_object_id += 1;

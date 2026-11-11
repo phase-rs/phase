@@ -13193,7 +13193,7 @@ mod legacy_unrecognized_static_condition_tests {
         .unwrap()
     }
 
-    /// B6-3: every container shape is reached (object statics and base
+    /// Every container shape is reached (object statics and base
     /// statics, a copy-effect `CopiableValues`-shaped snapshot, a back face,
     /// an LKI entry, nested arrays), and only the `condition` changes.
     #[test]
@@ -13234,7 +13234,7 @@ mod legacy_unrecognized_static_condition_tests {
         assert!(!value.to_string().contains("Unrecognized"));
     }
 
-    /// B6-4: nothing but the exact legacy twin migrates; each negative is
+    /// Nothing but the exact legacy twin migrates; each negative is
     /// paired with the exact twin in the same JSON, which IS rewritten.
     #[test]
     fn negative_controls_are_left_byte_identical() {

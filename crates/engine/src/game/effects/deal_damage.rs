@@ -5863,7 +5863,7 @@ mod tests {
         assert!(state.objects_that_dealt_damage.is_empty());
     }
 
-    /// A production-reachable parked stash (B4-8 / B4-9 fixtures): the sticky
+    /// A production-reachable parked stash: the sticky
     /// source (controlled by P1) dealt `actual_amount` to P0.
     fn parked_stash(
         source: ObjectId,
@@ -5912,7 +5912,7 @@ mod tests {
         }
     }
 
-    /// B4-8 - CR 120.3g + CR 120.3f + CR 120.4c: the settle function on the
+    /// CR 120.3g + CR 120.3f + CR 120.4c: the settle function on the
     /// production-reachable stash shapes only (a combat stash never owes
     /// lifelink; a non-combat stash never owes toxic).
     #[test]
@@ -6021,7 +6021,7 @@ mod tests {
         assert_eq!(state.players[0].poison_counters, 0);
     }
 
-    /// B4-9 - wire shape: `toxic_poison` is elided at zero, a stash JSON
+    /// Wire shape: `toxic_poison` is elided at zero, a stash JSON
     /// without the key decodes to 0, and a nonzero count round-trips.
     #[test]
     fn pending_damage_post_loss_toxic_poison_wire_shape() {

@@ -2349,7 +2349,7 @@ mod tests {
     use crate::types::zones::Zone;
     use std::sync::Arc;
 
-    /// B5-7 - CR 616.1 + CR 101.4: `order_phase_c_legs_by_apnap` keys each leg
+    /// CR 616.1 + CR 101.4: `order_phase_c_legs_by_apnap` keys each leg
     /// by its SURVIVOR's damaged player, not by the assignment's target, and
     /// sorts only player-survivor legs among their own slots (stable).
     #[test]
