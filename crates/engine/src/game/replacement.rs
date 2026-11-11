@@ -7872,18 +7872,6 @@ fn object_replacement_candidate_applies(
     {
         return false;
     }
-    // CR 614.12 + CR 613.1f: the entrant's own "as [this] enters" roll applies
-    // only if the permanent as it would exist on the battlefield has it,
-    // checked against continuous effects that already exist (a resident
-    // Humility or Dress Down removes it), on the board before this entry's
-    // event (CR 603.6a + CR 603.6d: a co-entrant's effect does not exist yet).
-    if is_entering
-        && !is_liminal_source
-        && replacement_rolls_as_it_enters(repl_def)
-        && !entrant_keeps_as_enters_roll(state, event, obj.id)
-    {
-        return false;
-    }
     // CR 614.12: off-battlefield entering/discarded objects only apply their
     // own self-replacement effects.
     if is_entering
@@ -8338,6 +8326,20 @@ fn object_replacement_candidate_applies(
         if !m.matches(ev_ct) {
             return false;
         }
+    }
+    // CR 614.12 + CR 613.1f: the entrant's own "as [this] enters" roll applies
+    // only if the permanent as it would exist on the battlefield has it,
+    // checked against continuous effects that already exist (a resident
+    // Humility or Dress Down removes it), on the board before this entry's
+    // event (CR 603.6a + CR 603.6d: a co-entrant's effect does not exist yet).
+    // Last, so the entrant's projection is built only for a candidate every
+    // cheaper check has kept.
+    if is_entering
+        && !is_liminal_source
+        && replacement_rolls_as_it_enters(repl_def)
+        && !entrant_keeps_as_enters_roll(state, event, obj.id)
+    {
+        return false;
     }
 
     true

@@ -9713,6 +9713,55 @@ fn mill_batch_wall_time_profile() {
     }
 }
 
+const FINAL_JUDGMENT: &str = "Exile all creatures.";
+
+/// L-scale-bf. Wall time of Final Judgment exiling N creatures end to end, for
+/// a battlefield-origin batch: every creature is a prospective battlefield
+/// member of the one event (CR 603.6a + CR 603.10a), and each member's
+/// completion is recorded on the batch's group. A measurement, not a gate: run
+/// with `--ignored --nocapture` and read the printed lines.
+///
+/// Measured on one debug build, one test thread, before and after a moved
+/// completion stopped scanning the members, two interleaved runs each (ms):
+///
+/// ```text
+///   N      before        after
+///   250    427 / 435     416 / 440
+///   500    1910 / 1924   1855 / 1964
+///   1000   11091 / 10993 10846 / 11142
+/// ```
+///
+/// The curve is superlinear before and after: the completion scan was not the
+/// cost. The group-level profile in `types/game_state.rs` measures it alone.
+#[test]
+#[ignore = "perf measurement; run manually"]
+fn battlefield_origin_batch_wall_time_profile() {
+    for n in [250usize, 500, 1000, 2000] {
+        let mut scenario = board(7);
+        for i in 0..n {
+            let player = if i % 2 == 0 { P0 } else { P1 };
+            scenario.add_creature(player, &format!("Profile Bear {i}"), 2, 2);
+        }
+        let spell = free_spell(&mut scenario, "Final Judgment", false, FINAL_JUDGMENT);
+        let mut runner = scenario.build();
+        let started = std::time::Instant::now();
+        let mut events = Vec::new();
+        cast_and_pass(&mut runner, spell, None, None, &mut events);
+        settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+        let elapsed = started.elapsed();
+        let state = runner.state();
+        assert!(
+            state.battlefield.is_empty(),
+            "reach: every creature left the battlefield"
+        );
+        assert_eq!(state.exile.len(), n, "reach: every creature was exiled");
+        eprintln!(
+            "L-scale battlefield exile n={n} elapsed_ms={}",
+            elapsed.as_millis()
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The split boundary: copy routes that cannot run a copied roll, and the
 // resident view of the entrant's own roll
@@ -9818,6 +9867,43 @@ fn a_saw_in_half_copy_records_its_copied_roll_unsupported() {
         assert_eq!(recorded_unsupported(state), donor.recorded(), "{what}");
         assert_finished(state, &[dwarf], &what);
     }
+}
+
+/// S1h. Saw in Half destroys a resident Hammer Jammer under a resident
+/// Humility + CR 707.5 + CR 614.12 + CR 613.1f: each token copy copies the
+/// roll, but as it would exist on the battlefield it has no abilities, so the
+/// roll does not apply. The copies correctly roll nothing and get no counters,
+/// and nothing is recorded unsupported (S1 records the roll without Humility).
+#[test]
+fn a_saw_in_half_copy_under_humility_rolls_nothing_and_records_nothing() {
+    let mut scenario = board(7);
+    scenario.add_enchantment_from_oracle(P0, "Humility", HUMILITY);
+    let target = Donor::Jammer.resident(&mut scenario);
+    let saw = free_spell(&mut scenario, "Saw in Half", true, SAW_IN_HALF);
+    let mut runner = scenario.build();
+    let mut events = Vec::new();
+    cast_and_pass(&mut runner, saw, None, Some(target), &mut events);
+    settle(&mut runner, &mut events, DEFAULT_ANSWERS);
+    let state = runner.state();
+    assert_eq!(zone(state, target), Zone::Graveyard, "reach: it died");
+    let tokens = tokens_named(state, "Hammer Jammer");
+    assert_eq!(tokens.len(), 2, "reach: two token copies entered");
+    assert!(die_results(&events).is_empty(), "no roll is made");
+    for token in &tokens {
+        let object = &state.objects[token];
+        assert!(
+            !object.base_replacement_definitions.is_empty(),
+            "reach: the copy copied Hammer Jammer's entry replacement"
+        );
+        assert!(
+            object.replacement_definitions.is_empty(),
+            "reach: Humility removed it"
+        );
+        assert_eq!(plus_counters(state, *token), 0);
+        assert_eq!((object.power, object.toughness), (Some(1), Some(1)));
+    }
+    assert!(recorded_unsupported(state).is_empty());
+    assert_finished(state, &[], "S1h");
 }
 
 /// Littjara Mirrorlake on P0's battlefield, untapped, with the {2}{G}{G}{U} its

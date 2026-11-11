@@ -4240,20 +4240,22 @@ impl LogicalZoneChangeGroup {
         object_id: ObjectId,
         completion: ZoneMoveCompletion,
     ) -> Result<(), String> {
-        let Some(member) = self
+        // A moved member is bound by its `ZoneChanged` record in
+        // `append_delivery_events`, so its completion reads no member here.
+        let outcome = match completion {
+            ZoneMoveCompletion::Moved => return Ok(()),
+            ZoneMoveCompletion::Prevented => LogicalZoneChangeTerminalOutcome::Prevented,
+            ZoneMoveCompletion::Remained => LogicalZoneChangeTerminalOutcome::Remained,
+        };
+        // One lookup: the member's slot is passed down, not searched for again.
+        let Some(member_index) = self
             .prospective_battlefield_members
             .iter()
-            .find(|member| member.identity.object_id == object_id)
-            .map(|member| member.identity)
+            .position(|member| member.identity.object_id == object_id)
         else {
             return Ok(());
         };
-
-        match completion {
-            ZoneMoveCompletion::Moved => Ok(()),
-            ZoneMoveCompletion::Prevented => self.record_prevented(member),
-            ZoneMoveCompletion::Remained => self.record_remained(member),
-        }
+        self.record_terminal_outcome(member_index, outcome)
     }
 
     fn record_terminal_for_member(
@@ -55672,6 +55674,179 @@ mod tests {
             (1..=50_000).map(|id| announced(id, 1)).collect(),
         );
         assert_eq!(large.validate_serialized_authority(), Ok(()));
+    }
+
+    /// A latched group announcing `n` battlefield members (object ids `1..=n`,
+    /// incarnation 2), and the `ZoneChanged` event each member's exile emits.
+    fn battlefield_exile_batch(n: u64) -> (LogicalZoneChangeGroup, Vec<GameEvent>) {
+        let objects: Vec<GameObject> = (1..=n)
+            .map(|id| {
+                let mut object = GameObject::new(
+                    ObjectId(id),
+                    CardId(id),
+                    PlayerId(0),
+                    format!("member {id}"),
+                    Zone::Battlefield,
+                );
+                object.incarnation = 2;
+                object
+            })
+            .collect();
+        let mut group = LogicalZoneChangeGroup::new(
+            LogicalZoneChangeGroupId(1),
+            objects
+                .iter()
+                .map(|object| LogicalZoneChangeProspectiveMember {
+                    identity: ObjectIncarnationRef::from_object(object),
+                })
+                .collect(),
+            Vec::new(),
+        );
+        group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("the test group owns an explicit pre-delivery latch");
+        let events = objects
+            .iter()
+            .map(|object| GameEvent::ZoneChanged {
+                object_id: object.id,
+                from: Some(Zone::Battlefield),
+                to: Zone::Exile,
+                record: Box::new(object.snapshot_for_zone_change(
+                    object.id,
+                    Some(Zone::Battlefield),
+                    Zone::Exile,
+                )),
+            })
+            .collect();
+        (group, events)
+    }
+
+    /// CR 603.10a: each member's delivery completion is recorded in its own
+    /// slot. A moved completion records nothing (its `ZoneChanged` record binds
+    /// it), a prevented or remaining member is recorded at its own index, a
+    /// non-member is ignored, and a second terminal result is refused.
+    #[test]
+    fn logical_zone_change_group_records_each_completion_in_its_members_slot() {
+        let (mut group, events) = battlefield_exile_batch(4);
+        for (object_id, completion) in [
+            (ObjectId(3), ZoneMoveCompletion::Prevented),
+            (ObjectId(4), ZoneMoveCompletion::Remained),
+            (ObjectId(2), ZoneMoveCompletion::Moved),
+            (ObjectId(1), ZoneMoveCompletion::Moved),
+            (ObjectId(99), ZoneMoveCompletion::Prevented),
+            (ObjectId(99), ZoneMoveCompletion::Moved),
+        ] {
+            group
+                .record_delivery_completion(object_id, completion)
+                .expect("each completion is recorded");
+        }
+        assert_eq!(
+            group.terminal_outcomes,
+            vec![
+                LogicalZoneChangeTerminalOutcome::Pending,
+                LogicalZoneChangeTerminalOutcome::Pending,
+                LogicalZoneChangeTerminalOutcome::Prevented,
+                LogicalZoneChangeTerminalOutcome::Remained,
+            ],
+            "a moved completion waits for its record"
+        );
+
+        group
+            .append_delivery_events(&[events[1].clone(), events[0].clone()])
+            .expect("the moved members' records bind them");
+        assert_eq!(
+            group.terminal_outcomes,
+            vec![
+                LogicalZoneChangeTerminalOutcome::Moved {
+                    occurrence_ordinal: 1
+                },
+                LogicalZoneChangeTerminalOutcome::Moved {
+                    occurrence_ordinal: 0
+                },
+                LogicalZoneChangeTerminalOutcome::Prevented,
+                LogicalZoneChangeTerminalOutcome::Remained,
+            ]
+        );
+        assert_eq!(
+            group.record_delivery_completion(ObjectId(3), ZoneMoveCompletion::Remained),
+            Err("logical zone-change member 3 already has a terminal outcome".into())
+        );
+        assert_eq!(
+            group.record_delivery_completion(ObjectId(1), ZoneMoveCompletion::Prevented),
+            Err("logical zone-change member 1 already has a terminal outcome".into())
+        );
+        group
+            .validate_complete()
+            .expect("every member has its terminal outcome");
+    }
+
+    /// Wall time of a battlefield-origin batch's group bookkeeping alone: N
+    /// moved completions, then the one slice that appends their N records
+    /// (`deliver_batch` then `complete_logical_zone_trigger_collection`), and
+    /// N remaining completions on a fresh group. A measurement, not a gate: run
+    /// with `--ignored --nocapture` and read the printed lines.
+    ///
+    /// Measured on one debug build, one test thread (ms), before and after a
+    /// moved completion stopped scanning the members and a remaining one
+    /// stopped scanning them twice:
+    ///
+    /// ```text
+    ///   N       moved completions   append          remained completions
+    ///           before   after      before  after   before   after
+    ///   2000    5        0          14      14      15       7
+    ///   8000    94       0          157     148     243      106
+    ///   32000   1519     0          2392    2269    3969     1725
+    /// ```
+    ///
+    /// Appending the records (`append_delivery_events`, unchanged) and a
+    /// remaining completion still find each member with one scan.
+    #[test]
+    #[ignore = "perf measurement; run manually"]
+    fn logical_zone_change_group_completion_wall_time_profile() {
+        for n in [2_000u64, 4_000, 8_000, 16_000, 32_000] {
+            let (mut group, events) = battlefield_exile_batch(n);
+            let started = std::time::Instant::now();
+            for id in 1..=n {
+                group
+                    .record_delivery_completion(ObjectId(id), ZoneMoveCompletion::Moved)
+                    .expect("moved completion");
+            }
+            let moved = started.elapsed();
+            let started = std::time::Instant::now();
+            group
+                .append_delivery_events(&events)
+                .expect("the records bind every member");
+            let appended = started.elapsed();
+            assert!(
+                group.terminal_outcomes.iter().all(|outcome| matches!(
+                    outcome,
+                    LogicalZoneChangeTerminalOutcome::Moved { .. }
+                )),
+                "reach: every member moved"
+            );
+
+            let (mut group, _) = battlefield_exile_batch(n);
+            let started = std::time::Instant::now();
+            for id in 1..=n {
+                group
+                    .record_delivery_completion(ObjectId(id), ZoneMoveCompletion::Remained)
+                    .expect("remained completion");
+            }
+            let remained = started.elapsed();
+            assert!(
+                group
+                    .terminal_outcomes
+                    .iter()
+                    .all(|outcome| matches!(outcome, LogicalZoneChangeTerminalOutcome::Remained)),
+                "reach: every member remained"
+            );
+            eprintln!(
+                "group n={n} moved_completions_ms={} append_ms={} remained_completions_ms={}",
+                moved.as_millis(),
+                appended.as_millis(),
+                remained.as_millis()
+            );
+        }
     }
 
     #[test]

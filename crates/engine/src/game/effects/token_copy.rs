@@ -802,12 +802,6 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             ))
             .chain(enter_with_counters.iter().cloned())
             .collect();
-    // CR 707.5: whether the copiable values carry an "as [this] enters" roll,
-    // which each copy should make as it enters. Loop-invariant.
-    let copies_an_as_enters_roll = values
-        .replacement_definitions
-        .iter()
-        .any(crate::game::replacement::replacement_rolls_as_it_enters);
 
     // Liminal choice is loop-invariant; compute once so the terminal drain below
     // can mirror the former continue_liminal_copy_token_batch tail for this path.
@@ -999,12 +993,6 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             );
             ObjectIncarnationRef::from_object(token)
         });
-        // CR 707.5: the copied as-enters roll should take effect; this route does
-        // not run copied entry instructions (follow-up A), so the roll is
-        // recorded unsupported rather than silently skipped.
-        if copies_an_as_enters_roll {
-            super::record_runtime_unimplemented(state, token_id, "copied_as_enters_roll");
-        }
 
         // CR 508.4: the tail resumes the rest of the batch counting its own
         // tokens from zero, so its request starts past the tokens created so
@@ -1039,6 +1027,20 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         // Mirrors `finish_copy_target_choice_entry` (`engine_replacement.rs:2927`).
         crate::game::layers::mark_layers_full(state);
         crate::game::layers::flush_layers(state);
+        // CR 707.5: a copied "as [this] enters" roll should take effect; this
+        // route does not run copied entry instructions (follow-up A), so the
+        // roll is recorded unsupported rather than silently skipped. CR 614.12:
+        // read the token as realized after this flush, not its copiable values,
+        // so a roll an existing effect removes (Humility) is not recorded: the
+        // copy correctly makes no roll. Mirrors `finish_copy_target_choice_entry`.
+        if state.objects.get(&token_id).is_some_and(|token| {
+            token
+                .replacement_definitions
+                .iter_all()
+                .any(crate::game::replacement::replacement_rolls_as_it_enters)
+        }) {
+            super::record_runtime_unimplemented(state, token_id, "copied_as_enters_roll");
+        }
         if crate::game::replacement::surface_copied_entry_payment(state, token_id, events).is_some()
         {
             state.last_created_token_ids = created_ids.clone();
