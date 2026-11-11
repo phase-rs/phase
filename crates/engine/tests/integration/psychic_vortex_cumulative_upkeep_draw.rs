@@ -2308,7 +2308,10 @@ fn a_payment_a_large_library_could_feed_past_the_ceiling_is_refused_before_any_c
 /// CR 616.1f + CR 800.4a: a parked skip prompt whose replacement's source has
 /// left is answered by re-proposing the draw: only the effects that would now
 /// apply are considered, so the draw happens, the payment goes on, and no
-/// answer is refused.
+/// answer is refused. The source is removed by a sandbox action, which normal
+/// play cannot take while the prompt is parked; the public-action form of
+/// this class is a concession that removes a candidate
+/// (`draw_cost_payment_authority.rs`, Notion Thief).
 #[test]
 fn a_skip_prompt_whose_source_left_reproposes_the_draw() {
     let (mut runner, vortex, familiar) = vortex_board(1, &STAGED_LIBRARY, |scenario| {

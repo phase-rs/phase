@@ -2158,9 +2158,11 @@ fn sandbox_mutations_are_refused_while_a_recovered_payment_is_parked() {
 
 /// P0's life gain equal to the cards in P0's hand: harmless on the canonical
 /// board, where the staged payment's drawn card is not yet in hand, and
-/// unrepresentable at `i32::MAX` life once the payment has drawn. No printed
-/// card has this shape; it probes the engine's numeric capacity, which is
-/// where a recovery can fail.
+/// unrepresentable at `i32::MAX` life once the payment has drawn. Union of
+/// the Third Path prints the same gain after a draw ("Draw a card, then you
+/// gain life equal to the number of cards in your hand."); no printed card
+/// makes it an unless-payment's rider. It probes the engine's numeric
+/// capacity, which is where a recovery can fail.
 fn gain_hand_size() -> Effect {
     Effect::GainLife {
         amount: QuantityExpr::Ref {
@@ -2300,8 +2302,8 @@ fn a_second_concession_whose_rider_is_unrepresentable_retires_the_payment() {
     assert_second_departure_retires_the_checkpoint(&mut runner);
 }
 
-/// CR 616.1 + CR 702.52a: a saved Dredge choice whose stored candidate no
-/// longer names a replacement the authority can execute is refused, like an
+/// CR 616.1 + CR 616.1f + CR 702.52a: a saved Dredge choice whose stored
+/// candidate no longer applies is refused by the candidate check, like an
 /// empty candidate list; the valid save restores and its prompt is answered.
 #[test]
 fn checked_restore_refuses_a_stale_replacement_candidate() {
@@ -2319,12 +2321,14 @@ fn checked_restore_refuses_a_stale_replacement_candidate() {
         .first_mut()
         .expect("Dredge is the candidate");
     stale.source = ObjectId(9_999);
+    let refusal = checked_round_trip(&state);
     assert!(
         matches!(
-            checked_round_trip(&state),
-            Err(PersistedRestoreError::InvalidPaymentTransaction(_))
+            &refusal,
+            Err(PersistedRestoreError::InvalidPaymentTransaction(reason))
+                if reason.contains("replacement candidate no longer applies")
         ),
-        "a candidate whose definition is gone is not admitted"
+        "a candidate whose definition is gone is not admitted: {refusal:?}"
     );
 }
 
@@ -2419,8 +2423,8 @@ fn a_departure_that_removes_a_parked_candidate_keeps_a_restorable_checkpoint() {
 /// CR 616.1f + CR 800.4a: outside any payment, P0's draw parks a choice
 /// between P0's Dredge and P3's Notion Thief, and P3 concedes. Notion Thief has
 /// left the game with its owner, so it is no longer an effect that would apply:
-/// P0's answer re-proposes the draw, which offers Dredge alone, and declining it
-/// draws the card instead of skipping it for a player who is gone.
+/// P0's answer naming it re-proposes the draw, which offers Dredge alone, and
+/// declining it draws the card instead of skipping it for a player who is gone.
 #[test]
 fn an_answer_after_a_candidate_left_the_game_reproposes_the_draw() {
     let mut scenario = GameScenario::new_n_player(4, 42);
@@ -2432,7 +2436,9 @@ fn an_answer_after_a_candidate_left_the_game_reproposes_the_draw() {
     scenario
         .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
         .from_oracle_text(STINKWEED_IMP_ORACLE);
-    scenario.add_creature_from_oracle(PlayerId(3), "Notion Thief", 3, 1, NOTION_THIEF_ORACLE);
+    let thief = scenario
+        .add_creature_from_oracle(PlayerId(3), "Notion Thief", 3, 1, NOTION_THIEF_ORACLE)
+        .id();
     let mut runner = scenario.build();
     evaluate_layers(runner.state_mut());
     let state = runner.state_mut();
@@ -2457,8 +2463,22 @@ fn an_answer_after_a_candidate_left_the_game_reproposes_the_draw() {
         },
     )
     .expect("a player can concede at any time");
-    apply(state, P0, GameAction::ChooseReplacement { index: 0 })
-        .expect("an answer to the parked prompt is accepted");
+    let thief_index = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| {
+            pending
+                .candidates
+                .iter()
+                .position(|rid| rid.source == thief)
+        })
+        .expect("reach guard: the parked prompt still lists Notion Thief");
+    apply(
+        state,
+        P0,
+        GameAction::ChooseReplacement { index: thief_index },
+    )
+    .expect("an answer naming the departed candidate is accepted");
     let pending = state
         .pending_replacement
         .as_ref()

@@ -2133,9 +2133,13 @@ struct RepeatedDrawUnlessPayment {
 ///   decline; so is a count the drawer's library could feed past it. The
 ///   ceiling inside the loop is the backstop for a dispatch that reaches it
 ///   anyway, which needs a work-performing replacement that was not
-///   applicable at the choice and became so mid-payment (no printed card
-///   does): that action is refused and rolled back whole, as an
-///   unrepresentable life change is.
+///   applicable at the choice and became so while the payment was parked
+///   (Hullbreacher under Humility, when Humility's controller leaves the game
+///   during a Dredge prompt): that action is refused and rolled back whole,
+///   as an unrepresentable life change is. The parked payment is not
+///   re-judged at the departure, so with more than the ceiling still owed an
+///   answer that reaches it is refused; that is the engine's representation
+///   limit, not a rule.
 fn pay_repeated_draw_unless_cost(
     state: &mut GameState,
     payment: RepeatedDrawUnlessPayment,
@@ -2291,7 +2295,8 @@ fn unrepresentable_repeated_payment() -> EngineError {
 ///   ceiling only then (conservative for a multi-card instruction).
 ///
 /// Together these keep the loop's backstop from refusing an answer to a
-/// resumed payment.
+/// resumed payment, unless a work-performing replacement becomes applicable
+/// while the payment is parked.
 fn repeated_draw_exceeds_one_resolution(
     state: &GameState,
     payment: &RepeatedDrawUnlessPayment,
