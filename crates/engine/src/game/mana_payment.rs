@@ -1019,21 +1019,6 @@ impl<'a> PooledProducerLedgerIndex<'a> {
                     && Some(snapshot.source_incarnation) == unit.source_incarnation
             })
     }
-
-    pub(crate) fn lki_for(
-        &self,
-        unit: &crate::types::mana::ManaUnit,
-    ) -> Option<&'a crate::types::game_state::LKISnapshot> {
-        self.row_for(unit).map(|row| &row.lki)
-    }
-
-    /// CR 111.1 + CR 106.3: the token bit this ledger row captured for ONE unit.
-    pub(crate) fn token_for(
-        &self,
-        unit: &crate::types::mana::ManaUnit,
-    ) -> Option<crate::types::game_state::CapturedTokenBit> {
-        self.row_for(unit).map(|row| row.source_token)
-    }
 }
 
 /// CR 118.3a + CR 400.7: a [`PooledProducerLedgerIndex`] built on the FIRST read that
@@ -1049,10 +1034,10 @@ impl<'a> PooledProducerLedgerIndex<'a> {
 /// Building an index over it before knowing whether any unit falls back charges every
 /// payment for facts a later step may never ask about.
 ///
-/// So the rows are held, not indexed, and the index is built by the first `lki_for` that
+/// So the rows are held, not indexed, and the index is built by the first `row_for` that
 /// arrives — once, since one payment can ask about many units and the build serves them
-/// all. Reads go through [`Self::lki_for`], the same pip-keyed question
-/// [`PooledProducerLedgerIndex::lki_for`] answers, so a lazy read and an eager one cannot
+/// all. Reads go through [`Self::row_for`], the same pip-keyed question
+/// [`PooledProducerLedgerIndex::row_for`] answers, so a lazy read and an eager one cannot
 /// disagree.
 pub(crate) struct LazyPooledProducerLedgerIndex<'a> {
     rows: &'a [crate::types::game_state::PooledManaProducerSnapshot],
@@ -1066,17 +1051,6 @@ impl<'a> LazyPooledProducerLedgerIndex<'a> {
             rows,
             index: std::cell::OnceCell::new(),
         }
-    }
-
-    /// The producer fact retained for ONE floating unit, building the index on the
-    /// first read that asks. `None` means the ledger holds no entry for THIS unit.
-    pub(crate) fn lki_for(
-        &self,
-        unit: &crate::types::mana::ManaUnit,
-    ) -> Option<&'a crate::types::game_state::LKISnapshot> {
-        self.index
-            .get_or_init(|| PooledProducerLedgerIndex::new(self.rows))
-            .lki_for(unit)
     }
 
     /// CR 111.1 + CR 106.3: the WHOLE row this ledger holds for ONE floating unit —
@@ -1094,26 +1068,16 @@ impl<'a> LazyPooledProducerLedgerIndex<'a> {
     }
 }
 
-/// CR 106.3 + CR 400.7: the producer fact the retained ledger holds for `unit`,
-/// read through an index the caller built ONCE for its whole batch (see
-/// [`PooledProducerLedgerIndex`]). The single spend-side read authority.
-///
-/// The index is the LAZY one: a caller whose units are answered by their live object or
-/// their exit last-known information never builds it (see
-/// [`LazyPooledProducerLedgerIndex`]). The fact is unchanged by that — the first read
-/// that reaches the ledger pays for one index, and every later read of the batch reuses
-/// it.
-pub(crate) fn pooled_mana_producer_snapshot<'a>(
-    index: &LazyPooledProducerLedgerIndex<'a>,
-    unit: &crate::types::mana::ManaUnit,
-) -> Option<&'a crate::types::game_state::LKISnapshot> {
-    index.lki_for(unit)
-}
-
 /// CR 106.3 + CR 111.1 + CR 400.7: the WHOLE retained row for ONE floating unit —
 /// the producer snapshot and the token bit it captured, read together. The bit
 /// outlives the step boundary a retention effect carries the record across because
 /// it is stored on the record itself.
+///
+/// The single spend-side read authority. The index is the LAZY one: a caller whose
+/// units are answered by their live object or their exit last-known information never
+/// builds it (see [`LazyPooledProducerLedgerIndex`]). The fact is unchanged by that —
+/// the first read that reaches the ledger pays for one index, and every later read of
+/// the batch reuses it.
 pub(crate) fn pooled_mana_producer_row<'a>(
     index: &LazyPooledProducerLedgerIndex<'a>,
     unit: &crate::types::mana::ManaUnit,

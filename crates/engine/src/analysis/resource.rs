@@ -12021,6 +12021,7 @@ mod tests {
             let state = runner.state_mut();
             let treasure = treasure_on_battlefield(state, 671, PlayerId(0));
             let incarnation = state.objects[&treasure].incarnation;
+            let source_is_token = state.objects[&treasure].is_token;
             let lki = state.objects[&treasure].snapshot_for_mana_spent();
             reincarnate(state, treasure);
             let mut rows = Vec::new();
@@ -12034,6 +12035,13 @@ mod tests {
                         pip_id: ManaPipId(pip),
                         source_id: treasure,
                         source_incarnation: incarnation,
+                        // CR 111.1 + CR 608.2h: the retained row states the bit its
+                        // producing source held, read from the object rather than
+                        // assumed, so this fixture cannot silently claim a non-token
+                        // producer for a token.
+                        source_token: crate::types::game_state::CapturedTokenBit::Known(
+                            source_is_token,
+                        ),
                         lki: lki.clone(),
                     });
                 }
