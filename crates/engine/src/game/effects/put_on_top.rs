@@ -44,58 +44,35 @@ pub(super) fn private_zone_selection<'a>(
     Some((choosing_player, source_zone, eligible))
 }
 
-/// CR 701.24a + CR 401.4: whether a `Shuffle` anywhere after this instruction
-/// randomizes one of `owners`' libraries, so the cards this placement stages
-/// there never have an order for their owner to choose. The shuffle need not be
-/// the immediate child: Elixir of Immortality stages its artifact, moves the
-/// graveyard, and only then shuffles. A shuffle seeded from the owners this
-/// instruction publishes (`OwnerLibraryShuffleSubject`) covers them by
-/// construction; any other shuffle is resolved against its own player
-/// reference. A scoped shuffle whose player is not bound yet still fans over
-/// this instruction's owners, so it counts.
-fn chained_shuffle_randomizes_owner(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    owners: &[PlayerId],
-) -> bool {
-    let mut next = ability.sub_ability.as_deref();
-    while let Some(node) = next {
-        if let Effect::Shuffle { target } = &node.effect {
-            if node
-                .player_scope
-                .as_ref()
-                .is_some_and(super::is_owner_library_shuffle_scope)
-            {
-                return true;
-            }
-            match super::resolve_player_for_context_ref(state, node, target) {
-                Some(player) if owners.contains(&player) => return true,
-                Some(_) => {}
-                None if matches!(target, TargetFilter::ScopedPlayer) => return true,
-                None => {}
-            }
-        }
-        next = node.sub_ability.as_deref();
-    }
-    false
-}
-
 /// CR 730.3c + CR 401.4: whether a recorded merged departure may widen this
 /// placement to every card the merged permanent became. It may only when a
-/// chained shuffle randomizes a library those cards land in ("shuffle it into
-/// its owner's library"): the shuffle erases their order, so no owner
-/// arrangement is owed. A top, bottom or nth-from-top placement with no such
-/// shuffle keeps the single object the instruction found.
+/// later instruction of the same ability shuffles the library of one of those
+/// cards' owners ("shuffle it into its owner's library"): CR 701.24a randomizes
+/// that library, so the cards have no order for their owner to choose. A top,
+/// bottom or nth-from-top placement with no such shuffle keeps the single
+/// object the instruction found, and so does a shuffle whose player cannot be
+/// resolved to one of those owners.
 fn departure_expansion_is_shuffled(
     state: &GameState,
     ability: &ResolvedAbility,
     arrivals: &[ObjectId],
 ) -> bool {
-    let owners: Vec<PlayerId> = arrivals
-        .iter()
-        .filter_map(|id| state.objects.get(id).map(|obj| obj.owner))
-        .collect();
-    chained_shuffle_randomizes_owner(state, ability, &owners)
+    let mut next = ability.sub_ability.as_deref();
+    while let Some(node) = next {
+        if let Effect::Shuffle { target } = &node.effect {
+            let shuffles_an_arrival_owner =
+                super::resolve_player_for_context_ref(state, node, target).is_some_and(|player| {
+                    arrivals
+                        .iter()
+                        .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == player))
+                });
+            if shuffles_an_arrival_owner {
+                return true;
+            }
+        }
+        next = node.sub_ability.as_deref();
+    }
+    false
 }
 
 /// Place target card at a specific position in its owner's library. Unlike
