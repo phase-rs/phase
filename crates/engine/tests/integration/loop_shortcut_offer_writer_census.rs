@@ -79,19 +79,19 @@
 // resource, locally, on engine-source edits. It is NOT checked in GitHub CI, and CI
 // enrollment is policy-blocked (`.agents/pr-review-policy.toml` `[hard_stops]` lists
 // `.github/workflows/**`). A green block in a merged commit is not a CI-verified block.
-// PROBE-PIN:BEGIN manifest=probe-pin/engine-census.toml digest=sha256:0553f51f3b146368
+// PROBE-PIN:BEGIN manifest=probe-pin/engine-census.toml digest=sha256:61bf13b16543cd94
 // instrument rustc = rustc 1.97.0-nightly (0febdbab2 2026-04-18)
 // | probe | mutation | expect | verdict | firing assertion (anchor) | provenance |
 // |---|---|---|---|---|---|
 // | P0_control | (none) | pass | pass | (control; no mounts) | — |
-// | P1_production_site_removed | scenario.rs ×1 | fail | fail | left: (26, 29) / right: (27, 29) / THE TEST HALF HAS BEEN ADJUDICATED NINE TIMES | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P2_test_site_removed | projection.rs ×1 | fail | fail | left: (27, 28) / right: (27, 29) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P3_walk_reaches_phase_ai_and_skips_comments | lib.rs ×1 | fail | fail | left: (28, 29) / right: (27, 29) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P4_counting_is_per_line | lib.rs ×1 | fail | fail | left: (29, 29) / right: (27, 29) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P1_production_site_removed | scenario.rs ×1 | fail | fail | left: (27, 23) / right: (28, 23) / THE TEST HALF HAS BEEN ADJUDICATED NINE TIMES | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P2_test_site_removed | projection.rs ×1 | fail | fail | left: (28, 22) / right: (28, 23) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P3_walk_reaches_phase_ai_and_skips_comments | lib.rs ×1 | fail | fail | left: (29, 23) / right: (28, 23) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P4_counting_is_per_line | lib.rs ×1 | fail | fail | left: (30, 23) / right: (28, 23) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P5_relocation_preserves_the_count | scenario.rs ×1, interaction.rs ×1 | fail | fail | the COUNT can be preserved by a move that relocates a writer / ("engine/src/game/interaction.rs", 6) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P6_second_validate_pins_consumer | scenario.rs ×1 | fail | fail | expected `validate_pins(` to appear in production exactly twice | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P7_coverage_half_unpaired | decision_template.rs ×1 | fail | fail | validating pin VALUES without also running | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P8_authority_call_site_removed | engine.rs ×1 | fail | fail | expected 1 definition + 4 call sites / ("engine/src/game/engine.rs", 2) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P8_authority_call_site_removed | engine.rs ×1 | fail | fail | expected 1 definition + 2 call sites / left: [("engine/src/analysis/decision_template.rs", 1), ("engine/src/game/interaction.rs", 1)] | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // probe-pin validates only the lines between BEGIN and END. Prose outside is never checked.
 // PROBE-PIN:END
 
