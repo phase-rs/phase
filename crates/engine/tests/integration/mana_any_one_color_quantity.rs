@@ -2231,7 +2231,7 @@ fn explicit_lotus_production_pays_experiment_fives_printed_z() {
         other => panic!("expected Lotus's mandatory five-color prompt, got {other:?}"),
     }
     choose_color(&mut r, ManaType::Green);
-    let units: Vec<_> = r.state().players[0].mana_pool.units().cloned().collect();
+    let units: Vec<_> = r.state().players[0].mana_pool.units().collect();
     assert_eq!(units.len(), 3);
     assert!(units.iter().all(|unit| unit.source_id == lotus
         && unit.color == ManaType::Green
@@ -2267,7 +2267,7 @@ fn explicit_lotus_production_pays_experiment_fives_printed_z() {
     assert!(r.state().players[0]
         .mana_pool
         .units()
-        .all(|unit| units.contains(unit)));
+        .all(|unit| units.contains(&unit)));
     assert_complete(&r, 1);
 }
 
