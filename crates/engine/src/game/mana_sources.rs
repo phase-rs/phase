@@ -52,6 +52,9 @@ pub use crate::types::mana::ManaSourcePenalty;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LiveManaOutputUnit {
     pub mana_type: ManaType,
+    /// CR 106.3 + CR 106.7: retain the actual producer's potential colors,
+    /// independently of the color selected for this unit.
+    pub source_could_produce_two_or_more_colors: bool,
     /// CR 106.3 + CR 107.4h: the producing ability, including an Aura trigger,
     /// supplies the snow provenance of its own units.
     pub supertype: Option<crate::types::mana::ManaSupertype>,
@@ -778,9 +781,14 @@ fn live_base_mana_output(
     player: PlayerId,
     option: &ManaSourceOption,
 ) -> Vec<LiveManaOutputUnit> {
+    // CR 106.3 + CR 106.7: the activated ability's source is the object,
+    // not a canonical row widened with another producer's Aura output.
+    let source_could_produce_two_or_more_colors =
+        source_could_produce_two_or_more_colors(state, option.object_id, player);
     let Some(ability_index) = option.ability_index else {
         return vec![LiveManaOutputUnit {
             mana_type: option.mana_type,
+            source_could_produce_two_or_more_colors,
             supertype: source_is_snow(state, option.object_id)
                 .then_some(crate::types::mana::ManaSupertype::Snow),
             restrictions: option.restrictions.clone(),
@@ -812,6 +820,7 @@ fn live_base_mana_output(
         restrictions,
         production_override.as_ref(),
         option.object_id,
+        source_could_produce_two_or_more_colors,
     )
 }
 
@@ -847,6 +856,14 @@ fn live_taps_for_mana_output(
     else {
         return Vec::new();
     };
+    // CR 106.3 + CR 113.7: the trigger supplies its own producer quality.
+    // CR 106.7: inspect its original production before a color choice narrows it.
+    let source_could_produce_two_or_more_colors = mana_production_could_produce_two_or_more_colors(
+        state,
+        ability.controller,
+        ability.source_id,
+        produced,
+    );
     live_mana_output_units(
         state,
         &ability,
@@ -854,6 +871,7 @@ fn live_taps_for_mana_output(
         restrictions,
         Some(production_override),
         ability.source_id,
+        source_could_produce_two_or_more_colors,
     )
 }
 
@@ -934,6 +952,7 @@ fn live_mana_output_units(
     restrictions: &[ManaSpendRestriction],
     production_override: Option<&ProductionOverride>,
     restriction_source_id: ObjectId,
+    source_could_produce_two_or_more_colors: bool,
 ) -> Vec<LiveManaOutputUnit> {
     let mana_types = match production_override {
         Some(ProductionOverride::SingleColor(color)) => {
@@ -970,6 +989,7 @@ fn live_mana_output_units(
         .into_iter()
         .map(|mana_type| LiveManaOutputUnit {
             mana_type,
+            source_could_produce_two_or_more_colors,
             supertype: source_is_snow(state, restriction_source_id)
                 .then_some(crate::types::mana::ManaSupertype::Snow),
             restrictions: restrictions.clone(),

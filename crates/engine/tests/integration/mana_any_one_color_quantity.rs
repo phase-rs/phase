@@ -59,6 +59,7 @@ const QUARRY: &str = "{T}: Add {C}.\n{T}, Sacrifice a creature: Add one mana of 
 const BASAL_THRULL: &str = "{T}, Sacrifice this creature: Add {B}{B}.";
 const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
 const LEYLINE_VOID: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.";
+const EXPERIMENT_FIVE: &str = "{1}{Z}: Put a +1/+2 counter on Experiment Five. ({Z} is paid with one mana from any source that could produce two or more colors of mana.)";
 
 fn pay_glint_eye_with_an_enchanted_land(land_name: &str, land_text: &str, count: usize) {
     for (aura_name, aura_text) in [
@@ -1960,6 +1961,448 @@ fn restricted_fixed_base_does_not_hide_snow_aura_payment() {
         .chain([&land, &lotus])
         .all(|id| r.state().objects[id].tapped));
     assert_complete(&r, 0);
+}
+
+fn experiment_five(s: &mut GameScenario) -> ObjectId {
+    s.add_creature_from_oracle(P0, "Experiment Five", 1, 1, EXPERIMENT_FIVE)
+        .with_subtypes(vec!["Bear", "Snake", "Mutant"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{G}"))
+        .id()
+}
+
+fn experiment_five_activation_index(r: &GameRunner, source: ObjectId) -> usize {
+    assert_eq!(r.state().objects[&source].power, Some(1));
+    assert_eq!(r.state().objects[&source].toughness, Some(1));
+    assert!(r.state().objects[&source].counters.is_empty());
+    let abilities = activated_ability_definitions(r.state(), source);
+    assert_eq!(abilities.len(), 1, "reach the real printed activation");
+    let (index, ability) = &abilities[0];
+    assert_eq!(
+        ability.cost,
+        Some(AbilityCost::Mana {
+            cost: parse_mtgjson_mana_cost("{1}{Z}")
+        })
+    );
+    assert!(matches!(
+        &*ability.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::PowerToughness {
+                power: 1,
+                toughness: 2
+            },
+            ..
+        }
+    ));
+    *index
+}
+
+fn assert_experiment_five_counter(r: &GameRunner, source: ObjectId) {
+    // CR 122.1a + CR 613.4c: one real +1/+2 counter changes 1/1 to 2/3.
+    let object = &r.state().objects[&source];
+    assert_eq!(object.counters.len(), 1);
+    assert_eq!(
+        object.counters.get(&CounterType::PowerToughness {
+            power: 1,
+            toughness: 2
+        }),
+        Some(&1)
+    );
+    assert_eq!(object.power, Some(2));
+    assert_eq!(object.toughness, Some(3));
+    assert!(r.state().stack.is_empty());
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+}
+
+fn restricted_experiment_five_board(
+    with_lotus: bool,
+) -> (
+    GameRunner,
+    ObjectId,
+    ObjectId,
+    Option<ObjectId>,
+    ObjectId,
+    ObjectId,
+) {
+    let mut s = board();
+    s.add_artifact_from_oracle(P0, "Resonating Lute", LUTE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{U}{R}"));
+    let maze = s.add_land_from_oracle(P0, "Maze of Ith", MAZE).id();
+    let aura = s
+        .add_enchantment_from_oracle(P0, "Overgrowth", OVERGROWTH)
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{G}"))
+        .id();
+    let lotus = with_lotus.then(|| {
+        s.add_artifact_from_oracle(P0, "Gilded Lotus", LOTUS)
+            .with_mana_cost(parse_mtgjson_mana_cost("{5}"))
+            .id()
+    });
+    let stone = s
+        .add_artifact_from_oracle(P0, "Mind Stone", MIND_STONE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}"))
+        .id();
+    let experiment = experiment_five(&mut s);
+    let mut r = s.build();
+    engine::game::effects::attach::attach_to(r.state_mut(), aura, maze);
+    evaluate_layers(r.state_mut());
+    assert_eq!(
+        r.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(maze))
+    );
+    assert!(r.state().players[0].mana_pool.is_empty());
+    assert!(r.state().players[1].mana_pool.is_empty());
+    let granted = assert_any_one(&r, maze);
+    let rows = activatable_land_mana_options(r.state(), maze, P0);
+    assert_eq!(rows.len(), 5, "Maze has only the five Lute color rows");
+    let triggers: Vec<_> = engine::game::functioning_abilities::active_trigger_definitions(
+        r.state(),
+        &r.state().objects[&aura],
+    )
+    .map(|active| active.definition_ref)
+    .collect();
+    assert_eq!(triggers.len(), 1);
+    assert!(rows.iter().all(|row| row.ability_index == Some(granted)
+        && !row.restrictions.is_empty()
+        && row.source_could_produce_two_or_more_colors
+        && row
+            .atomic_combination
+            .as_ref()
+            .is_some_and(|units| units.len() == 3)
+        && row.taps_for_mana_overrides.len() == 1
+        && row.taps_for_mana_overrides[0].0 == triggers[0]));
+    assert_eq!(activatable_mana_options(r.state(), stone, P0).len(), 1);
+    assert!(activatable_mana_options(r.state(), stone, P0)
+        .iter()
+        .all(|row| row.mana_type == ManaType::Colorless
+            && !row.source_could_produce_two_or_more_colors));
+    if let Some(lotus) = lotus {
+        let rows = activatable_mana_options(r.state(), lotus, P0);
+        assert_eq!(rows.len(), 5);
+        assert!(rows
+            .iter()
+            .all(|row| row.source_could_produce_two_or_more_colors
+                && row.restrictions.is_empty()
+                && row
+                    .atomic_combination
+                    .as_ref()
+                    .is_some_and(|units| units.len() == 3)));
+    }
+    experiment_five_activation_index(&r, experiment);
+    (r, maze, aura, lotus, stone, experiment)
+}
+
+#[test]
+fn projected_z_payment_uses_lotus_instead_of_restricted_lute_or_fixed_aura() {
+    for with_lotus in [true, false] {
+        let (mut r, maze, aura, lotus, stone, experiment) =
+            restricted_experiment_five_board(with_lotus);
+        let index = experiment_five_activation_index(&r, experiment);
+        let original_pool = r.state().players[0].mana_pool.clone();
+        let result = r.act(GameAction::ActivateAbility {
+            source_id: experiment,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        });
+        if let Some(lotus) = lotus {
+            let result = result.expect("the real Lotus supplies Experiment Five's printed Z");
+            assert_eq!(r.state().stack.len(), 1);
+            assert!(r.state().objects[&lotus].tapped);
+            let produced = result
+                .events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        engine::types::events::GameEvent::ManaAdded { player_id: P0, .. }
+                    )
+                })
+                .count();
+            let produced_by = |source| {
+                result.events.iter().filter(|event| matches!(event,
+                engine::types::events::GameEvent::ManaAdded { source_id, .. } if *source_id == source)).count()
+            };
+            assert_eq!(produced_by(lotus), 3);
+            assert_eq!(
+                production_count(&result.events, aura, ManaType::Green),
+                if r.state().objects[&maze].tapped {
+                    2
+                } else {
+                    0
+                }
+            );
+            // CR 106.3 + CR 106.6 + CR 106.7: only Lotus's unrestricted
+            // output can satisfy this printed Z; fixed G/G is not multicolor.
+            let remaining_lotus = r.state().players[0]
+                .mana_pool
+                .units()
+                .filter(|unit| unit.source_id == lotus)
+                .count();
+            assert!(
+                remaining_lotus < 3,
+                "at least one actual Lotus unit is spent"
+            );
+            assert_eq!(
+                r.state().players[0]
+                    .mana_pool
+                    .units()
+                    .filter(|unit| unit.source_id == maze)
+                    .count(),
+                produced_by(maze),
+                "both restricted Lute units remain unspent"
+            );
+            assert!(r.state().players[0].mana_pool.units().all(|unit| {
+                unit.pip_id != ManaPipId(0)
+                    && unit.supertype.is_none()
+                    && if unit.source_id == lotus {
+                        unit.restrictions.is_empty() && unit.source_could_produce_two_or_more_colors
+                    } else if unit.source_id == maze {
+                        !unit.restrictions.is_empty()
+                            && unit.source_could_produce_two_or_more_colors
+                    } else if unit.source_id == aura {
+                        unit.color == ManaType::Green
+                            && unit.restrictions.is_empty()
+                            && !unit.source_could_produce_two_or_more_colors
+                    } else {
+                        unit.source_id == stone
+                            && unit.color == ManaType::Colorless
+                            && unit.restrictions.is_empty()
+                            && !unit.source_could_produce_two_or_more_colors
+                    }
+            }));
+            r.advance_until_stack_empty();
+            assert_experiment_five_counter(&r, experiment);
+            // CR 106.4 + CR 118.3a: the complete two-unit cost is removed.
+            assert_complete(&r, produced - 2);
+        } else {
+            // CR 118.3 + CR 601.2h + CR 602.2b: generic quantity cannot
+            // replace the source capability required by the real Z symbol.
+            assert!(result.is_err());
+            assert_eq!(r.state().players[0].mana_pool, original_pool);
+            assert!([maze, stone, aura, experiment]
+                .iter()
+                .all(|id| !r.state().objects[id].tapped));
+            assert!(r.state().objects[&experiment].counters.is_empty());
+            assert_eq!(r.state().objects[&experiment].power, Some(1));
+            assert_eq!(r.state().objects[&experiment].toughness, Some(1));
+            assert_complete(&r, 0);
+            assert!(matches!(
+                r.state().waiting_for,
+                WaitingFor::Priority { player: P0 }
+            ));
+        }
+    }
+}
+
+#[test]
+fn explicit_lotus_production_pays_experiment_fives_printed_z() {
+    let (mut r, maze, aura, lotus, stone, experiment) = restricted_experiment_five_board(true);
+    let lotus = lotus.unwrap();
+    let selection = activatable_mana_source_selections(r.state(), P0)
+        .into_iter()
+        .find(|selection| selection.source.object_id == lotus)
+        .expect("the printed Lotus has a public mana selection");
+    assert!(matches!(
+        selection.output,
+        ManaSourceOutput::DeferredColorChoice {
+            quantity: ManaSourceQuantity::Fixed(3)
+        }
+    ));
+    r.act(GameAction::ActivateManaSource { selection }).unwrap();
+    match &r.state().waiting_for {
+        WaitingFor::ChooseManaColor {
+            player: P0,
+            choice: ManaChoicePrompt::SingleColor { options },
+            ..
+        } => {
+            assert_eq!(options.len(), 5);
+            assert!([
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green
+            ]
+            .iter()
+            .all(|color| options.contains(color)));
+        }
+        other => panic!("expected Lotus's mandatory five-color prompt, got {other:?}"),
+    }
+    choose_color(&mut r, ManaType::Green);
+    let units: Vec<_> = r.state().players[0].mana_pool.units().cloned().collect();
+    assert_eq!(units.len(), 3);
+    assert!(units.iter().all(|unit| unit.source_id == lotus
+        && unit.color == ManaType::Green
+        && unit.restrictions.is_empty()
+        && unit.source_could_produce_two_or_more_colors
+        && unit.pip_id != ManaPipId(0)));
+    assert_eq!(
+        units
+            .iter()
+            .map(|unit| unit.pip_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+    let index = experiment_five_activation_index(&r, experiment);
+    let result = r
+        .act(GameAction::ActivateAbility {
+            source_id: experiment,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    assert_eq!(r.state().stack.len(), 1);
+    assert!(!result
+        .events
+        .iter()
+        .any(|event| matches!(event, engine::types::events::GameEvent::ManaAdded { .. })));
+    r.advance_until_stack_empty();
+    assert_experiment_five_counter(&r, experiment);
+    assert!([maze, aura, stone]
+        .iter()
+        .all(|id| !r.state().objects[id].tapped));
+    assert!(r.state().players[0]
+        .mana_pool
+        .units()
+        .all(|unit| units.contains(unit)));
+    assert_complete(&r, 1);
+}
+
+#[test]
+fn flexible_aura_z_quality_survives_fixed_land_and_other_aura_controller() {
+    for (with_fertile, with_overgrowth) in [(true, false), (false, true), (true, true)] {
+        let mut s = board();
+        let wastes = s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id();
+        let overgrowth = with_overgrowth.then(|| {
+            s.add_enchantment_from_oracle(P0, "Overgrowth", OVERGROWTH)
+                .with_subtypes(vec!["Aura"])
+                .with_mana_cost(parse_mtgjson_mana_cost("{2}{G}"))
+                .id()
+        });
+        let fertile = with_fertile.then(|| {
+            s.add_enchantment_from_oracle(
+                if with_overgrowth { P1 } else { P0 },
+                "Fertile Ground",
+                FERTILE_GROUND,
+            )
+            .with_subtypes(vec!["Aura"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+            .id()
+        });
+        let experiment = experiment_five(&mut s);
+        let mut r = s.build();
+        {
+            let land = r.state_mut().objects.get_mut(&wastes).unwrap();
+            land.card_types.supertypes.push(Supertype::Basic);
+            land.base_card_types.supertypes.push(Supertype::Basic);
+        }
+        for aura in overgrowth.into_iter().chain(fertile) {
+            engine::game::effects::attach::attach_to(r.state_mut(), aura, wastes);
+        }
+        evaluate_layers(r.state_mut());
+        let index = experiment_five_activation_index(&r, experiment);
+        let rows = activatable_land_mana_options(r.state(), wastes, P0);
+        assert_eq!(rows.len(), if with_fertile { 5 } else { 1 });
+        assert!(rows.iter().all(|row| row.mana_type == ManaType::Colorless
+            && row.restrictions.is_empty()
+            && row
+                .atomic_combination
+                .as_ref()
+                .is_some_and(|units| units.len()
+                    == 1 + usize::from(with_fertile) + usize::from(with_overgrowth))));
+        assert!(
+            rows.iter()
+                .any(|row| !row.source_could_produce_two_or_more_colors
+                    && row.taps_for_mana_overrides.iter().all(|(_, value)| *value
+                        == engine::types::game_state::ProductionOverride::SingleColor(
+                            ManaType::Green
+                        ))),
+            "the concrete all-green row cannot confer the Aura's quality on Wastes"
+        );
+        for aura in overgrowth.into_iter().chain(fertile) {
+            assert_eq!(
+                r.state().objects[&aura].attached_to,
+                Some(AttachTarget::Object(wastes))
+            );
+            let triggers: Vec<_> = engine::game::functioning_abilities::active_trigger_definitions(
+                r.state(),
+                &r.state().objects[&aura],
+            )
+            .map(|active| active.definition_ref)
+            .collect();
+            assert_eq!(triggers.len(), 1);
+            assert!(rows.iter().all(|row| row
+                .taps_for_mana_overrides
+                .iter()
+                .filter(|(reference, _)| *reference == triggers[0])
+                .count()
+                == 1));
+        }
+        assert!(r.state().players[0].mana_pool.is_empty());
+        assert!(r.state().players[1].mana_pool.is_empty());
+        let result = r.act(GameAction::ActivateAbility {
+            source_id: experiment,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        });
+        if let Some(fertile) = fertile {
+            let result = result.expect("Fertile Ground's own flexible unit pays Z");
+            assert_eq!(
+                production_count(&result.events, wastes, ManaType::Colorless),
+                1
+            );
+            assert_eq!(
+                result
+                    .events
+                    .iter()
+                    .filter(|event| matches!(event,
+                engine::types::events::GameEvent::ManaAdded { player_id: P0, source_id, .. }
+                if *source_id == fertile))
+                    .count(),
+                1
+            );
+            if let Some(overgrowth) = overgrowth {
+                assert_eq!(
+                    production_count(&result.events, overgrowth, ManaType::Green),
+                    2
+                );
+                assert_eq!(r.state().objects[&fertile].controller, P1);
+            }
+            assert_eq!(r.state().stack.len(), 1);
+            assert!(r.state().objects[&wastes].tapped);
+            assert!(r.state().players[1].mana_pool.is_empty());
+            // CR 106.3 + CR 106.7: the sole flexible producer's unit must
+            // pay Z after its output choice narrows the actual mana to one color.
+            assert!(!r.state().players[0]
+                .mana_pool
+                .units()
+                .any(|unit| unit.source_id == fertile));
+            assert!(r.state().players[0].mana_pool.units().all(|unit| !unit
+                .source_could_produce_two_or_more_colors
+                && unit.restrictions.is_empty()
+                && unit.pip_id != ManaPipId(0)
+                && ((unit.source_id == wastes && unit.color == ManaType::Colorless)
+                    || (Some(unit.source_id) == overgrowth && unit.color == ManaType::Green))));
+            r.advance_until_stack_empty();
+            assert_experiment_five_counter(&r, experiment);
+            assert_complete(&r, if with_overgrowth { 2 } else { 0 });
+        } else {
+            // CR 118.3 + CR 601.2h: Wastes plus fixed G/G has three generic
+            // units but no producer that meets Experiment Five's printed Z.
+            assert!(result.is_err());
+            assert!(!r.state().objects[&wastes].tapped);
+            assert!(r.state().objects[&experiment].counters.is_empty());
+            assert!(r.state().players[1].mana_pool.is_empty());
+            assert_complete(&r, 0);
+            assert!(matches!(
+                r.state().waiting_for,
+                WaitingFor::Priority { player: P0 }
+            ));
+        }
+    }
 }
 
 #[test]

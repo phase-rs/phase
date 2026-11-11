@@ -15478,7 +15478,11 @@ fn option_satisfies(
     if projected.is_none() && !option_allowed_for_context(opt, payment_context) {
         return false;
     }
-    if requires_two_or_more_color_source && !opt.source_could_produce_two_or_more_colors {
+    // CR 106.3 + CR 106.7: only unprojected units share the row's producer.
+    if projected.is_none()
+        && requires_two_or_more_color_source
+        && !opt.source_could_produce_two_or_more_colors
+    {
         return false;
     }
     // CR 106.6: even a type-agnostic shard needs an actual unit permitted by
@@ -15499,9 +15503,12 @@ fn option_satisfies(
     }
     option_units_for_context(opt, payment_context, output_projection)
         .iter()
-        .any(|(mana_type, supertype)| {
-            (acceptable.is_empty() || acceptable.contains(mana_type))
-                && required_supertype.is_none_or(|required| *supertype == Some(required))
+        .any(|unit| {
+            unit.satisfies(
+                acceptable,
+                requires_two_or_more_color_source,
+                required_supertype,
+            )
         })
 }
 
@@ -15548,7 +15555,12 @@ fn option_units_for_context(
                             .all(|restriction| restriction.allows(ctx))
                 })
             })
-            .map(|unit| (unit.mana_type, unit.supertype))
+            .map(|unit| AutoTapUnit {
+                mana_type: unit.mana_type,
+                supertype: unit.supertype,
+                source_could_produce_two_or_more_colors: unit
+                    .source_could_produce_two_or_more_colors,
+            })
             .collect();
     }
     // CR 106.6: without a producer projection, every unit still belongs to
@@ -15558,7 +15570,11 @@ fn option_units_for_context(
     }
     option_mana_types_for_context(option, payment_context)
         .into_iter()
-        .map(|mana| (mana, None))
+        .map(|mana_type| AutoTapUnit {
+            mana_type,
+            supertype: None,
+            source_could_produce_two_or_more_colors: option.source_could_produce_two_or_more_colors,
+        })
         .collect()
 }
 
@@ -15568,11 +15584,8 @@ fn auto_tap_matching_unit(units: &[AutoTapUnit], need: &AutoTapNeed) -> Option<u
     units
         .iter()
         .enumerate()
-        .filter(|(_, (mana, supertype))| {
-            (need.0.is_empty() || need.0.contains(mana))
-                && need.4.is_none_or(|required| *supertype == Some(required))
-        })
-        .min_by_key(|(_, unit)| unit.1.is_some())
+        .filter(|(_, unit)| unit.satisfies(&need.0, need.2, need.4))
+        .min_by_key(|(_, unit)| unit.supertype.is_some())
         .map(|(index, _)| index)
 }
 
@@ -16795,7 +16808,27 @@ fn auto_tap_mana_sources_inner(
 /// supertype (CR 107.4h).
 type AutoTapNeed = (Vec<ManaType>, bool, bool, bool, Option<ManaSupertype>);
 
-type AutoTapUnit = (ManaType, Option<ManaSupertype>);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AutoTapUnit {
+    mana_type: ManaType,
+    supertype: Option<ManaSupertype>,
+    source_could_produce_two_or_more_colors: bool,
+}
+
+impl AutoTapUnit {
+    /// CR 106.3 + CR 106.7 + CR 107.4h: every required quality belongs to
+    /// the same actual unit, rather than another producer in its grouped row.
+    fn satisfies(
+        &self,
+        acceptable: &[ManaType],
+        requires_two_or_more_color_source: bool,
+        required_supertype: Option<ManaSupertype>,
+    ) -> bool {
+        (acceptable.is_empty() || acceptable.contains(&self.mana_type))
+            && (!requires_two_or_more_color_source || self.source_could_produce_two_or_more_colors)
+            && required_supertype.is_none_or(|required| self.supertype == Some(required))
+    }
+}
 // Index the existing snapshot by source/ability. Preserve row order inside a
 // bucket for exact color, restriction and selected-trigger identity matching.
 type AutoTapOutput =
@@ -17280,12 +17313,6 @@ fn plan_auto_tap_rows_in_order(
                 for index in remaining {
                     if units.is_empty() {
                         break;
-                    }
-                    let (_, _, requires_two_or_more_color_source, _, _) = &needs[index];
-                    if *requires_two_or_more_color_source
-                        && !option.source_could_produce_two_or_more_colors
-                    {
-                        continue;
                     }
                     if let Some(unit) = auto_tap_matching_unit(&units, &needs[index]) {
                         units.remove(unit);
@@ -18056,22 +18083,26 @@ fn score_combination(
     // CR 107.4h: spend non-snow units first so a same-color snow unit remains
     // available for a later snow requirement, including separate Aura output.
     let mut units = std::borrow::Cow::Borrowed(combo);
-    if combo.iter().any(|unit| unit.1.is_some()) {
-        units.to_mut().sort_by_key(|unit| unit.1.is_some());
+    if combo.iter().any(|unit| unit.supertype.is_some()) {
+        units.to_mut().sort_by_key(|unit| unit.supertype.is_some());
     }
-    for (mana, supertype) in units.iter() {
+    for unit in units.iter() {
         for (i, (acceptable, _, requires_two_or_more_color_source, _, required_supertype)) in
             needs.iter().enumerate()
         {
             if locally_consumed[i] {
                 continue;
             }
-            if *requires_two_or_more_color_source {
-                continue;
-            }
-            if (acceptable.contains(mana)
-                || (required_supertype.is_some() && acceptable.is_empty()))
-                && required_supertype.is_none_or(|required| *supertype == Some(required))
+            // CR 106.3 + CR 106.7 + CR 118.10: credit a qualified producer's
+            // unit once, preserving the existing non-generic coverage rule.
+            if (!acceptable.is_empty()
+                || required_supertype.is_some()
+                || *requires_two_or_more_color_source)
+                && unit.satisfies(
+                    acceptable,
+                    *requires_two_or_more_color_source,
+                    *required_supertype,
+                )
             {
                 locally_consumed[i] = true;
                 covered.push(i);
@@ -20519,6 +20550,9 @@ mod tests {
         const NYX: &str = "Nyx Lotus enters tapped.\n{T}: Choose a color. Add an amount of mana of that color equal to your devotion to that color. (Your devotion to a color is the number of mana symbols of that color in the mana costs of permanents you control.)";
         const UNTAIDAKE: &str = "Untaidake enters tapped.\n{T}, Pay 2 life: Add {C}{C}. Spend this mana only to cast legendary spells.";
         const WEIRD: &str = "{U/R}: This creature gets +1/-1 until end of turn.";
+        const EXPERIMENT: &str = "{1}{Z}: Put a +1/+2 counter on Experiment Five. ({Z} is paid with one mana from any source that could produce two or more colors of mana.)";
+        const OVERGROWTH: &str = "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional {G}{G}.";
+        const FERTILE: &str = "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional one mana of any color.";
         let reset_work =
             || AUTO_TAP_WORK.with_borrow_mut(|work| *work = Some(AutoTapWork::default()));
         let take_work = || AUTO_TAP_WORK.with_borrow_mut(|work| work.take().unwrap());
@@ -20587,7 +20621,14 @@ mod tests {
         let meta = super::super::casting::build_spell_meta(runner.state(), P0, nyx).unwrap();
         assert_eq!(
             option_units_for_context(row, Some(&PaymentContext::Spell(&meta)), output.as_ref()),
-            vec![(ManaType::Colorless, None); 2]
+            vec![
+                AutoTapUnit {
+                    mana_type: ManaType::Colorless,
+                    supertype: None,
+                    source_could_produce_two_or_more_colors: false,
+                };
+                2
+            ]
         );
         let work = take_work();
         assert_eq!(
@@ -20598,6 +20639,415 @@ mod tests {
             3,
             "the denied empty view and both permitted fallback views are observed"
         );
+
+        // CR 106.3 + CR 106.6 + CR 106.7: the projected Maze row keeps
+        // Lute's restricted flexible output separate from fixed Aura G/G.
+        // Its nonempty eligible view cannot inherit the land's printed Z quality.
+        let mut scenario = GameScenario::new();
+        scenario
+            .add_artifact_from_oracle(P0, "Resonating Lute", LUTE)
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}{U}{R}"));
+        let maze = scenario.add_land_from_oracle(P0, "Maze of Ith", MAZE).id();
+        let aura = scenario
+            .add_enchantment_from_oracle(P0, "Overgrowth", OVERGROWTH)
+            .with_subtypes(vec!["Aura"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}{G}"))
+            .id();
+        let lotus = scenario
+            .add_artifact_from_oracle(P0, "Gilded Lotus", "{T}: Add three mana of any one color.")
+            .with_mana_cost(parse_mtgjson_mana_cost("{5}"))
+            .id();
+        let stone = scenario
+            .add_artifact_from_oracle(P0, "Mind Stone", STONE)
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}"))
+            .id();
+        let experiment = scenario
+            .add_creature_from_oracle(P0, "Experiment Five", 1, 1, EXPERIMENT)
+            .with_subtypes(vec!["Bear", "Snake", "Mutant"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{G}"))
+            .id();
+        let mut runner = scenario.build();
+        crate::game::effects::attach::attach_to(runner.state_mut(), aura, maze);
+        crate::game::layers::evaluate_layers(runner.state_mut());
+        let definitions =
+            super::super::casting::activated_ability_definitions(runner.state(), experiment);
+        assert_eq!(definitions.len(), 1);
+        let (experiment_index, ability) = &definitions[0];
+        assert!(matches!(
+            &*ability.effect,
+            Effect::PutCounter {
+                counter_type: crate::types::counter::CounterType::PowerToughness {
+                    power: 1,
+                    toughness: 2
+                },
+                ..
+            }
+        ));
+        let Some(AbilityCost::Mana { cost }) = &ability.cost else {
+            panic!("printed mana activation")
+        };
+        assert_eq!(*cost, parse_mtgjson_mana_cost("{1}{Z}"));
+        let ManaCost::Cost { shards, generic } = cost else {
+            panic!("printed payable cost")
+        };
+        let (needs, deferred) = auto_tap_needs(shards, None);
+        assert_eq!(needs.len(), 1);
+        assert!(needs[0].2 && needs[0].0.is_empty());
+        assert_eq!((*generic, deferred), (1, 0));
+        let activation = super::super::casting::activation_payment_context(
+            runner.state(),
+            experiment,
+            Some(*experiment_index),
+        );
+        let context = activation.as_payment_context();
+        let available =
+            collect_sorted_auto_tap_source_options(runner.state(), P0, None, &HashSet::new(), None);
+        let maze_rows: Vec<_> = available
+            .iter()
+            .filter(|row| row.object_id == maze)
+            .collect();
+        assert_eq!(maze_rows.len(), 5);
+        let row = *maze_rows
+            .iter()
+            .find(|row| row.mana_type == ManaType::Green)
+            .unwrap();
+        assert!(row.source_could_produce_two_or_more_colors && !row.restrictions.is_empty());
+        assert_eq!(
+            row.atomic_combination.as_deref(),
+            Some([ManaType::Green; 3].as_slice())
+        );
+        assert_eq!(row.taps_for_mana_overrides.len(), 1);
+        let trigger_refs: Vec<_> = crate::game::functioning_abilities::active_trigger_definitions(
+            runner.state(),
+            &runner.state().objects[&aura],
+        )
+        .map(|active| active.definition_ref)
+        .collect();
+        assert_eq!(trigger_refs.len(), 1);
+        assert_eq!(row.taps_for_mana_overrides[0].0, trigger_refs[0]);
+        let output = auto_tap_output_projection(runner.state(), &available, false).unwrap();
+        let groups =
+            projected_mana_output(row, Some(&output)).expect("exact nonempty Maze projection");
+        assert_eq!(groups.base.len(), 2);
+        assert!(groups
+            .base
+            .iter()
+            .all(|unit| unit.source_could_produce_two_or_more_colors
+                && !unit.restrictions.is_empty()));
+        assert_eq!(groups.triggers.len(), 1);
+        assert_eq!(groups.triggers[0].0, trigger_refs[0]);
+        assert_eq!(groups.triggers[0].1.len(), 2);
+        assert!(groups.triggers[0]
+            .1
+            .iter()
+            .all(|unit| unit.mana_type == ManaType::Green
+                && unit.restrictions.is_empty()
+                && !unit.source_could_produce_two_or_more_colors));
+        let units = option_units_for_context(row, Some(&context), Some(&output));
+        assert_eq!(
+            units.len(),
+            2,
+            "positive reach: independent Aura units remain eligible"
+        );
+        assert!(units.iter().all(|unit| unit.mana_type == ManaType::Green
+            && !unit.source_could_produce_two_or_more_colors));
+        assert!(option_satisfies(
+            row,
+            &[],
+            false,
+            None,
+            Some(&output),
+            Some(&context)
+        ));
+        assert!(!option_satisfies(
+            row,
+            &needs[0].0,
+            needs[0].2,
+            needs[0].4,
+            Some(&output),
+            Some(&context)
+        ));
+        assert_eq!(auto_tap_matching_unit(&units, &needs[0]), None);
+        assert_eq!(score_combination(&units, &needs, &[false]), (0, Vec::new()));
+        let lotus_row = available
+            .iter()
+            .find(|row| row.object_id == lotus && row.mana_type == ManaType::Green)
+            .expect("real Lotus row");
+        let lotus_groups = projected_mana_output(lotus_row, Some(&output)).unwrap();
+        assert_eq!(lotus_groups.base.len(), 3);
+        assert!(lotus_groups.triggers.is_empty());
+        let lotus_units = option_units_for_context(lotus_row, Some(&context), Some(&output));
+        assert_eq!(lotus_units.len(), 3);
+        assert!(lotus_units
+            .iter()
+            .all(|unit| unit.source_could_produce_two_or_more_colors));
+        assert!(option_satisfies(
+            lotus_row,
+            &needs[0].0,
+            needs[0].2,
+            needs[0].4,
+            Some(&output),
+            Some(&context)
+        ));
+        assert!(auto_tap_matching_unit(&lotus_units, &needs[0]).is_some());
+        assert_eq!(
+            score_combination(&lotus_units, &needs, &[false]),
+            (1, vec![0])
+        );
+        let stone_row = available.iter().find(|row| row.object_id == stone).unwrap();
+        assert!(projected_mana_output(stone_row, Some(&output)).is_none());
+        assert!(option_satisfies(
+            stone_row,
+            &[],
+            false,
+            None,
+            Some(&output),
+            Some(&context)
+        ));
+        assert!(!option_satisfies(
+            stone_row,
+            &needs[0].0,
+            needs[0].2,
+            needs[0].4,
+            Some(&output),
+            Some(&context)
+        ));
+        assert_eq!(
+            count_available_sources(
+                &available,
+                &HashSet::new(),
+                &needs[0].0,
+                needs[0].2,
+                needs[0].4,
+                Some(&output),
+                Some(&context)
+            ),
+            1
+        );
+        let plan = plan_auto_tap_rows(
+            runner.state(),
+            &available,
+            &needs,
+            *generic as usize,
+            Some(&context),
+            AutoTapFunding::Conservative,
+            Some(&output),
+        );
+        assert!(plan.covers_cost && plan.used_sources.contains(&lotus));
+
+        // CR 106.3 + CR 106.7 + CR 113.7: reverse the authorities. Wastes
+        // cannot produce colors; Fertile Ground can, even when another seat
+        // controls that Aura and a separate Aura adds fixed G/G beside it.
+        for (with_fertile, with_overgrowth) in [(true, false), (false, true), (true, true)] {
+            let mut scenario = GameScenario::new();
+            let wastes = scenario
+                .add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.")
+                .id();
+            let overgrowth = with_overgrowth.then(|| {
+                scenario
+                    .add_enchantment_from_oracle(P0, "Overgrowth", OVERGROWTH)
+                    .with_subtypes(vec!["Aura"])
+                    .with_mana_cost(parse_mtgjson_mana_cost("{2}{G}"))
+                    .id()
+            });
+            let fertile = with_fertile.then(|| {
+                scenario
+                    .add_enchantment_from_oracle(
+                        if with_overgrowth {
+                            crate::game::scenario::P1
+                        } else {
+                            P0
+                        },
+                        "Fertile Ground",
+                        FERTILE,
+                    )
+                    .with_subtypes(vec!["Aura"])
+                    .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+                    .id()
+            });
+            let experiment = scenario
+                .add_creature_from_oracle(P0, "Experiment Five", 1, 1, EXPERIMENT)
+                .with_subtypes(vec!["Bear", "Snake", "Mutant"])
+                .with_mana_cost(parse_mtgjson_mana_cost("{G}"))
+                .id();
+            let mut runner = scenario.build();
+            {
+                let land = runner.state_mut().objects.get_mut(&wastes).unwrap();
+                land.card_types
+                    .supertypes
+                    .push(crate::types::card_type::Supertype::Basic);
+                land.base_card_types
+                    .supertypes
+                    .push(crate::types::card_type::Supertype::Basic);
+            }
+            for aura in overgrowth.into_iter().chain(fertile) {
+                crate::game::effects::attach::attach_to(runner.state_mut(), aura, wastes);
+            }
+            crate::game::layers::evaluate_layers(runner.state_mut());
+            let definitions =
+                super::super::casting::activated_ability_definitions(runner.state(), experiment);
+            assert_eq!(definitions.len(), 1);
+            let (index, ability) = &definitions[0];
+            assert!(matches!(
+                &*ability.effect,
+                Effect::PutCounter {
+                    counter_type: crate::types::counter::CounterType::PowerToughness {
+                        power: 1,
+                        toughness: 2
+                    },
+                    ..
+                }
+            ));
+            let Some(AbilityCost::Mana { cost }) = &ability.cost else {
+                panic!("printed activation")
+            };
+            assert_eq!(*cost, parse_mtgjson_mana_cost("{1}{Z}"));
+            let ManaCost::Cost { shards, generic } = cost else {
+                panic!("printed payable cost")
+            };
+            let (needs, deferred) = auto_tap_needs(shards, None);
+            assert_eq!(needs.len(), 1);
+            assert!(needs[0].2);
+            assert_eq!((*generic, deferred), (1, 0));
+            let activation = super::super::casting::activation_payment_context(
+                runner.state(),
+                experiment,
+                Some(*index),
+            );
+            let context = activation.as_payment_context();
+            let available = collect_sorted_auto_tap_source_options(
+                runner.state(),
+                P0,
+                None,
+                &HashSet::new(),
+                None,
+            );
+            assert_eq!(available.len(), if with_fertile { 5 } else { 1 });
+            let output = auto_tap_output_projection(runner.state(), &available, false).unwrap();
+            // Colored Aura markers can widen a canonical row. No such row
+            // may confer that union on the actual fixed-colorless base producer.
+            for row in &available {
+                let groups = projected_mana_output(row, Some(&output)).unwrap();
+                assert_eq!(groups.base.len(), 1);
+                assert_eq!(groups.base[0].mana_type, ManaType::Colorless);
+                assert!(!groups.base[0].source_could_produce_two_or_more_colors);
+            }
+            let row = available
+                .iter()
+                .find(|row| {
+                    row.taps_for_mana_overrides.iter().all(|(_, value)| {
+                        *value
+                            == crate::types::game_state::ProductionOverride::SingleColor(
+                                ManaType::Green,
+                            )
+                    })
+                })
+                .expect("concrete green choices for both actual Aura producers");
+            assert!(!row.source_could_produce_two_or_more_colors);
+            let groups = projected_mana_output(row, Some(&output)).unwrap();
+            assert_eq!(
+                groups.triggers.len(),
+                usize::from(with_fertile) + usize::from(with_overgrowth)
+            );
+            for (source, count, flexible) in overgrowth
+                .map(|id| (id, 2, false))
+                .into_iter()
+                .chain(fertile.map(|id| (id, 1, true)))
+            {
+                let refs: Vec<_> = crate::game::functioning_abilities::active_trigger_definitions(
+                    runner.state(),
+                    &runner.state().objects[&source],
+                )
+                .map(|active| active.definition_ref)
+                .collect();
+                assert_eq!(refs.len(), 1);
+                assert_eq!(
+                    row.taps_for_mana_overrides
+                        .iter()
+                        .filter(|(reference, _)| *reference == refs[0])
+                        .count(),
+                    1
+                );
+                let (_, units) = groups
+                    .triggers
+                    .iter()
+                    .find(|(reference, _)| *reference == refs[0])
+                    .unwrap();
+                assert_eq!(units.len(), count);
+                assert!(units.iter().all(|unit| unit.mana_type == ManaType::Green
+                    && unit.restrictions.is_empty()
+                    && unit.source_could_produce_two_or_more_colors == flexible));
+            }
+            let units = option_units_for_context(row, Some(&context), Some(&output));
+            assert_eq!(
+                units.len(),
+                1 + 2 * usize::from(with_overgrowth) + usize::from(with_fertile)
+            );
+            assert!(option_satisfies(
+                row,
+                &[],
+                false,
+                None,
+                Some(&output),
+                Some(&context)
+            ));
+            assert_eq!(
+                option_satisfies(
+                    row,
+                    &needs[0].0,
+                    needs[0].2,
+                    needs[0].4,
+                    Some(&output),
+                    Some(&context)
+                ),
+                with_fertile
+            );
+            let matching = auto_tap_matching_unit(&units, &needs[0]);
+            assert_eq!(matching.is_some(), with_fertile);
+            if let Some(matching) = matching {
+                assert!(units[matching].source_could_produce_two_or_more_colors);
+            }
+            assert_eq!(
+                score_combination(&units, &needs, &[false]),
+                if with_fertile {
+                    (1, vec![0])
+                } else {
+                    (0, Vec::new())
+                }
+            );
+            let plan = plan_auto_tap_rows(
+                runner.state(),
+                &available,
+                &needs,
+                *generic as usize,
+                Some(&context),
+                AutoTapFunding::Conservative,
+                Some(&output),
+            );
+            assert_eq!(plan.covers_cost, with_fertile);
+            let mut assigned = vec![false; needs.len()];
+            let mut used = HashSet::new();
+            let mut selected = Vec::new();
+            let surplus = assign_combination_sources(
+                runner.state(),
+                std::slice::from_ref(row),
+                &needs,
+                &mut assigned,
+                &mut used,
+                &mut selected,
+                Some(&context),
+                Some(&output),
+            );
+            assert_eq!(assigned, vec![with_fertile]);
+            assert_eq!(selected.len(), usize::from(with_fertile));
+            assert_eq!(used.contains(&wastes), with_fertile);
+            // CR 118.10: only the sole qualified Aura unit is assigned to Z;
+            // every other actual unit is surplus once, including fixed G/G.
+            assert_eq!(surplus, if with_fertile { units.len() - 1 } else { 0 });
+            if with_fertile {
+                assert_eq!(selected[0], *row);
+            }
+        }
 
         // Dynamic row labels distinguish native scalar work from the legal
         // projected work on unrelated Lute rows, even when that view is empty.
