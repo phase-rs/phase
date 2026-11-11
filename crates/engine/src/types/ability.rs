@@ -700,6 +700,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
             destination,
             target,
             owner_library: _,
+            library_shuffle: _,
             enter_transformed: _,
             enters_under: _,
             enter_tapped: _,
@@ -6459,6 +6460,7 @@ mod tests {
     fn resolved_ability_duration_roundtrips() {
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -6890,6 +6892,7 @@ mod tests {
         ) -> ResolvedAbility {
             let mut ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
                     target: TargetFilter::SelfRef,

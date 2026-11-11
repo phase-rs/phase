@@ -16611,17 +16611,77 @@ fn try_parse_event(
         }
     }
 
-    // CR 701.13a: "is exiled" / "are exiled" — exile trigger
-    if alt((
+    // CR 701.13a + CR 603.6c: "is exiled" / "are exiled" — exile trigger, with an
+    // optional " from <zone>" source-zone tail. The tail used to be a bare
+    // prefix test that silently dropped it, so "is exiled from the battlefield"
+    // parsed with no origin (issue #10195: Soulherder, Market Gnome, Captain
+    // Marvel, Shooting Star); the battlefield observers then fired on an exile
+    // from any zone.
+    if let Ok((after_verb, ())) = alt((
         value((), tag::<_, _, OracleError<'_>>("is exiled")),
         value((), tag("are exiled")),
     ))
     .parse(rest)
-    .is_ok()
     {
+        // CR 603.6c: the source-zone constraint. `Any` when the clause names no
+        // source zone; the vocabulary is "the battlefield" and bare "anywhere"
+        // (`parse_exiled_origin_zone`). The possessive zones ("your graveyard",
+        // ...) are not readable here because `Exiled` has no owner scope
+        // (CR 108.4a). A "from <zone>" tail this grammar cannot read must not
+        // silently widen the trigger to every origin — the #10195 defect class —
+        // so the arm fails closed. Mirrors the sibling arm's fail-closed contract.
+        let Ok((tail, origin)) = parse_origin_constraint_tail(after_verb, parse_exiled_origin_zone)
+        else {
+            return None;
+        };
+        // CR 603.6c: a residual zone-list or exclusion tail ("... or your
+        // graveyard", "from anywhere other than ...") means the origin was not
+        // fully consumed; widening or narrowing it silently is the #10195 defect
+        // class, so fail the arm closed. ("anywhere other than your graveyard"
+        // reaches here as a bare "anywhere" followed by "other than ": the
+        // exclusion list is unreadable without the possessive zone.)
+        // `find_effect_boundary` ends the condition at the first ", " that none of
+        // its list-continuation predicates claim; a zone-list leg ("from the
+        // battlefield, your graveyard, or exile") is claimed by none of them, so
+        // the condition ends at that comma and the list never reaches this tail;
+        // only the comma-less connective forms below can arrive here.
+        let tail = tail.trim_start();
+        if alt((
+            value((), tag::<_, _, OracleError<'_>>("or ")),
+            value((), tag("and/or ")),
+            value((), tag("other than ")),
+        ))
+        .parse(tail)
+        .is_ok()
+        {
+            return None;
+        }
+        // Any other residual condition tail (e.g. Market Gnome's "while you're
+        // activating a craft ability") stays unrepresented: it needs a
+        // serialized `TriggerConstraint`, i.e. a game protocol bump, and is
+        // tracked in #10630. This arm's contract is the origin only.
         let mut def = make_base();
         def.mode = TriggerMode::Exiled;
         def.valid_card = Some(subject.clone());
+        match origin {
+            OriginConstraint::Any => {}
+            OriginConstraint::Equals(zone) => def.origin = Some(zone),
+            OriginConstraint::OneOf(zones) => def.origin_zones = zones,
+            // CR 603.6c: "from anywhere other than <zone>" is a source-zone
+            // exclusion; the positive zone list expresses the same set.
+            OriginConstraint::NotEquals(zone) => def.origin_zones = origin_zones_except(&[zone]),
+        }
+        // CR 113.6k: an unconstrained self-referential "When ~ is exiled" can
+        // trigger from outside the battlefield (e.g. a graveyard exile), so it
+        // must function there; `Exile` is listed because this mode is matched
+        // immediately after the move, with the source already in exile. A
+        // battlefield-origin form (Market Gnome) triggers from the battlefield
+        // and is collected by the CR 603.10a leaves-the-battlefield look-back
+        // scan; the extra zones are inert for it because `match_exiled` checks
+        // the origin. Mirrors `try_parse_put_into_exile_from`.
+        if filter_references_self(subject) {
+            def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
+        }
         return Some((TriggerMode::Exiled, def));
     }
 
@@ -23874,6 +23934,35 @@ fn try_parse_returned_to_hand(
     Some((TriggerMode::ChangesZone, def))
 }
 
+/// CR 603.6c: The zone vocabulary of the "is put into exile from <zone>" tail
+/// (`try_parse_put_into_exile_from`). The "is exiled from <zone>" arm uses the
+/// narrower `parse_exiled_origin_zone`.
+fn parse_exile_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
+    alt((
+        value(Some(Zone::Battlefield), tag("the battlefield")),
+        value(None, tag("anywhere")),
+        value(Some(Zone::Library), tag("your library")),
+        value(Some(Zone::Hand), tag("your hand")),
+        value(Some(Zone::Graveyard), tag("your graveyard")),
+    ))
+    .parse(input)
+}
+
+/// CR 603.6c + CR 108.4a: The zone vocabulary of the "is/are exiled from <zone>"
+/// tail: only "the battlefield" and bare "anywhere". The possessive zones
+/// ("your library", "your hand", "your graveyard") that `parse_exile_origin_zone`
+/// accepts are deliberately excluded: a card outside the battlefield is scoped
+/// by its owner (CR 108.4a), and `TriggerMode::Exiled` carries no owner scope in
+/// `valid_card`, so a "your <zone>" origin would also fire when an opponent's
+/// card leaves that opponent's zone. Those tails fail the arm closed instead.
+fn parse_exiled_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
+    alt((
+        value(Some(Zone::Battlefield), tag("the battlefield")),
+        value(None, tag("anywhere")),
+    ))
+    .parse(input)
+}
+
 /// Parse "[subject] is/are put into exile [from <zone>]" — explicit zone-change
 /// form of the exile trigger. Mirror of `try_parse_put_into_graveyard` with exile
 /// as the destination. Example: God-Eternal Oketra — "When ~ is put into exile
@@ -23896,21 +23985,11 @@ fn try_parse_put_into_exile_from(
         value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_verb)
     {
         let after_from = after_from.trim_start();
-        fn parse_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
-            alt((
-                value(Some(Zone::Battlefield), tag("the battlefield")),
-                value(None, tag("anywhere")),
-                value(Some(Zone::Library), tag("your library")),
-                value(Some(Zone::Hand), tag("your hand")),
-                value(Some(Zone::Graveyard), tag("your graveyard")),
-            ))
-            .parse(input)
-        }
         // Strict origin + tail (mirrors `parse_graveyard_origin_union`): an
         // origin this grammar cannot fully consume fails the arm. Dropping it
         // would leave an unconstrained trigger that fires on exile from any
         // zone (e.g. "from an opponent's library").
-        let (tail, origin) = parse_origin_zone.parse(after_from).ok()?;
+        let (tail, origin) = parse_exile_origin_zone(after_from).ok()?;
         if !tail.trim().is_empty() {
             return None;
         }

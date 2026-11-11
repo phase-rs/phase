@@ -146,6 +146,10 @@ struct Board {
     wood_elves: Option<usize>,
     /// Impact Tremors on P0's battlefield.
     tremors: bool,
+    /// Synthetic prevention-shield creature on P0's battlefield; not a printed-card witness.
+    synthetic_shield: bool,
+    /// Gibbering Fiend on P0's battlefield and Shieldmate's Blessing cast at P1 before kickoff.
+    finite_prevention: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -176,6 +180,8 @@ struct Run {
     prompts: BTreeMap<&'static str, usize>,
     /// Priority beats at which P0's Mountain stood untapped on the battlefield.
     out_beats: usize,
+    /// The most floating damage replacements ever present at a sampled beat.
+    max_shields: usize,
     /// Each action's acting player, whether it ordered triggers, and the confirm replays it ran.
     replays: Vec<(Option<PlayerId>, bool, u64)>,
 }
@@ -284,6 +290,19 @@ fn build(board: Board, mode: LoopDetectionMode) -> Option<Built> {
     if board.tremors {
         scenario.add_real_card(P0, "Impact Tremors", Zone::Battlefield, db);
     }
+    if board.synthetic_shield {
+        // Explicitly synthetic, like `Test Counter Sink`: this target-free mandatory ETB
+        // exercises shield multiplicity without claiming to model a printed card's choices.
+        scenario
+            .add_creature_from_oracle(
+                P0,
+                "Test Prevention Shield Creature",
+                5,
+                5,
+                SYNTHETIC_SHIELD_CREATURE,
+            )
+            .id();
+    }
     if let Some(bears) = board.banisher {
         scenario.add_real_card(P0, "Banisher Priest", Zone::Battlefield, db);
         for _ in 0..bears {
@@ -335,6 +354,10 @@ fn build(board: Board, mode: LoopDetectionMode) -> Option<Built> {
     if board.wood_elves.is_some() {
         scenario.add_real_card(P0, "Wood Elves", Zone::Battlefield, db);
     }
+    let blessing = board.finite_prevention.then(|| {
+        scenario.add_real_card(P0, "Gibbering Fiend", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Shieldmate's Blessing", Zone::Hand, db)
+    });
     for (seat, swamps) in [(P0, board.wood_elves.unwrap_or(10)), (P1, 10)] {
         for _ in 0..swamps {
             scenario.add_real_card(seat, "Swamp", Zone::Library, db);
@@ -350,6 +373,11 @@ fn build(board: Board, mode: LoopDetectionMode) -> Option<Built> {
             .expect("the sink is on the battlefield")
             .counters
             .insert(CounterType::Minus1Minus1, counters);
+    }
+    if let Some(blessing) = blessing {
+        add_mana(&mut runner, P0, &[ManaType::White]);
+        drop(runner.cast(blessing).target_player(P1).commit());
+        settle(&mut runner, |state| holds_priority(state, P0));
     }
     let (mut watched, animate) = kickoff;
     match animate {
@@ -433,6 +461,7 @@ fn run_observed(
     let (mut entries, mut entries_at_half, mut reveals, mut reveals_at_half, mut max_ring) =
         (0, 0, 0, 0, 0);
     let (mut max_entries_per_action, mut out_beats, mut remembered) = (0, 0, false);
+    let mut max_shields = 0usize;
     let mut picks = 0;
     let mut prompts = BTreeMap::new();
     let mut replays = Vec::new();
@@ -445,6 +474,13 @@ fn run_observed(
         observe(state);
         let mut yield_first = None;
         max_ring = max_ring.max(state.loop_detect_ring.len());
+        max_shields = max_shields.max(
+            state
+                .pending_damage_replacements
+                .iter()
+                .filter(|shield| !shield.is_consumed)
+                .count(),
+        );
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             *prompts.entry(state.waiting_for.variant_name()).or_insert(0) += 1;
         }
@@ -619,6 +655,7 @@ fn run_observed(
         max_ring,
         prompts,
         out_beats,
+        max_shields,
         replays,
     })
 }
@@ -663,11 +700,30 @@ const PLAIN: Board = Board {
     first: None,
     wood_elves: None,
     tremors: false,
+    synthetic_shield: false,
+    finite_prevention: false,
 };
 
 const ANCHOR: Board = Board {
     maggots: 1,
     first: Some("Brain Maggot"),
+    ..PLAIN
+};
+
+/// Synthetic mechanism fixture for the comparator's multiplicity rule, not a printed card.
+/// Its nearest printed card is Angel of Salvation, whose ETB targets and divides prevention
+/// (CR 603.3d + CR 601.2c-d: triggers announce targets and division). The parser does not yet
+/// model those printed semantics; parser bring-up is separate scope. The real Angel is NOT
+/// exercised here.
+const SYNTHETIC_SHIELD_CREATURE: &str =
+    "When this creature enters, prevent the next 5 damage that would be dealt this turn.";
+
+const SYNTHETIC_SHIELD: Board = Board {
+    synthetic_shield: true,
+    // CR 603.3b: this is the board default too — with Animate Dead's trigger first in
+    // the order it resolves LAST, so the synthetic creature's trigger is listed last and
+    // resolves first. The install itself does not depend on the order (CR 113.7a).
+    first: Some("Test Prevention Shield Creature"),
     ..PLAIN
 };
 
@@ -685,6 +741,88 @@ fn worldgorger_animate_dead_is_a_draw_on_every_drive() {
             "{drive:?}: reach: the Dragon entered at least twice, got {}",
             run.entries
         );
+    }
+}
+
+/// CR 104.4b + CR 615.7: the synthetic creature's mandatory, target-free ETB appends one
+/// identical amount shield to `pending_damage_replacements` every Worldgorger Dragon /
+/// Animate Dead cycle. This mechanism test checks that the comparator's multiplicity rule
+/// lets the mandatory loop draw despite the growing registry; it does not exercise real Angel.
+#[test]
+fn worldgorger_with_a_synthetic_prevention_shield_is_still_a_draw() {
+    for drive in EVERY_DRIVE {
+        let Some(run) = run(SYNTHETIC_SHIELD, LoopDetectionMode::Interactive, drive, 300) else {
+            return;
+        };
+        assert_eq!(run.terminal, Terminal::GameOver(None), "{drive:?}");
+        assert!(
+            run.entries >= 2,
+            "{drive:?}: reach: the Dragon entered at least twice, got {}",
+            run.entries
+        );
+        assert!(
+            run.max_shields >= 1,
+            "{drive:?}: reach: the synthetic ETB resolved and its shield was live at a \
+             sampled beat, got {}",
+            run.max_shields
+        );
+    }
+}
+
+/// CR 615.7: the synthetic multiplicity mechanism — the registry grows by one by-value
+/// identical, unconsumed, rider-less amount shield per cycle. With the detector off the board
+/// does not end by itself, so this row is also the synthetic draw row's negative control.
+#[test]
+fn worldgorger_with_a_synthetic_prevention_shield_accumulates_identical_shields() {
+    let Some(run) = run(SYNTHETIC_SHIELD, LoopDetectionMode::Off, Drive::Pass, 120) else {
+        return;
+    };
+    assert_eq!(run.terminal, Terminal::BeatsExhausted);
+    assert!(run.entries >= 3, "reach: {}", run.entries);
+    assert!(
+        run.max_shields >= 3,
+        "reach: registry grew, got {}",
+        run.max_shields
+    );
+    let shields = &run.state().pending_damage_replacements;
+    assert!(!shields.is_empty(), "reach: the registry is non-empty");
+    assert!(
+        shields.iter().all(|def| def == &shields[0]),
+        "each cycle installs a by-value identical shield"
+    );
+    assert!(
+        shields.iter().all(|def| def.runtime_execute.is_none()),
+        "the synthetic shield has no rider, so the arena is not in play"
+    );
+}
+
+/// CR 615.7 + CR 104.4b: Shieldmate's Blessing absorbs only the first three Fiend ETBs.
+/// Its remaining capacity is progress even while P1's life stays unchanged; the mandatory
+/// Worldgorger / Animate Dead cycle eventually exhausts it and kills P1, rather than drawing.
+#[test]
+fn worldgorger_with_a_finite_player_prevention_shield_is_not_a_draw() {
+    let board = Board {
+        finite_prevention: true,
+        first: Some("Gibbering Fiend"),
+        ..PLAIN
+    };
+    for mode in [LoopDetectionMode::Off, LoopDetectionMode::Interactive] {
+        for drive in EVERY_DRIVE {
+            let result = run(board, mode, drive, 1800).expect("the integration fixture exists");
+            assert_eq!(
+                result.terminal,
+                Terminal::GameOver(Some(P0)),
+                "{mode:?}, {drive:?}: finite prevention must not turn a lethal loop into a draw"
+            );
+            if mode == LoopDetectionMode::Off {
+                // CR 615.7: three prevented points, then twenty points of lethal damage.
+                assert_eq!(
+                    result.entries, 23,
+                    "{drive:?}: the finite shield was exhausted"
+                );
+                assert_eq!(result.life(P1), 0, "{drive:?}: P1 naturally reached lethal");
+            }
+        }
     }
 }
 

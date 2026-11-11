@@ -3218,6 +3218,7 @@ mod entering_aura_attachment_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::SelfRef,
@@ -3289,6 +3290,7 @@ mod entering_aura_attachment_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::SelfRef,
@@ -5233,6 +5235,7 @@ mod w3_library_placement_tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Exile,
                         target: TargetFilter::Any,
@@ -5259,6 +5262,7 @@ mod w3_library_placement_tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: to,
                     target: TargetFilter::Any,
@@ -5280,6 +5284,7 @@ mod w3_library_placement_tests {
     fn face_down_self_search(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
         let mut exile_step = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -5850,6 +5855,7 @@ mod w3_library_placement_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -5964,6 +5970,7 @@ mod w3_library_placement_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -6106,6 +6113,7 @@ mod w3_library_placement_tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Exile,
                         target: TargetFilter::Any,
@@ -7573,6 +7581,7 @@ mod exiling_player_record_tests {
         let card = card_p1_exiled(&mut state);
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -7783,6 +7792,7 @@ mod hand_entry_receiver_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,

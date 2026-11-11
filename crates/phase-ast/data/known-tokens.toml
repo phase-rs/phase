@@ -49629,6 +49629,77 @@ scryfall_oracle_id = "f351e0ab-44bf-4895-a05f-c0bb473da1ef"
 preset_id = "3968de9a-3aac-5b38-8a48-51f1cdfe3f9d"
 
 [[token]]
+id = "399734a1-fe83-56ec-89cd-ef707c0fcfd8"
+category = "Creature"
+fidelity = "Full"
+source_card_names = ["Phyrexian Processor"]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "2446"
+released_at = "2019-12-02"
+type_line = "Token Creature — Phyrexian Minion"
+
+[token.pt_provenance.SourceDefinedOrDynamic]
+power = "*"
+toughness = "*"
+
+[token.body]
+display_name = "Phyrexian Minion"
+core_types = ["Creature"]
+subtypes = [
+    "Phyrexian",
+    "Minion",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "04789161-f0a8-4ba5-832f-4d585c5117a6"
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "c49eed6b-d446-4ce1-ab51-6f42e145b1a7"
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "34cefcd1-9aa2-4c34-ba68-736c7889cc92"
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "a2e35d8d-050f-4f7a-809a-c0aea30c0dbb"
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "56df1833-4c93-499b-9f40-f8c2d0f29342"
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "86238bde-8a82-4e85-bd64-2fdce77fb72b"
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "6cd99a2f-d20a-409e-9cf7-b3eb4399c8b8"
+
+[[token.source_card_refs]]
+card_name = "Phyrexian Processor"
+scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
+scryfall_id = "554fdc29-279d-4297-b8d3-01d90c96c7ba"
+
+[token.token_image_ref]
+scryfall_id = "f85b3716-0352-4401-afae-e5927f2acae0"
+scryfall_oracle_id = "6488080c-132c-4c5e-8ea2-1b689c519d83"
+preset_id = "399734a1-fe83-56ec-89cd-ef707c0fcfd8"
+
+[[token]]
 id = "399a0137-524e-559d-9d11-e41db7e4897a"
 category = "Creature"
 fidelity = "Full"
@@ -74296,7 +74367,6 @@ preset_id = "534ff50b-4189-562a-89cb-ec8790d38620"
 id = "53518bdd-3f35-5b95-9591-255a1036fda8"
 category = "Creature"
 fidelity = "Full"
-source_card_names = ["Phyrexian Processor"]
 set_code = "DDE"
 set_name = "Duel Decks: Phyrexia vs. the Coalition"
 collector_number = "2"
@@ -74314,46 +74384,6 @@ subtypes = ["Minion"]
 supertypes = []
 colors = ["Black"]
 keywords = []
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "04789161-f0a8-4ba5-832f-4d585c5117a6"
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "c49eed6b-d446-4ce1-ab51-6f42e145b1a7"
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "34cefcd1-9aa2-4c34-ba68-736c7889cc92"
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "a2e35d8d-050f-4f7a-809a-c0aea30c0dbb"
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "56df1833-4c93-499b-9f40-f8c2d0f29342"
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "86238bde-8a82-4e85-bd64-2fdce77fb72b"
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "6cd99a2f-d20a-409e-9cf7-b3eb4399c8b8"
-
-[[token.source_card_refs]]
-card_name = "Phyrexian Processor"
-scryfall_oracle_id = "36c800cb-b1ca-4432-ad3c-4d8b90337f4c"
-scryfall_id = "554fdc29-279d-4297-b8d3-01d90c96c7ba"
 
 [token.token_image_ref]
 scryfall_id = "a9930d11-4772-4fc2-abbd-9af0a9b23a3e"
