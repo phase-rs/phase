@@ -66,8 +66,10 @@ fn prepare(runner: &mut GameRunner, player: PlayerId) {
     }
 }
 
-/// Cast a printed spell at `target`, answering an "As this Aura enters, choose
-/// a color" prompt with `color`, and let the stack settle.
+/// Cast a printed spell at `target` and let the stack settle. `color` is the
+/// answer to the spell's "As this Aura enters, choose a color" prompt: when it
+/// is given the prompt is required, and the chosen color must be recorded on
+/// the permanent; when it is not, no prompt may appear.
 fn cast(
     runner: &mut GameRunner,
     player: PlayerId,
@@ -82,16 +84,28 @@ fn cast(
         None => cast,
     };
     let outcome = cast.resolve();
-    if let WaitingFor::NamedChoice { options, .. } = outcome.final_waiting_for() {
-        let wanted = color.expect("a color prompt needs an answer");
-        let choice = options
-            .iter()
-            .find(|option| option.eq_ignore_ascii_case(wanted))
-            .expect("the color is offered")
-            .clone();
-        runner
-            .act(GameAction::ChooseOption { choice })
-            .expect("the color choice resolves");
+    match (color, outcome.final_waiting_for()) {
+        (
+            Some(wanted),
+            WaitingFor::NamedChoice {
+                player: chooser,
+                options,
+                ..
+            },
+        ) => {
+            assert_eq!(*chooser, player, "the caster chooses the color");
+            let choice = options
+                .iter()
+                .find(|option| option.eq_ignore_ascii_case(wanted))
+                .expect("the color is offered")
+                .clone();
+            runner
+                .act(GameAction::ChooseOption { choice })
+                .expect("the color choice resolves");
+        }
+        (Some(_), other) => panic!("the spell must ask a color, got {other:?}"),
+        (None, WaitingFor::NamedChoice { .. }) => panic!("unexpected color prompt"),
+        (None, _) => {}
     }
     runner.advance_until_stack_empty();
     assert!(
@@ -99,6 +113,12 @@ fn cast(
         "{:?}",
         runner.state().waiting_for
     );
+    if let Some(wanted) = color {
+        let chosen = runner.state().objects[&spell]
+            .chosen_color()
+            .expect("the chosen color is recorded");
+        assert!(format!("{chosen:?}").eq_ignore_ascii_case(wanted));
+    }
 }
 
 fn attached(runner: &GameRunner, aura: ObjectId, host: ObjectId) {
@@ -284,10 +304,24 @@ fn printed_protection_blocks_own_rider_aura_after_layers() {
     let mut runner = s.build();
     cast(&mut runner, P0, ward, Some(knight), Some("white"));
     attached(&runner, ward, knight);
+    // Reach guard: under Humility the only white instance is Ward's own grant,
+    // carrying Ward's own rider; Black Knight's printed protection is gone.
+    assert_eq!(
+        white_riders(runner.state(), knight),
+        vec![Some(crate::game::game_object::ProtectionRiderGrant {
+            source: ward,
+            occurrence: ProtectionGrantOccurrence::Static {
+                definition_index: ridered_static_index(runner.state(), ward),
+            },
+            mod_index: 0,
+            does_not_remove: ProtectionDoesNotRemove::Source,
+        })],
+        "Ward-only white protection before Humility leaves"
+    );
     assert_eq!(
         attachment_illegality(runner.state(), ward, knight),
         None,
-        "reach guard: under Humility only Ward's own instance is live"
+        "Ward's rider exempts Ward from its own instance"
     );
 
     cast(&mut runner, P0, demystify, Some(humility), None);
