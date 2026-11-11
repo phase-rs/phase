@@ -6257,7 +6257,7 @@ mod tests {
     /// is classified, so a serde reconstruction cannot drop it silently.
     #[test]
     fn decoder_skipped_object_fields_are_carried_or_derived() {
-        const DERIVED: [&str; 8] = [
+        const DERIVED: [&str; 9] = [
             "unimplemented_mechanics",
             "has_summoning_sickness",
             "devotion",
@@ -6266,6 +6266,8 @@ mod tests {
             "available_mana_pips",
             "blocked_abilities",
             "commander_tax",
+            // CR 702.16 + CR 613.1f: rebuilt by every layer flush.
+            "protection_provenance",
         ];
         let source = crate::source_census::code_lines(include_str!("game_object.rs"));
         let body = source
