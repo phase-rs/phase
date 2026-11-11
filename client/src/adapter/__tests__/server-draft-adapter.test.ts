@@ -3958,6 +3958,110 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
     adapter.dispose();
   });
 
+  it("retires the incumbent when a written ReconnectDraft candidate is superseded", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const first = draftCodecSession(decodeEnvelope);
+    const second = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    provider.mockResolvedValueOnce(first.session);
+    const superseded = trackRejection(adapter.reconnectDraft());
+    await drainArt();
+    const candidate = MockWebSocket.last!;
+    expect(candidate).not.toBe(ws);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    // The transport does not honor the signal: the frame still goes out.
+    candidate.sendReceipt = vi.fn(async (data: string) => {
+      await gate;
+      candidate.send(data);
+    });
+    candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+    await drainArt();
+    provider.mockResolvedValueOnce(second.session);
+    void trackRejection(adapter.reconnectDraft());
+    await drainArt();
+    // Before the write the incumbent is untouched.
+    expect(ws.close).not.toHaveBeenCalled();
+    release();
+    await drainArt();
+    expect(candidate.send).toHaveBeenCalledWith(expect.stringContaining('"type":"ReconnectDraft"'));
+    await expect(superseded()).resolves.toMatchObject({ code: "WS_CLOSED" });
+    // The seat's sender moved to the written candidate: the incumbent is no
+    // longer the connection and is released with the candidate.
+    expect(ws.close).toHaveBeenCalledOnce();
+    expect(candidate.close).toHaveBeenCalled();
+    await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects
+      .toMatchObject({ message: "WebSocket not connected" });
+    adapter.dispose();
+  });
+
+  it("retires the incumbent when a written ReconnectDraft candidate closes before adoption", async () => {
+    const session = draftCodecSession(decodeEnvelope);
+    const candidateSession = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    provider.mockResolvedValueOnce(candidateSession.session);
+    const reconnecting = trackRejection(adapter.reconnectDraft());
+    await drainArt();
+    const candidate = MockWebSocket.last!;
+    expect(candidate).not.toBe(ws);
+    candidate.sendReceipt = vi.fn(async (data: string) => {
+      candidate.send(data);
+      candidate.readyState = 3;
+      candidate.dispatchSynthetic("close");
+    });
+    candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+    await drainArt();
+    expect(candidate.send).toHaveBeenCalledWith(expect.stringContaining('"type":"ReconnectDraft"'));
+    await expect(reconnecting()).resolves.toMatchObject({ code: "WS_CLOSED" });
+    expect(ws.close).toHaveBeenCalledOnce();
+    await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects
+      .toMatchObject({ message: "WebSocket not connected" });
+    adapter.dispose();
+  });
+
+  it("keeps the incumbent when a written Create candidate is superseded", async () => {
+    // Create attaches a different seat: the incumbent's seat is not replaced.
+    const session = draftCodecSession(decodeEnvelope);
+    const first = draftCodecSession(decodeEnvelope);
+    const second = draftCodecSession(decodeEnvelope);
+    const { adapter, ws, provider } = await startCodecDraft(session.session);
+    const events: unknown[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await enterCodecMatch(ws, events);
+    provider.mockResolvedValueOnce(first.session);
+    const superseded = trackRejection(adapter.createDraft({
+      displayName: "First", setCodes: ["TST"], kind: "Premier", public: false,
+      tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+    }));
+    await drainArt();
+    const candidate = MockWebSocket.last!;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    candidate.sendReceipt = vi.fn(async (data: string) => {
+      await gate;
+      candidate.send(data);
+    });
+    candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+    await drainArt();
+    provider.mockResolvedValueOnce(second.session);
+    void trackRejection(adapter.createDraft({
+      displayName: "Second", setCodes: ["TST"], kind: "Premier", public: false,
+      tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+    }));
+    await drainArt();
+    release();
+    await drainArt();
+    await expect(superseded()).resolves.toMatchObject({ code: "WS_CLOSED" });
+    expect(ws.close).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
   it("does not accept a same-key GameStarted Full older than the applied revision", async () => {
     const session = draftCodecSession(decodeEnvelope);
     const { adapter, ws } = await startCodecDraft(session.session);

@@ -366,7 +366,9 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (socket.readyState !== WebSocket.OPEN) return false;
     try {
       await socket.sendReceipt(JSON.stringify(frame), signal);
-      return !isAborted();
+      // A resolved receipt means the frame was written, even if the attachment
+      // was cancelled while waiting; the caller decides what that implies.
+      return true;
     } catch {
       return false;
     }
@@ -1097,6 +1099,28 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.emit({ type: "actionPendingChanged", pending: false });
   }
 
+  /**
+   * The server replaces a seat's sender on `ReconnectDraft` and never closes
+   * the predecessor, so after that frame is written the incumbent no longer
+   * receives the seat's broadcasts. A candidate cancelled or closed past that
+   * point must not leave the incumbent as the current socket: it stops being
+   * current and is released unless it still owes a reply (the same contract a
+   * replaced socket has after a successful adoption). Create and Join attach a
+   * different seat and leave the incumbent's seat untouched.
+   */
+  private retireSwappedIncumbent(candidate: PhaseSocketTransport, owner: AttachmentOwner): void {
+    if (owner.type !== "init" || owner.init.kind !== "reconnect") return;
+    const incumbent = this.ws;
+    if (incumbent === null || incumbent === candidate) return;
+    this.ws = null;
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+    this.stateCodec.clearRecovery();
+    this.retireIdleSockets();
+  }
+
   private abandonSocket(socket: PhaseSocket): void {
     // Invalidate the candidate before notifications can reenter on a successor.
     if (this.ws === socket.ws) {
@@ -1269,6 +1293,9 @@ export class ServerDraftAdapter implements EngineAdapter {
         throw new AdapterError("WS_CLOSED", "Failed to send setup frame", true);
       }
       if (!this.ownsAttachment(attachment) || !this.sockets.has(sourceSocket)) {
+        // The frame is on the wire: a ReconnectDraft has already moved the
+        // seat's sender to this candidate, so the incumbent is deaf.
+        this.retireSwappedIncumbent(sourceSocket, attachment.owner);
         this.abandonSocket(socket);
         return;
       }
