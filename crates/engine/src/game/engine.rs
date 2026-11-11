@@ -6472,10 +6472,13 @@ pub(crate) fn settle_recurs(boundary: &GameState, settled: &GameState) -> bool {
         || crate::analysis::resource::loop_states_cover_modulo_growth(boundary, settled)
 }
 
-/// What each loop comparator entry point answers for one frame pair, each side put through
-/// the production normalization that entry point applies. The sample form and the
-/// comparators are crate-private; integration tests reach them through
-/// [`loop_entry_point_verdicts_for_tests`].
+/// What the expression each loop comparator entry point evaluates answers for one frame
+/// pair, each side put through the production normalization that entry point applies. These
+/// are the same expressions as the call sites, not the call sites: `ring_walk` is the
+/// equality arm alone (the walks also OR in growth covers), and `settlement` seeds both sides
+/// with [`take_boundary`], where production samples a settle frame that is already at the
+/// active player's priority. The sample form and the comparators are crate-private;
+/// integration tests reach them through [`loop_entry_point_verdicts_for_tests`].
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoopEntryPointVerdicts {
@@ -23627,11 +23630,18 @@ mod stage2_injector_tests {
     /// drainer and the feedback engine in a three-player game: each life gain makes exactly
     /// one drain, so the cascade holds a constant depth and, with the pinned opponent far
     /// from lethal, no seat leaves. The drive reaches the settle arm and returns `Recurred`
-    /// ("The game advances to the last proposed ending point"). The turn already holds a long
-    /// damage history, and the journal counter is reset BEFORE the boundary is built, so the
-    /// measurement covers boundary construction and every settle comparison of the take.
+    /// ("The game advances to the last proposed ending point").
+    ///
+    /// What the visit count shows, and what it does not: the 256 damage rows are INJECTED
+    /// history unrelated to the take, and the loop is life drain, so no retained carrier
+    /// holds a damage event. The bound is therefore zero, and it discriminates one thing:
+    /// a committed take must not rank or scan damage history nobody in the loop can read
+    /// (a strict boundary alone walks it). The counter is reset BEFORE the boundary is
+    /// built. A take whose own carrier reads a damage recipient pays one journal pass per
+    /// projection; that cost is measured by
+    /// `loop_relational_take_boundary_defers_history_through_first_settle`, not here.
     #[test]
-    fn drive_one_cycle_recurs_on_a_committed_take_over_a_populated_damage_journal() {
+    fn drive_one_cycle_recurs_on_a_committed_take_without_reading_unrelated_damage_history() {
         use crate::types::game_state::{DamageRecord, LOOP_DAMAGE_JOURNAL_VISITS};
 
         const ROWS: usize = 256;

@@ -2134,6 +2134,115 @@ mod tests {
         state
     }
 
+    /// The first priority frame of a mandatory loop at which the recurrence span is known,
+    /// with the offers before it declined (CR 732.5), and that span.
+    fn first_mandatory_recurrence(
+        mut runner: crate::game::scenario::GameRunner,
+    ) -> (GameState, NamedSpan) {
+        for _ in 0..80 {
+            let state = runner.state();
+            match &state.waiting_for {
+                WaitingFor::LoopShortcut { .. } => {
+                    runner
+                        .act(GameAction::DeclineShortcut)
+                        .expect("decline the offer");
+                }
+                WaitingFor::Priority { .. } => {
+                    if let Some(span) = crate::game::play_trace::mandatory_recurrence_span(state) {
+                        return (state.clone(), span);
+                    }
+                    runner.act(GameAction::PassPriority).expect("pass priority");
+                }
+                other => panic!("unexpected prompt {}", other.variant_name()),
+            }
+        }
+        panic!("the loop never exposed a mandatory recurrence span at a priority frame");
+    }
+
+    /// CR 104.4b + CR 732.4: the MANDATORY-REPLAY caller over real damage history.
+    ///
+    /// Marauding Raptor ("Whenever another creature you control enters, this creature deals 2
+    /// damage to it. ...") and Polyraptor ("Enrage — Whenever this creature is dealt damage,
+    /// create a token that's a copy of this creature.") loop with no choice once Shock deals
+    /// the first damage; the opponent's Prodigal Sorcerer is the out that turns the draw
+    /// into an offer, which is declined so play continues to a priority frame inside the
+    /// loop. Every row of the damage journal was written by that play. The visit counter is
+    /// reset, then `mandatory_period_holds` replays the span twice from that frame and
+    /// settles each replayed frame against `take_boundary`.
+    ///
+    /// What it shows: the period holds; the take is `Unperformable(UndelimitedCover)`, because
+    /// each period adds a token and no settle frame recurs (so this board does NOT reach a
+    /// `Performs` take); and the whole replay, boundary construction and every settle
+    /// comparison included, reads no journal row, because neither trigger in the loop reads
+    /// a damage recipient.
+    #[test]
+    fn mandatory_replay_holds_over_a_real_damage_journal_without_reading_it() {
+        use crate::analysis::loop_check::{CountedTake, UnperformableCause};
+        use crate::game::scenario::GameScenario;
+        use crate::types::game_state::{LoopDetectionMode, LOOP_DAMAGE_JOURNAL_VISITS};
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_creature_from_oracle(
+            p0,
+            "Marauding Raptor",
+            2,
+            3,
+            "Creature spells you cast cost {1} less to cast.\nWhenever another creature you control enters, this creature deals 2 damage to it. If a Dinosaur is dealt damage this way, this creature gets +2/+0 until end of turn.",
+        );
+        let polyraptor = scenario
+            .add_creature_from_oracle(
+                p0,
+                "Polyraptor",
+                5,
+                5,
+                "Enrage \u{2014} Whenever this creature is dealt damage, create a token that's a copy of this creature.",
+            )
+            .id();
+        scenario.add_creature_from_oracle(
+            p1,
+            "Prodigal Sorcerer",
+            1,
+            1,
+            "{T}: This creature deals 1 damage to any target.",
+        );
+        let shock = scenario
+            .add_spell_to_hand_from_oracle(p0, "Shock", true, "Shock deals 2 damage to any target.")
+            .id();
+        scenario.with_mana_pool(
+            p0,
+            vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+        let _ = runner.cast(shock).target_object(polyraptor).commit();
+
+        let (frame, span) = first_mandatory_recurrence(runner);
+        let rows = frame.damage_dealt_this_turn.len();
+        assert!(
+            rows >= 3,
+            "reach guard: play wrote the damage journal ({rows} rows) before the measurement"
+        );
+
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let held = mandatory_period_holds(&frame, span);
+        let visits = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
+
+        let held = held.expect("the mandatory token-copy period holds");
+        assert_eq!(
+            held.counted_take,
+            CountedTake::Unperformable(UnperformableCause::UndelimitedCover),
+            "each period adds a token, so no replayed settle frame recurs against the boundary"
+        );
+        assert_eq!(
+            visits, 0,
+            "{visits} journal visits through the mandatory replay over {rows} real rows"
+        );
+    }
+
     /// CR 603.2c + CR 603.3b: two occurrences equal in source and text are still two triggered
     /// abilities, so the orders tried at a point apply every order of the three.
     #[test]

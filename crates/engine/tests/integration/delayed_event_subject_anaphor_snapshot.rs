@@ -1319,18 +1319,12 @@ fn zone_after_the_trigger_resolves(frame: &GameState, object: ObjectId) -> Zone 
     zone_of(&runner, object)
 }
 
-/// Both frames are loop-comparable and recur against themselves (the reach guard
-/// that keeps the negative verdicts from being vacuous), and neither recurs
-/// against the other at any entry point, in either order.
+/// Neither frame recurs against the other at any entry point, in either order; and
+/// each recurs against itself, the reach guard that keeps those negative verdicts
+/// from being vacuous. The cross pair is asserted FIRST so that a comparator which
+/// merges the two fails on the claim itself.
 fn assert_different_loop_positions(stale: &GameState, live: &GameState, what: &str) {
     assert!(stale != live, "{what}: reach guard, the raw frames differ");
-    for (name, frame) in [("stale", stale), ("live", live)] {
-        assert_eq!(
-            loop_entry_point_verdicts_for_tests(frame, &frame.clone()),
-            ALL_RECUR,
-            "{what}: reach guard, the {name} frame recurs against itself"
-        );
-    }
     for (prior, current, order) in [
         (stale, live, "stale then live"),
         (live, stale, "live then stale"),
@@ -1340,6 +1334,13 @@ fn assert_different_loop_positions(stale: &GameState, live: &GameState, what: &s
             NONE_RECUR,
             "{what} ({order}): CR 603.7c, a pin on the live recipient is not the position \
              of a pin on a recipient that left and returned"
+        );
+    }
+    for (name, frame) in [("stale", stale), ("live", live)] {
+        assert_eq!(
+            loop_entry_point_verdicts_for_tests(frame, &frame.clone()),
+            ALL_RECUR,
+            "{what}: reach guard, the {name} frame recurs against itself"
         );
     }
 }
