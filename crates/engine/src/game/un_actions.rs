@@ -602,36 +602,3 @@ fn touch_object(
         Ok(ActionResult::applied(events, state.waiting_for.clone()))
     }
 }
-
-/// CR 603.3: a touch made while a decision was pending parked its triggers until
-/// a player would next receive priority. Most answers put the deferred queue on
-/// the stack in their own priority pass, but an answer that hands priority back
-/// without one (a paid unless-cost with nothing after it) leaves the queue
-/// parked. Put it on the stack now, before any player acts on that priority.
-pub(crate) fn place_parked_touch_triggers(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EngineError> {
-    let WaitingFor::Priority { .. } = state.waiting_for else {
-        return Ok(());
-    };
-    let touch_parked = state.deferred_triggers.iter().any(|context| {
-        context
-            .trigger_events
-            .iter()
-            .any(|event| matches!(event, GameEvent::ObjectTouched { .. }))
-    });
-    // CR 104.1: once the game has ended nothing more triggers.
-    if state.game_end.is_some()
-        || !touch_parked
-        || !super::triggers::should_drain_deferred_triggers_now(state)
-    {
-        return Ok(());
-    }
-    // A fresh event buffer: this pass places only the parked queue and must not
-    // rescan the action's already-collected events for delayed triggers.
-    let mut placed = Vec::new();
-    settle_triggers_at_priority(state, &mut placed)?;
-    events.extend(placed);
-    Ok(())
-}

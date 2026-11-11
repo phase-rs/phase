@@ -118,13 +118,15 @@ pub(super) fn run_post_action_pipeline_after_resumed_resolution(
 
 /// CR 117.3c + CR 117.5 + CR 605.4a: the settled-Priority convergence wrapper.
 ///
-/// The one caller family is a handler that returns its `ActionResult` directly,
+/// Caller families: a handler that returns its `ActionResult` directly,
 /// bypassing the reducer's ordinary epilogue, after a sidecar-owned accepted
 /// triggered-mana occurrence resumed a **direct `ManaAbilityResume::Priority`
 /// root or a top-level special action** (CR 116.2) with no live
-/// cast/resolution/payment owner left. Its `settled_priority` is that root's own
-/// exact reconstructed wait, and it is exhaustively validated here rather than
-/// trusted.
+/// cast/resolution/payment owner left; and
+/// [`settle_deferred_triggers_at_priority`], the shared convergence for a
+/// settled `Priority` that some answer path handed back without a post-action
+/// pass of its own. Callers supply that root's own exact Priority wait, and it
+/// is exhaustively validated here rather than trusted.
 ///
 /// It differs from the ordinary wrappers in exactly three ways: its drain policy
 /// does not select the announced-cast batch; the carried recipient
@@ -162,6 +164,52 @@ pub(crate) fn run_post_action_pipeline_from_settled_priority(
     Ok(triggers::finish_trigger_construction_action(
         state, events, produced,
     ))
+}
+
+/// CR 603.3 + CR 603.3b: put the deferred-trigger queue on the stack at a
+/// settled `Priority` boundary, through the ordinary settled-priority pipeline.
+///
+/// Most answers reach their own post-action pass, which drains the queue. A few
+/// hand a settled `Priority` back without one — most visibly a successful
+/// unless payment whose paid branch has no successor instruction — and a
+/// triggered ability parked while the answered decision was open must not stay
+/// parked while players act on that priority.
+///
+/// The authority is deliberately event-agnostic: eligibility is the same
+/// [`triggers::should_drain_deferred_triggers_now`] rule every ordinary priority
+/// pass uses, and one call places the whole queue. Naming no event kind keeps
+/// every parked context converging through one path, so a new out-of-band event
+/// needs no rescue of its own and unrelated queues that meet at the same
+/// boundary cannot diverge.
+pub(crate) fn settle_deferred_triggers_at_priority(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let WaitingFor::Priority { .. } = state.waiting_for else {
+        return Ok(());
+    };
+    // CR 104.1: once the game has ended nothing more triggers.
+    if state.game_end.is_some()
+        || state.deferred_triggers.is_empty()
+        || !triggers::should_drain_deferred_triggers_now(state)
+    {
+        return Ok(());
+    }
+    // A fresh event buffer: this pass places only the parked queue and must not
+    // rescan the caller's already-collected events for delayed triggers.
+    let settled_priority = state.waiting_for.clone();
+    let mut placed = Vec::new();
+    let stack_before = state.stack.len();
+    let settled =
+        run_post_action_pipeline_from_settled_priority(state, &mut placed, 0, &settled_priority)?;
+    state.waiting_for = settled;
+    // CR 117.4: a pass made before the new triggered ability joined the stack
+    // was not a pass on it, so the consecutive-pass record starts over.
+    if state.stack.len() > stack_before {
+        super::priority::clear_priority_passes(state);
+    }
+    events.extend(placed);
+    Ok(())
 }
 
 /// CR 608.2n + CR 117.5: the pass pipeline after `stack::resolve_top`'s net

@@ -2332,12 +2332,18 @@ fn finish_action_boundary_with_lifecycle(
     state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
     // CR 603.3: only once the action's own wait has settled into the state.
     let settled = state.waiting_for == result.waiting_for;
-    let touch_placement = if settled {
-        super::un_actions::place_parked_touch_triggers(state, &mut result.events)
+    // CR 603.3 + CR 603.3b: an answer that hands a settled `Priority` back
+    // without a post-action pass of its own (a successful unless payment with
+    // no successor instruction) leaves parked triggers in the deferred queue.
+    // The shared priority-boundary authority places whatever is eligible by the
+    // same rule every ordinary pass uses; it names no event kind, so every
+    // parked context converges through one path.
+    let deferred_placement = if settled {
+        super::engine_priority::settle_deferred_triggers_at_priority(state, &mut result.events)
     } else {
         Ok(())
     };
-    if let Err(err) = touch_placement {
+    if let Err(err) = deferred_placement {
         let life_failure = close_ingress_window(state, &mut prior_window);
         lifecycle.discard();
         *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);

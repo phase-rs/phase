@@ -6254,13 +6254,13 @@ fn masked_cast_root_mana_batch_stays_queued_until_the_spell_is_announced() {
 /// FIXTURE NOTE, deliberately recorded rather than absorbed: the punisher
 /// carries an "if you do" rider, so the paid branch runs an ability chain and
 /// the owner reaches its own post-action settlement, which is what releases the
-/// group. A rider-FREE unless-payment currently has no settlement convergence
-/// at all — `finish_successful_unless_payment` runs the pipeline only when it
-/// resolved a sub-ability, so a bare paid cost lands on `Priority` with the
-/// three contexts still queued. That gap is exactly what the plan's settled-
-/// Priority convergence wrapper (`run_post_action_pipeline_from_settled_priority`
-/// plus the `engine_payment_choices` readiness hook) closes, and it is still
-/// owed; this row deliberately does not encode the gap as a contract.
+/// group. The rider-FREE counterpart used to have no settlement convergence at
+/// all — `finish_successful_unless_payment` ran the pipeline only when it
+/// resolved a sub-ability, so a bare paid cost landed on `Priority` with the
+/// three contexts still queued. That gap is now closed by
+/// `engine_priority::settle_deferred_triggers_at_priority`, which the paid
+/// completion invokes on its no-successor route; the sibling row below is the
+/// contract for it.
 #[test]
 fn masked_unless_payment_root_mana_batch_stays_queued_until_the_owner_settles() {
     let HostileAbcdFixture {
@@ -6490,6 +6490,201 @@ fn masked_unless_payment_root_mana_batch_stays_queued_until_the_owner_settles() 
         runner.state().players[P0.0 as usize].life,
         life_before + 1 + 5 + 3 + observer_gain,
         "each masked batch member resolves exactly once, and the paid-for punisher never does"
+    );
+}
+
+/// CR 118.12 + CR 603.3 + CR 603.3b + CR 608.2: the non-touch sibling of the
+/// masked `UnlessPayment` control above, at the same **no-successor** boundary.
+///
+/// The punisher here has no "if you do" rider, so a paid answer ends the
+/// resolution with no further instruction and no post-action pass of its own.
+/// The three deferred contexts are ordinary triggered abilities (A's and B's
+/// reflexive riders, D's `Taps` observer) — none is an Un-card touch — so the
+/// row proves the release belongs to the shared priority-boundary authority and
+/// not to any event-kind discriminator. Placement must be once-only: each
+/// context appears once in the released ordering group, the punisher's -100
+/// never resolves, and each member resolves exactly once.
+#[test]
+fn rider_free_paid_unless_payment_places_the_parked_batch_once() {
+    let HostileAbcdFixture {
+        mut scenario,
+        source_a,
+        source_b,
+        source_c: _,
+        observer: observer_d,
+        observer_gain,
+    } = hostile_abcd_fixture(HostileObserverAxis::TapsB);
+
+    // "You lose 100 life unless you pay {1}." No rider: paying is the owner's
+    // last instruction, which is exactly the no-successor boundary.
+    let mut punisher = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 100 },
+            target: Some(TargetFilter::Controller),
+        },
+    );
+    punisher.unless_pay = Some(UnlessPayModifier {
+        cost: AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        },
+        payer: TargetFilter::Controller,
+    });
+    let spell = scenario
+        .add_spell_to_hand(P0, "Bare Paid Unless Witness", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        })
+        .with_ability_definition(punisher)
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the free witness spell is announced");
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    let owner = runner
+        .act(GameAction::PassPriority)
+        .expect("P1 passes and the witness resolves into its unless-payment");
+    assert!(
+        matches!(
+            owner.waiting_for,
+            WaitingFor::UnlessPayment { player: P0, .. }
+        ),
+        "expected a live UnlessPayment resolution owner, got {:?}",
+        owner.waiting_for
+    );
+
+    // Park the batch during the payment, exactly as the masked row does: A's
+    // activation pauses on B's replacement choice below the resolution owner.
+    let paused = runner
+        .act(GameAction::ActivateAbility {
+            source_id: source_a,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("A is manually activated during the unless payment (CR 118.12)");
+    assert!(
+        matches!(paused.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "expected the nested pause under the resolution owner, got {:?}",
+        paused.waiting_for
+    );
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the replacement choice resumes B, then A's later synchronous C");
+    assert!(
+        matches!(
+            resumed.waiting_for,
+            WaitingFor::UnlessPayment { player: P0, .. }
+        ),
+        "the resolution owner must retain the action, got {:?}",
+        resumed.waiting_for
+    );
+    let queued: Vec<ObjectId> = runner
+        .state()
+        .deferred_triggers
+        .iter()
+        .map(|context| context.pending.source_id)
+        .collect();
+    assert_eq!(
+        queued.len(),
+        3,
+        "reach guard: the resolution owner holds three parked non-touch contexts: {queued:?}"
+    );
+    for (label, id) in [("A", source_a), ("B", source_b), ("D", observer_d)] {
+        assert_eq!(
+            queued.iter().filter(|member| **member == id).count(),
+            1,
+            "reach guard: {label} is parked exactly once: {queued:?}"
+        );
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach guard: nothing has reached the stack before the owner settles"
+    );
+    assert_eq!(runner.state().players[P0.0 as usize].life, life_before);
+
+    // Paying settles the resolution owner. This is the no-successor boundary:
+    // the parked group must be released here, once.
+    let settled = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the unless cost is paid and the punisher is prevented");
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        0,
+        "the green pip really paid the unless cost"
+    );
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "the boundary places the parked queue instead of leaving it waiting: {:?}",
+        runner.state().deferred_triggers
+    );
+    let WaitingFor::OrderTriggers {
+        triggers: ref group,
+        ..
+    } = settled.waiting_for
+    else {
+        panic!(
+            "the settled priority boundary must expose the single ordering group, got {:?}",
+            settled.waiting_for
+        );
+    };
+    let members: Vec<ObjectId> = group.iter().map(|summary| summary.source_id).collect();
+    assert_eq!(members.len(), 3, "{members:?}");
+    for (label, id) in [("A", source_a), ("B", source_b), ("D", observer_d)] {
+        assert_eq!(
+            members.iter().filter(|member| **member == id).count(),
+            1,
+            "{label} appears in the released group exactly once: {members:?}"
+        );
+    }
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+            .count(),
+        0,
+        "no trigger entry may be on the stack before the group is ordered"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before,
+        "a paid unless cost suppresses the -100 punishment"
+    );
+
+    runner
+        .act(GameAction::OrderTriggers {
+            order: vec![0, 1, 2],
+        })
+        .expect("the released group orders once the resolution owner has settled");
+    for _ in 0..3 {
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+        runner.act(GameAction::PassPriority).expect("P1 passes");
+    }
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        life_before + 5 + 3 + observer_gain,
+        "each parked member resolves exactly once; once-only placement adds no duplicate"
+    );
+    assert!(
+        runner.state().deferred_triggers.is_empty(),
+        "normal Priority completion left nothing parked"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "normal Priority completion drained the group"
     );
 }
 
