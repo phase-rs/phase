@@ -9,8 +9,9 @@
 //!   and acts on the members still on the battlefield when it resolves.
 //! - Pauses reached: a counter-replacement ordering on a copy's "enters with"
 //!   counters (CR 614.1c + CR 122.6 + CR 616.1e / CR 616.1f), an entry
-//!   replacement ordering (Archelos + Imposing Sovereign, CR 616.1e), and an
-//!   as-enters choice (Painter's Servant, CR 614.12a).
+//!   replacement ordering (Archelos + Imposing Sovereign, CR 616.1e), an
+//!   as-enters choice (Painter's Servant, CR 614.12a), and an "enter as a copy"
+//!   choice (Quicksilver Gargantuan, CR 614.1c + CR 707.5).
 //! - Token multipliers are in the class (rulings, verbatim):
 //!   - Twinflame: "if Twinflame creates multiple tokens copying a single creature
 //!     due to a replacement effect (like the one Doubling Season creates),
@@ -27,17 +28,17 @@ use std::collections::HashSet;
 use crate::support::shared_card_db;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{Effect, EffectKind, TargetFilter};
-use engine::types::actions::GameAction;
+use engine::types::ability::{Effect, EffectKind, TargetFilter, TargetRef};
+use engine::types::actions::{GameAction, ReplacementAutoChoice};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::{ObjectId, TrackedSetId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::resolution::FrameKind;
+use engine::types::resolution::{FrameKind, ResolutionFrame};
 use engine::types::zones::Zone;
 
 // Verbatim Oracle text (MTGJSON); Saheeli, the Gifted is not in the
@@ -56,6 +57,12 @@ const BEARS: &str = "Grizzly Bears";
 const PAINTERS_SERVANT: &str = "Painter's Servant";
 const MEMNITE: &str = "Memnite";
 const ARCBOUND_WORKER: &str = "Arcbound Worker";
+const QUICKSILVER_GARGANTUAN: &str = "Quicksilver Gargantuan";
+
+/// Targets set up before every other permanent: a creature that "may enter as
+/// a copy of any creature on the battlefield" would otherwise prompt its own
+/// setup entry.
+const SETUP_FIRST: &[&str] = &[QUICKSILVER_GARGANTUAN];
 
 /// Ordering answers: Hardened Scales first (so Branching Evolution doubles
 /// the +1), Imposing Sovereign first, then Grumgully.
@@ -89,8 +96,23 @@ fn has_copy_token_frame(runner: &GameRunner) -> bool {
 fn is_paused(runner: &GameRunner) -> bool {
     matches!(
         runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { .. } | WaitingFor::NamedChoice { .. }
+        WaitingFor::ReplacementChoice { .. }
+            | WaitingFor::NamedChoice { .. }
+            | WaitingFor::CopyTargetChoice { .. }
     )
+}
+
+/// The tokens the parked CopyToken owner already lists ("those tokens" so far),
+/// or `None` when no owner is on the resolution stack.
+fn copy_token_owner_ids(runner: &GameRunner) -> Option<Vec<ObjectId>> {
+    runner
+        .state()
+        .resolution_stack
+        .iter()
+        .find_map(|frame| match frame {
+            ResolutionFrame::CopyToken(owner) => Some(owner.created_ids.clone()),
+            _ => None,
+        })
 }
 
 /// What one driven resolution observed, from the production entry point to
@@ -169,10 +191,44 @@ impl Driven {
     }
 }
 
+/// The default answer to one prompt: an ordering by [`PREFERENCE`], an
+/// as-enters choice's first option. `None` for any other prompt.
+fn default_answer(waiting: &WaitingFor, driven: &mut Driven) -> Option<GameAction> {
+    match waiting {
+        WaitingFor::ReplacementChoice { candidates, .. } => {
+            let names: Vec<String> = candidates
+                .iter()
+                .map(|candidate| candidate.source_name.clone())
+                .collect();
+            let index = PREFERENCE
+                .iter()
+                .find_map(|preferred| names.iter().position(|name| name == preferred))
+                .unwrap_or(0);
+            driven.orderings.push(names);
+            Some(GameAction::ChooseReplacement { index })
+        }
+        WaitingFor::NamedChoice { options, .. } => {
+            driven.named_choices += 1;
+            Some(GameAction::ChooseOption {
+                choice: options[0].clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Answer every ordering and as-enters choice until the resolution settles,
 /// asserting owner custody (the CopyToken frame survives every non-final
 /// answer) and the completion boundary.
-fn settle(mut driven: Driven) -> Driven {
+fn settle(driven: Driven) -> Driven {
+    settle_with(driven, default_answer)
+}
+
+/// [`settle`], answering each prompt with `answer` (`None` stops answering).
+fn settle_with(
+    mut driven: Driven,
+    mut answer: impl FnMut(&WaitingFor, &mut Driven) -> Option<GameAction>,
+) -> Driven {
     if is_paused(&driven.runner) {
         assert!(
             has_copy_token_frame(&driven.runner),
@@ -183,26 +239,9 @@ fn settle(mut driven: Driven) -> Driven {
         driven.producer_set_at_pause = driven.runner.state().chain_tracked_set_id;
     }
     for _ in 0..MAX_PROMPTS {
-        let action = match &driven.runner.state().waiting_for {
-            WaitingFor::ReplacementChoice { candidates, .. } => {
-                let names: Vec<String> = candidates
-                    .iter()
-                    .map(|candidate| candidate.source_name.clone())
-                    .collect();
-                let index = PREFERENCE
-                    .iter()
-                    .find_map(|preferred| names.iter().position(|name| name == preferred))
-                    .unwrap_or(0);
-                driven.orderings.push(names);
-                GameAction::ChooseReplacement { index }
-            }
-            WaitingFor::NamedChoice { options, .. } => {
-                driven.named_choices += 1;
-                GameAction::ChooseOption {
-                    choice: options[0].clone(),
-                }
-            }
-            _ => break,
+        let waiting = driven.runner.state().waiting_for.clone();
+        let Some(action) = answer(&waiting, &mut driven) else {
+            break;
         };
         let result = driven.runner.act(action).expect("answer must be accepted");
         driven.actions.push(result.events);
@@ -292,11 +331,19 @@ fn build_board(
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     // Targets first, so the replacement permanents below do not prompt their
-    // setup entries.
-    let sources = targets
-        .iter()
-        .map(|name| scenario.add_real_card(P0, name, Zone::Battlefield, db))
+    // setup entries; a copy-on-entry target first of all, while there is no
+    // creature for its as-enters copy to choose. Returned in target order.
+    let mut placement: Vec<usize> = (0..targets.len()).collect();
+    placement.sort_by_key(|&index| !SETUP_FIRST.contains(&targets[index]));
+    let mut placed: Vec<(usize, ObjectId)> = placement
+        .into_iter()
+        .map(|index| {
+            let id = scenario.add_real_card(P0, targets[index], Zone::Battlefield, db);
+            (index, id)
+        })
         .collect();
+    placed.sort_by_key(|(index, _)| *index);
+    let sources = placed.into_iter().map(|(_, id)| id).collect();
     for (player, name) in board {
         scenario.add_real_card(*player, name, Zone::Battlefield, db);
     }
@@ -305,6 +352,15 @@ fn build_board(
 
 /// Cast Twinflame targeting `targets` over `board`, and settle it.
 fn cast_twinflame(targets: &[&str], board: &[(PlayerId, &str)]) -> Option<Driven> {
+    cast_twinflame_with(targets, board, default_answer)
+}
+
+/// [`cast_twinflame`], answering each prompt with `answer`.
+fn cast_twinflame_with(
+    targets: &[&str],
+    board: &[(PlayerId, &str)],
+    answer: impl FnMut(&WaitingFor, &mut Driven) -> Option<GameAction>,
+) -> Option<Driven> {
     let db = shared_card_db()?;
     let (mut scenario, sources) = build_board(targets, board)?;
     let twinflame = scenario.add_real_card(P0, "Twinflame", Zone::Hand, db);
@@ -318,15 +374,18 @@ fn cast_twinflame(targets: &[&str], board: &[(PlayerId, &str)]) -> Option<Driven
         .try_resolve()
         .expect("Twinflame must be castable");
     let actions = vec![cast.events().to_vec()];
-    Some(settle(Driven {
-        runner,
-        sources,
-        pre,
-        actions,
-        orderings: Vec::new(),
-        named_choices: 0,
-        producer_set_at_pause: None,
-    }))
+    Some(settle_with(
+        Driven {
+            runner,
+            sources,
+            pre,
+            actions,
+            orderings: Vec::new(),
+            named_choices: 0,
+            producer_set_at_pause: None,
+        },
+        answer,
+    ))
 }
 
 /// Activate Saheeli, the Gifted's −7 with `artifacts` over `board`, and settle it.
@@ -703,6 +762,189 @@ fn r13_chatterfang_squirrels_join_the_referent() {
     assert_eq!(driven.created_tokens().len(), 4);
     let last_created = driven.runner.state().last_created_token_ids.clone();
     assert_eq!(sorted(last_created), sorted(driven.created_tokens()));
+    assert_referent_is_every_token(&driven);
+    assert_end_step_exiles_every_token(driven);
+}
+
+/// R14: the Quicksilver Gargantuan copy "may enter as a copy of any creature on
+/// the battlefield"; it copies the original Triskelion, so Triskelion's
+/// "enters with three +1/+1 counters" applies to it (CR 707.5) and pauses on a
+/// second Hardened Scales / Branching Evolution ordering. That answer commits
+/// the second batch's entry (`EmitCommittedCopyTokenEntry`) while the owner
+/// already lists the first batch's Triskelion copy, and both stay in "those
+/// tokens".
+#[test]
+fn r14_copy_target_entry_counter_prompt_keeps_the_earlier_batch() {
+    let mut copy_target_choices = 0;
+    let mut optional_copies = 0;
+    // The owner's list and the batch ledger as the counter ordering that
+    // follows the copy choice is answered.
+    let mut at_second_counter_ordering: Option<(Vec<ObjectId>, Vec<ObjectId>)> = None;
+    let driven = cast_twinflame_with(
+        &[TRISKELION, QUICKSILVER_GARGANTUAN],
+        &counter_board(),
+        |waiting, driven| match waiting {
+            WaitingFor::ReplacementChoice {
+                kind: ReplacementChoiceKind::OptionalBranch,
+                ..
+            } => {
+                optional_copies += 1;
+                // Index 0 accepts the "you may" copy.
+                Some(GameAction::ChooseReplacement { index: 0 })
+            }
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                copy_target_choices += 1;
+                let triskelion = driven.sources[0];
+                assert!(
+                    valid_targets.contains(&triskelion),
+                    "REACH-GUARD: the original Triskelion must be a legal copy choice, got \
+                     {valid_targets:?}"
+                );
+                Some(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(triskelion)),
+                })
+            }
+            WaitingFor::ReplacementChoice { .. } if copy_target_choices == 1 => {
+                at_second_counter_ordering.get_or_insert_with(|| {
+                    (
+                        copy_token_owner_ids(&driven.runner).unwrap_or_default(),
+                        driven.runner.state().last_created_token_ids.clone(),
+                    )
+                });
+                default_answer(waiting, driven)
+            }
+            _ => default_answer(waiting, driven),
+        },
+    );
+    let Some(driven) = driven else {
+        return;
+    };
+    assert_ordering_prompted(&driven, &[HARDENED_SCALES, BRANCHING_EVOLUTION]);
+    assert_eq!(
+        (optional_copies, copy_target_choices),
+        (1, 1),
+        "REACH-GUARD: the Gargantuan copy's optional copy and its copy choice are each raised once"
+    );
+    let tokens = driven.created_tokens();
+    assert_eq!(tokens.len(), 2, "REACH-GUARD: one copy per target");
+    let (earlier, later) = (tokens[0], tokens[1]);
+    let state = driven.runner.state();
+    assert_eq!(
+        (
+            state.objects[&earlier].name.as_str(),
+            state.objects[&later].name.as_str()
+        ),
+        (TRISKELION, TRISKELION),
+        "REACH-GUARD: the Gargantuan copy became a copy of Triskelion"
+    );
+    // CR 614.1c + CR 616.1f: Hardened Scales first gives (3 + 1) × 2 on each.
+    assert_eq!(
+        (
+            plus_one_counters(&driven, earlier),
+            plus_one_counters(&driven, later)
+        ),
+        (8, 8),
+        "REACH-GUARD: both copies' counter entries were ordered"
+    );
+    let (owner, ledger) = at_second_counter_ordering
+        .expect("REACH-GUARD: a counter ordering must follow the copy choice");
+    assert_eq!(
+        (owner, ledger),
+        (vec![earlier], vec![later]),
+        "REACH-GUARD: the later batch's entry commits while the owner lists only the earlier \
+         batch's copy and the batch ledger only the later one"
+    );
+    assert_eq!(
+        driven.runner.state().last_created_token_ids,
+        tokens,
+        "LastCreated must list both copies in creation order, once"
+    );
+    assert_referent_is_every_token(&driven);
+    assert_end_step_exiles_every_token(driven);
+}
+
+/// R12b: R12's board, with the second batch's entry orderings answered by
+/// remembering Imposing Sovereign before Archelos (CR 616.1). The second batch's
+/// second token then enters without a prompt, and the liminal batch terminal
+/// runs in that same action while the owner lists the first batch's tokens.
+#[test]
+fn r12b_remembered_ordering_enters_the_last_liminal_token_inline() {
+    let board = [
+        (P0, PARALLEL_LIVES),
+        (P0, ARCHELOS),
+        (P1, IMPOSING_SOVEREIGN),
+    ];
+    let mut remembered = 0;
+    // The owner's list as the first remembered ordering is answered.
+    let mut owner_at_first_remember: Option<Vec<ObjectId>> = None;
+    let driven = cast_twinflame_with(&[BEARS, BEARS], &board, |waiting, driven| match waiting {
+        // Batch 2: the owner already lists both of batch 1's tokens.
+        WaitingFor::ReplacementChoice { candidates, .. }
+            if copy_token_owner_ids(&driven.runner).is_some_and(|ids| ids.len() == 2) =>
+        {
+            remembered += 1;
+            owner_at_first_remember
+                .get_or_insert_with(|| copy_token_owner_ids(&driven.runner).unwrap_or_default());
+            let position = |name: &str| {
+                candidates
+                    .iter()
+                    .position(|candidate| candidate.source_name == name)
+                    .expect("REACH-GUARD: both entry replacements are candidates")
+            };
+            driven.orderings.push(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.source_name.clone())
+                    .collect(),
+            );
+            Some(GameAction::ChooseReplacementAndRemember {
+                choice: ReplacementAutoChoice::Order {
+                    order: vec![position(IMPOSING_SOVEREIGN), position(ARCHELOS)],
+                },
+            })
+        }
+        _ => default_answer(waiting, driven),
+    });
+    let Some(driven) = driven else {
+        return;
+    };
+    assert_ordering_prompted(&driven, &[ARCHELOS, IMPOSING_SOVEREIGN]);
+    let tokens = driven.created_tokens();
+    assert_eq!(
+        tokens.len(),
+        4,
+        "REACH-GUARD: Parallel Lives must double both copies"
+    );
+    assert!(
+        remembered >= 1,
+        "REACH-GUARD: batch 2 must raise an entry ordering"
+    );
+    assert_eq!(
+        owner_at_first_remember,
+        Some(tokens[..2].to_vec()),
+        "REACH-GUARD: batch 2's ordering is answered while the owner lists batch 1's tokens"
+    );
+    let settling: Vec<ObjectId> = driven
+        .actions
+        .last()
+        .expect("at least the producing action")
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        settling,
+        tokens[2..].to_vec(),
+        "REACH-GUARD: the remembered ordering enters batch 2's second token inline, in the \
+         action that settles the resolution"
+    );
+    let last_created = driven.runner.state().last_created_token_ids.clone();
+    assert_eq!(
+        last_created, tokens,
+        "LastCreated must list all four tokens in creation order, once"
+    );
     assert_referent_is_every_token(&driven);
     assert_end_step_exiles_every_token(driven);
 }
