@@ -3762,11 +3762,12 @@ type UnitProducerFact = (crate::types::mana::ManaShape, Option<LKISnapshot>);
 /// quantity relaxation and casts no vote; a payer who holds the same bodies of mana but
 /// different EVIDENCE about them is what this conjunct is asked about.
 ///
-/// The evidence is compared as the MULTISET of (unit shape, fact) pairs
-/// ([`spendable_unit_producer_facts`], [`same_producer_fact_multiset`]): what a payment
-/// selects is the UNIT, so a fact that sits on a different unit of a different shape is a
-/// different position even when the pool's set of facts is unchanged, and a fact proved by
-/// more units is more of it, not the same evidence.
+/// The evidence is compared PER CANONICAL PIP, in pool order
+/// ([`spendable_unit_producer_facts`], [`same_producer_facts_in_pip_order`]): what a payment
+/// selects is the FIRST ELIGIBLE unit, so a fact that sits on a different unit — of a
+/// different shape, or merely later among the same shape — is a different position even when
+/// the pool's multiset of facts is unchanged, and a fact proved by more units is more of it,
+/// not the same evidence.
 fn payer_producer_facts_match(
     left_reader: &crate::game::casting::ProducerFactReader<'_>,
     payer: &Player,
@@ -3778,7 +3779,7 @@ fn payer_producer_facts_match(
     }
     let left = spendable_unit_producer_facts(left_reader, &payer.mana_pool);
     let right = spendable_unit_producer_facts(right_reader, &counterpart.mana_pool);
-    same_producer_fact_multiset(&left, &right)
+    same_producer_facts_in_pip_order(&left, &right)
 }
 
 /// CR 118.3a + CR 732.2a: does every (unit shape, producer fact) pair occur on one side
@@ -3794,26 +3795,36 @@ fn payer_producer_facts_match(
 /// `casting::pay_mana_cost…` records, one snapshot per spent unit, and what the gate re-counts
 /// (`game::quantity`'s mana-spent-to-cast metric), so the comparison counts too.
 ///
-/// WHICH of two same-shaped units carries a proof is NOT payment-visible, and is therefore
-/// deliberately not compared. A unit is selected by its shape (CR 107.4a), and two units of
-/// one shape are told apart by nothing a cost can read — their pips are the engine's monotone
-/// mint tag, which `ManaUnit`'s own equality excludes (`types/mana.rs`, where the exclusion is
-/// grounded in CR 104.4b loop equality) — so a payment reaches the same choices, with the same
-/// outcomes, whichever of them holds the proof. Comparing the pairs in pool order, position by
-/// position, would refuse a pair no payment can price differently; the control
-/// `reordering_the_same_proofs_among_same_shaped_units_stays_equal` pins that reading.
+/// WHICH of two same-shaped units carries a proof IS payment-visible, and is compared —
+/// by canonical pip. A unit is selected by its SHAPE and its position: a payment spends the
+/// FIRST eligible unit in pool order (`mana_payment::spend_color_prefer_non_z`'s
+/// `ManaPool::first_where`), so with one Treasure proof among three same-shaped units, the
+/// cast that spends a Treasure-backed unit and the cast that spends a unit that cannot say
+/// are the same PAIR of shapes but different outcomes. The pool's own equality, the gate
+/// above, compares the units in that same order shape by shape, and
+/// `GameState::canonicalize_floating_pip_identities` renumbers the pips by rank in it — so
+/// the INDEX into this list is the canonical pip, the one identity a payment can tell two
+/// same-shaped units apart by. The list is therefore compared POSITIONALLY, not as a
+/// multiset: the multiset reading this replaces equated a reordering that moves which
+/// evidence the first eligible pip spends (`the_first_eligible_pip_spends_its_own_evidence`
+/// drives that through the real payment, and
+/// `reordering_the_same_proofs_among_same_shaped_units_is_not_equal` pins the comparison).
+/// Mint tags still do not leak: two pools whose pips were renumbered but which present the
+/// same facts on the same canonical pips compare EQUAL.
 ///
 /// The counts are compared by OCCURRENCE rather than by sorting: a canonical order over
 /// [`LKISnapshot`] would be a second, hand-written notion of identity for a fact whose
 /// identity is its own equality. Both lists are bounded by one payer's pool, and the length
 /// conjunct is what makes "every left count matches its right count" a full multiset
 /// equality rather than a one-sided inclusion.
-fn same_producer_fact_multiset(left: &[UnitProducerFact], right: &[UnitProducerFact]) -> bool {
+fn same_producer_facts_in_pip_order(left: &[UnitProducerFact], right: &[UnitProducerFact]) -> bool {
     left.len() == right.len()
-        && left.iter().all(|pair| {
-            left.iter().filter(|candidate| *candidate == pair).count()
-                == right.iter().filter(|candidate| *candidate == pair).count()
-        })
+        && left
+            .iter()
+            .zip(right)
+            .all(|((left_shape, left_fact), (right_shape, right_fact))| {
+                left_shape == right_shape && left_fact == right_fact
+            })
 }
 
 /// CR 106.3 + CR 107.4a + CR 118.3a: the (unit shape, producer fact) pair of EVERY unit in
@@ -3822,7 +3833,7 @@ fn same_producer_fact_multiset(left: &[UnitProducerFact], right: &[UnitProducerF
 ///
 /// ONE ENTRY PER UNIT, NOT ONE PER DISTINCT PAIR. A payment reads each unit it selects, so the
 /// list is what the payment's own read returns — one answer per pip — and
-/// [`same_producer_fact_multiset`] is what compares two lists. Collapsing repeated pairs here
+/// [`same_producer_facts_in_pip_order`] is what compares two lists. Collapsing repeated pairs here
 /// would make the comparison quantity-blind in a place a price is not: a cost that counts the
 /// mana ("create a Treasure token for each mana from a Treasure spent to cast it", Marut) reads
 /// how MANY units are provable, which a distinct-pair list cannot state. This function used to
@@ -11818,6 +11829,13 @@ mod tests {
     /// separately, so which pips a position can prove is a per-pip fact and not a property of
     /// the shape.
     fn three_pips_of_one_treasure_tenure(described: &[u64]) -> GameState {
+        three_pips_of_one_treasure_tenure_from(1, described)
+    }
+
+    /// [`three_pips_of_one_treasure_tenure`] whose pips are MINTED from `base` — the same
+    /// three same-shaped units in the same pool order under another mint tag, for the control
+    /// that renumbering alone must not refuse.
+    fn three_pips_of_one_treasure_tenure_from(base: u64, described: &[u64]) -> GameState {
         use crate::types::mana::{ManaPipId, ManaUnit};
         const PIPS: u64 = 3;
         let mut state = GameState::new_two_player(7);
@@ -11828,7 +11846,8 @@ mod tests {
         // is answered by its live source and every one of them reaches the ledger.
         reincarnate(&mut state, treasure);
         let mut rows = Vec::new();
-        for pip in 1..=PIPS {
+        for offset in 0..PIPS {
+            let pip = base + offset;
             let mut unit = ManaUnit::new(ManaType::Red, treasure, false, Vec::new());
             unit.pip_id = ManaPipId(pip);
             unit.source_incarnation = Some(incarnation);
@@ -11923,23 +11942,22 @@ mod tests {
         );
     }
 
-    /// CR 118.3a + CR 732.2a: the over-tightening guard for the witness above. The same
-    /// MULTISET of (shape, fact) pairs is the same evidence even when a different one of the
-    /// indistinguishable units carries the proof, so that pair compares EQUAL.
+    /// CR 118.3a + CR 107.4a + CR 732.2a: reordering the same proofs among same-shaped units
+    /// is NOT the same position — a payment spends the FIRST eligible pip, so which unit
+    /// carries a proof decides which evidence the cast consumes.
     ///
-    /// DECISION — MULTIPLICITY IS PAYMENT-VISIBLE, ORDER IS NOT. Which of two same-shaped units
-    /// carries a proof is invisible to every payment: a unit is selected by its shape
-    /// (CR 107.4a), two units of one shape are told apart by nothing a cost can read (their pips
-    /// are the mint tag CR 104.4b excludes), and the outcomes a payment can reach — "spend a
-    /// Treasure-backed unit", "spend one that cannot say" — are the same whichever of them holds
-    /// the proof. Comparing the pairs position by position in pool order would therefore refuse
-    /// a pair no price can tell apart, which is the over-tightening this comparator exists to
-    /// avoid; counting is what remains.
-    ///
-    /// The second assertion is the control that keeps that decision from being quantity-
-    /// blindness: the SAME shape carrying a different COUNT still refuses.
+    /// PREMISE CORRECTION (maintainer review 5863557054, blocker 3). This test used to assert
+    /// the opposite, on the stated ground that "which of two same-shaped units carries a proof
+    /// is invisible to every payment". That ground is false: `mana_payment` selects with
+    /// `ManaPool::first_where` in pool order, so a unit is told apart by its canonical pip
+    /// (the rank `canonicalize_floating_pip_identities` assigns in that order), and
+    /// `the_first_eligible_pip_spends_its_own_evidence` drives the two orders through the real
+    /// payment to different paid evidence. The control is therefore INVERTED rather than
+    /// deleted, with two controls of its own: renumbering the mint tags while keeping the
+    /// canonical pip order still compares EQUAL (the mint tag must not leak), and a different
+    /// COUNT still refuses (multiplicity stays payment-visible).
     #[test]
-    fn reordering_the_same_proofs_among_same_shaped_units_stays_equal() {
+    fn reordering_the_same_proofs_among_same_shaped_units_is_not_equal() {
         let first = three_pips_of_one_treasure_tenure(&[1]);
         let third = three_pips_of_one_treasure_tenure(&[3]);
 
@@ -11953,14 +11971,99 @@ mod tests {
             "reach-guard: the ORDER of the facts must really differ, or this control is vacuous"
         );
         assert!(
-            floating_producer_facts_match(&first, &third),
-            "CR 118.3a + CR 732.2a: one Treasure proof among three same-shaped units is the \
-             same evidence wherever it sits, so the pair must compare EQUAL"
+            !floating_producer_facts_match(&first, &third),
+            "CR 118.3a + CR 732.2a: the first eligible pip spends its own evidence, so the \
+             same proof on the third pip is a different position"
+        );
+        let renumbered = three_pips_of_one_treasure_tenure_from(7, &[7]);
+        assert!(
+            floating_producer_facts_match(&first, &renumbered),
+            "control: the same canonical pip carrying the same proof under a different mint tag \
+             is the same position — the mint tag must not leak into the comparison"
         );
         assert!(
             !floating_producer_facts_match(&three_pips_of_one_treasure_tenure(&[1, 2]), &first),
-            "the control: the same shape carrying a different COUNT is a different position, so \
-             the equality above is not quantity-blindness"
+            "control: the same shape carrying a different COUNT is a different position"
+        );
+    }
+
+    /// CR 118.3a + CR 107.4a + CR 732.2a: the REAL payment spends the first eligible pip, and
+    /// the evidence of THAT pip is what the paid state carries.
+    ///
+    /// Both positions hold the same three same-shaped red units and the same single Treasure
+    /// proof; one has the proof on the first pip and one on the last. Each is cast for `{R}`
+    /// through the production casting/payment pipeline. The first cast spends the
+    /// Treasure-backed unit and records its producer snapshot; the second spends a unit that
+    /// cannot say and records none — the first-eligible-pip selection reaches the paid state.
+    /// The comparator must refuse the pair the payment tells apart.
+    ///
+    /// Revert-probe: comparing the evidence as a multiset of (shape, fact) pairs certifies
+    /// the pair and the last assertion fails.
+    #[test]
+    fn the_first_eligible_pip_spends_its_own_evidence() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaPipId, ManaUnit};
+
+        let cast = |described: &[u64]| -> (GameState, usize) {
+            let mut s = GameScenario::new_n_player(2, 7);
+            s.at_phase(Phase::PreCombatMain);
+            let spell = s
+                .add_creature_to_hand(PlayerId(0), "Pip Probe", 1, 1)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 0,
+                })
+                .id();
+            let mut runner = s.build();
+            let state = runner.state_mut();
+            let treasure = treasure_on_battlefield(state, 671, PlayerId(0));
+            let incarnation = state.objects[&treasure].incarnation;
+            let lki = state.objects[&treasure].snapshot_for_mana_spent();
+            reincarnate(state, treasure);
+            let mut rows = Vec::new();
+            for pip in 1..=3u64 {
+                let mut unit = ManaUnit::new(ManaType::Red, treasure, false, Vec::new());
+                unit.pip_id = ManaPipId(pip);
+                unit.source_incarnation = Some(incarnation);
+                state.players[0].mana_pool.add(unit);
+                if described.contains(&pip) {
+                    rows.push(crate::types::game_state::PooledManaProducerSnapshot {
+                        pip_id: ManaPipId(pip),
+                        source_id: treasure,
+                        source_incarnation: incarnation,
+                        lki: lki.clone(),
+                    });
+                }
+            }
+            state.pooled_mana_producer_snapshots = rows;
+            let before = runner.state().clone();
+            runner.cast(spell).resolve();
+            let record = runner.state().spells_cast_this_turn_by_player[&PlayerId(0)]
+                .last()
+                .cloned()
+                .expect("the cast is recorded for the payer");
+            (
+                before,
+                record.mana_spent_source_snapshots.unwrap_or_default().len(),
+            )
+        };
+
+        let (first_pip, spent_first) = cast(&[1]);
+        let (last_pip, spent_last) = cast(&[3]);
+        assert_eq!(
+            first_pip.players[0].mana_pool, last_pip.players[0].mana_pool,
+            "reach-guard: the two positions hold the same three same-shaped units"
+        );
+        assert_eq!(
+            (spent_first, spent_last),
+            (1, 0),
+            "the payment spends the FIRST eligible pip: the proof on pip 1 is recorded as the \
+             cast's spent evidence, the proof on pip 3 is not"
+        );
+        assert!(
+            !floating_producer_facts_match(&first_pip, &last_pip),
+            "CR 118.3a + CR 732.2a: the payment tells the two positions apart, so the \
+             comparator must refuse them"
         );
     }
 
