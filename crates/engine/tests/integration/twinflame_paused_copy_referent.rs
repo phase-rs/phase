@@ -32,7 +32,10 @@ use engine::types::ability::{Effect, EffectKind, TargetFilter, TargetRef};
 use engine::types::actions::{GameAction, ReplacementAutoChoice};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
+use engine::types::game_state::{
+    PendingCopyTokenResolution, PersistedGameState, PersistedRestoreFinalization,
+    ReplacementChoiceKind, WaitingFor,
+};
 use engine::types::identifiers::{ObjectId, TrackedSetId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -41,9 +44,10 @@ use engine::types::player::PlayerId;
 use engine::types::resolution::{FrameKind, ResolutionFrame};
 use engine::types::zones::Zone;
 
-// Verbatim Oracle text (MTGJSON); Saheeli, the Gifted is not in the
-// integration fixture. "can be your commander" is not a game-time ability.
-const SAHEELI: &str = "[+1]: Create a 1/1 colorless Servo artifact creature token.\n[+1]: The next spell you cast this turn has affinity for artifacts. (It costs {1} less to cast for each artifact you control as you cast it.)\n[\u{2212}7]: For each artifact you control, create a token that's a copy of it. Those tokens gain haste. Exile those tokens at the beginning of the next end step.";
+// Verbatim Oracle text (client card-data / MTGJSON); Saheeli, the Gifted is not in the
+// integration fixture. The last line is a deck-construction permission (CR 903.3a), which the
+// parser reads as no game-time ability.
+const SAHEELI: &str = "[+1]: Create a 1/1 colorless Servo artifact creature token.\n[+1]: The next spell you cast this turn has affinity for artifacts. (It costs {1} less to cast for each artifact you control as you cast it.)\n[\u{2212}7]: For each artifact you control, create a token that's a copy of it. Those tokens gain haste. Exile those tokens at the beginning of the next end step.\nSaheeli, the Gifted can be your commander.";
 
 const HARDENED_SCALES: &str = "Hardened Scales";
 const BRANCHING_EVOLUTION: &str = "Branching Evolution";
@@ -102,17 +106,22 @@ fn is_paused(runner: &GameRunner) -> bool {
     )
 }
 
-/// The tokens the parked CopyToken owner already lists ("those tokens" so far),
-/// or `None` when no owner is on the resolution stack.
-fn copy_token_owner_ids(runner: &GameRunner) -> Option<Vec<ObjectId>> {
+/// The parked CopyToken owner, or `None` when no owner is on the resolution stack.
+fn copy_token_owner(runner: &GameRunner) -> Option<&PendingCopyTokenResolution> {
     runner
         .state()
         .resolution_stack
         .iter()
         .find_map(|frame| match frame {
-            ResolutionFrame::CopyToken(owner) => Some(owner.created_ids.clone()),
+            ResolutionFrame::CopyToken(owner) => Some(owner),
             _ => None,
         })
+}
+
+/// The tokens the parked CopyToken owner already lists ("those tokens" so far),
+/// or `None` when no owner is on the resolution stack.
+fn copy_token_owner_ids(runner: &GameRunner) -> Option<Vec<ObjectId>> {
+    copy_token_owner(runner).map(|owner| owner.created_ids.clone())
 }
 
 /// What one driven resolution observed, from the production entry point to
@@ -321,6 +330,30 @@ fn frame_kinds(runner: &GameRunner) -> Vec<FrameKind> {
         .iter()
         .map(|frame| frame.kind())
         .collect()
+}
+
+/// The engine's own save / undo / P2P restore pipeline (`PersistedGameState`'s trusted
+/// envelope), with the deferred production reload (as
+/// `grist_zone_functioning.rs::cast_prohibition_restore`) — not a bare
+/// `serde_json::from_str::<GameState>`.
+fn save_and_restore(runner: &GameRunner) -> GameRunner {
+    let db = shared_card_db().expect("REACH-GUARD: a restore needs the integration CardDB");
+    let json = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the paused state serializes");
+    let state = serde_json::from_str::<PersistedGameState>(&json)
+        .expect("the paused state decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+        .expect("the paused state is admissible")
+        .finalize_after_rehydration(|state| {
+            engine::game::rehydrate_game_from_card_db_with_finalization(
+                state,
+                db,
+                engine::game::CardDbRehydrationFinalization::Defer,
+            );
+            Ok(())
+        })
+        .expect("the restored state is publishable");
+    GameRunner::from_state(state)
 }
 
 fn build_board(
@@ -662,12 +695,91 @@ fn r6_ordering_then_post_replacement_counter_prompt() {
     assert_end_step_exiles_every_token(driven);
 }
 
+/// How R7 carries its pauses: in memory, or through the save/restore wire.
+#[derive(Clone, Copy)]
+enum PauseCarry {
+    Live,
+    SavedAndRestored,
+}
+
 /// R7 (PS3): an entry ordering, then Painter's Servant's as-enters color
 /// choice, whose post-replacement chain resolves at depth 0 and resets the
-/// chain scope. The delayed exile must still bind the producer's set.
+/// chain scope. The delayed exile must still bind the producer's set. Also run
+/// through the engine's save/restore pipeline at every pause while the parked
+/// owner holds its referent set (CR 608.2c + CR 603.7a).
 #[test]
 fn r7_as_enters_choice_keeps_the_producer_set() {
-    let Some(driven) = cast_twinflame(&[BEARS, PAINTERS_SERVANT], &entry_board()) else {
+    r7_as_enters_choice(PauseCarry::Live);
+}
+
+/// R7 with the game saved and restored before every answer.
+#[test]
+fn r7_as_enters_choice_keeps_the_producer_set_across_save_and_restore() {
+    r7_as_enters_choice(PauseCarry::SavedAndRestored);
+}
+
+fn r7_as_enters_choice(carry: PauseCarry) {
+    let mut restores = 0;
+    let mut named_restores = 0;
+    let driven = cast_twinflame_with(
+        &[BEARS, PAINTERS_SERVANT],
+        &entry_board(),
+        |waiting, driven| {
+            match carry {
+                PauseCarry::Live => {}
+                PauseCarry::SavedAndRestored if is_paused(&driven.runner) => {
+                    let set = driven
+                        .producer_set_at_pause
+                        .expect("REACH-GUARD: the producer published its set before pausing");
+                    let owner = copy_token_owner(&driven.runner)
+                        .cloned()
+                        .expect("REACH-GUARD: the CopyToken owner is parked");
+                    assert_eq!(
+                        owner.referent_set,
+                        Some(set),
+                        "REACH-GUARD: the owner holds the populated referent while the game is \
+                         saved"
+                    );
+                    let members = driven.runner.state().tracked_object_sets.get(&set).cloned();
+                    let next_set_id = driven.runner.state().next_tracked_set_id;
+                    if matches!(waiting, WaitingFor::NamedChoice { .. }) {
+                        assert_ne!(
+                            driven.runner.state().chain_tracked_set_id,
+                            Some(set),
+                            "REACH-GUARD: at the as-enters choice the chain scope no longer \
+                             names the producer set (the depth-0 entry chain reset it), so the \
+                             owner's `referent_set` is its only carrier across the wire"
+                        );
+                        named_restores += 1;
+                    }
+                    driven.runner = save_and_restore(&driven.runner);
+                    restores += 1;
+                    assert_eq!(
+                        copy_token_owner(&driven.runner).cloned(),
+                        Some(owner),
+                        "the owner, its `referent_set` included, crosses the wire unchanged"
+                    );
+                    let state = driven.runner.state();
+                    assert_eq!(
+                        state.tracked_object_sets.get(&set).cloned(),
+                        members,
+                        "the producer set's membership crosses the wire unchanged"
+                    );
+                    assert_eq!(
+                        state.next_tracked_set_id, next_set_id,
+                        "the tracked-set allocator crosses the wire unchanged"
+                    );
+                    assert_eq!(
+                        state.waiting_for, *waiting,
+                        "the restored game is at the same prompt"
+                    );
+                }
+                PauseCarry::SavedAndRestored => {}
+            }
+            default_answer(waiting, driven)
+        },
+    );
+    let Some(driven) = driven else {
         return;
     };
     assert_ordering_prompted(&driven, &[ARCHELOS, IMPOSING_SOVEREIGN]);
@@ -675,6 +787,14 @@ fn r7_as_enters_choice_keeps_the_producer_set() {
         driven.named_choices >= 1,
         "REACH-GUARD: the Painter's Servant copy must raise its as-enters color choice"
     );
+    match carry {
+        PauseCarry::Live => {}
+        PauseCarry::SavedAndRestored => assert!(
+            restores >= 2 && named_restores == 1,
+            "REACH-GUARD: the game was saved and restored at an entry ordering and at the \
+             as-enters choice, saw {restores} restores, {named_restores} at the choice"
+        ),
+    }
     let producer_set = driven
         .producer_set_at_pause
         .expect("REACH-GUARD: the producing instruction published its set before pausing");
@@ -683,7 +803,17 @@ fn r7_as_enters_choice_keeps_the_producer_set() {
         bound, producer_set,
         "the delayed exile must bind the set the producing instruction published"
     );
-    assert_referent_is_every_token(&driven);
+    let members = assert_referent_is_every_token(&driven);
+    assert_eq!(
+        members,
+        driven.created_tokens(),
+        "the producer's set lists the copies in creation order"
+    );
+    assert_eq!(
+        driven.runner.state().last_created_token_ids,
+        driven.created_tokens(),
+        "LastCreated must list both copies in creation order, once"
+    );
     assert_end_step_exiles_every_token(driven);
 }
 
