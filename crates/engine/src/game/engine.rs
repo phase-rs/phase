@@ -2562,8 +2562,13 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     // player would next receive priority. Until then that player is still in
     // the game, so waiting on their choices is not the #962 softlock; prompts
     // owned by a resolution keep the net.
+    //
+    // CR 603.2 + CR 603.3b: the post-action pass has already scanned this action's
+    // events, so the departure collects what it triggers itself. The abilities wait
+    // in the queue and join the batch placed when a player next receives priority
+    // (issue #10157: Magma Jet's damage leaves a player at 0 life before its scry).
     if sba::has_pending_player_loss_sba(state) && !state.withholds_priority() {
-        sba::check_state_based_actions(state, &mut result.events);
+        sba::check_state_based_actions_unscanned(state, &mut result.events);
         // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
         // the next living player). Sync the result.
         result.waiting_for = state.waiting_for.clone();

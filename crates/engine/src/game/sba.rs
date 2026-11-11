@@ -110,6 +110,18 @@ pub(crate) fn check_state_based_actions_in_pass(
     run_state_based_actions(state, events, &[], DepartureTriggers::PlacedByPass);
 }
 
+/// CR 704.3 + CR 603.2: [`check_state_based_actions`] for a caller whose event buffer no
+/// post-action pass will scan — the player-loss check an action's end runs while a
+/// choice is open. A departure collects the abilities its own events trigger,
+/// "whenever a player loses the game" (CR 603.10f) among them, into the queue that
+/// is placed when a player next receives priority (CR 117.5).
+pub(crate) fn check_state_based_actions_unscanned(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    run_state_based_actions(state, events, &[], DepartureTriggers::CollectedByDeparture);
+}
+
 /// CR 704.3 + CR 704.5v + CR 510.3a: run state-based actions in a fixpoint loop
 /// until no more actions are performed, capped at MAX_SBA_ITERATIONS, for a
 /// caller that holds abilities that have triggered but are not yet on the
@@ -186,10 +198,17 @@ fn run_state_based_actions(
         losers.dedup();
         if !losers.is_empty() {
             any_performed = true;
+            let loss_events_start = events.len();
             for &loser in &losers {
                 events.push(GameEvent::PlayerLost { player_id: loser });
             }
-            super::elimination::eliminate_players(state, &losers, departures, events);
+            super::elimination::eliminate_players(
+                state,
+                &losers,
+                departures,
+                events,
+                loss_events_start,
+            );
 
             // If the game ended (a sole winner or a CR 104.4a draw), stop now.
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {

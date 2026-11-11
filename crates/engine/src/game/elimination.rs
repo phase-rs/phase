@@ -157,11 +157,13 @@ pub fn eliminate_players_simultaneously(
     players_to_eliminate: &[PlayerId],
     events: &mut Vec<GameEvent>,
 ) {
+    let loss_events_start = events.len();
     eliminate_players(
         state,
         players_to_eliminate,
         DepartureTriggers::ScannedByCaller,
         events,
+        loss_events_start,
     );
 }
 
@@ -173,11 +175,13 @@ pub fn eliminate_players_simultaneously(
 /// a leaves-the-battlefield observer sees the conceding player's permanents leave
 /// the game (CR 603.6c).
 pub fn concede(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
+    let loss_events_start = events.len();
     eliminate_players(
         state,
         &[player],
         DepartureTriggers::CollectedByDeparture,
         events,
+        loss_events_start,
     );
 }
 
@@ -192,17 +196,22 @@ pub(crate) enum DepartureTriggers {
     /// own settle (CR 117.5).
     PlacedByPass,
     /// Nothing scans the departure's events after it returns (a concession,
-    /// CR 104.3a), so the departure queues their triggers itself.
+    /// CR 104.3a, or the player-loss check an action's end runs while a choice is
+    /// open), so the departure queues their triggers itself.
     CollectedByDeparture,
 }
 
+/// `loss_events_start` is where the loss's own events begin in `events`: the
+/// `PlayerLost` events a state-based action announces before the departure
+/// (CR 603.10f), or `events.len()` when there are none.
 pub(crate) fn eliminate_players(
     state: &mut GameState,
     players_to_eliminate: &[PlayerId],
     departure_triggers: DepartureTriggers,
     events: &mut Vec<GameEvent>,
+    loss_events_start: usize,
 ) {
-    let first_event = events.len();
+    let first_event = loss_events_start;
     let first_record = state.zone_changes_this_turn.len();
     let mut eliminated_any = false;
     let mut leaving_set = HashSet::new();

@@ -567,6 +567,8 @@ fn drive(runner: &mut GameRunner, answers: &Answers) -> Trace {
             WaitingFor::ChooseLegend { candidates, .. } => GameAction::ChooseLegend {
                 keep: picks(candidates, 1, &answers.pick)[0],
             },
+            // Every scried card stays on top.
+            WaitingFor::ScryChoice { .. } => GameAction::SelectCards { cards: vec![] },
             WaitingFor::CommanderZoneChoice { .. } => GameAction::DecideOptionalEffect {
                 accept: answers.commander_to_command_zone,
             },
@@ -640,8 +642,11 @@ fn state_trigger_board(mode: LoopDetectionMode, crocodile: bool) -> Trace {
         sc.add_real_card(P0, "Emperor Crocodile", Zone::Battlefield, db);
     }
     let traveler = sc.add_real_card(P0, "Doomed Traveler", Zone::Battlefield, db);
-    let shock = sc.add_real_card(P0, "Shock", Zone::Hand, db);
-    sc.with_mana_pool(P0, pool(1, ManaType::Red));
+    let shock = sc.add_real_card(P0, "Magma Jet", Zone::Hand, db);
+    for _ in 0..3 {
+        sc.add_real_card(P0, "Island", Zone::Library, db);
+    }
+    sc.with_mana_pool(P0, pool(2, ManaType::Red));
     let mut r = start(sc, mode);
     drop(r.cast(shock).target_object(traveler).commit());
     drive(&mut r, &Answers::default())
@@ -1682,6 +1687,78 @@ fn elimination_keeps_the_survivors_batch_whole() {
             "{mode:?}"
         );
         assert_eq!(life(&r, P0), 22, "{mode:?}");
+    }
+}
+
+fn counters_on(r: &GameRunner, id: ObjectId) -> u32 {
+    r.state().objects[&id].counters.values().sum()
+}
+
+/// CR 603.3b + CR 603.10f + CR 800.4a (issue #10157): three players; P1 at 2
+/// life. P0's Magma Jet deals 2 damage to P1, then P0 scries 2. P1 leaves the
+/// game while the scry is open, triggering Withengar Unbound; answering the scry
+/// triggers Lost Isle Calling and runs the spell's final part (CR 608.2n). No
+/// player received priority between the two, so both go on the stack as one P0
+/// batch: one ordering prompt, and neither trigger is lost or placed alone.
+///
+/// Oracle text (Scryfall):
+///   Magma Jet: "Magma Jet deals 2 damage to any target. Scry 2."
+///   Lost Isle Calling: "Whenever you scry, put a verse counter on this
+///    enchantment. / {4}{U}{U}, Exile this enchantment: Draw a card for each
+///    verse counter on this enchantment. If it had seven or more verse counters
+///    on it, take an extra turn after this one. Activate only as a sorcery."
+///   Withengar Unbound: "Flying, intimidate, trample / Whenever a player loses
+///    the game, put thirteen +1/+1 counters on Withengar Unbound."
+#[test]
+fn final_part_elimination_keeps_the_survivors_batch_whole() {
+    for mode in MODES {
+        let db = shared_card_db().expect("card db");
+        let mut sc = GameScenario::new_n_player(3, 42);
+        sc.at_phase(Phase::PreCombatMain);
+        sc.with_life(P1, 2);
+        let calling = sc.add_real_card(P0, "Lost Isle Calling", Zone::Battlefield, db);
+        let withengar = sc.add_real_card(P0, "Withengar Unbound", Zone::Battlefield, db);
+        let jet = sc.add_real_card(P0, "Magma Jet", Zone::Hand, db);
+        for _ in 0..3 {
+            sc.add_real_card(P0, "Island", Zone::Library, db);
+        }
+        let mut mana = pool(1, ManaType::Red);
+        mana.extend(pool(1, ManaType::Colorless));
+        sc.with_mana_pool(P0, mana);
+        let mut r = start(sc, mode);
+        drop(r.cast(jet).target_player(P1).commit());
+        assert_eq!(
+            r.state().players[0].mana_pool.total(),
+            0,
+            "{mode:?}: Magma Jet's {{1}}{{R}} was paid"
+        );
+        let trace = drive(&mut r, &Answers::default());
+
+        // Reach: the scry paused the resolution with Magma Jet off the stack,
+        // and Withengar's trigger waited behind it for the scry's own trigger.
+        let scry = trace.choice("ScryChoice");
+        assert_eq!(scry.stack, Vec::<String>::new(), "{mode:?}");
+        assert_eq!(
+            scry.deferred_sources,
+            names(&["Withengar Unbound"]),
+            "{mode:?}"
+        );
+        assert!(eliminated(&r, P1), "{mode:?}");
+        let prompt = trace.the_prompt();
+        assert_eq!(prompt.player, P0, "{mode:?}");
+        assert_eq!(
+            sorted(prompt.sources.clone()),
+            names(&["Lost Isle Calling", "Withengar Unbound"]),
+            "{mode:?}"
+        );
+        assert_eq!(
+            sorted(trace.first_ability_stack().stack.clone()),
+            names(&["Lost Isle Calling", "Withengar Unbound"]),
+            "{mode:?}"
+        );
+        assert_eq!(counters_on(&r, calling), 1, "{mode:?}");
+        assert_eq!(counters_on(&r, withengar), 13, "{mode:?}");
+        assert!(r.state().stack.is_empty(), "{mode:?}");
     }
 }
 
