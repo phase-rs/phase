@@ -401,6 +401,7 @@ mod wheel_of_misfortune_secret_numbers;
 mod where_x_coverage_runtime;
 mod where_x_quantity_channel_binds;
 mod where_x_totality_guard;
+mod whisperwood_elemental_face_up_grant;
 mod white_suns_twilight;
 mod who_villainous_choice_scoped_player;
 mod wickerfolk_indomitable_composite_gerund_cost;
