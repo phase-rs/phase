@@ -2878,6 +2878,103 @@ mod tests {
         assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);
     }
 
+    /// CR 603.2c + CR 730.3: while a merged permanent's component child is
+    /// active, the announcing owner beneath it still holds the occurrences it
+    /// collected for its own settlement. The retained-occurrence authority that
+    /// the post-action scan and a concession's trigger pass share reaches that
+    /// owner through the child's link, and only through it.
+    #[test]
+    fn retained_occurrences_include_the_announcing_owner_beneath_a_component_child() {
+        let mut state = setup_three_player();
+        let original = create_object(
+            &mut state,
+            CardId(719),
+            PlayerId(1),
+            "Merged original member".to_string(),
+            Zone::Battlefield,
+        );
+        let departed = create_object(
+            &mut state,
+            CardId(720),
+            PlayerId(0),
+            "Owner's earlier member".to_string(),
+            Zone::Battlefield,
+        );
+        let mut delivery = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, departed, Zone::Graveyard, &mut delivery);
+        let collected = delivery
+            .iter()
+            .find(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+            .cloned()
+            .expect("the earlier member's departure is recorded");
+        let mut owner_group = state.allocate_logical_zone_change_group(&[original]);
+        owner_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("owner group latches");
+        owner_group
+            .append_delivery_events(std::slice::from_ref(&collected))
+            .expect("owner retains its collected occurrence");
+        let owner_group_id = owner_group.logical_group_id;
+        let mut child_group = state.allocate_logical_zone_change_group(&[original]);
+        child_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("child group latches");
+        let paused = paused_zone_change_delivery(&state, original, ObjectId(901));
+        state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            component_delivery_parent: None,
+            logical_zone_change_group: owner_group,
+            paused_current: Some(paused.clone()),
+            remaining: Vec::new(),
+            destination: Zone::Graveyard,
+            source_id: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: vec![original],
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+        });
+        state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            component_delivery_parent: Some(PendingComponentDeliveryParent {
+                parent_group_id: owner_group_id,
+                member: paused.member,
+                expected_event: paused.expected_event.clone(),
+                approved_event: paused.expected_event.clone(),
+            }),
+            logical_zone_change_group: child_group,
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: Zone::Graveyard,
+            source_id: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: vec![original],
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+        });
+
+        assert!(
+            crate::game::engine_priority::retained_logical_zone_events(&state).contains(&collected),
+            "the linked child exposes its announcing owner's retained occurrence"
+        );
+        state
+            .active_batch_delivery_mut()
+            .expect("child is active")
+            .component_delivery_parent = None;
+        assert!(
+            !crate::game::engine_priority::retained_logical_zone_events(&state)
+                .contains(&collected),
+            "an unlinked batch never reaches a frame beneath it"
+        );
+    }
+
     /// CR 800.4a + CR 616.1: an eliminated original member cancels only its
     /// exact paused obligation in a linked component pair. Both logical groups
     /// retire that identity, and the relation is retained for the whole sweep so
