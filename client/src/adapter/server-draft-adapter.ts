@@ -49,6 +49,7 @@ import {
   StateCodecPreparationAbortError,
   prepareStateCodecSession as prepareBoundedStateCodecSession,
   StateCodecAttachment,
+  type StateCodecBootstrapBinding,
   type StateCodecSessionProvider,
 } from "../services/stateCodecSocket";
 
@@ -1113,6 +1114,18 @@ export class ServerDraftAdapter implements EngineAdapter {
     }
   }
 
+  /**
+   * Retires a candidate this adapter never adopted. A terminal codec failure
+   * it reported before adoption (during ClientHello, or after its setup frame
+   * was written) still moves this adapter's sticky delivery policy, so the
+   * next attachment is snapshot-only; `consumeFailure` leaves the incumbent's
+   * or a newer attachment's binding, bootstrap status and recovery gate alone.
+   */
+  private abandonCandidate(socket: PhaseSocket, bootstrap: StateCodecBootstrapBinding): void {
+    if (!this.disposed && bootstrap.failure !== null) this.stateCodec.consumeFailure(bootstrap);
+    this.abandonSocket(socket);
+  }
+
   private abandonSocket(socket: PhaseSocket): void {
     // Invalidate the candidate before notifications can reenter on a successor.
     if (this.ws === socket.ws) {
@@ -1183,7 +1196,7 @@ export class ServerDraftAdapter implements EngineAdapter {
       attachment.socket = socket.ws;
       this.sockets.add(socket.ws);
       if (!this.ownsAttachment(attachment)) {
-        this.abandonSocket(socket);
+        this.abandonCandidate(socket, bootstrap);
         return;
       }
       const sourceSocket = socket.ws;
@@ -1278,13 +1291,9 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.draftActionSocket = sourceSocket;
       }
       if (!this.ownsAttachment(attachment) || !this.sockets.has(sourceSocket)) {
-        // A terminal codec failure may have arrived during ClientHello. Consume
-        // that binding's sticky delivery policy without displacing an incumbent
-        // peer: this candidate never owned a setup-capable attachment.
-        if (!this.disposed && bootstrap.failure !== null) {
-          this.stateCodec.consumeFailure(bootstrap);
-        }
-        this.abandonSocket(socket);
+        // A terminal codec failure may have arrived during ClientHello: this
+        // candidate never owned a setup-capable attachment.
+        this.abandonCandidate(socket, bootstrap);
         return;
       }
       // Same policy consumption for a live candidate; the incumbent socket and
@@ -1352,8 +1361,10 @@ export class ServerDraftAdapter implements EngineAdapter {
         } else if (refusal !== null) {
           this.rejectAttachment(attachment.owner, new AdapterError("WS_ERROR", refusal.message, true));
         }
-        // Retired before any listener runs, so a throwing listener strands nothing.
-        this.abandonSocket(socket);
+        // Retired before any listener runs, so a throwing listener strands
+        // nothing. A terminal codec failure that closed the candidate after
+        // its setup was written stays with this adapter's next attachment.
+        this.abandonCandidate(socket, bootstrap);
         if (this.disposed) return;
         if (refusal !== null) this.emit({ type: "error", message: refusal.message });
         return;
@@ -1362,7 +1373,7 @@ export class ServerDraftAdapter implements EngineAdapter {
         // The frame is on the wire: a ReconnectDraft may already have moved
         // the seat's sender to this candidate, so the incumbent may be deaf.
         this.retireSwappedIncumbent(incumbent, sourceSocket, attachment.owner);
-        this.abandonSocket(socket);
+        this.abandonCandidate(socket, bootstrap);
         return;
       }
       // Adoption retires the previous binding only after setup is on the wire
@@ -1421,12 +1432,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           ? new AdapterError("WS_ERROR", String(error), true)
           : error instanceof Error ? error : new Error(String(error));
       this.rejectAttachment(attachment.owner, failure);
-      if (socket) {
-        if (!this.disposed && bootstrap.failure !== null) {
-          this.stateCodec.consumeFailure(bootstrap);
-        }
-        this.abandonSocket(socket);
-      }
+      if (socket) this.abandonCandidate(socket, bootstrap);
       if (error instanceof HandshakeError
         && error.kind === "protocol_mismatch" && error.serverInfo
         && this.unfinishedAttachment === attachment && !attachment.controller.signal.aborted) {

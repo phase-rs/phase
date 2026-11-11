@@ -2342,7 +2342,7 @@ describe("WebSocketAdapter", () => {
       }
     });
 
-    it.each(["raw", "gzip"] as const)("parses a %s reconnect bootstrap once, on adoption", async (wire) => {
+    it.each(["raw", "gzip"] as const)("parses a large %s reconnect bootstrap once, on adoption", async (wire) => {
       acceptFullReplyOwnershipSession(adapter, ws);
       vi.useFakeTimers();
       const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
@@ -2363,10 +2363,11 @@ describe("WebSocketAdapter", () => {
         const bootstrap = JSON.stringify({
           type: "GameStarted",
           data: {
-            state_revision: 1, state: createMockState(), your_player: 0,
+            state_revision: 1, state: largeReconnectState(), your_player: 0,
             player_token: "accepted-full-session-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
           },
         });
+        expect(bootstrap.length).toBeGreaterThan(8_388_608);
         parse.mockClear();
         candidate.dispatchSynthetic("message", wire === "gzip"
           ? (await encodeJsonEnvelope(bootstrap)).buffer as unknown as string
@@ -4800,6 +4801,15 @@ function scriptedCodec(): {
   };
 }
 
+/**
+ * A reconnect bootstrap's board larger than 8 Mi UTF-16 code units, the size
+ * class of the large Full proofs: synthetic padding on a mock state, so the
+ * parse-count controls measure a genuinely large materialization.
+ */
+function largeReconnectState(turn = 1) {
+  return { ...createMockState(), turn_number: turn, padding: "x".repeat(8_388_608) };
+}
+
 function codecGameStarted(turn: number, revision: number, overrides: Record<string, unknown> = {}) {
   return {
     type: "GameStarted",
@@ -6357,10 +6367,14 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       }
     });
 
-    it("parses a codec reconnect bootstrap once, on adoption", async () => {
+    it("parses a large codec reconnect bootstrap once, on adoption", async () => {
       const { adapter, raw, candidate, events } = await sentCandidate();
       // Built before the spy: the fixture helper parses its own input.
-      const frame = fullFrame(JSON.stringify(codecGameStarted(5, 5)));
+      const frame = fullFrame(JSON.stringify(codecGameStarted(5, 5, { state: largeReconnectState(5) })));
+      expect(frame.length).toBeGreaterThan(8_388_608);
+      // The confirmation drains first, as frames arriving in separate tasks
+      // do: a frame this large is admitted only as the transport's sole message.
+      await vi.advanceTimersByTimeAsync(0);
       const parse = vi.spyOn(JSON, "parse");
       try {
         candidate.dispatchSynthetic("message", frame);

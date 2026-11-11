@@ -4127,10 +4127,66 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
-    it("parses the reattach bootstrap once, on adoption", async () => {
+    it("keeps a terminal codec failure after the written ReconnectDraft for the next reattach, which is snapshot-only", async () => {
+      vi.useFakeTimers();
+      const session = draftCodecSession(decodeEnvelope);
+      // The candidate's decoder rejects the bootstrap Full: a terminal
+      // bootstrapRejection before adoption.
+      const rejecting = draftCodecSession(() => ({ kind: "resyncRequired" }));
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+      provider.mockResolvedValueOnce(rejecting.session);
+      const reconnecting = watch(adapter.reconnectDraft());
+      await drainArt();
+      const candidate = MockWebSocket.last!;
+      try {
+        candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+          expect.stringContaining('"type":"ReconnectDraft"'),
+        ));
+        candidate.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+        // Reach guard: the codec was negotiated and the setup is on the wire.
+        expect(offeredCodec(candidate)).toBe(true);
+        expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
+        candidate.dispatchSynthetic("message", draftFrame("Full", {
+          type: "GameStarted",
+          data: { state: matchState("reattach-start"), your_player: 0, full_key: FULL_KEY },
+        }));
+        await vi.waitFor(() => expect(rejecting.decode).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({ code: "WS_CLOSED" }));
+        // The failure belongs to this adapter's draft episode.
+        expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "bootstrapRejection" });
+
+        // The next reattach through the public API is snapshot-only.
+        const next = watch(adapter.reconnectDraft());
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(candidate));
+        const replacement = MockWebSocket.last!;
+        replacement.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.waitFor(() => expect(replacement.send).toHaveBeenCalledWith(
+          expect.stringContaining('"type":"ReconnectDraft"'),
+        ));
+        expect(offeredCodec(replacement)).toBe(false);
+        expect(provider).toHaveBeenCalledTimes(2);
+        receive(replacement, "DraftStateUpdate", { view: createMockDraftView() });
+        await vi.waitFor(() => expect(next.value()).toEqual({ resolvedWith: undefined }));
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("parses a large reattach bootstrap once, on adoption", async () => {
       vi.useFakeTimers();
       const { adapter, candidate, reconnecting } = await sentCandidate();
-      const bootstrap = JSON.stringify({ type: "DraftStateUpdate", data: { view: createMockDraftView({ pick_number: 2 }) } });
+      // Synthetic padding: a view larger than 8 Mi UTF-16 code units.
+      const view = { ...createMockDraftView({ pick_number: 2 }), padding: "x".repeat(8_388_608) };
+      const bootstrap = JSON.stringify({ type: "DraftStateUpdate", data: { view } });
+      expect(bootstrap.length).toBeGreaterThan(8_388_608);
+      // The confirmation drains first, as frames arriving in separate tasks
+      // do: a frame this large is admitted only as the transport's sole message.
+      await vi.advanceTimersByTimeAsync(0);
       const parse = vi.spyOn(JSON, "parse");
       try {
         candidate.dispatchSynthetic("message", bootstrap);
