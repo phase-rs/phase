@@ -44,7 +44,7 @@ import {
   type PhaseSocketFactory,
   type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
-import { SetupConfirmation, type SetupConfirmationOutcome } from "../services/setupConfirmation";
+import { SetupConfirmation, classifySetupFrame, type SetupConfirmationOutcome } from "../services/setupConfirmation";
 import { isValidWebSocketUrl, mixedContentBlockReason } from "../services/serverDetection";
 import type { FullSessionKey, WsSessionData } from "../services/multiplayerSession";
 import {
@@ -2545,8 +2545,12 @@ export class WebSocketAdapter implements EngineAdapter {
       // entire drain: their synchronous replies follow already-admitted frames.
       socket.ws.onmessage = (event) => {
         (setupMessages ??= []).push(event);
-        // The candidate's first frame is its positive response.
-        confirmation?.confirm();
+        // Only the positive bootstrap adopts; a refusal ends the interval.
+        if (confirmation !== null) {
+          const frame = classifySetupFrame("game", event.data);
+          if (frame.kind === "positive") confirmation.confirm();
+          else if (frame.kind === "refusal") confirmation.refuse(frame.refusal, frame.rejected);
+        }
       };
 
       socket.ws.onerror = () => {
@@ -2737,6 +2741,15 @@ export class WebSocketAdapter implements EngineAdapter {
         // timeout hands the retry to the one retry owner.
         retireSwappedIncumbent();
         if (unconfirmed === "aborted" || this.stateCodecPreparation !== preparation) return;
+        if (unconfirmed === "refused") {
+          // A refusal is terminal, exactly as the `Error` handler treats it:
+          // surface it and end the episode instead of retrying forever.
+          const { refusal } = confirmation!.refusal!;
+          this.rejectInitialization(serverErrorInitializationError(refusal));
+          if (this.reconnectInFlight) this.failReconnect();
+          this.emit({ type: "error", message: refusal.message });
+          return;
+        }
         this.rejectInitialization(new AdapterError(
           "WS_CLOSED",
           unconfirmed === "timeout"

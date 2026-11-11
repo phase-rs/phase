@@ -28,7 +28,7 @@ import {
   type PhaseSocket,
   type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
-import { SetupConfirmation, type SetupConfirmationOutcome } from "../services/setupConfirmation";
+import { SetupConfirmation, classifySetupFrame, type SetupConfirmationOutcome } from "../services/setupConfirmation";
 import { isValidWebSocketUrl } from "../services/serverDetection";
 import { captureSubmissionArtPreferences, submitDeckList } from "../services/deckSubmission";
 import type {
@@ -1186,8 +1186,12 @@ export class ServerDraftAdapter implements EngineAdapter {
       const confirmation = initOwner?.kind === "reconnect" ? new SetupConfirmation() : null;
       sourceSocket.onmessage = (event) => {
         setupMessages.push(event);
-        // The candidate's first frame is its positive response.
-        confirmation?.confirm();
+        // Only the positive bootstrap adopts; a refusal ends the interval.
+        if (confirmation !== null) {
+          const frame = classifySetupFrame("draft", event.data);
+          if (frame.kind === "positive") confirmation.confirm();
+          else if (frame.kind === "refusal") confirmation.refuse(frame.refusal, frame.rejected);
+        }
       };
       const handleMessage: NonNullable<PhaseSocketTransport["onmessage"]> = (event) => {
         if (!this.sockets.has(sourceSocket)) return;
@@ -1319,6 +1323,13 @@ export class ServerDraftAdapter implements EngineAdapter {
         if (unconfirmed === "timeout") {
           this.rejectAttachment(attachment.owner, new AdapterError(
             "WS_CLOSED", "Reconnect was not confirmed in time", true,
+          ));
+        } else if (unconfirmed === "refused") {
+          // The server refused the reattach: surface its reason, as the
+          // refusal handlers do for an adopted socket.
+          const { refusal, rejected } = confirmation!.refusal!;
+          this.rejectAttachment(attachment.owner, new AdapterError(
+            rejected ? "ACTION_REJECTED" : "WS_ERROR", refusal.message, true,
           ));
         }
         this.abandonSocket(socket);

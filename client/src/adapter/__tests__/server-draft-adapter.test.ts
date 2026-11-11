@@ -152,7 +152,7 @@ async function completeHandshake(hello = SERVER_HELLO): Promise<MockWebSocket> {
   // so tests that only need the adopted socket keep their own scripts.
   for (let turn = 0; turn < 8; turn++) await Promise.resolve();
   if (ws.send.mock.calls.some(([frame]) => String(frame).includes('"type":"ReconnectDraft"'))) {
-    ws.dispatchSynthetic("message", JSON.stringify({ type: "Pong", data: { timestamp: 0 } }));
+    ws.dispatchSynthetic("message", JSON.stringify({ type: "DraftMatchStart", data: { match_id: "stand-in", round: 1, game_code: "G", player_token: "t", your_player: 0, opponent_name: "x" } }));
     for (let turn = 0; turn < 8; turn++) await Promise.resolve();
   }
   return ws;
@@ -4124,6 +4124,66 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
+    it.each([
+      ["DraftActionRejected", { reason: "seat already reattached" }, "ACTION_REJECTED", "seat already reattached"],
+      ["Error", { message: "Drafts unavailable" }, "WS_ERROR", "Drafts unavailable"],
+    ] as const)("does not adopt on a %s refusal: retires both sockets and surfaces the reason", async (type, data, code, message) => {
+      vi.useFakeTimers();
+      const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();
+      try {
+        receive(candidate, type, data);
+        await vi.waitFor(() => expect(ws.close).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({ code, message }));
+        await vi.waitFor(() => expect(command.value()).toMatchObject({ code: "WS_CLOSED" }));
+        expect(candidate.close).toHaveBeenCalled();
+        await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects
+          .toMatchObject({ message: "WebSocket not connected" });
+        // Nothing retries on its own.
+        const dialed = MockWebSocket.last;
+        await vi.advanceTimersByTimeAsync(130_000);
+        expect(MockWebSocket.last).toBe(dialed);
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("an unrelated frame neither adopts nor refuses; the positive bootstrap then adopts", async () => {
+      vi.useFakeTimers();
+      const { adapter, ws, candidate, reconnecting } = await sentCandidate();
+      try {
+        receive(candidate, "Pong", { timestamp: 1 });
+        await vi.advanceTimersByTimeAsync(4000);
+        expect(ws.close).not.toHaveBeenCalled();
+        expect(reconnecting.value()).toBe("never settled");
+        receive(candidate, "DraftStateUpdate", { view: createMockDraftView() });
+        await vi.waitFor(() => expect(reconnecting.value()).toEqual({ resolvedWith: undefined }));
+        expect(candidate.close).not.toHaveBeenCalled();
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("adopts on DraftMatchStart, the other positive frame of a reattach", async () => {
+      vi.useFakeTimers();
+      const { adapter, candidate, reconnecting } = await sentCandidate();
+      try {
+        receive(candidate, "DraftMatchStart", {
+          match_id: "r2-t0", round: 2, game_code: FULL_KEY.game_code, full_key: FULL_KEY,
+          player_token: "match-draft-token", your_player: 0, opponent_name: "Bob",
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(candidate.close).not.toHaveBeenCalled();
+        // The new match is only published once the candidate is adopted.
+        await vi.waitFor(() => expect(adapter.currentMatchId).toBe("r2-t0"));
+        void reconnecting;
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
     it.each(["close", "timeout"] as const)(
       "retires both sockets and settles the incumbent's command and the reattach when the candidate %s before its bootstrap",
       async (ending) => {
@@ -4142,6 +4202,11 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
           if (ending === "timeout") expect(candidate.close).toHaveBeenCalled();
           await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects
             .toMatchObject({ message: "WebSocket not connected" });
+          // The draft adapter has no retry owner and nothing in the product
+          // retries a reattach: no second dial is scheduled by anyone.
+          const dialed = MockWebSocket.last;
+          await vi.advanceTimersByTimeAsync(130_000);
+          expect(MockWebSocket.last).toBe(dialed);
         } finally {
           adapter.dispose();
           vi.useRealTimers();
@@ -5353,7 +5418,7 @@ describe("ServerDraftAdapter — commands across socket replacement", () => {
     } else {
       // The candidate is adopted on its first post-setup frame; a neutral one
       // adopts it without settling the reattach.
-      receive(ws, "Pong", { timestamp: 0 });
+      receive(ws, "DraftMatchStart", { match_id: "stand-in", round: 1, game_code: "G", player_token: "t", your_player: 0, opponent_name: "x" });
       await drainArt();
     }
     return { ws, session, leaseClose, reconnected };

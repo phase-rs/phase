@@ -124,7 +124,12 @@ const REPLY_OWNERSHIP_FULL_KEY = { game_code: "GAME01", generation: 7 };
  * post-ServerHello state. Returns the adapter's underlying mock ws once
  * the handshake has landed, so tests can then fire game-level frames.
  */
-async function completeHandshake(adapter: WebSocketAdapter, hello = SERVER_HELLO): Promise<MockWebSocket> {
+async function completeHandshake(
+  adapter: WebSocketAdapter,
+  hello = SERVER_HELLO,
+  /** The candidate's first frame; `null` sends none (the candidate stays unconfirmed). */
+  firstFrame?: string | null,
+): Promise<MockWebSocket> {
   // Allow the microtask inside `openPhaseSocket` to install its
   // `onmessage` handler before we deliver the hello frame.
   await Promise.resolve();
@@ -132,23 +137,25 @@ async function completeHandshake(adapter: WebSocketAdapter, hello = SERVER_HELLO
   ws.dispatchSynthetic("message", hello);
   // One more tick so the adapter's `attachSocket` re-binds `onmessage`
   // to its post-handshake handler and the `this.ws` assignment settles.
-  await Promise.resolve();
-  await Promise.resolve();
-  // A reconnect candidate is adopted only on its first post-setup frame. A
-  // server answers `Reconnect` with a bootstrap; a neutral frame stands in for
-  // it here so tests that only need the adopted socket keep their own scripts.
-  if (ws.send.mock.calls.some(([frame]) => String(frame).includes('"type":"Reconnect"'))) {
-    ws.dispatchSynthetic("message", JSON.stringify({ type: "Pong", data: { timestamp: 0 } }));
-    for (let turn = 0; turn < 8; turn++) await Promise.resolve();
-  } else {
-    // The write may still be in flight on a microtask: give it its turns.
-    for (let turn = 0; turn < 8; turn++) await Promise.resolve();
-    if (ws.send.mock.calls.some(([frame]) => String(frame).includes('"type":"Reconnect"'))) {
-      ws.dispatchSynthetic("message", JSON.stringify({ type: "Pong", data: { timestamp: 0 } }));
-      for (let turn = 0; turn < 8; turn++) await Promise.resolve();
-    }
+  for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+  // A reconnect candidate is adopted only on a positive bootstrap frame. A
+  // server answers `Reconnect` with one; a plain GameStarted stands in for it
+  // here unless the test supplies its own first frame (or `null`).
+  const gated = !(adapter as unknown as { isNativeSocket(): boolean }).isNativeSocket();
+  const sentReconnect = ws.send.mock.calls.some(([frame]) => String(frame).includes('"type":"Reconnect"'));
+  if (gated && sentReconnect && firstFrame !== null) {
+    ws.dispatchSynthetic("message", firstFrame ?? JSON.stringify({
+      type: "GameStarted",
+      data: {
+        state_revision: 1, state: createMockState(), your_player: 0,
+        player_token: "accepted-full-session-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+      },
+    }));
+    for (let turn = 0; turn < 10; turn++) await Promise.resolve();
   }
-  return (adapter as unknown as { ws: MockWebSocket }).ws;
+  return firstFrame === null && gated && sentReconnect
+    ? ws
+    : (adapter as unknown as { ws: MockWebSocket }).ws;
 }
 
 /**
@@ -2215,7 +2222,7 @@ describe("WebSocketAdapter", () => {
         for (let second = 0; second < 120; second++) {
           await vi.advanceTimersByTimeAsync(1000);
           if (MockWebSocket.last !== previous) {
-            previous = await completeHandshake(subject);
+            previous = await completeHandshake(subject, SERVER_HELLO, null);
             previous.dispatchSynthetic("close");
           }
         }
@@ -2334,7 +2341,7 @@ describe("WebSocketAdapter", () => {
       }
     });
 
-    it("fully ends the reconnect episode when a reconnect is answered with PasswordRequired", async () => {
+    it("fully ends the reconnect episode when a reconnect is answered with a refusal", async () => {
       acceptFullReplyOwnershipSession(adapter, ws);
       vi.useFakeTimers();
       const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
@@ -2343,9 +2350,8 @@ describe("WebSocketAdapter", () => {
       try {
         ws.dispatchSynthetic("close");
         await vi.advanceTimersByTimeAsync(1000);
-        const retry = await completeHandshake(adapter);
-        retry.dispatchSynthetic("message", JSON.stringify({
-          type: "PasswordRequired", data: { game_code: "GAME01" },
+        await completeHandshake(adapter, SERVER_HELLO, JSON.stringify({
+          type: "Error", data: { message: "Reconnect session identity is no longer current" },
         }));
         expect(events).toHaveBeenCalledWith({ type: "reconnectFailed" });
         // The lifecycle listeners are gone and the budget is reset: neither a
@@ -2434,11 +2440,10 @@ describe("WebSocketAdapter", () => {
       };
       try {
         expect(subject.tryReconnect(session)).toBe(true);
-        const socket = await completeHandshake(subject);
-        expect(socket.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Reconnect"'));
         const seatOneNotice = JSON.parse(BOOTSTRAP_WITHHELD) as { data: Record<string, unknown> };
         seatOneNotice.data.withheld = { type: "GameStarted", data: { your_player: 1 } };
-        socket.dispatchSynthetic("message", JSON.stringify(seatOneNotice));
+        const socket = await completeHandshake(subject, SERVER_HELLO, JSON.stringify(seatOneNotice));
+        expect(socket.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Reconnect"'));
         const types = events.mock.calls.map(([event]) => (event as { type: string }).type);
         expect(types.indexOf("playerIdentity")).toBeGreaterThan(-1);
         expect(types.indexOf("playerIdentity")).toBeLessThan(types.indexOf("reconnectFailed"));
@@ -2590,8 +2595,7 @@ describe("WebSocketAdapter", () => {
       try {
         ws.dispatchSynthetic("close");
         await vi.advanceTimersByTimeAsync(1000);
-        const hosting = await completeHandshake(adapter);
-        hosting.dispatchSynthetic("message", JSON.stringify({
+        const hosting = await completeHandshake(adapter, SERVER_HELLO, JSON.stringify({
           type: "GameCreated",
           data: { game_code: "GAME01", player_token: "accepted-full-session-token", full_key: REPLY_OWNERSHIP_FULL_KEY },
         }));
@@ -6305,6 +6309,86 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         await vi.advanceTimersByTimeAsync(10_000);
         expect(candidate.close).not.toHaveBeenCalled();
       } finally {
+        adapter.dispose();
+      }
+    });
+
+    it("does not adopt on a refusal: retires both sockets, settles the incumbent's request and ends the episode without a retry", async () => {
+      const { adapter, raw, candidate, pending, events } = await sentCandidate();
+      try {
+        candidate.dispatchSynthetic("message", JSON.stringify({
+          type: "Error", data: { message: "Reconnect session identity is no longer current" },
+        }));
+        await vi.waitFor(() => expect(raw.close).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(pending.value()).toMatchObject({ code: "WS_CLOSED" }));
+        await vi.waitFor(() => expect(candidate.close).toHaveBeenCalled());
+        // The refusal is surfaced and terminal, as the Error handler treats it.
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnectFailed" }));
+        expect(events).toContainEqual({
+          type: "error", message: "Reconnect session identity is no longer current",
+        });
+        expect(events).not.toContainEqual({ type: "reconnected", inGame: true });
+        const dialed = MockWebSocket.last;
+        await vi.advanceTimersByTimeAsync(130_000);
+        expect(MockWebSocket.last).toBe(dialed);
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "reconnecting" }));
+      } finally {
+        adapter.dispose();
+      }
+    });
+
+    it("an unrelated frame neither adopts nor refuses; the positive bootstrap then adopts", async () => {
+      const { adapter, raw, candidate, pending, events } = await sentCandidate();
+      try {
+        candidate.dispatchSynthetic("message", JSON.stringify({ type: "Pong", data: { timestamp: 1 } }));
+        await vi.advanceTimersByTimeAsync(4000);
+        expect(raw.close).not.toHaveBeenCalled();
+        expect(pending.value()).toBe("never settled");
+        expect(events).not.toContainEqual({ type: "reconnected", inGame: true });
+        deliverCodec(candidate, "Full", codecGameStarted(5, 5));
+        await vi.waitFor(() => expect(raw.close).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+        expect(candidate.close).not.toHaveBeenCalled();
+      } finally {
+        adapter.dispose();
+      }
+    });
+
+    it.each([
+      ["GameCreated", { game_code: "GAME01", player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY }],
+      ["SessionAttached", {
+        game_code: "GAME01", player_id: 0, player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+      }],
+    ] as const)("adopts on the pregame seat return frame %s", async (type, data) => {
+      const { adapter, raw, candidate } = await sentCandidate();
+      try {
+        candidate.dispatchSynthetic("message", JSON.stringify({ type, data }));
+        await vi.waitFor(() => expect(raw.close).toHaveBeenCalledOnce());
+        expect(candidate.close).not.toHaveBeenCalled();
+      } finally {
+        adapter.dispose();
+      }
+    });
+
+    it("completing the episode clears the pending retry timer (completeReconnect)", async () => {
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+      const { adapter, candidate, events } = await sentCandidate();
+      try {
+        candidate.readyState = 3;
+        candidate.dispatchSynthetic("close");
+        await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "reconnecting" })));
+        const internals = adapter as unknown as {
+          reconnectTimer: unknown; completeReconnect(inGame: boolean): void;
+        };
+        expect(internals.reconnectTimer).not.toBeNull();
+        const dialed = MockWebSocket.last;
+        internals.completeReconnect(true);
+        expect(internals.reconnectTimer).toBeNull();
+        // The cleared timer never fires: no second dial for the finished episode.
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(MockWebSocket.last).toBe(dialed);
+      } finally {
+        random.mockRestore();
         adapter.dispose();
       }
     });
