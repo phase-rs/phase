@@ -23538,7 +23538,19 @@ fn resolve_chain_body(
             // CR 118.4 + CR 107.3c: Resolve a dynamic-generic mana cost into a
             // fixed `Mana { cost }` BEFORE entering the prompt — the runtime
             // payment site only handles static AbilityCost variants.
-            let (resolved_cost, repeat) = resolved_unless_cost(state, ability, &unless_pay.cost);
+            // CR 702.24a + CR 118.12a: the compact repeated form (the printed
+            // draw instruction plus a count) is the contract of ONE payer's
+            // repeated draw, which `engine_payment_choices` pays instruction by
+            // instruction. An "unless any player pays" poll re-offers the cost
+            // to each later payer, so it carries the whole expanded cost through
+            // the general path instead. No printed card polls a repeated cost.
+            let (resolved_cost, repeat) =
+                match resolved_unless_cost(state, ability, &unless_pay.cost) {
+                    (base, Some(count)) if unless_payers.len() > 1 => {
+                        (expand_per_counter(&base, count), None)
+                    }
+                    compact => compact,
+                };
             // CR 121.2b + CR 614.17b: judge the whole repeated payment, not
             // just the compact first instruction, before offering it — without
             // allocating one leg per age counter.
@@ -28913,11 +28925,6 @@ fn resolve_unless_payers(
     }
 }
 
-/// CR 702.24a: Expand `pay [base] for each counter on it` into the
-/// concrete N-fold cost the player actually pays. N=0 yields a {0} cost
-/// (CR 118.3a), which is still asked (CR 118.5). `OneOf`
-/// unfolds into a `Composite` of N independent disjunctive choices
-/// (CR 702.24a: each choice is made separately).
 /// CR 121.2b + CR 702.24a: a compact repeated draw admission check. The whole
 /// repeated payment is impossible exactly when a single draw of the total size
 /// is, so no per-leg allocation is needed; non-fixed quantities fall back to the
@@ -28950,6 +28957,11 @@ pub(crate) fn repeated_draw_check_cost(base: &AbilityCost, count: u32) -> Abilit
     expand_per_counter(base, count)
 }
 
+/// CR 702.24a: Expand `pay [base] for each counter on it` into the
+/// concrete N-fold cost the player actually pays. N=0 yields a {0} cost
+/// (CR 118.3a), which is still asked (CR 118.5). `OneOf`
+/// unfolds into a `Composite` of N independent disjunctive choices
+/// (CR 702.24a: each choice is made separately).
 pub(crate) fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
     if n == 0 {
         return AbilityCost::Mana {
@@ -40009,6 +40021,63 @@ mod tests {
             }
             other => panic!("expected UnlessPayment for triggering player, got {other:?}"),
         }
+    }
+
+    /// CR 702.24a + CR 118.12a: the compact repeated draw form is offered only
+    /// to a single payer. A poll ("unless any player pays") carries the whole
+    /// expanded cost, so the next payer it re-offers to is asked for every
+    /// instruction rather than one.
+    #[test]
+    fn a_repeated_draw_cost_is_compact_only_for_a_single_payer() {
+        let prompt_for = |payer: TargetFilter| {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Repeated Draw Source".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&source)
+                .expect("source exists")
+                .counters
+                .insert(crate::types::counter::CounterType::Age, 3);
+            let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], source, PlayerId(0));
+            ability.unless_pay = Some(UnlessPayModifier {
+                cost: AbilityCost::PerCounter {
+                    counter: crate::types::counter::CounterType::Age,
+                    target: TargetFilter::SelfRef,
+                    base: Box::new(AbilityCost::EffectCost {
+                        effect: Box::new(Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        }),
+                    }),
+                },
+                payer,
+            });
+            resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+                .expect("the unless payment is offered");
+            match state.waiting_for {
+                WaitingFor::UnlessPayment {
+                    cost,
+                    repeat,
+                    remaining,
+                    ..
+                } => (cost, repeat, remaining.len()),
+                other => panic!("expected the unless prompt, got {other:?}"),
+            }
+        };
+        let (_, repeat, remaining) = prompt_for(TargetFilter::Controller);
+        assert_eq!((repeat, remaining), (Some(3), 0), "one payer: compact");
+        let (cost, repeat, remaining) = prompt_for(TargetFilter::AllPlayers);
+        assert_eq!((repeat, remaining), (None, 1), "a poll: expanded");
+        assert!(
+            matches!(&cost, AbilityCost::Composite { costs } if costs.len() == 3),
+            "the poll offers every instruction: {cost:?}"
+        );
     }
 
     /// CR 118.12a + CR 701.9: Wrench Mind — "unless they discard an artifact

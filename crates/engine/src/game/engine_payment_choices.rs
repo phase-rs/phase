@@ -1,8 +1,8 @@
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, QuantityExpr,
-    ResolvedAbility, SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, ResolvedAbility,
+    SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
@@ -16,7 +16,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::mana::ManaSourceSelection;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{DrawEventStage, ProposedEvent};
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::resolution::OptionalEffectFrame;
 use crate::types::zones::Zone;
 use crate::types::ResolutionOptionalPaymentChoice;
@@ -2107,13 +2107,25 @@ struct RepeatedDrawUnlessPayment {
 /// instructions still owed, and its resume re-enters here; no player receives
 /// priority in between (CR 117.2e).
 ///
-/// CR 121.4 + CR 121.6a: the work is bounded by the game, not by the count.
-/// Once the payer's library is empty, the empty-library attempt is already
-/// recorded, and no replacement can apply to the next draw, every further
-/// instruction emits no event and its ledger edit changes nothing, so no
-/// observer can tell the attempts apart. The rest of the count is then paid at
-/// once: the journal keeps every instruction that changed the game, and
-/// replaying it reproduces the same state.
+/// CR 118.11 + CR 614.1: each instruction is performed through the draw
+/// replacement authority, whatever replaces it. The synchronous work of one
+/// dispatch is bounded at this owner:
+/// - an instruction that emits nothing a trigger can key on
+///   (`trigger_index::keys_from_event`) and leaves the game unchanged
+///   (Possessed Portal's mandatory skip, an attempt from an empty library
+///   already recorded, a draw a can't-draw effect clamps) is a fixed point:
+///   the payment is deterministic, so every further instruction is the same
+///   identity and the rest of the count is paid at once. The journal keeps
+///   every instruction that changed the game, so replaying it reproduces the
+///   state;
+/// - a replacement that ends the game (Laboratory Maniac) ends the payment;
+/// - every other instruction changes the game and is performed, all within
+///   this dispatch with priority withheld, up to
+///   [`SYNCHRONOUS_INSTRUCTION_CEILING`]. A count that would still be changing
+///   the game past it (Hullbreacher creating a Treasure per draw) is beyond
+///   what the engine can represent in one resolution: the choice to pay is
+///   refused and the action rolled back whole, as an unrepresentable life
+///   change is, and the player may still decline.
 fn pay_repeated_draw_unless_cost(
     state: &mut GameState,
     payment: RepeatedDrawUnlessPayment,
@@ -2122,8 +2134,14 @@ fn pay_repeated_draw_unless_cost(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let mut owed = owed.get();
-    while owed > 0 && !repeated_draw_tail_is_fixed_point(state, &payment) {
+    let mut changing_instructions = 0u32;
+    // The game before the current instruction, kept while the previous one
+    // emitted nothing a trigger can key on: only such an instruction can be a
+    // fixed point.
+    let mut quiet_before = Some(state.clone());
+    while owed > 0 {
         owed -= 1;
+        let instruction_start = events.len();
         match costs::resume_ability_cost_for_resolution(
             state,
             payment.payer,
@@ -2177,6 +2195,30 @@ fn pay_repeated_draw_unless_cost(
                 tracing::warn!(?reason, "a latched draw instruction failed; settling PAID");
             }
         }
+        // CR 104.1: a replacement ended the game; nothing more is paid.
+        if state.game_end.is_some() {
+            return Ok(state.waiting_for.clone());
+        }
+        // CR 603.2: an event no trigger can key on (the replacement
+        // bookkeeping a replaced draw emits) is invisible to the game.
+        let quiet = events[instruction_start..]
+            .iter()
+            .all(|event| super::trigger_index::keys_from_event(event, state).is_empty());
+        if quiet
+            && quiet_before
+                .as_ref()
+                .is_some_and(|before| instruction_changed_nothing(before, state))
+        {
+            break;
+        }
+        changing_instructions += 1;
+        if changing_instructions > SYNCHRONOUS_INSTRUCTION_CEILING {
+            return Err(EngineError::ActionNotAllowed(format!(
+                "a repeated payment that changes the game on more than \
+                 {SYNCHRONOUS_INSTRUCTION_CEILING} instructions is not representable"
+            )));
+        }
+        quiet_before = quiet.then(|| state.clone());
     }
     finish_successful_unless_payment(
         state,
@@ -2212,54 +2254,21 @@ pub(crate) fn draw_payment_is_parked(state: &GameState) -> bool {
     )
 }
 
-/// CR 121.4 + CR 121.6a + CR 614.17c: whether every further instruction of a
-/// repeated "draw a card" payment is the identity: the drawer can't draw, or
-/// has an empty library and has already attempted to draw from it, and no
-/// replacement applies to a one-card draw at either proposal stage
-/// (CR 121.2a). Obstinate Familiar's skip or Laboratory Maniac's win still
-/// apply on an empty library, so the attempts stay individual while one can.
-fn repeated_draw_tail_is_fixed_point(
-    state: &GameState,
-    payment: &RepeatedDrawUnlessPayment,
-) -> bool {
-    let AbilityCost::EffectCost { effect } = &payment.cost else {
-        return false;
-    };
-    let Effect::Draw {
-        count: QuantityExpr::Fixed { value: 1 },
-        target,
-    } = effect.as_ref()
-    else {
-        return false;
-    };
-    let Some(drawer) =
-        effects::resolve_player_for_context_ref(state, &payment.pending_effect, target)
-    else {
-        return false;
-    };
-    let Some(player) = state.players.iter().find(|player| player.id == drawer) else {
-        return false;
-    };
-    // CR 121.3 + CR 614.17c: a draw the drawer can't make is clamped to
-    // nothing, and no replacement can apply to it.
-    let clamped = effects::draw::allowed_draw_count(state, drawer, 1) == 0;
-    let exhausted = player.library.is_empty() && player.drew_from_empty_library;
-    (clamped || exhausted)
-        && [DrawEventStage::Instruction, DrawEventStage::Individual]
-            .into_iter()
-            .all(|stage| {
-                replacement::find_applicable_replacements(
-                    state,
-                    &ProposedEvent::Draw {
-                        player_id: drawer,
-                        count: 1,
-                        stage,
-                        applied: Default::default(),
-                    },
-                    replacement::replacement_registry(),
-                )
-                .is_empty()
-            })
+/// The most instructions one dispatch of a repeated draw payment performs
+/// while each still changes the game. Every printed draw replacement either
+/// moves a real card (bounded by the cards in a library, a few hundred at
+/// most), ends the game, reaches the fixed point, or creates objects without
+/// bound (Hullbreacher); this sits far above the first and stops the last
+/// long before the engine's runaway-cascade object ceiling.
+const SYNCHRONOUS_INSTRUCTION_CEILING: u32 = 1_024;
+
+/// CR 104.4b + CR 118.11: whether an instruction left the game exactly as it
+/// found it, by the same semantic equality loop detection uses (derived caches
+/// excluded), with the instruction's own journal entries set aside.
+fn instruction_changed_nothing(before: &GameState, after: &GameState) -> bool {
+    let mut unjournaled = after.clone();
+    unjournaled.resolved_rules_journal = before.resolved_rules_journal.clone();
+    unjournaled == *before
 }
 
 /// CR 118.12 + CR 616.1: Complete an already-paid unless cost without entering
@@ -2292,6 +2301,12 @@ pub(crate) fn finish_successful_unless_payment(
     });
 
     let mut post_action_event_start = None;
+    // CR 603.2c: scan contract. Without a paid successor, the payment's own
+    // events are scanned from `payment_event_start`. With one, the scan starts
+    // at the successor's events: no printed unless cost both pays by drawing
+    // and has an "if they do" rider (Psychic Vortex's draw cost guards a
+    // sacrifice with no successor), so draw-owned payment events never sit
+    // before a successor's range.
     // CR 118.12 + CR 118.12a: "[Effect] unless [player] pays [cost]. If they
     // do, [alternative]." A paid cost suppresses the primary effect and runs
     // an `IfAPlayerDoes` alternative outcome.

@@ -672,6 +672,40 @@ fn skipping_every_draw_still_pays_the_cost() {
     assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
     assert!(upkeep_ability_resolved(&result.events, vortex));
     assert!(runner.state().pending_cost_move_resume.is_none());
+
+    // CR 118.11 + CR 614.1: the same mandatory skip over 2^31 instructions.
+    // A skipped draw changes nothing and emits nothing, so once one has been
+    // performed the rest of the count is paid at once: bounded work, the
+    // upkeep paid, nothing drawn and no draw attempted.
+    const HUGE: u32 = 1 << 31;
+    let (mut runner, vortex, ()) = vortex_board(HUGE - 1, &STAGED_LIBRARY, |scenario| {
+        scenario.add_artifact_from_oracle(P1, "Possessed Portal", POSSESSED_PORTAL_ORACLE);
+    });
+    advance_through_upkeep(&mut runner);
+    let before = ZoneSizes::of(&runner, P0);
+    let journal_start = runner.state().resolved_rules_journal.entries().len();
+    let result = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("a skip replacement does not forbid paying");
+    let journal_growth = runner.state().resolved_rules_journal.entries().len() - journal_start;
+    assert!(
+        journal_growth < 200,
+        "the skipped instructions are not each journaled: {journal_growth}"
+    );
+    assert_eq!(ZoneSizes::of(&runner, P0), before, "every draw was skipped");
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
+    assert!(
+        upkeep_ability_resolved(&result.events, vortex),
+        "the upkeep is paid"
+    );
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PlayerLost { .. })),
+        "a skipped draw is not an attempt to draw from the library"
+    );
+    assert!(runner.state().pending_cost_move_resume.is_none());
 }
 
 /// CR 121.2 + CR 614.11a: a skipped draw inside a two-draw instruction finishes
@@ -1657,9 +1691,9 @@ fn each_paused_instruction_keeps_the_rest_owed_without_priority() {
 /// CR 121.3 + CR 118.11 + CR 121.4 (2008-04-01 ruling: "Psychic Vortex will
 /// remain on the battlefield", and the player loses after upkeep finishes): a
 /// draw cost chosen on an empty library is paid. The upkeep's paid epilogue
-/// resolves, Vortex is not sacrificed, and the player loses only after it. One
-/// empty-library attempt is journaled; the remaining 64 attempts change
-/// nothing and are not.
+/// resolves, Vortex is not sacrificed, and the player loses only after it. The
+/// first empty-library attempt changes the game and the second shows it no
+/// longer does; the remaining 63 identical attempts are not journaled.
 #[test]
 fn a_repeated_draw_cost_on_an_empty_library_is_paid_then_loses() {
     const AGE: u32 = 65;
@@ -1690,8 +1724,8 @@ fn a_repeated_draw_cost_on_an_empty_library_is_paid_then_loses() {
     assert!(paid < lost, "the payment completes before the loss");
     assert_eq!(
         empty_library_draw_edits(&runner, P0, journal_start),
-        1,
-        "only the first empty-library attempt changes the game"
+        2,
+        "the first empty-library attempt changes the game; the second shows it no longer does"
     );
 }
 
@@ -1816,7 +1850,11 @@ fn a_huge_age_count_on_a_short_library_is_bounded_and_replayable() {
         journal_growth < 200,
         "the journal records the draws that changed the game, not 2^31 attempts: {journal_growth}"
     );
-    assert_eq!(empty_library_draw_edits(&runner, P0, journal_start), 1);
+    assert_eq!(
+        empty_library_draw_edits(&runner, P0, journal_start),
+        2,
+        "the first empty attempt and the identity attempt that ends the payment"
+    );
     assert_eq!(
         result
             .events
@@ -2088,4 +2126,99 @@ fn a_departing_payer_takes_the_owed_instructions_with_them() {
     runner
         .act(GameAction::PassPriority)
         .expect("the game goes on for the living players");
+}
+
+/// Notion Thief, verbatim Oracle text: a mandatory draw replacement that
+/// changes the game on every draw it replaces.
+const NOTION_THIEF_ORACLE: &str = "Flash\nIf an opponent would draw a card except the first one \
+they draw in each of their draw steps, instead that player skips that draw and you draw a card.";
+
+/// Hullbreacher, verbatim Oracle text.
+const HULLBREACHER_ORACLE: &str = "Flash\nIf an opponent would draw a card except the first one \
+they draw in each of their draw steps, instead you create a Treasure token. (It's an artifact \
+with \"{T}, Sacrifice this token: Add one mana of any color.\")";
+
+/// CR 118.11 + CR 614.1: a mandatory replacement that changes the game on each
+/// draw is performed for each instruction, never collapsed. Each of P0's draws
+/// becomes a draw by Notion Thief's controller: ten real draws from P1's
+/// ten-card library, then P1 attempts to draw from the empty library, and only
+/// once an attempt changes nothing is the rest of the count paid at once.
+#[test]
+fn a_replacement_that_changes_the_game_is_performed_for_each_instruction() {
+    const AGE: u32 = 65;
+    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &STAGED_LIBRARY, |scenario| {
+        scenario.with_library_top(P1, &STAGED_LIBRARY[..10]);
+        scenario.add_creature_from_oracle(P1, "Notion Thief", 3, 1, NOTION_THIEF_ORACLE);
+    });
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    let before = ZoneSizes::of(&runner, P0);
+    let journal_start = runner.state().resolved_rules_journal.entries().len();
+    let result = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("a mandatory substitute does not forbid paying");
+    let drawn_by = |player: PlayerId| {
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == player))
+            .count()
+    };
+    assert_eq!(
+        drawn_by(P1),
+        10,
+        "each replaced draw is performed: P1 draws its library"
+    );
+    assert_eq!(drawn_by(P0), 0, "P0 skips every draw");
+    assert_eq!(ZoneSizes::of(&runner, P0).hand, before.hand);
+    assert_eq!(
+        empty_library_draw_edits(&runner, P1, journal_start),
+        2,
+        "P1's first empty attempt changes the game and the second ends the payment"
+    );
+    assert!(
+        upkeep_ability_resolved(&result.events, vortex),
+        "the upkeep is paid"
+    );
+}
+
+/// CR 118.11 + CR 614.1: a replacement that creates an object for every draw
+/// never reaches a fixed point. One more instruction than the engine performs
+/// in a single resolution is not representable, so the choice to pay is
+/// refused and the game is left exactly as it was, with priority never
+/// handed out mid-payment; the player may still decline.
+#[test]
+fn a_payment_past_the_synchronous_ceiling_is_refused_whole() {
+    const AGE: u32 = 1_025;
+    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &STAGED_LIBRARY, |scenario| {
+        scenario.add_creature_from_oracle(P1, "Hullbreacher", 3, 2, HULLBREACHER_ORACLE);
+    });
+    advance_through_upkeep(&mut runner);
+    let prompt = runner.state().waiting_for.clone();
+    let objects_before = runner.state().objects.len();
+    let error = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect_err("more game-changing instructions than one resolution can perform");
+    assert!(
+        matches!(
+            &error,
+            engine::game::engine::EngineError::ActionNotAllowed(reason)
+                if reason.contains("more than 1024 instructions is not representable")
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        runner.state().waiting_for,
+        prompt,
+        "the prompt is unchanged"
+    );
+    assert_eq!(
+        runner.state().objects.len(),
+        objects_before,
+        "no Treasure was kept"
+    );
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("declining stays legal");
+    assert_eq!(zone_of(&runner, vortex), Zone::Graveyard);
 }
