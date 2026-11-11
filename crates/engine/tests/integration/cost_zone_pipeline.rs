@@ -15287,6 +15287,280 @@ fn restore_validates_the_delve_completion_by_its_variant() {
     let _ = fuel;
 }
 
+/// Kaervek's Spite (`ORI`, verbatim from Scryfall): the printed card whose whole cost is a
+/// commit-time arrangement — "sacrifice all permanents you control" is a DETERMINED set
+/// arranged after the mana is spent (CR 404.3), so its continuation is
+/// `PendingSacrificeCostCompletion::FinalizeSpell` on a `SacrificeForCost` cost move.
+const KAERVEKS_SPITE_SACRIFICE: &str = "As an additional cost to cast this spell, sacrifice all permanents you control and discard your hand.\nTarget player loses 5 life.";
+
+/// CR 601.2h + CR 616.1: P0 casts Kaervek's Spite from a three-black floating pool. The
+/// arrangement of the determined sacrifice set is submitted with the graveyard-redirecting
+/// enchantment's move proposed first, so the sacrifice pauses on its CR 616.1 replacement
+/// choice with the cast parked on `SacrificeForCost` carrying the spell finalization.
+///
+/// The hand is otherwise empty, so the commit owes no discard and the parked continuation is
+/// exactly the sacrifice one.
+fn kaerveks_spite_sacrifice_park() -> (GameRunner, ObjectId) {
+    const DARKSTEEL_COLOSSUS: &str = "Trample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)\nIndestructible (Effects that say \"destroy\" don't destroy this creature. A creature with indestructible can't be destroyed by damage.)\nIf Darksteel Colossus would be put into a graveyard from anywhere, reveal Darksteel Colossus and shuffle it into its owner's library instead.";
+    const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Kaervek's Spite", true, KAERVEKS_SPITE_SACRIFICE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black; 3],
+            generic: 0,
+        })
+        .id();
+    // CR 404.3: two permanents, so the determined sacrifice set needs an ARRANGEMENT before
+    // it is paid — that arrangement is what defers the sacrifice to the commit.
+    let colossus = scenario
+        .add_creature_from_oracle(P0, "Darksteel Colossus", 11, 11, DARKSTEEL_COLOSSUS)
+        .id();
+    // CR 616.1: TWO competing "instead of a graveyard" replacements on the same move, so
+    // paying the set raises an ordering choice and parks the commit.
+    let rest_in_peace = scenario
+        .add_creature(P0, "Rest in Peace", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(REST_IN_PEACE)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("printed Kaervek's Spite is announced");
+    let mut seen = Vec::new();
+    for _ in 0..16 {
+        seen.push(runner.waiting_for_kind());
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(P1)),
+                    })
+                    .expect("P1 is a legal target");
+            }
+            // CR 404.3: arrange the Colossus FIRST, while Rest in Peace is still on the
+            // battlefield to compete with its own replacement.
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                choices,
+                ..
+            } => {
+                assert_eq!(
+                    choices.len(),
+                    2,
+                    "reach-guard: the determined set is both permanents, got {choices:?}"
+                );
+                let order = if choices.iter().position(|id| *id == colossus) == Some(0) {
+                    choices.clone()
+                } else {
+                    vec![colossus, rest_in_peace]
+                };
+                runner
+                    .act(GameAction::SelectCards { cards: order })
+                    .expect("the arrangement of the determined sacrifice set is paid");
+                return (runner, spell);
+            }
+            other => {
+                panic!("unexpected prompt while casting Kaervek's Spite: {other:?}; seen {seen:?}")
+            }
+        }
+    }
+    panic!("Kaervek's Spite never reached its sacrifice arrangement; prompts seen: {seen:?}");
+}
+
+/// CR 700.14 + CR 601.2h + CR 404.3: the sacrifice-for-cost continuation is validated by its
+/// COMPLETION variant. `SacrificeForCost` with `FinalizeSpell` re-enters the prepaid resume
+/// (`pay_deferred_hand_discard_cost` → `resume_prepaid_spell_finalization`), which consumes
+/// `pending.prepaid_actual_mana_spent` and otherwise falls back to the spell COPY; that
+/// number becomes the cast's CR 601.2h paid-facts snapshot and CR 700.14's "Whenever you
+/// expend N" ledger. Before the completion-keyed enumeration this park was skipped by the
+/// `PendingCast` walk as soon as its amount was erased, and the resume spent the copy.
+#[test]
+fn restore_validates_the_sacrifice_completion_by_its_variant() {
+    let (runner, spell) = kaerveks_spite_sacrifice_park();
+    // The recipient the payment actually left behind — the journal's own key for this cast.
+    let recipient = runner
+        .state()
+        .resolved_rules_journal
+        .spent_mana()
+        .iter()
+        .find(|spent| {
+            matches!(&spent.recipient,
+                engine::types::resolved_commands::ManaPaymentRecipient::Object(r)
+                    if r.object_id == spell)
+        })
+        .map(|spent| spent.recipient.clone())
+        .expect("the journal recorded this cast's spend");
+    // CR 702.51a: the same projection the production guard uses — no convoke/exile unit.
+    let settled_units = runner
+        .state()
+        .resolved_rules_journal
+        .spent_units_for_payer_and_recipient(P0, &recipient)
+        .unwrap_or_else(|| {
+            panic!(
+                "DIAG recipient={recipient:?} spell={spell:?} all={:?}",
+                runner
+                    .state()
+                    .resolved_rules_journal
+                    .spent_mana()
+                    .iter()
+                    .map(|spent| format!("{:?}", spent.recipient))
+                    .collect::<Vec<_>>()
+            )
+        })
+        .iter()
+        .filter(|unit| !unit.is_convoke_payment())
+        .count();
+    let settled = settled_units as u32;
+
+    // REACH GUARD: this is the SACRIFICE arm specifically — `SacrificeForCost` carrying the
+    // spell finalization — not the delve/cast completion that shares its helper.
+    {
+        let Some(PendingCostMoveResume::SacrificeForCost {
+            player,
+            pending: Some(parking),
+            completion:
+                engine::types::game_state::PendingSacrificeCostCompletion::FinalizeSpell { .. },
+            ..
+        }) = runner.state().pending_cost_move_resume.as_ref()
+        else {
+            panic!(
+                "reach-guard: the commit-time sacrifice must park on \
+                 SacrificeForCost/FinalizeSpell, got {:?}",
+                runner.state().pending_cost_move_resume
+            );
+        };
+        assert_eq!(
+            *player, P0,
+            "reach-guard: the caster pays its own sacrifice"
+        );
+        assert_eq!(
+            parking.prepaid_actual_mana_spent,
+            Some(settled),
+            "reach-guard: the commit-time park repeats the amount it settled"
+        );
+        assert_eq!(
+            runner.state().objects[&spell].mana_spent_to_cast_amount,
+            settled,
+            "reach-guard: the finalizers already stamped the copy this continuation reads"
+        );
+        assert!(
+            settled > 0,
+            "reach-guard: this cast really spent mana, so the amount is worth validating"
+        );
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "reach-guard: the sacrifice paused on its CR 616.1 choice, got {:?}",
+            runner.state().waiting_for
+        );
+    }
+
+    // (a) The UNTOUCHED control: the honest save restores and resumes to completion.
+    {
+        let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+            .expect("the sacrifice park serializes");
+        let restored: PersistedGameState =
+            serde_json::from_str(&saved).expect("the sacrifice park deserializes");
+        let mut resumed = GameRunner::from_state(
+            restored
+                .into_game_state()
+                .expect("CR 601.2h: the untouched sacrifice park is admitted"),
+        );
+        resumed
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("the redirect resolves and the commit resumes");
+        assert!(
+            resumed.state().pending_cost_move_resume.is_none(),
+            "reach-guard: the resumed commit retired the cost-move root, got {:?}",
+            resumed.state().pending_cost_move_resume
+        );
+    }
+
+    // (b) The amount ERASED and the copy honest: still admitted — the continuation consumes
+    // the copy, and the copy IS the payment the journal recorded.
+    {
+        let mut state = runner.state().clone();
+        let Some(PendingCostMoveResume::SacrificeForCost {
+            pending: Some(parking),
+            ..
+        }) = state.pending_cost_move_resume.as_mut()
+        else {
+            panic!("reach-guard: the sacrifice completion is still parked");
+        };
+        parking.prepaid_actual_mana_spent = None;
+        let admitted = PersistedGameState::capture(state).into_game_state().expect(
+            "CR 601.2h: a sacrifice completion whose cast states no amount is admitted when \
+                 the copy it consumes states the settled payment",
+        );
+        assert_eq!(
+            admitted.objects[&spell].mana_spent_to_cast_amount, settled,
+            "and the admitted copy still states the caster's spend"
+        );
+    }
+
+    // (c) The amount ERASED and the copy forged: REFUSED, or the resume rewrites the cast's
+    // expenditure — and with it Wandertale Mentor's "Whenever you expend 4" history.
+    let mut state = runner.state().clone();
+    let Some(PendingCostMoveResume::SacrificeForCost {
+        pending: Some(parking),
+        ..
+    }) = state.pending_cost_move_resume.as_mut()
+    else {
+        panic!("reach-guard: the sacrifice completion is still parked");
+    };
+    parking.prepaid_actual_mana_spent = None;
+    state
+        .objects
+        .get_mut(&spell)
+        .expect("the spell object is in the save")
+        .mana_spent_to_cast_amount = settled + 1;
+    let error = PersistedGameState::capture(state)
+        .into_game_state()
+        .expect_err(
+            "CR 700.14: a sacrifice completion whose erased amount falls back to a forged copy \
+             must be refused",
+        );
+    match error {
+        engine::types::game_state::PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+            source_id,
+            reason:
+                engine::types::game_state::PrepaidSpellCopyConflict::AmountDisagreesWithSettledSpend {
+                    copy_amount,
+                    settled: reported,
+                    ..
+                },
+        } => {
+            assert_eq!(source_id, spell, "the refusal names the cast it is about");
+            assert_eq!(copy_amount, settled + 1, "and the amount the copy states");
+            assert_eq!(
+                reported, settled_units,
+                "against the units the journal records for this cast (CR 118.3a)"
+            );
+        }
+        other => panic!(
+            "CR 700.14 + CR 601.2h: the sacrifice completion must have its copy validated \
+             against the journal, got {other:?}"
+        ),
+    }
+}
+
 /// CR 406.6: only a fuel that actually arrived in exile is linked to the spell.
 #[test]
 fn commit_links_only_fuel_delivered_to_exile() {
