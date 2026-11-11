@@ -4022,6 +4022,7 @@ mod tests {
             face_down_in_exile: Default::default(),
             face_down_profile: None,
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
         };
         let member = ChangeZoneMemberEntry {
@@ -10464,6 +10465,7 @@ mod tests {
             moved_count: None,
             face_down_profile: None,
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,
         });

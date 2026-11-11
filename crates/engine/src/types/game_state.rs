@@ -42722,6 +42722,7 @@ mod tests {
             moved_count: None,
             face_down_profile: None,
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,
         });
@@ -54891,6 +54892,7 @@ mod tests {
                 cause: crate::types::ability::FaceDownCause::Manifest,
             }),
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             effect_kind: crate::types::ability::EffectKind::ChangeZone,
             enter_attached_to: None,
         };

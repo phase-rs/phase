@@ -15894,6 +15894,7 @@ mod tests {
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: HashSet::new(),
             face_down_profile: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
@@ -19951,6 +19952,7 @@ mod tests {
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: HashSet::new(),
             face_down_profile: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
@@ -21427,6 +21429,7 @@ mod tests {
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: HashSet::new(),
             face_down_profile: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
@@ -24839,6 +24842,7 @@ mod tests {
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
             performed_by: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: HashSet::new(),
         };
         let cast_matches = find_applicable_replacements(&state, &cast_event, &registry);
@@ -24891,6 +24895,7 @@ mod tests {
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
             performed_by: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: HashSet::new(),
         };
         let put_matches = find_applicable_replacements(&state, &put_event, &registry);
