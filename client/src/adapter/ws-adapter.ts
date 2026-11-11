@@ -2655,13 +2655,53 @@ export class WebSocketAdapter implements EngineAdapter {
         if (this.reconnectInFlight) this.attemptReconnect();
         return;
       }
-      if (this.disposed || this.stateCodecPreparation !== preparation
-        || preparation.signal.aborted) return;
+      // The candidate's setup is on the wire, and the server replaces the
+      // seat's sender on `Reconnect` without closing the predecessor
+      // (`install_full_sender_while_state_locked`). The incumbent can never
+      // receive the seat again, so from here cancellation or failure retires
+      // BOTH sockets instead of preserving a deaf one.
+      const retireSwappedIncumbent = () => {
+        const incumbent = previous;
+        if (incumbent === null || this.ws !== incumbent) return;
+        this.ws = null;
+        this.closeSocket = null;
+        this.stateCodec.clearRecovery();
+        if (this.pingInterval) {
+          clearInterval(this.pingInterval);
+          this.pingInterval = null;
+        }
+        incumbent.onmessage = null;
+        incumbent.onerror = null;
+        incumbent.onclose = null;
+        try {
+          previousPending = this.rejectSocketRequests(false) || previousPending;
+        } finally {
+          closePrevious?.();
+        }
+        if (previousPending) {
+          previousPending = false;
+          this.emit({ type: "actionPendingChanged", pending: false });
+        }
+      };
+      // Disposal already retired the incumbent and every owned request.
+      if (this.disposed) return;
+      if (this.stateCodecPreparation !== preparation || preparation.signal.aborted) {
+        // A newer attachment (or the end of an initial fallback) cancelled
+        // this one. It owns the episode, so no retry is scheduled from here:
+        // only the deaf incumbent is retired. The candidate follows through
+        // `retireSocket` in the `finally` below.
+        retireSwappedIncumbent();
+        return;
+      }
       if (closed) {
+        retireSwappedIncumbent();
         this.rejectInitialization(new AdapterError("WS_CLOSED", "Connection closed during setup", true));
         if (this.reconnectInFlight) this.attemptReconnect();
         return;
       }
+      // A cancelled candidate's post-write path may already have retired the
+      // incumbent (its seat sender is gone), so detach only a still-current one.
+      const incumbentIsCurrent = previous !== null && this.ws === previous;
       this.ws = socket.ws;
       this.closeSocket = closeSocket;
       this.stateCodec.adopt(bootstrap, socket.ws);
@@ -2670,7 +2710,7 @@ export class WebSocketAdapter implements EngineAdapter {
       // detach it, settle its owned requests, release its decoder and stop its
       // keepalive. A candidate that never reached this point left all of that
       // untouched and the incumbent usable.
-      if (previous) {
+      if (previous && incumbentIsCurrent) {
         previous.onmessage = null;
         previous.onerror = null;
         previous.onclose = null;
@@ -2740,7 +2780,11 @@ export class WebSocketAdapter implements EngineAdapter {
     if (socket.readyState !== WebSocket.OPEN) return false;
     try {
       await socket.sendReceipt(JSON.stringify(frame), signal);
-      return !isAborted();
+      // A resolved receipt means the frame was admitted, even if the
+      // attachment was cancelled while waiting: past this point the server may
+      // already have swapped the seat sender, so the caller must treat the
+      // write as committed rather than as a cancellation.
+      return true;
     } catch {
       return false;
     }

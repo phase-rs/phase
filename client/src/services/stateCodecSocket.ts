@@ -467,8 +467,11 @@ export class StateCodecSocket implements PhaseSocketTransport {
         if (this.closed || this.naturalClose !== null || signal?.aborted === true) {
           return Promise.reject(new Error("state codec socket is closed"));
         }
+        // A resolved inner receipt means the frame was written. A signal that
+        // aborts afterwards cannot un-write it, so the caller must still learn
+        // that it was (the server may already have acted on it); only a
+        // rejection reports a frame that did not go out.
         return innerReceipt.call(inner, data, signal).then(() => {
-          if (signal?.aborted === true) throw new Error("setup write was abandoned");
           this.options.onFrameSent?.();
         });
       };

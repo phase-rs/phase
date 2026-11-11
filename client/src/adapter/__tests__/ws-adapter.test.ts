@@ -6121,6 +6121,123 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
     });
   });
 
+  describe("a candidate cancelled or failed after its setup frame was written", () => {
+    /**
+     * The server replaces the seat's sender on `Reconnect` and never closes the
+     * predecessor, so once the frame is written the incumbent can no longer
+     * receive the seat. `onSetupWritten` runs inside the raw write of the
+     * `Reconnect` frame, i.e. after the transport accepted it and before the
+     * attachment adopts the candidate.
+     */
+    async function writtenCandidate(
+      onSetupWritten: (candidate: MockWebSocket, adapter: WebSocketAdapter) => void,
+    ) {
+      const codec = scriptedCodec();
+      const provider = vi.fn(() => Promise.resolve(codec.session));
+      const { adapter, raw } = await establishCodecAdapter(provider);
+      const pending = observe(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+      expect(adapter.tryReconnect(session() as never)).toBe(true);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+      const candidate = latestSocket();
+      let fired = false;
+      candidate.send.mockImplementation((data: unknown) => {
+        const text = typeof data === "string"
+          ? data
+          : new TextDecoder().decode((data as Uint8Array).subarray(1));
+        if (fired || !text.includes('"type":"Reconnect"')) return;
+        fired = true;
+        onSetupWritten(candidate, adapter);
+      });
+      candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+      return { adapter, raw, candidate, pending };
+    }
+
+    it("retires both sockets and settles the incumbent's request when a newer attachment supersedes it", async () => {
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+      let successorInitialization: Promise<unknown> = Promise.resolve(undefined);
+      const { adapter, raw, candidate, pending } = await writtenCandidate((_candidate, owner) => {
+        successorInitialization = owner.initialize().catch(() => undefined);
+      });
+      try {
+        await vi.waitFor(() => expect(raw.close).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(candidate.close).toHaveBeenCalledOnce());
+        // The deaf incumbent's request cannot be answered: it settles now.
+        await vi.waitFor(() => expect(pending.value()).toMatchObject({ code: "WS_CLOSED" }));
+        // The newer attachment owns the episode: it dials, and no retry timer
+        // of the cancelled attachment replaces it.
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(candidate));
+        const successor = latestSocket();
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(MockWebSocket.last).toBe(successor);
+      } finally {
+        random.mockRestore();
+        void successorInitialization;
+        adapter.dispose();
+      }
+    });
+
+    it("retires both sockets and retries the episode when the candidate closes before adoption", async () => {
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+      const { adapter, raw, candidate, pending } = await writtenCandidate((socket) => {
+        socket.readyState = 3;
+        socket.dispatchSynthetic("close");
+      });
+      try {
+        await vi.waitFor(() => expect(raw.close).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(pending.value()).toMatchObject({ code: "WS_CLOSED" }));
+        // A fresh attempt of the same episode follows; nothing keeps the
+        // retired incumbent as the connection.
+        await vi.advanceTimersByTimeAsync(2000);
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(candidate));
+        expect(MockWebSocket.last).not.toBe(raw);
+      } finally {
+        random.mockRestore();
+        adapter.dispose();
+      }
+    });
+
+    it("treats a receipt that resolves after the cancellation as a written setup", async () => {
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+      const codec = scriptedCodec();
+      const provider = vi.fn(() => Promise.resolve(codec.session));
+      const { adapter, raw } = await establishCodecAdapter(provider);
+      let successorInitialization: Promise<unknown> = Promise.resolve(undefined);
+      try {
+        expect(adapter.tryReconnect(session() as never)).toBe(true);
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+        const candidate = latestSocket();
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        // The transport does not honor the signal: the frame still goes out.
+        candidate.sendReceipt = vi.fn(async (data: string) => {
+          await gate;
+          candidate.send(data);
+        });
+        candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+        await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+        // A newer attachment cancels the write while it is still in flight.
+        successorInitialization = adapter.initialize().catch(() => undefined);
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(candidate));
+        const successor = latestSocket();
+        expect(raw.close).not.toHaveBeenCalled();
+        release();
+        await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+          expect.stringContaining('"type":"Reconnect"'),
+        ));
+        // The frame was written, so the incumbent is deaf and is retired
+        // together with the cancelled candidate.
+        await vi.waitFor(() => expect(raw.close).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(candidate.close).toHaveBeenCalledOnce());
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(MockWebSocket.last).toBe(successor);
+      } finally {
+        random.mockRestore();
+        void successorInitialization;
+        adapter.dispose();
+      }
+    });
+  });
+
   it("clears every request and initialization owner before a synchronous close's pending listener throws", async () => {
     MockWebSocket.last = null;
     const adapter = new WebSocketAdapter(
