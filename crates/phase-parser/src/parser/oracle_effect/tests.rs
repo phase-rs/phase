@@ -80398,6 +80398,30 @@ fn bare_choose_feeding_a_printed_target_through_the_chosen_object_keeps_stack_ti
         "the Giant choice must stay announced at cast"
     );
 
+    // Guard Dogs prints "target creature" in a clause the parser leaves
+    // `Unimplemented`, which has no announcement slot either, so the choice that
+    // clause reads ("that permanent") keeps its stack-time timing as well.
+    let parsed = parse_oracle_text(
+        "{2}{W}, {T}: Choose a permanent you control. Prevent all combat damage target creature would deal this turn if it shares a color with that permanent.",
+        "Guard Dogs",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Construct".to_string()],
+    );
+    let head = &parsed.abilities[0];
+    assert!(
+        matches!(head.effect.as_ref(), Effect::TargetOnly { .. }),
+        "Guard Dogs must reach the bare-choice producer: {head:#?}"
+    );
+    assert!(
+        matches!(
+            head.sub_ability.as_deref().map(|sub| sub.effect.as_ref()),
+            Some(Effect::Unimplemented { .. })
+        ),
+        "reach guard: the printed-target prevention clause stays unimplemented: {head:#?}"
+    );
+    assert_eq!(head.target_choice_timing, TargetChoiceTiming::Stack);
+
     for text in [
         "Choose a creature you control. It deals damage equal to its power to target creature you don't control.",
         "Choose a creature you control. Target creature gets +1/+1 until end of turn.",

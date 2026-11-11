@@ -29373,7 +29373,11 @@ fn announced_target_antecedent(
 /// moving the choice to resolution would let the spell be cast with no legal
 /// recipient (Crush Underfoot: "Choose a Giant creature you control. It deals
 /// damage equal to its power to target creature."; upstream issue #10688). Such
-/// a choice keeps the timing it had before the producer existed.
+/// a choice keeps the timing it had before the producer existed. A later clause
+/// that prints "target" but lowers to `Unimplemented` has no announcement slot to
+/// keep either, and reads the chosen object the same way (Guard Dogs: "Prevent all
+/// combat damage target creature would deal this turn if it shares a color with
+/// that permanent."), so it is treated alike.
 fn withhold_resolution_timing_from_choices_feeding_printed_targets(clauses: &mut [ClauseIr]) {
     for choice in 0..clauses.len() {
         if clauses[choice].declared_target_choice_timing != Some(TargetChoiceTiming::Resolution)
@@ -29382,7 +29386,8 @@ fn withhold_resolution_timing_from_choices_feeding_printed_targets(clauses: &mut
             continue;
         }
         let feeds_printed_target = clauses[choice + 1..].iter().any(|later| {
-            later.parsed.effect.target_filter() == Some(&TargetFilter::ParentTarget)
+            (later.parsed.effect.target_filter() == Some(&TargetFilter::ParentTarget)
+                || matches!(later.parsed.effect, Effect::Unimplemented { .. }))
                 && later.source.fragment().is_some_and(|fragment| {
                     scan_contains_phrase(&fragment.to_ascii_lowercase(), "target ")
                 })
