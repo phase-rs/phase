@@ -487,7 +487,11 @@ pub(crate) fn retain_pooled_mana_producer_snapshots(state: &mut GameState) {
     // ([`PooledProducerLedgerIndex`]), so one unit's fact is looked up the same way
     // wherever it is read.
     let carried_index = PooledProducerLedgerIndex::new(&carried);
-    let carried_lki = |unit: &crate::types::mana::ManaUnit| carried_index.lki_for(unit).cloned();
+    // CR 106.3 + CR 111.1: ONE row read per unit carries BOTH halves of the fact —
+    // the producing snapshot and the token bit captured with it, which a row from an
+    // EARLIER boundary already states and a unit crossing its FIRST boundary reads
+    // from the step-scoped capture below.
+    let carried_row = |unit: &crate::types::mana::ManaUnit| carried_index.row_for(unit);
 
     let mut retained: Vec<PooledManaProducerSnapshot> = Vec::new();
     for player in &state.players {
@@ -514,18 +518,36 @@ pub(crate) fn retain_pooled_mana_producer_snapshots(state: &mut GameState) {
             // still reads that cache. A departure that records no last-known
             // information (a hidden zone) leaves the fact unprovable, so nothing
             // is recorded rather than inventing one.
-            let lki = carried_lki(&unit).or_else(|| {
+            let carried = carried_row(&unit);
+            let lki = carried.map(|row| row.lki.clone()).or_else(|| {
                 crate::game::filter::exit_lki_for_incarnation(state, unit.source_id, incarnation)
                     .cloned()
             });
             let Some(lki) = lki else {
                 continue;
             };
+            // CR 111.1 + CR 608.2h: the bit the same epoch captured — carried from
+            // the record when an earlier boundary already retained it, otherwise read
+            // from the still-live departure capture this call precedes.
+            let source_token = carried
+                .map(|row| row.source_token)
+                .filter(|token| *token != crate::types::game_state::CapturedTokenBit::Unknown)
+                .unwrap_or_else(|| {
+                    state
+                        .departure_token_by_incarnation
+                        .get(&unit.source_id)
+                        .and_then(|history| history.get(&incarnation))
+                        .map_or(
+                            crate::types::game_state::CapturedTokenBit::Unknown,
+                            |is_token| crate::types::game_state::CapturedTokenBit::Known(*is_token),
+                        )
+                });
             retained.push(PooledManaProducerSnapshot {
                 pip_id: unit.pip_id,
                 source_id: unit.source_id,
                 source_incarnation: incarnation,
                 lki,
+                source_token,
             });
         }
     }
@@ -602,6 +624,7 @@ mod pooled_producer_ledger_index_tests {
                 source_id: source,
                 source_incarnation: incarnation,
                 lki: lki.clone(),
+                source_token: crate::types::game_state::CapturedTokenBit::Unknown,
             });
         }
         state.pooled_mana_producer_snapshots = rows;
@@ -786,6 +809,7 @@ mod pooled_producer_ledger_index_tests {
                 source_id: source,
                 source_incarnation: incarnation.wrapping_sub(1),
                 lki: lki.clone(),
+                source_token: crate::types::game_state::CapturedTokenBit::Unknown,
             })
             .collect();
         (state, batch)
@@ -979,21 +1003,36 @@ impl<'a> PooledProducerLedgerIndex<'a> {
     /// `None` when the ledger holds no entry for THIS unit: its producing source's
     /// characteristics are then unprovable from the ledger, and the caller must fall
     /// through to its other evidence rather than borrow another unit's fact.
-    pub(crate) fn lki_for(
+    pub(crate) fn row_for(
         &self,
         unit: &crate::types::mana::ManaUnit,
-    ) -> Option<&'a crate::types::game_state::LKISnapshot> {
+    ) -> Option<&'a crate::types::game_state::PooledManaProducerSnapshot> {
         self.by_pip
             .get(&unit.pip_id)
             .into_iter()
             .flatten()
+            .copied()
             .find(|snapshot| {
                 #[cfg(feature = "test-support")]
                 crate::game::perf_counters::record_pooled_producer_row_probed();
                 snapshot.source_id == unit.source_id
                     && Some(snapshot.source_incarnation) == unit.source_incarnation
             })
-            .map(|snapshot| &snapshot.lki)
+    }
+
+    pub(crate) fn lki_for(
+        &self,
+        unit: &crate::types::mana::ManaUnit,
+    ) -> Option<&'a crate::types::game_state::LKISnapshot> {
+        self.row_for(unit).map(|row| &row.lki)
+    }
+
+    /// CR 111.1 + CR 106.3: the token bit this ledger row captured for ONE unit.
+    pub(crate) fn token_for(
+        &self,
+        unit: &crate::types::mana::ManaUnit,
+    ) -> Option<crate::types::game_state::CapturedTokenBit> {
+        self.row_for(unit).map(|row| row.source_token)
     }
 }
 
@@ -1039,6 +1078,20 @@ impl<'a> LazyPooledProducerLedgerIndex<'a> {
             .get_or_init(|| PooledProducerLedgerIndex::new(self.rows))
             .lki_for(unit)
     }
+
+    /// CR 111.1 + CR 106.3: the WHOLE row this ledger holds for ONE floating unit —
+    /// the snapshot and the token bit it captured together.
+    ///
+    /// One read, one probe: a caller that needs both halves must not pay a second
+    /// pass over the pip's rows, which the boundary's per-unit bound measures.
+    pub(crate) fn row_for(
+        &self,
+        unit: &crate::types::mana::ManaUnit,
+    ) -> Option<&'a crate::types::game_state::PooledManaProducerSnapshot> {
+        self.index
+            .get_or_init(|| PooledProducerLedgerIndex::new(self.rows))
+            .row_for(unit)
+    }
 }
 
 /// CR 106.3 + CR 400.7: the producer fact the retained ledger holds for `unit`,
@@ -1055,6 +1108,17 @@ pub(crate) fn pooled_mana_producer_snapshot<'a>(
     unit: &crate::types::mana::ManaUnit,
 ) -> Option<&'a crate::types::game_state::LKISnapshot> {
     index.lki_for(unit)
+}
+
+/// CR 106.3 + CR 111.1 + CR 400.7: the WHOLE retained row for ONE floating unit —
+/// the producer snapshot and the token bit it captured, read together. The bit
+/// outlives the step boundary a retention effect carries the record across because
+/// it is stored on the record itself.
+pub(crate) fn pooled_mana_producer_row<'a>(
+    index: &LazyPooledProducerLedgerIndex<'a>,
+    unit: &crate::types::mana::ManaUnit,
+) -> Option<&'a crate::types::game_state::PooledManaProducerSnapshot> {
+    index.row_for(unit)
 }
 
 /// CR 106.3 + CR 113.7 + CR 400.7: `source_incarnation` is the object epoch the
@@ -3501,6 +3565,125 @@ mod tests {
     use crate::types::identifiers::ObjectId;
     use crate::types::mana::{ManaColor, ManaRestriction, SpellMeta};
     use crate::types::zones::Zone;
+
+    /// CR 111.1 + CR 106.3 + CR 106.4 + CR 400.7 + CR 608.2h: a spent producer's
+    /// token bit is retained WITH its per-pip record across the step boundary, and
+    /// the token leaf over that pip still answers afterwards.
+    ///
+    /// The boundary ([`super::retain_pooled_mana_producer_snapshots`], called by
+    /// `turns::finish_enter_phase` before it clears the step-scoped captures) keeps a
+    /// still-floating unit's producer fact when a retention effect (Upwelling) holds
+    /// the mana. The `lki` it carries cannot state token-ness (CR 707.2), and both
+    /// departure tables are cleared by the same boundary, so the record has to carry
+    /// the bit itself — otherwise a token leaf over that pip reads nothing.
+    ///
+    /// Revert-probe: leaving the retained row's bit `Unknown` (the pre-field shape)
+    /// makes every assertion below fail: the row states no classification and the
+    /// leaf refuses both `Token` and `NonToken`.
+    #[test]
+    fn a_retained_producer_record_carries_its_token_bit_across_the_boundary() {
+        use crate::types::game_state::CapturedTokenBit;
+        use crate::types::mana::{ManaPipId, ManaType, ManaUnit};
+
+        let mut state = GameState::new_two_player(7);
+        // One TOKEN producer and one real card, each floating a unit whose producer
+        // then leaves — the shape a retention effect keeps alive past the boundary.
+        for (pip, card, is_token) in [(1u64, 61, true), (2u64, 62, false)] {
+            let source = crate::game::zones::create_object(
+                &mut state,
+                CardId(card),
+                PlayerId(0),
+                "Producer".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let producer = state.objects.get_mut(&source).unwrap();
+                producer.is_token = is_token;
+                producer.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+            }
+            let incarnation = state.objects[&source].incarnation;
+            let mut unit = ManaUnit::new(ManaType::Black, source, false, vec![]);
+            unit.pip_id = ManaPipId(pip);
+            unit.source_incarnation = Some(incarnation);
+            state.players[PlayerId(0).0 as usize].mana_pool.add(unit);
+            // CR 400.7: the producer leaves, so only a captured fact can answer.
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+            assert_eq!(
+                state.departure_token_by_incarnation[&source][&incarnation], is_token,
+                "fixture precondition: the departure captured the bit"
+            );
+        }
+
+        // CR 106.4: the retention the step boundary performs, while the departure
+        // captures are still live.
+        super::retain_pooled_mana_producer_snapshots(&mut state);
+        assert_eq!(
+            state.pooled_mana_producer_snapshots.len(),
+            2,
+            "reach-guard: both floating units keep their producer fact"
+        );
+
+        // The boundary then clears every step-scoped capture: the record is the only
+        // evidence left (CR 400.7 / CR 608.2h).
+        state.departure_token_by_incarnation.clear();
+        state.departure_token_cache.clear();
+        state.lki_cache.clear();
+        state.lki_by_incarnation.clear();
+
+        let bits: Vec<CapturedTokenBit> = state
+            .pooled_mana_producer_snapshots
+            .iter()
+            .map(|row| row.source_token)
+            .collect();
+        assert!(
+            bits.contains(&CapturedTokenBit::Known(true))
+                && bits.contains(&CapturedTokenBit::Known(false)),
+            "the retained rows state the bits their epochs captured: {bits:?}"
+        );
+
+        // The leaf over each retained pip, read through the same capture authority a
+        // payment uses.
+        let units: Vec<ManaUnit> = state.players[PlayerId(0).0 as usize]
+            .mana_pool
+            .units()
+            .collect();
+        let snapshots = crate::game::casting::mana_spent_source_snapshots(&state, &units);
+        assert_eq!(snapshots.len(), 2, "reach-guard: one fact per spent unit");
+        let filter_ctx = crate::game::filter::FilterContext::neutral();
+        let answers: Vec<(CapturedTokenBit, bool, bool)> = snapshots
+            .iter()
+            .map(|snapshot| {
+                let by_prop = |prop| {
+                    crate::game::filter::mana_spent_source_matches(
+                        &state,
+                        snapshot,
+                        &TargetFilter::Typed(
+                            crate::types::ability::TypedFilter::creature().properties(vec![prop]),
+                        ),
+                        &filter_ctx,
+                    )
+                };
+                (
+                    snapshot.source_token,
+                    by_prop(crate::types::ability::FilterProp::Token),
+                    by_prop(crate::types::ability::FilterProp::NonToken),
+                )
+            })
+            .collect();
+        assert!(
+            answers.iter().any(|(bit, token, non_token)| {
+                *bit == CapturedTokenBit::Known(true) && *token && !*non_token
+            }),
+            "the retained TOKEN pip still answers `token` after the boundary: {answers:?}"
+        );
+        assert!(
+            answers.iter().any(|(bit, token, non_token)| {
+                *bit == CapturedTokenBit::Known(false) && !*token && *non_token
+            }),
+            "and the retained NON-token pip still answers `nontoken`: {answers:?}"
+        );
+    }
 
     /// The building-block predicate must classify each shape the parser can produce.
     /// Generic + colored + snow + free `X` (pre-concretization sentinel) are all

@@ -1458,6 +1458,18 @@ pub struct PooledManaProducerSnapshot {
     /// The producing source's public characteristics at that epoch.
     #[serde(with = "crate::types::history_snapshot::compact_history_lki")]
     pub lki: LKISnapshot,
+    /// CR 111.1 + CR 106.3 + CR 400.7: whether the producing source WAS a token at
+    /// that epoch, captured with the fact above.
+    ///
+    /// A retention effect (Upwelling, CR 106.4) keeps a floating unit — and this
+    /// record — past the step boundary that clears every step-scoped capture, so the
+    /// fact has to carry its own bit: `lki` cannot state it (CR 707.2), and both
+    /// `GameState::departure_token_by_incarnation` and the storage-id-keyed pair are
+    /// cleared by the same boundary. `Unknown` is a unit whose producer fact named no
+    /// bit (a payload written before this field, a hidden-zone producer that recorded
+    /// no last-known information): a token leaf over that pip then refuses.
+    #[serde(default, skip_serializing_if = "CapturedTokenBit::is_unknown")]
+    pub source_token: CapturedTokenBit,
 }
 
 // CR 106.3 + CR 118.3a + CR 104.4b: a fact belongs to ONE pooled unit, so equality
@@ -64676,6 +64688,7 @@ mod pooled_producer_ledger_key_tests {
             source_id: source,
             source_incarnation: incarnation,
             lki: lki.clone(),
+            source_token: crate::types::game_state::CapturedTokenBit::Unknown,
         };
         state.pooled_mana_producer_snapshots = vec![row(1), row(2)];
 

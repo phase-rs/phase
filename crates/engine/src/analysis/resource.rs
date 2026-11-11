@@ -11701,6 +11701,7 @@ mod tests {
                 source_id: source,
                 source_incarnation: incarnation,
                 lki: lki.clone(),
+                source_token: crate::types::game_state::CapturedTokenBit::Unknown,
             });
         }
         state.pooled_mana_producer_snapshots = rows;
@@ -11771,6 +11772,7 @@ mod tests {
                     source_id: source,
                     source_incarnation: incarnation,
                     lki: lki.clone(),
+                    source_token: crate::types::game_state::CapturedTokenBit::Unknown,
                 });
             }
         }
@@ -11858,6 +11860,7 @@ mod tests {
                     source_id: treasure,
                     source_incarnation: incarnation,
                     lki: lki.clone(),
+                    source_token: crate::types::game_state::CapturedTokenBit::Unknown,
                 });
             }
         }

@@ -24963,9 +24963,7 @@ fn mana_spent_source_snapshot(
                     pinned.incarnation,
                 );
                 // CR 608.2h: the capture the SAME departure recorded for that
-                // epoch. A pooled producer row below supplies no bit — the epoch
-                // it was produced at is gone with the step — so that unit's leaf
-                // refuses rather than guessing.
+                // epoch, while it is still live.
                 let exit_bit = exit_lki.and_then(|_| {
                     state
                         .departure_token_by_incarnation
@@ -24973,12 +24971,29 @@ fn mana_spent_source_snapshot(
                         .and_then(|history| history.get(&pinned.incarnation))
                         .copied()
                 });
-                let lki = exit_lki.cloned().or_else(|| {
-                    super::mana_payment::pooled_mana_producer_snapshot(pooled_index, unit).cloned()
-                })?;
-                let source_token =
-                    exit_bit.map_or(CapturedTokenBit::Unknown, CapturedTokenBit::Known);
-                (lki, source_token)
+                match exit_lki {
+                    // CR 608.2h: the exit cache answered, so the retained ledger is
+                    // not read at all — touching it would build the index this
+                    // caller avoided.
+                    Some(exit_lki) => (
+                        exit_lki.clone(),
+                        exit_bit.map_or(CapturedTokenBit::Unknown, CapturedTokenBit::Known),
+                    ),
+                    // CR 111.1 + CR 106.3 + CR 400.7: past the step boundary the exit
+                    // cache and the departure captures are both gone, and the retained
+                    // ledger row states the bit IT was written with — the
+                    // classification a retention effect (Upwelling, CR 106.4) carries
+                    // across the boundary with the unit. ONE row read yields both
+                    // halves.
+                    None => {
+                        let row = super::mana_payment::pooled_mana_producer_row(pooled_index, unit);
+                        let lki = row.map(|row| row.lki.clone())?;
+                        let source_token = row
+                            .map(|row| row.source_token)
+                            .unwrap_or(CapturedTokenBit::Unknown);
+                        (lki, source_token)
+                    }
+                }
             }
         },
         None => {
