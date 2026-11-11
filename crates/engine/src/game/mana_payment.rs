@@ -1495,6 +1495,12 @@ impl PaymentContinuation<'_> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static HYBRID_ALTERNATIVE_ENTRIES: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 #[allow(clippy::too_many_arguments)]
 fn reduce_cost_by_pool_from(
     pool: &ManaPool,
@@ -1538,7 +1544,19 @@ fn reduce_cost_by_pool_from(
             ShardRequirement::ColorlessHybrid(color) => Some((ManaType::Colorless, color)),
             _ => None,
         };
-        if let Some(((a, b), accepts)) = hybrid_halves.zip(fundable).filter(|_| !any_color) {
+        if let Some(((a, b), accepts)) = hybrid_halves.zip(fundable).filter(|((a, b), _)| {
+            !any_color
+                && scratch.count_where(|unit| {
+                    is_eligible_color_unit(unit, *a, spell)
+                        || is_eligible_color_unit(unit, *b, spell)
+                }) > 0
+        }) {
+            #[cfg(test)]
+            HYBRID_ALTERNATIVE_ENTRIES.with(|entries| {
+                if let Some(count) = entries.get() {
+                    entries.set(Some(count + 1));
+                }
+            });
             let preferred = remaining_payment.hybrid_color(&scratch, a, b, spell, &[]);
             let other = if preferred == a { b } else { a };
             let mut residuals = Vec::new();
@@ -4670,6 +4688,95 @@ mod tests {
             assert!(spent.iter().all(|unit| unit.restrictions.is_empty()));
             assert!(life.is_empty());
         }
+
+        let cost = crate::types::mana::parse_mtgjson_mana_cost("{U/R}{U/R}");
+        let residual = crate::types::mana::parse_mtgjson_mana_cost("{U/R}");
+        // CR 106.6 + CR 107.4e: neither an empty pool nor rejected mana
+        // offers an eligible hybrid half. Observe the actual branch, not
+        // just its callbacks (the old branch also made no callback here).
+        for pool in [
+            ManaPool::default(),
+            ManaPool::from_units([ManaUnit {
+                restrictions: vec![ManaRestriction::OnlyForActivation],
+                ..make_unit(ManaType::Blue)
+            }]),
+        ] {
+            HYBRID_ALTERNATIVE_ENTRIES.with(|entries| entries.set(Some(0)));
+            let requests = std::cell::Cell::new(0);
+            let rejects = |_: &ManaCost| {
+                requests.set(requests.get() + 1);
+                false
+            };
+            assert_eq!(
+                reduce_cost_by_pool_with_fundability(
+                    &pool,
+                    &cost,
+                    Some(&PaymentContext::Effect),
+                    None,
+                    None,
+                    Some(&rejects)
+                ),
+                cost
+            );
+            assert_eq!(requests.get(), 0);
+            assert_eq!(
+                HYBRID_ALTERNATIVE_ENTRIES.with(|entries| entries.replace(None)),
+                Some(0)
+            );
+        }
+        // CR 702.51a + CR 107.4e: a colored convoke stand-in is eligible
+        // for its hybrid half, just like real mana; keep both positive paths.
+        for unit in [
+            make_unit(ManaType::Blue),
+            ManaUnit::convoke_payment(ManaType::Blue, ObjectId(2)),
+        ] {
+            HYBRID_ALTERNATIVE_ENTRIES.with(|entries| entries.set(Some(0)));
+            let requests = std::cell::Cell::new(0);
+            let rejects = |candidate: &ManaCost| {
+                requests.set(requests.get() + 1);
+                assert_eq!(*candidate, residual);
+                false
+            };
+            assert_eq!(
+                reduce_cost_by_pool_with_fundability(
+                    &ManaPool::from_units([unit]),
+                    &cost,
+                    None,
+                    None,
+                    None,
+                    Some(&rejects)
+                ),
+                residual
+            );
+            assert!(requests.get() > 0);
+            assert!(
+                HYBRID_ALTERNATIVE_ENTRIES
+                    .with(|entries| entries.replace(None))
+                    .unwrap()
+                    > 0
+            );
+        }
+        // CR 702.51a: a colorless convoke stand-in cannot pay a C symbol.
+        HYBRID_ALTERNATIVE_ENTRIES.with(|entries| entries.set(Some(0)));
+        let colorless_hybrid = crate::types::mana::parse_mtgjson_mana_cost("{C/U}");
+        assert_eq!(
+            reduce_cost_by_pool_with_fundability(
+                &ManaPool::from_units([ManaUnit::convoke_payment(
+                    ManaType::Colorless,
+                    ObjectId(2)
+                )]),
+                &colorless_hybrid,
+                None,
+                None,
+                None,
+                Some(&|_| false)
+            ),
+            colorless_hybrid
+        );
+        assert_eq!(
+            HYBRID_ALTERNATIVE_ENTRIES.with(|entries| entries.replace(None)),
+            Some(0)
+        );
     }
 
     /// CR 601.2g / CR 107.4h: the {S} (snow) payment route must honor the spell

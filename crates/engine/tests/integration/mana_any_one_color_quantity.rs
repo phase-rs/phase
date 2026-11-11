@@ -47,6 +47,8 @@ const SPATIAL: &str =
 const LOTUS_FIELD: &str = "Hexproof\nThis land enters tapped.\nWhen this land enters, sacrifice two lands.\n{T}: Add three mana of any one color.";
 const WILD_GROWTH: &str = "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional {G}.";
 const OVERGROWTH: &str = "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional {G}{G}.";
+const MAZE: &str = "{T}: Untap target attacking creature. Prevent all combat damage that would be dealt to and dealt by that creature this turn.";
+const UNTAIDAKE: &str = "Untaidake enters tapped.\n{T}, Pay 2 life: Add {C}{C}. Spend this mana only to cast legendary spells.";
 const FERTILE_GROUND: &str = "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional one mana of any color.";
 const OWL: &str = "Flying\nRimefeather Owl's power and toughness are each equal to the number of snow permanents on the battlefield.\n{1}{S}: Put an ice counter on target permanent.\nPermanents with ice counters on them are snow.";
 const WOWZER: &str = "Whenever Wowzer, the Aspirational attacks, if you have an {E}, control a Blood, a Clue, a Food, a Map, a Powerstone, and a Treasure, are the monarch, and have the city's blessing and the initiative, you win the game.";
@@ -1751,6 +1753,300 @@ fn overgrowth_keeps_both_snow_units_without_tapping_the_spare() {
             // Overgrowth and Lotus remain ordinary producers.
             assert!(result.is_err());
             assert!([land, spare].iter().all(|id| !r.state().objects[id].tapped));
+            assert_complete(&r, 0);
+        }
+    }
+}
+
+fn pay_raptor_with_restricted_base_and_overgrowth(fixed_base: bool) {
+    for ice_land in [None, Some(true), Some(false)] {
+        let mut s = board();
+        let owl = owl(&mut s);
+        let setup_snow = s
+            .add_land_from_oracle(P0, "Snow-Covered Island", "({T}: Add {U}.)")
+            .as_snow()
+            .with_subtypes(vec!["Island"])
+            .id();
+        let setup_c = s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id();
+        let land = if fixed_base {
+            s.add_land_from_oracle(P0, "Untaidake, the Cloud Keeper", UNTAIDAKE)
+                .as_legendary()
+                .id()
+        } else {
+            s.add_artifact_from_oracle(P0, "Resonating Lute", LUTE)
+                .with_mana_cost(parse_mtgjson_mana_cost("{2}{U}{R}"));
+            s.add_land_from_oracle(P0, "Maze of Ith", MAZE).id()
+        };
+        let aura = s
+            .add_enchantment_from_oracle(P0, "Overgrowth", OVERGROWTH)
+            .with_subtypes(vec!["Aura"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}{G}"))
+            .id();
+        let spare = s
+            .add_land_from_oracle(P0, "Snow-Covered Island", "({T}: Add {U}.)")
+            .as_snow()
+            .with_subtypes(vec!["Island"])
+            .id();
+        let raptor = s
+            .add_creature_from_oracle(P0, "Frost Raptor", 2, 2, RAPTOR)
+            .as_snow()
+            .with_subtypes(vec!["Bird"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}{U}"))
+            .id();
+        let mut r = s.build();
+        r.state_mut().objects.get_mut(&land).unwrap().tapped = false;
+        engine::game::effects::attach::attach_to(r.state_mut(), aura, land);
+        finish_snow_forest(&mut r, spare);
+        let target = ice_land.map_or(owl, |is_land| if is_land { land } else { aura });
+        ice_permanent(&mut r, owl, target, setup_snow, setup_c);
+        assert!([setup_snow, setup_c]
+            .iter()
+            .all(|id| r.state().objects[id].tapped));
+        assert_eq!(
+            r.state().objects[&aura].attached_to,
+            Some(AttachTarget::Object(land))
+        );
+        let rows = activatable_land_mana_options(r.state(), land, P0);
+        assert!(
+            !rows.is_empty(),
+            "reach: the actual restricted ability offers rows"
+        );
+        assert!(rows.iter().all(|row| !row.restrictions.is_empty()
+            && row
+                .atomic_combination
+                .as_ref()
+                .is_some_and(|units| units.len() == 4)
+            && row.taps_for_mana_overrides.len() == 1
+            && row.taps_for_mana_overrides[0].0.source.object_id == aura));
+        if fixed_base {
+            assert!(rows.iter().all(|row| row.mana_type == ManaType::Colorless));
+        } else {
+            let granted = assert_any_one(&r, land);
+            assert!(
+                rows.iter().all(|row| row.ability_index == Some(granted)),
+                "Maze has no native unrestricted mana row"
+            );
+        }
+        let restrictions = rows[0].restrictions.clone();
+        let before_life = r.state().players[0].life;
+        let result = r.act(GameAction::ActivateAbility {
+            source_id: raptor,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        });
+        if ice_land == Some(false) {
+            let result = result.expect("the independent Snow Aura pays both S symbols");
+            // CR 106.3 + CR 106.6 + CR 107.4h: the Aura supplies two
+            // eligible Snow G; restricted base units stay in the pool.
+            assert_eq!(production_count(&result.events, aura, ManaType::Green), 2);
+            assert_eq!(result.events.iter().filter(|event| matches!(event,
+                engine::types::events::GameEvent::ManaAdded { source_id, .. } if *source_id == land)).count(), 2);
+            assert!(r.state().objects[&land].tapped);
+            assert!(!r.state().objects[&spare].tapped);
+            assert_eq!(
+                r.state().players[0].life,
+                before_life - if fixed_base { 2 } else { 0 }
+            );
+            assert_eq!(r.state().stack.len(), 1);
+            r.advance_until_stack_empty();
+            // CR 702.18a: payment reaches the printed shroud effect.
+            assert!(
+                r.state().objects[&raptor].has_keyword(&engine::types::keywords::Keyword::Shroud)
+            );
+            assert!(r.state().players[0]
+                .mana_pool
+                .units()
+                .all(|unit| unit.source_id == land
+                    && unit.supertype.is_none()
+                    && unit.restrictions == restrictions
+                    && (!fixed_base || unit.color == ManaType::Colorless)));
+            assert_complete(&r, 2);
+        } else {
+            // CR 106.6 + CR 107.4h: Snow on restricted base output cannot
+            // make it payable, and one spare Snow unit cannot pay both S.
+            assert!(result.is_err());
+            assert!([land, spare].iter().all(|id| !r.state().objects[id].tapped));
+            assert_eq!(r.state().players[0].life, before_life);
+            assert!(
+                !r.state().objects[&raptor].has_keyword(&engine::types::keywords::Keyword::Shroud)
+            );
+            assert_complete(&r, 0);
+        }
+    }
+}
+
+#[test]
+fn restricted_lute_base_does_not_hide_snow_aura_payment() {
+    pay_raptor_with_restricted_base_and_overgrowth(false);
+}
+
+#[test]
+fn restricted_fixed_base_does_not_hide_snow_aura_payment() {
+    pay_raptor_with_restricted_base_and_overgrowth(true);
+
+    // CR 106.6 + CR 601.2h: without the Aura, Untaidake's real fixed C/C
+    // cannot fund Mind Stone's generic activation. Nothing is spent.
+    let mut s = board();
+    let land = s
+        .add_land_from_oracle(P0, "Untaidake, the Cloud Keeper", UNTAIDAKE)
+        .as_legendary()
+        .id();
+    let stone = s
+        .add_artifact_from_oracle(P0, "Mind Stone", MIND_STONE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}"))
+        .id();
+    let mut r = s.build();
+    r.state_mut().objects.get_mut(&land).unwrap().tapped = false;
+    evaluate_layers(r.state_mut());
+    let rows = activatable_land_mana_options(r.state(), land, P0);
+    assert!(rows.iter().any(|row| row.atomic_combination.as_deref()
+        == Some([ManaType::Colorless; 2].as_slice())
+        && !row.restrictions.is_empty()
+        && row.taps_for_mana_overrides.is_empty()));
+    let index = activated_ability_definitions(r.state(), stone)
+        .iter()
+        .find(|(_, ability)| matches!(&*ability.effect, Effect::Draw { .. }))
+        .unwrap()
+        .0;
+    let before = (
+        r.state().players[0].life,
+        r.state().players[0].hand.clone(),
+        r.state().players[0].library.clone(),
+    );
+    assert!(r
+        .act(GameAction::ActivateAbility {
+            source_id: stone,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto
+        })
+        .is_err());
+    assert_eq!(
+        before,
+        (
+            r.state().players[0].life,
+            r.state().players[0].hand.clone(),
+            r.state().players[0].library.clone()
+        )
+    );
+    assert!([land, stone].iter().all(|id| !r.state().objects[id].tapped));
+    assert_eq!(r.state().objects[&stone].zone, Zone::Battlefield);
+    assert_complete(&r, 0);
+
+    let mut s = board();
+    let land = s
+        .add_land_from_oracle(P0, "Untaidake, the Cloud Keeper", UNTAIDAKE)
+        .as_legendary()
+        .id();
+    let mountains: Vec<_> = (0..2)
+        .map(|_| s.add_basic_land(P0, ManaColor::Red))
+        .collect();
+    let lotus = s
+        .add_artifact_to_hand_from_oracle(P0, "Nyx Lotus", NYX)
+        .as_legendary()
+        .with_mana_cost(parse_mtgjson_mana_cost("{4}"))
+        .id();
+    let mut r = s.build();
+    r.state_mut().objects.get_mut(&land).unwrap().tapped = false;
+    let before_life = r.state().players[0].life;
+    r.cast(lotus)
+        .resolve()
+        .assert_zone(&[lotus], Zone::Battlefield);
+    // CR 106.6: the same C/C is allowed for this real legendary spell.
+    assert_eq!(r.state().players[0].life, before_life - 2);
+    assert!(mountains
+        .iter()
+        .chain([&land, &lotus])
+        .all(|id| r.state().objects[id].tapped));
+    assert_complete(&r, 0);
+}
+
+#[test]
+fn restricted_base_does_not_hide_unrestricted_aura_generic_payment() {
+    for with_aura in [false, true] {
+        let mut s = board();
+        s.add_artifact_from_oracle(P0, "Resonating Lute", LUTE)
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}{U}{R}"));
+        let land = s.add_land_from_oracle(P0, "Maze of Ith", MAZE).id();
+        let aura = with_aura.then(|| {
+            s.add_enchantment_from_oracle(P0, "Overgrowth", OVERGROWTH)
+                .with_subtypes(vec!["Aura"])
+                .with_mana_cost(parse_mtgjson_mana_cost("{2}{G}"))
+                .id()
+        });
+        let stone = s
+            .add_artifact_from_oracle(P0, "Mind Stone", MIND_STONE)
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}"))
+            .id();
+        let mut r = s.build();
+        if let Some(aura) = aura {
+            engine::game::effects::attach::attach_to(r.state_mut(), aura, land);
+        }
+        evaluate_layers(r.state_mut());
+        let granted = assert_any_one(&r, land);
+        let rows = activatable_land_mana_options(r.state(), land, P0);
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|row| row.ability_index == Some(granted)
+            && !row.restrictions.is_empty()
+            && row
+                .atomic_combination
+                .as_ref()
+                .is_some_and(|units| units.len() == if with_aura { 4 } else { 2 })));
+        let restrictions = rows[0].restrictions.clone();
+        let index = activated_ability_definitions(r.state(), stone)
+            .iter()
+            .find(|(_, ability)| matches!(&*ability.effect, Effect::Draw { .. }))
+            .unwrap()
+            .0;
+        let before = (
+            r.state().players[0].hand.len(),
+            r.state().players[0].library.len(),
+        );
+        let result = r.act(GameAction::ActivateAbility {
+            source_id: stone,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        });
+        if let Some(aura) = aura {
+            let result = result.expect("one unrestricted Aura unit pays the generic activation");
+            assert_eq!(production_count(&result.events, aura, ManaType::Green), 2);
+            assert_eq!(r.state().stack.len(), 1);
+            r.advance_until_stack_empty();
+            // CR 106.3 + CR 106.6 + CR 107.4b: only one Aura G is spent;
+            // both land-produced restricted units and the other G remain.
+            assert_eq!(r.state().objects[&stone].zone, Zone::Graveyard);
+            assert!(r.state().objects[&land].tapped);
+            assert_eq!(r.state().players[0].hand.len(), before.0 + 1);
+            assert_eq!(r.state().players[0].library.len(), before.1 - 1);
+            assert_eq!(
+                r.state().players[0]
+                    .mana_pool
+                    .units()
+                    .filter(|unit| unit.source_id == land && unit.restrictions == restrictions)
+                    .count(),
+                2
+            );
+            assert_eq!(
+                r.state().players[0]
+                    .mana_pool
+                    .units()
+                    .filter(|unit| unit.source_id == aura
+                        && unit.color == ManaType::Green
+                        && unit.restrictions.is_empty())
+                    .count(),
+                1
+            );
+            assert_complete(&r, 3);
+        } else {
+            assert!(result.is_err());
+            assert_eq!(r.state().objects[&stone].zone, Zone::Battlefield);
+            assert!([land, stone].iter().all(|id| !r.state().objects[id].tapped));
+            assert_eq!(
+                before,
+                (
+                    r.state().players[0].hand.len(),
+                    r.state().players[0].library.len()
+                )
+            );
             assert_complete(&r, 0);
         }
     }
@@ -5506,10 +5802,8 @@ fn astral_known_counts_include_zero_one_and_three() {
         let mut r = s.build();
         assert_any_one(&r, astral);
         let selections = activatable_mana_source_selections(r.state(), P0);
-        assert_eq!(
-            selections.iter().any(|x| x.source.object_id == astral),
-            count > 0
-        );
+        // CR 605.2: zero output removes funding credit, not the activation.
+        assert!(selections.iter().any(|x| x.source.object_id == astral));
         if count == 3 {
             r.cast(card)
                 .modes(&[1])
@@ -5535,6 +5829,106 @@ fn astral_known_counts_include_zero_one_and_three() {
         assert_eq!(r.state().objects[&card].zone, Zone::Graveyard);
         assert_complete(&r, 0);
     }
+}
+
+#[test]
+fn known_zero_counted_source_remains_explicitly_activatable() {
+    for (name, text, cost) in [
+        ("Astral Cornucopia", ASTRAL, "{X}{X}{X}"),
+        ("Nyx Lotus", NYX, "{4}"),
+    ] {
+        let mut s = board();
+        let builder = s
+            .add_artifact_from_oracle(P0, name, text)
+            .with_mana_cost(parse_mtgjson_mana_cost(cost));
+        let source = if name == "Nyx Lotus" {
+            builder.as_legendary().id()
+        } else {
+            builder.id()
+        };
+        let opponent = s
+            .add_artifact_from_oracle(P1, "Astral Cornucopia", ASTRAL)
+            .with_mana_cost(parse_mtgjson_mana_cost("{X}{X}{X}"))
+            .id();
+        let mut r = s.build();
+        // The Lotus is an established untapped permanent, with zero devotion.
+        r.state_mut().objects.get_mut(&source).unwrap().tapped = false;
+        evaluate_layers(r.state_mut());
+        let index = assert_any_one(&r, source);
+        assert_eq!(
+            engine::game::mana_sources::max_mana_yield(r.state(), source, P0),
+            0
+        );
+        let selections = activatable_mana_source_selections(r.state(), P0);
+        assert!(!selections
+            .iter()
+            .any(|selection| selection.source.object_id == opponent));
+        let selected = selections
+            .into_iter()
+            .find(|selection| selection.source.object_id == source)
+            .expect("CR 605.2 preserves the legal zero-output selection");
+        assert_eq!(selected.ability_index, Some(index));
+        assert!(matches!(
+            selected.output,
+            ManaSourceOutput::DeferredColorChoice { .. }
+        ));
+        let result = r
+            .act(GameAction::ActivateManaSource {
+                selection: selected.clone(),
+            })
+            .unwrap();
+        // CR 605.2 + CR 605.3b: pay T, add zero and complete immediately.
+        assert!(r.state().objects[&source].tapped);
+        assert!(!r.state().objects[&opponent].tapped);
+        assert!(
+            !result.events.iter().any(|event| matches!(event,
+            engine::types::events::GameEvent::ManaAdded { source_id, .. } if *source_id == source))
+        );
+        assert_complete(&r, 0);
+        assert!(r
+            .act(GameAction::ActivateManaSource {
+                selection: selected
+            })
+            .is_err());
+        assert_complete(&r, 0);
+    }
+
+    // CR 601.2h: a zero-counter source cannot cover the printed U cost.
+    let mut s = board();
+    let zero = s
+        .add_artifact_from_oracle(P0, "Astral Cornucopia", ASTRAL)
+        .id();
+    let mists = spell(&mut s, "Reach Through Mists", true, "Draw a card.", "{U}");
+    let mut r = s.build();
+    assert!(activatable_mana_source_selections(r.state(), P0)
+        .iter()
+        .any(|selection| selection.source.object_id == zero));
+    assert!(r.cast(mists).try_resolve().is_err());
+    assert!(!r.state().objects[&zero].tapped);
+    assert_eq!(r.state().objects[&mists].zone, Zone::Hand);
+    assert_complete(&r, 0);
+
+    let mut s = board();
+    let one = s
+        .add_artifact_from_oracle(P0, "Astral Cornucopia", ASTRAL)
+        .id();
+    s.with_counter(one, CounterType::Generic("charge".into()), 1);
+    let mut r = s.build();
+    let selected = activatable_mana_source_selections(r.state(), P0)
+        .into_iter()
+        .find(|selection| selection.source.object_id == one)
+        .unwrap();
+    r.act(GameAction::ActivateManaSource {
+        selection: selected,
+    })
+    .unwrap();
+    choose_color(&mut r, ManaType::Blue);
+    assert!(r.state().objects[&one].tapped);
+    assert_eq!(
+        r.state().players[0].mana_pool.count_color(ManaType::Blue),
+        1
+    );
+    assert_complete(&r, 1);
 }
 
 #[test]

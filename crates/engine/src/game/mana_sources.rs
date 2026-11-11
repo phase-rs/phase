@@ -3581,6 +3581,18 @@ fn emit_source_rows(
         ManaProduction::AnyOneColor { .. }
             if super::effects::mana::any_one_color_count_reads_choice(produced) =>
         {
+            // CR 605.2: zero devotion does not remove the printed activation.
+            // Only planning needs a color that would currently produce mana.
+            if payability_mode == ManaPayabilityMode::Current {
+                return mana_options_from_production(state, controller, object_id, produced)
+                    .into_iter()
+                    .map(|mana_type| SourceRow {
+                        mana_type,
+                        atomic_combination: None,
+                        restrictions: concrete_restrictions.clone(),
+                    })
+                    .collect();
+            }
             let resolved =
                 super::ability_utils::build_resolved_from_def(ability, object_id, controller);
             super::effects::mana::any_one_color_outputs(state, produced, &resolved)
@@ -3609,7 +3621,9 @@ fn emit_source_rows(
                 }
                 _ => 0,
             };
-            if count == 0 {
+            // CR 605.2: a legal explicit activation may add zero mana; it
+            // still pays its costs, but cannot fund an automatic payment.
+            if count == 0 && payability_mode == ManaPayabilityMode::Planning {
                 return Vec::new();
             }
             mana_options_from_production(state, controller, object_id, produced)
