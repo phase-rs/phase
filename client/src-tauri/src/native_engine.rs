@@ -586,28 +586,9 @@ pub(crate) fn register_native_engine_bridge(
 
 pub(crate) fn native_engine_bridge_sender(
     bridge_id: u64,
-) -> Option<crate::native_bridge::OutboundSender> {
+) -> Option<tokio::sync::mpsc::UnboundedSender<tokio_tungstenite::tungstenite::Message>> {
     let state = engine_state().lock().ok()?;
     state.bridges.get(&bridge_id).map(BridgeHandle::outbound)
-}
-
-/// Marks every frame still queued for this bridge as cancelled. The writer
-/// acknowledges those frames without transmitting them.
-pub(crate) fn native_engine_bridge_order(
-    bridge_id: u64,
-) -> Option<std::sync::Arc<crate::native_bridge::AdmissionOrder>> {
-    let state = engine_state().lock().ok()?;
-    state.bridges.get(&bridge_id).map(BridgeHandle::order)
-}
-
-pub(crate) fn abandon_native_engine_bridge(bridge_id: u64) -> bool {
-    let Ok(state) = engine_state().lock() else {
-        return false;
-    };
-    state.bridges.get(&bridge_id).is_some_and(|bridge| {
-        bridge.abandoned().store(true, Ordering::Relaxed);
-        true
-    })
 }
 
 pub(crate) fn close_native_engine_bridge(bridge_id: u64) -> bool {
@@ -3596,23 +3577,14 @@ mod tests {
         let mut bridges = BTreeMap::from([(1, BridgeHandle::new(abort.clone(), outbound))]);
         bridges[&1]
             .outbound()
-            .send(crate::native_bridge::OutboundFrame {
-                message: Message::Text("queued".into()),
-                ack: None,
-            })
+            .send(Message::Text("queued".into()))
             .unwrap();
 
         assert!(close_registered_bridge(&mut bridges, 1));
 
         assert!(!close_registered_bridge(&mut bridges, 1));
         assert!(!abort.is_aborted());
-        assert_eq!(
-            receiver.try_recv().unwrap().message,
-            Message::Text("queued".into())
-        );
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(TryRecvError::Disconnected)
-        ));
+        assert_eq!(receiver.try_recv().unwrap(), Message::Text("queued".into()));
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
     }
 }

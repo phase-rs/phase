@@ -232,11 +232,7 @@ pub fn run() {
             native_engine::native_engine_progress,
             native_engine::stop_native_engine,
             native_bridge::connect_native_engine,
-            native_bridge::bridge_capabilities,
             native_bridge::native_engine_bridge_send,
-            native_bridge::native_engine_bridge_write,
-            native_bridge::native_engine_bridge_finish,
-            native_bridge::native_engine_bridge_abandon,
             native_bridge::native_engine_bridge_close,
             lan::lan_capabilities,
             lan::start_lan_server,
@@ -246,9 +242,6 @@ pub fn run() {
             native_bridge::authorize_lan_server,
             native_bridge::connect_lan_server,
             native_bridge::lan_bridge_send,
-            native_bridge::lan_bridge_write,
-            native_bridge::lan_bridge_finish,
-            native_bridge::lan_bridge_abandon,
             native_bridge::lan_bridge_close,
             deep_link::take_pending_deep_link
         ]);
@@ -1265,10 +1258,6 @@ mod tests {
                 "process:allow-restart",
                 "updater:default",
                 "allow-lan",
-                "allow-native-engine-bridge-abandon",
-                "allow-native-engine-bridge-write",
-                "allow-native-engine-bridge-finish",
-                "allow-bridge-capabilities",
                 "allow-take-pending-deep-link",
             ])
         );

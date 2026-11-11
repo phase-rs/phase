@@ -351,12 +351,6 @@
           "markdownDescription": "Allows shell content to read the boot-time audio-device health verdict. Granted to both the local (dev/bootstrap) and remote capabilities: the dev origin classifies as local, and the verdict is read-only."
         },
         {
-          "description": "Allows first-party remote content to read the shell bridge capability contract.",
-          "type": "string",
-          "const": "allow-bridge-capabilities",
-          "markdownDescription": "Allows first-party remote content to read the shell bridge capability contract."
-        },
-        {
           "description": "Allows first-party remote content to confirm legacy storage import.",
           "type": "string",
           "const": "allow-confirm-legacy-import",
@@ -381,22 +375,10 @@
           "markdownDescription": "Allows the frontend to read the shell host platform."
         },
         {
-          "description": "Allows first-party desktop content to explicitly host, discover, and connect to private LAN servers.",
-          "type": "string",
-          "const": "allow-lan",
-          "markdownDescription": "Allows first-party desktop content to explicitly host, discover, and connect to private LAN servers."
-        },
-        {
           "description": "Allows first-party remote content to mark a successful remote load.",
           "type": "string",
           "const": "allow-mark-remote-load-ok",
           "markdownDescription": "Allows first-party remote content to mark a successful remote load."
-        },
-        {
-          "description": "Allows first-party remote content to cancel and retire its unadopted native-engine bridge candidate.",
-          "type": "string",
-          "const": "allow-native-engine-bridge-abandon",
-          "markdownDescription": "Allows first-party remote content to cancel and retire its unadopted native-engine bridge candidate."
         },
         {
           "description": "Allows first-party remote content to close its native-engine bridge.",
@@ -405,22 +387,10 @@
           "markdownDescription": "Allows first-party remote content to close its native-engine bridge."
         },
         {
-          "description": "Allows first-party remote content to close its bridge after every earlier sequenced write was admitted.",
-          "type": "string",
-          "const": "allow-native-engine-bridge-finish",
-          "markdownDescription": "Allows first-party remote content to close its bridge after every earlier sequenced write was admitted."
-        },
-        {
           "description": "Allows first-party remote content to send JSON text through its native-engine bridge.",
           "type": "string",
           "const": "allow-native-engine-bridge-send",
           "markdownDescription": "Allows first-party remote content to send JSON text through its native-engine bridge."
-        },
-        {
-          "description": "Allows first-party remote content to send a sequenced frame and wait for its sink write.",
-          "type": "string",
-          "const": "allow-native-engine-bridge-write",
-          "markdownDescription": "Allows first-party remote content to send a sequenced frame and wait for its sink write."
         },
         {
           "description": "Allows first-party remote content to read the latest native-engine provisioning progress.",
@@ -451,12 +421,6 @@
           "type": "string",
           "const": "allow-take-legacy-storage",
           "markdownDescription": "Allows first-party remote content to read staged legacy storage."
-        },
-        {
-          "description": "Allows first-party desktop content to take the validated deep link the shell holds.",
-          "type": "string",
-          "const": "allow-take-pending-deep-link",
-          "markdownDescription": "Allows first-party desktop content to take the validated deep link the shell holds."
         },
         {
           "description": "Denies reading the shell host platform.",
@@ -2479,126 +2443,6 @@
           "type": "string",
           "const": "core:window:deny-unminimize",
           "markdownDescription": "Denies the unminimize command without any pre-configured scope."
-        },
-        {
-          "description": "Allows reading the opened deep link via the get_current command\n#### This default permission set includes:\n\n- `allow-get-current`",
-          "type": "string",
-          "const": "deep-link:default",
-          "markdownDescription": "Allows reading the opened deep link via the get_current command\n#### This default permission set includes:\n\n- `allow-get-current`"
-        },
-        {
-          "description": "Enables the get_current command without any pre-configured scope.",
-          "type": "string",
-          "const": "deep-link:allow-get-current",
-          "markdownDescription": "Enables the get_current command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the is_registered command without any pre-configured scope.",
-          "type": "string",
-          "const": "deep-link:allow-is-registered",
-          "markdownDescription": "Enables the is_registered command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the register command without any pre-configured scope.",
-          "type": "string",
-          "const": "deep-link:allow-register",
-          "markdownDescription": "Enables the register command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the unregister command without any pre-configured scope.",
-          "type": "string",
-          "const": "deep-link:allow-unregister",
-          "markdownDescription": "Enables the unregister command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the get_current command without any pre-configured scope.",
-          "type": "string",
-          "const": "deep-link:deny-get-current",
-          "markdownDescription": "Denies the get_current command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the is_registered command without any pre-configured scope.",
-          "type": "string",
-          "const": "deep-link:deny-is-registered",
-          "markdownDescription": "Denies the is_registered command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the register command without any pre-configured scope.",
-          "type": "string",
-          "const": "deep-link:deny-register",
-          "markdownDescription": "Denies the register command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the unregister command without any pre-configured scope.",
-          "type": "string",
-          "const": "deep-link:deny-unregister",
-          "markdownDescription": "Denies the unregister command without any pre-configured scope."
-        },
-        {
-          "description": "This permission set configures the types of dialogs\navailable from the dialog plugin.\n\n#### Granted Permissions\n\nAll dialog types are enabled.\n\n\n\n#### This default permission set includes:\n\n- `allow-message`\n- `allow-save`\n- `allow-open`",
-          "type": "string",
-          "const": "dialog:default",
-          "markdownDescription": "This permission set configures the types of dialogs\navailable from the dialog plugin.\n\n#### Granted Permissions\n\nAll dialog types are enabled.\n\n\n\n#### This default permission set includes:\n\n- `allow-message`\n- `allow-save`\n- `allow-open`"
-        },
-        {
-          "description": "Enables the ask command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `allow-message` and will be removed in v3)",
-          "type": "string",
-          "const": "dialog:allow-ask",
-          "markdownDescription": "Enables the ask command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `allow-message` and will be removed in v3)"
-        },
-        {
-          "description": "Enables the confirm command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `allow-message` and will be removed in v3)",
-          "type": "string",
-          "const": "dialog:allow-confirm",
-          "markdownDescription": "Enables the confirm command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `allow-message` and will be removed in v3)"
-        },
-        {
-          "description": "Enables the message command without any pre-configured scope.",
-          "type": "string",
-          "const": "dialog:allow-message",
-          "markdownDescription": "Enables the message command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the open command without any pre-configured scope.",
-          "type": "string",
-          "const": "dialog:allow-open",
-          "markdownDescription": "Enables the open command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the save command without any pre-configured scope.",
-          "type": "string",
-          "const": "dialog:allow-save",
-          "markdownDescription": "Enables the save command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the ask command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `deny-message` and will be removed in v3)",
-          "type": "string",
-          "const": "dialog:deny-ask",
-          "markdownDescription": "Denies the ask command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `deny-message` and will be removed in v3)"
-        },
-        {
-          "description": "Denies the confirm command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `deny-message` and will be removed in v3)",
-          "type": "string",
-          "const": "dialog:deny-confirm",
-          "markdownDescription": "Denies the confirm command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `deny-message` and will be removed in v3)"
-        },
-        {
-          "description": "Denies the message command without any pre-configured scope.",
-          "type": "string",
-          "const": "dialog:deny-message",
-          "markdownDescription": "Denies the message command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the open command without any pre-configured scope.",
-          "type": "string",
-          "const": "dialog:deny-open",
-          "markdownDescription": "Denies the open command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the save command without any pre-configured scope.",
-          "type": "string",
-          "const": "dialog:deny-save",
-          "markdownDescription": "Denies the save command without any pre-configured scope."
         },
         {
           "description": "This permission set allows opening `mailto:`, `tel:`, `https://` and `http://` urls using their default application\nas well as reveal file in directories using default file explorer\n#### This default permission set includes:\n\n- `allow-open-url`\n- `allow-reveal-item-in-dir`\n- `allow-default-urls`",

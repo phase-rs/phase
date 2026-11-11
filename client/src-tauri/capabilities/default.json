@@ -49,11 +49,7 @@
       "allow-stop-native-engine",
       "allow-connect-native-engine",
       "allow-native-engine-bridge-send",
-      "allow-native-engine-bridge-write",
-      "allow-native-engine-bridge-finish",
-      "allow-native-engine-bridge-abandon",
       "allow-native-engine-bridge-close",
-      "allow-bridge-capabilities",
       "allow-audio-boot-health"
     ]
   },
@@ -76,10 +72,6 @@
       "process:allow-restart",
       "updater:default",
       "allow-lan",
-      "allow-native-engine-bridge-abandon",
-      "allow-native-engine-bridge-write",
-      "allow-native-engine-bridge-finish",
-      "allow-bridge-capabilities",
       "allow-take-pending-deep-link"
     ]
   }
