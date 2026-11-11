@@ -848,6 +848,18 @@ pub struct DraftPlayerView {
     pub tournament_format: TournamentFormat,
     /// Pod policy from config.
     pub pod_policy: PodPolicy,
+    /// What the session does once every seat has submitted a deck: an
+    /// in-session tournament, or completion with play arranged outside it
+    /// (CR 903.13a: Commander Draft). Published for the same reason as
+    /// [`Self::launch_capability`]: it is a PROCEDURE fact a display layer
+    /// needs (whether a submitted deck faces rounds at all) and must not
+    /// infer from the kind label.
+    pub post_draft_play: PostDraftPlay,
+    /// Whether the viewer may submit (or revise) a deck now. Engine-derived from
+    /// `DraftSession::deck_submission_open` so clients never re-derive it from
+    /// `status` + `pod_policy`. Defaulted for views from hosts predating it.
+    #[serde(default)]
+    pub deck_submission_open: bool,
     /// Pairings for the current round.
     pub pairings: Vec<PairingView>,
     /// Resolved match configuration owned by the draft engine.
@@ -1617,6 +1629,8 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         next_pairing_round: session.next_pairing_round(),
         tournament_format: session.config.tournament_format,
         pod_policy: session.config.pod_policy,
+        post_draft_play: session.kind.procedure().post_draft_play,
+        deck_submission_open: session.deck_submission_open(),
         pairings,
         match_config: session.kind.match_config(),
         shared_stack: shared_stack_view_for(session, is_drafting, Some(seat_index)),
@@ -3897,6 +3911,43 @@ mod tests {
                 .pick_steps_per_pack(15),
             8
         );
+    }
+
+    #[test]
+    fn player_view_publishes_the_procedure_owned_post_draft_play() {
+        let (mut session, _) = test_session(4);
+        session.kind = DraftKind::CommanderDraft;
+        session.config.kind = DraftKind::CommanderDraft;
+        assert_eq!(
+            filter_for_player(&session, 0).post_draft_play,
+            PostDraftPlay::CompleteImmediately,
+            "CR 903.13a: a Commander Draft pod plays no in-session rounds"
+        );
+
+        session.kind = DraftKind::Premier;
+        session.config.kind = DraftKind::Premier;
+        assert_eq!(
+            filter_for_player(&session, 0).post_draft_play,
+            PostDraftPlay::TournamentPairings
+        );
+    }
+
+    #[test]
+    fn player_view_publishes_the_deck_submission_window() {
+        let (mut session, _) = test_session(4);
+        let mut open_at = |policy, status| {
+            session.config.pod_policy = policy;
+            session.status = status;
+            filter_for_player(&session, 0).deck_submission_open
+        };
+
+        assert!(open_at(PodPolicy::Casual, DraftStatus::RoundComplete));
+        assert!(open_at(PodPolicy::Competitive, DraftStatus::Deckbuilding));
+        assert!(
+            !open_at(PodPolicy::Competitive, DraftStatus::RoundComplete),
+            "MTR 7.3: a Competitive pod's submitted deck is final"
+        );
+        assert!(!open_at(PodPolicy::Casual, DraftStatus::MatchInProgress));
     }
 
     #[test]
