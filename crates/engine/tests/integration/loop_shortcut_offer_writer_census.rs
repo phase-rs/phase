@@ -453,10 +453,8 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
     );
 
     // Every production site that asks "is this declaration legal?" — the declare
-    // handler, the human ingress, and the bounded PUBLISHER — routes through the
-    // authority. The publisher is the site F1 added: it is what makes
-    // `declaration.is_some()`, the predicate `ai_support::candidates` gates its
-    // `DeclareShortcut` candidate on, mean "the handler will accept this".
+    // handler and the human ingress — routes through the authority; the bounded
+    // publishers route through `declaration_pins_conform`.
     let authority = census("declaration_conforms(");
     let authority_production: Vec<&Hit> = authority.iter().filter(|h| !h.in_test).collect();
     let mut authority_per_file: BTreeMap<&str, usize> = BTreeMap::new();
@@ -467,15 +465,14 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
         authority_per_file.into_iter().collect::<Vec<_>>(),
         vec![
             ("engine/src/analysis/decision_template.rs", 1),
-            ("engine/src/game/engine.rs", 2),
+            ("engine/src/game/engine.rs", 1),
             ("engine/src/game/interaction.rs", 1),
         ],
-        "expected 1 definition + 3 call sites: \
+        "expected 1 definition + 2 call sites: \
          `game/engine.rs::handle_declare_shortcut` (accept), \
-         `game/engine.rs::build_bounded_declaration` (publish), \
          `game/interaction.rs::materialize_loop_shortcut_response` (human emit); \
-         `game/engine.rs::bounded_offer_tail` publishes its suggestion through \
-         `declaration_pins_conform`, the same gates less the aim walk. A MISSING \
+         `game/engine.rs::build_bounded_declaration` and `game/engine.rs::bounded_offer_tail` \
+         publish through `declaration_pins_conform`, the same gates less the aim walk. A MISSING \
          call site is a path that publishes or accepts a declaration under its own predicate; \
          a NEW one is benign but must be named here rather than absorbed. \
          got {authority_production:?}"

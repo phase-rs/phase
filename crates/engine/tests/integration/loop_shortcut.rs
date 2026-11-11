@@ -8086,7 +8086,7 @@ fn multiplayer_pure_life_drain_offers_at_three_and_four_players() {
             opponents.len(),
             usize::from(seats) - 1,
             "reach-guard at {seats} players: every opponent must still be living at the offer \
-             beat, else the bound below is computed over the wrong seats"
+             beat"
         );
         assert!(
             !matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),

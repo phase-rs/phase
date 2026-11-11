@@ -374,7 +374,7 @@ describe("LoopShortcutModal", () => {
     seed(buildLoopShortcutWaitingFor({ schema: { points: [convokePoint] } }));
     render(<DeclareShortcutModal />);
 
-    expect(screen.getByText("This loop deals lethal damage.")).toBeInTheDocument();
+    expect(screen.getByText("This loop reduces an opponent's life total to 0 or less.")).toBeInTheDocument();
     expect(screen.getByText("Repeat without end. If every player accepts, the game is a draw.")).toBeInTheDocument();
     expect(
       screen.getByText("Auto-taps up to 2 creatures for convoke each iteration."),
@@ -723,7 +723,7 @@ describe("LoopShortcutModal", () => {
   // CR 732.2a: a certificate naming no outcome states none, and an outcome the engine decided at
   // one count is stated beside that count only — on the picker and on a proposal alike.
   it("states an outcome only at the count it is decided at", () => {
-    const lethal = "This loop deals lethal damage.";
+    const lethal = "This loop reduces an opponent's life total to 0 or less.";
     seed(
       buildLoopShortcutWaitingFor({
         certificate: { win_kind: undefined, unbounded: [] },
@@ -772,7 +772,7 @@ describe("LoopShortcutModal", () => {
     seed(buildRespondToShortcutWaitingFor());
     render(<RespondToShortcutModal />);
 
-    expect(screen.getByText("This loop deals lethal damage.")).toBeInTheDocument();
+    expect(screen.getByText("This loop reduces an opponent's life total to 0 or less.")).toBeInTheDocument();
     expect(screen.getByText("Repeat without end. If every player accepts, the game is a draw.")).toBeInTheDocument();
 
     // No published reply spec is the other member of "no range to name a place in": nothing to
@@ -1034,7 +1034,7 @@ describe("LoopShortcutModal", () => {
     seed(buildRespondToShortcutWaitingFor(), {}, respondInteraction());
     render(<RespondToShortcutModal />);
 
-    expect(screen.getByText("This loop deals lethal damage.")).toBeInTheDocument();
+    expect(screen.getByText("This loop reduces an opponent's life total to 0 or less.")).toBeInTheDocument();
     expect(screen.getByText("Repeat without end. If every player accepts, the game is a draw.")).toBeInTheDocument();
     expect(screen.queryByText("Proposed declaration:")).not.toBeInTheDocument();
     expect(screen.queryByText(/^Repeating /)).not.toBeInTheDocument();

@@ -12568,14 +12568,12 @@ mod tests {
     /// specify: the declare handler refuses any `Fixed(n)` above it, so a picker publishing the
     /// measurement would offer a count that handler then hands back.
     ///
-    /// THREE ARMS, because only one of them can discriminate WHICH field is read:
+    /// THREE ARMS:
     ///
-    /// * ⓐ THE DISCRIMINATING ARM — the two published answers differ BELOW the budget, so
-    ///   `.min(MAX_SHORTCUT_CYCLES)` cannot mask a swap. No producer mints this pair
-    ///   (`build_shortcut_schema` derives the capacity as `measured.min(budget)`, which is the
-    ///   measurement itself whenever it fits); it is the loaded/persisted authority the
-    ///   zero-capacity guard above exists for, and it is the only board on which reading the
-    ///   measured field is observable at all.
+    /// * ⓐ the two published answers differ BELOW the budget, so `.min(MAX_SHORTCUT_CYCLES)`
+    ///   cannot mask a swap. No producer mints this pair (`build_shortcut_schema` derives the
+    ///   capacity as `measured.min(budget)`, which is the measurement itself whenever it fits);
+    ///   it is the loaded/persisted authority the zero-capacity guard above exists for.
     /// * ⓑ the production-reachable boundary — a threshold ABOVE the budget, whose capacity is
     ///   therefore the budget. The pair a real above-budget board carries.
     /// * ⓒ the hostile sibling — `WithoutEnd` publishes NO finite ceiling, stated on the

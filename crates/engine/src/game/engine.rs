@@ -7022,8 +7022,7 @@ fn handle_declare_shortcut(
         // global cap. A `Fixed(n)` above the capacity this offer published would contain a
         // conditional action — some living player crosses a CR 704.5a / CR 704.5c / CR 104.3c
         // loss threshold inside the proposal, and what happens next depends on that — so it is
-        // not a legal shortcut. The capacity, never the measured threshold: the threshold
-        // wears no budget, so it can name a count the over-cap arm above already refuses.
+        // not a legal shortcut.
         crate::analysis::decision_template::IterationCount::Fixed(n)
             if *n > offer.schema.deliverable_capacity =>
         {

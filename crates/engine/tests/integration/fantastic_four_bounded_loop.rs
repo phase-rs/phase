@@ -7364,8 +7364,7 @@ fn the_near_equal_split_at_the_capacity_commits_its_whole_count() {
 /// the count and leaves the game.
 #[test]
 fn an_offer_holding_no_charged_announcement_delivers_the_re_aiming_count_whole() {
-    // How many of the offer's charged slots have an announcement on the board's own stack, read
-    // off the offer's published lead snapshot.
+    // How many of the offer's charged slots the offer's published lead snapshot names.
     let charged_on_stack = |board: &GameState| -> (usize, usize) {
         let (_, certificate, schema) = offer_parts(board);
         let charged = &certificate

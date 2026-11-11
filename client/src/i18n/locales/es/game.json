@@ -56,7 +56,7 @@
     "mayTakeAria": "Aceptar la habilidad opcional {{group}}",
     "mayDeclineAria": "Rechazar la habilidad opcional {{group}}",
     "winKind": {
-      "LethalDamage": "This loop deals lethal damage.",
+      "LethalDamage": "This loop reduces an opponent's life total to 0 or less.",
       "PoisonLoss": "This loop gives lethal poison counters.",
       "Decking": "This loop decks an opponent.",
       "ImmediateWin": "This loop wins the game.",

@@ -1204,7 +1204,7 @@
       "Decking": "此循环让一名对手抓空牌库。",
       "ExtraTurns": "此循环能获得无限个额外回合。",
       "ImmediateWin": "此循环能赢得游戏。",
-      "LethalDamage": "此循环造成致命伤害。",
+      "LethalDamage": "此循环使一名对手的生命值降至0或更低。",
       "PoisonLoss": "此循环会造成致命的中毒指示物。"
     }
   },

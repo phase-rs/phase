@@ -4977,12 +4977,11 @@ export type AutoPassMode =
 
 /**
  * CR 732.2a: user-controllable opt-in gate for the live combo (infinite-loop)
- * detector. `Off` (default) restores pre-detector behavior; `On` enables it.
+ * detector. `Off` (default) restores pre-detector behavior; `Interactive` enables it.
  * Mirrors `engine::types::game_state::LoopDetectionMode`.
  */
 export type LoopDetectionMode =
   | { type: "Off" }
-  | { type: "On" }
   | { type: "Interactive" };
 
 // ── Source attribution (CR 613 layers) ───────────────────────────────────

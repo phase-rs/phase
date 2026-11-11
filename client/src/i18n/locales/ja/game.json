@@ -56,7 +56,7 @@
     "mayTakeAria": "任意能力{{group}}を実行",
     "mayDeclineAria": "任意能力{{group}}を実行しない",
     "winKind": {
-      "LethalDamage": "このループは致死ダメージを与えます。",
+      "LethalDamage": "このループは対戦相手のライフを0以下にします。",
       "PoisonLoss": "このループは致死量の毒カウンターを与えます。",
       "Decking": "このループは対戦相手をライブラリーアウトさせます。",
       "ImmediateWin": "このループはゲームに勝利します。",

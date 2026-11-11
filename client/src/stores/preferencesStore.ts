@@ -4,6 +4,7 @@ import { persist } from "zustand/middleware";
 import type {
   ChallengeDeck,
   GameFormat,
+  LoopDetectionMode,
   MatchType,
   PhaseStop,
   PriorityPassingMode,
@@ -345,6 +346,7 @@ function buildDefaultPreferences(): PreferencesState {
     aiPoolSelection: emptyPoolSelection(),
     lastFormat: null,
     lastMatchType: "Bo1",
+    lastLoopDetection: { type: "Off" },
     lastPlayerCount: 2,
     dismissedFlowHelpNudge: false,
     dismissedSandboxToolsNudge: false,
@@ -482,6 +484,7 @@ interface PreferencesState {
   aiPoolSelection: RandomPoolSelection;
   lastFormat: GameFormat | null;
   lastMatchType: MatchType;
+  lastLoopDetection: LoopDetectionMode;
   lastPlayerCount: number;
   dismissedFlowHelpNudge: boolean;
   dismissedSandboxToolsNudge: boolean;
@@ -577,6 +580,7 @@ interface PreferencesActions {
   setAiPoolSelection: (selection: RandomPoolSelection) => void;
   setLastFormat: (format: GameFormat) => void;
   setLastMatchType: (matchType: MatchType) => void;
+  setLastLoopDetection: (mode: LoopDetectionMode) => void;
   setLastPlayerCount: (count: number) => void;
   setDismissedFlowHelpNudge: (dismissed: boolean) => void;
   setDismissedSandboxToolsNudge: (dismissed: boolean) => void;
@@ -781,6 +785,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setAiPoolSelection: (selection) => set({ aiPoolSelection: selection }),
       setLastFormat: (format) => set({ lastFormat: format }),
       setLastMatchType: (matchType) => set({ lastMatchType: matchType }),
+      setLastLoopDetection: (mode) => set({ lastLoopDetection: mode }),
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
       setDismissedFlowHelpNudge: (dismissed) => set({ dismissedFlowHelpNudge: dismissed }),
       setDismissedSandboxToolsNudge: (dismissed) => set({ dismissedSandboxToolsNudge: dismissed }),
