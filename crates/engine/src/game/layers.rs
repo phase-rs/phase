@@ -12046,7 +12046,9 @@ fn apply_continuous_effect_filtered(
     // effect's "you", must be baked into concrete `Protection` qualities at
     // apply-time — the modifier lives on the granted creature, which has none of
     // those attributes. `keywords::resolve_granted_protection` is the single
-    // authority shared with attachment legality (`effects/attach.rs`).
+    // authority, shared with the CR 702.16p start-snapshot refresh
+    // (`effects/attach.rs`); attachment legality reads the
+    // `protection_provenance` this pass records.
     let granted_protection: Vec<crate::types::keywords::ProtectionTarget> =
         if let ContinuousModification::AddKeyword {
             keyword: Keyword::Protection(quality),

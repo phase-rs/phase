@@ -69,9 +69,6 @@ pub fn has_keyword(obj: &GameObject, keyword: &Keyword) -> bool {
         .any(|k| std::mem::discriminant(k) == std::mem::discriminant(keyword))
 }
 
-/// Object-scoped keyword-kind query — same battlefield-only caveat as
-/// [`has_keyword`]; prefer [`object_has_effective_keyword_kind`] for objects
-/// that can be off-battlefield.
 /// CR 702.16: borrowed traversal over an object's protection qualities.
 /// Shared by targeting and attachment legality so both read the same list
 /// without cloning or re-looking-up the host.
@@ -84,6 +81,9 @@ pub(crate) fn protection_qualities(
     })
 }
 
+/// Object-scoped keyword-kind query — same battlefield-only caveat as
+/// [`has_keyword`]; prefer [`object_has_effective_keyword_kind`] for objects
+/// that can be off-battlefield.
 pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
     // allow-raw-authority: this IS the object-scoped authority
     obj.keywords.iter().any(|keyword| keyword.kind() == kind)
