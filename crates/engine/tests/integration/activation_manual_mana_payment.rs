@@ -6949,17 +6949,18 @@ const SELESNYA_EVANGEL: &str =
 const MURDEROUS_BETRAYAL: &str = "{B}{B}, Pay half your life, rounded up: Destroy target nonblack creature. It can't be regenerated.";
 const GAEA_S_CRADLE: &str = "{T}: Add {G} for each creature you control.";
 
-/// Crature `ids` into untapped, non-sick creature tokens (the scenario builder
-/// creates ordinary creatures; "tokens you control" reads `is_token`).
+/// Make `ids` untapped, non-sick creature tokens (the scenario builder creates
+/// ordinary creatures; "tokens you control" reads `is_token`).
 fn as_untapped_tokens(runner: &mut GameRunner, ids: &[ObjectId]) {
+    untap_and_settle(runner, ids);
     for &id in ids {
         let obj = runner.state_mut().objects.get_mut(&id).expect("a token");
         obj.is_token = true;
-        obj.tapped = false;
-        obj.summoning_sick = false;
     }
 }
 
+/// Clear `ids`' tapped state and summoning sickness, so the {T} costs of the
+/// abilities under test are payable on the board each test builds.
 fn untap_and_settle(runner: &mut GameRunner, ids: &[ObjectId]) {
     for &id in ids {
         let obj = runner
