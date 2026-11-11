@@ -37619,8 +37619,9 @@ impl GameState {
             pending_triggered_mana_resume: _,
             resolution_stack: _,
             // COMPARED RAW — departed stack records (CR 400.7 last-known information),
-            // pruned to the ones a retained carrier names, keyed by a raw incarnation and
-            // holding a raw ability: a different key only splits two frames, while the
+            // pruned to the ones a retained carrier names. `departed_stack_spells` is keyed
+            // by object and raw incarnation, `departed_activated_abilities` by object; both
+            // hold a raw ability. A different key only splits two frames, while the
             // record's ability pins are not ranked, so a record kept unchanged across a
             // re-incarnation of an object it pins could merge, in principle.
             departed_stack_spells: _,

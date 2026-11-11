@@ -5466,11 +5466,15 @@ fn stack_pin_liveness(state: &mut GameState) -> Vec<Vec<bool>> {
 }
 
 /// CR 400.7 + CR 603.7c + CR 608.2b: whether the two frames disagree about which stack pins
-/// still name their object. The two covers that set the stack aside ask this; every other
-/// comparator keeps the stack, where the ranked pin itself separates a live carrier from a
-/// stale one. A frame pair whose stacks hold no superseded pin is not judged here, as before;
-/// a superseded pin held at the same place in both frames (a Clue that sacrificed itself to
-/// pay for its own ability, say) is the same position and is not refused.
+/// still name their object. The two covers that set the whole stack aside ask this; the
+/// other comparators keep the stack, where the ranked pin itself separates a live carrier
+/// from a stale one (the stack-growth cover's buried arm sets aside only the entries below
+/// the replay floor, which the period does not resolve). A frame pair whose stacks hold no
+/// superseded pin is not judged here, as before; a superseded pin held at the same place in
+/// both frames (a Clue that sacrificed itself to pay for its own ability, say) is the same
+/// position and is not refused. The comparison is positional, entry by entry from the bottom:
+/// stacks of different depth or order that hold a superseded pin are refused even where every
+/// shared entry agrees, which can only miss a cover.
 fn stack_pins_superseded_apart(prior: &mut GameState, current: &mut GameState) -> bool {
     let (prior, current) = (stack_pin_liveness(prior), stack_pin_liveness(current));
     let superseded = |frame: &[Vec<bool>]| frame.iter().flatten().any(|live| !live);
