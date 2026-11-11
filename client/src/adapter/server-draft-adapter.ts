@@ -24,6 +24,7 @@ import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstima
 import {
   HandshakeError,
   openPhaseSocket,
+  writeSetupFrame,
   type PhaseSocket,
   type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
@@ -347,31 +348,6 @@ export class ServerDraftAdapter implements EngineAdapter {
   async initializeGame(): Promise<SubmitResult> {
     // Server handles game initialization during DraftMatchStart.
     return { events: [] };
-  }
-
-  /**
-   * A setup frame must be actually *written* before its candidate displaces
-   * anything. Transports with an ordered write receipt (gzip encode+send,
-   * native IPC) report the real outcome; a raw transport writes synchronously
-   * inside `send` and reports through it.
-   */
-  private async writeSetupFrame(
-    socket: PhaseSocketTransport,
-    frame: unknown,
-    signal?: AbortSignal,
-  ): Promise<boolean> {
-    const isAborted = () => signal?.aborted === true;
-    if (isAborted()) return false;
-    if (socket.sendReceipt === undefined) return this.send(frame, socket);
-    if (socket.readyState !== WebSocket.OPEN) return false;
-    try {
-      await socket.sendReceipt(JSON.stringify(frame), signal);
-      // A resolved receipt means the frame was written, even if the attachment
-      // was cancelled while waiting; the caller decides what that implies.
-      return true;
-    } catch {
-      return false;
-    }
   }
 
   async submitAction(action: GameAction, _actor: PlayerId): Promise<SubmitResult> {
@@ -1289,7 +1265,9 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.stateCodec.consumeFailure(bootstrap);
       }
       // Address the local candidate, not the still-current previous socket.
-      if (!(await this.writeSetupFrame(sourceSocket, setupFrame, attachment.controller.signal))) {
+      if (!(await writeSetupFrame(
+        sourceSocket, setupFrame, attachment.controller.signal, (frame, target) => this.send(frame, target),
+      ))) {
         throw new AdapterError("WS_CLOSED", "Failed to send setup frame", true);
       }
       if (!this.ownsAttachment(attachment) || !this.sockets.has(sourceSocket)) {

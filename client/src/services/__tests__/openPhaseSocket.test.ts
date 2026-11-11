@@ -18,6 +18,7 @@ import {
   HandshakeError,
   openPhaseSocket,
   withReconnect,
+  writeSetupFrame,
   type PhaseSocketTransport,
 } from "../openPhaseSocket";
 import {
@@ -4077,5 +4078,47 @@ describe("StateCodecAttachment — first notice and the adoption boundary", () =
     expect(early.binding.failure).toBe(stripped);
     expect(early.binding.failure).toEqual({ kind: "failed", reason: "confirmationFailure", joinCredentials: null });
     expect(early.attachment.deliveryPolicy).toEqual({ kind: "snapshotOnly", reason: "confirmationFailure" });
+  });
+});
+
+describe("writeSetupFrame", () => {
+  const transport = (extra: Partial<PhaseSocketTransport>): PhaseSocketTransport => ({
+    readyState: WebSocket.OPEN, send: vi.fn(), close: vi.fn(), ...extra,
+  }) as unknown as PhaseSocketTransport;
+
+  it("reports a transport without a receipt through its synchronous send", async () => {
+    const socket = transport({});
+    const sendSync = vi.fn(() => true);
+    await expect(writeSetupFrame(socket, { type: "Reconnect" }, undefined, sendSync)).resolves.toBe(true);
+    expect(sendSync).toHaveBeenCalledWith({ type: "Reconnect" }, socket);
+    sendSync.mockReturnValue(false);
+    await expect(writeSetupFrame(socket, { type: "Reconnect" }, undefined, sendSync)).resolves.toBe(false);
+  });
+
+  it("writes nothing for an already-aborted signal or a socket that is not open", async () => {
+    const sendReceipt = vi.fn(async () => undefined);
+    const sendSync = vi.fn(() => true);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(writeSetupFrame(transport({ sendReceipt }), {}, controller.signal, sendSync)).resolves.toBe(false);
+    await expect(writeSetupFrame(
+      transport({ sendReceipt, readyState: WebSocket.CLOSING }), {}, undefined, sendSync,
+    )).resolves.toBe(false);
+    expect(sendReceipt).not.toHaveBeenCalled();
+    expect(sendSync).not.toHaveBeenCalled();
+  });
+
+  it("reports a rejected receipt as not written", async () => {
+    const sendReceipt = vi.fn(async () => { throw new Error("write failed"); });
+    await expect(writeSetupFrame(transport({ sendReceipt }), {}, undefined, vi.fn())).resolves.toBe(false);
+  });
+
+  it("keeps a resolved receipt written when the signal aborts while it is in flight", async () => {
+    const controller = new AbortController();
+    const sendReceipt = vi.fn(async () => { controller.abort(); });
+    await expect(writeSetupFrame(
+      transport({ sendReceipt }), { type: "Reconnect" }, controller.signal, vi.fn(),
+    )).resolves.toBe(true);
+    expect(sendReceipt).toHaveBeenCalledWith('{"type":"Reconnect"}', controller.signal);
   });
 });

@@ -54,9 +54,10 @@ export interface PhaseSocketTransport {
   removeEventListener(type: "message", listener: (event: MessageEvent<string>) => void): void;
   send(data: string): void;
   /**
-   * Optional ordered write receipt: resolves once `data` has entered the
-   * transport's serialized write path and its final write step settled;
-   * rejects when that write fails. Adapters use it to keep an incumbent
+   * Optional ordered write receipt: resolves once `data` has been written to
+   * the underlying socket (after any encoding), rejects when that write fails
+   * or never happens. Resolution is final: the frame is on the wire even if the
+   * caller's `signal` aborts afterwards. Adapters use it to keep an incumbent
    * transport until a candidate's setup frame is actually written, rather
    * than only queued. A transport without this method writes synchronously
    * within `send` (throwing on failure).
@@ -72,6 +73,35 @@ export interface PhaseSocket<T extends PhaseSocketTransport = PhaseSocketTranspo
   readonly ws: T;
   readonly serverInfo: ServerInfo;
   close(): void;
+}
+
+/**
+ * Writes a candidate's setup frame and reports whether it was written. The one
+ * owner of "was the setup frame written": both server adapters decide whether
+ * to retire their incumbent from this answer.
+ *
+ * `true` means the frame is on the wire, and stays `true` if `signal` aborts
+ * while the receipt is in flight or afterwards: a resolved receipt cannot be
+ * undone, and the server may already have replaced the seat's sender, so the
+ * caller must treat the setup as committed. `false` means it was not written
+ * (aborted first, socket not open, or the write failed). A transport without a
+ * receipt writes synchronously through `sendSync`.
+ */
+export async function writeSetupFrame(
+  socket: PhaseSocketTransport,
+  frame: unknown,
+  signal: AbortSignal | undefined,
+  sendSync: (frame: unknown, socket: PhaseSocketTransport) => boolean,
+): Promise<boolean> {
+  if (signal?.aborted === true) return false;
+  if (socket.sendReceipt === undefined) return sendSync(frame, socket);
+  if (socket.readyState !== WebSocket.OPEN) return false;
+  try {
+    await socket.sendReceipt(JSON.stringify(frame), signal);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface OpenOptions<T extends PhaseSocketTransport = WebSocket> {

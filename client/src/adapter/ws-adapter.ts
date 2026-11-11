@@ -39,6 +39,7 @@ import type { BracketDeckRequest, BracketEstimate, CommanderBracketTier } from "
 import {
   HandshakeError,
   openPhaseSocket,
+  writeSetupFrame,
   type PhaseSocket,
   type PhaseSocketFactory,
   type PhaseSocketTransport,
@@ -2641,7 +2642,9 @@ export class WebSocketAdapter implements EngineAdapter {
       this.setupWritePreparation = preparation;
       let written: boolean;
       try {
-        written = await this.writeSetupFrame(socket.ws, setupFrame, preparation.signal);
+        written = await writeSetupFrame(
+          socket.ws, setupFrame, preparation.signal, (frame, target) => this.send(frame, target),
+        );
       } finally {
         if (this.setupWritePreparation === preparation) this.setupWritePreparation = null;
       }
@@ -2760,33 +2763,6 @@ export class WebSocketAdapter implements EngineAdapter {
       }
     } finally {
       if (!retained) retireSocket();
-    }
-  }
-
-  /**
-   * A setup frame must be actually *written* before its candidate displaces
-   * anything. Transports with an ordered write receipt (gzip encode+send,
-   * native IPC) report the real outcome; a raw transport writes synchronously
-   * inside `send` and reports through it.
-   */
-  private async writeSetupFrame(
-    socket: PhaseSocketTransport,
-    frame: unknown,
-    signal?: AbortSignal,
-  ): Promise<boolean> {
-    const isAborted = () => signal?.aborted === true;
-    if (isAborted()) return false;
-    if (socket.sendReceipt === undefined) return this.send(frame, socket);
-    if (socket.readyState !== WebSocket.OPEN) return false;
-    try {
-      await socket.sendReceipt(JSON.stringify(frame), signal);
-      // A resolved receipt means the frame was admitted, even if the
-      // attachment was cancelled while waiting: past this point the server may
-      // already have swapped the seat sender, so the caller must treat the
-      // write as committed rather than as a cancellation.
-      return true;
-    } catch {
-      return false;
     }
   }
 
