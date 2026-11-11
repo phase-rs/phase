@@ -866,12 +866,16 @@ pub(crate) fn parse_becomes_type_modifications(
 /// AddSubtype modifications — a common coverage false-positive pattern.
 /// The animation's supertypes and card types/subtypes, or `None` when the
 /// phrase is declined. A P/T with no named card type normally makes the
-/// object a creature ("becomes a 3/3 Elemental"). A granted noncreature
-/// subtype has no creature type to land on (CR 205.3d), and a Vehicle is a
-/// creature only while crewed (CR 301.7a): "noncreature artifacts you control
-/// become 3/3 Vehicles … and gain … crew 1" sets the P/T it will have once
-/// crewed, not a creature now. That reading is not representable here, so the
-/// phrase is declined instead of animating a creature.
+/// object a creature ("becomes a 3/3 Elemental": Elemental is a creature
+/// type). A granted noncreature subtype names no creature: "noncreature
+/// artifacts you control become 3/3 Vehicles … and gain … crew 1" adds the
+/// artifact type Vehicle (CR 205.3g), whose 3/3 applies only while the
+/// artifact is also a creature (CR 301.7a), and crew is what makes it an
+/// artifact creature (CR 702.122a). The decline covers every subtype in
+/// `noncreature_subtype_set` (artifact, enchantment, land and planeswalker
+/// types), not only Vehicle. A P/T held for a later creature type is not
+/// representable here, so the phrase is declined instead of animating a
+/// creature at once.
 fn animation_type_parts(text: &str, infer_creature: bool) -> Option<(Vec<Supertype>, Vec<String>)> {
     let descriptor = text.trim().trim_end_matches(',').trim();
     if descriptor.is_empty() {
@@ -1991,10 +1995,12 @@ mod vehicle_animation_decline_tests {
             .clone()
     }
 
-    /// CR 205.3d + CR 301.7a: printed planes whose artifacts "become N/N
-    /// Vehicle(s)" with crew. A Vehicle is a creature only while crewed, so
-    /// inferring the Creature type from the P/T would animate them at once;
-    /// the parser declines the phrase instead (the card stays unsupported).
+    /// CR 205.3g + CR 301.7a + CR 702.122a: printed planes whose artifacts
+    /// "become N/N Vehicle(s)" with crew. Vehicle is an artifact type, its P/T
+    /// applies only while it is also a creature, and crew makes it an artifact
+    /// creature; inferring the Creature type from the P/T would animate the
+    /// artifacts at once, so the parser declines the phrase instead (the card
+    /// stays unsupported).
     #[test]
     fn granted_vehicle_animation_is_declined_not_made_a_creature() {
         for (name, text) in [
