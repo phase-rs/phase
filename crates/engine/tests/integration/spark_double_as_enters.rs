@@ -1436,7 +1436,7 @@ mod feldon_tokens {
                     "Mister Fantastic, Reed Richards",
                     2,
                     4,
-                    "Whenever one or more tokens you control enter, you may draw a card.",
+                    "Reach\nWhenever one or more tokens you control enter, you may draw a card.",
                 )
                 .as_legendary()
                 .id()
@@ -1512,7 +1512,7 @@ mod feldon_tokens {
         }
     }
 
-    // Oracle text below is verbatim from the generated card data (MTGJSON).
+    // Oracle text below is from the generated card data (MTGJSON), reminder text omitted.
     const BODY_DOUBLE: &str =
         "You may have this creature enter as a copy of any creature card in a graveyard.";
     const HUSHBRINGER: &str =
