@@ -447,7 +447,13 @@ own the seat: the incumbent stays current, and a close, a refusal, an abort or
 the bound (`SETUP_CONFIRMATION_TIMEOUT_MS`, the decoder's own deadline) retires
 both sockets and settles the incumbent's work. After a close or the bound the
 game adapter retries through `attemptReconnect`, a refusal ends the episode, and
-nothing retries a draft reattach. Frames already admitted for that candidate
+nothing retries a draft reattach. Two game attachments keep the write-time
+cutover: native sidecar sockets (`nativeAi` / `nativePregame`), whose transport
+this change leaves as it was, and the attempts of an active initial-join
+fallback, which start only after the previous socket closed and have their own
+deadline. The interval reads each frame's tag from the canonical type-first
+envelope and materializes only its small refusal and notice frames, so the
+bootstrap is parsed once, after adoption. Frames already admitted for that candidate
 stay buffered through those callbacks and drain in wire order, so a synchronous
 peer reply cannot overtake an older bootstrap. A game command is also refused
 with the typed unsent error until the *current* socket has accepted its own

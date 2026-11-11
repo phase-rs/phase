@@ -4127,9 +4127,29 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
+    it("parses the reattach bootstrap once, on adoption", async () => {
+      vi.useFakeTimers();
+      const { adapter, candidate, reconnecting } = await sentCandidate();
+      const bootstrap = JSON.stringify({ type: "DraftStateUpdate", data: { view: createMockDraftView({ pick_number: 2 }) } });
+      const parse = vi.spyOn(JSON, "parse");
+      try {
+        candidate.dispatchSynthetic("message", bootstrap);
+        await vi.waitFor(() => expect(reconnecting.value()).toEqual({ resolvedWith: undefined }));
+        // The interval reads the tag by prefix; only the adopted socket's
+        // dispatch materializes the view.
+        expect(parse.mock.calls.filter(([text]) => text === bootstrap)).toHaveLength(1);
+      } finally {
+        parse.mockRestore();
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
     it("does not adopt on an Error refusal: retires both sockets, surfaces the reason and nothing retries", async () => {
       vi.useFakeTimers();
       const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
       try {
         // The mode gate's answer to a ReconnectDraft (phase-server main.rs:10062-10067).
         receive(candidate, "Error", { message: "Server is in lobby-only mode — this message is not supported" });
@@ -4137,6 +4157,10 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
         await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({
           code: "WS_ERROR", message: "Server is in lobby-only mode — this message is not supported",
         }));
+        // The same event the Error handler emits on an adopted socket.
+        expect(events).toContainEqual({
+          type: "error", message: "Server is in lobby-only mode — this message is not supported",
+        });
         await vi.waitFor(() => expect(command.value()).toMatchObject({ code: "WS_CLOSED" }));
         expect(candidate.close).toHaveBeenCalled();
         await expect(adapter.submitAction({ type: "PassPriority" } as GameAction, 0)).rejects
@@ -4185,6 +4209,8 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
     it("rejects the reattach with a DraftActionRejected that no bootstrap follows, at the bound, retiring both sockets", async () => {
       vi.useFakeTimers();
       const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
       try {
         receive(candidate, "DraftActionRejected", { reason: "Invalid player token" });
         await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS - 1000);
@@ -4195,6 +4221,8 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
         await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({
           code: "ACTION_REJECTED", message: "Invalid player token",
         }));
+        // The same event the DraftActionRejected handler emits on an adopted socket.
+        expect(events).toContainEqual({ type: "draftActionRejected", reason: "Invalid player token" });
         await vi.waitFor(() => expect(command.value()).toMatchObject({ code: "WS_CLOSED" }));
         expect(candidate.close).toHaveBeenCalled();
         const dialed = MockWebSocket.last;

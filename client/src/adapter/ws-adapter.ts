@@ -2522,9 +2522,11 @@ export class WebSocketAdapter implements EngineAdapter {
       const previous = this.ws;
       const closePrevious = this.closeSocket;
       // Keep the candidate private until setup has entered its transport's
-      // serialized write order. This also keeps the incumbent usable: its
+      // serialized write order and, for a gated `Reconnect`, until its
+      // positive bootstrap. This also keeps the incumbent usable: its
       // transport, pending requests, recovery gate and codec lease are not
-      // touched unless this candidate's setup actually commits.
+      // touched unless this candidate's setup is written (and then they are
+      // retired, whether or not the candidate is adopted).
       if (this.disposed || this.stateCodecPreparation !== preparation) return;
 
       const handleSocketMessage = (event: MessageEvent<string>) => {

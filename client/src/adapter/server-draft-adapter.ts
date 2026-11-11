@@ -1186,7 +1186,8 @@ export class ServerDraftAdapter implements EngineAdapter {
         return;
       }
       const sourceSocket = socket.ws;
-      // Do not publish a request-capable candidate until its setup is sent.
+      // Do not publish a request-capable candidate until its setup is sent
+      // (Create, Join) or, for a ReconnectDraft, until its positive bootstrap.
       // Raw transports can synchronously reenter during send; retain those
       // messages until both setup ordering and attachment ownership are safe.
       const setupMessages: Parameters<NonNullable<PhaseSocketTransport["onmessage"]>>[0][] = [];
@@ -1334,20 +1335,24 @@ export class ServerDraftAdapter implements EngineAdapter {
         // retries a reattach: this adapter schedules no retry and, as on main,
         // no product code calls `reconnectDraft`.
         this.retireSwappedIncumbent(incumbent, sourceSocket, attachment.owner);
+        // The server's answer, surfaced as the `DraftActionRejected` and
+        // `Error` handlers surface it on an adopted socket: the reattach
+        // rejects with its reason and the same event follows. A rejection the
+        // bootstrap never followed is the answer to a timed-out reattach.
+        const rejection = unconfirmed === "timeout" ? confirmation!.rejection : null;
+        const refusal = unconfirmed === "refused" ? confirmation!.refusal : null;
         if (unconfirmed === "timeout") {
-          // A rejection the bootstrap never followed is the server's answer.
-          const rejection = confirmation!.rejection;
           this.rejectAttachment(attachment.owner, rejection === null
             ? new AdapterError("WS_CLOSED", "Reconnect was not confirmed in time", true)
             : new AdapterError("ACTION_REJECTED", rejection.message, true));
-        } else if (unconfirmed === "refused") {
-          // The server refused the reattach: surface its reason, as the
-          // `Error` handler does for an adopted socket.
-          this.rejectAttachment(attachment.owner, new AdapterError(
-            "WS_ERROR", confirmation!.refusal!.message, true,
-          ));
+        } else if (refusal !== null) {
+          this.rejectAttachment(attachment.owner, new AdapterError("WS_ERROR", refusal.message, true));
         }
+        // Retired before any listener runs, so a throwing listener strands nothing.
         this.abandonSocket(socket);
+        if (this.disposed) return;
+        if (rejection !== null) this.emit({ type: "draftActionRejected", reason: rejection.message });
+        if (refusal !== null) this.emit({ type: "error", message: refusal.message });
         return;
       }
       if (!this.ownsAttachment(attachment) || !this.sockets.has(sourceSocket)) {
@@ -1357,7 +1362,8 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.abandonSocket(socket);
         return;
       }
-      // Adoption retires the previous binding only after setup is on the wire.
+      // Adoption retires the previous binding only after setup is on the wire
+      // and, for a ReconnectDraft, confirmed by its positive bootstrap.
       this.stateCodec.adopt(bootstrap, sourceSocket);
       this.ws = sourceSocket;
       this.acceptedGameSocket = null;

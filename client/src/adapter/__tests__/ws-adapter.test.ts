@@ -51,7 +51,7 @@ import type {
 } from "../generated/interaction";
 import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
 import type { FullTerminalDelivery } from "../../services/fullTerminalResult";
-import { decodeJsonEnvelope } from "../../network/wireEnvelope";
+import { decodeJsonEnvelope, encodeJsonEnvelope } from "../../network/wireEnvelope";
 
 // Minimal mock WebSocket. Latest-constructed instance is exposed via
 // `MockWebSocket.last` so tests can grab it synchronously — the adapter
@@ -2338,6 +2338,47 @@ describe("WebSocketAdapter", () => {
       } finally {
         random.mockRestore();
         nativeAdapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(["raw", "gzip"] as const)("parses a %s reconnect bootstrap once, on adoption", async (wire) => {
+      acceptFullReplyOwnershipSession(adapter, ws);
+      vi.useFakeTimers();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const events = vi.fn();
+      adapter.onEvent(events);
+      const parse = vi.spyOn(JSON, "parse");
+      try {
+        ws.dispatchSynthetic("close");
+        await vi.advanceTimersByTimeAsync(1000);
+        const hello = JSON.parse(SERVER_HELLO) as { data: Record<string, unknown> };
+        if (wire === "gzip") hello.data.wire_formats = ["GzipEnvelopeV1"];
+        await completeHandshake(adapter, JSON.stringify(hello), null);
+        const candidate = MockWebSocket.last!;
+        expect(candidate).not.toBe(ws);
+        await vi.advanceTimersByTimeAsync(0);
+        // Reach guard: the gzip case really sent its Reconnect as an envelope.
+        expect(candidate.send.mock.calls.some(([frame]) => typeof frame !== "string")).toBe(wire === "gzip");
+        const bootstrap = JSON.stringify({
+          type: "GameStarted",
+          data: {
+            state_revision: 1, state: createMockState(), your_player: 0,
+            player_token: "accepted-full-session-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+          },
+        });
+        parse.mockClear();
+        candidate.dispatchSynthetic("message", wire === "gzip"
+          ? (await encodeJsonEnvelope(bootstrap)).buffer as unknown as string
+          : bootstrap);
+        await vi.waitFor(() => expect(events).toHaveBeenCalledWith({ type: "reconnected", inGame: true }));
+        // The interval reads the tag by prefix; only the adopted socket's
+        // dispatch materializes the board.
+        expect(parse.mock.calls.filter(([text]) => text === bootstrap)).toHaveLength(1);
+      } finally {
+        parse.mockRestore();
+        adapter.dispose();
+        visibility.mockRestore();
         vi.useRealTimers();
       }
     });
@@ -6312,6 +6353,26 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         await vi.advanceTimersByTimeAsync(10_000);
         expect(candidate.close).not.toHaveBeenCalled();
       } finally {
+        adapter.dispose();
+      }
+    });
+
+    it("parses a codec reconnect bootstrap once, on adoption", async () => {
+      const { adapter, raw, candidate, events } = await sentCandidate();
+      // Built before the spy: the fixture helper parses its own input.
+      const frame = fullFrame(JSON.stringify(codecGameStarted(5, 5)));
+      const parse = vi.spyOn(JSON, "parse");
+      try {
+        candidate.dispatchSynthetic("message", frame);
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
+        expect(raw.close).toHaveBeenCalledOnce();
+        // The decoded board reaches the interval as text; only the adopted
+        // socket's dispatch materializes it.
+        const decodedBootstrapParses = parse.mock.calls
+          .filter(([text]) => typeof text === "string" && text.startsWith('{"type":"GameStarted"'));
+        expect(decodedBootstrapParses).toHaveLength(1);
+      } finally {
+        parse.mockRestore();
         adapter.dispose();
       }
     });

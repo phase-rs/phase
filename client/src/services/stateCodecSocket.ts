@@ -76,8 +76,11 @@ export interface StateCodecJoinCredentials {
  * bootstrap was pending: a decode rejection, a bootstrap rejection, a receive
  * overload, or a `Full` that preceded the codec confirmation. Every other failure carries
  * `null`, and a notice recorded before its socket was adopted is stripped to
- * `null` (the setup frame has not been sent, so a conforming join cannot have
- * received credentials yet).
+ * `null`. Such a socket has either not sent its setup frame yet (a conforming
+ * join cannot have received credentials), or is a reconnect candidate in its
+ * confirmation interval: it reconnects with credentials the adapter already
+ * holds, and no fallback reads an unadopted binding's credentials
+ * (`admitInitialFallback` requires the adopted one).
  */
 export interface StateCodecFailure {
   readonly kind: "failed";
@@ -245,8 +248,9 @@ export class StateCodecAttachment {
   ): void {
     if (disposed) return;
     if (typeof state === "object") {
-      // Before adoption the setup frame has not been sent, so no conforming
-      // server could have issued credentials to this attachment yet.
+      // An unadopted attachment's credentials are never read: either its setup
+      // frame has not been sent, or it is a reconnect candidate that already
+      // holds them (see `StateCodecFailure`).
       binding.failure ??= binding.socket === null ? { ...state, joinCredentials: null } : state;
       if (this.current === binding && binding.socket !== null && currentSocket === binding.socket) {
         this.degrade(state.reason);
@@ -1070,7 +1074,7 @@ export class StateCodecSocket implements PhaseSocketTransport {
  */
 const CANONICAL_ENVELOPE_PREFIX = '{"type":"';
 
-function frameType(text: string): string {
+export function frameType(text: string): string {
   if (text.startsWith(CANONICAL_ENVELOPE_PREFIX)) {
     const end = text.indexOf('"', CANONICAL_ENVELOPE_PREFIX.length);
     // `,"data":` immediately after the tag is the canonical serde envelope; a

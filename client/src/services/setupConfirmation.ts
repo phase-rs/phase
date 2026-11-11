@@ -1,4 +1,5 @@
 import { STATE_CODEC_DECODE_TIMEOUT_MS } from "../adapter/state-codec-runtime";
+import { frameType } from "./stateCodecSocket";
 
 /**
  * The uncertain interval of a reconnect: from the moment a candidate's setup
@@ -30,11 +31,14 @@ import { STATE_CODEC_DECODE_TIMEOUT_MS } from "../adapter/state-codec-runtime";
  */
 /**
  * The bound on the interval. It runs from the setup write until the decoded
- * bootstrap reaches the adapter, so it covers the server's own work (session
- * lock, AI turn, building the frame), the transfer and the decode. It is the
- * decoder's own deadline: a bootstrap whose decode alone takes that long has
- * already failed its socket, so the bound never retires a candidate the codec
- * would still accept on decode time alone. Server work and transfer share it.
+ * bootstrap reaches the adapter, so it spans the server's own work before the
+ * bootstrap (session lock, any AI actions it runs first, building the frame),
+ * the transfer and the decode. It is the decoder's own deadline: a bootstrap
+ * whose decode alone takes that long has already failed its socket, so the
+ * bound never retires a candidate the codec would still accept on decode time
+ * alone. Server work and transfer share it; it is not measured against them, so
+ * an attempt whose server work runs past it ends as a timeout and the game
+ * adapter retries within its episode budget.
  */
 export const SETUP_CONFIRMATION_TIMEOUT_MS = STATE_CODEC_DECODE_TIMEOUT_MS;
 
@@ -93,17 +97,23 @@ const POSITIVE_FRAMES: Record<"game" | "draft", ReadonlySet<string>> = {
 
 export function classifySetupFrame(surface: "game" | "draft", text: unknown): SetupFrameClass {
   if (typeof text !== "string") return { kind: "other" };
-  let message: { type?: unknown; data?: unknown };
+  // The tag comes from the canonical type-first envelope without materializing
+  // the frame: the positive bootstrap carries the whole board and is parsed
+  // once, by the adapter, after adoption. Only the small frames whose data the
+  // decision needs are parsed here.
+  const type = frameType(text);
+  if (POSITIVE_FRAMES[surface].has(type)) return { kind: "positive" };
+  const needsData = type === "Error"
+    || (surface === "game" && type === "StateWithheld")
+    || (surface === "draft" && type === "DraftActionRejected");
+  if (!needsData) return { kind: "other" };
+  let data: { message?: unknown; reason?: unknown; code?: unknown; withheld?: unknown };
   try {
-    message = JSON.parse(text) as { type?: unknown; data?: unknown };
+    data = ((JSON.parse(text) as { data?: unknown }).data ?? {}) as typeof data;
   } catch {
     return { kind: "other" };
   }
-  const type = typeof message?.type === "string" ? message.type : null;
-  if (type === null) return { kind: "other" };
-  if (POSITIVE_FRAMES[surface].has(type)) return { kind: "positive" };
-  const data = (message.data ?? {}) as { message?: unknown; reason?: unknown; code?: unknown; withheld?: unknown };
-  if (surface === "game" && type === "StateWithheld") {
+  if (type === "StateWithheld") {
     const withheld = data.withheld as { type?: unknown } | null | undefined;
     return withheld?.type === "GameStarted" ? { kind: "positive" } : { kind: "other" };
   }
@@ -116,13 +126,10 @@ export function classifySetupFrame(surface: "game" | "draft", text: unknown): Se
       },
     };
   }
-  if (surface === "draft" && type === "DraftActionRejected") {
-    return {
-      kind: "rejection",
-      refusal: { message: typeof data.reason === "string" ? data.reason : "The server rejected the setup." },
-    };
-  }
-  return { kind: "other" };
+  return {
+    kind: "rejection",
+    refusal: { message: typeof data.reason === "string" ? data.reason : "The server rejected the setup." },
+  };
 }
 
 export class SetupConfirmation {
@@ -143,6 +150,9 @@ export class SetupConfirmation {
 
   /** Feeds one frame the candidate received during the interval. */
   observe(surface: "game" | "draft", data: unknown): void {
+    // A settled interval classifies nothing more: later frames only wait, in
+    // order, for the adopted socket's own handler.
+    if (this.outcome !== null) return;
     const frame = classifySetupFrame(surface, data);
     switch (frame.kind) {
       case "positive":

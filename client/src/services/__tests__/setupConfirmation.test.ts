@@ -131,6 +131,31 @@ describe("SetupConfirmation.observe", () => {
     expect(confirmation.rejection).toEqual({ message: "Invalid player token" });
   });
 
+  it("classifies nothing once settled", async () => {
+    const confirmation = new SetupConfirmation();
+    confirmation.observe("game", frame("GameStarted", { state: {} }));
+    await expect(confirmation.settled).resolves.toBe("confirmed");
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      confirmation.observe("game", frame("Error", { message: "late" }));
+      expect(parse).not.toHaveBeenCalled();
+      expect(confirmation.refusal).toBeNull();
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it("reads a canonical bootstrap's tag without parsing it", () => {
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      expect(classifySetupFrame("game", frame("GameStarted", { state: { objects: [] } }))).toEqual({ kind: "positive" });
+      expect(classifySetupFrame("draft", frame("DraftStateUpdate", { view: {} }))).toEqual({ kind: "positive" });
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
   it("ignores frames that are neither positive nor a refusal", () => {
     const confirmation = new SetupConfirmation();
     confirmation.observe("game", frame("Pong", { timestamp: 1 }));
