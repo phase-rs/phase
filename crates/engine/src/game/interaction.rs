@@ -50,13 +50,13 @@ use crate::types::interaction::{
     InteractionPreview, InteractionPreviewRequest, InteractionPreviewStatus, InteractionProgress,
     InteractionReasonCode, InteractionRelationConstraint, InteractionRelationSourceConstraint,
     InteractionResponse, InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
-    InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPin,
-    InteractionShortcutPoint, InteractionShortcutPointKind, InteractionShortcutPreview,
-    InteractionShortcutPreviewEntry, InteractionShortcutPreviewFamily, InteractionShortcutReply,
-    InteractionShortcutResponseCode, InteractionSlotKind, InteractionSubmission,
-    InteractionSummaryCode, InteractionWaitingForCode, InteractionWaitingForKind,
-    InteractionZoneCode, SelectionConstraint, SimultaneousDecisionKind, ViewerInteraction,
-    MAX_INTERACTION_LIST_LEN, MAX_SHORTCUT_PREVIEW_ELEMENTS,
+    InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutOutcome,
+    InteractionShortcutOutcomeKind, InteractionShortcutPin, InteractionShortcutPoint,
+    InteractionShortcutPointKind, InteractionShortcutPreview, InteractionShortcutPreviewEntry,
+    InteractionShortcutPreviewFamily, InteractionShortcutReply, InteractionShortcutResponseCode,
+    InteractionSlotKind, InteractionSubmission, InteractionSummaryCode, InteractionWaitingForCode,
+    InteractionWaitingForKind, InteractionZoneCode, SelectionConstraint, SimultaneousDecisionKind,
+    ViewerInteraction, MAX_INTERACTION_LIST_LEN, MAX_SHORTCUT_PREVIEW_ELEMENTS,
 };
 use crate::types::mana::{
     AbilityActivationScope, ManaColor, ManaCost, ManaRestriction, ManaSourceOutput,
@@ -1383,6 +1383,9 @@ struct LoopShortcutProjection {
     suggestion: Option<crate::analysis::decision_template::DecisionTemplate>,
     /// The offer's `ShortcutDecisionSchema::leading_aims`.
     leading_aims: Vec<(crate::analysis::decision_template::DecisionSlot, PlayerId)>,
+    /// CR 732.2a: the outcome the declarer's selected ending reaches (`loop_shortcut_outcome`);
+    /// `None` on a responder's copy, whose outcome rides `ShortcutReply` instead.
+    outcome: Option<InteractionShortcutOutcome>,
 }
 
 #[derive(Debug, Clone)]
@@ -3845,6 +3848,7 @@ fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequ
             candidates,
             suggestion: None,
             leading_aims: proposal.leading_aims.clone(),
+            outcome: None,
         },
         segments,
     })
@@ -4011,7 +4015,16 @@ fn loop_shortcut_projection(
             if schema.deliverable_capacity == 0 {
                 return Err(InteractionReasonCode::InvalidAuthorityState);
             }
-            let max = schema.deliverable_capacity.min(MAX_SHORTCUT_CYCLES);
+            // CR 704.5a + CR 732.2a: a count past the crossing the offer proved names repetitions
+            // after the game has ended, which the declare handler binds back to the crossing
+            // (`loop_check::reachable_fixed_count`), so the picker stops there. A zero
+            // crossing bounds nothing a picker could show and is left to the capacity guard.
+            let max = schema.deliverable_capacity.min(MAX_SHORTCUT_CYCLES).min(
+                certificate
+                    .win_kind_at
+                    .filter(|&at| at > 0)
+                    .unwrap_or(u32::MAX),
+            );
             InteractionShortcutCountSpec::Fixed {
                 min: 1,
                 max,
@@ -4191,6 +4204,7 @@ fn loop_shortcut_projection(
             candidate_indices: (start..candidates.len()).collect(),
         });
     }
+    let outcome = loop_shortcut_outcome(certificate, &count);
     Ok(LoopShortcutProjection {
         count,
         per_cycle,
@@ -4198,7 +4212,77 @@ fn loop_shortcut_projection(
         candidates,
         suggestion: schema.suggested_declaration.clone(),
         leading_aims: schema.leading_aims.clone(),
+        outcome,
     })
+}
+
+/// The projection-layer code for a loop's classified outcome. Exhaustive, so a new `WinKind`
+/// build-breaks here rather than publishing nothing.
+fn shortcut_outcome_kind(
+    kind: crate::analysis::loop_check::WinKind,
+) -> InteractionShortcutOutcomeKind {
+    use crate::analysis::loop_check::WinKind;
+    match kind {
+        WinKind::LethalDamage => InteractionShortcutOutcomeKind::LethalDamage,
+        WinKind::PoisonLoss => InteractionShortcutOutcomeKind::PoisonLoss,
+        WinKind::Decking => InteractionShortcutOutcomeKind::Decking,
+        WinKind::ImmediateWin => InteractionShortcutOutcomeKind::ImmediateWin,
+        WinKind::ExtraTurns => InteractionShortcutOutcomeKind::ExtraTurns,
+        WinKind::Advantage => InteractionShortcutOutcomeKind::Advantage,
+    }
+}
+
+/// CR 732.2a + CR 704.5a: the outcome the ending a declarer selects reaches, stated through
+/// `loop_check::outcome_at_ending` for the count spec the picker publishes.
+///
+/// A non-numeric ending is stated unkeyed. Over a fixed picker an outcome is monotone in the
+/// count — once a take reaches it, every longer take does — so one reached at the picker's
+/// smallest count is reached at all of them and is stated unkeyed too; otherwise it is keyed to
+/// the proved crossing, the one count inside the picker that reaches it (the picker's maximum
+/// stops at that crossing). A crossing outside the picker states nothing.
+fn loop_shortcut_outcome(
+    certificate: &crate::analysis::loop_check::LoopCertificate,
+    count: &InteractionShortcutCountSpec,
+) -> Option<InteractionShortcutOutcome> {
+    use crate::analysis::decision_template::IterationCount;
+    let stated = |ending: IterationCount, count: Option<u32>| {
+        crate::analysis::loop_check::outcome_at_ending(
+            certificate.win_kind,
+            certificate.win_kind_at,
+            &ending,
+        )
+        .map(|kind| InteractionShortcutOutcome {
+            count,
+            kind: shortcut_outcome_kind(kind),
+        })
+    };
+    match *count {
+        InteractionShortcutCountSpec::UntilLethal => stated(IterationCount::UntilLethal, None),
+        InteractionShortcutCountSpec::WithoutEnd => stated(IterationCount::WithoutEnd, None),
+        InteractionShortcutCountSpec::Fixed { min, max, .. } => {
+            stated(IterationCount::Fixed(min), None).or_else(|| {
+                certificate
+                    .win_kind_at
+                    .filter(|at| (min..=max).contains(at))
+                    .and_then(|at| stated(IterationCount::Fixed(at), Some(at)))
+            })
+        }
+    }
+}
+
+/// CR 732.2a + CR 732.2b: the outcome a pending proposal reaches at its current ending point —
+/// the declared count, or the place a responder named — stated through the same
+/// `loop_check::outcome_at_ending` authority as the declarer's.
+fn shortcut_reply_outcome(waiting_for: &WaitingFor) -> Option<InteractionShortcutOutcomeKind> {
+    let WaitingFor::RespondToShortcut { proposal, .. } = waiting_for else {
+        return None;
+    };
+    crate::analysis::loop_check::outcome_at_ending(
+        proposal.win_kind,
+        proposal.win_kind_at,
+        &proposal.count,
+    )
+    .map(shortcut_outcome_kind)
 }
 
 fn comparator_dto(comparator: Comparator) -> AggregateComparator {
@@ -8698,6 +8782,7 @@ fn opportunity_for_slot(
                             points,
                             declared,
                             allocation_group,
+                            outcome: shortcut_reply_outcome(&filtered_state.waiting_for),
                             confirm: ConfirmSemantics::Explicit,
                         },
                         candidates,
@@ -8889,6 +8974,7 @@ fn opportunity_for_slot(
                             points,
                             allow_decline: true,
                             preview,
+                            outcome: projection.outcome,
                             confirm: ConfirmSemantics::Explicit,
                         },
                         candidates,
@@ -12169,6 +12255,7 @@ mod tests {
             points: Vec::new(),
             allow_decline: true,
             preview,
+            outcome: None,
             confirm: ConfirmSemantics::Explicit,
         };
         let element = |count: u32, allocation: Vec<AmountAssignment>| InteractionShortcutPreview {

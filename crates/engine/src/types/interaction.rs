@@ -1047,6 +1047,10 @@ pub enum InteractionResponseSpec {
         allow_decline: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         preview: Vec<InteractionShortcutPreview>,
+        /// CR 732.2a: the outcome the engine projects for the ending the declarer selects —
+        /// `None` where no ending the picker admits reaches one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<InteractionShortcutOutcome>,
         confirm: ConfirmSemantics,
     },
     /// CR 732.2b + CR 732.2c: the proposal this player is being asked to accept, published so
@@ -1097,8 +1101,42 @@ pub enum InteractionResponseSpec {
         declared: Option<InteractionShortcutPreview>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allocation_group: Option<u32>,
+        /// CR 732.2a + CR 732.2b: the outcome the proposal reaches at its current ending point.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<InteractionShortcutOutcomeKind>,
         confirm: ConfirmSemantics,
     },
+}
+
+/// The projection-layer code for `analysis::loop_check::WinKind`, mapped by an exhaustive `match`
+/// in `game::interaction`. Variant names serialize verbatim, matching the client's existing
+/// `comboShortcut.winKind.*` labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+pub enum InteractionShortcutOutcomeKind {
+    LethalDamage,
+    PoisonLoss,
+    Decking,
+    ImmediateWin,
+    ExtraTurns,
+    Advantage,
+}
+
+/// CR 732.2a: the outcome a declarer's selected ending reaches, projected by the engine
+/// (`analysis::loop_check::outcome_at_ending`) so the dialog renders it rather than deriving it.
+///
+/// `count` is the picker count the outcome is stated at, the same pairing
+/// [`InteractionShortcutPreview::count`] makes: a game-ending outcome is reached only at the
+/// count its proved crossing lands on, and the picker stops there. `None` states an outcome that
+/// holds at whatever ending is selected — the offer's own non-numeric ending (`UntilLethal`), or
+/// an accrual such as an advantage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub struct InteractionShortcutOutcome {
+    pub count: Option<u32>,
+    pub kind: InteractionShortcutOutcomeKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

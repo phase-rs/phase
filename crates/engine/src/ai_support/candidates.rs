@@ -10839,6 +10839,7 @@ mod tests {
                 iteration_count: IterationCount::Fixed(5),
                 measured_repetition_bound: Some(5),
                 deliverable_capacity: 5,
+                headroom: crate::analysis::decision_template::RepresentableHeadroom::Measured,
                 points: vec![DecisionPoint {
                     slot: DecisionSlot::first(d6n_source(), ChoicePoint::AnnouncedTarget),
                     kind: DecisionPointKind::Targets {

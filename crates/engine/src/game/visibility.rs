@@ -2373,6 +2373,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                     // only hidden-info legal targets are rewritten above.
                     measured_repetition_bound: schema.measured_repetition_bound,
                     deliverable_capacity: schema.deliverable_capacity,
+                    // Whether that capacity was measured is a fact about the engine's own
+                    // derivation, public for the same reason.
+                    headroom: schema.headroom,
                     points,
                     convoke_tappable_count,
                 },
@@ -13930,6 +13933,7 @@ mod tests {
                 iteration_count: IterationCount::Fixed(3),
                 measured_repetition_bound: Some(3),
                 deliverable_capacity: 3,
+                headroom: crate::analysis::decision_template::RepresentableHeadroom::Measured,
                 points: vec![DecisionPoint {
                     slot: slot.clone(),
                     kind: DecisionPointKind::Targets {

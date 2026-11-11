@@ -357,11 +357,18 @@ describe("LoopShortcutModal", () => {
     cleanup();
   });
 
-  // T1: the declare modal renders directly from the engine schema/certificate —
-  // win_kind, iteration_count, and the read-only ConvokeTaps count. A wrong field
-  // read renders a different/absent string and fails.
-  it("renders the offer summary from certificate + schema (T1)", () => {
-    seed(buildLoopShortcutWaitingFor({ schema: { points: [convokePoint] } }));
+  // T1: the declare modal renders directly from engine-published fields — the projected outcome,
+  // iteration_count, and the read-only ConvokeTaps count. A wrong field read renders a
+  // different/absent string and fails.
+  it("renders the offer summary from the published outcome + schema (T1)", () => {
+    seed(
+      buildLoopShortcutWaitingFor({ schema: { points: [convokePoint] } }),
+      {},
+      shortcutInteraction({
+        count: { type: "untilLethal" },
+        outcome: { count: null, kind: "LethalDamage" },
+      }),
+    );
     render(<DeclareShortcutModal />);
 
     expect(screen.getByText("This loop deals lethal damage.")).toBeInTheDocument();
@@ -710,30 +717,31 @@ describe("LoopShortcutModal", () => {
     expect(screen.getByText("-40 life — P2")).toBeInTheDocument();
   });
 
-  // CR 732.2a: a certificate naming no outcome states none, and an outcome the engine decided at
-  // one count is stated beside that count only — on the picker and on a proposal alike.
-  it("states an outcome only at the count it is decided at", () => {
+  // CR 732.2a: the outcome line renders the ENGINE's projection for the selected ending and never
+  // the raw classification. The raw certificate below classifies lethal damage every time; only
+  // the published `outcome` decides what the dialog states.
+  it("states only the outcome the engine projects for the selected ending", () => {
     const lethal = "This loop deals lethal damage.";
-    seed(
-      buildLoopShortcutWaitingFor({
-        certificate: { win_kind: undefined, unbounded: [] },
-        schema: { iteration_count: { Fixed: 2 } },
-      }),
-      {},
-      shortcutInteraction({ count: { type: "fixed", data: { min: 1, max: 2, suggested: 2 } } }),
-    );
+    const lethalOffer = buildLoopShortcutWaitingFor({
+      certificate: { win_kind: "LethalDamage" },
+      schema: { iteration_count: { Fixed: 2 } },
+    });
+    // A lethal classification the engine projects no outcome for — a crossing past what the
+    // offer can drive — states none, at any count.
+    seed(lethalOffer, {}, shortcutInteraction({ count: fixedCount(1, 2, 2) }));
     render(<DeclareShortcutModal />);
     expect(screen.getByText("Repeat at most 2 times.")).toBeInTheDocument();
     expect(screen.queryByText(/^This loop|comboShortcut\.winKind/)).toBeNull();
 
+    // Keyed to one count: stated beside that count only.
     cleanup();
     seed(
-      buildLoopShortcutWaitingFor({
-        certificate: { win_kind: "LethalDamage", win_kind_at: 2 },
-        schema: { iteration_count: { Fixed: 2 } },
-      }),
+      lethalOffer,
       {},
-      shortcutInteraction({ count: { type: "fixed", data: { min: 1, max: 2, suggested: 2 } } }),
+      shortcutInteraction({
+        count: fixedCount(1, 2, 2),
+        outcome: { count: 2, kind: "LethalDamage" },
+      }),
     );
     render(<DeclareShortcutModal />);
     expect(screen.getByText(lethal)).toBeInTheDocument();
@@ -742,18 +750,23 @@ describe("LoopShortcutModal", () => {
     fireEvent.change(countBox(), { target: { value: "2" } });
     expect(screen.getByText(lethal)).toBeInTheDocument();
 
-    for (const [declared, shown] of [
-      [2, true],
-      [1, false],
+    // The responder's dialog states exactly the outcome its spec carries — including the genuine
+    // lethal response to an `UntilLethal` proposal, which names no explicit count.
+    for (const [count, outcome] of [
+      [{ Fixed: 2 }, "LethalDamage"],
+      [{ Fixed: 1 }, null],
+      ["UntilLethal", "LethalDamage"],
     ] as const) {
       cleanup();
       seed(
         buildRespondToShortcutWaitingFor({
-          proposal: { count: { Fixed: declared }, win_kind: "LethalDamage", win_kind_at: 2 },
+          proposal: { count, win_kind: "LethalDamage", win_kind_at: 2 },
         }),
+        {},
+        respondInteraction({ outcome }),
       );
       render(<RespondToShortcutModal />);
-      expect(screen.queryByText(lethal) !== null).toBe(shown);
+      expect(screen.queryByText(lethal) !== null).toBe(outcome !== null);
     }
   });
 
@@ -762,7 +775,8 @@ describe("LoopShortcutModal", () => {
     seed(buildRespondToShortcutWaitingFor());
     render(<RespondToShortcutModal />);
 
-    expect(screen.getByText("This loop deals lethal damage.")).toBeInTheDocument();
+    // No published reply spec means no projected outcome: the raw classification is not read.
+    expect(screen.queryByText("This loop deals lethal damage.")).toBeNull();
     expect(screen.getByText("Repeat until the game ends.")).toBeInTheDocument();
 
     // No published reply spec is the other member of "no range to name a place in": nothing to
@@ -1021,7 +1035,7 @@ describe("LoopShortcutModal", () => {
   // three lines unchanged and adds no declaration panel. Paired with the row above, the two are
   // a SWITCH.
   it("renders the base three lines and nothing else without a declared sequence", () => {
-    seed(buildRespondToShortcutWaitingFor(), {}, respondInteraction());
+    seed(buildRespondToShortcutWaitingFor(), {}, respondInteraction({ outcome: "LethalDamage" }));
     render(<RespondToShortcutModal />);
 
     expect(screen.getByText("This loop deals lethal damage.")).toBeInTheDocument();

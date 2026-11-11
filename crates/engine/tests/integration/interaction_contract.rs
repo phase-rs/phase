@@ -4305,6 +4305,7 @@ fn the_preview_list_and_its_allocation_default_when_absent_and_are_omitted_when_
         points: Vec::new(),
         allow_decline: true,
         preview,
+        outcome: None,
         confirm: engine::types::interaction::ConfirmSemantics::Explicit,
     };
 
@@ -6115,6 +6116,7 @@ fn the_respond_side_points_and_declared_default_when_absent_and_are_omitted_when
             points,
             declared,
             allocation_group,
+            outcome: None,
             confirm: engine::types::interaction::ConfirmSemantics::Explicit,
         }
     };
@@ -6974,6 +6976,7 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
             // a capacity at the global cap.
             measured_repetition_bound: None,
             deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
+            headroom: engine::analysis::decision_template::RepresentableHeadroom::Measured,
             points: vec![
                 DecisionPoint {
                     slot: slot(ChoicePoint::AnnouncedTarget),
@@ -7211,6 +7214,7 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
             iteration_count: IterationCount::Fixed(2),
             measured_repetition_bound: None,
             deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
+            headroom: engine::analysis::decision_template::RepresentableHeadroom::Measured,
             points: vec![DecisionPoint {
                 slot: slot.clone(),
                 kind: DecisionPointKind::Targets {
@@ -8553,6 +8557,7 @@ fn stage_sequenced_offer(
                 ShortcutDecisionSchema::default().deliverable_capacity,
                 |m| m.min(ShortcutDecisionSchema::default().deliverable_capacity),
             ),
+            headroom: engine::analysis::decision_template::RepresentableHeadroom::Measured,
             points: slots
                 .iter()
                 .cloned()

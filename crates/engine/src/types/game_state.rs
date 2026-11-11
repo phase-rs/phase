@@ -14168,24 +14168,53 @@ pub(crate) fn normalize_resolution_cast_offer_allocator(
     Ok(())
 }
 
-/// CR 614.1 + CR 732.2a: Re-validates the maximum representable repetitions for an
-/// already-parked `WaitingFor::PayAmountChoice` for `PayableResource::LoopCollapse`
-/// on restore, accounting for live replacements on the restored board.
-pub fn normalize_parked_loop_collapse_max(state: &mut GameState) {
-    let controller = match &state.waiting_for {
+/// CR 732.2a + CR 704.5a: re-binds, on restore, a pending `WaitingFor::RespondToShortcut`
+/// proposal's fixed count to the end its sequence can reach
+/// (`ShortcutProposal::bind_count_to_reachable_end`). The declare seam binds every proposal it
+/// builds; a predecessor's did not, and its over-count names repetitions after the crossing that
+/// ends the game. Binding rather than refusing keeps that save loadable, and the take is the same
+/// one either way: its drive ends the game at the crossing.
+pub fn normalize_pending_shortcut_proposal(state: &mut GameState) {
+    if let WaitingFor::RespondToShortcut { proposal, .. } = &mut state.waiting_for {
+        proposal.bind_count_to_reachable_end();
+    }
+}
+
+/// Re-derives, on restore, the maximum an already-parked `WaitingFor::PayAmountChoice` publishes
+/// wherever that maximum is an engine capacity rather than a rules bound, so a prompt written by
+/// a predecessor never shows a number its own reducer refuses:
+///
+/// * CR 614.1 + CR 732.2a: `PayableResource::LoopCollapse` — the repetitions the restored board
+///   can represent, accounting for its live replacements.
+/// * CR 107.14: `PayableResource::Energy` — what one checked payment can remove
+///   (`effects::life::max_representable_energy_spend`), the bound the prompt's mint and the
+///   submit-time guard in `engine_resolution_choices` share. A predecessor minted the bare
+///   reserve, which the guard refuses past the per-turn tally's room.
+///
+/// Only ever narrows, and `min` follows `max` down so the published range stays non-empty.
+pub fn normalize_parked_pay_amount_max(state: &mut GameState) {
+    let bound = match &state.waiting_for {
         WaitingFor::PayAmountChoice {
             player,
             resource: PayableResource::LoopCollapse { .. },
             ..
-        } => Some(*player),
+        } => crate::game::turns::materialization_representable_bound(state, *player),
+        WaitingFor::PayAmountChoice {
+            player,
+            resource: PayableResource::Energy,
+            ..
+        } => state
+            .players
+            .iter()
+            .find(|candidate| candidate.id == *player)
+            .map(crate::game::effects::life::max_representable_energy_spend),
         _ => None,
     };
-    if let Some(player) = controller {
-        if let Some(rep) = crate::game::turns::materialization_representable_bound(state, player) {
-            if let WaitingFor::PayAmountChoice { max, .. } = &mut state.waiting_for {
-                *max = (*max).min(rep);
-            }
-        }
+    if let (Some(bound), WaitingFor::PayAmountChoice { min, max, .. }) =
+        (bound, &mut state.waiting_for)
+    {
+        *max = (*max).min(bound);
+        *min = (*min).min(*max);
     }
 }
 
@@ -16234,12 +16263,14 @@ fn reject_unproved_shortcut_proposal(
         ));
     }
     // CR 732.2a + CR 704.5a: an `UntilLethal` proposal ends at the crossing its offer proved; a
-    // saved one carrying no crossing, or one past its proved capacity, states no ending point.
+    // saved one carrying no crossing, or one past its proved capacity, states no ending point. A
+    // fixed count was bound to that crossing by `normalize_pending_shortcut_proposal` before
+    // this validator runs.
     if !proposal.states_its_ending_point() {
         return Err(format!(
-            "persisted RespondToShortcut proposal runs until lethal with crossing {:?}, which \
-             states no ending point inside its proved capacity {:?}",
-            proposal.win_kind_at, proposal.deliverable_capacity
+            "persisted RespondToShortcut proposal of {:?} with crossing {:?} states no ending \
+             point inside its proved capacity {:?}",
+            proposal.count, proposal.win_kind_at, proposal.deliverable_capacity
         ));
     }
     Ok(())
@@ -16282,6 +16313,12 @@ fn reject_zero_bound_shortcut_offer(state: &GameState) -> Result<(), String> {
         // A legacy Ring offer from a save written before the headroom measurement existed
         // decodes with the default schema (iteration_count = Fixed(0), deliverable_capacity = budget).
         // Such an offer states no measured take and must be refused — the player must play it out.
+        //
+        // A predecessor Ring offer that DID carry a schema still loads, decoded
+        // `RepresentableHeadroom::Unmeasured`: its capacity is the budget standing in for a number
+        // nobody proved, and `game::engine::handle_declare_shortcut` refuses every count whose take
+        // would drive a repetition against it, so the offer can be declined or played out but
+        // never taken past its proof.
         if *road == crate::analysis::loop_check::OfferRoad::Ring
             && schema.iteration_count
                 == crate::analysis::decision_template::IterationCount::Fixed(0)
@@ -28343,7 +28380,8 @@ impl GameStateDecode {
         validate_restored_zone_change_replay_keys(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
-        normalize_parked_loop_collapse_max(&mut state);
+        normalize_parked_pay_amount_max(&mut state);
+        normalize_pending_shortcut_proposal(&mut state);
         // The PERSISTED half of the projection gate; `decode` below carries the other.
         // See the pairing comment there for why one site is not enough.
         reject_viewer_projection_as_authority(&state)?;
@@ -28387,7 +28425,8 @@ impl GameStateDecode {
         let mut state = Self::materialize_prepared(value)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
-        normalize_parked_loop_collapse_max(&mut state);
+        normalize_parked_pay_amount_max(&mut state);
+        normalize_pending_shortcut_proposal(&mut state);
         // NO viewer-projection guard here, deliberately. This is the TRANSPORT decode
         // path as much as a restore path: `ServerMessage::GameStarted { state, .. }`
         // (`server-core/src/protocol.rs`) carries a `filter_state_for_viewer` projection

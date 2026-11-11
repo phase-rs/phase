@@ -104,6 +104,51 @@ pub enum WinKind {
     Advantage,
 }
 
+impl WinKind {
+    /// Whether this outcome ENDS THE GAME at some repetition — a loss threshold crossed
+    /// (CR 704.5a / CR 704.5c / CR 104.3c) or a printed win (CR 104.2) — rather than describing
+    /// what the loop accrues as a whole. A game-ending outcome is the result of a take only where
+    /// that take reaches the repetition it lands on; an accrual is the result of any take.
+    pub fn ends_the_game(self) -> bool {
+        match self {
+            Self::LethalDamage | Self::PoisonLoss | Self::Decking | Self::ImmediateWin => true,
+            Self::ExtraTurns | Self::Advantage => false,
+        }
+    }
+}
+
+/// CR 732.2a + CR 704.5a: the outcome a shortcut ending after `ending` reaches — part of "the
+/// predictable results of the sequence of choices" — read off a certificate's (or proposal's)
+/// `win_kind` and the repetition `win_kind_at` it is decided at. `None` where no outcome can be
+/// stated for that ending.
+///
+/// * An `UntilLethal` ending IS the crossing, so it reaches the outcome by definition.
+/// * A fixed count reaches a game-ending outcome only when the proved crossing lies inside it; a
+///   classification with no proved crossing states nothing about where the game ends, so no
+///   fixed count claims it.
+/// * An accrual (advantage, extra turns) is the result of any take that repeats at least once.
+/// * A proposal without end performs no repetition, and zero repetitions reach nothing.
+///
+/// THE single authority the declare and respond projections (`game::interaction`) read, so a
+/// dialog never re-derives an outcome from the raw classification.
+pub fn outcome_at_ending(
+    win_kind: Option<WinKind>,
+    win_kind_at: Option<u32>,
+    ending: &IterationCount,
+) -> Option<WinKind> {
+    let kind = win_kind?;
+    match *ending {
+        IterationCount::Fixed(0) | IterationCount::WithoutEnd => None,
+        IterationCount::Fixed(_) | IterationCount::UntilLethal if !kind.ends_the_game() => {
+            Some(kind)
+        }
+        IterationCount::UntilLethal => Some(kind),
+        IterationCount::Fixed(count) => win_kind_at
+            .is_some_and(|at| (1..=count).contains(&at))
+            .then_some(kind),
+    }
+}
+
 /// A confirmed loop cycle — its unbounded axes, win kind and breakability — as
 /// [`detect_loop`] and `game::engine`'s offer producers mint it; `WaitingFor::LoopShortcut`
 /// carries it to the players.
@@ -399,11 +444,27 @@ impl ShortcutProposal {
     /// crossing past what the take can perform is not a sequence that "may be legally taken".
     pub fn states_its_ending_point(&self) -> bool {
         match self.count {
-            IterationCount::Fixed(_) | IterationCount::WithoutEnd => true,
+            // CR 704.5a: a fixed count past the proved crossing names repetitions after the game
+            // has ended, which no player can take. Every proposal the engine builds or restores
+            // is bound first (`bind_count_to_reachable_end`), so this refuses only a proposal
+            // that bypassed both.
+            IterationCount::Fixed(count) => count == reachable_fixed_count(count, self.win_kind_at),
+            IterationCount::WithoutEnd => true,
             IterationCount::UntilLethal => crossing_within(
                 self.win_kind_at,
                 self.effective_deliverable_capacity().unwrap_or(0),
             ),
+        }
+    }
+
+    /// CR 732.2a + CR 704.5a: binds a fixed count to the end the sequence can reach
+    /// ([`reachable_fixed_count`]). A declarer may name a count past the proved crossing — the
+    /// take drives to the crossing and the game ends there — but the proposal the table answers,
+    /// the response range it publishes and the outcome it states all describe the sequence that
+    /// is actually taken, which ends at the crossing. Other counts are left alone.
+    pub fn bind_count_to_reachable_end(&mut self) {
+        if let IterationCount::Fixed(count) = self.count {
+            self.count = IterationCount::Fixed(reachable_fixed_count(count, self.win_kind_at));
         }
     }
 
@@ -416,7 +477,12 @@ impl ShortcutProposal {
     /// `contains` refuses every place against it, zero included.
     pub fn shortening_places(&self) -> std::ops::RangeInclusive<u32> {
         let places = match self.count {
-            IterationCount::Fixed(iterations) => iterations
+            // CR 704.5a + CR 732.2b: the sequence ends at its count or at the proved crossing,
+            // whichever comes first — the drive ends the game at the crossing — so a place at or
+            // past either names nothing inside it.
+            IterationCount::Fixed(iterations) => self
+                .win_kind_at
+                .map_or(iterations, |crossing| iterations.min(crossing))
                 .checked_sub(1)
                 .map_or(std::ops::RangeInclusive::new(1, 0), |last| 0..=last),
             // CR 704.5a + CR 732.2b: the drain runs until the crossing the offer proved, which
@@ -444,6 +510,20 @@ impl ShortcutProposal {
 /// it of the offer, and the proposal, which asks it again at restore and consumption.
 pub fn crossing_within(crossing: Option<u32>, capacity: u32) -> bool {
     crossing.is_some_and(|crossing| (1..=capacity).contains(&crossing))
+}
+
+/// CR 732.2a + CR 704.5a: the repetitions a fixed count of `count` can actually reach — the count
+/// itself, or the proved crossing ([`LoopCertificate::win_kind_at`]) where that comes first. The
+/// crossing's repetition ends the game with the proposer the winner (`win_kind` is set only for
+/// such a take), so a repetition past it is not part of a sequence that "may be legally taken
+/// based on the current game state and the predictable results of the sequence of choices". With
+/// no crossing proved the count states its own end.
+///
+/// THE single authority for a fixed count's reachable end: the declare seam binds the proposal to
+/// it ([`ShortcutProposal::bind_count_to_reachable_end`]), checked restore re-binds a persisted
+/// proposal, and the response range and consumption seam read the bound count.
+pub fn reachable_fixed_count(count: u32, crossing: Option<u32>) -> u32 {
+    crossing.map_or(count, |crossing| count.min(crossing))
 }
 
 /// CR 732.2b/c: an opponent's answer to a proposed loop shortcut. `Accept` lets the

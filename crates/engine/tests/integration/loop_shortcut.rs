@@ -802,6 +802,109 @@ fn printed_harnessed_lightning_pays_its_minted_energy_prompt_at_the_tally_limit(
     ));
 }
 
+/// CR 107.14: a parked energy prompt restored from a predecessor's save publishes the maximum
+/// its own reducer accepts. The printed Harnessed Lightning prompt is parked with the tally's
+/// room at four; a predecessor minted the bare twelve-energy reserve as `max`, which the submit
+/// guard refuses past four. Checked restore re-derives the bound through the same
+/// `max_representable_energy_spend` authority, so the displayed maximum is four and paying it
+/// continues to the damage (#10543).
+#[test]
+fn a_restored_predecessor_energy_prompt_publishes_the_payable_maximum() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ogre = scenario.add_creature(P1, "Target Ogre", 2, 6).id();
+    let lightning = scenario
+        .add_spell_to_hand_from_oracle(P0, "Harnessed Lightning", true, HARNESSED_LIGHTNING)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 1,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].energy = 9;
+    runner.state_mut().players[P0.0 as usize].energy_paid_or_lost_this_turn = u32::MAX - 4;
+    let _ = runner
+        .cast(lightning)
+        .target_object(ogre)
+        .accept_optional()
+        .resolve();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayAmountChoice { max: 4, .. }
+        ),
+        "reach guard: the live mint publishes the tally's room, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // The predecessor's payload: the same parked prompt, its `max` the bare reserve.
+    let mut predecessor = serde_json::to_value(runner.state()).expect("the prompt serializes");
+    let prompt = &mut predecessor["waiting_for"]["data"];
+    assert_eq!(
+        prompt["max"], 4,
+        "reach guard: the key being rewritten is the maximum"
+    );
+    prompt["max"] = serde_json::json!(12);
+
+    let mut restored = restore_runner(predecessor);
+    assert!(
+        matches!(
+            restored.state().waiting_for,
+            WaitingFor::PayAmountChoice { max: 4, .. }
+        ),
+        "checked restore narrows the predecessor's maximum to what one payment can record, got {:?}",
+        restored.state().waiting_for
+    );
+    {
+        use engine::types::interaction::{InteractionOpportunityResponse, InteractionResponseSpec};
+        let mut bound = restored.state().clone();
+        engine::game::interaction::bind_interaction_authority(
+            &mut bound,
+            engine::types::interaction::InteractionSessionId("energy".into()),
+        )
+        .expect("the parked prompt binds an interaction authority");
+        let filtered = engine::game::visibility::filter_state_for_viewer(&bound, P0);
+        let view = engine::game::interaction::derive_viewer_interaction(&bound, &filtered, P0);
+        let [opportunity] = view.opportunities.as_slice() else {
+            panic!("the payer reads one energy opportunity, got {view:?}");
+        };
+        assert!(
+            matches!(
+                &opportunity.response,
+                InteractionOpportunityResponse::Schema {
+                    spec: InteractionResponseSpec::Number { max: 4, .. },
+                    ..
+                }
+            ),
+            "the public projection advertises the narrowed maximum, got {:?}",
+            opportunity.response
+        );
+    }
+
+    let over = restored.act(GameAction::SubmitPayAmount { amount: 5 });
+    assert!(
+        matches!(over, Err(EngineError::InvalidAction(_))),
+        "one past the restored maximum is outside the prompt's range, got {over:?}"
+    );
+    restored
+        .act(GameAction::SubmitPayAmount { amount: 4 })
+        .expect("the restored maximum is payable");
+    assert_eq!(restored.state().players[P0.0 as usize].energy, 8);
+    assert_eq!(
+        restored.state().objects[&ogre].damage_marked,
+        4,
+        "the restored prompt continues to Harnessed Lightning's damage"
+    );
+    assert!(restored.state().stack.is_empty());
+}
+
 /// CR 107.14 + CR 601.2f + CR 732.2a/c: three printed Modules refund Assembly Line's
 /// payment, so the recorded offer is unbounded even though Hulk's cost journal keeps moving.
 /// The accepted fixed take must replay those gross payments, not merely mark token growth.
@@ -2811,6 +2914,7 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
         // capacity at the global cap.
         measured_repetition_bound: None,
         deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
+        headroom: engine::analysis::decision_template::RepresentableHeadroom::Measured,
         points: vec![DecisionPoint {
             slot: slot.clone(),
             kind: DecisionPointKind::Targets {
@@ -5183,6 +5287,7 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
         // capacity at the global cap.
         measured_repetition_bound: None,
         deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
+        headroom: engine::analysis::decision_template::RepresentableHeadroom::Measured,
         points: vec![DecisionPoint {
             slot,
             kind: DecisionPointKind::Targets {
@@ -8211,6 +8316,7 @@ fn template_none_against_a_pin_consuming_schema_falls_back_to_manual_play() {
         iteration_count: IterationCount::UntilLethal,
         measured_repetition_bound: None,
         deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
+        headroom: engine::analysis::decision_template::RepresentableHeadroom::Measured,
         points: vec![DecisionPoint {
             slot: DecisionSlot::first(source, ChoicePoint::AnnouncedTarget),
             kind: DecisionPointKind::Targets {
@@ -13003,6 +13109,376 @@ fn an_until_lethal_proposal_without_its_crossing_is_not_restored_or_taken() {
     );
 }
 
+/// The near-limit printed Dina–Conqueror board of `representable_count_bounds_the_offer`'s second
+/// arm: P0 can represent two more gains and P1 falls on the second repetition, so the Ring offer
+/// runs `UntilLethal` with capacity two and crossing two.
+fn near_limit_dina_ring_offer() -> GameRunner {
+    let (mut runner, kickoff, _bolt, _cleric) =
+        setup_2p_optional_dina_conqueror(LoopDetectionMode::Interactive);
+    runner.state_mut().players[P0.0 as usize].life = i32::MAX - 4;
+    runner.state_mut().players[P1.0 as usize].life = 3;
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    let WaitingFor::LoopShortcut {
+        road,
+        certificate,
+        schema,
+        period,
+        ..
+    } = &wf
+    else {
+        panic!("the near-limit drain must be offered, got {wf:?}");
+    };
+    assert_eq!(*road, engine::analysis::loop_check::OfferRoad::Ring);
+    assert!(
+        certificate.per_cycle.is_none() && period.is_empty(),
+        "reach guard: the Ring offer carries no evidence the declare seam could re-measure"
+    );
+    assert_eq!(schema.deliverable_capacity, 2, "two gains fit");
+    assert_eq!(
+        schema.headroom,
+        engine::analysis::decision_template::RepresentableHeadroom::Measured,
+        "the Ring producer records that it measured the headroom"
+    );
+    runner
+}
+
+/// Restores `payload` through the checked persistence ingress into a fresh runner.
+fn restore_runner(payload: serde_json::Value) -> GameRunner {
+    GameRunner::from_state(
+        serde_json::from_value::<engine::types::game_state::PersistedGameState>(payload)
+            .expect("the payload decodes")
+            .into_game_state()
+            .expect("the payload satisfies the checked restore contract"),
+    )
+}
+
+/// CR 732.2a: a Ring offer's representable headroom is measured over the transient detection
+/// ring, so nothing after its mint can measure it again; the declare seam trusts its capacity only
+/// where the schema records the measurement. A PREDECESSOR's Ring offer — the shape the mint
+/// published before the measurement existed: `UntilLethal`, the full engine budget as capacity, no
+/// crossing, no headroom record, no signature and no period — still loads, but takes no fixed
+/// count. On the near-limit Dina board only two gains fit, and before this guard a declaration of
+/// three opened a response window whose accept then failed with `LifeChangeUnrepresentable`
+/// (#10543).
+#[test]
+fn a_predecessor_ring_offer_without_measured_headroom_takes_no_fixed_count() {
+    let runner = near_limit_dina_ring_offer();
+    let payload = serde_json::to_value(runner.state()).expect("the offer board serializes");
+
+    // The predecessor's payload, built from the live offer by undoing exactly what it lacked.
+    let mut predecessor = payload.clone();
+    let offer = &mut predecessor["waiting_for"]["data"];
+    offer["certificate"]
+        .as_object_mut()
+        .expect("the certificate is an object")
+        .remove("win_kind_at")
+        .expect("the crossing was serialized before removal");
+    let schema = offer["schema"]
+        .as_object_mut()
+        .expect("the schema is an object");
+    schema
+        .remove("headroom")
+        .expect("the headroom record was serialized before removal");
+    schema.insert(
+        "deliverable_capacity".into(),
+        serde_json::json!(ShortcutDecisionSchema::default().deliverable_capacity),
+    );
+
+    let mut restored = restore_runner(predecessor);
+    let WaitingFor::LoopShortcut {
+        schema,
+        certificate,
+        ..
+    } = &restored.state().waiting_for
+    else {
+        panic!("the predecessor offer loads as an offer");
+    };
+    assert_eq!(
+        schema.headroom,
+        engine::analysis::decision_template::RepresentableHeadroom::Unmeasured
+    );
+    assert_eq!(
+        schema.deliverable_capacity,
+        ShortcutDecisionSchema::default().deliverable_capacity,
+        "reach guard: the stored capacity alone admits a third repetition"
+    );
+    assert_eq!(
+        certificate.win_kind_at, None,
+        "reach guard: no crossing bounds it either"
+    );
+    let p0_life = restored.state().players[P0.0 as usize].life;
+
+    for count in [3, 2, 1] {
+        let mut declared = GameRunner::from_state(restored.state().clone());
+        declared
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(count),
+                template: None,
+            })
+            .expect("the refusal is a handback, not an error");
+        assert!(
+            matches!(declared.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+            "Fixed({count}): an unmeasured Ring offer opens no response window, got {:?}",
+            declared.state().waiting_for
+        );
+        assert_eq!(declared.state().players[P0.0 as usize].life, p0_life);
+    }
+    // The predecessor offer can still be declined: it is retired, not stuck.
+    restored
+        .act(GameAction::DeclineShortcut)
+        .expect("the predecessor offer can be declined");
+    assert!(matches!(
+        restored.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+
+    // Control: the same offer, restored with its measurement, opens the window at the two that
+    // fit and takes them to the life limit and the crossing.
+    let mut honest = restore_runner(payload);
+    honest
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(2),
+            template: None,
+        })
+        .expect("the measured offer admits the two gains that fit");
+    assert!(
+        matches!(
+            honest.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ),
+        "the measured offer opens the response window, got {:?}",
+        honest.state().waiting_for
+    );
+    honest
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("the measured take is accepted");
+    assert!(
+        matches!(
+            honest.state().waiting_for,
+            WaitingFor::GameOver { winner: Some(winner) } if winner == P0
+        ),
+        "the measured take reaches the crossing, got {:?}",
+        honest.state().waiting_for
+    );
+}
+
+/// CR 732.2a + CR 704.5a: a fixed count is bound to the crossing its offer proved, not only to the
+/// storage capacity. On the printed Dina–Conqueror board with ample life storage, P1 falls on the
+/// second repetition while the capacity is the whole engine budget. A fixed count past the
+/// crossing names repetitions after the game ends, which nobody can take, so the declaration, the
+/// proposal the table answers, its shortening places and a restored copy of it all name the
+/// sequence that ends at the crossing — and the take of either count reaches it (#10543).
+#[test]
+fn proven_lethal_offer_binds_a_fixed_count_past_its_crossing_to_it() {
+    let (mut runner, kickoff, _bolt, _cleric) =
+        setup_2p_optional_dina_conqueror(LoopDetectionMode::Interactive);
+    runner.state_mut().players[P1.0 as usize].life = 3;
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    let WaitingFor::LoopShortcut {
+        certificate,
+        schema,
+        ..
+    } = wf
+    else {
+        panic!("the lethal drain must be offered, got {wf:?}");
+    };
+    assert_eq!(certificate.win_kind_at, Some(2));
+    assert_eq!(
+        schema.deliverable_capacity, 1_000,
+        "reach guard: the storage capacity alone admits every over-count below"
+    );
+
+    let p1_at_offer = runner.state().players[P1.0 as usize].life;
+
+    // The valid lethal endpoint and two over-counts — one just past it, one at the whole budget —
+    // each open the window on the same two-repetition proposal and take it to the crossing.
+    for count in [2, 3, 1_000] {
+        let mut declared = GameRunner::from_state(runner.state().clone());
+        declared
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(count),
+                template: None,
+            })
+            .expect("the declaration is admitted");
+        let WaitingFor::RespondToShortcut { proposal, .. } = &declared.state().waiting_for else {
+            panic!(
+                "Fixed({count}) opens the response window, got {:?}",
+                declared.state().waiting_for
+            );
+        };
+        assert_eq!(
+            proposal.count,
+            IterationCount::Fixed(2),
+            "Fixed({count}): the proposal names the sequence that ends at the crossing"
+        );
+        assert_eq!(
+            proposal.win_kind_at,
+            Some(2),
+            "the proposal carries the crossing"
+        );
+        assert_eq!(
+            proposal.shortening_places(),
+            0..=1,
+            "Fixed({count}): no place at or past the terminal repetition is offered"
+        );
+        assert_eq!(
+            declared.state().players[P1.0 as usize].life,
+            p1_at_offer,
+            "reach guard: nothing is taken before the table answers"
+        );
+        declared
+            .act(GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            })
+            .expect("accept the bound count");
+        assert!(
+            matches!(
+                declared.state().waiting_for,
+                WaitingFor::GameOver { winner: Some(winner) } if winner == P0
+            ),
+            "Fixed({count}): the take ends the game at the crossing, got {:?}",
+            declared.state().waiting_for
+        );
+    }
+
+    // Restore: a predecessor's proposal still counted past its crossing loads bound to it.
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(2),
+            template: None,
+        })
+        .expect("the count at the crossing is declared");
+    let mut past = serde_json::to_value(runner.state()).expect("state serializes");
+    past["waiting_for"]["data"]["proposal"]["count"] = serde_json::json!({ "Fixed": 3 });
+    let mut restored = restore_runner(past);
+    let WaitingFor::RespondToShortcut { proposal, .. } = &restored.state().waiting_for else {
+        panic!(
+            "the restored proposal is pending, got {:?}",
+            restored.state().waiting_for
+        );
+    };
+    assert_eq!(
+        proposal.count,
+        IterationCount::Fixed(2),
+        "checked restore binds the over-count to the crossing"
+    );
+    assert_eq!(proposal.shortening_places(), 0..=1);
+    restored
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("accept the restored proposal");
+    assert!(
+        matches!(
+            restored.state().waiting_for,
+            WaitingFor::GameOver { winner: Some(winner) } if winner == P0
+        ),
+        "the restored take ends the game at the crossing, got {:?}",
+        restored.state().waiting_for
+    );
+}
+
+/// The outcome the engine publishes on the shortcut dialog `viewer` is shown.
+fn published_shortcut_outcome(
+    state: &GameState,
+    viewer: PlayerId,
+) -> (
+    Option<engine::types::interaction::InteractionShortcutOutcome>,
+    Option<engine::types::interaction::InteractionShortcutOutcomeKind>,
+) {
+    use engine::types::interaction::{InteractionOpportunityResponse, InteractionResponseSpec};
+    let mut state = state.clone();
+    engine::game::interaction::bind_interaction_authority(
+        &mut state,
+        engine::types::interaction::InteractionSessionId("outcome".into()),
+    )
+    .expect("the shortcut beat binds an interaction authority");
+    let filtered = engine::game::visibility::filter_state_for_viewer(&state, viewer);
+    let view = engine::game::interaction::derive_viewer_interaction(&state, &filtered, viewer);
+    let [opportunity] = view.opportunities.as_slice() else {
+        panic!("the viewer reads one shortcut opportunity, got {view:?}");
+    };
+    match &opportunity.response {
+        InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Shortcut { outcome, .. },
+            ..
+        } => (*outcome, None),
+        InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::ShortcutReply { outcome, .. },
+            ..
+        } => (None, *outcome),
+        other => panic!("expected a shortcut spec, got {other:?}"),
+    }
+}
+
+/// CR 732.2a: both shortcut dialogs state the outcome the ENGINE projects for the selected
+/// ending, never the raw classification. The long printed drain classifies lethal damage but its
+/// thousand-repetition take leaves P1 alive, so neither its offer nor its proposal states lethal;
+/// the proven drain's `UntilLethal` offer and proposal both do, though the latter names no count
+/// (#10543).
+#[test]
+fn shortcut_dialogs_publish_the_outcome_of_the_selected_ending() {
+    use engine::types::interaction::{InteractionShortcutOutcome, InteractionShortcutOutcomeKind};
+
+    // The long drain: lethal classification, no crossing within the take.
+    let (mut long, kickoff, _bolt, _cleric) =
+        setup_2p_optional_dina_conqueror(LoopDetectionMode::Interactive);
+    long.state_mut().players[P1.0 as usize].life = 2_500;
+    let _ = long.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut long, 500);
+    let WaitingFor::LoopShortcut { certificate, .. } = &wf else {
+        panic!("the long drain is offered, got {wf:?}");
+    };
+    assert_eq!(
+        certificate.win_kind,
+        Some(WinKind::LethalDamage),
+        "reach guard: the raw classification is lethal"
+    );
+    assert_eq!(published_shortcut_outcome(long.state(), P0), (None, None));
+    long.act(GameAction::DeclareShortcut {
+        count: IterationCount::Fixed(1_000),
+        template: None,
+    })
+    .expect("the offered count is declared");
+    assert_eq!(
+        published_shortcut_outcome(long.state(), P1),
+        (None, None),
+        "the thousand-repetition prefix leaves P1 alive, so the responder is told no outcome"
+    );
+
+    // The proven drain: the `UntilLethal` ending is the crossing.
+    let (mut proven, kickoff, _bolt, _cleric) =
+        setup_2p_optional_dina_conqueror(LoopDetectionMode::Interactive);
+    proven.state_mut().players[P1.0 as usize].life = 3;
+    let _ = proven.cast(kickoff).resolve();
+    let _ = drive_collect(&mut proven, 500);
+    assert_eq!(
+        published_shortcut_outcome(proven.state(), P0),
+        (
+            Some(InteractionShortcutOutcome {
+                count: None,
+                kind: InteractionShortcutOutcomeKind::LethalDamage,
+            }),
+            None
+        )
+    );
+    proven
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::UntilLethal,
+            template: None,
+        })
+        .expect("declare UntilLethal on the proven offer");
+    assert_eq!(
+        published_shortcut_outcome(proven.state(), P1),
+        (None, Some(InteractionShortcutOutcomeKind::LethalDamage)),
+        "the genuine lethal proposal states its outcome without an explicit count"
+    );
+}
+
 /// CR 732.2a: an offer restored from a save that carries no capacity decodes the engine budget,
 /// and the declare seam re-proves the representable headroom on the board before any response
 /// window opens, so that budget never reaches a proposal as if it were proof. On the near-limit
@@ -13242,7 +13718,11 @@ fn an_aborted_until_lethal_drive_discards_only_the_proposers_own_driving_period(
             proposer: P0,
             predicted_winner: Some(P0),
             certificate: synthetic_lethal_cert(),
-            schema: ShortcutDecisionSchema::default(),
+            // A minted Ring offer: its producer measured the headroom.
+            schema: ShortcutDecisionSchema {
+                headroom: engine::analysis::decision_template::RepresentableHeadroom::Measured,
+                ..ShortcutDecisionSchema::default()
+            },
             declaration: None,
             road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
@@ -16412,6 +16892,7 @@ fn g1_declare_verdict(
         // capacity at the global cap.
         measured_repetition_bound: None,
         deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
+        headroom: engine::analysis::decision_template::RepresentableHeadroom::Measured,
         points: vec![DecisionPoint {
             slot: slot.clone(),
             kind: DecisionPointKind::Targets {
@@ -18158,6 +18639,7 @@ fn d7_a_pre_declaration_save_decodes_with_no_declaration() {
             iteration_count: IterationCount::Fixed(3),
             measured_repetition_bound: Some(3),
             deliverable_capacity: 3,
+            headroom: engine::analysis::decision_template::RepresentableHeadroom::Measured,
             points: vec![DecisionPoint {
                 slot: slot.clone(),
                 kind: DecisionPointKind::Targets {
@@ -20184,7 +20666,7 @@ fn a_declined_life_axis_does_not_bound_the_parked_prompt_or_restore() {
         "a count the prompt published must be admitted when its axis is declined, got {submitted:?}"
     );
 
-    // On restore of the parked prompt, normalize_parked_loop_collapse_max has nothing to narrow.
+    // On restore of the parked prompt, normalize_parked_pay_amount_max has nothing to narrow.
     runner.state_mut().waiting_for = WaitingFor::PayAmountChoice {
         player: controller,
         resource: engine::types::game_state::PayableResource::LoopCollapse {
@@ -20196,7 +20678,7 @@ fn a_declined_life_axis_does_not_bound_the_parked_prompt_or_restore() {
         source_id: ObjectId(0),
         pending_mana_ability: None,
     };
-    engine::types::game_state::normalize_parked_loop_collapse_max(runner.state_mut());
+    engine::types::game_state::normalize_parked_pay_amount_max(runner.state_mut());
     let WaitingFor::PayAmountChoice { max, .. } = runner.state().waiting_for else {
         panic!("expected PayAmountChoice");
     };

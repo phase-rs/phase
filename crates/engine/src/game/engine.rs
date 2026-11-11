@@ -3131,7 +3131,7 @@ fn interactive_loop_bridge_paths(
         }
         // CR 732.2a + CR 732.5: a period of outs and choices proven to continue is offered, not drawn.
         if let Some((idx, counted_take)) = outs_offer {
-            offer_draw_without_end(state, result, &priors[idx].normalized, counted_take);
+            offer_draw_without_end(state, result, &priors[idx..], counted_take);
             return;
         }
     }
@@ -3216,7 +3216,7 @@ fn interactive_loop_bridge_paths(
             })
         };
         if let Some((idx, counted_take)) = hit {
-            offer_draw_without_end(state, result, &priors[idx].normalized, counted_take);
+            offer_draw_without_end(state, result, &priors[idx..], counted_take);
         }
     }
     // else: staggered-pod loss / non-beneficial optional loop ⇒ nothing is offered or decided.
@@ -3370,12 +3370,26 @@ fn option_proof(
 fn offer_draw_without_end(
     state: &mut GameState,
     result: &mut ActionResult,
-    prior: &GameState,
+    period: &[std::sync::Arc<crate::types::LoopDetectSample>],
     counted_take: crate::analysis::loop_check::CountedTake,
 ) {
     let WaitingFor::Priority { player: proposer } = state.waiting_for else {
         unreachable!("interactive bridge only runs during priority")
     };
+    let prior = &period[0].normalized;
+    // The offer states no count, but a declarer may still name a fixed one, and the take of that
+    // count performs the period's player-resource edits. The headroom is measured here, over the
+    // ring period the offer certified, because that ring does not survive a save.
+    let period_frames: Vec<&GameState> = period
+        .iter()
+        .map(|sample| &sample.live)
+        .chain(std::iter::once(&*state))
+        .collect();
+    let representable = crate::analysis::headroom::PeriodExcursions::representable_over_frames(
+        &period_frames,
+        state,
+        MAX_SHORTCUT_CYCLES,
+    );
     state.waiting_for = WaitingFor::LoopShortcut {
         proposer,
         predicted_winner: None,
@@ -3392,7 +3406,7 @@ fn offer_draw_without_end(
             Vec::new(),
             crate::analysis::decision_template::IterationCount::WithoutEnd,
             None,
-            None,
+            representable,
         ),
         declaration: None,
         road: crate::analysis::loop_check::OfferRoad::Ring,
@@ -5682,7 +5696,9 @@ pub(crate) fn bounded_cycle_charged_targets_for_window(
 ///
 /// `representable_repetitions` is the second engine ceiling, applied here beside the budget: the
 /// repetitions whose player-resource edits the stored integer widths can hold
-/// (`analysis::headroom`), where the producer measured one. Like the budget it is ours and not
+/// (`analysis::headroom`), as the producer measured it — `None` states that the whole budget
+/// fits, never that nothing was measured, so every producer measures before it calls here and
+/// the schema is stamped `RepresentableHeadroom::Measured`. Like the budget it is ours and not
 /// the game's (CR 119.3 sets no maximum), so it narrows the capacity and never the measured
 /// threshold. Without it an offer states a count whose take is refused with
 /// `EngineError::LifeChangeUnrepresentable` at a repetition the offer promised.
@@ -5729,6 +5745,10 @@ fn build_shortcut_schema(
         iteration_count,
         measured_repetition_bound,
         deliverable_capacity,
+        // Every producer hands its measurement in — `None` states that the whole budget fits —
+        // so a schema minted here is measured by construction; only a schema decoded from a save
+        // written before the field existed is not.
+        headroom: crate::analysis::decision_template::RepresentableHeadroom::Measured,
         points,
         convoke_tappable_count,
     }
@@ -6177,8 +6197,12 @@ fn apply_confirmed_shortcut(
         // `IterationCount` variant carrying its own unbounded count must build-break here and
         // force a bound decision rather than silently regress either ceiling.
         || match proposal.count {
+            // CR 732.2a + CR 704.5a: a fixed count is also bound to the crossing the offer proved
+            // — the repetitions past it come after the game ends — which a restored proposal
+            // reaches without the declare seam.
             crate::analysis::decision_template::IterationCount::Fixed(n) => {
                 !shortcut_count_is_drivable(state, proposal, n)
+                    || !proposal.states_its_ending_point()
             }
             // Bounded elsewhere by the same constant: `apply_until_lethal_shortcut` drives
             // `shortcut_drive_period` cycles, which clamps to `MAX_SHORTCUT_CYCLES`. CR 732.2a +
@@ -9398,9 +9422,12 @@ fn handle_declare_shortcut(
     // measurement existed decodes the engine budget in its place — a number nobody proved the
     // take can perform. So the headroom is re-derived from what the offer carries before any
     // response window opens: its per-period signature, or else the confirmed period its take
-    // replays (`representable_on_replay`). An offer carrying neither is a Ring offer, whose
-    // `UntilLethal` ending point is checked below and whose fixed count no save predating this
-    // measurement can state.
+    // replays (`representable_on_replay`). An offer carrying neither is a Ring offer, measured
+    // over the transient detection ring at its mint: its capacity is proof only where the schema
+    // says that measurement was taken (`RepresentableHeadroom::Measured`). An unmeasured one — a
+    // predecessor's offer whose capacity is the budget standing in for a number nobody proved —
+    // can perform no repetition this handler can vouch for, so its capacity is zero and any count
+    // that drives one is refused below.
     let deliverable_capacity =
         if let Some(crate::analysis::resource::PeriodSignature::EveryRepetition(periodic)) =
             &offer.certificate.per_cycle
@@ -9430,12 +9457,19 @@ fn handle_declare_shortcut(
                 offer.schema.deliverable_capacity.min(r)
             })
         } else {
-            offer.schema.deliverable_capacity
+            match offer.schema.headroom {
+                crate::analysis::decision_template::RepresentableHeadroom::Measured => {
+                    offer.schema.deliverable_capacity
+                }
+                crate::analysis::decision_template::RepresentableHeadroom::Unmeasured => 0,
+            }
         };
     // CR 732.2a: the narrowed capacity is the ceiling for THIS declaration, so an over-count is
     // refused here rather than opening a response window whose take would then commit nothing.
     // The earlier arm compares against the offer's PUBLISHED capacity; this one compares against
     // the same ceiling re-derived under the declaration's own template and the board's lead.
+    // Every cap reads the count AS DECLARED; only the proposal built below is bound to the
+    // proved crossing, so an over-cap count is still handed back however early its take ends.
     if let crate::analysis::decision_template::IterationCount::Fixed(n) = &count {
         if *n > deliverable_capacity {
             reject_shortcut_declaration(state, &mut result);
@@ -9455,7 +9489,7 @@ fn handle_declare_shortcut(
         reject_shortcut_declaration(state, &mut result);
         return Ok(result);
     }
-    let proposal = crate::analysis::loop_check::ShortcutProposal {
+    let mut proposal = crate::analysis::loop_check::ShortcutProposal {
         proposer: offer.proposer,
         predicted_winner: offer.predicted_winner,
         count,
@@ -9479,6 +9513,11 @@ fn handle_declare_shortcut(
         period: offer.period.clone(),
         deliverable_capacity: Some(deliverable_capacity),
     };
+    // CR 732.2a + CR 704.5a: the crossing the offer proved ends the game with the proposer the
+    // winner, so a fixed count past it names repetitions nobody takes. The proposal the table
+    // answers — its count, its shortening places and the outcome it states — names the sequence
+    // that ends at the crossing, which is the one the take performs.
+    proposal.bind_count_to_reachable_end();
     // CR 732.2b: living opponents in APNAP turn order, starting after the proposer.
     let opps: Vec<PlayerId> = crate::game::players::apnap_order_from(
         state,
@@ -26540,6 +26579,8 @@ mod stage2_injector_tests {
                     },
                     kind: DecisionPointKind::MayChoice,
                 }],
+                // A minted offer: every producer measures its headroom.
+                headroom: crate::analysis::decision_template::RepresentableHeadroom::Measured,
                 ..ShortcutDecisionSchema::default()
             },
             crate::analysis::loop_check::OfferRoad::RecordedPeriod,
