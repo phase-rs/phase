@@ -11318,4 +11318,379 @@ mod tests {
             );
         }
     }
+
+    /// PR #10440 B2: an old save (no `dealt_damage_kinds`, the OLD
+    /// `Unrecognized` Ruric static) restored through
+    /// `GameSession::from_persisted`. Rows i, ii, iii, ix and x of the shared
+    /// recipe (the engine file `tests/integration/ruric_thar_magecrusher_hexproof.rs`
+    /// holds the real-combat rows); the latch recovery is the engine's
+    /// `prepare_for_restore` authority, shared with engine-wasm.
+    mod ruric_legacy_restore {
+        use super::*;
+        use engine::database::mtgjson::AtomicCard;
+        use engine::database::synthesis::build_oracle_face;
+        use engine::game::keywords::has_hexproof;
+        use engine::game::layers::flush_layers;
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::game::scenario_db::GameScenarioDbExt;
+        use engine::types::ability::{
+            ContinuousModification, DamageKindFilter, StaticCondition, StaticDefinition, TargetRef,
+        };
+        use engine::types::card::PrintedCardRef;
+        use engine::types::game_state::{DamageRecord, PersistedGameState};
+        use engine::types::keywords::Keyword;
+        use engine::types::phase::Phase;
+        use engine::types::zones::Zone;
+        use serde_json::{json, Map, Value};
+
+        /// Verbatim Oracle text of Ruric Thar, Magecrusher.
+        const RURIC_ORACLE_TEXT: &str = "This spell can't be countered.\nReach, vigilance, trample\nRuric Thar has hexproof as long as they haven't dealt combat damage yet. (They can't be the target of spells or abilities your opponents control.)";
+        const RURIC_NAME: &str = "Ruric Thar, Magecrusher";
+        const RURIC_ORACLE_ID: &str = "ruric-thar-test-oracle";
+        /// The condition the pre-PR parser wrote for Ruric's hexproof static.
+        const OLD_RURIC_CONDITION_TEXT: &str = "they haven't dealt combat damage yet";
+
+        fn current_ruric_condition() -> StaticCondition {
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                    kind: DamageKindFilter::CombatOnly,
+                }),
+            }
+        }
+
+        fn hexproof_conditions<'a>(
+            defs: impl IntoIterator<Item = &'a StaticDefinition>,
+        ) -> Vec<Option<StaticCondition>> {
+            defs.into_iter()
+                .filter(|def| {
+                    def.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::AddKeyword {
+                                keyword: Keyword::Hexproof
+                            }
+                        )
+                    })
+                })
+                .map(|def| def.condition.clone())
+                .collect()
+        }
+
+        /// F1: one-face database whose Ruric face comes from the real card-data
+        /// pipeline (`build_oracle_face`), with the current-static face guard.
+        fn ruric_face_db() -> CardDatabase {
+            let atomic: AtomicCard = serde_json::from_value(json!({
+                "name": RURIC_NAME,
+                "manaCost": "{5}{G}{G}",
+                "colors": ["G"],
+                "colorIdentity": ["G"],
+                "power": "7",
+                "toughness": "7",
+                "text": RURIC_ORACLE_TEXT,
+                "layout": "normal",
+                "type": "Legendary Creature — Ogre Warrior",
+                "types": ["Creature"],
+                "subtypes": ["Ogre", "Warrior"],
+                "supertypes": ["Legendary"],
+                "keywords": ["Reach", "Trample", "Vigilance"],
+                "manaValue": 7.0,
+                "identifiers": {
+                    "scryfallOracleId": RURIC_ORACLE_ID,
+                    "scryfallId": "ruric-thar-test-face"
+                }
+            }))
+            .expect("MTGJSON-shaped Ruric deserializes");
+            let face = build_oracle_face(&atomic, Some(RURIC_ORACLE_ID.to_string()));
+            assert_eq!(
+                hexproof_conditions(&face.static_abilities),
+                vec![Some(current_ruric_condition())],
+                "face guard: the parser emits the current Ruric static"
+            );
+            let face_json = serde_json::to_value(&face).expect("CardFace serializes");
+            assert!(!face_json.to_string().contains("\"Unrecognized\""));
+            let mut export = Map::new();
+            export.insert(face.name.to_lowercase(), face_json);
+            CardDatabase::from_json_str(&Value::Object(export).to_string())
+                .expect("one-face export parses")
+        }
+
+        /// F3: rewrite the object's hexproof static in both static lists to the
+        /// OLD `Unrecognized` condition; returns the patch count.
+        fn patch_old_static(value: &mut Value, id: ObjectId) -> usize {
+            match value {
+                Value::Object(map) => {
+                    let mut patched = 0;
+                    if map.get("id") == Some(&json!(id)) && map.contains_key("static_definitions") {
+                        for key in ["static_definitions", "base_static_definitions"] {
+                            if let Some(Value::Array(defs)) = map.get_mut(key) {
+                                for def in defs.iter_mut() {
+                                    let gated = def.get("condition").is_some_and(|c| {
+                                        c.to_string().contains("SourceHasDealtDamage")
+                                    });
+                                    if gated {
+                                        def["condition"] = json!({
+                                            "type": "Unrecognized",
+                                            "text": OLD_RURIC_CONDITION_TEXT
+                                        });
+                                        patched += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for child in map.values_mut() {
+                        patched += patch_old_static(child, id);
+                    }
+                    patched
+                }
+                Value::Array(items) => items
+                    .iter_mut()
+                    .map(|item| patch_old_static(item, id))
+                    .sum(),
+                _ => 0,
+            }
+        }
+
+        /// Remove `source_incarnation` from every damage record of `source` (a
+        /// save written before that field existed).
+        fn strip_record_incarnation(value: &mut Value, source: ObjectId) -> usize {
+            match value {
+                Value::Object(map) => {
+                    let mut removed = 0;
+                    if let Some(Value::Array(records)) = map.get_mut("damage_dealt_this_turn") {
+                        for record in records.iter_mut() {
+                            if record.get("source_id") == Some(&json!(source)) {
+                                if let Some(record) = record.as_object_mut() {
+                                    removed +=
+                                        usize::from(record.remove("source_incarnation").is_some());
+                                }
+                            }
+                        }
+                    }
+                    for child in map.values_mut() {
+                        removed += strip_record_incarnation(child, source);
+                    }
+                    removed
+                }
+                Value::Array(items) => items
+                    .iter_mut()
+                    .map(|item| strip_record_incarnation(item, source))
+                    .sum(),
+                _ => 0,
+            }
+        }
+
+        /// Damage history installed by typed mutation, exactly what an old build
+        /// wrote (the latch is left empty). The record shape is pinned against
+        /// real combat by the engine guard test
+        /// `s_guard_adapter_record_shape_matches_real_combat_record`.
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum History {
+            /// Row x control: no damage history.
+            None,
+            /// Rows i and x: combat damage this turn, entered a previous turn.
+            SameTurnCombat,
+            /// Row iii: an Any-set entry from an earlier turn, no record.
+            PreviousTurn,
+            /// Row ii: entered this turn, one trusted noncombat record.
+            SameTurnNoncombatEntrant,
+            /// Row ix: row ii with the record's `source_incarnation` key removed.
+            PreFieldNoncombatEntrant,
+        }
+
+        const HISTORIES: [History; 5] = [
+            History::None,
+            History::SameTurnCombat,
+            History::PreviousTurn,
+            History::SameTurnNoncombatEntrant,
+            History::PreFieldNoncombatEntrant,
+        ];
+
+        impl History {
+            /// (combat latch, noncombat latch, hexproof) after restore.
+            fn expected(self) -> (bool, bool, bool) {
+                match self {
+                    History::None => (false, false, true),
+                    History::SameTurnCombat => (true, false, false),
+                    // Policy A: unprovable history is attributed to combat.
+                    History::PreviousTurn => (true, false, false),
+                    History::SameTurnNoncombatEntrant => (false, true, true),
+                    // Policy A: an incarnation-less record is not trusted.
+                    History::PreFieldNoncombatEntrant => (true, false, false),
+                }
+            }
+        }
+
+        /// F2 + F3: a printed Ruric (`add_real_card`, carrying `printed_ref`) with
+        /// `history`, captured, then rewritten into an old save (no latch key, the
+        /// OLD `Unrecognized` static in both lists). Returns the pre-save state,
+        /// Ruric and the old-format JSON.
+        fn old_save(db: &CardDatabase, history: History) -> (GameState, ObjectId, Value) {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let ruric = scenario.add_real_card(P0, RURIC_NAME, Zone::Battlefield, db);
+            let mut state = scenario.build().state().clone();
+            assert_eq!(
+                state.objects[&ruric].printed_ref,
+                Some(PrintedCardRef {
+                    oracle_id: RURIC_ORACLE_ID.to_string(),
+                    face_name: RURIC_NAME.to_string(),
+                })
+            );
+            assert_eq!(
+                hexproof_conditions(state.objects[&ruric].static_definitions.0.iter()),
+                vec![Some(current_ruric_condition())]
+            );
+            let incarnation = state.objects[&ruric].incarnation;
+            let turn = state.turn_number;
+            if matches!(
+                history,
+                History::SameTurnNoncombatEntrant | History::PreFieldNoncombatEntrant
+            ) {
+                state
+                    .objects
+                    .get_mut(&ruric)
+                    .unwrap()
+                    .entered_battlefield_turn = Some(turn);
+            }
+            let record = |is_combat: bool| -> DamageRecord {
+                serde_json::from_value(json!({
+                    "source_id": ruric,
+                    "source_controller": P0,
+                    "target": TargetRef::Player(P1),
+                    "amount": 7,
+                    "is_combat": is_combat,
+                    "source_incarnation": incarnation,
+                }))
+                .expect("old-format damage record decodes")
+            };
+            match history {
+                History::None => {}
+                History::SameTurnCombat => {
+                    state.objects_that_dealt_damage.insert(ruric);
+                    state.damage_dealt_this_turn.push_back(record(true));
+                }
+                History::PreviousTurn => {
+                    state.objects_that_dealt_damage.insert(ruric);
+                }
+                History::SameTurnNoncombatEntrant | History::PreFieldNoncombatEntrant => {
+                    state.objects_that_dealt_damage.insert(ruric);
+                    state.damage_dealt_this_turn.push_back(record(false));
+                }
+            }
+            state.layers_dirty.mark_full();
+            flush_layers(&mut state);
+            let obj = &state.objects[&ruric];
+            assert!(
+                obj.dealt_damage_kinds.is_empty(),
+                "an old build wrote no latch"
+            );
+            if matches!(
+                history,
+                History::SameTurnNoncombatEntrant | History::PreFieldNoncombatEntrant
+            ) {
+                assert_eq!(obj.entered_battlefield_turn, Some(state.turn_number));
+                assert_eq!(
+                    state.damage_dealt_this_turn[0].source_incarnation,
+                    Some(obj.incarnation)
+                );
+            } else {
+                assert_ne!(obj.entered_battlefield_turn, Some(state.turn_number));
+            }
+            // The unmigrated live reading: an empty latch leaves the current
+            // static TRUE, so a FALSE after restore comes from the recovery.
+            assert!(
+                has_hexproof(obj),
+                "pre-save: the empty latch reads as hexproof"
+            );
+
+            let mut json = serde_json::to_value(PersistedGameState::capture(state.clone()))
+                .expect("persisted state serializes");
+            assert!(
+                !json.to_string().contains("dealt_damage_kinds"),
+                "old format: the empty latch is elided, no latch key is saved"
+            );
+            assert_eq!(
+                patch_old_static(&mut json, ruric),
+                2,
+                "both static lists patched"
+            );
+            let saved = json.to_string();
+            assert!(
+                !saved.contains("SourceHasDealtDamage"),
+                "only the old static is saved"
+            );
+            assert!(saved.contains(OLD_RURIC_CONDITION_TEXT));
+            assert!(saved.contains("printed_ref"));
+            if history == History::PreFieldNoncombatEntrant {
+                assert_eq!(strip_record_incarnation(&mut json, ruric), 1);
+            }
+            (state, ruric, json)
+        }
+
+        /// The restored-state assertions shared by every adapter row.
+        fn assert_restored(
+            history: History,
+            pre: &GameState,
+            restored: &GameState,
+            ruric: ObjectId,
+        ) {
+            let obj = &restored.objects[&ruric];
+            assert_eq!(
+                hexproof_conditions(obj.static_definitions.0.iter()),
+                vec![Some(current_ruric_condition())],
+                "{history:?}: reapply replaced the saved Unrecognized static"
+            );
+            assert_eq!(
+                hexproof_conditions(obj.base_static_definitions.iter()),
+                vec![Some(current_ruric_condition())],
+                "{history:?}"
+            );
+            assert_eq!(
+                restored.objects_that_dealt_damage.contains(&ruric),
+                pre.objects_that_dealt_damage.contains(&ruric),
+                "{history:?}: the Any-set entry survives restore"
+            );
+            assert_eq!(
+                restored.damage_dealt_this_turn.len(),
+                pre.damage_dealt_this_turn.len(),
+                "{history:?}: the records survive restore"
+            );
+            if history == History::PreFieldNoncombatEntrant {
+                assert!(restored.damage_dealt_this_turn[0]
+                    .source_incarnation
+                    .is_none());
+                assert!(!restored.damage_dealt_this_turn[0].is_combat);
+            }
+            assert!(
+                !restored.layers_dirty.is_dirty(),
+                "{history:?}: the restore finalized with layers flushed"
+            );
+            let latch = &obj.dealt_damage_kinds;
+            assert_eq!(
+                (
+                    latch.has(DamageKindFilter::CombatOnly),
+                    latch.has(DamageKindFilter::NoncombatOnly),
+                    has_hexproof(obj),
+                ),
+                history.expected(),
+                "{history:?}: (combat latch, noncombat latch, hexproof)"
+            );
+        }
+
+        #[test]
+        fn from_persisted_recovers_old_save_damage_kinds() {
+            let db = Arc::new(ruric_face_db());
+            for history in HISTORIES {
+                let (mgr, code, _token0, _token1) = setup_two_player_game();
+                let mut persisted = mgr.try_session(&code).unwrap().to_persisted();
+                let (pre, ruric, json) = old_save(&db, history);
+                persisted.state = serde_json::from_value::<PersistedGameState>(json)
+                    .expect("old-format persisted state decodes");
+                let restored = GameSession::from_persisted(persisted, &db)
+                    .unwrap_or_else(|error| panic!("{history:?}: restore failed: {error}"));
+                assert_restored(history, &pre, &restored.state, ruric);
+            }
+        }
+    }
 }

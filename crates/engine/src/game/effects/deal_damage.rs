@@ -12,9 +12,9 @@ use crate::game::quantity::{
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     names_resolution_chosen_recipient, quantity_expr_uses_recipient, DamageContextSnapshot,
-    DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind, ExcessRecipient,
-    PlayerFilter, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetDamageSourceBinding,
-    TargetFilter, TargetRef,
+    DamageKindFilter, DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind,
+    ExcessRecipient, PlayerFilter, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
+    TargetDamageSourceBinding, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -1249,6 +1249,85 @@ pub(crate) fn emit_damage_dealt_and_record(
             }
         }
     }
+}
+
+/// Restore-time reconstruction of `GameObject::dealt_damage_kinds` for a save
+/// written before the per-kind latch existed. Called once from
+/// `PersistedGameState::prepare_for_restore`, before printed-face reapply and
+/// the finalizing layer flush, so the restored layer-6 grant (CR 613.1f;
+/// CR 611.3a: a static's condition is read continuously) sees the recovered
+/// latch. Returns whether any latch changed.
+///
+/// Trigger (idempotence): an object on the battlefield, in
+/// `objects_that_dealt_damage` (the Any set), with an EMPTY latch. The writer
+/// above sets both stores under one guard and retirement clears both
+/// (CR 400.7), so a current-format state never matches and this is a no-op on it;
+/// the recovered latch serializes as an ordinary latch, so a second restore is
+/// a no-op too.
+///
+/// Recovery: the this-turn `damage_dealt_this_turn` records whose
+/// `source_id` is the object AND whose `source_incarnation` is
+/// `Some(obj.incarnation)` are this incarnation's damage (CR 400.7); each
+/// records its kind (CR 120.2a combat, CR 120.2b noncombat). `amount` is NOT
+/// filtered: a record exists only for a nonzero dealt amount, and its
+/// `amount` is the recorded lethal portion, which can differ from the amount
+/// dealt. A record with `source_incarnation: None` cannot be proven to belong
+/// to this incarnation and is not trusted. The history is complete only when
+/// the incarnation entered the battlefield this turn and at least one trusted
+/// record matched (records are cleared at the start of each turn, so an
+/// earlier entrant may have dealt damage of unknown kind before this turn).
+///
+/// Policy A for the unrecoverable remainder: when the history is not complete
+/// and no trusted combat record exists, the Any-set entry is attributed to
+/// combat damage. Rationale: an Any-set member is overwhelmingly a combat
+/// damage dealer; the failure direction is the less harmful one ("hasn't
+/// dealt combat damage yet" protection, e.g. hexproof per CR 702.11b, drops
+/// rather than staying undeserved for the rest of the game); it writes no new
+/// state. Pre-field saves (records without `source_incarnation`) therefore
+/// lose the a2 exactness ("entered this turn, noncombat only, stays
+/// hexproof") and fall to policy A. `DamageKindFilter::Any` readers consult
+/// only the Any set, so they are unaffected.
+///
+/// The direct `GameState` serde path (`GameStateDecodeMode::DirectCurrentRaw`)
+/// is deliberately not migrated: it is limited to the current canonical
+/// representation.
+pub(crate) fn recover_legacy_dealt_damage_kinds(state: &mut GameState) -> bool {
+    let candidates: Vec<ObjectId> = state.objects_that_dealt_damage.iter().copied().collect();
+    let mut changed = false;
+    for id in candidates {
+        let Some(obj) = state.objects.get(&id) else {
+            continue;
+        };
+        if obj.zone != crate::types::zones::Zone::Battlefield || !obj.dealt_damage_kinds.is_empty()
+        {
+            continue;
+        }
+        // CR 400.7: only this incarnation's records are this object's history.
+        let incarnation = obj.incarnation;
+        let mut recovered = crate::game::game_object::DealtDamageKinds::default();
+        let mut matched = 0usize;
+        for record in state
+            .damage_dealt_this_turn
+            .iter()
+            .filter(|r| r.source_id == id && r.source_incarnation == Some(incarnation))
+        {
+            recovered.record(record.is_combat);
+            matched += 1;
+        }
+        let complete = obj.entered_battlefield_turn == Some(state.turn_number) && matched > 0;
+        if !recovered.has(DamageKindFilter::CombatOnly) && !complete {
+            // Policy A: unprovable history is attributed to combat damage.
+            recovered.record(true);
+        }
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.dealt_damage_kinds = recovered;
+            changed = true;
+        }
+    }
+    if changed {
+        state.layers_dirty.mark_full();
+    }
+    changed
 }
 
 /// CR 702.15b / CR 120.3f: gain the lifelink life for one damage leg. Returns

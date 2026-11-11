@@ -16871,6 +16871,12 @@ impl PersistedGameState {
             &mut state,
         )
         .map_err(PersistedRestoreError::InvalidPerPlayerChoice)?;
+        // CR 120.2a + CR 120.2b + CR 400.7: rebuild the per-kind damage latch of
+        // a save written before it existed. This is the one restore authority
+        // shared by server-core and engine-wasm; it runs before printed-face
+        // rehydration and the finalizing layer flush, and is a no-op on
+        // current-format state.
+        crate::game::effects::deal_damage::recover_legacy_dealt_damage_kinds(&mut state);
         state
             .format_config
             .reject_unimplemented_range_of_influence()
