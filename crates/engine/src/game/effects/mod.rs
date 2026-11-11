@@ -16741,6 +16741,12 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         // CR 701.61a + CR 608.2d: A player cannot choose to forage unless at
         // least one complete forage mode is currently available.
         Effect::Forage => !forage::can_forage(state, ability),
+        // CR 701.59b + CR 608.2d: a player who can't exile cards with total
+        // mana value N or greater from their graveyard can't choose to collect
+        // evidence, so the offer (and its "when/if you do" rider) never opens.
+        Effect::CollectEvidence { amount } => {
+            !collect_evidence::can_collect_evidence(state, ability.controller, None, *amount)
+        }
         // CR 608.2d: "you may transform/convert ~. If you do, …" cannot be
         // chosen once the transform is impossible — accepting would record a
         // performed effect for a no-op and still run the "If you do" rider
@@ -23110,6 +23116,10 @@ fn resolve_chain_body(
             // The resolver would discard the cards it has (`count = min(num,
             // eligible)`) and run the "If you do" rider on a cost never paid in full.
             | Effect::Discard { .. }
+            // CR 701.59b + CR 603.12: unaffordable evidence is a declined
+            // option; accepting would leave its "when you do" reflexive to
+            // read an action that never happened.
+            | Effect::CollectEvidence { .. }
     );
     if optional_is_infeasible && auto_decline_infeasible_optional {
         return resolve_optional_effect_decision_step(

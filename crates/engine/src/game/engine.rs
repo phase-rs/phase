@@ -14733,7 +14733,7 @@ fn apply_non_priority_pass_action(
         ) => {
             let effect_resume = matches!(
                 resume.as_ref(),
-                crate::types::game_state::CollectEvidenceResume::Effect { .. }
+                crate::types::game_state::CollectEvidenceResume::Resolution { .. }
             );
             let next = super::effects::collect_evidence::handle_choice(
                 state,

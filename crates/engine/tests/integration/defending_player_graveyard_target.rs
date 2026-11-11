@@ -169,7 +169,9 @@ struct Answers {
 /// Declare `attacker` at `defender`, decline all blocks, answer every prompt
 /// from `answers`, and run combat through damage until the postcombat main
 /// phase opens with an empty stack. `on_priority` runs at every priority
-/// window before it is passed. Returns every non-priority prompt answered, in order.
+/// window before it is passed. Returns every non-priority prompt answered, in
+/// order; an evidence prompt is first probed with a cancel, recorded as
+/// `"CancelRejected"` once the engine refuses it.
 fn run_combat(
     r: &mut GameRunner,
     attacker: ObjectId,
@@ -230,8 +232,31 @@ fn run_combat(
                 r.act(GameAction::PassPriority)
                     .expect("finalizing the mana payment is legal");
             }
-            WaitingFor::PayCost { choices, .. }
-            | WaitingFor::CollectEvidenceChoice { cards: choices, .. } => {
+            WaitingFor::CollectEvidenceChoice { cards: choices, .. } => {
+                // CR 608.2d + CR 117.2e: the accepted evidence prompt belongs to
+                // the resolving ability; backing out is refused and the prompt
+                // stays, so a rejected cancel is recorded and then the evidence paid.
+                let prompt = r.state().waiting_for.clone();
+                assert!(
+                    r.act(GameAction::CancelCast).is_err(),
+                    "the evidence prompt can't be cancelled"
+                );
+                assert_eq!(
+                    r.state().waiting_for,
+                    prompt,
+                    "the prompt stays after the cancel"
+                );
+                prompts.push("CancelRejected");
+                let cards = answers
+                    .pay_with
+                    .iter()
+                    .copied()
+                    .filter(|id| choices.contains(id))
+                    .collect();
+                r.act(GameAction::SelectCards { cards })
+                    .expect("the evidence payment is legal");
+            }
+            WaitingFor::PayCost { choices, .. } => {
                 let cards = answers
                     .pay_with
                     .iter()
@@ -384,28 +409,51 @@ fn rysorian_badger_rider_follows_the_exile_decision_through_combat() {
     }
 }
 
-/// Goblin Vandal: paying {R} destroys the defending player's artifact and the
-/// Vandal assigns no combat damage; declining leaves both untouched.
+/// Goblin Vandal against P1, who controls two artifacts (so the target prompt
+/// is never auto-answered), while P2 controls a third.
+/// Returns `(runner, vandal, [P1's artifacts], P2's artifact)`.
+fn goblin_vandal_scenario() -> (GameRunner, ObjectId, [ObjectId; 2], ObjectId) {
+    let mut sc = GameScenario::new_n_player(3, 42);
+    sc.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, P2] {
+        for _ in 0..10 {
+            sc.add_card_to_library_top(player, "Plains");
+        }
+    }
+    let vandal = sc
+        .add_creature_from_oracle(P0, "Goblin Vandal", 1, 1, GOBLIN_VANDAL)
+        .id();
+    sc.add_basic_land(P0, ManaColor::Red);
+    sc.add_creature(P1, "P1 Bystander", 1, 1);
+    let defenders = [
+        sc.add_artifact_from_oracle(P1, "P1 Trinket", "").id(),
+        sc.add_artifact_from_oracle(P1, "P1 Bauble", "").id(),
+    ];
+    let other_artifact = sc.add_artifact_from_oracle(P2, "P2 Trinket", "").id();
+    (sc.build(), vandal, defenders, other_artifact)
+}
+
+/// CR 508.5a: "target artifact defending player controls" offers exactly the
+/// attacked player's artifacts, never the third player's.
+#[test]
+fn goblin_vandal_targets_only_the_defending_players_artifacts() {
+    let (mut r, vandal, defenders, _) = goblin_vandal_scenario();
+    let legal = legal_targets_at_trigger_prompt(&mut r, vandal, P1);
+    // The same exact-set check as the graveyard rows, over P1's artifacts.
+    let owned: Vec<(PlayerId, ObjectId)> = defenders.iter().map(|id| (P1, *id)).collect();
+    assert_only_defenders_cards(&legal, &owned, P1);
+}
+
+/// Goblin Vandal: paying {R} destroys the chosen defending artifact and the
+/// Vandal assigns no combat damage; declining leaves it and deals damage. Both
+/// rows must reach the target and payment prompts, so a trigger that never
+/// fires can't pass the decline row.
 #[test]
 fn goblin_vandal_rider_follows_the_payment_decision_through_combat() {
     for (accept, destroyed, combat_damage) in [(true, true, 0), (false, false, 1)] {
-        let mut sc = GameScenario::new_n_player(3, 42);
-        sc.at_phase(Phase::PreCombatMain);
-        for player in [P0, P1, P2] {
-            for _ in 0..10 {
-                sc.add_card_to_library_top(player, "Plains");
-            }
-        }
-        let vandal = sc
-            .add_creature_from_oracle(P0, "Goblin Vandal", 1, 1, GOBLIN_VANDAL)
-            .id();
-        sc.add_basic_land(P0, ManaColor::Red);
-        sc.add_creature(P1, "P1 Bystander", 1, 1);
-        let artifact = sc.add_artifact_from_oracle(P1, "P1 Trinket", "").id();
-        let other_artifact = sc.add_artifact_from_oracle(P2, "P2 Trinket", "").id();
-        let mut r = sc.build();
+        let (mut r, vandal, [artifact, unchosen], other_artifact) = goblin_vandal_scenario();
         let p1_life = r.life(P1);
-        run_combat(
+        let prompts = run_combat(
             &mut r,
             vandal,
             P1,
@@ -416,12 +464,26 @@ fn goblin_vandal_rider_follows_the_payment_decision_through_combat() {
             },
             &mut |_| {},
         );
+        // Reach guard: the trigger chose its target and offered the payment.
+        assert!(
+            prompts.contains(&"TriggerTargetSelection"),
+            "accept={accept}: target prompt offered: {prompts:?}"
+        );
+        assert!(
+            prompts.contains(&"OptionalEffectChoice"),
+            "accept={accept}: payment offered: {prompts:?}"
+        );
         let expected = if destroyed {
             Zone::Graveyard
         } else {
             Zone::Battlefield
         };
         assert_eq!(zone(&r, artifact), expected, "accept={accept}: artifact");
+        assert_eq!(
+            zone(&r, unchosen),
+            Zone::Battlefield,
+            "accept={accept}: the untargeted defending artifact survives"
+        );
         assert_eq!(
             zone(&r, other_artifact),
             Zone::Battlefield,
@@ -569,6 +631,11 @@ fn memory_vampire_casts_from_the_defenders_graveyard_after_leaving_play() {
         paid < reflexive_target,
         "the reflexive trigger waits for evidence: {prompts:?}"
     );
+    assert_eq!(
+        prompts.get(paid + 1),
+        Some(&"CancelRejected"),
+        "cancelling the accepted evidence prompt was refused: {prompts:?}"
+    );
     let cast = &r.state().objects[&wanted];
     assert_eq!(cast.zone, Zone::Battlefield, "the defender's card was cast");
     assert_eq!(cast.controller, P0);
@@ -623,5 +690,78 @@ fn memory_vampire_declining_evidence_casts_nothing() {
         "declined evidence is never chosen: {prompts:?}"
     );
     assert_eq!(zone(&r, evidence), Zone::Graveyard);
+    assert_eq!(zone(&r, wanted), Zone::Graveyard, "nothing was cast");
+}
+
+/// CR 701.59b + CR 603.12: with only mana value 8 in the graveyard, the
+/// controller can't choose to collect evidence 9. The offer is never made,
+/// nothing is exiled, and the "When you do" reflexive never reaches the stack,
+/// so the defender's card is never offered as a cast target.
+#[test]
+fn memory_vampire_unaffordable_evidence_opens_no_cast() {
+    let mut sc = GameScenario::new_n_player(3, 42);
+    sc.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, P2] {
+        for _ in 0..10 {
+            sc.add_card_to_library_top(player, "Plains");
+        }
+    }
+    let vampire = sc
+        .add_creature_from_oracle(P0, "Memory Vampire", 4, 4, MEMORY_VAMPIRE)
+        .id();
+    sc.add_creature(P1, "P1 Bystander", 1, 1);
+    let short = sc
+        .add_creature_to_graveyard(P0, "Short Evidence", 1, 1)
+        .with_mana_cost(ManaCost::generic(8))
+        .id();
+    let wanted = sc
+        .add_creature_to_graveyard(P1, "P1 Recruit", 2, 2)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let mut r = sc.build();
+    let p1_life = r.life(P1);
+
+    let (mut damage_trigger_seen, mut reflexive_seen) = (false, false);
+    let mut hook = |r: &mut GameRunner| {
+        for entry in r.state().stack.iter().filter(|e| e.source_id == vampire) {
+            if let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind {
+                if ability.targets.contains(&TargetRef::Object(wanted)) {
+                    reflexive_seen = true;
+                } else {
+                    damage_trigger_seen = true;
+                }
+            }
+        }
+    };
+    let prompts = run_combat(
+        &mut r,
+        vampire,
+        P1,
+        &Answers {
+            picks: vec![wanted],
+            accept: true,
+            pay_with: vec![short],
+        },
+        &mut hook,
+    );
+    // Reach guard: the combat damage trigger went on the stack and resolved.
+    assert_eq!(p1_life - r.life(P1), 4, "the Vampire dealt combat damage");
+    assert!(
+        damage_trigger_seen,
+        "the combat damage trigger was put on the stack"
+    );
+    assert!(
+        !prompts.contains(&"OptionalEffectChoice"),
+        "an unaffordable evidence offer is never made: {prompts:?}"
+    );
+    assert!(
+        !prompts.contains(&"CollectEvidenceChoice"),
+        "no evidence is chosen: {prompts:?}"
+    );
+    assert!(
+        !reflexive_seen,
+        "the cast reflexive never reached the stack"
+    );
+    assert_eq!(zone(&r, short), Zone::Graveyard, "nothing was exiled");
     assert_eq!(zone(&r, wanted), Zone::Graveyard, "nothing was cast");
 }

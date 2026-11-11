@@ -9728,7 +9728,9 @@ impl PendingCostMoveResume {
             PendingCostMoveResume::CollectEvidencePayment { resume, .. } => match resume.as_ref() {
                 CollectEvidenceResume::Casting { .. }
                 | CollectEvidenceResume::ManaAbility { .. } => true,
-                CollectEvidenceResume::Effect { .. } => false,
+                CollectEvidenceResume::Effect { .. } | CollectEvidenceResume::Resolution { .. } => {
+                    false
+                }
             },
             // Unless-costs and ward payments are made while an ability resolves
             // (CR 118.12), and a replacement's optional cost belongs to that
@@ -10333,6 +10335,7 @@ impl GameState {
                     match resume.as_ref() {
                         CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
                         CollectEvidenceResume::Effect { .. }
+                        | CollectEvidenceResume::Resolution { .. }
                         | CollectEvidenceResume::ManaAbility { .. } => None,
                     }
                 }
@@ -10380,6 +10383,7 @@ impl GameState {
                     match resume.as_mut() {
                         CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
                         CollectEvidenceResume::Effect { .. }
+                        | CollectEvidenceResume::Resolution { .. }
                         | CollectEvidenceResume::ManaAbility { .. } => None,
                     }
                 }
@@ -10548,9 +10552,20 @@ pub enum CollectEvidenceResume {
         #[serde(default)]
         source: SpellCostSource,
     },
+    /// Legacy effect-form resume: prompts serialized before the evidence
+    /// prompt became a resolution choice carry the rest of their ability in
+    /// `pending_ability` and resolve it after the payment. Kept so those
+    /// prompts load and finish as they were created; the resolver now emits
+    /// [`CollectEvidenceResume::Resolution`].
     Effect {
         pending_ability: Box<ResolvedAbility>,
     },
+    /// CR 701.59a + CR 608.2c: collect evidence as an effect of a resolving
+    /// spell or ability. The rest of that ability is parked on the resolution
+    /// stack behind the prompt, so the payment only hands back to that
+    /// continuation. `source_id` is the resolving ability's source, the cause
+    /// of the evidence exile.
+    Resolution { source_id: ObjectId },
     /// CR 605.2 + CR 701.59: Collect evidence paid as a mana ability's
     /// activation cost (Cryptex's `{T}, Collect evidence 3: Add one mana...`).
     /// Resumes the parked mana-ability activation with the chosen cards stamped
@@ -10760,7 +10775,9 @@ fn visit_cost_move_resume_events(
             CollectEvidenceResume::ManaAbility {
                 pending_mana_ability,
             } => visit_pending_mana_ability_events(pending_mana_ability, f),
-            CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } => {}
+            CollectEvidenceResume::Casting { .. }
+            | CollectEvidenceResume::Effect { .. }
+            | CollectEvidenceResume::Resolution { .. } => {}
         },
         PendingCostMoveResume::ManaAbilityPayment { pending, cursor } => {
             visit_pending_mana_ability_events(pending, f);
@@ -20977,6 +20994,7 @@ impl WaitingFor {
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
                 CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
                 CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::Resolution { .. }
                 | CollectEvidenceResume::ManaAbility { .. } => None,
             },
             _ => None,
@@ -21016,6 +21034,7 @@ impl WaitingFor {
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
                 CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
                 CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::Resolution { .. }
                 | CollectEvidenceResume::ManaAbility { .. } => None,
             },
             _ => None,
@@ -21276,9 +21295,9 @@ impl WaitingFor {
                 CollectEvidenceResume::ManaAbility {
                     pending_mana_ability,
                 } => Some(pending_mana_ability),
-                CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } => {
-                    None
-                }
+                CollectEvidenceResume::Casting { .. }
+                | CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::Resolution { .. } => None,
             },
             WaitingFor::PayAmountChoice {
                 pending_mana_ability,
@@ -27405,6 +27424,8 @@ fn visit_collect_evidence_resume_chains<'a>(
         CollectEvidenceResume::Effect { pending_ability } => {
             f(pending_ability, SuspendedChainEvent::Ambient)
         }
+        // The parked continuation frame owns that chain and is visited there.
+        CollectEvidenceResume::Resolution { .. } => Ok(()),
         CollectEvidenceResume::ManaAbility {
             pending_mana_ability,
         } => visit_pending_mana_ability_chains(pending_mana_ability, f),
@@ -30374,7 +30395,8 @@ impl GameState {
                             pending_mana_ability,
                         } => pending_mana_ability.resumes_pending_cast(),
                         CollectEvidenceResume::Casting { .. }
-                        | CollectEvidenceResume::Effect { .. } => false,
+                        | CollectEvidenceResume::Effect { .. }
+                        | CollectEvidenceResume::Resolution { .. } => false,
                     }
                 }
                 PendingCostMoveResume::Cast { .. }
