@@ -612,11 +612,14 @@ pub struct ParseContext {
     /// resolution-time chooser prompts only the ability's controller, so a bare
     /// choice owned by this subject cannot declare resolution timing. Set by the
     /// subject-predicate lowering around a printed subject's predicate, and seeded
-    /// by the chain chunk loop from the carried player subject that a conjugated
-    /// continuation inherits (CR 608.2c). Inherited by the compound continuations
-    /// that predicate splits into; a continuation with a controller subject of its
-    /// own clears it for that conjunct. `None` outside such a predicate. Set and
-    /// consumed within a single chunk parse; never serialized.
+    /// by the chain chunk loop for a chunk that names no subject of its own: from
+    /// the carried player subject that a conjugated continuation inherits, or else
+    /// from the latest subject other than the controller or the source that an
+    /// earlier chunk of the same sentence named (CR 608.2c). Inherited by the
+    /// compound continuations that predicate splits into; a continuation with a
+    /// controller subject of its own clears it for that conjunct. `None` outside
+    /// such a predicate. Set and consumed within a single chunk parse; never
+    /// serialized.
     pub clause_subject_chooser: Option<TargetFilter>,
     /// CR 608.2c + CR 701.16a: Transient per-chunk `repeat_for` lifted from a
     /// fieldless-effect subject-predicate that carries a "for each <filter> …
@@ -777,10 +780,10 @@ pub struct ParseContext {
     /// the bare-choice producer from declaring `Resolution` on its own clause and
     /// on the compound continuations it owns, which is the timing those clauses had
     /// before the producer existed. The object-and-player producer declares
-    /// `Resolution` for every subject, as it always did. A `Resolution`
-    /// declaration is withdrawn after the chain is built when a later clause's
-    /// printed "target" was bound to the chosen object
-    /// (`withhold_resolution_timing_from_choices_feeding_printed_targets`).
+    /// `Resolution` for every subject, as it always did. The bare choice's
+    /// `Resolution` declaration is withdrawn after the chain is built when a later
+    /// clause's printed "target" was bound to the chosen object or left
+    /// unimplemented (`withhold_resolution_timing_from_choices_feeding_printed_targets`).
     ///
     /// Set and consumed within a single chunk parse; never serialized. A
     /// speculative sub-parse that discards its cloned context discards this too.

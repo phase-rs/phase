@@ -23208,11 +23208,14 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // the continuation itself may be attached to the chained sub-ability.
     continuation_ctx.target_chooser = None;
     // CR 608.2d + CR 115.10a: the continuation is part of the same predicate, so a
-    // non-controller subject owns its bare choices too. The non-anaphoric arm
-    // already inherits it through the cloned context; this keeps the anaphoric
-    // arm's blank context from dropping it. No anaphoric bare-choose phrase
-    // parses today, so only the non-anaphoric arm is exercised by a test.
+    // non-controller subject or peeled player scope owns its bare choices too.
+    // The non-anaphoric arm already inherits all three through the cloned
+    // context; this keeps the anaphoric arm's blank context from dropping them.
+    // No anaphoric bare-choose phrase parses today, so only the non-anaphoric arm
+    // is exercised by a test.
     continuation_ctx.clause_subject_chooser = ctx.clause_subject_chooser.clone();
+    continuation_ctx.clause_player_scope = ctx.clause_player_scope.clone();
+    continuation_ctx.clause_opponent_may_scope = ctx.clause_opponent_may_scope.clone();
     // CR 608.2c + CR 608.2k: a bare object pronoun in an anaphoric continuation
     // names the object the primary instruction acted on. When that object is the
     // ability's source ("destroy it and all creatures it blocked this turn",
@@ -29377,11 +29380,19 @@ fn announced_target_antecedent(
 /// that prints "target" but lowers to `Unimplemented` has no announcement slot to
 /// keep either, and reads the chosen object the same way (Guard Dogs: "Prevent all
 /// combat damage target creature would deal this turn if it shares a color with
-/// that permanent."), so it is treated alike.
+/// that permanent."), so it is treated alike: whether such a clause reads the
+/// choice cannot be read from its lowering, and keeping the earlier timing is the
+/// conservative reading.
+///
+/// Only the bare object choice is withheld. The object-and-player choice ("choose
+/// a creature you control and an opponent") chains its player choice as the
+/// clause's own sub-ability and keeps the `Resolution` its producer has always
+/// declared.
 fn withhold_resolution_timing_from_choices_feeding_printed_targets(clauses: &mut [ClauseIr]) {
     for choice in 0..clauses.len() {
         if clauses[choice].declared_target_choice_timing != Some(TargetChoiceTiming::Resolution)
             || !matches!(clauses[choice].parsed.effect, Effect::TargetOnly { .. })
+            || clauses[choice].parsed.sub_ability.is_some()
         {
             continue;
         }
@@ -45913,6 +45924,16 @@ fn parse_effect_chain_ir_body(
     // The same slot holds the anchor above (`CarryLifetime::Chain`), so a declared
     // player is carried as one reference.
     let mut carried_player: Option<CarriedPlayerSubject> = None;
+    // CR 608.2c + CR 608.2d: the latest subject, other than the controller or the
+    // source, that a chunk of this sentence named. A later chunk of the sentence
+    // that names no subject of its own continues that subject's instruction ("an
+    // opponent draws a card, then chooses ..."; "your opponents draw a card, then
+    // choose ..."), including a subject `carried_player` keeps no reference for, so
+    // its bare choices are not proven to be the controller's. An object subject is
+    // kept too: the bare choice then keeps the timing it had before the bare-choice
+    // producer existed. A chunk naming the controller ends it, and it never crosses
+    // a sentence boundary.
+    let mut sentence_subject_chooser: Option<TargetFilter> = None;
     let mut declarations: PlayerDeclarations = Vec::new();
     // `chunk_ctx` is rebuilt per chunk, so the group counter threads through this local.
     let mut chain_declared_groups = ctx.next_declared_player_group;
@@ -48976,14 +48997,25 @@ fn parse_effect_chain_ir_body(
         }
         // CR 608.2c + CR 608.2d + CR 115.10a: a conjugated continuation's elided
         // subject is the carried player, who announces this chunk's choices while
-        // the effect is applied. Record it as the clause's subject chooser so the
-        // controller-only resolution-choice producers do not declare Resolution
-        // for it, exactly as for a printed non-controller subject. `chunk_ctx` is
-        // rebuilt per chunk, so the seed ends with this chunk; a nested printed
-        // subject overrides it for its own predicate and restores it.
+        // the effect is applied. A chunk naming no subject of its own otherwise
+        // continues the sentence's latest non-controller subject, carried or not.
+        // Record that subject as the clause's subject chooser so the
+        // controller-only bare-choice producer does not declare Resolution for it,
+        // exactly as for a printed non-controller subject. `chunk_ctx` is rebuilt
+        // per chunk, so the seed ends with this chunk; a nested printed subject
+        // overrides it for its own predicate and restores it.
+        let continued_sentence_subject = sentence_subject_chooser
+            .clone()
+            .filter(|_| leading_subject_application.is_none() && !chunk_declares_caster_subject);
         ctx.clause_subject_chooser = inherited_player_subject
             .as_ref()
-            .and_then(|carried| non_controller_subject_chooser(carried.reference()));
+            .and_then(|carried| non_controller_subject_chooser(carried.reference()))
+            .or(continued_sentence_subject);
+        if chunk.boundary_after == Some(ClauseBoundary::Sentence) || chunk_declares_caster_subject {
+            sentence_subject_chooser = None;
+        } else if let Some(application) = leading_subject_application.as_ref() {
+            sentence_subject_chooser = non_controller_subject_chooser(&application.affected);
+        }
 
         let rejected_search_guard =
             if player_scope.is_none() && opponent_may_scope.is_none() && repeat_for.is_none() {
