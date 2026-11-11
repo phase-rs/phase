@@ -1171,15 +1171,12 @@ fn apply_pending_counter_post_action(
                 super::token::record_last_created_token(state, object_id);
             }
             // DELIBERATELY NOT `record_last_created_copy_batch_token`: this arm RE-SYNCS the batch
-            // buffer to the whole guarded ledger rather than appending one id, and the two are not
+            // buffer with the whole guarded ledger rather than appending one id, and the two are not
             // interchangeable — the buffer accumulates across batches while the ledger is reset per
-            // batch. Copying the ledger cannot publish an id the ledger's own guard withheld, so
+            // batch. Merging the ledger cannot publish an id the ledger's own guard withheld, so
             // this shape needs no second predicate; it needs the source to stay the GUARDED ledger,
             // which is what `state.last_created_token_ids` is after the call above.
-            let created_ids = state.last_created_token_ids.clone();
-            if let Some(pending) = state.active_copy_token_mut() {
-                pending.created_ids = created_ids;
-            }
+            super::token::record_copy_batch_ledger_on_active_copy_token(state);
             true
         }
         PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant } => {
@@ -9388,6 +9385,58 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 111.1: `EmitCommittedCopyTokenEntry` re-syncs the batch ledger onto an
+    /// ACTIVE CopyToken owner by merging, so the earlier batches' tokens the owner already lists
+    /// ("those tokens") stay ahead of this batch's. An assignment there would drop them, since
+    /// the ledger is reset per batch. The earlier id lives only in the owner's buffer.
+    #[test]
+    fn emit_committed_copy_token_entry_merges_the_ledger_into_the_active_copy_token_owner() {
+        use crate::types::game_state::PendingCopyTokenResolution;
+        use std::collections::VecDeque;
+
+        let mut state = GameState::new_two_player(42);
+        let earlier = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Earlier Copy".to_string(),
+            Zone::Battlefield,
+        );
+        let object_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Copy Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.push_copy_token(PendingCopyTokenResolution {
+            created_ids: vec![earlier],
+            remaining: VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id: earlier,
+            referent_set: None,
+        });
+        assert!(
+            state.last_created_token_ids.is_empty(),
+            "REACH-GUARD: the ledger holds only this batch, and starts empty"
+        );
+        let mut events = Vec::new();
+        assert!(apply_pending_counter_post_action(
+            &mut state,
+            PendingCounterPostAction::EmitCommittedCopyTokenEntry { object_id },
+            &mut events,
+        ));
+        assert_eq!(state.last_created_token_ids, vec![object_id]);
+        assert_eq!(
+            state
+                .active_copy_token()
+                .expect("REACH-GUARD: the owner stays parked")
+                .created_ids,
+            vec![earlier, object_id],
+            "the owner keeps the earlier batch's token, then lists this batch's once"
+        );
+    }
+
     /// The COPY-BATCH BUFFER half of the same invariant, and the one every test above is
     /// structurally blind to.
     ///
@@ -9467,6 +9516,7 @@ mod tests {
                 remaining: VecDeque::new(),
                 effect_kind: EffectKind::CopyTokenOf,
                 source_id,
+                referent_set: None,
             });
             assert!(
                 state.active_copy_token().is_some(),
