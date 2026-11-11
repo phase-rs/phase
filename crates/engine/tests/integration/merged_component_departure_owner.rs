@@ -1,0 +1,559 @@
+//! CR 730.3 + CR 603.2c + CR 616.1: a merged permanent's departure belongs to
+//! the logical owner that announced it. When a component's own replacement
+//! choice parks the split, that owner — the batch of a library placement or the
+//! ChangeZone iteration of an owner shuffle — still collects the departure once,
+//! records its terminal outcome once, and resumes its own tail, whether the
+//! choice is answered or its chooser concedes.
+//!
+//! Oracle text (card data):
+//!   Circuit Mender: "When this creature enters, you gain 2 life. / When this
+//!    creature leaves the battlefield, draw a card."
+//!   Brokkos, Apex of Forever: "Mutate {2}{U/B}{G}{G} (...) / Trample / You may
+//!    cast this card from your graveyard using its mutate ability."
+//!   Totally Lost: "Put target nonland permanent on top of its owner's library."
+//!   Chaos Warp: "The owner of target permanent shuffles it into their library,
+//!    then reveals the top card of their library. If it's a permanent card, they
+//!    put it onto the battlefield."
+//!   Rebuking Ceremony: "Put two target artifacts on top of their owners'
+//!    libraries."
+//!
+//! The mutate itself is staged with `merge_object_onto` (mutate casting is not
+//! under test). Brokkos is a legendary creature and the designated commander
+//! (CR 903.3); CR 903.9b offers its owner the command zone when it would be put
+//! into a library.
+
+use engine::game::merge::{merge_object_onto, MergeSide};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode, TargetFilter,
+};
+use engine::types::actions::GameAction;
+use engine::types::events::{GameEvent, PlayerActionKind};
+use engine::types::format::FormatConfig;
+use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::{EtbTapState, Zone};
+
+use crate::support::shared_card_db;
+
+const P2: PlayerId = PlayerId(2);
+
+/// Which card the merged permanent keeps as its survivor (the object that stays
+/// on the battlefield, CR 730.2c). Components are delivered topmost first.
+#[derive(Clone, Copy, Debug)]
+enum Pile {
+    /// Circuit Mender is the survivor and the topmost component; Brokkos was
+    /// mutated under it. Circuit Mender is delivered, then Brokkos's prompt opens.
+    BrokkosUnderMender,
+    /// Brokkos is the survivor with Circuit Mender mutated on top. Circuit
+    /// Mender is delivered, then the prompt opens on the survivor's own
+    /// incarnation — the same object the original owner announced.
+    MenderOverBrokkos,
+}
+
+struct MergedCommander {
+    survivor: ObjectId,
+    mender: ObjectId,
+    brokkos: ObjectId,
+}
+
+fn mana(color: ManaType, amount: usize) -> Vec<ManaUnit> {
+    (0..amount)
+        .map(|_| ManaUnit::new(color, ObjectId(0), false, vec![]))
+        .collect()
+}
+
+fn add_pile(scenario: &mut GameScenario, owner: PlayerId) -> (ObjectId, ObjectId) {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mender = scenario.add_real_card(owner, "Circuit Mender", Zone::Battlefield, db);
+    let brokkos = scenario.add_real_card(owner, "Brokkos, Apex of Forever", Zone::Battlefield, db);
+    (mender, brokkos)
+}
+
+/// CR 702.140c + CR 730.2: stage the mutate and the commander designation.
+fn merge_pile(
+    runner: &mut GameRunner,
+    pile: Pile,
+    mender: ObjectId,
+    brokkos: ObjectId,
+    commander: bool,
+) -> MergedCommander {
+    let state = runner.state_mut();
+    let mut events = Vec::new();
+    let (rider, survivor, side) = match pile {
+        Pile::BrokkosUnderMender => (brokkos, mender, MergeSide::Bottom),
+        Pile::MenderOverBrokkos => (mender, brokkos, MergeSide::Top),
+    };
+    merge_object_onto(state, rider, survivor, side, &mut events);
+    state.battlefield.retain(|&id| id != rider);
+    state
+        .objects
+        .get_mut(&brokkos)
+        .expect("Brokkos exists")
+        .is_commander = commander;
+    assert_eq!(
+        state.objects[&survivor].merged_components,
+        vec![mender, brokkos],
+        "CR 730.2a: Circuit Mender is the topmost component"
+    );
+    MergedCommander {
+        survivor,
+        mender,
+        brokkos,
+    }
+}
+
+/// Commit `spell` and pass priority until it resolves or its resolution asks a
+/// question.
+fn cast_until_resolved_or_asked(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    targets: &[ObjectId],
+) -> Vec<GameEvent> {
+    let mut events = runner
+        .cast(spell)
+        .target_objects(targets)
+        .commit()
+        .events()
+        .to_vec();
+    for _ in 0..6 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            || !runner.state().stack.iter().any(|entry| entry.id == spell)
+        {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("priority passes while the spell resolves")
+                .events,
+        );
+    }
+    events
+}
+
+/// The CR 903.9b prompt opened by Brokkos's own component delivery.
+fn assert_commander_prompt(state: &GameState, chooser: PlayerId, brokkos: ObjectId) {
+    assert!(
+        matches!(
+            &state.waiting_for,
+            WaitingFor::ReplacementChoice { player, .. } if *player == chooser
+        ),
+        "{:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        state
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| pending.proposed.affected_object_id()),
+        Some(brokkos)
+    );
+}
+
+fn answer(runner: &mut GameRunner, index: usize) -> Vec<GameEvent> {
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("the parked replacement choice is answered")
+        .events
+}
+
+/// Serialize and restore the whole game at the parked prompt.
+fn save_and_restore(runner: &mut GameRunner) {
+    let wire = serde_json::to_value(runner.state()).expect("parked prompt serializes");
+    let mut restored: GameState = serde_json::from_value(wire).expect("parked prompt restores");
+    restored.rehydrate_rng();
+    *runner.state_mut() = restored;
+}
+
+/// The controllers of Circuit Mender leaves-the-battlefield triggers waiting on
+/// the stack.
+fn mender_departure_triggers(state: &GameState) -> Vec<PlayerId> {
+    state
+        .stack
+        .iter()
+        .filter(|entry| {
+            matches!(
+                &entry.kind,
+                StackEntryKind::TriggeredAbility { description: Some(text), .. }
+                    if text.contains("leaves the battlefield")
+            )
+        })
+        .map(|entry| entry.controller)
+        .collect()
+}
+
+fn resolution_finished(state: &GameState) {
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        state.waiting_for
+    );
+    assert!(state.pending_replacement.is_none());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "no parked zone-change owner or component child survives the resolution"
+    );
+}
+
+/// CR 730.3 + CR 603.2c: Totally Lost puts the merged permanent on top of its
+/// owner's library through one batch. Circuit Mender's ability triggers once
+/// for the one permanent that left — whether the split runs straight through
+/// (Brokkos is not a commander) or Brokkos's CR 903.9b prompt parks it and is
+/// answered either way.
+#[test]
+fn totally_lost_collects_the_merged_departure_once_for_each_commander_answer() {
+    for answer_index in [None, Some(0), Some(1)] {
+        let db = shared_card_db().expect("integration card fixture must load");
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let (mender, brokkos) = add_pile(&mut scenario, P0);
+        let lost = scenario.add_real_card(P0, "Totally Lost", Zone::Hand, db);
+        scenario.with_library_top(P0, &["Library Card A", "Library Card B"]);
+        scenario.with_mana_pool(P0, mana(ManaType::Blue, 5));
+        let mut runner = scenario.build();
+        let pile = merge_pile(
+            &mut runner,
+            Pile::BrokkosUnderMender,
+            mender,
+            brokkos,
+            answer_index.is_some(),
+        );
+
+        cast_until_resolved_or_asked(&mut runner, lost, &[pile.survivor]);
+        let brokkos_zone = match answer_index {
+            None => Zone::Library,
+            Some(index) => {
+                assert_commander_prompt(runner.state(), P0, pile.brokkos);
+                answer(&mut runner, index);
+                if index == 0 {
+                    Zone::Command
+                } else {
+                    Zone::Library
+                }
+            }
+        };
+
+        let label = format!("answer {answer_index:?}");
+        resolution_finished(runner.state());
+        assert_eq!(
+            mender_departure_triggers(runner.state()),
+            vec![P0],
+            "{label}: one merged permanent left, so its ability triggers once"
+        );
+        assert_eq!(runner.state().objects[&pile.mender].zone, Zone::Library);
+        assert_eq!(runner.state().objects[&pile.brokkos].zone, brokkos_zone);
+    }
+}
+
+/// The Circuit Mender departure triggers `spell` produces on the same pile when
+/// Brokkos is not a commander, so nothing parks the split: the synchronous
+/// control the parked runs must match.
+fn unparked_control_triggers(spell_name: &str, pile_shape: Pile) -> Vec<PlayerId> {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let (mender, brokkos) = add_pile(&mut scenario, P1);
+    let spell = scenario.add_real_card(P0, spell_name, Zone::Hand, db);
+    scenario.with_library_top(P1, &["Library Card A", "Library Card B"]);
+    let mut pool = mana(ManaType::Blue, 5);
+    pool.extend(mana(ManaType::Red, 3));
+    scenario.with_mana_pool(P0, pool);
+    let mut runner = scenario.build();
+    let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, false);
+    cast_until_resolved_or_asked(&mut runner, spell, &[pile.survivor]);
+    resolution_finished(runner.state());
+    mender_departure_triggers(runner.state())
+}
+
+/// CR 730.3 + CR 701.24a + CR 608.2c: Chaos Warp's owner shuffle runs through a
+/// ChangeZone iteration of the owner. Brokkos's CR 903.9b prompt parks the
+/// split; the iteration keeps the original permanent's boundary, so after either
+/// answer (and a save/restore at the prompt) the owner records the departure,
+/// collects it exactly as often as the unparked control does, and only then
+/// shuffles and reveals. This holds both when the prompt opens on a
+/// non-survivor component and when it opens on the survivor's own incarnation.
+#[test]
+fn chaos_warp_hands_a_parked_component_back_to_the_owner_iteration() {
+    assert_eq!(
+        unparked_control_triggers("Chaos Warp", Pile::BrokkosUnderMender),
+        vec![P1],
+        "control: the unparked merged departure triggers Circuit Mender once"
+    );
+    for pile_shape in [Pile::BrokkosUnderMender, Pile::MenderOverBrokkos] {
+        let control = unparked_control_triggers("Chaos Warp", pile_shape);
+        for answer_index in [0, 1] {
+            let db = shared_card_db().expect("integration card fixture must load");
+            let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 7);
+            scenario.at_phase(Phase::PreCombatMain);
+            let (mender, brokkos) = add_pile(&mut scenario, P1);
+            let warp = scenario.add_real_card(P0, "Chaos Warp", Zone::Hand, db);
+            scenario.with_library_top(P1, &["Library Card A", "Library Card B"]);
+            scenario.with_mana_pool(P0, mana(ManaType::Red, 3));
+            let mut runner = scenario.build();
+            let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, true);
+            let label = format!("{pile_shape:?}, answer {answer_index}");
+
+            let mut events = cast_until_resolved_or_asked(&mut runner, warp, &[pile.survivor]);
+            assert_commander_prompt(runner.state(), P1, pile.brokkos);
+            save_and_restore(&mut runner);
+            events.extend(answer(&mut runner, answer_index));
+
+            resolution_finished(runner.state());
+            let shuffle = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        GameEvent::PlayerPerformedAction {
+                            player_id: P1,
+                            action: PlayerActionKind::ShuffledLibrary,
+                            ..
+                        }
+                    )
+                })
+                .unwrap_or_else(|| panic!("{label}: the owner shuffles"));
+            let reveal = events
+                .iter()
+                .position(|event| matches!(event, GameEvent::CardsRevealed { player: P1, .. }))
+                .unwrap_or_else(|| panic!("{label}: the owner reveals"));
+            assert!(shuffle < reveal, "{label}: shuffle, then reveal");
+            let brokkos_destination = if answer_index == 0 {
+                Zone::Command
+            } else {
+                Zone::Library
+            };
+            for (component, destination) in [
+                (pile.mender, Zone::Library),
+                (pile.brokkos, brokkos_destination),
+            ] {
+                let arrival = events
+                    .iter()
+                    .position(|event| {
+                        matches!(
+                            event,
+                            GameEvent::ZoneChanged { object_id, to, .. }
+                                if *object_id == component && *to == destination
+                        )
+                    })
+                    .unwrap_or_else(|| panic!("{label}: {component:?} reaches {destination:?}"));
+                assert!(
+                    arrival < shuffle,
+                    "{label}: the owner records the departure before it shuffles"
+                );
+            }
+            let revealed = events
+                .iter()
+                .find_map(|event| match event {
+                    GameEvent::CardsRevealed {
+                        player: P1,
+                        card_ids,
+                        ..
+                    } => card_ids.first().copied(),
+                    _ => None,
+                })
+                .expect("one card is revealed");
+            if revealed == pile.mender || revealed == pile.brokkos {
+                assert_eq!(
+                    runner.state().objects[&revealed].zone,
+                    Zone::Battlefield,
+                    "{label}: a revealed permanent card is put onto the battlefield"
+                );
+            }
+            assert_eq!(
+                mender_departure_triggers(runner.state()),
+                control,
+                "{label}: the parked departure is collected exactly as the unparked one"
+            );
+        }
+    }
+}
+
+/// CR 800.4a + CR 117.2e + CR 730.3: Rebuking Ceremony targets a surviving
+/// artifact and P1's merged artifact commander; the merged one is placed first.
+/// Brokkos's CR 903.9b prompt parks the split, and P1 — the commander's owner
+/// and the prompt's chooser — concedes. P1's objects leave the game, including
+/// the parked component, and within that concession the ceremony finishes: the
+/// surviving artifact goes on top of its owner's library before any player has
+/// priority. Both pile shapes; in `MenderOverBrokkos` the departure also cancels
+/// the original permanent's own pending member.
+#[test]
+fn rebuking_ceremony_concession_during_the_prompt_places_the_surviving_artifact_first() {
+    for pile_shape in [Pile::BrokkosUnderMender, Pile::MenderOverBrokkos] {
+        let db = shared_card_db().expect("integration card fixture must load");
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let (mender, brokkos) = add_pile(&mut scenario, P1);
+        let surviving = scenario.add_real_card(P2, "Circuit Mender", Zone::Battlefield, db);
+        let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
+        scenario.with_library_top(P2, &["Library Card A"]);
+        scenario.with_library_top(P1, &["Library Card B"]);
+        scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
+        let mut runner = scenario.build();
+        let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, true);
+        let label = format!("{pile_shape:?}");
+
+        // CR 401.4: "on top" placement is delivered last-target-first, so the
+        // merged permanent (second target) moves before the surviving artifact.
+        cast_until_resolved_or_asked(&mut runner, ceremony, &[surviving, pile.survivor]);
+        assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        assert_eq!(runner.state().objects[&surviving].zone, Zone::Battlefield);
+
+        let conceded = engine::game::engine::apply(
+            runner.state_mut(),
+            P1,
+            GameAction::Concede { player_id: P1 },
+        )
+        .expect("a player may concede at any time");
+
+        assert!(
+            matches!(conceded.waiting_for, WaitingFor::Priority { .. }),
+            "{label}: {:?}",
+            conceded.waiting_for
+        );
+        resolution_finished(runner.state());
+        assert_eq!(
+            runner.state().players[2].library.front(),
+            Some(&surviving),
+            "{label}: the surviving artifact is on top of its owner's library"
+        );
+        assert!(
+            conceded.events.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Library, .. }
+                    if *object_id == surviving
+            )),
+            "{label}: the ceremony's own placement moved it in the concession"
+        );
+        assert_eq!(runner.state().objects[&ceremony].zone, Zone::Graveyard);
+        assert_eq!(
+            runner.state().objects[&pile.brokkos].zone,
+            Zone::Exile,
+            "{label}: CR 800.4a: the parked component leaves the game with its owner"
+        );
+        assert_eq!(
+            mender_departure_triggers(runner.state()),
+            vec![P2],
+            "{label}: only the surviving artifact's ability waits on the stack"
+        );
+    }
+}
+
+/// CR 616.1 + CR 730.3: a synthetic member-level replacement first parks the
+/// original permanent's own move. The nearest printed analogue is an optional
+/// move replacement such as Rest in Peace's graveyard redirect; no printed card
+/// replaces a move into a library, so this one is staged directly. Answering it
+/// resumes the original member, whose split then either delivers every
+/// component at once (Brokkos not a commander) or parks again on the survivor's
+/// own component (Brokkos is the survivor and the commander). Both owners —
+/// Totally Lost's batch and Chaos Warp's owner iteration — finish and collect
+/// the departure exactly as the unparked control does.
+#[test]
+fn resumed_merged_member_settles_once_whether_its_components_park_or_not() {
+    for spell_name in ["Totally Lost", "Chaos Warp"] {
+        assert_eq!(
+            unparked_control_triggers(spell_name, Pile::BrokkosUnderMender),
+            vec![P1],
+            "{spell_name} control: the unparked merged departure triggers Circuit Mender once"
+        );
+        for (pile_shape, component_answer) in [
+            (Pile::BrokkosUnderMender, None),
+            (Pile::MenderOverBrokkos, Some(0)),
+            (Pile::MenderOverBrokkos, Some(1)),
+        ] {
+            let control = unparked_control_triggers(spell_name, pile_shape);
+            let db = shared_card_db().expect("integration card fixture must load");
+            let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 7);
+            scenario.at_phase(Phase::PreCombatMain);
+            let (mender, brokkos) = add_pile(&mut scenario, P1);
+            let survivor = match pile_shape {
+                Pile::BrokkosUnderMender => mender,
+                Pile::MenderOverBrokkos => brokkos,
+            };
+            let spell = scenario.add_real_card(P0, spell_name, Zone::Hand, db);
+            scenario.with_library_top(P1, &["Library Card A", "Library Card B"]);
+            let mut pool = mana(ManaType::Blue, 5);
+            pool.extend(mana(ManaType::Red, 3));
+            scenario.with_mana_pool(P0, pool);
+            scenario
+                .add_creature(P0, "Synthetic member-level library redirect", 0, 0)
+                .as_enchantment()
+                .with_replacement_definition(member_level_library_redirect(survivor));
+            let mut runner = scenario.build();
+            let pile = merge_pile(
+                &mut runner,
+                pile_shape,
+                mender,
+                brokkos,
+                component_answer.is_some(),
+            );
+            let label = format!("{spell_name}, {pile_shape:?}, {component_answer:?}");
+
+            cast_until_resolved_or_asked(&mut runner, spell, &[pile.survivor]);
+            assert_eq!(
+                runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .and_then(|pending| pending.proposed.affected_object_id()),
+                Some(pile.survivor),
+                "{label}: the original permanent's own move parks first"
+            );
+            // Decline the optional redirect: the permanent still goes to the library.
+            answer(&mut runner, 1);
+            if let Some(index) = component_answer {
+                assert_commander_prompt(runner.state(), P1, pile.brokkos);
+                save_and_restore(&mut runner);
+                answer(&mut runner, index);
+            }
+
+            resolution_finished(runner.state());
+            assert_eq!(
+                mender_departure_triggers(runner.state()),
+                control,
+                "{label}: the resumed departure is collected exactly as the unparked one"
+            );
+            if component_answer == Some(0) {
+                assert_eq!(
+                    runner.state().objects[&pile.brokkos].zone,
+                    Zone::Command,
+                    "{label}"
+                );
+            }
+        }
+    }
+}
+
+/// Synthetic: "If the merged permanent would be put into a library, you may
+/// exile it instead." Scoped to the original permanent; the split inherits the
+/// applied record, so its components are not offered it again (CR 730.3d).
+fn member_level_library_redirect(survivor: ObjectId) -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .mode(ReplacementMode::Optional { decline: None })
+        .destination_zone(Zone::Library)
+        .valid_card(TargetFilter::SpecificObject { id: survivor })
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                library_shuffle: Default::default(),
+                destination: Zone::Exile,
+                origin: None,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        ))
+}

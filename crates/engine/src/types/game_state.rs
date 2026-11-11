@@ -4129,6 +4129,18 @@ impl LogicalZoneChangeGroup {
         self.record_terminal_for_member(member, LogicalZoneChangeTerminalOutcome::Remained)
     }
 
+    /// The terminal outcome recorded so far for one announced battlefield member,
+    /// or `None` when this owner did not announce that exact incarnation.
+    pub fn member_outcome(
+        &self,
+        member: ObjectIncarnationRef,
+    ) -> Option<&LogicalZoneChangeTerminalOutcome> {
+        self.prospective_battlefield_members
+            .iter()
+            .position(|candidate| candidate.identity == member)
+            .and_then(|index| self.terminal_outcomes.get(index))
+    }
+
     /// CR 800.4a: Retire a member with no retained original occurrence because
     /// its owner left the game. A shared batch retains its other members and
     /// their original event authority; the abandoned member contributes neither

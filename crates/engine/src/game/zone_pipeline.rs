@@ -816,7 +816,11 @@ pub(crate) fn move_object_with_terminal(
     move_batch_member_with_terminal(state, req, None, events)
 }
 
-pub(crate) struct BatchMemberDeliveryOwner {
+/// CR 730.3 + CR 603.10a: the logical owner that announced one member's move —
+/// a `BatchDelivery` or a `ChangeZone` iteration, named by its group. A merged
+/// permanent's component batch links to this owner, which alone collects and
+/// records that departure.
+pub(crate) struct MemberDeliveryOwner {
     pub group: LogicalZoneChangeGroupId,
     pub member: ObjectIncarnationRef,
     pub expected_event: Option<ProposedEvent>,
@@ -825,7 +829,7 @@ pub(crate) struct BatchMemberDeliveryOwner {
 fn move_batch_member_with_terminal(
     state: &mut GameState,
     req: ZoneMoveRequest,
-    owner: Option<BatchMemberDeliveryOwner>,
+    owner: Option<MemberDeliveryOwner>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
     let Some(object) = state.objects.get(&req.object_id) else {
@@ -1316,20 +1320,27 @@ pub(crate) fn move_component_batch_then(
         reqs,
         logical_zone_change_group,
         BatchDeliveryParking::NewChild,
+        component_delivery_parent.as_ref(),
         events,
     ) {
         BatchDeliveryResult::Done(mut logical_zone_change_group) => {
-            crate::game::triggers::complete_logical_zone_trigger_collection(
-                state,
-                &mut logical_zone_change_group,
-                &mut events[event_start..],
-            )
-            .expect("completed batch owns every terminal zone-change outcome");
-            crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
-                state,
-                &logical_zone_change_group,
-                &events[event_start..],
-            );
+            // CR 730.3 + CR 603.2c: a component batch that delivers for an
+            // announcing owner leaves its events in that owner's slice; the
+            // owner collects the one departure once. Only an unowned move's
+            // component batch is its own collector.
+            if component_delivery_parent.is_none() {
+                crate::game::triggers::complete_logical_zone_trigger_collection(
+                    state,
+                    &mut logical_zone_change_group,
+                    &mut events[event_start..],
+                )
+                .expect("completed batch owns every terminal zone-change outcome");
+                crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
+                    state,
+                    &logical_zone_change_group,
+                    &events[event_start..],
+                );
+            }
             // Synchronous completion (the common single-redirect path): run the
             // cleanup now, and surface a pause it raises to the enclosing caller.
             completion.map_or(BatchMoveResult::Done, |mut completion| {
@@ -1420,16 +1431,66 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
         .expect("pending batch record was just initialized")
 }
 
+/// CR 603.2c + CR 730.3: retain one delivered segment on its logical owner and
+/// collect its triggers there. A component batch that delivers for an
+/// announcing owner (`handback`) retains the segment only to classify its
+/// members; the announcing owner collects the departure once, from the events
+/// handed back to it.
+fn retain_batch_segment(
+    state: &mut GameState,
+    group: &mut LogicalZoneChangeGroup,
+    events: &[GameEvent],
+    handback: Option<&PendingComponentDeliveryParent>,
+) -> Result<(), String> {
+    match handback {
+        None => crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+            state, group, events,
+        ),
+        Some(_) => group.append_delivery_events(events),
+    }
+}
+
+/// CR 730.3 + CR 616.1: the boundary a paused member leaves on the logical owner
+/// that announced it. A merged member whose component batch parked is named by
+/// that child's link to this owner, so the owner parks the original member's
+/// boundary, never the component's. Otherwise the replacement record's boundary
+/// is authoritative, else the request-derived boundary with its delivered slice.
+pub(crate) fn parked_member_boundary(
+    state: &GameState,
+    owner: LogicalZoneChangeGroupId,
+    anticipated: Option<PendingZoneChangeDelivery>,
+    delivery_events: &[GameEvent],
+) -> Option<PendingZoneChangeDelivery> {
+    state
+        .active_batch_delivery()
+        .and_then(|child| child.component_delivery_parent.as_ref())
+        .filter(|link| link.parent_group_id == owner)
+        .map(|link| PendingZoneChangeDelivery::new(link.member, link.expected_event.clone()))
+        .or_else(|| state.pending_zone_change_delivery_from_replacement())
+        .or_else(|| {
+            anticipated.map(|mut boundary| {
+                boundary.append_delivery_events(delivery_events);
+                boundary
+            })
+        })
+}
+
 /// CR 603.10a + CR 616.1: shared batch delivery loop. Runs each request through
 /// `move_object_with_terminal`; on a pause, parks the prompt and stashes the
 /// undelivered tail with each request's exact heterogeneous context. The exact
 /// same logical owner flows into the parked record, which settles only after
 /// every requested move has a terminal result.
+///
+/// CR 730.3 + CR 603.2c: `handback` names the logical owner a merged
+/// permanent's component batch delivers for. That owner alone collects the
+/// departure's triggers, so a handed-back batch retains its segments without
+/// collecting them.
 fn deliver_batch(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
     mut logical_zone_change_group: LogicalZoneChangeGroup,
     parking: BatchDeliveryParking,
+    handback: Option<&PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchDeliveryResult {
     let segment_start = events.len();
@@ -1442,7 +1503,7 @@ fn deliver_batch(
         let object_id = req.object_id;
         let owner = anticipated_pause
             .as_ref()
-            .map(|paused| BatchMemberDeliveryOwner {
+            .map(|paused| MemberDeliveryOwner {
                 group: logical_zone_change_group.logical_group_id,
                 member: paused.member,
                 expected_event: None,
@@ -1459,29 +1520,19 @@ fn deliver_batch(
                 // stash the rest of the batch so no object strands. The paused
                 // object rides in `state.pending_replacement` and is delivered
                 // by the resume path.
-                let delegated = state
-                    .active_batch_delivery()
-                    .and_then(|child| child.component_delivery_parent.as_ref())
-                    .filter(|parent| {
-                        parent.parent_group_id == logical_zone_change_group.logical_group_id
-                    });
-                let mut paused_current = delegated
-                    .map(|parent| {
-                        PendingZoneChangeDelivery::new(parent.member, parent.expected_event.clone())
-                    })
-                    .or_else(|| state.pending_zone_change_delivery_from_replacement())
-                    .or_else(|| {
-                        anticipated_pause.map(|mut boundary| {
-                            boundary.append_delivery_events(&events[delivery_start..]);
-                            boundary
-                        })
-                    })
-                    .expect("parked batch zone change must retain an exact boundary");
+                let mut paused_current = parked_member_boundary(
+                    state,
+                    logical_zone_change_group.logical_group_id,
+                    anticipated_pause,
+                    &events[delivery_start..],
+                )
+                .expect("parked batch zone change must retain an exact boundary");
                 paused_current.face_down_in_exile = face_down_in_exile;
-                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                retain_batch_segment(
                     state,
                     &mut logical_zone_change_group,
                     &events[segment_start..delivery_start],
+                    handback,
                 )
                 .expect("paused batch retains its exact delivered segment");
                 stash_batch_tail(
@@ -1518,10 +1569,11 @@ fn deliver_batch(
                     boundary.face_down_in_exile = face_down_in_exile;
                     boundary
                 });
-                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                retain_batch_segment(
                     state,
                     &mut logical_zone_change_group,
                     &events[segment_start..delivery_start],
+                    handback,
                 )
                 .expect("paused Aura batch retains its exact delivered segment");
                 stash_batch_tail(
@@ -1730,10 +1782,11 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 .collect()
         };
         if let Some(ref paused_current) = paused_current {
-            crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+            retain_batch_segment(
                 state,
                 &mut logical_zone_change_group,
                 &paused_current.delivery_events,
+                component_delivery_parent.as_ref(),
             )
             .expect("resumed batch retains its exact paused delivery");
             // CR 616.1 + CR 603.10a: a resumed batch member must be classified
@@ -1764,75 +1817,46 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
             reqs,
             logical_zone_change_group,
             BatchDeliveryParking::ReparkActive,
+            component_delivery_parent.as_ref(),
             events,
         ) {
             BatchDeliveryResult::Done(mut logical_zone_change_group) => {
-                crate::game::triggers::complete_logical_zone_trigger_collection(
-                    state,
-                    &mut logical_zone_change_group,
-                    events,
-                )
-                .expect("completed batch drain owns every terminal zone-change outcome");
-                crate::game::triggers::sync_logical_zone_change_departure_stamps(
-                    &logical_zone_change_group,
-                    &mut deferred_events,
-                );
+                if component_delivery_parent.is_none() {
+                    crate::game::triggers::complete_logical_zone_trigger_collection(
+                        state,
+                        &mut logical_zone_change_group,
+                        events,
+                    )
+                    .expect("completed batch drain owns every terminal zone-change outcome");
+                    crate::game::triggers::sync_logical_zone_change_departure_stamps(
+                        &logical_zone_change_group,
+                        &mut deferred_events,
+                    );
+                } else {
+                    logical_zone_change_group
+                        .append_delivery_events(events)
+                        .expect("handed-back component batch retains its final segment");
+                }
                 deferred_events.append(events);
                 events.append(&mut deferred_events);
-                // This completed owner has already collected every one of its
-                // retained ZoneChanged occurrences.  The replacement-resume
-                // action still reaches the generic priority scan, so claim the
-                // exact occurrences now rather than collecting them a second
-                // time through that scan.
-                crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
-                    state,
-                    &logical_zone_change_group,
-                    events,
-                );
+                if component_delivery_parent.is_none() {
+                    // This completed owner has already collected every one of
+                    // its retained ZoneChanged occurrences. The
+                    // replacement-resume action still reaches the generic
+                    // priority scan, so claim the exact occurrences now rather
+                    // than collecting them a second time through that scan.
+                    crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
+                        state,
+                        &logical_zone_change_group,
+                        events,
+                    );
+                }
                 state
                     .take_active_batch_delivery()
                     .expect("settled batch delivery must own the active frame")
                     .expect("settled batch delivery frame must exist");
                 if let Some(link) = component_delivery_parent.as_ref() {
-                    let parent = state
-                        .active_batch_delivery()
-                        .expect("component child reveals its original owner");
-                    assert_eq!(
-                        parent.logical_zone_change_group.logical_group_id,
-                        link.parent_group_id
-                    );
-                    assert!(parent
-                        .paused_current
-                        .as_ref()
-                        .is_some_and(|paused| paused.captures(link.member, &link.expected_event)
-                            && paused.terminal_completion.is_none()));
-                    let index = logical_zone_change_group
-                        .prospective_battlefield_members
-                        .iter()
-                        .position(|member| member.identity == link.member)
-                        .expect("component group retains original incarnation");
-                    let terminal = match logical_zone_change_group.terminal_outcomes[index] {
-                        LogicalZoneChangeTerminalOutcome::Moved { .. } => ZoneMoveCompletion::Moved,
-                        LogicalZoneChangeTerminalOutcome::Prevented => {
-                            ZoneMoveCompletion::Prevented
-                        }
-                        LogicalZoneChangeTerminalOutcome::Remained => ZoneMoveCompletion::Remained,
-                        LogicalZoneChangeTerminalOutcome::Pending
-                        | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => panic!(
-                            "settled component handback requires a terminal original delivery"
-                        ),
-                    };
-                    assert!(state.capture_paused_zone_change_delivery(
-                        link.member,
-                        &link.expected_event,
-                        events,
-                        terminal
-                    ));
-                    crate::game::effects::settle_replaced_forwarded_zone_delivery(
-                        state,
-                        link.member,
-                        events,
-                    );
+                    hand_back_component_departure(state, link, &logical_zone_change_group);
                 }
                 // CR 603.10a + CR 616.1: logical settlement has completed before
                 // the one post-batch cleanup can run.
@@ -1865,10 +1889,13 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                     );
                     let _ = run_batch_completion(state, completion, events);
                 }
+                // CR 730.3 + CR 608.2c: the announcing owner resumes its own
+                // tail in this same drain — a batch's remaining members, or a
+                // ChangeZone iteration and the instructions after it.
                 if component_delivery_parent.is_some()
                     && matches!(state.waiting_for, WaitingFor::Priority { .. })
                 {
-                    drain_pending_batch_deliveries(state, events);
+                    crate::game::effects::resume_resolution_frames(state, events);
                 }
             }
             BatchDeliveryResult::NeedsChoice => {
@@ -1886,6 +1913,83 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 deferred_events.append(events);
                 reparking.deferred_events = deferred_events;
             }
+        }
+    }
+}
+
+/// CR 730.3 + CR 603.2c + CR 616.1: hand a merged permanent's departure back to
+/// the logical owner that announced it, now the top frame (a `BatchDelivery` or
+/// a `ChangeZone` iteration). The handed-back slice is exactly the component
+/// batch's retained delivery occurrences, so the owner collects the one
+/// departure once and nothing else from the action. While the owner's group
+/// still awaits the member, the slice and the member's single terminal outcome
+/// settle its paused boundary, which its own drain collects. A member the owner
+/// already retired because its player left the game (CR 800.4a) is not
+/// reclassified: the owner collects the slice now and still resumes its tail.
+fn hand_back_component_departure(
+    state: &mut GameState,
+    link: &PendingComponentDeliveryParent,
+    component_group: &LogicalZoneChangeGroup,
+) {
+    let departure: Vec<GameEvent> = component_group
+        .all_origin_occurrences
+        .iter()
+        .map(|occurrence| occurrence.event.clone())
+        .collect();
+    let owner_outcome = state
+        .resolution_stack
+        .component_owner_group_mut(link)
+        .expect("component child reveals its original owner")
+        .member_outcome(link.member)
+        .cloned()
+        .expect("the announcing owner announced the delegated member");
+    match owner_outcome {
+        LogicalZoneChangeTerminalOutcome::Pending => {
+            let terminal = match component_group.member_outcome(link.member) {
+                Some(LogicalZoneChangeTerminalOutcome::Moved { .. }) => ZoneMoveCompletion::Moved,
+                Some(LogicalZoneChangeTerminalOutcome::Prevented) => ZoneMoveCompletion::Prevented,
+                Some(LogicalZoneChangeTerminalOutcome::Remained) => ZoneMoveCompletion::Remained,
+                Some(
+                    LogicalZoneChangeTerminalOutcome::Pending
+                    | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft,
+                )
+                | None => {
+                    panic!("settled component handback requires a terminal original delivery")
+                }
+            };
+            assert!(state.capture_paused_zone_change_delivery(
+                link.member,
+                &link.expected_event,
+                &departure,
+                terminal
+            ));
+            crate::game::effects::settle_replaced_forwarded_zone_delivery(
+                state,
+                link.member,
+                &departure,
+            );
+        }
+        LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => {
+            let mut owner_group = state
+                .resolution_stack
+                .component_owner_group_mut(link)
+                .expect("component child reveals its original owner")
+                .clone();
+            crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                state,
+                &mut owner_group,
+                &departure,
+            )
+            .expect("the announcing owner retains the handed-back slice");
+            *state
+                .resolution_stack
+                .component_owner_group_mut(link)
+                .expect("component child reveals its original owner") = owner_group;
+        }
+        LogicalZoneChangeTerminalOutcome::Moved { .. }
+        | LogicalZoneChangeTerminalOutcome::Prevented
+        | LogicalZoneChangeTerminalOutcome::Remained => {
+            panic!("an announcing owner records a delegated member only through its handback")
         }
     }
 }
@@ -2111,7 +2215,7 @@ pub(crate) fn deliver_batch_member(
     state: &mut GameState,
     approved: ApprovedZoneChange,
     ctx: DeliveryCtx,
-    owner: Option<BatchMemberDeliveryOwner>,
+    owner: Option<MemberDeliveryOwner>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
     let track_exiled_by_source = matches!(
@@ -3879,7 +3983,7 @@ fn deliver_replaced_batch_member(
     exile_controller: Option<PlayerId>,
     track_exiled_by_source: bool,
     drain: PostReplacementDrainOwner,
-    owner: Option<BatchMemberDeliveryOwner>,
+    owner: Option<MemberDeliveryOwner>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
     // A merged permanent's departure is the only path that consumes the
@@ -4682,6 +4786,7 @@ pub(crate) fn execute_zone_move_with_controller(
         enter_attached_to,
         exile_controller,
         performed_by,
+        None,
         events,
     )
     .into_zone_move_result()
@@ -4725,6 +4830,7 @@ pub(crate) fn execute_zone_move_with_terminal(
         enter_attached_to,
         None,
         None,
+        None,
         events,
     )
 }
@@ -4749,6 +4855,8 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
     enter_attached_to: Option<AttachTarget>,
     exile_controller: Option<PlayerId>,
     performed_by: Option<PlayerId>,
+    // CR 730.3: the logical owner that announced this member's move, if any.
+    owner: Option<MemberDeliveryOwner>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
     execute_zone_move_with_applied_terminal(
@@ -4772,7 +4880,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
         exile_controller,
         performed_by,
         HashSet::new(),
-        None,
+        owner,
         events,
     )
 }
@@ -4874,7 +4982,7 @@ fn execute_zone_move_with_applied_terminal(
     // CR 608.2c + CR 406.6: the player performing this move, if any.
     performed_by: Option<PlayerId>,
     replacement_applied: HashSet<AppliedReplacementKey>,
-    owner: Option<BatchMemberDeliveryOwner>,
+    owner: Option<MemberDeliveryOwner>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
     let Some(object) = state.objects.get(&obj_id) else {
@@ -5527,6 +5635,7 @@ mod w3_library_placement_tests {
                     ExileConcealment::Public,
                     false,
                     Some(position.clone()),
+                    None,
                     None,
                     None,
                     None,

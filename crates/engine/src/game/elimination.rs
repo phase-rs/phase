@@ -10,7 +10,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
-use crate::types::resolution::OptionalEffectFrame;
+use crate::types::resolution::{OptionalEffectFrame, ZoneChangeOwnerMut};
 use crate::types::resolved_commands::{
     ResolvedPlayerLeaveCommand, ResolvedPlayerLeaveReplayInvariantError, RulesExecutionNodeRef,
 };
@@ -278,6 +278,11 @@ pub(crate) fn eliminate_players(
             super::stack::stack_object_controller(state, entry),
         )
     });
+
+    // CR 800.4a + CR 117.2e: whether a parked zone-change owner's replacement
+    // choice is the current operation as the departures begin.
+    let zone_change_pause_was_live = state.pending_replacement.is_some()
+        && state.resolution_stack.active_zone_change_owner_is_parked();
 
     let interrupted_ordinary_search = state
         .pending_scoped_library_search
@@ -557,6 +562,38 @@ pub(crate) fn eliminate_players(
                 }
             };
 
+        // CR 800.4a + CR 117.2e + CR 608.2c: a departure that canceled the
+        // current pause of a parked zone-change owner (a batch delivery or a
+        // ChangeZone iteration, or a merged permanent's component child and the
+        // owner that announced it) leaves that owner's surviving tail owed. No
+        // player has priority while it resolves, and no post-action pipeline
+        // follows a concession, so the concession resumes it here through the
+        // common priority boundary and queues what the resumed moves trigger
+        // (CR 603.2) before the deferred-trigger drain below places them.
+        if departure_triggers == DepartureTriggers::CollectedByDeparture
+            && zone_change_pause_was_live
+            && state.pending_replacement.is_none()
+            && matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && state.resolution_stack.active_zone_change_owner_is_parked()
+        {
+            let resumed_start = events.len();
+            if let Err(error) =
+                super::engine::resume_pending_continuation_if_priority(state, events)
+            {
+                tracing::error!(%error, "a canceled zone-change pause did not resume its tail");
+                debug_assert!(
+                    false,
+                    "a canceled zone-change pause did not resume its tail: {error}"
+                );
+            }
+            super::triggers::collect_unclaimed_triggers_into_deferred(
+                state,
+                events,
+                resumed_start,
+                None,
+            );
+        }
+
         if let Some(frame) = staged_optional_sacrifice_decline {
             state.push_optional_effect_frame(frame);
             super::engine_payment_choices::handle_optional_effect_choice(state, false, events)
@@ -755,14 +792,13 @@ pub(crate) fn eliminate_players(
     // surviving player's paused announcement.
     super::announcement_triggers::disown_events_through(state, events.len());
 
-    // CR 616.1 + CR 800.4a: the elimination transaction is complete. Retire a
-    // component-delivery handoff only now so a later same-leaver parent-tail
-    // member still reached its original owner during the object sweep and
-    // context retirement above. A handoff whose parent pause still captures the
-    // delegated member remains live for its replacement choice.
+    // CR 616.1 + CR 800.4a: the elimination transaction is complete. A
+    // component-delivery handoff stays the announcing owner's resume obligation
+    // even when that owner retired the delegated member; only a handoff whose
+    // owner frame is gone is cleared.
     state
         .resolution_stack
-        .retire_unanswered_component_delivery_parent();
+        .retire_orphaned_component_delivery_parent();
 }
 
 /// CR 103.5 + CR 800.4a: Prune eliminated players from the in-flight
@@ -997,6 +1033,9 @@ fn exile_owned_objects_on_player_left_game(
     // graveyard.
     let resolving_spell =
         super::stack::resolving_instant_or_sorcery_on_stack(state).map(|entry| entry.id);
+    // CR 730.3: a merged permanent's components still held by its active
+    // component child are in no zone list until delivered.
+    let held_components = state.resolution_stack.active_component_child_held_objects();
     let mut to_exile: Vec<_> = state
         .battlefield
         .iter()
@@ -1007,6 +1046,7 @@ fn exile_owned_objects_on_player_left_game(
                 .flat_map(|zone| super::targeting::zone_object_ids(state, zone)),
         )
         .chain(resolving_spell)
+        .chain(held_components)
         .filter(|id| state.objects.get(id).is_some_and(|obj| obj.owner == player))
         .collect();
     to_exile.sort_by_key(|id| id.0);
@@ -1177,55 +1217,46 @@ fn abandon_pending_zone_change_member_for_player_left(
     leaving_player: PlayerId,
 ) {
     let mut canceled_pauses = Vec::new();
-    if let Some(pending) = state
-        .active_change_zone_frame_mut()
-        .and_then(|frame| frame.pending.as_mut())
-    {
-        pending
-            .logical_zone_change_group
-            .record_abandoned_by_player_left(identity)
-            .expect("pending change-zone iteration owns a coherent logical group");
-        pending
-            .remaining
-            .retain(|member| member.object_id != identity.object_id);
-        if pending
-            .paused_current
-            .as_ref()
-            .is_some_and(|paused| paused.member == identity && paused.terminal_completion.is_none())
-        {
-            canceled_pauses.push(
-                pending
-                    .paused_current
-                    .take()
-                    .expect("checked paused delivery is present")
-                    .expected_event,
-            );
-        }
-    }
+    // CR 730.3: under a merged permanent's component child this visits the
+    // child and the batch or ChangeZone owner that announced the departure.
     state
         .resolution_stack
-        .visit_active_component_delivery_pair_mut(|pending| {
-            pending
-                .logical_zone_change_group
+        .visit_active_zone_change_owners_mut(|owner| {
+            let (group, paused_current) = match owner {
+                ZoneChangeOwnerMut::Batch(pending) => {
+                    pending.remaining.retain(|id| *id != identity.object_id);
+                    pending
+                        .requests
+                        .retain(|request| request.object_id != identity.object_id);
+                    (
+                        &mut pending.logical_zone_change_group,
+                        &mut pending.paused_current,
+                    )
+                }
+                ZoneChangeOwnerMut::ChangeZone(pending) => {
+                    pending
+                        .remaining
+                        .retain(|member| member.object_id != identity.object_id);
+                    (
+                        &mut pending.logical_zone_change_group,
+                        &mut pending.paused_current,
+                    )
+                }
+            };
+            group
                 .record_abandoned_by_player_left(identity)
-                .expect("pending batch owns a coherent logical group");
-            pending.remaining.retain(|id| *id != identity.object_id);
-            pending
-                .requests
-                .retain(|request| request.object_id != identity.object_id);
-            if pending.paused_current.as_ref().is_some_and(|paused| {
+                .expect("pending zone-change owner holds a coherent logical group");
+            if paused_current.as_ref().is_some_and(|paused| {
                 paused.member == identity && paused.terminal_completion.is_none()
             }) {
                 canceled_pauses.push(
-                    pending
-                        .paused_current
+                    paused_current
                         .take()
                         .expect("checked paused delivery is present")
                         .expected_event,
                 );
             }
-        })
-        .expect("elimination visits only an identified component delivery pair");
+        });
 
     for expected_event in canceled_pauses {
         if state
@@ -1873,22 +1904,16 @@ pub fn apply_resolved_player_leave(
 /// left before any remaining member resumes; otherwise a pre-pause latch could
 /// fire from an object that no longer exists in the game.
 fn retire_pending_zone_change_contexts_owned_by(state: &mut GameState, player: PlayerId) {
-    if let Some(pending) = state
-        .active_change_zone_frame_mut()
-        .and_then(|frame| frame.pending.as_mut())
-    {
-        pending
-            .logical_zone_change_group
-            .retire_contexts_owned_by(player);
-    }
     state
         .resolution_stack
-        .visit_active_component_delivery_pair_mut(|pending| {
-            pending
+        .visit_active_zone_change_owners_mut(|owner| match owner {
+            ZoneChangeOwnerMut::Batch(pending) => pending
                 .logical_zone_change_group
-                .retire_contexts_owned_by(player);
-        })
-        .expect("context retirement visits only an identified component delivery pair");
+                .retire_contexts_owned_by(player),
+            ZoneChangeOwnerMut::ChangeZone(pending) => pending
+                .logical_zone_change_group
+                .retire_contexts_owned_by(player),
+        });
 }
 
 /// CR 800.4a: A response prompt owned by a player who left cannot retain a
@@ -2851,8 +2876,8 @@ mod tests {
     /// exact paused obligation in a linked component pair. Both logical groups
     /// retire that identity, and the relation is retained for the whole sweep so
     /// a second leaver-owned parent-tail member still retires from the original
-    /// owner's remaining/requests. The child loses the now-unanswerable handoff
-    /// only when the transaction retires it, and the surviving tail continues.
+    /// owner's remaining/requests. The relation then stays as the owner's resume
+    /// obligation: one drain settles the child and resumes the surviving tail.
     #[test]
     fn leaving_original_member_retires_linked_component_pair_obligation() {
         let mut state = setup_three_player();
@@ -2953,9 +2978,13 @@ mod tests {
         let child = state
             .active_batch_delivery()
             .expect("the child remains the active owner");
-        assert!(
-            child.component_delivery_parent.is_none(),
-            "the completed transaction retires the unanswerable handoff"
+        assert_eq!(
+            child
+                .component_delivery_parent
+                .as_ref()
+                .map(|link| link.parent_group_id),
+            Some(parent_group_id),
+            "the owner's resume obligation survives the retired member"
         );
         assert!(child.remaining.is_empty());
         assert_eq!(
@@ -3010,13 +3039,17 @@ mod tests {
             "the child group retires the same leaving member"
         );
 
+        let restored: GameState =
+            serde_json::from_value(wire).expect("the retained obligation restores");
+        assert!(restored
+            .active_batch_delivery()
+            .is_some_and(|child| child.component_delivery_parent.is_some()));
+
         crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut state, &mut events);
         assert!(
-            state.active_batch_delivery().is_some(),
-            "the canceled child hands no obligation back to the original owner"
+            state.resolution_stack.is_empty(),
+            "the settled child resumes its owner's surviving tail in the same drain"
         );
-        crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut state, &mut events);
-        assert!(state.active_batch_delivery().is_none());
         assert_eq!(state.objects[&leaving].zone, Zone::Exile);
         assert_eq!(state.objects[&leaving_tail].zone, Zone::Exile);
         assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);

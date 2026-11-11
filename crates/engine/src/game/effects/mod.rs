@@ -2671,8 +2671,12 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             });
             let delivery_start = events.len();
             let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
+            let owner = crate::game::effects::change_zone::change_zone_member_owner(
+                logical_zone_change_group.logical_group_id,
+                anticipated_pause.as_ref(),
+            );
             match crate::game::effects::change_zone::process_one_zone_move_with_terminal(
-                state, &ctx, member, events,
+                state, &ctx, member, owner, events,
             ) {
                 crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                     logical_zone_change_group
@@ -2747,15 +2751,13 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                         WaitingFor::EntryAttackTargetChoice { .. }
                     );
                     let paused_current = (!entry_target_choice).then(|| {
-                        state
-                            .pending_zone_change_delivery_from_replacement()
-                            .or_else(|| {
-                                anticipated_pause.map(|mut boundary| {
-                                    boundary.append_delivery_events(&events[delivery_start..]);
-                                    boundary
-                                })
-                            })
-                            .expect("replacement pause must retain its exact boundary")
+                        crate::game::zone_pipeline::parked_member_boundary(
+                            state,
+                            logical_zone_change_group.logical_group_id,
+                            anticipated_pause,
+                            &events[delivery_start..],
+                        )
+                        .expect("replacement pause must retain its exact boundary")
                     });
                     let trigger_events: Vec<GameEvent> = events[events_before_drain..]
                         .iter()
@@ -29224,10 +29226,10 @@ mod tests {
         LibraryInstructionActor, LibraryPosition, ParentTargetMissingReason,
         SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
     };
+    use TargetFilter::{Or, ParentTarget, SelfRef};
 
     #[test]
     fn phase_out_context_union_dependency_proof_is_bounded() {
-        use TargetFilter::{Or, ParentTarget, SelfRef};
         for (target, expected) in [
             (
                 Or {
@@ -29327,7 +29329,6 @@ mod tests {
     // CR 115.6 + CR 608.2c + CR 609.3: zero targets omit only dependent work.
     #[test]
     fn phase_out_optional_parent_chain_preserves_independent_tail() {
-        use TargetFilter::{Or, ParentTarget, SelfRef};
         for (target, selected, stale, reaches, phases_source) in [
             (ParentTarget, false, false, false, false),
             (ParentTarget, true, false, true, false),

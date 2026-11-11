@@ -7527,8 +7527,14 @@ pub(super) fn handle_resolution_choice(
                                 ctx.face_down_in_exile,
                             );
                         let delivery_start = events.len();
+                        let stack_depth_before_zone_move =
+                            state.resolution_stack.capture_child_boundary();
+                        let owner = effects::change_zone::change_zone_member_owner(
+                            logical_zone_change_group.logical_group_id,
+                            anticipated_pause.as_ref(),
+                        );
                         match effects::change_zone::process_one_zone_move_with_terminal(
-                            state, &ctx, member, events,
+                            state, &ctx, member, owner, events,
                         ) {
                             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                                 logical_zone_change_group
@@ -7632,23 +7638,19 @@ pub(super) fn handle_resolution_choice(
                                     &events[logical_group_event_start..],
                                 )
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
-                                state.push_change_zone_iteration(
+                                let paused_current =
+                                    crate::game::zone_pipeline::parked_member_boundary(
+                                        state,
+                                        logical_zone_change_group.logical_group_id,
+                                        anticipated_pause,
+                                        &events[delivery_start..],
+                                    )
+                                    .expect("zone-change pause must retain its exact boundary");
+                                state.push_change_zone_iteration_after_child(
                                     crate::types::game_state::PendingChangeZoneIteration {
                                         pending_return_result_producer,
                                         logical_zone_change_group,
-                                        paused_current: Some(
-                                            state
-                                                .pending_zone_change_delivery_from_replacement()
-                                                .or_else(|| {
-                                                    anticipated_pause.map(|mut boundary| {
-                                                        boundary.append_delivery_events(
-                                                            &events[delivery_start..],
-                                                        );
-                                                        boundary
-                                                    })
-                                                })
-                                                .expect("zone-change pause must retain its exact boundary"),
-                                        ),
+                                        paused_current: Some(paused_current),
                                         remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
@@ -7680,6 +7682,7 @@ pub(super) fn handle_resolution_choice(
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
+                                    stack_depth_before_zone_move,
                                 );
                                 state.waiting_for =
                                     super::replacement::replacement_choice_waiting_for(
@@ -8049,8 +8052,14 @@ pub(super) fn handle_resolution_choice(
                                 ctx.face_down_in_exile,
                             );
                         let delivery_start = events.len();
+                        let stack_depth_before_zone_move =
+                            state.resolution_stack.capture_child_boundary();
+                        let owner = effects::change_zone::change_zone_member_owner(
+                            logical_zone_change_group.logical_group_id,
+                            anticipated_pause.as_ref(),
+                        );
                         match effects::change_zone::process_one_zone_move_with_terminal(
-                            state, &ctx, member, events,
+                            state, &ctx, member, owner, events,
                         ) {
                             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
                                 logical_zone_change_group
@@ -8113,23 +8122,19 @@ pub(super) fn handle_resolution_choice(
                                     &events[logical_group_event_start..],
                                 )
                                 .expect("paused cost-payment zone move retains its explicit delivery prefix");
-                                state.push_change_zone_iteration(
+                                let paused_current =
+                                    crate::game::zone_pipeline::parked_member_boundary(
+                                        state,
+                                        logical_zone_change_group.logical_group_id,
+                                        anticipated_pause,
+                                        &events[delivery_start..],
+                                    )
+                                    .expect("zone-change pause must retain its exact boundary");
+                                state.push_change_zone_iteration_after_child(
                                     crate::types::game_state::PendingChangeZoneIteration {
                                         pending_return_result_producer: None,
                                         logical_zone_change_group,
-                                        paused_current: Some(
-                                            state
-                                                .pending_zone_change_delivery_from_replacement()
-                                                .or_else(|| {
-                                                    anticipated_pause.map(|mut boundary| {
-                                                        boundary.append_delivery_events(
-                                                            &events[delivery_start..],
-                                                        );
-                                                        boundary
-                                                    })
-                                                })
-                                                .expect("zone-change pause must retain its exact boundary"),
-                                        ),
+                                        paused_current: Some(paused_current),
                                         remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
@@ -8146,6 +8151,7 @@ pub(super) fn handle_resolution_choice(
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
+                                    stack_depth_before_zone_move,
                                 );
                                 state.waiting_for =
                                     super::replacement::replacement_choice_waiting_for(

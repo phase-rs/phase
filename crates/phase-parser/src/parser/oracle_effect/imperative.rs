@@ -19715,6 +19715,7 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle::{has_unimplemented, parse_oracle_text};
 
     #[test]
     fn r2_bound_shuffle_uses_terminal_population_but_self_keeps_explicit_referent() {
@@ -26738,8 +26739,6 @@ mod tests {
     /// makes both cards parse as a bare `TargetOnly` again (no `Unimplemented`).
     #[test]
     fn choose_target_with_unparsed_restriction_is_an_honest_gap_on_printed_cards() {
-        use crate::parser::oracle::{has_unimplemented, parse_oracle_text};
-
         for (name, text, types, gap_name) in [
             (
                 "Desperate Gambit",

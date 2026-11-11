@@ -1074,7 +1074,6 @@ mod test_den_bugbear {
 
     #[test]
     fn animation_registered_subtypes_are_canonical_and_word_bounded() {
-        use crate::types::ability::ContinuousModification;
         for (printed, canonical) in [
             ("Warriors", "Warrior"),
             ("Elves", "Elf"),

@@ -24,14 +24,16 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AbilityOnsetRecord, ChangeZoneMemberEntry, CostResume, DrainStatus, DrawSequenceStack,
-    GameState, GameStateDecode, GameStateDecodeMode, ParentTargetOccurrences, PayCostKind,
-    PendingBatchDeliveries, PendingChangeZoneIteration, PendingChooseOneOf, PendingConniveReentry,
-    PendingContinuation, PendingCopyTokenResolution, PendingCounterAdditionQueue,
-    PendingCounterMoveQueue, PendingCounterRemoval, PendingCounterRemovalInFlight,
-    PendingCounterRemovalQueue, PendingDebugCardEntries, PendingEachPlayerCopyChosen,
-    PendingLifeTotalAssignment, PendingMultiDraw, PendingPerCategoryZoneChoice,
-    PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution,
-    PendingVoteBallotIteration, PostReplacementDrain, PostReplacementDrainDispatch,
+    GameState, GameStateDecode, GameStateDecodeMode, LogicalZoneChangeGroup,
+    LogicalZoneChangeTerminalOutcome, ParentTargetOccurrences, PayCostKind, PendingBatchDeliveries,
+    PendingChangeZoneIteration, PendingChooseOneOf, PendingComponentDeliveryParent,
+    PendingConniveReentry, PendingContinuation, PendingCopyTokenResolution,
+    PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemoval,
+    PendingCounterRemovalInFlight, PendingCounterRemovalQueue, PendingDebugCardEntries,
+    PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMultiDraw,
+    PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
+    PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
+    PendingZoneChangeDelivery, PostReplacementDrain, PostReplacementDrainDispatch,
     PostReplacementDrainStack, PostReplacementFrameId, RepeatIterationChoice, ResidentDrainPolicy,
     ResolvingTriggerContext, WaitingFor, ABILITY_ONSET_RECORD_FIELD,
 };
@@ -767,6 +769,13 @@ pub struct PendingCipherEncode {
     /// live board by `handle_encode_choice`, which already re-checks the chosen
     /// creature, so a host that left the battlefield meanwhile simply declines.
     pub creatures: Vec<ObjectId>,
+}
+
+/// CR 800.4a: one logical zone-change owner a player-left-game sweep retires a
+/// member from: a parked batch delivery or a paused `ChangeZone` iteration.
+pub(crate) enum ZoneChangeOwnerMut<'a> {
+    Batch(&'a mut PendingBatchDeliveries),
+    ChangeZone(&'a mut PendingChangeZoneIteration),
 }
 
 /// The ChangeZone owner plus the only sidecar that is not already embedded in
@@ -1932,17 +1941,52 @@ impl ResolutionStack {
         }
     }
 
+    /// The logical zone-change owner a frame carries, with its current pause:
+    /// a `BatchDelivery` or a paused `ChangeZone` iteration. These are the two
+    /// owners that can announce a merged permanent's departure (CR 730.3).
+    fn zone_change_owner(
+        frame: &ResolutionFrame,
+    ) -> Option<(&LogicalZoneChangeGroup, Option<&PendingZoneChangeDelivery>)> {
+        match frame {
+            ResolutionFrame::BatchDelivery(batch) => Some((
+                &batch.logical_zone_change_group,
+                batch.paused_current.as_ref(),
+            )),
+            ResolutionFrame::ChangeZone(frame) => frame.pending.as_ref().map(|pending| {
+                (
+                    &pending.logical_zone_change_group,
+                    pending.paused_current.as_ref(),
+                )
+            }),
+            _ => None,
+        }
+    }
+
+    /// CR 730.3 + CR 800.4a: a component child's link names its immediate
+    /// announcing owner. That owner either still awaits the delegated member
+    /// (its pause captures the link's exact key) or already retired the member
+    /// because its player left the game, in which case the link remains the
+    /// owner's resume obligation.
     fn validate_component_parent(
         child: &PendingBatchDeliveries,
-        parent: &PendingBatchDeliveries,
+        owner_group: &LogicalZoneChangeGroup,
+        owner_paused: Option<&PendingZoneChangeDelivery>,
     ) -> Result<(), ResolutionStackError> {
         let valid = child.component_delivery_parent.as_ref().is_some_and(|link| {
-            link.parent_group_id == parent.logical_zone_change_group.logical_group_id
+            let owner_state = match owner_group.member_outcome(link.member) {
+                Some(LogicalZoneChangeTerminalOutcome::Pending) => {
+                    owner_paused.is_some_and(|paused| {
+                        paused.captures(link.member, &link.expected_event)
+                            && paused.terminal_completion.is_none()
+                    })
+                }
+                Some(LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft) => owner_paused
+                    .is_none_or(|paused| !paused.captures(link.member, &link.expected_event)),
+                Some(_) | None => false,
+            };
+            link.parent_group_id == owner_group.logical_group_id
                 && link.parent_group_id != child.logical_zone_change_group.logical_group_id
-                && parent.paused_current.as_ref().is_some_and(|paused| {
-                    paused.captures(link.member, &link.expected_event)
-                        && paused.terminal_completion.is_none()
-                })
+                && owner_state
                 && matches!(&link.expected_event, crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, .. } if *object_id == link.member.object_id)
                 && matches!(&link.approved_event, crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, .. } if *object_id == link.member.object_id)
                 && child.logical_zone_change_group.prospective_battlefield_members.iter()
@@ -1955,6 +1999,88 @@ impl ResolutionStack {
                 frame: FrameKind::BatchDelivery,
                 message: "component delivery does not identify its immediate original owner".into(),
             })
+        }
+    }
+
+    /// CR 730.3 + CR 800.4a: the absorbed components a merged permanent's
+    /// active component child still holds — its paused member and its
+    /// undelivered tail. Until delivered they are in no zone list, yet they
+    /// are objects their owner owns.
+    pub(crate) fn active_component_child_held_objects(&self) -> Vec<ObjectId> {
+        let Some(ResolutionFrame::BatchDelivery(child)) = self.last() else {
+            return Vec::new();
+        };
+        if child.component_delivery_parent.is_none() {
+            return Vec::new();
+        }
+        child
+            .paused_current
+            .iter()
+            .map(|paused| paused.member.object_id)
+            .chain(child.remaining.iter().copied())
+            .chain(child.requests.iter().map(|request| request.object_id))
+            .collect()
+    }
+
+    /// Whether the active frame is a parked logical zone-change owner: a batch
+    /// delivery (including a merged permanent's component child) or a paused
+    /// `ChangeZone` iteration.
+    pub(crate) fn active_zone_change_owner_is_parked(&self) -> bool {
+        self.last().and_then(Self::zone_change_owner).is_some()
+    }
+
+    /// CR 616.1 + CR 730.3: the active logical zone-change owner (a batch
+    /// delivery or a paused `ChangeZone` iteration) whose current pause is this
+    /// exact member and event — the owner a resumed delivery belongs to.
+    pub(crate) fn active_owner_parking(
+        &self,
+        member: ObjectIncarnationRef,
+        expected_event: &ProposedEvent,
+    ) -> Option<crate::types::identifiers::LogicalZoneChangeGroupId> {
+        let (group, paused) = Self::zone_change_owner(self.last()?)?;
+        paused
+            .is_some_and(|paused| {
+                paused.captures(member, expected_event) && paused.terminal_completion.is_none()
+            })
+            .then_some(group.logical_group_id)
+    }
+
+    /// CR 730.3 + CR 616.1: whether the active frame is a component child that
+    /// a resumed delivery of `member` just handed its departure to: a batch
+    /// linked to `owner` for that exact member. Its handback, not the resume,
+    /// classifies the member.
+    pub(crate) fn active_component_child_of(
+        &self,
+        owner: crate::types::identifiers::LogicalZoneChangeGroupId,
+        member: ObjectIncarnationRef,
+    ) -> bool {
+        self.active_batch_delivery()
+            .and_then(|child| child.component_delivery_parent.as_ref())
+            .is_some_and(|link| link.parent_group_id == owner && link.member == member)
+    }
+
+    /// CR 730.3: the group of the announcing owner a settled component child
+    /// hands its departure back to — the frame now on top of the stack.
+    pub(crate) fn component_owner_group_mut(
+        &mut self,
+        link: &PendingComponentDeliveryParent,
+    ) -> Result<&mut LogicalZoneChangeGroup, ResolutionStackError> {
+        let group = match self.frames.last_mut() {
+            Some(ResolutionFrame::BatchDelivery(batch)) => &mut batch.logical_zone_change_group,
+            Some(ResolutionFrame::ChangeZone(frame)) => {
+                &mut frame
+                    .pending
+                    .as_mut()
+                    .ok_or(ResolutionStackError::NoActiveChild)?
+                    .logical_zone_change_group
+            }
+            Some(_) => return Err(ResolutionStackError::NoActiveChild),
+            None => return Err(ResolutionStackError::Empty),
+        };
+        if group.logical_group_id == link.parent_group_id {
+            Ok(group)
+        } else {
+            Err(ResolutionStackError::NoActiveChild)
         }
     }
 
@@ -1978,7 +2104,11 @@ impl ResolutionStack {
                 let Some(ResolutionFrame::BatchDelivery(parent)) = self.frames.get(below) else {
                     return Err(ResolutionStackError::NoActiveChild);
                 };
-                Self::validate_component_parent(child, parent)?;
+                Self::validate_component_parent(
+                    child,
+                    &parent.logical_zone_change_group,
+                    parent.paused_current.as_ref(),
+                )?;
                 if parent.logical_zone_change_group.logical_group_id != group {
                     return Err(ResolutionStackError::NoActiveChild);
                 }
@@ -2020,7 +2150,8 @@ impl ResolutionStack {
         }
         Self::validate_component_parent(
             self.active_batch_delivery().expect("checked child"),
-            &pending,
+            &pending.logical_zone_change_group,
+            pending.paused_current.as_ref(),
         )?;
         let existing = self.frames.iter().filter(|frame| matches!(frame, ResolutionFrame::BatchDelivery(batch) if batch.logical_zone_change_group.logical_group_id == group)).count();
         if existing > 0 {
@@ -2040,103 +2171,79 @@ impl ResolutionStack {
         Ok(())
     }
 
-    /// Mutably accesses a BatchDelivery owner while its exact active
-    /// component-delivery child remains linked to it. The identified parent is
-    /// retained for the complete elimination object sweep so a later
-    /// same-leaver parent-tail member can still retire from the original
-    /// owner's remaining/requests. `retire_unanswered_component_delivery_parent`
-    /// clears the handoff once the transaction finishes; this visitor never
-    /// searches for a buried parent.
-    pub(crate) fn visit_active_component_delivery_pair_mut(
+    /// CR 800.4a: visit the active logical zone-change owners a departing
+    /// player's member may belong to — the active `BatchDelivery` or paused
+    /// `ChangeZone` iteration, or, under an active component child, that child
+    /// and the announcing owner immediately beneath it (either kind). The
+    /// visitor never searches for a buried owner.
+    pub(crate) fn visit_active_zone_change_owners_mut(
         &mut self,
-        mut visit: impl FnMut(&mut PendingBatchDeliveries),
-    ) -> Result<(), ResolutionStackError> {
-        let linked = self
-            .active_batch_delivery()
-            .and_then(|child| child.component_delivery_parent.clone());
-        if let Some(link) = linked {
-            // The parent may already have completed or been pruned during an
-            // earlier member's visit. The child still needs its own visit; the
-            // dangling relation is retired by the final sweep instead of being
-            // dropped here, which would orphan a later parent-tail member.
-            if let Some(parent) = self.retained_component_parent_owner_mut(link.parent_group_id) {
-                visit(parent);
-            }
-            if let Some(child) = self.active_batch_delivery_mut() {
-                visit(child);
-            }
-        } else if let Some(active) = self.active_batch_delivery_mut() {
-            visit(active);
-        }
-        Ok(())
-    }
-
-    /// Access the immediate parent owner of a retained component handoff without
-    /// requiring its original pause to still capture the delegated member. The
-    /// elimination sweep retains the identified relation for the whole
-    /// transaction and retires it afterwards. This reads only the active top and
-    /// the frame immediately beneath it; it never scans for a buried parent.
-    fn retained_component_parent_owner_mut(
-        &mut self,
-        group: crate::types::identifiers::LogicalZoneChangeGroupId,
-    ) -> Option<&mut PendingBatchDeliveries> {
-        let top = self.frames.top()?;
-        let ResolutionFrame::BatchDelivery(_) = self.frames.get(top)? else {
-            return None;
+        mut visit: impl FnMut(ZoneChangeOwnerMut<'_>),
+    ) {
+        let Some(top) = self.frames.top() else {
+            return;
         };
-        let below = self.frames.below(top)?;
-        let ResolutionFrame::BatchDelivery(parent) = self.frames.get(below)? else {
-            return None;
-        };
-        if parent.logical_zone_change_group.logical_group_id != group {
-            return None;
-        }
-        match self.frames.get_mut(below)? {
-            ResolutionFrame::BatchDelivery(parent) => Some(parent.as_mut()),
+        let link = match self.frames.get(top) {
+            Some(ResolutionFrame::BatchDelivery(child)) => child.component_delivery_parent.clone(),
             _ => None,
+        };
+        if let Some(link) = link {
+            if let Some(below) = self.frames.below(top) {
+                match self.frames.get_mut(below) {
+                    Some(ResolutionFrame::BatchDelivery(parent))
+                        if parent.logical_zone_change_group.logical_group_id
+                            == link.parent_group_id =>
+                    {
+                        visit(ZoneChangeOwnerMut::Batch(parent.as_mut()));
+                    }
+                    Some(ResolutionFrame::ChangeZone(frame)) => {
+                        if let Some(parent) = frame.pending.as_mut().filter(|pending| {
+                            pending.logical_zone_change_group.logical_group_id
+                                == link.parent_group_id
+                        }) {
+                            visit(ZoneChangeOwnerMut::ChangeZone(parent));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        match self.frames.get_mut(top) {
+            Some(ResolutionFrame::BatchDelivery(batch)) => {
+                visit(ZoneChangeOwnerMut::Batch(batch.as_mut()));
+            }
+            Some(ResolutionFrame::ChangeZone(frame)) => {
+                if let Some(pending) = frame.pending.as_mut() {
+                    visit(ZoneChangeOwnerMut::ChangeZone(pending));
+                }
+            }
+            _ => {}
         }
     }
 
-    /// CR 616.1 + CR 800.4a: After the complete elimination object sweep and
-    /// context retirement, clear every component-delivery handoff whose original
-    /// parent pause no longer captures the delegated member (or whose parent
-    /// frame has already retired). A handoff that a surviving parent still owns
-    /// stays live for its replacement choice. A parent tail owned by the same
-    /// leaver keeps its relation until this pass, so the sweep cannot orphan it.
-    pub(crate) fn retire_unanswered_component_delivery_parent(&mut self) {
-        let mut present_groups = HashSet::new();
-        let mut captured_pauses = Vec::new();
-        for frame in self.frames.iter() {
-            let ResolutionFrame::BatchDelivery(batch) = frame else {
-                continue;
-            };
-            present_groups.insert(batch.logical_zone_change_group.logical_group_id);
-            if let Some(paused) = batch
-                .paused_current
-                .as_ref()
-                .filter(|paused| paused.terminal_completion.is_none())
-            {
-                captured_pauses.push((
-                    batch.logical_zone_change_group.logical_group_id,
-                    paused.member,
-                    paused.expected_event.clone(),
-                ));
-            }
-        }
-        for frame in self.frames.iter_mut() {
+    /// CR 616.1 + CR 800.4a: clear a component-delivery handoff only when its
+    /// announcing owner frame is no longer immediately beneath it. A handoff
+    /// whose owner retired the delegated member because its player left the
+    /// game stays: it is that owner's obligation to resume its own tail once
+    /// the child settles.
+    pub(crate) fn retire_orphaned_component_delivery_parent(&mut self) {
+        let owners: Vec<_> = self
+            .frames
+            .iter()
+            .map(|frame| Self::zone_change_owner(frame).map(|(group, _)| group.logical_group_id))
+            .collect();
+        for (index, frame) in self.frames.iter_mut().enumerate() {
             let ResolutionFrame::BatchDelivery(child) = frame else {
                 continue;
             };
             let Some(link) = child.component_delivery_parent.as_ref() else {
                 continue;
             };
-            let retained = present_groups.contains(&link.parent_group_id)
-                && captured_pauses.iter().any(|(group, member, event)| {
-                    *group == link.parent_group_id
-                        && *member == link.member
-                        && *event == link.expected_event
-                });
-            if !retained {
+            let owner_present = index
+                .checked_sub(1)
+                .and_then(|below| owners.get(below).copied().flatten())
+                == Some(link.parent_group_id);
+            if !owner_present {
                 child.component_delivery_parent = None;
             }
         }
@@ -4128,6 +4235,11 @@ impl ResolutionStack {
 
     /// Install an outer continuation immediately below the active child.
     ///
+    /// CR 730.3 + CR 608.2c: a merged permanent's component child and the
+    /// owner immediately beneath it that announced the departure are one
+    /// operation, so an outer continuation goes below that owner; the owner's
+    /// own instruction completes before the next instruction begins.
+    ///
     /// There is deliberately no fallback insertion position: callers that do
     /// not have an active child must first trace the real nesting relationship.
     pub fn insert_parent_of_active(
@@ -4138,7 +4250,19 @@ impl ResolutionStack {
             .frames
             .top()
             .ok_or(ResolutionStackError::NoActiveChild)?;
-        self.frames.insert_below(active, frame);
+        let announcing_owner = match self.frames.get(active) {
+            Some(ResolutionFrame::BatchDelivery(child)) => {
+                child.component_delivery_parent.as_ref().and_then(|link| {
+                    let below = self.frames.below(active)?;
+                    Self::zone_change_owner(self.frames.get(below)?)
+                        .is_some_and(|(group, _)| group.logical_group_id == link.parent_group_id)
+                        .then_some(below)
+                })
+            }
+            _ => None,
+        };
+        self.frames
+            .insert_below(announcing_owner.unwrap_or(active), frame);
         Ok(())
     }
 
@@ -4340,21 +4464,35 @@ impl ResolutionStack {
         for (index, frame) in self.frames.iter().enumerate() {
             if let ResolutionFrame::BatchDelivery(child) = frame {
                 if let Some(link) = &child.component_delivery_parent {
-                    let parent = index.checked_sub(1).and_then(|i| self.frames.iter().nth(i));
-                    let Some(ResolutionFrame::BatchDelivery(parent)) = parent else {
+                    let owner = index
+                        .checked_sub(1)
+                        .and_then(|i| self.frames.iter().nth(i))
+                        .and_then(Self::zone_change_owner);
+                    let Some((owner_group, owner_paused)) = owner else {
                         return Err(ResolutionStackError::InvalidPayload {
                             frame: FrameKind::BatchDelivery,
-                            message: "component delivery has no immediate batch parent".into(),
+                            message: "component delivery has no immediate announcing owner".into(),
                         });
                     };
-                    Self::validate_component_parent(child, parent)?;
+                    Self::validate_component_parent(child, owner_group, owner_paused)?;
                     for id in [
                         link.parent_group_id,
                         child.logical_zone_change_group.logical_group_id,
                     ] {
-                        if self.frames.iter().filter(|frame| matches!(frame, ResolutionFrame::BatchDelivery(batch) if batch.logical_zone_change_group.logical_group_id == id)).count() != 1 {
-                            return Err(ResolutionStackError::InvalidPayload { frame: FrameKind::BatchDelivery,
-                                message: "duplicate component delivery group".into() });
+                        if self
+                            .frames
+                            .iter()
+                            .filter(|frame| {
+                                Self::zone_change_owner(frame)
+                                    .is_some_and(|(group, _)| group.logical_group_id == id)
+                            })
+                            .count()
+                            != 1
+                        {
+                            return Err(ResolutionStackError::InvalidPayload {
+                                frame: FrameKind::BatchDelivery,
+                                message: "duplicate component delivery group".into(),
+                            });
                         }
                     }
                 }

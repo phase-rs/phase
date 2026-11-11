@@ -410,22 +410,20 @@ fn handle_replacement_choice_inner(
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
     let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
-    let batch_member_owner = parked_zone_change_delivery.as_ref().and_then(|paused| {
+    // CR 730.3: the batch or ChangeZone owner that parked this member is the
+    // announcing owner of its resumed delivery, so a merged member's component
+    // batch links back to it.
+    let parked_member_owner = parked_zone_change_delivery.as_ref().and_then(|paused| {
         state
-            .active_batch_delivery()
-            .filter(|batch| {
-                batch.paused_current.as_ref().is_some_and(|boundary| {
-                    boundary.captures(paused.member, &paused.expected_event)
-                })
+            .resolution_stack
+            .active_owner_parking(paused.member, &paused.expected_event)
+            .map(|group| crate::game::zone_pipeline::MemberDeliveryOwner {
+                group,
+                member: paused.member,
+                expected_event: Some(paused.expected_event.clone()),
             })
-            .map(
-                |batch| crate::game::zone_pipeline::BatchMemberDeliveryOwner {
-                    group: batch.logical_zone_change_group.logical_group_id,
-                    member: paused.member,
-                    expected_event: Some(paused.expected_event.clone()),
-                },
-            )
     });
+    let parked_member_owner_group = parked_member_owner.as_ref().map(|owner| owner.group);
     // CR 701.9a + CR 614.6: the paused frameless single-card discard this
     // replacement answer owns, if any (paused by a CR 616.1 choice or by a
     // single optional replacement's apply-or-decline choice).
@@ -530,7 +528,7 @@ fn handle_replacement_choice_inner(
                             drain:
                                 crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
                         },
-                        batch_member_owner,
+                        parked_member_owner,
                         events,
                     );
                     // CR 616.1 + CR 614.1c + CR 400.7: the resumed segment IS the
@@ -540,12 +538,22 @@ fn handle_replacement_choice_inner(
                     // same single-authority classifier as the synchronous path, or
                     // a tail park returns early and the batch owner later reaches
                     // `drain_pending_batch_deliveries` with `terminal_completion:
-                    // None` (issue #10431). A pre-move park (merge leave) pushes a
-                    // child batch frame that owns the pause; the member has not
-                    // moved, so its classification is `Remained`, the exact path
-                    // sees only the child, and the occurrence-level walk (gated on
-                    // `Moved`) records nothing for the parent.
-                    if let Some(paused) = parked_zone_change_delivery.as_ref() {
+                    // None` (issue #10431).
+                    // CR 730.3: a merged member whose component batch parked has
+                    // handed its departure to that linked child; the child's
+                    // handback, not this resume, classifies it for its owner.
+                    let delegated_to_component_child =
+                        parked_zone_change_delivery.as_ref().is_some_and(|paused| {
+                            parked_member_owner_group.is_some_and(|owner| {
+                                state
+                                    .resolution_stack
+                                    .active_component_child_of(owner, paused.member)
+                            })
+                        });
+                    if let Some(paused) = parked_zone_change_delivery
+                        .as_ref()
+                        .filter(|_| !delegated_to_component_child)
+                    {
                         let completion =
                             crate::game::zone_pipeline::zone_move_completion_from_delivery(
                                 paused.member,
