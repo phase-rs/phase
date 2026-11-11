@@ -121,7 +121,7 @@ const store = vi.hoisted(() => {
     addBasicLand: vi.fn(),
     removeBasicLand: vi.fn(),
     autoSuggestLands: vi.fn(),
-    submitDeck: vi.fn(),
+    submitDeck: vi.fn(async (_commanders?: string[]) => {}),
     leave: vi.fn(),
     resumeDraft: vi.fn(async () => "absent" as const),
   };
@@ -310,6 +310,7 @@ describe("DraftPodPage workspace", () => {
     store.state.role = "host";
     store.state.view.kind = "Premier";
     store.state.view.commanders_required = 0;
+    store.state.view.pod_policy = "Casual";
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1440 });
     Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 900 });
     usePreferencesStore.setState({ draftCardPreviewMode: "none", draftDoubleClickConfirmPick: true });
@@ -371,8 +372,80 @@ describe("DraftPodPage workspace", () => {
     expect(deckbuilder.onAutoSuggestLands).toBe(store.state.autoSuggestLands);
     await deckbuilder.onAutoSuggestLands?.();
     expect(store.state.autoSuggestLands).toHaveBeenCalledOnce();
-    await deckbuilder.onSubmitDeck([]);
+    let submission: Promise<void> | void = undefined;
+    act(() => {
+      submission = deckbuilder.onSubmitDeck([]);
+    });
+    expect(store.state.submitDeck).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm Submission" }));
+    await submission;
     expect(store.state.submitDeck).toHaveBeenCalledWith([]);
+  });
+
+  it("confirms a Competitive pod submission with the final-deck warning before submitting once", async () => {
+    store.state.phase = "deckbuilding";
+    store.state.view.pod_policy = "Competitive";
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const deckbuilder = captured.deckbuilder;
+    if (!isEditableDeckBuilderController(deckbuilder)) {
+      throw new Error("editable deck builder controller not installed");
+    }
+
+    let submission: Promise<void> | void = undefined;
+    act(() => {
+      submission = deckbuilder.onSubmitDeck(["Commander A"]);
+    });
+    const dialog = await screen.findByRole("alertdialog", { name: "Submit this deck?" });
+    expect(dialog).toHaveAccessibleDescription(
+      "This is a Competitive pod: your submitted deck is final for every round. You can still sideboard between games of a best-of-three match.",
+    );
+    expect(store.state.submitDeck).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Submission" }));
+    await submission;
+    expect(store.state.submitDeck).toHaveBeenCalledOnce();
+    expect(store.state.submitDeck).toHaveBeenCalledWith(["Commander A"]);
+    await vi.waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  });
+
+  it("cancels a Casual pod submission without submitting", async () => {
+    store.state.phase = "deckbuilding";
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const deckbuilder = captured.deckbuilder;
+    if (!isEditableDeckBuilderController(deckbuilder)) {
+      throw new Error("editable deck builder controller not installed");
+    }
+
+    let submission: Promise<void> | void = undefined;
+    act(() => {
+      submission = deckbuilder.onSubmitDeck([]);
+    });
+    const dialog = await screen.findByRole("alertdialog", { name: "Submit this deck?" });
+    expect(dialog).toHaveAccessibleDescription("You can still change your deck between rounds.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await submission;
+    await vi.waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(store.state.submitDeck).not.toHaveBeenCalled();
+    expect(screen.getByTestId("deckbuilder")).toBeInTheDocument();
+  });
+
+  it("rejects the deck builder's submission with the store's refusal after confirming", async () => {
+    store.state.phase = "deckbuilding";
+    store.state.submitDeck.mockRejectedValueOnce(new Error("Deck refused by host"));
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const deckbuilder = captured.deckbuilder;
+    if (!isEditableDeckBuilderController(deckbuilder)) {
+      throw new Error("editable deck builder controller not installed");
+    }
+
+    let submission: Promise<void> | void = undefined;
+    act(() => {
+      submission = deckbuilder.onSubmitDeck([]);
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm Submission" }));
+    await expect(submission).rejects.toThrow("Deck refused by host");
+    expect(store.state.submitDeck).toHaveBeenCalledOnce();
   });
 
   it("clicks Submit in the real Set-backed guest builder and forwards no commanders", async () => {
@@ -423,6 +496,7 @@ describe("DraftPodPage workspace", () => {
     const submit = screen.getByRole("button", { name: "Submit Deck" });
     expect(submit).toBeEnabled();
     fireEvent.click(submit);
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm Submission" }));
     await vi.waitFor(() => expect(store.state.submitDeck).toHaveBeenCalledWith([]));
   });
 

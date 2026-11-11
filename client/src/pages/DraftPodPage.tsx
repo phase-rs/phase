@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { MenuSelect } from "../components/ui/MenuSelect";
 import type { CardHoverInfo } from "../components/card/CardPreview";
 import { HoverCardPreview } from "../components/card/HoverCardPreview";
@@ -1349,7 +1350,15 @@ function DraftingPhaseContent({
   );
 }
 
+/** A deck submission held until the player answers the confirmation dialog. */
+interface PendingDeckSubmission {
+  commanders: string[];
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
 function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraftLayout }) {
+  const { t } = useTranslation("draft");
   const view = useMultiplayerDraftStore((s) => s.view);
   const workspace = useMultiplayerDraftStore((s) => s.workspaceState);
   const interactionLocked = useMultiplayerDraftStore((s) => s.pickInteractionLocked);
@@ -1357,6 +1366,7 @@ function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraf
   const autoSuggestLands = useMultiplayerDraftStore((s) => s.autoSuggestLands);
   const submissionError = useMultiplayerDraftStore((s) => s.error);
   const [preferences, setPreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
+  const [pendingSubmission, setPendingSubmission] = useState<PendingDeckSubmission | null>(null);
   const handlePreferencesChange = useCallback((next: DraftWorkspacePreferences) => {
     setPreferences(next);
     saveDraftWorkspacePreferences(next);
@@ -1364,25 +1374,55 @@ function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraf
 
   if (!view || !workspace) return null;
 
+  // The deck builder awaits this promise, so its submitting state and error
+  // display stay in force until the player answers the dialog: Confirm settles
+  // it with the store submission's outcome, Cancel resolves it unsubmitted.
+  const confirmSubmitDeck = (commanders: string[] = []) =>
+    new Promise<void>((resolve, reject) => setPendingSubmission({ commanders, resolve, reject }));
+  const handleConfirmSubmit = () => {
+    if (!pendingSubmission) return;
+    setPendingSubmission(null);
+    submitDeck(pendingSubmission.commanders).then(pendingSubmission.resolve, pendingSubmission.reject);
+  };
+  const handleCancelSubmit = () => {
+    pendingSubmission?.resolve();
+    setPendingSubmission(null);
+  };
+
   return (
-    <LimitedDeckBuilder
-      local={{
-        view,
-        workspace,
-        preferences,
-        interactionLocked,
-        capabilities: { kind: "editable-pool", suggestions: true },
-        onWorkspaceChange: (next) => useMultiplayerDraftStore.getState().setWorkspaceState(next),
-        onPreferencesChange: handlePreferencesChange,
-        onAddBasicLand: (name) => useMultiplayerDraftStore.getState().addBasicLand(name),
-        onRemoveBasicLand: (name) => useMultiplayerDraftStore.getState().removeBasicLand(name),
-        onAutoSuggestLands: autoSuggestLands,
-        onSubmitDeck: submitDeck,
-      }}
-      submissionError={submissionError}
-      showSuggestions
-      responsiveLayout={responsiveLayout}
-    />
+    <>
+      <LimitedDeckBuilder
+        local={{
+          view,
+          workspace,
+          preferences,
+          interactionLocked,
+          capabilities: { kind: "editable-pool", suggestions: true },
+          onWorkspaceChange: (next) => useMultiplayerDraftStore.getState().setWorkspaceState(next),
+          onPreferencesChange: handlePreferencesChange,
+          onAddBasicLand: (name) => useMultiplayerDraftStore.getState().addBasicLand(name),
+          onRemoveBasicLand: (name) => useMultiplayerDraftStore.getState().removeBasicLand(name),
+          onAutoSuggestLands: autoSuggestLands,
+          onSubmitDeck: confirmSubmitDeck,
+        }}
+        submissionError={submissionError}
+        showSuggestions
+        responsiveLayout={responsiveLayout}
+      />
+      <ConfirmDialog
+        open={pendingSubmission !== null}
+        tone="primary"
+        title={t("deckSubmitConfirm.title")}
+        message={
+          view.pod_policy === "Competitive"
+            ? t("deckSubmitConfirm.competitive")
+            : t("deckSubmitConfirm.casual")
+        }
+        confirmLabel={t("deckSubmitConfirm.confirm")}
+        onConfirm={handleConfirmSubmit}
+        onCancel={handleCancelSubmit}
+      />
+    </>
   );
 }
 
