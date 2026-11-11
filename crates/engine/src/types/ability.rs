@@ -4805,7 +4805,8 @@ impl ResolvedAbility {
     /// `(object, incarnation)`, for loop normalization to rank with the other
     /// carriers: the keyed delayed-referent pins (CR 603.7c), the positional
     /// announcement pins (CR 601.2c), the bound force-block attacker
-    /// (CR 509.1c), the granting object, the boon and exile-until batches, and
+    /// (CR 509.1c), the granting object, the boon and exile-until batches, the
+    /// objects a forwarding instruction produced or selected (CR 608.2c), and
     /// the announcement epoch of the source (CR 602.2a). That last one is a
     /// bare epoch, so the caller supplies the object it belongs to:
     /// `source_id` is the CARRIER's source, which normalization leaves in
@@ -4826,6 +4827,18 @@ impl ResolvedAbility {
             .chain(self.context.granting_object.iter_mut())
             .chain(self.context.boon_trigger_batch_objects.iter_mut())
             .chain(self.context.exile_until_batch.iter_mut())
+            .chain(
+                self.context
+                    .forwarded_result_context
+                    .iter_mut()
+                    .flat_map(|context| context.object_incarnations.iter_mut()),
+            )
+            .chain(
+                self.context
+                    .pending_forwarded_zone_result
+                    .iter_mut()
+                    .flat_map(|result| result.selected.iter_mut().flatten()),
+            )
         {
             f(pin.object_id, &mut pin.incarnation);
         }

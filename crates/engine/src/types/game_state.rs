@@ -52838,6 +52838,10 @@ mod tests {
         GrantingObject,
         BoonBatch,
         ExileUntilBatch,
+        /// CR 608.2c: the objects a forwarding instruction produced.
+        ForwardedResult,
+        /// CR 608.2c: the objects a pending forwarded zone change selected.
+        ForwardedZoneSelection,
     }
 
     /// Which ability carrier holds the ability.
@@ -52880,6 +52884,21 @@ mod tests {
                 ability.context.boon_trigger_batch_objects = vec![reference]
             }
             AbilityPinSlot::ExileUntilBatch => ability.context.exile_until_batch = vec![reference],
+            AbilityPinSlot::ForwardedResult => {
+                ability.context.forwarded_result_context =
+                    Some(Box::new(crate::types::ability::ForwardedResultContext {
+                        targets: vec![target],
+                        object_incarnations: vec![reference],
+                    }));
+            }
+            AbilityPinSlot::ForwardedZoneSelection => {
+                ability.context.pending_forwarded_zone_result =
+                    Some(crate::types::ability::PendingForwardedZoneResult {
+                        producer: x,
+                        selected: Some(vec![reference]),
+                        group: None,
+                    });
+            }
         }
         ability
     }
@@ -53385,6 +53404,16 @@ mod tests {
             "stack trigger context.exile_until_batch",
             ExileUntilBatch,
             StackTrigger
+        ),
+        ability_pin_case!(
+            "stack trigger context.forwarded_result_context",
+            ForwardedResult,
+            StackTrigger
+        ),
+        ability_pin_case!(
+            "delayed_triggers context.pending_forwarded_zone_result",
+            ForwardedZoneSelection,
+            Delayed
         ),
     ];
 
