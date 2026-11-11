@@ -354,7 +354,6 @@
     "pickNone": "None",
     "underAttack_one": "Attacked by {{count}} creature",
     "underAttack_other": "Attacked by {{count}} creatures",
-    "target": "Target",
     "sacrifice": "Sacrifice",
     "token": "Token",
     "tokenTooltip": "Token copy of a real card",
