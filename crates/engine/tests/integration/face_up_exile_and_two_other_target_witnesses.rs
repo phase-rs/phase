@@ -4,8 +4,9 @@
 //! Eternity, Time Reaper). Printed Oracle text is quoted from the card data.
 //!
 //! Infrastructure exceptions: permanents are tapped and exiled cards are turned
-//! face down by setting the object fields directly, isolating the target
-//! declaration and resolution under test.
+//! face down by setting the object fields directly, and Pull from Eternity's
+//! printed {W} cost is set to zero, isolating the target declaration and
+//! resolution under test.
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -35,14 +36,16 @@ fn face_down(runner: &mut GameRunner, id: ObjectId) {
     runner.state_mut().objects.get_mut(&id).unwrap().face_down = true;
 }
 
-/// Activate `ability_index` of `source` through the public action, assert the
-/// offered targets exclude the source itself ("other"), choose `targets` in
-/// order and resolve.
+/// Activate `ability_index` of `source` through the public action, assert it
+/// declares exactly two required target slots whose offered targets exclude the
+/// source itself ("other") and every object in `never_offered`, choose
+/// `targets` in order and resolve.
 fn activate_two_other_targets(
     runner: &mut GameRunner,
     source: ObjectId,
     ability_index: usize,
     targets: [ObjectId; 2],
+    never_offered: &[ObjectId],
 ) {
     runner
         .act(GameAction::ActivateAbility {
@@ -63,11 +66,19 @@ fn activate_two_other_targets(
                 runner.state().waiting_for
             );
         };
+        assert_eq!(target_slots.len(), 2, "exactly two targets");
+        assert!(
+            target_slots.iter().all(|slot| !slot.optional),
+            "two targets, not up to two"
+        );
         let legal = &target_slots[selection.current_slot].legal_targets;
         assert!(
             !legal.contains(&TargetRef::Object(source)),
             "\"other\" excludes the source: {legal:?}"
         );
+        for id in never_offered {
+            assert!(!legal.contains(&TargetRef::Object(*id)), "{legal:?}");
+        }
         assert!(legal.contains(&TargetRef::Object(target)), "{legal:?}");
         runner
             .act(GameAction::ChooseTarget {
@@ -80,8 +91,8 @@ fn activate_two_other_targets(
 
 /// CR 115.1 + CR 602.2b: "Untap two other target legendary creatures"
 /// declares exactly two targets, neither of them Ioreth (an untapped legendary
-/// creature, so only "other" keeps it out); both untap, and an untargeted
-/// tapped creature stays tapped.
+/// creature, so only "other" keeps it out) nor the nonlegendary bystander; both
+/// untap, and the bystander stays tapped.
 #[test]
 fn ioreth_untaps_two_other_target_legendary_creatures() {
     let mut scenario = GameScenario::new();
@@ -105,15 +116,15 @@ fn ioreth_untaps_two_other_target_legendary_creatures() {
         tap(&mut runner, id);
     }
 
-    activate_two_other_targets(&mut runner, ioreth, 1, [first, second]);
+    activate_two_other_targets(&mut runner, ioreth, 1, [first, second], &[bystander]);
     assert!(tapped(&runner, ioreth), "{{T}} is paid");
     assert!(!tapped(&runner, first));
     assert!(!tapped(&runner, second));
     assert!(tapped(&runner, bystander), "only the two targets untap");
 }
 
-/// CR 115.1 + CR 602.2b + CR 602.5d: Nimbleclaw Adept's sorcery-speed ability
-/// declares exactly two other target permanents and untaps both.
+/// CR 115.1 + CR 602.2b: Nimbleclaw Adept's ability declares exactly two other
+/// target permanents and untaps both.
 #[test]
 fn nimbleclaw_adept_untaps_two_other_target_permanents() {
     let mut scenario = GameScenario::new();
@@ -130,11 +141,60 @@ fn nimbleclaw_adept_untaps_two_other_target_permanents() {
         tap(&mut runner, id);
     }
 
-    activate_two_other_targets(&mut runner, adept, 0, [first, second]);
+    activate_two_other_targets(&mut runner, adept, 0, [first, second], &[]);
     assert!(tapped(&runner, adept), "{{T}} is paid");
     assert!(!tapped(&runner, first));
     assert!(!tapped(&runner, second));
     assert!(tapped(&runner, bystander), "only the two targets untap");
+}
+
+/// CR 602.5d: "Activate only as a sorcery": in its controller's beginning of
+/// combat step, with P0 holding priority, Nimbleclaw Adept's ability cannot be
+/// activated and nothing is tapped; in the postcombat main phase with an empty
+/// stack it can.
+#[test]
+fn nimbleclaw_adept_activates_only_as_a_sorcery() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::BeginCombat);
+    let adept = scenario
+        .add_creature_from_oracle(P0, "Nimbleclaw Adept", 2, 3, NIMBLECLAW_ADEPT)
+        .with_subtypes(vec!["Dragon", "Wizard"])
+        .id();
+    let first = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let second = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    for id in [first, second] {
+        tap(&mut runner, id);
+    }
+
+    assert_eq!(runner.state().phase, Phase::BeginCombat);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    let activate = GameAction::ActivateAbility {
+        source_id: adept,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    };
+    assert!(runner.act(activate.clone()).is_err());
+    assert!(!tapped(&runner, adept), "no cost was paid");
+    assert!(runner.state().stack.is_empty());
+    assert!(tapped(&runner, first) && tapped(&runner, second));
+
+    runner.advance_to_phase(Phase::DeclareAttackers);
+    runner
+        .declare_attackers(&[])
+        .expect("P0 declares no attackers");
+    runner.advance_to_phase(Phase::PostCombatMain);
+    assert_eq!(runner.state().phase, Phase::PostCombatMain);
+    runner
+        .act(activate)
+        .expect("the ability is activated at sorcery speed");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ));
 }
 
 /// CR 406.3 + CR 115.1: Pull from Eternity may target only a face-up exiled
