@@ -19131,6 +19131,11 @@ impl GameState {
         // CR 700.14: the caster's share is the remainder of the combined payment. Reading
         // it, rather than assuming the caster paid it all, is what keeps a helper's mana out
         // of the caster's Expend tally (and the caster's mana out of the helper's).
+        //
+        // CR 118.3a: the helper's settled units are a subset of the settled payment, so a
+        // claim larger than the payment itself fails the `helper_settled == helper_credit`
+        // conjunct below rather than underflowing this subtraction — no save can reach the
+        // remainder with a claim the payment cannot cover.
         let caster = pending.ability.controller;
         let caster_credit = settled.len().saturating_sub(helper_credit);
         let caster_settled = self.payer_settled_units(caster, &recipient);
@@ -19378,10 +19383,10 @@ impl GameState {
     /// targets a creature costs {W}{B} less to cast." is a zero-count gate over exactly
     /// those records (`filter::declared_target_fact_matches` reads the fact's zone and
     /// characteristics), so a fabricated battlefield-creature fact both consumes the gate
-    /// and qualifies a spell the announcement never qualified. The
-    /// mirror direction is refused for the same reason the absent latch is: a latch with
-    /// a declared fact deleted reads as "the cast declared nothing", which re-opens a gate
-    /// the cast already spent.
+    /// and qualifies a spell the announcement never qualified. The mirror direction — a
+    /// latch with a declared fact deleted — is refused for the same reason the absent
+    /// latch is: it reads as "the cast declared nothing", which re-opens a gate the cast
+    /// already spent.
     ///
     /// Both directions are decided against the CHAIN, never against the live board. The
     /// declared slots are what the announcement chose, they travel on the cast itself, and
