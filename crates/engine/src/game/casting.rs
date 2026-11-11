@@ -28310,7 +28310,7 @@ const MANA_ABILITY_WINDOW_WITNESS_BUDGET: usize = 256;
 /// leaves the search inconclusive rather than unpayable.
 const MAX_CANDIDATES_PER_BOARD: usize = 16;
 
-/// The board-building and payability-probe work one legal-action snapshot may
+/// The board-building and payability-probe work one legal-action enumeration may
 /// spend on [`payable_with_mana_ability_window_mana`]'s searches, across every
 /// offered ability. Each search has its own
 /// [`MANA_ABILITY_WINDOW_WITNESS_BUDGET`], but a board can carry many activatable
@@ -28318,8 +28318,11 @@ const MAX_CANDIDATES_PER_BOARD: usize = 16;
 /// snapshot budget refuses the remaining manual offers instead of running
 /// unbounded work: like an exhausted search it proves nothing, so it offers
 /// nothing (CR 733.1's reversal is not modelled, and no activation is offered
-/// on an unproven window).
-const MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET: usize = 8_192;
+/// on an unproven window). The scope is opened by the one priority-offer
+/// authority (`ai_support::candidates::priority_actions_with_probe`), so the
+/// bound covers every enumeration — the server's `legal_actions_full`, the flat
+/// priority list, and the per-seat candidate lists alike.
+pub const MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET: usize = 8_192;
 
 thread_local! {
     /// CR 601.2g: the remaining [`MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET`] while a
@@ -28343,7 +28346,12 @@ impl Drop for WindowWitnessSnapshotScope {
     }
 }
 
-/// CR 601.2g: start a legal-action snapshot's shared window-search budget.
+/// CR 601.2g: start a legal-action enumeration's shared window-search budget.
+/// Opened by the one priority-offer authority
+/// (`ai_support::candidates::priority_actions_with_probe`), which every
+/// legal-action surface reaches: `legal_actions_full`, `flat_priority_actions`
+/// and the per-seat candidate lists. Every manual offer in that enumeration
+/// draws on the returned scope's one budget.
 pub(crate) fn window_witness_snapshot_scope() -> WindowWitnessSnapshotScope {
     let previous = WINDOW_WITNESS_SNAPSHOT_REMAINING.with(|budget| {
         let previous = budget.get();
@@ -28849,6 +28857,8 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
                 if !spend_window_witness_snapshot_unit() {
                     return WitnessOutcome::BudgetExhausted;
                 }
+                #[cfg(feature = "test-support")]
+                crate::game::perf_counters::record_window_witness_probe();
                 if (self.payable)(&next, self.cost) {
                     return WitnessOutcome::Payable;
                 }
@@ -29232,6 +29242,8 @@ impl<F: Fn(&GameState, &AbilityCost) -> bool> ManaWindowWitnessSearch<'_, F> {
         if !spend_window_witness_snapshot_unit() {
             return None;
         }
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_window_witness_board();
         crate::game::perf_counters::record_state_clone_for_legality();
         Some(board.clone())
     }

@@ -111,6 +111,20 @@ pub struct PriorTargetBindingCounters {
     pub selection_bindings: u64,
 }
 
+/// Test-only counters for the CR 601.2g mana-ability-window witness search
+/// (`casting::mana_ability_window_mana_witness`). A unit is one whole-state
+/// clone the witness builds (`boards`) or one payability dry run it takes on a
+/// reached board (`probes`); together they are the work the per-snapshot budget
+/// bounds. Kept out of [`PerfCounterSnapshot`] for the same reason as the
+/// counter sets above: that struct's serialized field set powers the AI
+/// performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WindowWitnessSearchCounters {
+    pub boards: u64,
+    pub probes: u64,
+}
+
 /// Test-only counter for the CR 704.5a life-crossing read in `analysis::resource::PeriodicDelta`:
 /// how many repetitions' life charges were computed, by the one closure every reader of those
 /// charges goes through. It pins that an offer's work does not grow with a life total. Kept out of
@@ -541,6 +555,13 @@ thread_local! {
         Cell::new(PriorTargetBindingCounters {
             static_union_enumerations: 0,
             selection_bindings: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static WINDOW_WITNESS_SEARCH_COUNTERS: Cell<WindowWitnessSearchCounters> = const {
+        Cell::new(WindowWitnessSearchCounters {
+            boards: 0,
+            probes: 0,
         })
     };
     #[cfg(feature = "test-support")]
@@ -1044,6 +1065,31 @@ pub fn reset_targeted_offer_witness_counters() {
         .with(|counters| counters.set(TargetedOfferWitnessCounters::default()));
 }
 
+/// CR 601.2g: one whole-state clone built by the mana-ability-window witness.
+#[cfg(feature = "test-support")]
+pub fn record_window_witness_board() {
+    WINDOW_WITNESS_SEARCH_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.boards += 1;
+        cell.set(counters);
+    });
+}
+
+/// CR 601.2g: one payability dry run taken on a board the witness reached.
+#[cfg(feature = "test-support")]
+pub fn record_window_witness_probe() {
+    WINDOW_WITNESS_SEARCH_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.probes += 1;
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn window_witness_search_snapshot() -> WindowWitnessSearchCounters {
+    WINDOW_WITNESS_SEARCH_COUNTERS.with(Cell::get)
+}
+
 /// CR 508.1d: one solver target-table build.
 #[cfg(feature = "test-support")]
 pub fn record_attack_solver_target_table_build() {
@@ -1355,6 +1401,9 @@ pub fn reset() {
         .with(|counters| counters.set(HomogeneousTargetWalkCacheCounters::default()));
     #[cfg(feature = "test-support")]
     reset_prior_target_binding_counters();
+    #[cfg(feature = "test-support")]
+    WINDOW_WITNESS_SEARCH_COUNTERS
+        .with(|counters| counters.set(WindowWitnessSearchCounters::default()));
     #[cfg(feature = "test-support")]
     reset_declared_life_charge_counters();
     #[cfg(feature = "test-support")]

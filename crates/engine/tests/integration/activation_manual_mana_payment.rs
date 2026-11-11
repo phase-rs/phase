@@ -8,8 +8,9 @@
 
 use crate::support::shared_card_db;
 use engine::ai_support::legal_actions_full;
-use engine::game::casting::activated_ability_definitions;
+use engine::game::casting::{activated_ability_definitions, MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET};
 use engine::game::mana_abilities::is_mana_ability;
+use engine::game::perf_counters;
 use engine::game::printed_cards::rehydrate_game_from_card_db;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -7227,4 +7228,58 @@ fn a_manual_offer_locks_the_half_life_total_before_the_window() {
         in_zone(&runner, victim, Zone::Graveyard),
         "the target was destroyed"
     );
+}
+
+/// CR 601.2g (#10190 security review): one legal-action enumeration's manual
+/// offers share ONE window-search budget. Each idol's mana leg is {U} and the
+/// only window producer is Ashnod's Altar (colorless), so the color-blind
+/// `activation_window_mana_may_suffice` bound admits the search while the
+/// witness can never make it payable — each search runs to its per-verdict
+/// bound of 256 units. Sixty such abilities would spend 60 × 256 = 15,360
+/// whole-state clones/probes in one `legal_actions_full` call without the
+/// shared budget; the snapshot budget caps the total at
+/// `MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET` and refuses the unproven offers.
+#[test]
+fn one_legal_action_snapshot_bounds_the_window_witness_work() {
+    let mut scenario = scenario_at_main();
+    let idols: Vec<ObjectId> = (0..60)
+        .map(|i| {
+            scenario
+                .add_artifact_from_oracle(P0, &format!("Thirsting Idol {i}"), "{U}: Draw a card.")
+                .with_mana_cost(ManaCost::generic(2))
+                .id()
+        })
+        .collect();
+    add(&mut scenario, P0, "Ashnod's Altar", Zone::Battlefield);
+    // Distinct bodies: the Altar's sacrifice prompt then offers distinct
+    // answers, so the search branches instead of collapsing them into one.
+    for i in 0..10 {
+        scenario.add_vanilla(P0, 1 + i, 1);
+    }
+    let runner = build(scenario);
+
+    perf_counters::reset();
+    let (actions, _, _) = legal_actions_full(runner.state());
+    let counters = perf_counters::window_witness_search_snapshot();
+    let spent = counters.boards + counters.probes;
+
+    assert!(
+        spent >= MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET as u64 / 2,
+        "reach-guard: the manual offers ran the witness search across the board \
+         ({spent} units), so the cap below is not vacuous"
+    );
+    assert!(
+        spent <= MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET as u64,
+        "the enumeration's window-search work is bounded by the shared budget \
+         ({spent} units for 60 abilities, each allowed 256 alone)"
+    );
+    for &idol in &idols {
+        assert!(
+            !actions.iter().any(|action| matches!(
+                action,
+                GameAction::ActivateAbility { source_id, .. } if *source_id == idol
+            )),
+            "the {{U}} ability stays unoffered: no window can make blue"
+        );
+    }
 }

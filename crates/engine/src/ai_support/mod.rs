@@ -2539,10 +2539,10 @@ pub fn flat_priority_actions_with_probe(
 /// flat `actions` list; auto-pass consumes the flat list, while board
 /// interaction consumes the grouped map.
 pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
-    // CR 601.2g: every manual-activation offer this snapshot enumerates shares
-    // one bounded window-search budget, so an offered board's number of
-    // activatable abilities cannot multiply the witness work without limit.
-    let _window_witness_scope = crate::game::casting::window_witness_snapshot_scope();
+    // CR 601.2g: the manual-activation offers this snapshot enumerates share one
+    // bounded window-search budget. The scope is opened by the one offer
+    // authority (`candidates::priority_actions_with_probe`), not here, so the
+    // flat priority list and the per-seat candidate lists get the same bound.
     // CR 601.2h + CR 608.2c: enumerate against the replayed payment shadow so
     // the live choice remains actionable while canonical resources stay staged.
     let payment_projected;

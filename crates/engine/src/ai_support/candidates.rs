@@ -4575,6 +4575,15 @@ pub(crate) fn priority_actions_with_probe(
     player: PlayerId,
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
+    // CR 601.2g: every manual-activation offer enumerated below draws on ONE
+    // shared window-search budget, so a board carrying many activatable
+    // abilities cannot multiply the witness work of a single enumeration
+    // without bound. This is the one priority-offer authority —
+    // `legal_actions_full`, `flat_priority_actions(_with_probe)` and the
+    // per-seat candidate lists all reach the offer loops through here — so the
+    // scope bounds every legal-action enumeration, not only the server's full
+    // snapshot.
+    let _window_witness_scope = casting::window_witness_snapshot_scope();
     let mut actions = vec![candidate(
         GameAction::PassPriority,
         TacticalClass::Pass,
