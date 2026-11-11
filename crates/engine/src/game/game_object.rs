@@ -28,6 +28,7 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIdentityBinding, ObjectI
 use crate::types::keywords::{Keyword, KeywordKind, PartnerType};
 use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip, ManaType};
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::CopiedFaceUp;
 use crate::types::stickers::AppliedSticker;
 use crate::types::zones::Zone;
 
@@ -4004,7 +4005,8 @@ impl GameObject {
     /// `modal_back_face` gate does not fire. A destination parameter is not added:
     /// only the battlefield-exit value is proven, and a parameter with one proven
     /// value is speculative generality. Add it when a second transition earns its
-    /// own per-flag proof.
+    /// own per-flag proof. The two orientation flags are read through
+    /// `transform::face_up`, so a front-face-up permanent with both set reads its base.
     ///
     /// # The one flag combination that occurs, and why it is still correct
     ///
@@ -4064,7 +4066,14 @@ impl GameObject {
     /// (`zone_pipeline::apply_face_down_entry_profile`) still stores the live
     /// `printed_cards::snapshot_object_face`.
     pub fn mana_value_on_battlefield_exit(&self) -> u32 {
-        let shows_stashed_face = self.transformed || self.modal_back_face || self.face_down;
+        // CR 712.8a + CR 712.8d: a front-face-up permanent shows its front face, which is the
+        // face it keeps off the battlefield, even with both flags set (Lisette Moonmisted into
+        // Valentin).
+        let shows_stashed_face = self.face_down
+            || match crate::game::transform::face_up(self) {
+                CopiedFaceUp::Front => false,
+                CopiedFaceUp::TransformedBack | CopiedFaceUp::ModalBack => true,
+            };
         match self.back_face.as_ref().filter(|_| shows_stashed_face) {
             Some(stashed) => stashed.mana_cost.mana_value(),
             // CR 613.1: "For a card, [the characteristics are] the values printed on
@@ -5965,6 +5974,29 @@ mod tests {
             missing_stash.mana_value_on_battlefield_exit(),
             4,
             "a missing stash falls back to the baseline rather than panicking"
+        );
+
+        // CR 712.8a + CR 712.11b: a modal card cast back face up (Valentin, Dean of the Vein
+        // cast as Lisette, Dean of the Root) keeps its front face, stashed, off the battlefield.
+        let mut modal_back = exit_value_fixture(8, 4);
+        modal_back.modal_back_face = true;
+        install_stashed_face(&mut modal_back, 5);
+        assert_eq!(
+            modal_back.mana_value_on_battlefield_exit(),
+            5,
+            "a modal back face up restores its stashed front face"
+        );
+
+        // CR 712.8a + CR 712.8d: the same card transformed back to its front face (Moonmist)
+        // shows its front face, which is the base, even with both flags set.
+        let mut both_flags = exit_value_fixture(9, 1);
+        both_flags.transformed = true;
+        both_flags.modal_back_face = true;
+        install_stashed_face(&mut both_flags, 5);
+        assert_eq!(
+            both_flags.mana_value_on_battlefield_exit(),
+            1,
+            "a front-face-up permanent with both flags uses its base"
         );
     }
 

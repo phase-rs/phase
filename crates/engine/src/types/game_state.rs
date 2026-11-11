@@ -1245,7 +1245,9 @@ impl<'context, 'state> TriggerSourceRead<'context, 'state> {
 
     pub fn transformed(self) -> bool {
         match self {
-            Self::ExactLive(object) => object.transformed,
+            // CR 701.27g: a live source answers through the one "transformed permanent"
+            // authority. The latched context keeps the raw swap record.
+            Self::ExactLive(object) => crate::game::transform::is_transformed_permanent(object),
             Self::Latched(context) => context.transformed,
         }
     }
@@ -32008,7 +32010,9 @@ impl GameState {
                 is_commander: object.is_commander,
                 tapped: object.tapped,
                 face_down: object.face_down,
-                transformed: object.transformed,
+                // CR 701.27g: whether the subject was a transformed permanent when observed
+                // (`transform::is_transformed_permanent`).
+                transformed: crate::game::transform::is_transformed_permanent(object),
                 is_suspected: object.is_suspected,
                 is_renowned: object.is_renowned,
                 is_saddled: object.is_saddled,

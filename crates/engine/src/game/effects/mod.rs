@@ -17133,7 +17133,8 @@ pub(crate) fn opponent_may_selection_pool(
 
 /// CR 608.2d + CR 701.68b + CR 701.21a + CR 701.26a: the seat-bound options a seat
 /// can't take — an exact counted graveyard exile it lacks the cards for, a blight
-/// with no creature that can take the counters, or a sacrifice/tap with no legal
+/// with no creature that can take the counters (`blight::blighting_player_cannot_blight`,
+/// judged for the seat this offer binds), or a sacrifice/tap with no legal
 /// pool. The only per-seat feasibility judgment, asked when a seat is offered
 /// (through `next_offerable_seat`) and again when it accepts. `ability` is the
 /// unbound offer; the seat is bound on a clone.
@@ -17145,7 +17146,7 @@ pub(crate) fn offered_seat_cannot_accept(
     let mut bound = ability.clone();
     bind_accepting_seat(&mut bound, seat);
     change_zone::exact_scoped_graveyard_exile_is_infeasible(state, &bound) == Some(true)
-        || blight::optional_blight_is_infeasible(state, &bound)
+        || blight::blighting_player_cannot_blight(state, &bound)
         || opponent_may_selection_pool(state, &bound, seat)
             .is_some_and(|pool| pool.legal.is_empty())
 }

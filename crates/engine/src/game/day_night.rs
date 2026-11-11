@@ -1,8 +1,25 @@
+use crate::game::game_object::GameObject;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DayNight, GameState};
 use crate::types::keywords::Keyword;
+use crate::types::proposed_event::CopiedFaceUp;
 
 use super::transform;
+
+/// CR 702.145b + CR 702.145c + CR 702.145e + CR 702.145f: whether a permanent turns over for
+/// `designation`: daybound and front face up at night, nightbound and back face up during the
+/// day. "Front face up" is the face that's up (`transform::face_up`), not whether it last
+/// transformed.
+pub(crate) fn face_disagrees_with(obj: &GameObject, designation: DayNight) -> bool {
+    let front_face_up = match transform::face_up(obj) {
+        CopiedFaceUp::Front => true,
+        CopiedFaceUp::TransformedBack | CopiedFaceUp::ModalBack => false,
+    };
+    match designation {
+        DayNight::Night => obj.has_keyword(&Keyword::Daybound) && front_face_up,
+        DayNight::Day => obj.has_keyword(&Keyword::Nightbound) && !front_face_up,
+    }
+}
 
 /// Check and apply day/night transition at end of turn.
 ///
@@ -49,12 +66,10 @@ pub fn check_day_night_transition(state: &mut GameState, events: &mut Vec<GameEv
         .iter()
         .copied()
         .filter(|id| {
-            state.objects.get(id).is_some_and(|obj| match new_state {
-                // Becoming Night: transform Daybound creatures (front face -> night face)
-                DayNight::Night => obj.has_keyword(&Keyword::Daybound) && !obj.transformed,
-                // Becoming Day: transform Nightbound creatures (back face -> day face)
-                DayNight::Day => obj.has_keyword(&Keyword::Nightbound) && obj.transformed,
-            })
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| face_disagrees_with(obj, new_state))
         })
         .collect();
 
@@ -91,10 +106,10 @@ pub fn resolve_set_day_night(state: &mut GameState, to: DayNight, events: &mut V
         .iter()
         .copied()
         .filter(|id| {
-            state.objects.get(id).is_some_and(|obj| match to {
-                DayNight::Night => obj.has_keyword(&Keyword::Daybound) && !obj.transformed,
-                DayNight::Day => obj.has_keyword(&Keyword::Nightbound) && obj.transformed,
-            })
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| face_disagrees_with(obj, to))
         })
         .collect();
 

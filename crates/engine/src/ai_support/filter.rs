@@ -682,6 +682,10 @@ struct ObjectFingerprint {
     face_down: bool,
     flipped: bool,
     transformed: bool,
+    /// CR 701.27g: `FilterProp::Transformed` (Incubation Triformer's target) reads
+    /// `transform::is_transformed_permanent`, which also reads `modal_back_face` and the stored
+    /// face; the raw `transformed` above does not carry them.
+    transformed_permanent: bool,
     defense: Option<u32>,
     class_level: Option<u8>,
     room_unlocks: Option<RoomUnlockState>,
@@ -821,6 +825,7 @@ fn object_fingerprint(state: &GameState, id: ObjectId) -> Option<ObjectFingerpri
         face_down: obj.face_down,
         flipped: obj.flipped,
         transformed: obj.transformed,
+        transformed_permanent: crate::game::transform::is_transformed_permanent(obj),
         defense: obj.defense,
         class_level: obj.class_level,
         room_unlocks: obj.room_unlocks,
@@ -2550,6 +2555,43 @@ mod tests {
             object_fingerprint(&s, a),
             object_fingerprint(&s, b),
             "the gained-ability boundary must be in the fingerprint"
+        );
+    }
+
+    /// CR 701.27g: whether a permanent is a transformed permanent is part of the
+    /// fingerprint, so Incubation Triformer ("Choose target transformed Phyrexian token you
+    /// control.") never shares a memoized target verdict between a modal double-faced card
+    /// back face up and the same card front face up. The two objects store the same other
+    /// face and differ only in `modal_back_face`, which no other fingerprint field reads.
+    #[test]
+    fn fingerprint_membership_guards_transformed_permanent() {
+        use crate::game::game_object::BackFaceData;
+        use crate::types::card::LayoutKind;
+        let mut s = GameState::new_two_player(5);
+        let a = make_object(&mut s, 100, 0, "Lisette, Dean of the Root");
+        let b = make_object(&mut s, 100, 0, "Lisette, Dean of the Root");
+        for id in [a, b] {
+            s.objects.get_mut(&id).unwrap().back_face = Some(BackFaceData {
+                name: "Valentin, Dean of the Vein".to_string(),
+                layout_kind: Some(LayoutKind::Modal),
+                ..Default::default()
+            });
+        }
+        assert_eq!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "control: two equal fresh objects share a fingerprint"
+        );
+
+        s.objects.get_mut(&b).unwrap().modal_back_face = true;
+        assert!(
+            crate::game::transform::is_transformed_permanent(&s.objects[&b]),
+            "reach guard: the modal back face up is a transformed permanent"
+        );
+        assert_ne!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "whether it is a transformed permanent must be in the fingerprint"
         );
     }
 

@@ -11012,9 +11012,9 @@ fn matches_filter_prop(
         // stack entry's actual targets.
         // CR 707.2: Match face-down permanents on the battlefield.
         FilterProp::FaceDown => obj.face_down,
-        // CR 701.27g: Match transformed permanents (a transforming DFC on the
-        // battlefield with its back face up).
-        FilterProp::Transformed => obj.transformed,
+        // CR 701.27g: Match transformed permanents ("a double-faced permanent on the
+        // battlefield with its back face up"), read through the one authority.
+        FilterProp::Transformed => crate::game::transform::is_transformed_permanent(obj),
         // CR 115.9c: If the object is a stack entry, ALL of its targets must match
         // the inner filter. Falls back permissive for non-stack objects so trigger
         // matchers remain the primary authority (they validate separately).
@@ -17056,6 +17056,7 @@ mod tests {
     // CR 701.27g: `Transformed` matches only permanents whose back face is up.
     #[test]
     fn transformed_property_matches_only_transformed() {
+        use crate::types::card::LayoutKind;
         let mut state = setup();
         let transformed = add_creature(&mut state, PlayerId(0), "Back Face");
         let normal = add_creature(&mut state, PlayerId(0), "Front Face");
@@ -17070,6 +17071,110 @@ mod tests {
         assert!(
             !matches_target_filter(&state, normal, &filter, normal),
             "a non-transformed permanent must not match"
+        );
+
+        // CR 701.27g: the filter reads `transform::is_transformed_permanent`. Each object
+        // below stores an other face; the modal ones stand in for Valentin, Dean of the Vein
+        // cast as Lisette, Dean of the Root (and then Moonmisted), the Room for Mirror Room
+        // cast as Fractured Realm, the mutated one for Gemrazer mutated under a transformed
+        // Kessig Prowler.
+        let with_stash = |state: &mut GameState,
+                          name: &str,
+                          layout: LayoutKind,
+                          transformed: bool,
+                          modal_back_face: bool| {
+            let id = add_creature(state, PlayerId(0), name);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types = obj.card_types.clone();
+            obj.back_face = Some(crate::game::game_object::BackFaceData {
+                name: format!("{name} other face"),
+                layout_kind: Some(layout),
+                ..Default::default()
+            });
+            obj.transformed = transformed;
+            obj.modal_back_face = modal_back_face;
+            id
+        };
+        let modal_back = with_stash(&mut state, "Lisette", LayoutKind::Modal, false, true);
+        assert!(
+            matches_target_filter(&state, modal_back, &filter, modal_back),
+            "CR 701.27g + CR 712.11b: a modal double-faced card back face up must match"
+        );
+        let both_flags = with_stash(&mut state, "Valentin", LayoutKind::Modal, true, true);
+        assert!(
+            !matches_target_filter(&state, both_flags, &filter, both_flags),
+            "CR 701.27g: a front-face-up permanent with both flags must not match"
+        );
+        let room = with_stash(
+            &mut state,
+            "Fractured Realm",
+            LayoutKind::Split,
+            false,
+            true,
+        );
+        {
+            let obj = state.objects.get_mut(&room).unwrap();
+            obj.base_card_types = crate::types::card_type::CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Room".to_string()],
+            };
+            obj.card_types = obj.base_card_types.clone();
+        }
+        assert!(
+            !matches_target_filter(&state, room, &filter, room),
+            "CR 709.2: a Room cast as its right half is not a double-faced permanent"
+        );
+        let merged = with_stash(&mut state, "Mutated", LayoutKind::Transform, true, false);
+        state.objects.get_mut(&merged).unwrap().merge_kind =
+            Some(crate::game::game_object::MergeKind::Mutate);
+        assert!(
+            !matches_target_filter(&state, merged, &filter, merged),
+            "CR 701.27g + CR 730.2i: a merged permanent must not match"
+        );
+    }
+
+    /// CR 701.27g: an event snapshot carries the authority's answer, which its skeleton
+    /// reconstruction (`matches_target_filter_on_event_snapshot`) reads back. Synthetic: no
+    /// printed card filters a connive subject or any other event snapshot on "transformed";
+    /// the nearest printed reader of the property is Mutagen Connoisseur ("This creature gets
+    /// +1/+0 for each transformed permanent you control.").
+    #[test]
+    fn event_snapshot_carries_whether_the_subject_was_a_transformed_permanent() {
+        use crate::types::card::LayoutKind;
+        let mut state = setup();
+        let dfc = |state: &mut GameState, name: &str, transformed: bool| {
+            let id = add_creature(state, PlayerId(0), name);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_card_types = obj.card_types.clone();
+            obj.back_face = Some(crate::game::game_object::BackFaceData {
+                name: format!("{name} other face"),
+                layout_kind: Some(LayoutKind::Modal),
+                ..Default::default()
+            });
+            obj.transformed = transformed;
+            obj.modal_back_face = true;
+            id
+        };
+        let modal_back = dfc(&mut state, "Lisette", false);
+        let both_flags = dfc(&mut state, "Valentin", true);
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Transformed]));
+        let ctx = FilterContext::from_source_with_controller(modal_back, PlayerId(0));
+
+        let snapshot = |id| {
+            state
+                .capture_connive_subject(id)
+                .expect("a live object must capture a snapshot")
+                .snapshot
+        };
+        assert!(
+            matches_target_filter_on_event_snapshot(&state, &snapshot(modal_back), &filter, &ctx),
+            "a modal double-faced card back face up was a transformed permanent"
+        );
+        assert!(
+            !matches_target_filter_on_event_snapshot(&state, &snapshot(both_flags), &filter, &ctx),
+            "a front-face-up permanent with both flags was not a transformed permanent"
         );
     }
 

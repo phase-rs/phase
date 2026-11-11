@@ -40,22 +40,29 @@ fn blightable_creatures(
     })
 }
 
-/// CR 701.68b + CR 608.2d: a player unable to put the counters on a creature
-/// they control can't choose to blight, so the "you may" is an impossible option.
-/// Judged before the offer for the acting player, and for an any-player 'may', for
-/// each seat when it is offered and again when it accepts
-/// (`effects::offered_seat_cannot_accept`).
+/// CR 101.4 + CR 608.2c + CR 701.68b: the generic gate's judge of an optional blight, asked
+/// before the offer. An any-player offer's seat is bound only by that offer
+/// (`effects::offered_seat_cannot_accept`); context it inherited from an earlier accepted
+/// offer (`accepting_player`, and `scoped_player` set recursively by `bind_accepting_seat`)
+/// is not this offer's seat, so the generic gate leaves it to the fan-out, as
+/// `discard::optional_discard_is_infeasible` and `change_zone::optional_zone_pick_is_infeasible`
+/// do.
 pub(crate) fn optional_blight_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
+    if ability.optional_for.is_some() {
+        return false;
+    }
+    blighting_player_cannot_blight(state, ability)
+}
+
+/// CR 701.68b + CR 608.2d: a player unable to put the counters on a creature they control
+/// can't choose to blight, so the "you may" is an impossible option. The per-seat judge, asked
+/// on an ability whose blighting player is already bound: the acting player's "you may"
+/// (through the generic gate, [`optional_blight_is_infeasible`]), or the seat
+/// `effects::offered_seat_cannot_accept` bound on its clone.
+pub(crate) fn blighting_player_cannot_blight(state: &GameState, ability: &ResolvedAbility) -> bool {
     let Effect::BlightEffect { count, player } = &ability.effect else {
         return false;
     };
-    // CR 101.4 + CR 608.2c: an any-player "may" is the offered seat's choice, judged for each
-    // seat when it is offered and again when it accepts (`effects::offered_seat_cannot_accept`);
-    // an unbound any-player ability has no blighting player yet, and `ScopedPlayer` would fall
-    // back to the controller.
-    if ability.optional_for.is_some() && ability.context.accepting_player.is_none() {
-        return false;
-    }
     crate::game::effects::resolve_player_for_context_ref(state, ability, player)
         .is_none_or(|player| blightable_creatures(state, player, *count).next().is_none())
 }
@@ -620,8 +627,14 @@ mod tests {
     }
 
     /// Completes the eligible seat's blight and its rider: the seat chooses its
-    /// only creature, which takes one -1/-1 counter, and the controller gains 1.
-    fn finish_blight_by(state: &mut GameState, seat: PlayerId, creature: ObjectId) {
+    /// only creature, which takes one -1/-1 counter, and the controller gains 1,
+    /// ending at `controller_life`.
+    fn finish_blight_by(
+        state: &mut GameState,
+        seat: PlayerId,
+        creature: ObjectId,
+        controller_life: i32,
+    ) {
         match &state.waiting_for {
             WaitingFor::EffectZoneChoice {
                 player,
@@ -650,7 +663,7 @@ mod tests {
             Some(1)
         );
         assert_eq!(
-            state.players[0].life, 21,
+            state.players[0].life, controller_life,
             "the \"if a player does\" rider runs once"
         );
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
@@ -681,7 +694,7 @@ mod tests {
         assert_eq!(state.players[0].life, 20, "no player has blighted yet");
 
         accept(&mut state, PlayerId(1));
-        finish_blight_by(&mut state, PlayerId(1), theirs);
+        finish_blight_by(&mut state, PlayerId(1), theirs, 21);
     }
 
     /// CR 701.68b + CR 608.2d + CR 101.4: a later seat that can't blight is judged
@@ -781,6 +794,209 @@ mod tests {
         );
 
         accept(&mut state, PlayerId(1));
-        finish_blight_by(&mut state, PlayerId(1), theirs);
+        finish_blight_by(&mut state, PlayerId(1), theirs, 21);
+    }
+
+    /// The B2 typed witness: an any-player "you may gain 3 life" whose acceptor is
+    /// `ScopedPlayer`, nesting [`any_seat_blight`] under "If a player does": "Any player
+    /// may gain 3 life. If a player does, any player may blight 1. If a player does, you
+    /// gain 1 life." Synthetic: no printed card nests an any-player optional under an
+    /// accepted any-player optional (an MTGJSON scan finds none). The nearest printed
+    /// members are Carrion Wurm and Desecration Demon (the fan-out, quoted on
+    /// [`any_seat_blight`]) and Scuzzback Scrounger ("At the beginning of your first main
+    /// phase, you may blight 1. If you do, create a Treasure token.", the optional blight).
+    fn nested_any_seat_blight(source: ObjectId) -> ResolvedAbility {
+        use crate::types::ability::{
+            AbilityCondition, EffectOutcomeSignal, OpponentMayScope, QuantityExpr,
+        };
+
+        let mut nested = any_seat_blight(source, OpponentMayScope::AnyPlayer);
+        nested.condition = Some(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        });
+        let mut outer = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        outer.optional = true;
+        outer.optional_for = Some(OpponentMayScope::AnyPlayer);
+        outer.sub_ability = Some(Box::new(nested));
+        outer
+    }
+
+    /// Resolves the witness and has the controller take the outer offer, which binds
+    /// the controller as that offer's acceptor and gains it 3 life.
+    fn controller_accepts_the_outer_offer(state: &mut GameState, source: ObjectId) {
+        crate::game::effects::resolve_ability_chain(
+            state,
+            &nested_any_seat_blight(source),
+            &mut Vec::new(),
+            0,
+        )
+        .unwrap();
+        assert_offered(
+            state,
+            PlayerId(0),
+            &[PlayerId(1)],
+            "reach guard: the outer any-player offer goes to the controller first",
+        );
+        accept(state, PlayerId(0));
+        assert_eq!(
+            state.players[0].life, 23,
+            "reach guard: the accepted outer offer gained the controller 3"
+        );
+    }
+
+    /// CR 701.68b + CR 101.4 + CR 608.2c: the nested any-player blight is judged for the
+    /// seat its own offer binds, never the seat that took the earlier offer. The
+    /// controller took the outer offer and has no creature; the opponent can blight, so
+    /// the opponent is offered the nested blight, takes it, and the rider runs once.
+    #[test]
+    fn a_nested_any_player_blight_is_not_closed_by_an_ineligible_earlier_acceptor() {
+        let mut state = GameState::new_two_player(7);
+        let source = noncreature_source(&mut state);
+        let theirs = make_creature(&mut state, 2, PlayerId(1));
+
+        controller_accepts_the_outer_offer(&mut state, source);
+        assert_offered(
+            &state,
+            PlayerId(1),
+            &[],
+            "CR 701.68b: the earlier acceptor can't blight, so the opponent is offered",
+        );
+        accept(&mut state, PlayerId(1));
+        finish_blight_by(&mut state, PlayerId(1), theirs, 24);
+    }
+
+    /// CR 101.4: reach guard for the nested fan-out — an earlier acceptor that can blight
+    /// is offered the nested blight first, with the opponent queued; when it declines,
+    /// the opponent is offered.
+    #[test]
+    fn a_nested_any_player_blight_is_offered_to_an_eligible_earlier_acceptor_first() {
+        let mut state = GameState::new_two_player(7);
+        let source = noncreature_source(&mut state);
+        make_creature(&mut state, 1, PlayerId(0));
+        make_creature(&mut state, 2, PlayerId(1));
+
+        controller_accepts_the_outer_offer(&mut state, source);
+        assert_offered(
+            &state,
+            PlayerId(0),
+            &[PlayerId(1)],
+            "the controller can blight and is offered the nested blight first",
+        );
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .expect("the controller declines the nested blight");
+        assert_offered(
+            &state,
+            PlayerId(1),
+            &[],
+            "the opponent is offered after the controller declines",
+        );
+    }
+
+    /// CR 701.68b + CR 608.2c: when the only seat that can blight declines the nested
+    /// offer, no player blighted, so the nested "if a player does" rider stays closed
+    /// even though the earlier offer was performed.
+    #[test]
+    fn a_declined_nested_any_player_blight_keeps_its_rider_closed() {
+        let mut state = GameState::new_two_player(7);
+        let source = noncreature_source(&mut state);
+        make_creature(&mut state, 2, PlayerId(1));
+
+        controller_accepts_the_outer_offer(&mut state, source);
+        assert_offered(
+            &state,
+            PlayerId(1),
+            &[],
+            "reach guard: the opponent is offered the nested blight",
+        );
+        apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .expect("the opponent declines the nested blight");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "got {:?}",
+            state.waiting_for
+        );
+        assert!(state.stack.is_empty());
+        assert_eq!(
+            state.players[0].life, 23,
+            "only the outer gain applied; the nested rider stays closed"
+        );
+    }
+
+    /// CR 701.68b: when no seat can blight, the nested offer goes to no one and its
+    /// rider stays closed.
+    #[test]
+    fn a_nested_any_player_blight_no_seat_can_take_is_offered_to_no_one() {
+        let mut state = GameState::new_two_player(7);
+        let source = noncreature_source(&mut state);
+
+        controller_accepts_the_outer_offer(&mut state, source);
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "CR 701.68b: no seat can choose to blight; got {:?}",
+            state.waiting_for
+        );
+        assert!(state.stack.is_empty());
+        assert_eq!(
+            state.players[0].life, 23,
+            "only the outer gain applied; the nested rider stays closed"
+        );
+    }
+
+    /// CR 101.4 + CR 608.2c + CR 701.68b: the building block. Context an any-player
+    /// blight inherited from an earlier accepted offer is not this offer's seat: the
+    /// generic gate does not judge it, and the per-seat judge answers for whichever seat
+    /// the offer binds. The sibling — the same inherited seat on a plain "they may
+    /// blight" (no `optional_for`; nearest printed member Scuzzback Scrounger's "you may
+    /// blight 1") — is that seat's own choice, and CR 701.68b closes it.
+    #[test]
+    fn inherited_context_is_not_an_any_player_blight_offers_seat() {
+        use crate::types::ability::OpponentMayScope;
+
+        let mut state = GameState::new_two_player(7);
+        let source = noncreature_source(&mut state);
+        make_creature(&mut state, 2, PlayerId(1));
+        let mut ability = any_seat_blight(source, OpponentMayScope::AnyPlayer);
+        crate::game::effects::bind_accepting_seat(&mut ability, PlayerId(0));
+        assert_eq!(
+            ability.context.accepting_player,
+            Some(PlayerId(0)),
+            "reach guard: the ability carries an inherited acceptor"
+        );
+
+        assert!(
+            !optional_blight_is_infeasible(&state, &ability),
+            "the generic gate never judges an any-player offer"
+        );
+        assert!(
+            crate::game::effects::offered_seat_cannot_accept(&state, &ability, PlayerId(0)),
+            "CR 701.68b: the controller, offered, can't blight"
+        );
+        assert!(
+            !crate::game::effects::offered_seat_cannot_accept(&state, &ability, PlayerId(1)),
+            "the opponent, offered, can blight"
+        );
+
+        let mut sibling = ability.clone();
+        sibling.optional_for = None;
+        assert!(
+            optional_blight_is_infeasible(&state, &sibling),
+            "CR 701.68b: the bound \"they\" can't blight, so their \"may\" is impossible"
+        );
     }
 }

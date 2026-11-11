@@ -37112,6 +37112,47 @@ pub mod tests {
         ));
     }
 
+    /// CR 701.27g: a live source answers `SourceIsTransformed` through
+    /// `transform::is_transformed_permanent`, so a modal double-faced card back face up is a
+    /// transformed permanent and a front-face-up one with both flags set is not. Synthetic:
+    /// `SourceIsTransformed` has no parser producer; the nearest printed reader of
+    /// "transformed permanent" is Mutagen Connoisseur ("This creature gets +1/+0 for each
+    /// transformed permanent you control.").
+    #[test]
+    fn source_is_transformed_reads_the_face_that_is_up() {
+        let mut state = setup();
+        let modal_dfc = |state: &mut GameState, transformed: bool| {
+            let src = create_object(
+                state,
+                CardId(1),
+                PlayerId(0),
+                "Lisette, Dean of the Root".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&src).unwrap();
+            obj.back_face = Some(crate::game::game_object::BackFaceData {
+                name: "Valentin, Dean of the Vein".to_string(),
+                layout_kind: Some(crate::types::card::LayoutKind::Modal),
+                ..Default::default()
+            });
+            obj.transformed = transformed;
+            obj.modal_back_face = true;
+            src
+        };
+        let modal_back = modal_dfc(&mut state, false);
+        let both_flags = modal_dfc(&mut state, true);
+
+        let cond = TriggerCondition::SourceIsTransformed;
+        assert!(
+            check_trigger_condition(&state, &cond, PlayerId(0), Some(modal_back), None),
+            "a modal double-faced card back face up is a transformed permanent"
+        );
+        assert!(
+            !check_trigger_condition(&state, &cond, PlayerId(0), Some(both_flags), None),
+            "a front-face-up permanent with both flags is not a transformed permanent"
+        );
+    }
+
     #[test]
     fn source_is_face_up_inverse_of_face_down() {
         let mut state = setup();

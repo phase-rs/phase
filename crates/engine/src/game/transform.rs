@@ -365,6 +365,32 @@ pub(crate) fn face_up(obj: &GameObject) -> CopiedFaceUp {
     }
 }
 
+/// CR 701.27g: a "transformed permanent" is a double-faced permanent on the battlefield with
+/// its back face up. It composes the orientation authority ([`face_up`]) with the double-faced
+/// identity authority ([`is_double_faced_permanent`]), so a modal double-faced card cast back
+/// face up — Valentin, Dean of the Vein cast as Lisette, Dean of the Root — is one, and a
+/// permanent with its front face up never is, even after it transformed. Callers check the
+/// battlefield zone themselves (a filter's zone scope); this reads the object's face only.
+pub(crate) fn is_transformed_permanent(obj: &GameObject) -> bool {
+    // CR 701.27g + CR 730.2i: a melded or merged permanent is never a transformed permanent,
+    // even if it has components that are back face up.
+    if obj.merge_kind.is_some() {
+        return false;
+    }
+    match face_up(obj) {
+        // CR 701.27g: a permanent with its front face up never is, even after transforming.
+        CopiedFaceUp::Front => false,
+        // CR 701.27a: `transformed` is written only by a transform or entry back face up,
+        // which needs a transform destination (`face_swap_subject`), or by a TransformedBack
+        // token copy, a double-faced token (CR 707.8a).
+        CopiedFaceUp::TransformedBack => true,
+        // CR 709.3 + CR 709.5d: `modal_back_face` also records a split card's right half —
+        // a Room cast as its right half keeps it on the battlefield (`room::live_face_door`).
+        // CR 712.1: only a double-faced card has a face on each side; a Room is one split card (CR 709.2).
+        CopiedFaceUp::ModalBack => is_double_faced_permanent(obj),
+    }
+}
+
 /// CR 712.16 + CR 730.2j: True when `obj` is a double-faced permanent
 /// (transform/modal/meld DFC or a double-faced token) or a melded permanent —
 /// none of which can be turned face down. Used by `effects::turn_face_down` to
@@ -1060,6 +1086,73 @@ mod tests {
         assert!(
             disagreements.is_empty(),
             "is_double_faced_permanent disagrees with stored_double_face: {disagreements:#?}"
+        );
+    }
+
+    /// CR 701.27g: `is_transformed_permanent` across every `(transformed, modal_back_face)`
+    /// pair, a split card's right half and both merge kinds. The constructed objects stand in
+    /// for printed cards: `(false, true)` with a modal stash is Valentin, Dean of the Vein cast
+    /// as Lisette, Dean of the Root; `(true, true)` is that Lisette after Moonmist ("Transform
+    /// all Humans."); the split stash is Mirror Room cast as Fractured Realm.
+    #[test]
+    fn transformed_permanent_reads_the_face_that_is_up() {
+        use crate::game::game_object::MergeKind;
+        use crate::types::card::LayoutKind;
+
+        let mut state = GameState::new_two_player(42);
+        let mut row =
+            |transformed: bool, modal_back_face: bool, edit: &dyn Fn(&mut GameObject)| -> bool {
+                let id = setup_dfc(&mut state);
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.transformed = transformed;
+                obj.modal_back_face = modal_back_face;
+                edit(obj);
+                is_transformed_permanent(&state.objects[&id])
+            };
+        let modal_stash = |obj: &mut GameObject| {
+            obj.back_face.as_mut().unwrap().layout_kind = Some(LayoutKind::Modal);
+        };
+
+        // CR 701.27g: a front-face-up permanent that never transformed.
+        assert!(
+            !row(false, false, &|_| {}),
+            "(false, false) is front face up"
+        );
+        // CR 701.27g + CR 712.8e: a transformed nonmodal double-faced permanent.
+        assert!(row(true, false, &|_| {}), "(true, false) is back face up");
+        // CR 701.27g + CR 712.11b: a modal double-faced card cast back face up.
+        assert!(
+            row(false, true, &modal_stash),
+            "a modal back face up counts"
+        );
+        // CR 701.27g: "A permanent with its front face up is never considered a transformed
+        // permanent, even if it had its back face up previously."
+        assert!(
+            !row(true, true, &modal_stash),
+            "both flags set is front face up"
+        );
+        // CR 709.2 + CR 709.3: a Room cast as its right half records `modal_back_face`, but a
+        // split card is one single-faced card, never a double-faced permanent.
+        assert!(
+            !row(false, true, &|obj| {
+                obj.back_face.as_mut().unwrap().layout_kind = Some(LayoutKind::Split);
+                obj.base_card_types = CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Enchantment],
+                    subtypes: vec!["Room".to_string()],
+                };
+                obj.card_types = obj.base_card_types.clone();
+            }),
+            "a Room's right half is not a transformed permanent"
+        );
+        // CR 701.27g + CR 730.2i: a merged permanent is never one, whatever face is up.
+        assert!(
+            !row(true, false, &|obj| obj.merge_kind = Some(MergeKind::Mutate)),
+            "a mutated pile is never a transformed permanent"
+        );
+        assert!(
+            !row(true, false, &|obj| obj.merge_kind = Some(MergeKind::Meld)),
+            "a melded permanent is never a transformed permanent"
         );
     }
 

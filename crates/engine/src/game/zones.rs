@@ -2090,16 +2090,18 @@ pub(crate) fn move_to_zone_with_entry_flags(
     if to == Zone::Battlefield {
         if let Some(designation) = state.day_night {
             use crate::types::game_state::DayNight;
-            use crate::types::keywords::Keyword;
-            if let Some(obj) = state.objects.get(&object_id) {
+            if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|obj| crate::game::day_night::face_disagrees_with(obj, designation))
+            {
                 match designation {
-                    DayNight::Night if obj.has_keyword(&Keyword::Daybound) && !obj.transformed => {
+                    DayNight::Night => {
                         let _ = super::transform::enter_back_face_up(state, object_id);
                     }
-                    DayNight::Day if obj.has_keyword(&Keyword::Nightbound) && obj.transformed => {
+                    DayNight::Day => {
                         let _ = super::transform::transform_permanent(state, object_id, events);
                     }
-                    DayNight::Night | DayNight::Day => {}
                 }
             }
         }

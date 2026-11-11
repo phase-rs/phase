@@ -33,12 +33,18 @@
 //! so a token copy of it has each half's text under its own door.
 //! CR 111.10i: an Incubator token is double-faced, and a reloaded copy of one
 //! keeps its stored face's identity.
+//! CR 701.27g: a "transformed permanent" is a double-faced permanent on the battlefield
+//! with its back face up — a modal card cast back face up and its copy included, never a
+//! front-face-up permanent, a Room cast as its right half or a merged permanent.
+//! CR 702.145b + CR 702.145e: daybound and nightbound turn a permanent over by the face
+//! that is up, not by whether it last transformed.
 
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::derived_views::derive_views;
-use engine::game::game_object::{BackFaceData, RoomDoor, RoomUnlockState};
+use engine::game::game_object::{BackFaceData, MergeKind, RoomDoor, RoomUnlockState};
 use engine::game::layers::evaluate_layers;
+use engine::game::merge::MergeSide;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::transform::is_double_faced_permanent;
@@ -47,11 +53,13 @@ use engine::types::ability::{
     ChosenAttribute, Effect, RoomCopiableHalves, RoomHalfIdentity, TargetFilter, TargetRef,
     TriggerDefinition,
 };
-use engine::types::actions::GameAction;
+use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::card::LayoutKind;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastPaymentMode, GameState, ReplacementChoiceKind, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, DayNight, GameState, ReplacementChoiceKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -103,6 +111,12 @@ const FRACTURED_REALM: &str = "Fractured Realm";
 const OPALESCENCE: &str = "Opalescence";
 const GIDEON: &str = "Gideon, Ally of Zendikar";
 const SIN: &str = "Sin, Spira's Punishment";
+const CONNOISSEUR: &str = "Mutagen Connoisseur";
+const GEMRAZER: &str = "Gemrazer";
+const SCOUNDREL: &str = "Baneblade Scoundrel";
+const MARAUDER: &str = "Baneclaw Marauder";
+const INTO_THE_NIGHT: &str = "Into the Night";
+const CELESTUS: &str = "The Celestus";
 
 const AUNTIE_ORACLE: &str = "Menace\nWhenever Grub attacks, you may blight 1. If you do, create a tapped and attacking token that's a copy of the blighted creature, except it has \"At the beginning of the end step, sacrifice this token.\"\nAt the beginning of your first main phase, you may pay {B}. If you do, transform Grub.";
 const NEXUS_ORACLE: &str = "At the beginning of combat on your turn, draw a card. Then you may exile an artifact or creature card from your hand. If you do, create a token that's a copy of the exiled card, except it's a 3/3 Golem artifact creature in addition to its other types.";
@@ -151,6 +165,14 @@ const FRACTURED_REALM_ORACLE: &str = "If a triggered ability of a permanent you 
 const OPALESCENCE_ORACLE: &str = "Each other non-Aura enchantment is a creature in addition to its other types and has base power and base toughness each equal to its mana value.";
 const GIDEON_ORACLE: &str = "[+1]: Until end of turn, Gideon becomes a 5/5 Human Soldier Ally creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.\n[0]: Create a 2/2 white Knight Ally creature token.\n[−4]: You get an emblem with \"Creatures you control get +1/+1.\"";
 const SIN_ORACLE: &str = "Flying\nWhenever Sin enters or attacks, exile a permanent card from your graveyard at random, then create a tapped token that's a copy of that card. If the exiled card is a land card, repeat this process.";
+const CONNOISSEUR_ORACLE: &str =
+    "Flying, vigilance\nThis creature gets +1/+0 for each transformed permanent you control.";
+const GEMRAZER_ORACLE: &str = "Mutate {1}{G}{G} (If you cast this spell for its mutate cost, put it over or under target non-Human creature you own. They mutate into the creature on top plus all abilities from under it.)\nReach, trample\nWhenever this creature mutates, destroy target artifact or enchantment an opponent controls.";
+const SCOUNDREL_ORACLE: &str = "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nDaybound (If a player casts no spells during their own turn, it becomes night next turn.)";
+const MARAUDER_ORACLE: &str = "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nWhenever a creature blocking this creature dies, that creature's controller loses 1 life.\nNightbound (If a player casts at least two spells during their own turn, it becomes day next turn.)";
+const INTO_THE_NIGHT_ORACLE: &str =
+    "It becomes night. Discard any number of cards, then draw that many cards plus one.";
+const CELESTUS_ORACLE: &str = "If it's neither day nor night, it becomes day as The Celestus enters.\n{T}: Add one mana of any color.\n{3}, {T}: If it's night, it becomes day. Otherwise, it becomes night. Activate only as a sorcery.\nWhenever day becomes night or night becomes day, you gain 1 life. You may draw a card. If you do, discard a card.";
 const DOUBLING_SEASON_ORACLE: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
 
 /// A board at `phase`, with stocked libraries so a real draw step can't end the
@@ -2667,20 +2689,36 @@ fn tokens_entering_as_copies_of_a_transformed_permanent_are_single_faced() {
 
 /// CR 707.8a + CR 712.8f: a copy of Valentin, Dean of the Vein cast as Lisette,
 /// Dean of the Root is Lisette with Valentin stored, and the legend rule then
-/// applies (CR 704.5j).
+/// applies (CR 704.5j). CR 701.27g: each is "a double-faced permanent on the
+/// battlefield with its back face up", so Mutagen Connoisseur ("This creature
+/// gets +1/+0 for each transformed permanent you control.") counts the card, and
+/// then the token copy that is kept.
 #[test]
 fn a_copy_of_a_modal_card_cast_back_face_up_is_back_face_up() {
-    let (mut runner, (card, cackling)) = board(Phase::PreCombatMain, |scenario, db| {
-        assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
-        assert_oracle(db, LISETTE, LISETTE_ORACLE);
-        assert_oracle(db, CACKLING, CACKLING_ORACLE);
-        (
-            scenario.add_real_card(P0, VALENTIN, Zone::Hand, db),
-            scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
-        )
-    });
+    let (mut runner, (card, cackling, connoisseur)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
+            assert_oracle(db, LISETTE, LISETTE_ORACLE);
+            assert_oracle(db, CACKLING, CACKLING_ORACLE);
+            assert_oracle(db, CONNOISSEUR, CONNOISSEUR_ORACLE);
+            (
+                scenario.add_real_card(P0, VALENTIN, Zone::Hand, db),
+                scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
+                scenario.add_real_card(P0, CONNOISSEUR, Zone::Battlefield, db),
+            )
+        });
+    assert_eq!(
+        connoisseur_power(&mut runner, connoisseur),
+        0,
+        "reach guard: no transformed permanent yet"
+    );
     cast_as_lisette(&mut runner, card);
     assert_eq!(shown(&runner, card), face(LISETTE, 4, 4, false));
+    assert_eq!(
+        connoisseur_power(&mut runner, connoisseur),
+        1,
+        "CR 701.27g + CR 712.11b: Lisette, back face up, is a transformed permanent"
+    );
     fund(&mut runner, ManaType::Blue, 3);
     runner.cast(cackling).target_object(card).commit();
     both_pass(&mut runner);
@@ -2704,10 +2742,23 @@ fn a_copy_of_a_modal_card_cast_back_face_up_is_back_face_up() {
     expected.sort();
     assert_eq!(candidates, expected);
     runner
-        .act(GameAction::ChooseLegend { keep: card })
-        .expect("keeping the original must succeed");
-    assert!(!runner.state().battlefield.contains(&token));
-    assert_eq!(runner.state().objects[&card].zone, Zone::Battlefield);
+        .act(GameAction::ChooseLegend { keep: token })
+        .expect("keeping the token must succeed");
+    assert!(runner.state().battlefield.contains(&token));
+    assert_eq!(
+        runner.state().objects[&card].zone,
+        Zone::Graveyard,
+        "CR 704.5j: the original goes to the graveyard"
+    );
+    assert!(
+        runner.state().objects[&token].modal_back_face,
+        "reach guard: the kept token is back face up"
+    );
+    assert_eq!(
+        connoisseur_power(&mut runner, connoisseur),
+        1,
+        "CR 701.27g + CR 707.8a: the kept token copy, back face up, is a transformed permanent"
+    );
 }
 
 /// CR 707.9d + Soul Separator's ruling: "If the copied creature card has an
@@ -2937,20 +2988,37 @@ fn stomp_on_the_stack_is_not_double_faced() {
 /// the Root and then transformed by Moonmist shows its front face with both
 /// orientation flags set. Cackling Counterpart's copy is a double-faced token
 /// front face up, with Lisette stored, and the legend rule applies (CR 704.5j).
+/// CR 701.27g: "A permanent with its front face up is never considered a
+/// transformed permanent, even if it had its back face up previously", so Mutagen
+/// Connoisseur counts Lisette and then stops counting Valentin. CR 712.8a: off the
+/// battlefield the card is Valentin ({B}), so its exit mana value is 1 throughout.
 #[test]
 fn a_copy_of_lisette_moonmisted_into_valentin_is_double_faced_front_up() {
-    let (mut runner, (card, moonmist, cackling)) = board(Phase::PreCombatMain, |scenario, db| {
-        assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
-        assert_oracle(db, LISETTE, LISETTE_ORACLE);
-        assert_oracle(db, MOONMIST, MOONMIST_ORACLE);
-        assert_oracle(db, CACKLING, CACKLING_ORACLE);
-        (
-            scenario.add_real_card(P0, VALENTIN, Zone::Hand, db),
-            scenario.add_real_card(P0, MOONMIST, Zone::Hand, db),
-            scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
-        )
-    });
+    let (mut runner, (card, moonmist, cackling, connoisseur)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
+            assert_oracle(db, LISETTE, LISETTE_ORACLE);
+            assert_oracle(db, MOONMIST, MOONMIST_ORACLE);
+            assert_oracle(db, CACKLING, CACKLING_ORACLE);
+            assert_oracle(db, CONNOISSEUR, CONNOISSEUR_ORACLE);
+            (
+                scenario.add_real_card(P0, VALENTIN, Zone::Hand, db),
+                scenario.add_real_card(P0, MOONMIST, Zone::Hand, db),
+                scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
+                scenario.add_real_card(P0, CONNOISSEUR, Zone::Battlefield, db),
+            )
+        });
     cast_as_lisette(&mut runner, card);
+    assert_eq!(
+        connoisseur_power(&mut runner, connoisseur),
+        1,
+        "reach guard: Lisette, back face up, is a transformed permanent"
+    );
+    assert_eq!(
+        runner.state().objects[&card].mana_value_on_battlefield_exit(),
+        1,
+        "CR 712.8a: Lisette leaves as Valentin ({{B}})"
+    );
     fund(&mut runner, ManaType::Green, 2);
     runner.cast(moonmist).resolve();
     settle(&mut runner);
@@ -2959,6 +3027,21 @@ fn a_copy_of_lisette_moonmisted_into_valentin_is_double_faced_front_up() {
     assert!(
         obj.transformed && obj.modal_back_face,
         "reach-guard: the front face is up with both flags set"
+    );
+    assert_eq!(
+        obj.base_mana_cost.mana_value(),
+        1,
+        "reach guard: the front face's own mana value is Valentin's"
+    );
+    assert_eq!(
+        obj.mana_value_on_battlefield_exit(),
+        1,
+        "CR 712.8a + CR 712.8d: front face up, Valentin leaves as Valentin"
+    );
+    assert_eq!(
+        connoisseur_power(&mut runner, connoisseur),
+        0,
+        "CR 701.27g: Valentin, front face up, is not a transformed permanent"
     );
 
     fund(&mut runner, ManaType::Blue, 3);
@@ -3900,4 +3983,472 @@ fn a_reloaded_copy_of_a_transformed_incubator_with_aviators_values_cannot_be_tur
     settle(&mut runner);
     assert_not_turned_face_down(&runner, token, AVIATOR, &stored_before);
     assert_settled(&runner);
+}
+
+// ===== CR 701.27g: a transformed permanent is a double-faced permanent back face up =====
+
+/// Mutagen Connoisseur's settled power: "This creature gets +1/+0 for each
+/// transformed permanent you control." on a 0/5.
+fn connoisseur_power(runner: &mut GameRunner, connoisseur: ObjectId) -> i32 {
+    settle(runner);
+    runner.state().objects[&connoisseur]
+        .power
+        .expect("Mutagen Connoisseur has power")
+}
+
+/// CR 701.27g + CR 712.8d: the control for the modal rows. Valentin, Dean of the
+/// Vein cast front face up is not a transformed permanent, and neither is the
+/// Cackling Counterpart copy kept by the legend rule (CR 704.5j). Kessig Prowler
+/// ("{4}{G}: Transform this creature."), turned afterward, is one, so Mutagen
+/// Connoisseur's count fires on this board.
+#[test]
+fn a_modal_card_cast_front_face_up_is_not_a_transformed_permanent() {
+    let (mut runner, (card, cackling, prowler, connoisseur)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
+            assert_oracle(db, CACKLING, CACKLING_ORACLE);
+            assert_oracle(db, PROWLER, PROWLER_ORACLE);
+            assert_oracle(db, CONNOISSEUR, CONNOISSEUR_ORACLE);
+            (
+                scenario.add_real_card(P0, VALENTIN, Zone::Hand, db),
+                scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
+                scenario.add_real_card(P0, PROWLER, Zone::Battlefield, db),
+                scenario.add_real_card(P0, CONNOISSEUR, Zone::Battlefield, db),
+            )
+        });
+    fund(&mut runner, ManaType::Black, 1);
+    runner.cast(card).modal_back_face(false).commit();
+    both_pass(&mut runner);
+    assert_settled(&runner);
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&card].name, VALENTIN);
+    assert_eq!(
+        connoisseur_power(&mut runner, connoisseur),
+        0,
+        "CR 701.27g: Valentin, front face up, is not a transformed permanent"
+    );
+
+    fund(&mut runner, ManaType::Blue, 3);
+    runner.cast(cackling).target_object(card).commit();
+    both_pass(&mut runner);
+    settle(&mut runner);
+    let token = tokens(&runner)[0];
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ChooseLegend { .. }),
+        "CR 704.5j: two Valentins ask for the legend rule; got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseLegend { keep: token })
+        .expect("keeping the token must succeed");
+    assert!(runner.state().battlefield.contains(&token));
+    let obj = &runner.state().objects[&token];
+    assert!(
+        !obj.transformed && !obj.modal_back_face && is_double_faced_permanent(obj),
+        "reach guard: the kept token is a double-faced token front face up"
+    );
+    assert_eq!(
+        connoisseur_power(&mut runner, connoisseur),
+        0,
+        "CR 701.27g: the front-face-up token copy is not a transformed permanent"
+    );
+
+    turn(&mut runner, prowler, PREDATOR);
+    assert_eq!(
+        connoisseur_power(&mut runner, connoisseur),
+        1,
+        "positive control: the transformed Kessig Prowler is counted"
+    );
+}
+
+/// CR 701.27g + CR 712.8e + CR 707.8a: Kessig Prowler transformed into Sinuous
+/// Predator is a transformed permanent, and Cackling Counterpart's copy of it is a
+/// double-faced token back face up, so Mutagen Connoisseur counts both.
+#[test]
+fn a_transformed_card_and_its_token_copy_are_transformed_permanents() {
+    let (mut runner, (prowler, cackling, connoisseur)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, PROWLER, PROWLER_ORACLE);
+            assert_oracle(db, CACKLING, CACKLING_ORACLE);
+            assert_oracle(db, CONNOISSEUR, CONNOISSEUR_ORACLE);
+            (
+                scenario.add_real_card(P0, PROWLER, Zone::Battlefield, db),
+                scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
+                scenario.add_real_card(P0, CONNOISSEUR, Zone::Battlefield, db),
+            )
+        });
+    assert_eq!(connoisseur_power(&mut runner, connoisseur), 0);
+    turn(&mut runner, prowler, PREDATOR);
+    assert_eq!(connoisseur_power(&mut runner, connoisseur), 1);
+
+    fund(&mut runner, ManaType::Blue, 3);
+    runner.cast(cackling).target_object(prowler).resolve();
+    settle(&mut runner);
+    let token = tokens(&runner)[0];
+    assert!(
+        runner.state().objects[&token].transformed,
+        "reach guard: the token copy is back face up"
+    );
+    assert_eq!(
+        connoisseur_power(&mut runner, connoisseur),
+        2,
+        "CR 701.27g + CR 707.8a: the card and its token copy are each counted"
+    );
+}
+
+/// CR 709.2 + CR 709.3 + CR 701.27g: Mirror Room // Fractured Realm cast as
+/// Fractured Realm records its right half on the battlefield, but "each split card
+/// is only one card", never a double-faced permanent, so it is not a transformed
+/// permanent. The transformed Kessig Prowler keeps Mutagen Connoisseur at 1, so
+/// the Room's 0 is not vacuous.
+#[test]
+fn a_room_cast_as_its_right_half_is_not_a_transformed_permanent() {
+    let (mut runner, (room, prowler, connoisseur)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, MIRROR_ROOM, MIRROR_ROOM_ORACLE);
+        assert_oracle(db, FRACTURED_REALM, FRACTURED_REALM_ORACLE);
+        assert_oracle(db, PROWLER, PROWLER_ORACLE);
+        assert_oracle(db, CONNOISSEUR, CONNOISSEUR_ORACLE);
+        (
+            scenario.add_real_card(P0, MIRROR_ROOM, Zone::Hand, db),
+            scenario.add_real_card(P0, PROWLER, Zone::Battlefield, db),
+            scenario.add_real_card(P0, CONNOISSEUR, Zone::Battlefield, db),
+        )
+    });
+    turn(&mut runner, prowler, PREDATOR);
+    assert_eq!(connoisseur_power(&mut runner, connoisseur), 1);
+
+    fund(&mut runner, ManaType::Blue, 7);
+    runner.cast(room).modal_back_face(true).resolve();
+    settle(&mut runner);
+    assert_settled(&runner);
+    let obj = &runner.state().objects[&room];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(obj.modal_back_face, "reach guard: the right half was cast");
+    assert_eq!(
+        obj.room_unlocks,
+        Some(RoomUnlockState {
+            left_unlocked: false,
+            right_unlocked: true,
+        }),
+        "CR 709.5d: the right half is unlocked"
+    );
+    assert!(
+        !is_double_faced_permanent(obj),
+        "CR 709.2: a Room is not a double-faced permanent"
+    );
+    assert_eq!(
+        connoisseur_power(&mut runner, connoisseur),
+        1,
+        "CR 701.27g: the Room is not a transformed permanent"
+    );
+}
+
+/// CR 701.27g + CR 730.2i: Gemrazer cast for its mutate cost under a transformed
+/// Kessig Prowler makes a merged permanent. "A merged permanent is not a
+/// double-faced permanent even if it contains one or more double-faced
+/// components", so it is never a transformed permanent, though its top component
+/// is still back face up.
+#[test]
+fn a_mutated_pile_is_never_a_transformed_permanent() {
+    let (mut runner, (prowler, gemrazer, connoisseur)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, PROWLER, PROWLER_ORACLE);
+            assert_oracle(db, GEMRAZER, GEMRAZER_ORACLE);
+            assert_oracle(db, CONNOISSEUR, CONNOISSEUR_ORACLE);
+            (
+                scenario.add_real_card(P0, PROWLER, Zone::Battlefield, db),
+                scenario.add_real_card(P0, GEMRAZER, Zone::Hand, db),
+                scenario.add_real_card(P0, CONNOISSEUR, Zone::Battlefield, db),
+            )
+        });
+    turn(&mut runner, prowler, PREDATOR);
+    assert_eq!(
+        connoisseur_power(&mut runner, connoisseur),
+        1,
+        "reach guard: the transformed Prowler is counted before it mutates"
+    );
+
+    fund(&mut runner, ManaType::Green, 3);
+    runner
+        .cast(gemrazer)
+        .alternative_cast(AlternativeCastDecision::Alternative)
+        .target_object(prowler)
+        .commit();
+    both_pass(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::MutateMergeChoice { .. }
+        ),
+        "CR 702.140c: the mutating spell merges with its target, over or under; got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseMutateMergeSide {
+            side: MergeSide::Bottom,
+        })
+        .expect("putting Gemrazer under must succeed");
+    assert_settled(&runner);
+    settle(&mut runner);
+
+    let pile = &runner.state().objects[&prowler];
+    assert_eq!(pile.merge_kind, Some(MergeKind::Mutate));
+    assert_eq!(pile.merged_components.len(), 2, "reach guard: two cards");
+    assert!(
+        pile.transformed,
+        "reach guard: the top component is still back face up"
+    );
+    assert_eq!(
+        connoisseur_power(&mut runner, connoisseur),
+        0,
+        "CR 701.27g + CR 730.2i: a merged permanent is never a transformed permanent"
+    );
+}
+
+// ===== CR 702.145b/e: daybound and nightbound read the face that is up =====
+
+/// Casts Into the Night ("It becomes night. Discard any number of cards, then
+/// draw that many cards plus one.") with an empty hand and resolves it.
+fn cast_into_the_night(runner: &mut GameRunner, spell: ObjectId) {
+    fund(runner, ManaType::Red, 4);
+    runner.cast(spell).commit();
+    both_pass(runner);
+    assert_settled(runner);
+    settle(runner);
+    assert_eq!(runner.state().day_night, Some(DayNight::Night));
+}
+
+/// Activates The Celestus's "{3}, {T}: If it's night, it becomes day. Otherwise,
+/// it becomes night. Activate only as a sorcery." and resolves it.
+fn activate_celestus(runner: &mut GameRunner, celestus: ObjectId) {
+    fund(runner, ManaType::Colorless, 3);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: celestus,
+            ability_index: CELESTUS_DAY_NIGHT_ABILITY,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("The Celestus's day/night ability must be legal");
+    both_pass(runner);
+    assert_settled(runner);
+    settle(runner);
+    assert_eq!(runner.state().day_night, Some(DayNight::Day));
+}
+
+/// The index of The Celestus's "{3}, {T}" ability in the fixture parse.
+const CELESTUS_DAY_NIGHT_ABILITY: usize = 2;
+
+/// CR 702.145b: "As it becomes night, if this permanent is front face up,
+/// transform it." Valentin, Dean of the Vein cast as Lisette, Dean of the Root is
+/// back face up. Mirrorweave ("Each other creature becomes a copy of target
+/// nonlegendary creature until end of turn.") gives it Baneblade Scoundrel's
+/// daybound, and Into the Night makes it night: the Scoundrel transforms, Lisette
+/// does not.
+#[test]
+fn a_modal_card_back_face_up_with_daybound_does_not_transform_at_night() {
+    let (mut runner, (scoundrel, card, weave, night)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, SCOUNDREL, SCOUNDREL_ORACLE);
+            assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
+            assert_oracle(db, MIRRORWEAVE, MIRRORWEAVE_ORACLE);
+            assert_oracle(db, INTO_THE_NIGHT, INTO_THE_NIGHT_ORACLE);
+            (
+                scenario.add_real_card(P0, SCOUNDREL, Zone::Battlefield, db),
+                scenario.add_real_card(P0, VALENTIN, Zone::Hand, db),
+                scenario.add_real_card(P0, MIRRORWEAVE, Zone::Hand, db),
+                scenario.add_real_card(P0, INTO_THE_NIGHT, Zone::Hand, db),
+            )
+        });
+    runner.state_mut().day_night = Some(DayNight::Day);
+    cast_as_lisette(&mut runner, card);
+    fund(&mut runner, ManaType::Blue, 4);
+    runner.cast(weave).target_object(scoundrel).resolve();
+    settle(&mut runner);
+    let obj = &runner.state().objects[&card];
+    assert!(
+        obj.keywords.contains(&Keyword::Daybound) && obj.modal_back_face && !obj.transformed,
+        "reach guard: Lisette, back face up, is a daybound copy"
+    );
+
+    cast_into_the_night(&mut runner, night);
+    let scoundrel_obj = &runner.state().objects[&scoundrel];
+    assert!(
+        scoundrel_obj.transformed,
+        "positive control: the Scoundrel, front face up, transforms"
+    );
+    assert_eq!(stored_face(&runner, scoundrel).name, SCOUNDREL);
+    let obj = &runner.state().objects[&card];
+    assert!(
+        !obj.transformed,
+        "CR 702.145b: back face up, the Lisette copy does not transform"
+    );
+    assert_eq!(stored_face(&runner, card).name, VALENTIN);
+}
+
+/// CR 702.145b: Lisette, Dean of the Root Moonmisted into Valentin, Dean of the
+/// Vein is front face up with both orientation flags set. Made a copy of Baneblade
+/// Scoundrel by Mirrorweave, it is daybound and front face up, so it transforms
+/// when Into the Night makes it night.
+#[test]
+fn a_front_face_up_daybound_copy_with_both_flags_transforms_at_night() {
+    let (mut runner, (card, moonmist, scoundrel, weave, night)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
+            assert_oracle(db, MOONMIST, MOONMIST_ORACLE);
+            assert_oracle(db, SCOUNDREL, SCOUNDREL_ORACLE);
+            assert_oracle(db, MIRRORWEAVE, MIRRORWEAVE_ORACLE);
+            assert_oracle(db, INTO_THE_NIGHT, INTO_THE_NIGHT_ORACLE);
+            (
+                scenario.add_real_card(P0, VALENTIN, Zone::Hand, db),
+                scenario.add_real_card(P0, MOONMIST, Zone::Hand, db),
+                scenario.add_real_card(P0, SCOUNDREL, Zone::Hand, db),
+                scenario.add_real_card(P0, MIRRORWEAVE, Zone::Hand, db),
+                scenario.add_real_card(P0, INTO_THE_NIGHT, Zone::Hand, db),
+            )
+        });
+    runner.state_mut().day_night = Some(DayNight::Day);
+    cast_as_lisette(&mut runner, card);
+    fund(&mut runner, ManaType::Green, 2);
+    runner.cast(moonmist).resolve();
+    settle(&mut runner);
+    fund(&mut runner, ManaType::Black, 4);
+    runner.cast(scoundrel).resolve();
+    settle(&mut runner);
+    assert!(!runner.state().objects[&scoundrel].transformed);
+    fund(&mut runner, ManaType::Blue, 4);
+    runner.cast(weave).target_object(scoundrel).resolve();
+    settle(&mut runner);
+    let obj = &runner.state().objects[&card];
+    assert!(
+        obj.keywords.contains(&Keyword::Daybound) && obj.transformed && obj.modal_back_face,
+        "reach guard: Valentin, front face up with both flags, is a daybound copy"
+    );
+
+    cast_into_the_night(&mut runner, night);
+    assert!(
+        runner.state().objects[&scoundrel].transformed,
+        "positive control: the Scoundrel transforms"
+    );
+    assert_eq!(stored_face(&runner, scoundrel).name, SCOUNDREL);
+    let obj = &runner.state().objects[&card];
+    assert!(
+        !obj.transformed && obj.modal_back_face,
+        "CR 702.145b: front face up, the Valentin copy transforms to its back face"
+    );
+    assert_eq!(stored_face(&runner, card).name, VALENTIN);
+}
+
+/// CR 702.145e: "As it becomes day, if this permanent is back face up, transform
+/// it." At night Baneblade Scoundrel enters as Baneclaw Marauder (CR 702.145b: "If
+/// it is night … it enters transformed"). Valentin, Dean of the Vein cast as
+/// Lisette, Dean of the Root is back face up; Mirrorweave makes it a copy of the
+/// Marauder, so it is nightbound, and The Celestus makes it day: it transforms.
+#[test]
+fn a_modal_card_back_face_up_with_nightbound_transforms_at_day() {
+    let (mut runner, (celestus, scoundrel, card, weave)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, CELESTUS, CELESTUS_ORACLE);
+            assert_oracle(db, SCOUNDREL, SCOUNDREL_ORACLE);
+            assert_oracle(db, MARAUDER, MARAUDER_ORACLE);
+            assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
+            assert_oracle(db, MIRRORWEAVE, MIRRORWEAVE_ORACLE);
+            (
+                scenario.add_real_card(P0, CELESTUS, Zone::Battlefield, db),
+                scenario.add_real_card(P0, SCOUNDREL, Zone::Hand, db),
+                scenario.add_real_card(P0, VALENTIN, Zone::Hand, db),
+                scenario.add_real_card(P0, MIRRORWEAVE, Zone::Hand, db),
+            )
+        });
+    runner.state_mut().day_night = Some(DayNight::Night);
+    enter_scoundrel_at_night(&mut runner, scoundrel);
+    cast_as_lisette(&mut runner, card);
+    fund(&mut runner, ManaType::Blue, 4);
+    runner.cast(weave).target_object(scoundrel).resolve();
+    settle(&mut runner);
+    let obj = &runner.state().objects[&card];
+    assert!(
+        obj.keywords.contains(&Keyword::Nightbound) && obj.modal_back_face && !obj.transformed,
+        "reach guard: Lisette, back face up, is a nightbound copy"
+    );
+
+    activate_celestus(&mut runner, celestus);
+    assert_scoundrel_turned_back(&runner, scoundrel);
+    let obj = &runner.state().objects[&card];
+    assert!(
+        obj.transformed && obj.modal_back_face,
+        "CR 702.145e: back face up, the Lisette copy transforms to its front face"
+    );
+    assert_eq!(stored_face(&runner, card).name, LISETTE);
+}
+
+/// CR 702.145e: the nightbound sibling of the both-flags row. Lisette, Dean of the
+/// Root Moonmisted into Valentin, Dean of the Vein is front face up; Mirrorweave
+/// makes it a copy of Baneclaw Marauder, and when The Celestus makes it day it is
+/// not back face up, so it does not transform.
+#[test]
+fn a_front_face_up_nightbound_copy_with_both_flags_does_not_transform_at_day() {
+    let (mut runner, (celestus, card, moonmist, scoundrel, weave)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, CELESTUS, CELESTUS_ORACLE);
+            assert_oracle(db, VALENTIN, VALENTIN_ORACLE);
+            assert_oracle(db, MOONMIST, MOONMIST_ORACLE);
+            assert_oracle(db, SCOUNDREL, SCOUNDREL_ORACLE);
+            assert_oracle(db, MARAUDER, MARAUDER_ORACLE);
+            assert_oracle(db, MIRRORWEAVE, MIRRORWEAVE_ORACLE);
+            (
+                scenario.add_real_card(P0, CELESTUS, Zone::Battlefield, db),
+                scenario.add_real_card(P0, VALENTIN, Zone::Hand, db),
+                scenario.add_real_card(P0, MOONMIST, Zone::Hand, db),
+                scenario.add_real_card(P0, SCOUNDREL, Zone::Hand, db),
+                scenario.add_real_card(P0, MIRRORWEAVE, Zone::Hand, db),
+            )
+        });
+    runner.state_mut().day_night = Some(DayNight::Night);
+    cast_as_lisette(&mut runner, card);
+    fund(&mut runner, ManaType::Green, 2);
+    runner.cast(moonmist).resolve();
+    settle(&mut runner);
+    enter_scoundrel_at_night(&mut runner, scoundrel);
+    fund(&mut runner, ManaType::Blue, 4);
+    runner.cast(weave).target_object(scoundrel).resolve();
+    settle(&mut runner);
+    let obj = &runner.state().objects[&card];
+    assert!(
+        obj.keywords.contains(&Keyword::Nightbound) && obj.transformed && obj.modal_back_face,
+        "reach guard: Valentin, front face up with both flags, is a nightbound copy"
+    );
+
+    activate_celestus(&mut runner, celestus);
+    assert_scoundrel_turned_back(&runner, scoundrel);
+    let obj = &runner.state().objects[&card];
+    assert!(
+        obj.transformed && obj.modal_back_face,
+        "CR 702.145e: front face up, the Valentin copy does not transform"
+    );
+    assert_eq!(stored_face(&runner, card).name, LISETTE);
+}
+
+/// Casts Baneblade Scoundrel at night. CR 702.145b: "If it is night and this
+/// permanent is represented by a double-faced card, it enters transformed" — it is
+/// Baneclaw Marauder, its name read before Mirrorweave can change it.
+fn enter_scoundrel_at_night(runner: &mut GameRunner, scoundrel: ObjectId) {
+    fund(runner, ManaType::Black, 4);
+    runner.cast(scoundrel).resolve();
+    settle(runner);
+    let obj = &runner.state().objects[&scoundrel];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert_eq!(obj.name, MARAUDER, "CR 702.145b: it enters transformed");
+    assert!(obj.transformed);
+    assert_eq!(stored_face(runner, scoundrel).name, SCOUNDREL);
+}
+
+/// CR 702.145e: the Mirrorweave target, back face up and nightbound, transforms as
+/// it becomes day. Its flag and stored face are read, never its displayed name: it
+/// is Mirrorweave's own target.
+fn assert_scoundrel_turned_back(runner: &GameRunner, scoundrel: ObjectId) {
+    assert!(
+        !runner.state().objects[&scoundrel].transformed,
+        "positive control: the Scoundrel transforms back"
+    );
+    assert_eq!(stored_face(runner, scoundrel).name, MARAUDER);
 }
