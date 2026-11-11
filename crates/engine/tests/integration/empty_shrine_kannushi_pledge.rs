@@ -586,13 +586,10 @@ fn kannushi_pledge_export_and_game_state_roundtrip_keep_live_semantics() {
         .read_to_string(&mut json)
         .unwrap();
     let string_db = CardDatabase::from_json_str(&json).unwrap();
-    let directory = std::env::temp_dir().join(format!("kannushi-pledge-{}", std::process::id()));
-    std::fs::create_dir(&directory).unwrap();
-    let path = directory.join("cards.json");
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cards.json");
     std::fs::write(&path, &json).unwrap();
     let file_db = CardDatabase::from_export(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
-    std::fs::remove_dir(&directory).unwrap();
     for database in [&string_db, &file_db] {
         let old = database
             .get_face_by_name("Commander's Plate")
