@@ -11131,8 +11131,6 @@ mod tests {
             .get_face_by_name("Transcendent Dragon")
             .expect("integration fixture carries Transcendent Dragon");
         // Reach guard: the exported face is the production shape, not a stub.
-        assert!(face.keywords.contains(&Keyword::Flash));
-        assert!(face.keywords.contains(&Keyword::Flying));
         assert!(face.card_type.subtypes.iter().any(|s| s == "Dragon"));
 
         let request = DeckCompatibilityRequest {
@@ -11152,6 +11150,17 @@ mod tests {
             vec!["ResolverFeature:structural:counter_exile_rider_tail_dropped".to_string()],
             "the dropped tail is the only gap"
         );
+        // Reach guard: the public row carries the printed Flash and Flying.
+        for keyword in ["Flash", "Flying"] {
+            assert!(
+                unsupported.parse_details.iter().any(|item| {
+                    item.category == ParseCategory::Keyword
+                        && item.label == keyword
+                        && item.supported
+                }),
+                "{keyword} must reach the public parse details"
+            );
+        }
         // The nested Counter item sits under the enters trigger.
         assert!(
             unsupported.parse_details.iter().any(|item| {
@@ -11165,71 +11174,137 @@ mod tests {
         );
     }
 
-    /// A warning-only Scheme (no handler or resolver gap) is unsupported for
-    /// submitted-scheme validation and is skipped by default scheme selection,
-    /// while a clean Scheme in the same database is accepted (issue #9972).
+    /// Deck coverage reads the database subtype lexicon, the same one the report
+    /// builds. Mishra's Factory "becomes a 2/2 Assembly-Worker artifact creature";
+    /// Assembly-Worker is a creature type (CR 205.3m) printed on no face of a
+    /// database holding only the Factory, so both the report and the deck flag
+    /// the animation. Loading Cogwork Assembler, an Assembly-Worker, clears the
+    /// gap in both (issue #9972).
+    #[test]
+    fn deck_coverage_uses_database_subtype_lexicon() {
+        const FACTORY: &str = "Mishra's Factory";
+        const INVALID: &str = "ParserMisfire:InvalidSubtype(Assembly-Worker)";
+        let shared = crate::test_support::shared_card_db();
+        let database = |names: &[&str]| {
+            let mut cards = Map::new();
+            for name in names {
+                let face = shared
+                    .get_face_by_name(name)
+                    .unwrap_or_else(|| panic!("integration fixture carries {name}"));
+                cards.insert(
+                    name.to_lowercase(),
+                    serde_json::to_value(face).expect("printed face serializes"),
+                );
+            }
+            CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap()
+        };
+        let deck_gaps = |db: &CardDatabase| -> Vec<String> {
+            let request = DeckCompatibilityRequest {
+                main_deck: vec![FACTORY.to_string()],
+                ..Default::default()
+            };
+            let coverage = evaluate_deck_compatibility(db, &request)
+                .coverage
+                .expect("coverage present");
+            assert_eq!(coverage.total_unique, 1);
+            coverage
+                .unsupported_cards
+                .into_iter()
+                .find(|card| card.name == FACTORY)
+                .map(|card| card.gaps)
+                .unwrap_or_default()
+        };
+        let report_gaps = |db: &CardDatabase| -> Vec<String> {
+            crate::game::coverage::analyze_coverage(db)
+                .cards
+                .into_iter()
+                .find(|card| card.card_name == FACTORY)
+                .expect("factory in report")
+                .gap_details
+                .into_iter()
+                .map(|gap| gap.handler)
+                .collect()
+        };
+
+        // Reach guard: the default Oracle vocabulary lists Assembly-Worker, so a
+        // deck verdict built on it would pass the Factory alone.
+        assert!(crate::game::coverage::default_valid_subtypes().contains("Assembly-Worker"));
+
+        let factory_only = database(&[FACTORY]);
+        assert_eq!(report_gaps(&factory_only), vec![INVALID.to_string()]);
+        assert_eq!(deck_gaps(&factory_only), report_gaps(&factory_only));
+
+        let with_worker = database(&[FACTORY, "Cogwork Assembler"]);
+        assert!(report_gaps(&with_worker).is_empty());
+        assert!(deck_gaps(&with_worker).is_empty());
+    }
+
+    /// A printed warning-only Scheme is unsupported for submitted-scheme
+    /// validation on the public format-validation path and is skipped by default
+    /// scheme selection, while clean Schemes in the same database are accepted
+    /// (issue #9972). Your Inescapable Doom's only gap is the parse warning its
+    /// "the opponent with the highest life total among your opponents" recipient
+    /// raises.
     #[test]
     fn warning_only_scheme_is_unsupported_in_validation_and_default_selection() {
-        use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+        const DOOM: &str = "Your Inescapable Doom";
+        let printed = crate::test_support::shared_card_db()
+            .get_face_by_name(DOOM)
+            .expect("integration fixture carries Your Inescapable Doom");
 
         let mut cards = Map::new();
         insert_planechase_card(&mut cards, "Legal Standard", &[], &[]);
-        for index in 1..=20 {
-            insert_scheme_card(&mut cards, &format!("Scheme {index}"));
+        insert_planechase_card(&mut cards, "Plains", &["Basic"], &["Land"]);
+        // Every clean filler sorts after the printed scheme, so default selection
+        // would take the printed scheme first if coverage did not exclude it.
+        let fillers: Vec<String> = (1..=20).map(|index| format!("Zz Scheme {index}")).collect();
+        for name in &fillers {
+            insert_scheme_card(&mut cards, name);
         }
-        // Sorts before every clean scheme, so default selection would take it first.
-        let mut warned = planechase_card_json("Aaa Warning Scheme", &[], &["Scheme"]);
-        warned["parse_warnings"] = serde_json::to_value(vec![OracleDiagnostic::swallowed_clause(
-            "Replacement_Instead",
-            "exile it instead",
-            None,
-        )])
-        .unwrap();
-        cards.insert("aaa warning scheme".to_string(), warned);
+        cards.insert(
+            DOOM.to_lowercase(),
+            serde_json::to_value(printed).expect("printed face serializes"),
+        );
         let db = CardDatabase::from_json_str(&Value::Object(cards).to_string()).unwrap();
 
-        // Reach guard: the warned face is a Scheme whose only gap is the warning.
-        let face = db.get_face_by_name("Aaa Warning Scheme").unwrap();
-        let coverage = crate::game::coverage::card_face_coverage(face);
+        // Reach guard: the printed face is a Scheme whose only gaps are parse
+        // warnings.
+        let face = db.get_face_by_name(DOOM).unwrap();
+        assert!(face.card_type.core_types.contains(&CoreType::Scheme));
+        assert!(!face.parse_warnings.is_empty());
+        let coverage =
+            crate::game::coverage::card_face_coverage_with_subtypes(face, db.valid_subtypes());
         assert!(coverage.supported_before_parse_warnings());
         assert!(!coverage.is_supported());
 
-        let mut scheme_deck = scheme_names(19);
-        scheme_deck.push("Aaa Warning Scheme".to_string());
-        let check = evaluate_archenemy(
-            &db,
-            &archenemy_request(scheme_deck),
-            &BTreeSet::new(),
-            &FormatConfig::archenemy(),
+        let mut scheme_deck = fillers[..19].to_vec();
+        scheme_deck.push(DOOM.to_string());
+        let warned = evaluate_deck_compatibility(&db, &archenemy_request(scheme_deck));
+        assert_eq!(
+            warned.selected_format_compatible,
+            Some(false),
+            "reasons: {:?}",
+            warned.selected_format_reasons
         );
         assert!(
-            check
-                .reasons
+            warned
+                .selected_format_reasons
                 .iter()
-                .any(|reason| reason.contains("Unsupported scheme cards")),
+                .any(|reason| reason == &format!("Unsupported scheme cards: {DOOM}")),
             "reasons: {:?}",
-            check.reasons
+            warned.selected_format_reasons
         );
-        let clean = evaluate_archenemy(
-            &db,
-            &archenemy_request(scheme_names(20)),
-            &BTreeSet::new(),
-            &FormatConfig::archenemy(),
-        );
-        assert!(
-            !clean
-                .reasons
-                .iter()
-                .any(|reason| reason.contains("Unsupported scheme cards")),
+        let clean = evaluate_deck_compatibility(&db, &archenemy_request(fillers.clone()));
+        assert_eq!(
+            clean.selected_format_compatible,
+            Some(true),
             "reasons: {:?}",
-            clean.reasons
+            clean.selected_format_reasons
         );
 
         let selected = crate::game::deck_loading::default_scheme_deck_entries(&db);
         assert_eq!(selected.len(), 20);
-        assert!(selected
-            .iter()
-            .all(|entry| entry.card.name != "Aaa Warning Scheme"));
+        assert!(selected.iter().all(|entry| entry.card.name != DOOM));
     }
 
     /// A DFC commander whose two faces are each indexed under their own key,

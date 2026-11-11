@@ -544,6 +544,41 @@ fn classify(
     (status, base_gaps, mutant_gaps, projections)
 }
 
+/// Build one audit row: handler gaps (warnings excluded) and the parse warnings
+/// are reported in separate fields, so a warning-only face has empty handler gaps.
+fn audit_row(
+    atomic_key: String,
+    face_name: String,
+    oracle_id: Option<String>,
+    original_text: &str,
+    mutation: Mutation,
+    base_face: CardFace,
+    mutant_face: CardFace,
+) -> AuditResult {
+    let (status, base_gaps, mutant_gaps, projections) =
+        classify(&base_face, &mutant_face, mutation.kind);
+    AuditResult {
+        atomic_key,
+        face_name,
+        oracle_id,
+        family: mutation.kind.family(),
+        direction: mutation.kind.direction(),
+        original_text: original_text.to_string(),
+        mutated_text: mutation.text,
+        byte_span: ByteSpan {
+            start: 0,
+            end: original_text.len(),
+        },
+        base_handler_gaps: base_gaps,
+        mutant_handler_gaps: mutant_gaps,
+        base_warnings: base_face.parse_warnings,
+        mutant_warnings: mutant_face.parse_warnings,
+        projections,
+        status,
+        reason_code: status.reason_code(),
+    }
+}
+
 fn audit(input: &Path, input_label: String) -> Result<Report, Box<dyn Error>> {
     let bytes = fs::read(input)?;
     // Digest and deserialize the same read so a concurrent corpus refresh
@@ -612,28 +647,15 @@ fn audit(input: &Path, input_label: String) -> Result<Report, Box<dyn Error>> {
             mutated_card.text = Some(mutation.text.clone());
             let mutant_face = build_oracle_face(&mutated_card, oracle_id.clone());
             family_census.attempted += 1;
-            let (status, base_gaps, mutant_gaps, projections) =
-                classify(&base_face, &mutant_face, mutation.kind);
-            results.push(AuditResult {
-                atomic_key: atomic_key.clone(),
-                face_name: face.face_name.clone().unwrap_or_else(|| face.name.clone()),
+            results.push(audit_row(
+                atomic_key.clone(),
+                face.face_name.clone().unwrap_or_else(|| face.name.clone()),
                 oracle_id,
-                family: mutation.kind.family(),
-                direction: mutation.kind.direction(),
-                original_text: text.to_string(),
-                mutated_text: mutation.text,
-                byte_span: ByteSpan {
-                    start: 0,
-                    end: text.len(),
-                },
-                base_handler_gaps: base_gaps,
-                mutant_handler_gaps: mutant_gaps,
-                base_warnings: base_face.parse_warnings,
-                mutant_warnings: mutant_face.parse_warnings,
-                projections,
-                status,
-                reason_code: status.reason_code(),
-            });
+                text,
+                mutation,
+                base_face,
+                mutant_face,
+            ));
         }
     }
     results.sort_by(|left, right| {
@@ -1032,6 +1054,39 @@ mod tests {
             classify(&mixed, &clean, MutationKind::LifeYouToTargetOpponent);
         assert_eq!(status, Status::BaseUnsupported);
         assert_eq!(mixed_gaps, vec!["Effect:fixture".to_string()]);
+
+        // The serialized row carries handler gaps and warnings in separate fields.
+        let row = |base: &CardFace, mutant: &CardFace| {
+            serde_json::to_value(audit_row(
+                "Fixture".to_string(),
+                "Fixture".to_string(),
+                Some("fixture-oracle-id".to_string()),
+                "You gain 7 life.",
+                recognize_mutation("You gain 7 life.").expect("life fixture mutates"),
+                base.clone(),
+                mutant.clone(),
+            ))
+            .unwrap()
+        };
+        let warning_json = serde_json::to_value(&diagnostic.parse_warnings).unwrap();
+        assert_eq!(warning_json.as_array().map(Vec::len), Some(1));
+
+        let warning_only = row(&diagnostic, &clean);
+        assert_eq!(warning_only["status"], "base_diagnostic");
+        assert_eq!(warning_only["base_handler_gaps"], serde_json::json!([]));
+        assert_eq!(warning_only["mutant_handler_gaps"], serde_json::json!([]));
+        assert_eq!(warning_only["base_warnings"], warning_json);
+        assert_eq!(warning_only["mutant_warnings"], serde_json::json!([]));
+
+        let mixed_row = row(&clean, &mixed);
+        assert_eq!(mixed_row["status"], "mutant_unsupported");
+        assert_eq!(mixed_row["base_handler_gaps"], serde_json::json!([]));
+        assert_eq!(
+            mixed_row["mutant_handler_gaps"],
+            serde_json::json!(["Effect:fixture"])
+        );
+        assert_eq!(mixed_row["base_warnings"], serde_json::json!([]));
+        assert_eq!(mixed_row["mutant_warnings"], warning_json);
     }
 
     #[test]
