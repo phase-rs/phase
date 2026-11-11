@@ -463,6 +463,7 @@ pub(crate) fn eliminate_players(
             events,
             first_event,
             looked_back_observers.map(|observers| (observers, departure_end)),
+            &[],
         );
     }
 
@@ -590,7 +591,12 @@ pub(crate) fn eliminate_players(
                     "a canceled zone-change pause did not resume its tail: {error}"
                 );
             }
-            super::triggers::collect_unclaimed_triggers_into_deferred(state, &resumed, 0, None);
+            // CR 603.2c: an owner the resume parks again holds its collected
+            // occurrences for its own settlement; they are not collected here.
+            let retained = super::engine_priority::retained_logical_zone_events(state);
+            super::triggers::collect_unclaimed_triggers_into_deferred(
+                state, &resumed, 0, None, &retained,
+            );
             events.append(&mut resumed);
         }
 

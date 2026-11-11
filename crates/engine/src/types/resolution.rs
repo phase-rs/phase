@@ -2022,6 +2022,33 @@ impl ResolutionStack {
             .collect()
     }
 
+    /// The parked logical zone-change owners whose occurrences a generic trigger
+    /// scan must not rediscover: the active owner and, under a merged
+    /// permanent's linked component child, the announcing owner beneath it.
+    pub(crate) fn parked_zone_change_owners(
+        &self,
+    ) -> Vec<(&LogicalZoneChangeGroup, Option<&PendingZoneChangeDelivery>)> {
+        let Some(top) = self.frames.top() else {
+            return Vec::new();
+        };
+        let Some(active) = self.frames.get(top).and_then(Self::zone_change_owner) else {
+            return Vec::new();
+        };
+        let announcing_owner = match self.frames.get(top) {
+            Some(ResolutionFrame::BatchDelivery(child)) => {
+                child.component_delivery_parent.as_ref().and_then(|link| {
+                    self.frames
+                        .below(top)
+                        .and_then(|below| self.frames.get(below))
+                        .and_then(Self::zone_change_owner)
+                        .filter(|(group, _)| group.logical_group_id == link.parent_group_id)
+                })
+            }
+            _ => None,
+        };
+        std::iter::once(active).chain(announcing_owner).collect()
+    }
+
     /// Whether the active frame is a parked logical zone-change owner: a batch
     /// delivery (including a merged permanent's component child) or a paused
     /// `ChangeZone` iteration.

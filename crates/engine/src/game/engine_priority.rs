@@ -986,37 +986,26 @@ fn completed_priority_recipient(state: &GameState) -> Option<PlayerId> {
 }
 
 /// The zone-change occurrences a paused logical zone-change owner retains for
-/// its own final settlement (CR 603.2c: collected once, by that owner).
+/// its own final settlement (CR 603.2c: collected once, by that owner). Under a
+/// merged permanent's linked component child this includes the announcing owner
+/// beneath it (CR 730.3).
 pub(crate) fn retained_logical_zone_events(state: &GameState) -> Vec<GameEvent> {
-    let mut retained = Vec::new();
-    if let Some(pending) = state
-        .active_change_zone_frame()
-        .and_then(|frame| frame.pending.as_ref())
-    {
-        retained.extend(
-            pending
-                .logical_zone_change_group
+    state
+        .resolution_stack
+        .parked_zone_change_owners()
+        .into_iter()
+        .flat_map(|(group, paused_current)| {
+            group
                 .all_origin_occurrences
                 .iter()
-                .map(|occurrence| occurrence.event.clone()),
-        );
-        if let Some(paused_current) = pending.paused_current.as_ref() {
-            retained.extend(paused_current.delivery_events.iter().cloned());
-        }
-    }
-    if let Some(pending) = state.active_batch_delivery() {
-        retained.extend(
-            pending
-                .logical_zone_change_group
-                .all_origin_occurrences
-                .iter()
-                .map(|occurrence| occurrence.event.clone()),
-        );
-        if let Some(paused_current) = pending.paused_current.as_ref() {
-            retained.extend(paused_current.delivery_events.iter().cloned());
-        }
-    }
-    retained
+                .map(|occurrence| occurrence.event.clone())
+                .chain(
+                    paused_current
+                        .into_iter()
+                        .flat_map(|paused| paused.delivery_events.iter().cloned()),
+                )
+        })
+        .collect()
 }
 
 /// CR 603.3b + CR 608.2g: settles a terminal resolution marker only after its

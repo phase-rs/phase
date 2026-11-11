@@ -22,10 +22,12 @@
 //!    creatures, each its owner's commander in the two-commander row.
 //!
 //! The mutate itself is staged with `merge_object_onto` (mutate casting is not
-//! under test). When Circuit Mender is on top of Brokkos as the survivor, its
-//! own leaves-the-battlefield ability does not trigger even with nothing parked
-//! (the unparked control is empty), so Ninth Bridge Patrol observes that
-//! departure instead. Brokkos is a legendary creature and the designated commander
+//! under test). Known defect, not under test and not rules-correct: when
+//! Circuit Mender is on top of Brokkos as the survivor, the merged permanent has
+//! Circuit Mender's abilities (CR 730.2a) and its leaves-the-battlefield ability
+//! should look back and trigger (CR 603.10a), but it does not trigger even with
+//! nothing parked. For that pile the rows compare the parked run with the
+//! unparked one and use Ninth Bridge Patrol to observe the departure. Brokkos is a legendary creature and the designated commander
 //! (CR 903.3); CR 903.9b offers its owner the command zone when it would be put
 //! into a library.
 
@@ -316,14 +318,14 @@ fn unparked_control_triggers(spell_name: &str, pile_shape: Pile) -> Vec<PlayerId
     mender_departure_triggers(runner.state())
 }
 
-/// The unparked control: Circuit Mender's own trigger fires once when it is the
-/// survivor; with Brokkos as the survivor it is empty (see the module note).
+/// The unparked control. With Circuit Mender as the survivor its own trigger
+/// fires once. With Brokkos as the survivor it is not pinned: it is missing
+/// because of the known look-back defect in the module note, and the rows only
+/// require the parked run to match it.
 fn assert_control(spell_name: &str, pile_shape: Pile, control: &[PlayerId]) {
-    let expected: &[PlayerId] = match pile_shape {
-        Pile::BrokkosUnderMender => &[P1],
-        Pile::MenderOverBrokkos => &[],
-    };
-    assert_eq!(control, expected, "{spell_name} {pile_shape:?} control");
+    if matches!(pile_shape, Pile::BrokkosUnderMender) {
+        assert_eq!(control, [P1], "{spell_name} {pile_shape:?} control");
+    }
 }
 
 /// CR 730.3 + CR 701.24a + CR 608.2c: Chaos Warp's owner shuffle runs through a
