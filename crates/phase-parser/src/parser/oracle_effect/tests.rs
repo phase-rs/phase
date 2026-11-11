@@ -79637,13 +79637,14 @@ fn bare_choose_printed_cards_use_resolution_timing() {
     );
 
     // Sakashima the Impostor Avatar's second sentence declares its own target,
-    // not the chosen recipient.
+    // not the chosen recipient. The card is a Vanguard (CR 313.1), which has no
+    // subtypes (CR 313.3).
     let parsed = parse_oracle_text(
         "{2}: Choose a creature you control. It becomes a copy of target creature except for its name.",
         "Sakashima the Impostor Avatar",
         &[],
-        &["Creature".to_string()],
-        &["Avatar".to_string()],
+        &["Vanguard".to_string()],
+        &[],
     );
     let avatar = &parsed.abilities[0];
     assert!(matches!(avatar.effect.as_ref(), Effect::TargetOnly { .. }));
@@ -79748,7 +79749,7 @@ fn bare_choose_later_chunk_printed_cards_use_resolution_timing() {
         "Wraith Form — This creature can't be blocked.\nTransdimensional Scout — When this creature deals combat damage to a player, you may pay {3} and sacrifice it. If you do, choose a land you control. Then search your library for up to two basic land cards which have the same name as the chosen land, put them onto the battlefield tapped, then shuffle.",
         "Canoptek Wraith",
         &[],
-        &["Creature"],
+        &["Artifact", "Creature"],
     );
     assert_you_choice(
         "Canoptek Wraith",
@@ -79780,7 +79781,7 @@ fn bare_choose_later_chunk_printed_cards_use_resolution_timing() {
     assert_eq!(
         opponent_choice.target_choice_timing,
         TargetChoiceTiming::Stack,
-        "Tunnel of Love: the opponent's own choice must stay stack-time: {opponent_choice:#?}"
+        "Tunnel of Love: the opponent's choice keeps its pre-change Stack timing (unchanged baseline, not a rules claim): {opponent_choice:#?}"
     );
     assert_you_choice(
         "Tunnel of Love",
@@ -79794,7 +79795,7 @@ fn bare_choose_later_chunk_printed_cards_use_resolution_timing() {
         "Creature tokens you control have haste.\nAt the beginning of combat on your turn, create a 2/1 blue Phyrexian Myr artifact creature token. Then you may choose a token you control. If you do, each other token you control becomes a copy of that token.",
         "Brudiclad, Telchor Engineer",
         &[],
-        &["Creature"],
+        &["Artifact", "Creature"],
     );
     assert_you_choice(
         "Brudiclad, Telchor Engineer",
@@ -80034,7 +80035,7 @@ fn bare_choose_non_controller_subject_keeps_stack_timing() {
         "Wormfang Crab",
         &[],
         &["Creature".to_string()],
-        &["Crab".to_string()],
+        &["Nightmare".to_string(), "Crab".to_string()],
     );
     let head = parsed
         .triggers
@@ -80394,8 +80395,10 @@ fn compound_choice_inherited_non_controller_subject_object_and_player_keeps_base
 /// writes `Stack` here moves the timing off its baseline and asks the caster for the
 /// permanent before the opponent receives the offer. Synthetic Oracle: no printed
 /// card has "<opponent or player> may choose a <object> you control"; the nearest
-/// printed card with an accepting-player body is Druid of Purification ("each
-/// player may choose an artifact or enchantment you don't control").
+/// printed accepting-player body is Reservoir Kraken ("any opponent may tap an
+/// untapped creature they control"), and the nearest printed choose verb is Druid
+/// of Purification, whose "each player may" peels as a per-player scope rather
+/// than an accepting-player one.
 #[test]
 fn bare_choose_opponent_may_scope_keeps_base_resolution_timing() {
     for text in [

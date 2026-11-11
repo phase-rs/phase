@@ -343,6 +343,10 @@ fn later_chunk_bare_choose_resolves_at_resolution_and_later_printed_target_is_an
     ));
 }
 
+/// Sakashima the Impostor Avatar is a Vanguard: it stays in the command zone and
+/// is not a permanent (CR 313.2). The engine has no command-zone vanguard host, so
+/// this test puts the printed activated ability on a synthetic 1/1 creature body
+/// that carries the card's name; only the ability text is the card's.
 #[test]
 fn sakashima_avatar_announces_copy_source_then_prompts_recipient_at_resolution() {
     let mut scenario = GameScenario::new();

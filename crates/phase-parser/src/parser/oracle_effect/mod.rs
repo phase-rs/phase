@@ -29399,9 +29399,8 @@ fn withhold_resolution_timing_from_choices_feeding_printed_targets(clauses: &mut
         let feeds_printed_target = clauses[choice + 1..].iter().any(|later| {
             (later.parsed.effect.target_filter() == Some(&TargetFilter::ParentTarget)
                 || matches!(later.parsed.effect, Effect::Unimplemented { .. }))
-                && later.source.fragment().is_some_and(|fragment| {
-                    scan_contains_phrase(&fragment.to_ascii_lowercase(), "target ")
-                })
+                && lower::PrintedTargetWord::from_clauses(std::slice::from_ref(later))
+                    == lower::PrintedTargetWord::Present
         });
         if feeds_printed_target {
             clauses[choice].declared_target_choice_timing = None;
@@ -51507,10 +51506,13 @@ fn parse_effect_chain_ir_body(
     tag_player_declarations(&mut builder, &mut declarations, &mut chain_declared_groups);
     ctx.next_declared_player_group = chain_declared_groups;
 
+    // CR 601.2c: before the anaphor binder reads the clauses' timing, so a
+    // withheld choice is bound exactly as it was before the bare-choice producer
+    // existed.
+    withhold_resolution_timing_from_choices_feeding_printed_targets(builder.clauses_mut());
     // CR 608.2c: after player tagging, so a producer's player group is final and
     // the object-group stamp cannot suppress it.
     bind_anaphors_across_resolution_choices(builder.clauses_mut(), ctx.body_scope);
-    withhold_resolution_timing_from_choices_feeding_printed_targets(builder.clauses_mut());
 
     // CR 608.2c + CR 603.7: resolve delayed-payload placement over the finished clause sequence.
     // Must stay ABOVE `builder.finish()`: `try_fold_loses_other_sibling` removes a clause and the
