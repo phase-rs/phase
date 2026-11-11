@@ -554,8 +554,8 @@ const FAMISHED_WORLDSIRE: &str = "Ward {3}\nDevour land 3 (As this creature ente
 /// Boot Nipper {1}{B} Creature — Beast 2/1 — verbatim.
 const BOOT_NIPPER: &str =
     "This creature enters with your choice of a deathtouch counter or a lifelink counter on it.";
-/// Grist, the Hunger Tide {1}{B}{G} Legendary Planeswalker — Grist, loyalty 3 — the
-/// `grist_zone_functioning.rs` constant text.
+/// Grist, the Hunger Tide {1}{B}{G} Legendary Planeswalker — Grist, loyalty 3 — verbatim
+/// (Scryfall form of the loyalty costs; shared with grist_zone_functioning.rs).
 const GRIST_ORACLE: &str = "As long as Grist isn't on the battlefield, it's a 1/1 Insect creature in addition to its other types.\n+1: Create a 1/1 black and green Insect creature token, then mill a card. If an Insect card was milled this way, put a loyalty counter on Grist and repeat this process.\n\u{2212}2: You may sacrifice a creature. When you do, destroy target creature or planeswalker.\n\u{2212}5: Each opponent loses life equal to the number of creature cards in your graveyard.";
 /// Clone {3}{U} Creature — Shapeshifter 0/0 — verbatim.
 const CLONE: &str =
