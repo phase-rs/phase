@@ -13175,8 +13175,9 @@ fn pipeline_loop(
                     exile_controller: None,
                     exile_duration: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
-                    // CR 120.4a: set by `apply_damage_to_target` right after this
-                    // park returns NeedsChoice (the ctx rider isn't known here).
+                    // CR 120.4a + CR 400.7: set by `deal_damage::park_damage_context`
+                    // (called by every non-combat damage park site; the ctx riders
+                    // aren't known here).
                     excess_recipient: None,
                     lifelink_bonus: 0,
                     source_incarnation: None,
@@ -13248,8 +13249,9 @@ fn pipeline_loop(
                 exile_controller: None,
                 exile_duration: None,
                 exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
-                // CR 120.4a: set by `apply_damage_to_target` right after this park
-                // returns NeedsChoice (the ctx rider isn't known here).
+                // CR 120.4a + CR 400.7: set by `deal_damage::park_damage_context`
+                // (called by every non-combat damage park site; the ctx riders
+                // aren't known here).
                 excess_recipient: None,
                 lifelink_bonus: 0,
                 source_incarnation: None,
