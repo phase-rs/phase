@@ -711,6 +711,13 @@ fn priority_preflight_candidates(
 /// boundary on an isolated clone. A reducer rejection is not interpreted as a
 /// pass: it remains an indeterminate mandatory-transition block.
 pub(in crate::game) fn preflight_priority_window(state: &GameState) -> PriorityPreflight {
+    // CR 601.2g: the activation offers this preflight enumerates draw on ONE
+    // bounded window-search budget, exactly as `priority_actions_with_probe`'s
+    // offers do. Preflight runs for a priority state, so without the scope a
+    // board carrying many activatable abilities would multiply the per-offer
+    // witness search without bound. A nested scope keeps the outermost budget
+    // when a caller (such as a legal-action snapshot) already opened one.
+    let _window_witness_scope = casting::window_witness_snapshot_scope();
     debug_assert_eq!(PriorityReducerFamily::ALL.len(), 23);
     let principal = match priority_principal_for_preflight(state) {
         Ok(principal) => principal,
@@ -780,6 +787,14 @@ pub(crate) fn priority_window_is_actionless_for_mandatory_progress(state: &GameS
         preflight_priority_window(state),
         PriorityPreflight::Actionless
     )
+}
+
+/// Test-support view of [`priority_window_is_actionless_for_mandatory_progress`],
+/// so the integration suite can drive the preflight enumeration and pin the
+/// CR 601.2g window-search budget it shares, without exposing `PriorityPreflight`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn priority_window_is_actionless_for_tests(state: &GameState) -> bool {
+    priority_window_is_actionless_for_mandatory_progress(state)
 }
 
 /// Submit the sole ordinary pass for an already-proven actionless Priority

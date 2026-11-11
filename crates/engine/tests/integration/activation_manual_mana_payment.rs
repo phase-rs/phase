@@ -7230,7 +7230,7 @@ fn a_manual_offer_locks_the_half_life_total_before_the_window() {
     );
 }
 
-/// CR 601.2g (#10190 security review): one legal-action enumeration's manual
+/// CR 601.2g (#10190 security review): one priority enumeration's manual
 /// offers share ONE window-search budget. Each idol's mana leg is {U} and the
 /// only window producer is Ashnod's Altar (colorless), so the color-blind
 /// `activation_window_mana_may_suffice` bound admits the search while the
@@ -7238,7 +7238,8 @@ fn a_manual_offer_locks_the_half_life_total_before_the_window() {
 /// bound of 256 units. Sixty such abilities would spend 60 × 256 = 15,360
 /// whole-state clones/probes in one `legal_actions_full` call without the
 /// shared budget; the snapshot budget caps the total at
-/// `MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET` and refuses the unproven offers.
+/// `MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET` and refuses the unproven offers. The
+/// preflight enumeration is bounded the same way.
 #[test]
 fn one_legal_action_snapshot_bounds_the_window_witness_work() {
     let mut scenario = scenario_at_main();
@@ -7282,4 +7283,22 @@ fn one_legal_action_snapshot_bounds_the_window_witness_work() {
             "the {{U}} ability stays unoffered: no window can make blue"
         );
     }
+
+    // CR 601.2g: the preflight enumeration is the other surface that offers
+    // these abilities. It shares the same bounded budget instead of opening a
+    // fresh per-offer search, so it cannot spend more than one snapshot's work.
+    perf_counters::reset();
+    engine::game::engine::priority_window_is_actionless_for_tests(runner.state());
+    let counters = perf_counters::window_witness_search_snapshot();
+    let preflight_spent = counters.boards + counters.probes;
+    assert!(
+        preflight_spent >= MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET as u64 / 2,
+        "reach-guard: preflight ran the witness search across the board \
+         ({preflight_spent} units), so the cap below is not vacuous"
+    );
+    assert!(
+        preflight_spent <= MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET as u64,
+        "preflight's window-search work is bounded by the shared budget \
+         ({preflight_spent} units for 60 abilities, each allowed 256 alone)"
+    );
 }

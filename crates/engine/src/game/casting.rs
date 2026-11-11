@@ -28320,10 +28320,11 @@ const MAX_CANDIDATES_PER_BOARD: usize = 16;
 /// snapshot budget refuses the remaining manual offers instead of running
 /// unbounded work: like an exhausted search it proves nothing, so it offers
 /// nothing (CR 733.1's reversal is not modelled, and no activation is offered
-/// on an unproven window). The scope is opened by the one priority-offer
-/// authority (`ai_support::candidates::priority_actions_with_probe`), so the
-/// bound covers every enumeration — the server's `legal_actions_full`, the flat
-/// priority list, and the per-seat candidate lists alike.
+/// on an unproven window). The scope is opened by each priority-offer
+/// enumeration — `ai_support::candidates::priority_actions_with_probe` (which
+/// `legal_actions_full`, the flat priority list, and the per-seat candidate
+/// lists all reach) and `engine::preflight_priority_window` (the preflight
+/// enumeration) — so every surface that offers an activation shares it.
 pub const MANA_ABILITY_WINDOW_SNAPSHOT_BUDGET: usize = 8_192;
 
 thread_local! {
@@ -28348,12 +28349,13 @@ impl Drop for WindowWitnessSnapshotScope {
     }
 }
 
-/// CR 601.2g: start a legal-action enumeration's shared window-search budget.
-/// Opened by the one priority-offer authority
-/// (`ai_support::candidates::priority_actions_with_probe`), which every
-/// legal-action surface reaches: `legal_actions_full`, `flat_priority_actions`
-/// and the per-seat candidate lists. Every manual offer in that enumeration
-/// draws on the returned scope's one budget.
+/// CR 601.2g: start an enumeration's shared window-search budget. Opened by
+/// every authority that offers an activation: the priority-offer authority
+/// (`ai_support::candidates::priority_actions_with_probe`), which
+/// `legal_actions_full`, `flat_priority_actions` and the per-seat candidate
+/// lists all reach, and the preflight enumeration
+/// (`engine::preflight_priority_window`). Every manual offer in that
+/// enumeration draws on the returned scope's one budget.
 pub(crate) fn window_witness_snapshot_scope() -> WindowWitnessSnapshotScope {
     let previous = WINDOW_WITNESS_SNAPSHOT_REMAINING.with(|budget| {
         let previous = budget.get();
