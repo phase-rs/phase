@@ -11096,8 +11096,8 @@ mod tests {
             execute
         };
 
-        /// `sniper` / `doll_epoch`: the recipient epoch each damage row recorded. Both
-        /// recipients are live at 7. `unowned` adds a carrier with no paired ability.
+        // `sniper` / `doll_epoch`: the recipient epoch each damage row recorded. Both
+        // recipients are live at 7. `unowned` adds a carrier with no paired ability.
         let mixed = |sniper: u64, doll_epoch: u64, unowned: bool| -> GameState {
             // stack[0]: the fixture's reader, dealer 20 -> recipient 21.
             let mut state = relational_recipient_frame(Some(sniper), false, false);
