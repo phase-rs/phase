@@ -27322,7 +27322,7 @@ fn without_missing_forward_result_dependencies(
     without_missing_parent_referent_dependencies(ability, MissingParentReferent::ForwardResult)
 }
 
-/// CR 608.2c + CR 608.2h: a resolution-bound host instruction with no live host
+/// CR 608.2c + CR 608.2h: a resolution-bound host instruction with no host it can act on
 /// (`ResolutionHostBinding::Absent` / `Unaffectable`): the same node with every
 /// instruction after it that depends on what is `missing` pruned, so none can
 /// fall back to the ability's source or to another object.

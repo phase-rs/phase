@@ -2401,7 +2401,8 @@ impl PrintedTargetWord {
 /// target, as do donor shapes ("becomes a copy of", "gains all activated
 /// abilities of" the host). A host read through a filter-embedded
 /// `ObjectCount { controller: ParentTargetController }` is not seen here;
-/// Observed Stasis is refused earlier, by rule 3.
+/// Observed Stasis keeps its stack-time target because its follower's operand (the
+/// drawing player) is not a host anaphor (`is_parent_anaphor_follower`).
 pub(crate) fn convert_terminal_attachment_host_reference(
     def: &mut AbilityDefinition,
     printed: PrintedTargetWord,
