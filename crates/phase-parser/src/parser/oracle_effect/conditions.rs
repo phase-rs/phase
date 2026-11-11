@@ -12188,12 +12188,14 @@ mod tests {
 
     /// CR 608.2c (final review): a chain is proven to be its ability's resolved
     /// root only at a trigger body, an activated ability's effect, or a card's
-    /// first spell line on a card that can neither fuse nor be spliced. Every other chain may be attached under
-    /// another node, whose gate the engine evaluates against that node:
-    /// - a remainder the pump compound splitter parses as its own chain and
-    ///   hangs under the first pump (synthetic; printed shape: Gurmag Rakshasa,
-    ///   "target creature an opponent controls gets -2/-2 until end of turn and
-    ///   target creature you control gets +2/+2 until end of turn", reordered);
+    /// first spell line on a card that can neither fuse nor be spliced. Every
+    /// other chain may be attached under another node, whose gate the engine
+    /// evaluates against that node:
+    /// - a second targeted instruction joined to a first by " and " (synthetic;
+    ///   printed shape: Gurmag Rakshasa, "target creature an opponent controls
+    ///   gets -2/-2 until end of turn and target creature you control gets
+    ///   +2/+2 until end of turn", reordered). This row also declines without
+    ///   the root proof, so it is a positive witness only;
     /// - a later spell paragraph (pinned separately by
     ///   `target_controller_suffix_on_a_later_spell_paragraph_is_an_explicit_gap`);
     /// - a fused half (CR 702.102d) or a spliced card (CR 702.47a), both
@@ -12350,9 +12352,9 @@ mod tests {
 
     /// CR 602.2 + CR 608.2c: an activated ability's effect resolves as that
     /// ability's root, so its entry point proves the root and the suffix binds
-    /// on it through full parsing. Synthetic text; nearest printed card:
-    /// Unified Will (the comparison) and Coastal Wizard (a tap-activated
-    /// targeted instruction).
+    /// on it through full parsing. Synthetic text; nearest printed cards:
+    /// Skulking Killer (the zero-count condition) and Coastal Wizard (a
+    /// tap-activated targeted instruction).
     #[test]
     fn target_controller_suffix_on_an_activated_ability_binds() {
         let effect = "Destroy target artifact";
@@ -12384,9 +12386,9 @@ mod tests {
     /// "Choose two" with a tapped creature in mode 1 would read that creature's
     /// controller. Mode bodies are parsed without a resolved-root proof, which
     /// is what declines them here; the chunk loop's `BodyScope::ModalMode` arm
-    /// is a backstop this test does not isolate. Synthetic text; the gated mode is Skulking Killer's printed
-    /// instruction and the nearest printed modal shape is any "Choose two"
-    /// spell whose modes each target.
+    /// is a backstop this test does not isolate. Synthetic text; the gated mode
+    /// is Skulking Killer's printed instruction and the nearest printed modal
+    /// shape is any "Choose two" spell whose modes each target.
     #[test]
     fn target_controller_suffix_in_a_mode_is_an_explicit_gap() {
         let condition = "that opponent controls no other creatures";
