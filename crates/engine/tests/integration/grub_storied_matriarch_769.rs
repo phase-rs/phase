@@ -124,6 +124,7 @@ const INTO_THE_NIGHT: &str = "Into the Night";
 const CELESTUS: &str = "The Celestus";
 const BRUTAL_CATHAR: &str = "Brutal Cathar";
 const MOONRAGE_BRUTE: &str = "Moonrage Brute";
+const ELESH_NORN: &str = "Elesh Norn, Grand Cenobite";
 
 const AUNTIE_ORACLE: &str = "Menace\nWhenever Grub attacks, you may blight 1. If you do, create a tapped and attacking token that's a copy of the blighted creature, except it has \"At the beginning of the end step, sacrifice this token.\"\nAt the beginning of your first main phase, you may pay {B}. If you do, transform Grub.";
 const NEXUS_ORACLE: &str = "At the beginning of combat on your turn, draw a card. Then you may exile an artifact or creature card from your hand. If you do, create a token that's a copy of the exiled card, except it's a 3/3 Golem artifact creature in addition to its other types.";
@@ -179,6 +180,7 @@ const SCOUNDREL_ORACLE: &str = "Whenever this creature becomes blocked, each cre
 const MARAUDER_ORACLE: &str = "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nWhenever a creature blocking this creature dies, that creature's controller loses 1 life.\nNightbound (If a player casts at least two spells during their own turn, it becomes day next turn.)";
 const BRUTAL_CATHAR_ORACLE: &str = "Whenever this creature enters or transforms into Brutal Cathar, exile target creature an opponent controls until this creature leaves the battlefield.\nDaybound (If a player casts no spells during their own turn, it becomes night next turn.)";
 const MOONRAGE_BRUTE_ORACLE: &str = "First strike\nWard—Pay 3 life.\nNightbound (If a player casts at least two spells during their own turn, it becomes day next turn.)";
+const ELESH_NORN_ORACLE: &str = "Vigilance\nOther creatures you control get +2/+2.\nCreatures your opponents control get -2/-2.";
 const INTO_THE_NIGHT_ORACLE: &str =
     "It becomes night. Discard any number of cards, then draw that many cards plus one.";
 const CELESTUS_ORACLE: &str = "If it's neither day nor night, it becomes day as The Celestus enters.\n{T}: Add one mana of any color.\n{3}, {T}: If it's night, it becomes day. Otherwise, it becomes night. Activate only as a sorcery.\nWhenever day becomes night or night becomes day, you gain 1 life. You may draw a card. If you do, discard a card.";
@@ -4483,14 +4485,14 @@ fn assert_scoundrel_turned_back(runner: &GameRunner, scoundrel: ObjectId) {
 }
 
 /// A Feldon of the Third Path board: Feldon, able to activate, with `copied` the only creature
-/// card in P0's graveyard and Into the Night in P0's hand during the day; `opponent_bears`
-/// puts Grizzly Bears under P1.
+/// card in P0's graveyard and Into the Night in P0's hand during the day; `opponent` puts that
+/// card on the battlefield under P1.
 fn feldon_copy_board(
     copied: &'static str,
     copied_oracle: &'static str,
-    opponent_bears: bool,
+    opponent: Option<&'static str>,
 ) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
-    let (mut runner, (feldon, night, bears)) = board(Phase::PreCombatMain, |scenario, db| {
+    let (mut runner, (feldon, night, opposing)) = board(Phase::PreCombatMain, |scenario, db| {
         assert_oracle(db, FELDON, FELDON_ORACLE);
         assert_oracle(db, copied, copied_oracle);
         assert_oracle(db, INTO_THE_NIGHT, INTO_THE_NIGHT_ORACLE);
@@ -4498,7 +4500,7 @@ fn feldon_copy_board(
         (
             scenario.add_real_card(P0, FELDON, Zone::Battlefield, db),
             scenario.add_real_card(P0, INTO_THE_NIGHT, Zone::Hand, db),
-            opponent_bears.then(|| scenario.add_real_card(P1, BEARS, Zone::Battlefield, db)),
+            opponent.map(|name| scenario.add_real_card(P1, name, Zone::Battlefield, db)),
         )
     });
     runner
@@ -4508,11 +4510,12 @@ fn feldon_copy_board(
         .expect("Feldon exists")
         .summoning_sick = false;
     runner.state_mut().day_night = Some(DayNight::Day);
-    (runner, feldon, night, bears)
+    (runner, feldon, night, opposing)
 }
 
 /// Activates Feldon of the Third Path targeting the only creature card in the graveyard and
-/// resolves the ability, returning the events of both passes and the token it made.
+/// resolves the ability, returning the events of both passes and the token it made. The token
+/// is read from its creation event, not the battlefield, so a token that dies is still named.
 fn feldon_makes_a_token(
     runner: &mut GameRunner,
     feldon: ObjectId,
@@ -4529,7 +4532,13 @@ fn feldon_makes_a_token(
                 .events,
         );
     }
-    let made = tokens(runner);
+    let made: Vec<ObjectId> = events
+        .iter()
+        .filter_map(|event| match event {
+            engine::types::events::GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+            _ => None,
+        })
+        .collect();
     assert_eq!(made.len(), 1, "reach guard: Feldon made exactly one token");
     (events, made[0])
 }
@@ -4568,7 +4577,7 @@ fn entry_record_names(events: &[engine::types::events::GameEvent], id: ObjectId)
 /// both faces. CR 712.18: the haste grant and the delayed sacrifice still apply to it.
 #[test]
 fn feldons_copy_of_a_daybound_card_made_at_night_transforms() {
-    let (mut runner, feldon, night, _) = feldon_copy_board(SCOUNDREL, SCOUNDREL_ORACLE, false);
+    let (mut runner, feldon, night, _) = feldon_copy_board(SCOUNDREL, SCOUNDREL_ORACLE, None);
     assert_oracle(load_db().expect("card db"), MARAUDER, MARAUDER_ORACLE);
     cast_into_the_night(&mut runner, night);
 
@@ -4610,7 +4619,7 @@ fn feldons_copy_of_a_daybound_card_made_at_night_transforms() {
 #[test]
 fn feldons_copy_of_brutal_cathar_at_night_triggers_then_transforms() {
     let (mut runner, feldon, night, bears) =
-        feldon_copy_board(BRUTAL_CATHAR, BRUTAL_CATHAR_ORACLE, true);
+        feldon_copy_board(BRUTAL_CATHAR, BRUTAL_CATHAR_ORACLE, Some(BEARS));
     assert_oracle(
         load_db().expect("card db"),
         MOONRAGE_BRUTE,
@@ -4648,11 +4657,78 @@ fn feldons_copy_of_brutal_cathar_at_night_triggers_then_transforms() {
     assert_eq!(runner.state().objects[&token].name, MOONRAGE_BRUTE);
 }
 
+/// CR 702.145c: the daybound token transforms "immediately and isn't a state-based action", so
+/// it is turned before the first state-based action check (CR 704.3). P1's Elesh Norn, Grand
+/// Cenobite ("Creatures your opponents control get -2/-2.") would make Feldon of the Third
+/// Path's copy of Brutal Cathar a 0/0, put into the graveyard under CR 704.5f; as Moonrage
+/// Brute it is a 1/1 and survives. Its enters trigger, triggered as Brutal Cathar (CR 603.10),
+/// then exiles the Norn, and the token is 3/3.
+#[test]
+fn feldons_copy_of_brutal_cathar_at_night_survives_an_opposing_minus_two() {
+    let (mut runner, feldon, night, norn) =
+        feldon_copy_board(BRUTAL_CATHAR, BRUTAL_CATHAR_ORACLE, Some(ELESH_NORN));
+    let db = load_db().expect("card db");
+    assert_oracle(db, MOONRAGE_BRUTE, MOONRAGE_BRUTE_ORACLE);
+    assert_oracle(db, ELESH_NORN, ELESH_NORN_ORACLE);
+    let norn = norn.expect("the Norn is staged");
+    cast_into_the_night(&mut runner, night);
+
+    let (events, token) = feldon_makes_a_token(&mut runner, feldon);
+    assert_eq!(
+        entry_record_names(&events, token),
+        vec![BRUTAL_CATHAR.to_string()],
+        "reach guard: the token entered as Brutal Cathar"
+    );
+    let departures: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            engine::types::events::GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                to,
+                record,
+            } if *object_id == token => Some((record.name.clone(), record.toughness, *to)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        runner.state().battlefield.contains(&token) && departures.is_empty(),
+        "CR 702.145c: the token transforms before the state-based action check, so CR 704.5f \
+         doesn't put it into the graveyard; departures: {departures:?}"
+    );
+    let obj = &runner.state().objects[&token];
+    assert_eq!(obj.name, MOONRAGE_BRUTE);
+    assert_eq!(
+        obj.toughness,
+        Some(1),
+        "the Norn's -2/-2 applies to Moonrage Brute"
+    );
+    let stack = &runner.state().stack;
+    assert_eq!(stack.len(), 1, "the enters trigger waits");
+    assert!(
+        matches!(
+            stack[0].kind,
+            StackEntryKind::TriggeredAbility { source_id, .. } if source_id == token
+        ),
+        "the trigger's source is the token; stack: {stack:?}"
+    );
+
+    both_pass(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(
+        runner.state().objects[&norn].zone,
+        Zone::Exile,
+        "the trigger exiles the Norn"
+    );
+    let obj = &runner.state().objects[&token];
+    assert_eq!((obj.power, obj.toughness), (Some(3), Some(3)));
+}
+
 /// CR 702.145c: during the day a daybound token front face up agrees, so Feldon of the Third
 /// Path's copy of Baneblade Scoundrel stays Baneblade Scoundrel.
 #[test]
 fn feldons_copy_of_a_daybound_card_made_during_the_day_stays_front_face_up() {
-    let (mut runner, feldon, _, _) = feldon_copy_board(SCOUNDREL, SCOUNDREL_ORACLE, false);
+    let (mut runner, feldon, _, _) = feldon_copy_board(SCOUNDREL, SCOUNDREL_ORACLE, None);
 
     let (events, token) = feldon_makes_a_token(&mut runner, feldon);
     assert_settled(&runner);
