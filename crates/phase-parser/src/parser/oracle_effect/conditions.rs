@@ -5446,20 +5446,22 @@ pub(super) enum GatedInstructionPosition {
     /// The first instruction of a chain its entry point proved to be the
     /// ability's resolved root (`ResolvedChainRoot::Proven`: a triggered
     /// ability's body, an activated ability's effect, or a card's first spell
-    /// line on a card without fuse or splice). The engine evaluates its gate
-    /// on its own resolved node before its effect, so a target-controller read
-    /// sees the targets this instruction announced.
+    /// line on a card without fuse, splice, gift or overload). The engine
+    /// evaluates its gate on its own resolved node before its effect, so a
+    /// target-controller read sees the targets this instruction announced.
     ChainRoot,
     /// Anything else, declined. For a later instruction (lowered as a
     /// sub-ability), any mode of a modal body (the engine appends each later
     /// chosen mode to the earlier one as a sub-ability, CR 700.2), a nested
-    /// remainder parse, a later spell paragraph, a fused half or a spliced card,
-    /// the engine evaluates the gate in the parent's hand-off against the
-    /// PARENT's resolved node (engine `effects/mod.rs`, the `sub.condition`
-    /// check before the sub is dispatched), so a target-controller read would
-    /// see the preceding instruction's targets. A root whose entry point wires
-    /// no proof (a reflexive or granted body parsed elsewhere) is declined
-    /// conservatively.
+    /// remainder parse, a later spell paragraph, a fused half, a spliced card or
+    /// a gift spell's first line, the engine evaluates the gate first in the
+    /// parent's hand-off against the PARENT's resolved node (engine
+    /// `effects/mod.rs`, the `sub.condition` check before the sub is
+    /// dispatched), and only then on the sub itself; both must hold, so the
+    /// parent's targets would decide it. An overloaded spell announces no
+    /// targets (CR 702.96b), so its gate would read none. A root whose entry
+    /// point wires no proof (a reflexive or granted body parsed elsewhere) is
+    /// declined conservatively.
     AfterInstruction,
 }
 
@@ -11453,7 +11455,7 @@ mod tests {
     }
 
     /// CR 115.4: "any other target" admits players, so it cannot prove an
-    /// object controller even when the filter is type-less (review 8: Screaming
+    /// object controller even when the filter is type-less (printed Screaming
     /// Nemesis, "it deals that much damage to any other target").
     ///
     /// The probe cannot be the reach path here: the printed suffix text ends in
@@ -11492,7 +11494,7 @@ mod tests {
     /// CR 109.4: a single announced role whose domain cannot supply an object
     /// controller declines. Each row reaches the domain check (it parses, is
     /// Stack-timed and yields exactly one role), so a parse failure cannot
-    /// satisfy it; ef08040e asserted the same reach through the probe.
+    /// satisfy it.
     /// Printed Noble Vestige (a player-or-planeswalker slot), printed Deathrite
     /// Shaman (a graveyard card), printed Bump in the Night (a player).
     #[test]
@@ -11655,7 +11657,7 @@ mod tests {
         }));
     }
 
-    /// CR 601.2c + CR 609.7: Dromoka's Command (review 11). The printed mode
+    /// CR 601.2c + CR 609.7: Dromoka's Command. The printed mode
     /// announces ONE role, the damage source (the spell), through the
     /// enumerator's source-slot branch, and that branch returns before the
     /// companion and quantity branches the engine builder falls through to. The
@@ -11685,7 +11687,7 @@ mod tests {
     /// CR 115.1d + CR 601.2c: `EachDealsDamageEqualToPower` is enumerated as its
     /// recipient only, while production announces the sources first. It is safe
     /// only because every construction site stamps `multi_target`, which the
-    /// probe declines. Printed Graceful Takedown (review 8) and a synthetic
+    /// probe declines. Printed Graceful Takedown and a synthetic
     /// up-to-two row (nearest printed card: Allies at Last, whose recipient is
     /// "target creature an opponent controls") pin both halves: the enumerator
     /// yields ONE role, and the clause carries `multi_target`. The suffix is
@@ -12026,7 +12028,7 @@ mod tests {
         assert!(matches!(*head.effect, Effect::TargetOnly { .. }));
     }
 
-    /// CR 601.2c + CR 608.2c (review 12): Coastal Wizard's printed ability
+    /// CR 601.2c + CR 608.2c: Coastal Wizard's printed ability
     /// "{T}: Return this creature and another target creature to their owners'
     /// hands." lowers the self-bounce head and the independently targeted second
     /// bounce as separate nodes, so the only announced target is on the CHILD.
@@ -12101,7 +12103,7 @@ mod tests {
         assert_full_strip_declines(printed, condition);
     }
 
-    /// CR 608.2c (final review): a later instruction lowers as a sub-ability,
+    /// CR 608.2c: a later instruction lowers as a sub-ability,
     /// and the engine evaluates a sub-ability's gate against the PRECEDING
     /// node, so a target-controller suffix on it would read the earlier
     /// instruction's target. Such a suffix is an explicit gap even though the
@@ -12186,7 +12188,7 @@ mod tests {
             .collect()
     }
 
-    /// CR 608.2c (final review): a chain is proven to be its ability's resolved
+    /// CR 608.2c: a chain is proven to be its ability's resolved
     /// root only at a trigger body, an activated ability's effect, or a card's
     /// first spell line on a card that can neither fuse nor be spliced. Every
     /// other chain may be attached under another node, whose gate the engine
@@ -12198,8 +12200,11 @@ mod tests {
     ///   the root proof, so it is a positive witness only;
     /// - a later spell paragraph (pinned separately by
     ///   `target_controller_suffix_on_a_later_spell_paragraph_is_an_explicit_gap`);
-    /// - a fused half (CR 702.102d) or a spliced card (CR 702.47a), both
-    ///   synthetic: Unified Will's printed text on a card with fuse or splice.
+    /// - a fused half (CR 702.102d), a spliced card (CR 702.47a), a gift spell
+    ///   whose first spell ability the engine wraps under its gift delivery
+    ///   (CR 702.174j; printed shape: Long River's Pull) or an overloaded spell
+    ///   that requires no targets (CR 702.96b; printed shape: Cyclonic Rift),
+    ///   all synthetic: Unified Will's printed text on a card with that keyword.
     ///
     /// Each is an explicit condition gap, with no gate on any node.
     #[test]
@@ -12227,6 +12232,20 @@ mod tests {
                 unified_will,
                 "Instant",
                 &["Splice".to_owned()][..],
+                "Counter target spell",
+                "you control more creatures than that spell's controller",
+            ),
+            (
+                unified_will,
+                "Instant",
+                &["Gift".to_owned()][..],
+                "Counter target spell",
+                "you control more creatures than that spell's controller",
+            ),
+            (
+                unified_will,
+                "Instant",
+                &["Overload".to_owned()][..],
                 "Counter target spell",
                 "you control more creatures than that spell's controller",
             ),
@@ -12262,7 +12281,7 @@ mod tests {
         }
     }
 
-    /// CR 608.2c (final review): a later spell paragraph that the parser emits
+    /// CR 608.2c: a later spell paragraph that the parser emits
     /// as its own spell ability is a root at parse time, but at cast the engine
     /// appends it under the first spell ability (`combined_spell_ability_def`),
     /// so its gate would read the first paragraph's target. Synthetic text on
@@ -12381,7 +12400,49 @@ mod tests {
         assert_eq!(root.condition, seam);
     }
 
-    /// CR 700.2 + CR 608.2c (final review): every mode of a modal body is
+    /// CR 608.2c: the resolved-root proof is consumed by the parse it is handed
+    /// to, so no chain parsed afterwards on the same context (or a clone of it)
+    /// inherits it. Two take points:
+    /// - the chain body takes it on entry (an ordinary instruction);
+    /// - the ability entry point holds it back from the recognizers that run
+    ///   before the chain body, so one that returns early leaves it consumed.
+    ///   Booster Tutor's printed "Open a sealed Magic booster pack, reveal the
+    ///   cards, and put one of them into your hand." is such a recognizer.
+    #[test]
+    fn resolved_root_proof_is_consumed_by_the_parse_it_is_handed_to() {
+        use crate::parser::oracle_ir::context::ResolvedChainRoot;
+        let proven = || ParseContext {
+            resolved_chain_root: ResolvedChainRoot::Proven,
+            ..Default::default()
+        };
+
+        let mut ctx = proven();
+        let _ = crate::parser::oracle_effect::parse_effect_chain_ir_ability_root(
+            "Destroy target artifact",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        assert_eq!(ctx.resolved_chain_root, ResolvedChainRoot::Unproven);
+
+        let booster = "Open a sealed Magic booster pack, reveal the cards, and put one of them \
+                       into your hand.";
+        let mut ctx = proven();
+        let ir = crate::parser::oracle_effect::parse_ability_ir_with_context(
+            booster,
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        assert!(
+            matches!(
+                *crate::parser::oracle_effect::lower_ability_ir(&ir).effect,
+                Effect::OpenBoosterPack { .. }
+            ),
+            "reach guard: the booster recognizer returns before the chain body"
+        );
+        assert_eq!(ctx.resolved_chain_root, ResolvedChainRoot::Unproven);
+    }
+
+    /// CR 700.2 + CR 608.2c: every mode of a modal body is
     /// declined. The engine appends each later chosen mode to the earlier one as
     /// a sub-ability and evaluates its gate against the earlier mode's node, so
     /// "Choose two" with a tapped creature in mode 1 would read that creature's

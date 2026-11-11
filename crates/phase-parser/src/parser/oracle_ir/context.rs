@@ -400,18 +400,22 @@ pub enum BodyScope {
 
 /// CR 608.2c: whether the effect chain about to be parsed is proven to resolve
 /// as its ability's root node. The engine evaluates a root's gate on the root
-/// itself, but a sub-ability's gate on its PARENT, so a gate that reads the
-/// gated instruction's own target is only representable on a proven root.
+/// itself; a sub-ability's gate is evaluated first in its parent's hand-off,
+/// against the PARENT, and again on the sub itself, and both must hold. So a
+/// gate that reads the gated instruction's own target is only representable on
+/// a proven root.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ResolvedChainRoot {
     /// Not proven: the chain may be attached under another node at parse or
     /// cast time (a nested remainder parse, a mode, a later spell paragraph, a
-    /// fused half, a spliced spell).
+    /// fused half, a spliced spell, a gift spell), or lose its targets at cast
+    /// time (an overloaded spell).
     #[default]
     Unproven,
     /// Set by a top-level entry point whose chain is its ability's resolved
     /// root (a triggered ability's body, an activated ability's effect, a
-    /// card's first spell line on a card without fuse or splice).
+    /// card's first spell line on a card without fuse, splice, gift or
+    /// overload).
     Proven,
 }
 

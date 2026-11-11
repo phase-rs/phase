@@ -43997,6 +43997,10 @@ fn parse_ability_ir_with_damage_context(
     ctx: &mut ParseContext,
     damage_context: Option<DamageTargetContext>,
 ) -> AbilityIr {
+    // CR 608.2c: the resolved-root proof belongs to this body's own effect
+    // chain. Hold it back from every recognizer below, which may parse a chain
+    // of its own, and hand it back only to the chain body at the end.
+    let resolved_chain_root = std::mem::take(&mut ctx.resolved_chain_root);
     // CR 608.2c + CR 109.4: a leading "During target opponent's next turn, …"
     // window DECLARES a player target, and that player is in scope for the whole
     // ability body — so a "that player" anaphor anywhere in it refers to the
@@ -44119,6 +44123,7 @@ fn parse_ability_ir_with_damage_context(
             modal: None,
         };
     }
+    ctx.resolved_chain_root = resolved_chain_root;
     AbilityIr {
         source_text: text.to_string(),
         body: parse_effect_chain_ir_with_damage_context(text, kind, ctx, 0, damage_context),

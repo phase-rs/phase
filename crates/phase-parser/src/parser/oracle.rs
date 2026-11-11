@@ -5986,14 +5986,19 @@ fn parse_normalized_oracle_ir(
     {
         ctx.host_self_reference = Some(crate::types::ability::TargetFilter::AttachedTo);
     }
-    // CR 702.102d + CR 702.47a: a fused split card's right half follows its
-    // left half, and a spliced card's text is added to another spell, so no
-    // spell line of a card with fuse or splice is proven to be its spell's
-    // resolved root.
-    let card_spell_root = if mtgjson_keyword_names
-        .iter()
-        .any(|k| k.eq_ignore_ascii_case("fuse") || k.eq_ignore_ascii_case("splice"))
-    {
+    // CR 608.2c: no spell line of a card whose spell is rewritten at cast is
+    // proven to be its spell's resolved root with its printed targets:
+    // - fuse (CR 702.102d): the right half follows the left half;
+    // - splice (CR 702.47a): the card's text is added to another spell;
+    // - gift (CR 702.174j): the gift effect happens first, and the engine wraps
+    //   the first spell ability under a `GiftDelivery` root (`synthesize_gift`);
+    // - overload (CR 702.96b): the overloaded spell requires no targets.
+    // MTGJSON lists each as a bare keyword name.
+    let card_spell_root = if mtgjson_keyword_names.iter().any(|k| {
+        ["fuse", "splice", "gift", "overload"]
+            .iter()
+            .any(|rewrite| k.eq_ignore_ascii_case(rewrite))
+    }) {
         ResolvedChainRoot::Unproven
     } else {
         ResolvedChainRoot::Proven
