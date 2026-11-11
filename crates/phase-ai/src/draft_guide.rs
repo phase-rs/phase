@@ -56,6 +56,30 @@ pub enum GuideClass {
     /// mass removal (`DestroyAll`, `DamageAll`), `Counter` and `DiscardCard`, so
     /// this is "removal-shaped effect", not strictly single-target removal.
     Removal,
+    /// A Spirit creature (Kamigawa block).
+    Spirit,
+    /// An Arcane spell (instant/sorcery with Arcane subtype, Kamigawa block).
+    ArcaneSpell,
+    /// Has the Soulshift keyword (CR 702.46).
+    Soulshift,
+    /// Has the Splice keyword (CR 702.47).
+    Splice,
+    /// Has the Ninjutsu keyword (CR 702.49).
+    Ninjutsu,
+    /// A Ninja creature (Kamigawa block).
+    Ninja,
+    /// Has the Channel keyword (CR 702.133).
+    Channel,
+    /// An evasive threat: creature with flying, shadow, horsemanship, or similar.
+    EvasiveThreat,
+    /// A combat trick: instant that modifies combat (pump, tap, untap, etc.).
+    CombatTrick,
+    /// Mana fixing: land or artifact that produces multiple colors or searches for basics.
+    ManaFixing,
+    /// A card that enables Ninjutsu (cheap evasive creature or unblockable enabler).
+    NinjutsuEnabler,
+    /// Wisdom payoff: card that rewards seven or more cards in hand (Saviors of Kamigawa).
+    WisdomPayoff,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -200,6 +224,8 @@ pub fn classify(face: &CardFace) -> Vec<GuideClass> {
     let core = &face.card_type.core_types;
     let is_creature = core.contains(&CoreType::Creature);
     let is_land = core.contains(&CoreType::Land);
+    let is_instant = core.contains(&CoreType::Instant);
+    let is_sorcery = core.contains(&CoreType::Sorcery);
     let artifact = core.contains(&CoreType::Artifact);
     // The whole chain, not just the top-level effect: a mana ability can sit
     // behind a leading step (Rosheen's reveal, then Add {C}{C}).
@@ -207,6 +233,12 @@ pub fn classify(face: &CardFace) -> Vec<GuideClass> {
         .abilities
         .iter()
         .any(|a| a.kind == AbilityKind::Activated && chain_has_mana_effect(a));
+
+    let subtypes = &face.card_type.subtypes;
+    let has_spirit = subtypes.iter().any(|s| s.eq_ignore_ascii_case("Spirit"));
+    let has_arcane = subtypes.iter().any(|s| s.eq_ignore_ascii_case("Arcane"));
+    let has_ninja = subtypes.iter().any(|s| s.eq_ignore_ascii_case("Ninja"));
+    let has_equipment = subtypes.iter().any(|s| s == "Equipment");
 
     let mut classes = Vec::new();
     if is_land && artifact {
@@ -218,7 +250,7 @@ pub fn classify(face: &CardFace) -> Vec<GuideClass> {
     if artifact && !is_creature && !is_land && taps_for_mana {
         classes.push(GuideClass::ManaArtifact);
     }
-    if face.card_type.subtypes.iter().any(|s| s == "Equipment") {
+    if has_equipment {
         classes.push(GuideClass::Equipment);
     }
     if face.keywords.iter().any(|k| matches!(k, Keyword::Sunburst)) {
@@ -234,6 +266,40 @@ pub fn classify(face: &CardFace) -> Vec<GuideClass> {
     if crate::cast_facts::EffectProfile::from_face(face).has_direct_removal_text {
         classes.push(GuideClass::Removal);
     }
+    // Kamigawa block classes (reliably detectable from card data)
+    if is_creature && has_spirit {
+        classes.push(GuideClass::Spirit);
+    }
+    if (is_instant || is_sorcery) && has_arcane {
+        classes.push(GuideClass::ArcaneSpell);
+    }
+    if face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Soulshift(_)))
+    {
+        classes.push(GuideClass::Soulshift);
+    }
+    if face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Splice { .. }))
+    {
+        classes.push(GuideClass::Splice);
+    }
+    if face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Ninjutsu(_) | Keyword::CommanderNinjutsu(_)))
+    {
+        classes.push(GuideClass::Ninjutsu);
+    }
+    if is_creature && has_ninja {
+        classes.push(GuideClass::Ninja);
+    }
+    // Channel, EvasiveThreat, CombatTrick, ManaFixing, NinjutsuEnabler, WisdomPayoff
+    // are not reliably detectable from parsed card data alone; they are handled via
+    // per-card `card_bonus` entries in the guide JSON.
     classes
 }
 
@@ -258,7 +324,10 @@ fn is_threat(face: &CardFace) -> bool {
     power >= 3 || face.keywords.iter().any(|k| matches!(k, Keyword::Flying))
 }
 
-const BUILTIN_SOURCES: &[&str] = &[include_str!("../data/draft_guides/mirrodin_block.json")];
+const BUILTIN_SOURCES: &[&str] = &[
+    include_str!("../data/draft_guides/mirrodin_block.json"),
+    include_str!("../data/draft_guides/kamigawa_block.json"),
+];
 
 /// The guides shipped with the engine, parsed once.
 pub fn builtin_guides() -> &'static [DraftGuide] {
@@ -288,6 +357,14 @@ mod tests {
     #[test]
     fn mirrodin_guide_covers_the_block_and_nothing_else() {
         for code in ["MRD", "dst", "5DN"] {
+            assert!(guide_for_set(code).is_some(), "{code}");
+        }
+        assert!(guide_for_set("LEA").is_none());
+    }
+
+    #[test]
+    fn kamigawa_guide_covers_the_block_and_nothing_else() {
+        for code in ["CHK", "BOK", "SOK"] {
             assert!(guide_for_set(code).is_some(), "{code}");
         }
         assert!(guide_for_set("LEA").is_none());
