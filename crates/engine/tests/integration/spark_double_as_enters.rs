@@ -2363,6 +2363,82 @@ mod feldon_tokens {
         );
     }
 
+    const CALLOUS_DISMISSAL: &str =
+        "Return target nonland permanent to its owner's hand.\nAmass Zombies 1.";
+
+    /// CR 701.47a + CR 603.6a: Amass creates the 0/0 Zombie Army and then puts
+    /// its counter on it, inside one instruction. The counter's CR 616.1 order of
+    /// Hardened Scales and Branching Evolution is a replacement of the counter
+    /// event on a permanent that has already entered, not of its entry, so the
+    /// Army's entry is matched as it happened: Soul Warden sees it, and Elemental
+    /// Bond does not draw for the 0/0.
+    #[test]
+    fn a_counter_prompt_on_an_entered_permanent_does_not_hold_its_entry() {
+        let (mut scenario, _feldon) = setup();
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION);
+        scenario.add_enchantment_from_oracle(P0, "Elemental Bond", ELEMENTAL_BOND);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        // Grizzly Bears: a vanilla 2/2 for Callous Dismissal to return.
+        let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let dismissal = scenario
+            .add_spell_to_hand_from_oracle(P0, "Callous Dismissal", false, CALLOUS_DISMISSAL)
+            .id();
+        let mut runner = scenario.build();
+        let library = runner.state().players[0].library.len();
+        let life = runner.life(P0);
+        runner.cast(dismissal).target_object(bears).resolve();
+        // Reach guard: the Army has entered and its counter stopped on the order
+        // of its replacements.
+        let army = runner
+            .state()
+            .objects
+            .values()
+            .find(|object| {
+                object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Army")
+            })
+            .map(|object| object.id)
+            .expect("the Army token entered");
+        assert_eq!(runner.state().objects[&army].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&bears].zone, Zone::Hand);
+        let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+            panic!(
+                "required the counter order, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == scales)
+            .expect("Hardened Scales is offered");
+        runner.act(GameAction::ChooseReplacement { index }).unwrap();
+        assert_token_entry_complete(&mut runner);
+        // Scales first, then Branching Evolution: (1 + 1) doubled.
+        assert_eq!(
+            runner.state().objects[&army]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&4)
+        );
+        assert_eq!(
+            runner.life(P0) - life,
+            1,
+            "positive control: Soul Warden matches the Army's entry once"
+        );
+        assert_eq!(
+            runner.state().players[0].library.len(),
+            library,
+            "the Army entered as a 0/0: Elemental Bond does not draw"
+        );
+    }
+
     #[test]
     fn t8_triskelion_self_counters_and_spark_share_one_scales_application() {
         let (mut scenario, feldon) = setup();

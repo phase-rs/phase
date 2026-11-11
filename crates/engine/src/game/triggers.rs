@@ -9650,15 +9650,62 @@ fn action_has_settled(state: &GameState) -> bool {
 
 /// CR 614.12a + CR 616.1 + CR 707.5: is a battlefield entry still being made?
 /// Every carrier of an entry that has been decided but not completed: a parked
-/// replacement (an ordering choice, a copy offer, an entry-controller choice),
-/// an entrant held liminal for its copy choice, a token committed before its
-/// entry record, and an entry parked for its own mid-entry choice. A pause
-/// that holds none of them belongs to a later instruction, not to an entry.
+/// replacement that modifies an entry ([`parked_replacement_modifies_an_entry`]:
+/// an ordering choice, a copy offer, an entry-controller choice), an entrant
+/// held liminal for its copy choice, a token committed before its entry
+/// record, and an entry parked for its own mid-entry choice. A pause that
+/// holds none of them belongs to a later event, not to an entry.
 pub(crate) fn battlefield_entry_in_progress(state: &GameState) -> bool {
-    state.pending_replacement.is_some()
+    state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(|pending| parked_replacement_modifies_an_entry(state, &pending.proposed))
         || !state.liminal_entries.is_empty()
         || state.pending_token_battlefield_entry.is_some()
         || !state.deferred_entry_events.is_empty()
+}
+
+/// CR 614.12a + CR 614.1c + CR 616.1: does a parked replacement modify a
+/// battlefield entry still being made? The entry itself (a zone change to the
+/// battlefield, a token's creation or entry), or an event on an object whose
+/// entry has not been recorded yet (the counters it enters with). An event on
+/// a permanent that has already entered (counters put on it afterwards, as
+/// Amass does to the Army it has just created) is not part of any entry.
+fn parked_replacement_modifies_an_entry(
+    state: &GameState,
+    proposed: &crate::types::proposed_event::ProposedEvent,
+) -> bool {
+    use crate::types::proposed_event::ProposedEvent;
+    match proposed {
+        ProposedEvent::ZoneChange { to, .. } => *to == Zone::Battlefield,
+        ProposedEvent::TokenEntry { .. } | ProposedEvent::CreateToken { .. } => true,
+        other => other
+            .affected_object_id()
+            .is_some_and(|object_id| !battlefield_entry_recorded(state, object_id)),
+    }
+}
+
+/// CR 400.7 + CR 603.6a: has this object's current battlefield entry been
+/// recorded? It is on the battlefield and entered on an earlier turn, or this
+/// turn's zone-change ledger holds the entry of its current incarnation.
+fn battlefield_entry_recorded(state: &GameState, object_id: ObjectId) -> bool {
+    let Some(object) = state
+        .objects
+        .get(&object_id)
+        .filter(|object| object.zone == Zone::Battlefield)
+    else {
+        return false;
+    };
+    object
+        .entered_battlefield_turn
+        .is_some_and(|turn| turn < state.turn_number)
+        || state.zone_changes_this_turn.iter().any(|record| {
+            record.object_id == object_id
+                && record.to_zone == Zone::Battlefield
+                && record
+                    .entered_incarnation
+                    .is_none_or(|incarnation| incarnation == object.incarnation)
+        })
 }
 
 /// CR 608.2c + CR 603.6a: has the instruction that put this permanent onto the
@@ -9701,9 +9748,11 @@ fn battlefield_entry_instruction_completed(state: &GameState, event: &GameEvent)
 /// once no entry is in progress, its instruction has completed, or the action
 /// has settled. That collector matches the whole event in one scan against the
 /// completed state, so batched ("one or more", CR 603.2c) definitions and
-/// firing limits see it once. An entry whose instruction has completed is
-/// never held: a later instruction's pause, a replacement prompt included,
-/// matches it there, as before.
+/// firing limits see it once. Nothing is held at a pause with no entry in
+/// progress (a later instruction's own choice, or the replacement of a later
+/// event on a permanent that has already entered), nor an entry whose
+/// instruction has completed: what reached such a pause is matched there, as
+/// before.
 ///
 /// The collectors that run as an action pauses or settles route through here:
 /// the post-action scan, and [`collect_action_end_triggers_into_deferred`] for
