@@ -47,7 +47,7 @@ import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
 import { loadP2PTerminalResult, type P2PTerminalResult } from "../services/p2pTerminalResult";
-import type { ExpandedDeck, ParsedDeck } from "../services/deckParser";
+import { expandParsedDeck, type ExpandedDeck, type ParsedDeck } from "../services/deckParser";
 import {
   captureSubmissionArtPreferences,
   submitDeckList,
@@ -141,10 +141,26 @@ function setupRandomAvatars(playerCount: number, seed: string, preservePlayerNam
   );
 }
 
+/**
+ * Install one commander-derived identity per owner, and report whether it did.
+ *
+ * Derived from EVERY `is_commander` object in the state — deliberately NOT from
+ * `command_zone`, which is only the cards sitting in the command zone at this
+ * instant (`viewmodel/commanderColumn.ts` reads it that way). A commander that
+ * has been cast, that died, or that was exiled is still its owner's commander
+ * (CR 903.3), but it no longer appears in `command_zone` — so gating on that
+ * list made a mid-game reload skip this derivation entirely and keep the random
+ * planeswalker identities `setupRandomAvatars` seeded, swapping every seat's
+ * name and avatar on refresh (issue #8053).
+ *
+ * A state with no commander object at all — a non-Commander game, or a snapshot
+ * that has not loaded yet — writes NOTHING and answers `false`, so a caller's
+ * existing fallback identities survive instead of being erased to empty maps.
+ */
 function setupCommanderAvatars(
   gameState: { objects: Record<number, { name: string; owner: number; is_commander?: boolean }> },
   preservePlayerNames = false,
-) {
+): boolean {
   const names = new Map<number, string>();
   const commanderNames = new Map<number, string>();
   const playerAvatars = new Map<number, PlayerAvatarIdentity>();
@@ -155,6 +171,8 @@ function setupCommanderAvatars(
     commanderNames.set(obj.owner, obj.name);
   }
 
+  if (commanderNames.size === 0) return false;
+
   for (const [playerId, cardName] of commanderNames) {
     names.set(playerId, cardName.split(",")[0].split(" //")[0]);
     playerAvatars.set(playerId, { kind: "card", cardName });
@@ -163,6 +181,7 @@ function setupCommanderAvatars(
   useMultiplayerStore.setState(
     preservePlayerNames ? { playerAvatars } : { playerNames: names, playerAvatars },
   );
+  return true;
 }
 
 function setupDraftMatchAvatars(seed: string) {
@@ -374,7 +393,9 @@ function buildPlayerOnlyDeckList(player: ExpandedDeckWithTier): DeckListPayload 
   return { player, opponent: emptySeat(), ai_decks: [], ai_difficulties: [] };
 }
 
-async function buildLocalAiDeckList(
+// Exported for the Horde payload regression tests; production callers go
+// through the GameProvider start flow.
+export async function buildLocalAiDeckList(
   t: TFunction<["game", "multiplayer"]>,
   deck: ParsedDeck | null,
   playerCount: number,
@@ -396,6 +417,88 @@ async function buildLocalAiDeckList(
       player: { ...pile, bracket_tier: "core" },
       opponent: emptySeat(),
       ai_decks: Array.from({ length: opponentCount - 1 }, emptySeat),
+      ai_difficulties: aiDifficulties,
+    };
+  }
+
+  // Horde: the human is a survivor bringing their own constructed deck; the
+  // Horde seats are the self-piloting Horde, whose libraries are the
+  // engine-supplied challenge decks injected by `load_horde_library`. No saved
+  // deck is tagged "Horde", so Horde seats submit empty and must NOT be drawn
+  // from the (empty) Horde-filtered catalog — but AI seats OUTSIDE the Horde
+  // roster are allied survivors and need real decks from the unfiltered
+  // catalog, or they start with an empty library and lose on their first draw.
+  if (formatConfig && formatConfig.format === "Horde") {
+    const { aiSeats, cedhMode } = usePreferencesStore.getState();
+    const opponentCount = Math.max(1, playerCount - 1);
+    const emptySeat = (): ExpandedDeckWithTier => ({
+      main_deck: [],
+      sideboard: [],
+      commander: [],
+      planar_deck: [],
+      scheme_deck: [],
+      signature_spell: [],
+      companion: [],
+      sticker_sheets: [],
+      bracket_tier: "core",
+    });
+    // One catalog fetch serves the human Random fallback AND the AI survivor
+    // seats: no format tag (the pool is unrestricted), but the picked
+    // challenge deck, so the engine validates each candidate against the
+    // challenge's survivor requirements (Commander shape for EDH hordes,
+    // unrestricted for constructed-block hordes).
+    const survivorCatalog = await buildLegalAiDeckCatalog({
+      selectedMatchType,
+      selectedChallengeDeck: formatConfig.horde_ruleset?.challenge_deck ?? null,
+    });
+    let hordePlayerDeck = deck;
+    let hordePlayerBracket = playerBracket ?? null;
+    if (!hordePlayerDeck) {
+      // Human chose "Random Deck": pick from the unfiltered catalog rather
+      // than the Horde-tagged one (which is empty).
+      const pick = pickRandomDeckCandidate(survivorCatalog.candidates, {});
+      if (!pick) {
+        throw new Error(t("gameProvider.noLegalAiDecks.generic"));
+      }
+      hordePlayerDeck = pick.deck;
+      hordePlayerBracket = pick.bracket;
+    }
+    // Seat map: player = seat 0 (human survivor), opponent = seat 1 (Horde
+    // primary — the init path remaps archenemy_player onto the first AI seat),
+    // ai_decks[i] = seat 2+i. The Horde roster is the primary plus one seat
+    // per co-Horde deck; roster seats submit empty (the engine injects
+    // challenge libraries), every other AI seat is an allied survivor.
+    const hordeSeatCount =
+      1 + (formatConfig.horde_ruleset?.co_horde_decks?.length ?? 0);
+    const takenDeckIds = new Set<string>();
+    const aiDecks: ExpandedDeckWithTier[] = [];
+    for (let i = 0; i < opponentCount - 1; i++) {
+      if (i < hordeSeatCount - 1) {
+        aiDecks.push(emptySeat());
+        continue;
+      }
+      const pick = pickRandomDeckCandidate(survivorCatalog.candidates, {
+        excludeIds: takenDeckIds,
+      });
+      if (!pick) {
+        throw new Error(t("gameProvider.noLegalAiDecks.generic"));
+      }
+      takenDeckIds.add(pick.id);
+      aiDecks.push({
+        ...expandParsedDeck(pick.deck),
+        bracket_tier: bracketToEngineTier(pick.bracket),
+      });
+    }
+    const aiDifficulties = Array.from({ length: opponentCount }, (_, i) =>
+      effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
+    );
+    return {
+      player: {
+        ...expandParsedDeck(hordePlayerDeck),
+        bracket_tier: bracketToEngineTier(hordePlayerBracket),
+      },
+      opponent: emptySeat(),
+      ai_decks: aiDecks,
       ai_difficulties: aiDifficulties,
     };
   }
@@ -663,10 +766,13 @@ export function GameProvider({
   useEffect(() => {
     if (mode !== "ai") return;
     let applied = false;
+    // Applies as soon as the state carries a commander, in whatever zone it is
+    // in — see `setupCommanderAvatars` for why the command zone is the wrong
+    // gate. Waits (by answering `false`, so the subscription keeps listening)
+    // until a commander object exists.
     const applyCommanderAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
-      if (state.gameId !== gameId || !state.gameState?.command_zone?.length) return false;
-      setupCommanderAvatars(state.gameState);
-      return true;
+      if (state.gameId !== gameId || !state.gameState) return false;
+      return setupCommanderAvatars(state.gameState);
     };
     const unsub = useGameStore.subscribe((state) => {
       if (applied || !applyCommanderAvatars(state)) return;
@@ -717,12 +823,16 @@ export function GameProvider({
     }
     let appliedCommanderAvatars = false;
     const applyCommanderAvatars = (gameState: typeof state) => {
-      if (!gameState?.format_config?.uses_commander || !gameState.command_zone?.length) return;
-      appliedCommanderAvatars = true;
+      if (!gameState?.format_config?.uses_commander) return;
+      // Same zone-independent derivation as the AI path: `command_zone` is
+      // empty as soon as a commander is on the battlefield, and gating on it
+      // made a mid-game reload keep the random identities (issue #8053).
       // The lobby modes keep their names; the Commander pod game has none to
       // keep and takes commander-derived ones for every seat. Never `false` for
       // `setupRandomAvatars` above — that one would write a literal "You".
-      setupCommanderAvatars(gameState, !isCommanderDraftMatch);
+      if (setupCommanderAvatars(gameState, !isCommanderDraftMatch)) {
+        appliedCommanderAvatars = true;
+      }
     };
     applyCommanderAvatars(state);
     const unsub = useGameStore.subscribe((next) => {
@@ -1744,6 +1854,16 @@ export function GameProvider({
       }
       if (cancelled) return;
 
+      // Horde: the archenemy (Horde) seat is an AI, never the local human (who
+      // is always seat 0 in solo Play-vs-AI). Remap the registry default
+      // (archenemy_player: 0) onto the first AI seat (seat 1) so
+      // `load_horde_library` injects the challenge deck under the AI, not the
+      // player — otherwise the human is dealt the Cyberman library (the
+      // seat-inversion bug). Mirrors the P2PHostAdapter remap on the host path.
+      const initFormatConfig =
+        formatConfig?.format === "Horde"
+          ? { ...formatConfig, archenemy_player: 1 }
+          : formatConfig;
       if (soloDraft) {
         try {
           draftDeckRaw = sessionStorage.getItem(draftDeckKey);
@@ -1860,7 +1980,7 @@ export function GameProvider({
           }
           if (cancelled) return;
           try {
-            await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
+            await initGame(gameId, adapter, deckList, initFormatConfig, playerCount, matchConfig, firstPlayer);
             if (cancelled) return;
             if (!adapter.cardDbLoaded) {
               onCardDataMissingRef.current?.();
@@ -1936,7 +2056,7 @@ export function GameProvider({
           gameId,
           adapter,
           deckList,
-          formatConfig,
+          initFormatConfig,
           playerCount,
           matchConfig,
           firstPlayer,

@@ -31,7 +31,8 @@ use super::effects::destroy::apply_destroy_after_replacement;
 use super::effects::draw::{apply_draw_after_replacement, settle_draw_instruction};
 use super::effects::life::{
     drain_pending_life_total_assignment, settle_life_gain_after_choice,
-    settle_life_loss_after_choice, within_ingress_life_window, LifeChangeUnrepresentable,
+    settle_life_loss_after_choice, within_ingress_life_window, LifeChangeError,
+    LifeChangeUnrepresentable,
 };
 use super::effects::mill::apply_mill_after_replacement;
 use super::effects::scry::apply_scry_after_replacement;
@@ -423,6 +424,13 @@ fn handle_replacement_choice_inner(
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
     let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
+    // CR 701.9a + CR 614.6: the paused frameless single-card discard this
+    // replacement answer owns, if any (paused by a CR 616.1 choice or by a
+    // single optional replacement's apply-or-decline choice).
+    // Captured with the other `parked_*` reads; a carrier installed while this
+    // answer resolves (a nested connive) belongs to the next answer and is left
+    // in place.
+    let parked_single_discard = state.pending_single_discard.as_deref().copied();
     let parked_phase_begin = state
         .pending_replacement
         .as_ref()
@@ -496,6 +504,9 @@ fn handle_replacement_choice_inner(
                         } => (*object_id, *to, *cause, *discard_frame),
                         _ => unreachable!("arm pattern guarantees ZoneChange"),
                     };
+                    // CR 616.1: the approved resume event carries the chosen
+                    // replacement's modifications; keep it for the paused-key match.
+                    let event_for_capture = event.clone();
                     let Ok(approved) =
                         crate::game::zone_pipeline::ApprovedZoneChange::approve_post_replacement(
                             event,
@@ -504,7 +515,7 @@ fn handle_replacement_choice_inner(
                         unreachable!("arm pattern guarantees a ZoneChange payload");
                     };
                     let delivery_start = events.len();
-                    match crate::game::zone_pipeline::deliver(
+                    let delivery = crate::game::zone_pipeline::deliver(
                         state,
                         approved,
                         crate::game::zone_pipeline::DeliveryCtx {
@@ -523,15 +534,90 @@ fn handle_replacement_choice_inner(
                             library_placement: parked_library_placement.clone(),
                         },
                         events,
-                    ) {
+                    );
+                    // CR 616.1 + CR 614.1c + CR 400.7: the resumed segment IS the
+                    // parked member's terminal delivery history whether or not the
+                    // delivery's own tail parks again. Record the classification
+                    // BEFORE either terminal, using the same pre-move key and the
+                    // same single-authority classifier as the synchronous path, or
+                    // a tail park returns early and the batch owner later reaches
+                    // `drain_pending_batch_deliveries` with `terminal_completion:
+                    // None` (issue #10431). A pre-move park (merge leave) pushes a
+                    // child batch frame that owns the pause; the member has not
+                    // moved, so its classification is `Remained`, the exact path
+                    // sees only the child, and the occurrence-level walk (gated on
+                    // `Moved`) records nothing for the parent.
+                    if let Some(paused) = parked_zone_change_delivery.as_ref() {
+                        let completion =
+                            crate::game::zone_pipeline::zone_move_completion_from_delivery(
+                                paused.member,
+                                &events[delivery_start..],
+                            );
+                        // Exact boundary match first (the historical path every
+                        // shipped park uses), then the occurrence-level match for a
+                        // resume whose approved event carries the chosen
+                        // replacement's modifications (controller/counter override
+                        // or a CR 614.6 zone redirect).
+                        let matched = state.capture_paused_zone_change_delivery(
+                            paused.member,
+                            &paused.expected_event,
+                            &events[delivery_start..],
+                            completion,
+                        ) || (completion
+                            == crate::types::game_state::ZoneMoveCompletion::Moved
+                            && state.capture_resumed_paused_zone_change_delivery(
+                                paused.member,
+                                &event_for_capture,
+                                &events[delivery_start..],
+                                completion,
+                            ));
+                        if matched
+                            && matches!(
+                                &delivery,
+                                crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_)
+                            )
+                        {
+                            // CR 614.6: the replaced move's terminal `ZoneChanged` is
+                            // already in this slice, so the forwarded-result marker
+                            // settles against the same record the Done path uses.
+                            effects::settle_replaced_forwarded_zone_delivery(
+                                state,
+                                paused.member,
+                                &events[delivery_start..],
+                            );
+                        }
+                    }
+                    match delivery {
                         crate::game::zone_pipeline::ZoneDeliveryResult::Done => {}
                         // CR 614.1c / CR 614.12a: the delivery tail parked a
                         // counter-replacement or devour prompt and stashed the
                         // remaining tail as a `ContinueZoneDeliveryTail` record
                         // (carrying `CallerEpilogue`, so the NEXT resume's
                         // epilogue still owns the continuation drain). Surface
-                        // the parked prompt; the epilogue must not run yet.
+                        // the parked prompt; the epilogue must not run yet. A
+                        // paused frameless discard delivered by this move is
+                        // settled first.
                         crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                            // CR 701.9a + CR 614.6: the paused discard's move was
+                            // delivered in this action (its hand departure is in
+                            // `events`) before the delivery tail parked this
+                            // prompt; settle it now, while the shared stamp can
+                            // still see that departure. CR 603.2 + CR 603.3b: this
+                            // action ends on a prompt, so the post-action scan
+                            // never sees it; defer the observers of exactly the
+                            // stamped events.
+                            if parked_single_discard.is_some()
+                                && state.pending_single_discard.as_deref().copied()
+                                    == parked_single_discard
+                            {
+                                let settle_start = events.len();
+                                effects::settle_paused_single_discard(state, events);
+                                super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                                    state,
+                                    events,
+                                    settle_start,
+                                );
+                            }
                             if let (Some(provenance), Some(pending)) = (
                                 parked_sacrifice_provenance,
                                 state.pending_replacement.as_mut(),
@@ -546,15 +632,6 @@ fn handle_replacement_choice_inner(
                         }
                     }
                     if let Some(paused) = parked_zone_change_delivery.as_ref() {
-                        state.capture_paused_zone_change_delivery(
-                            paused.member,
-                            &paused.expected_event,
-                            &events[delivery_start..],
-                            crate::game::zone_pipeline::zone_move_completion_from_delivery(
-                                paused.member,
-                                &events[delivery_start..],
-                            ),
-                        );
                         effects::settle_replaced_forwarded_zone_delivery(
                             state,
                             paused.member,
@@ -909,7 +986,20 @@ fn handle_replacement_choice_inner(
                 // `Reject` fails the answer (the boundary restores the record and
                 // its prompt), `IgnoreImpossible` skips the change and resumes.
                 gain @ ProposedEvent::LifeGain { .. } => {
-                    settle_life_gain_after_choice(state, gain, parked_life_policy, events)?;
+                    // A settle that parks a prompt (the Horde loss redirect's
+                    // mill choice; gain itself never pauses) early-returns the
+                    // parked prompt like the Mill arm above, so the
+                    // unconditional `waiting_for = Priority` reset below does
+                    // not clobber it.
+                    match settle_life_gain_after_choice(state, gain, parked_life_policy, events) {
+                        Ok(_) => {}
+                        Err(LifeChangeError::Deferred(_)) => {
+                            return Ok(state.waiting_for.clone());
+                        }
+                        Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
+                            return Err(unrepresentable.into());
+                        }
+                    }
                 }
                 // CR 119.3: Life loss accepted after replacement choice.
                 loss @ ProposedEvent::LifeLoss { player_id, .. } => {
@@ -917,8 +1007,30 @@ fn handle_replacement_choice_inner(
                     // the phase-transition drain, so this is the only place
                     // its cause can still be named (a mana burn would
                     // otherwise land as an unexplained life change).
-                    let actual =
-                        settle_life_loss_after_choice(state, loss, parked_life_policy, events)?;
+                    let actual = match settle_life_loss_after_choice(
+                        state,
+                        loss,
+                        parked_life_policy,
+                        events,
+                    ) {
+                        Ok(actual) => actual,
+                        // The Horde redirect parked a mill choice mid-settle:
+                        // the LIFE choice terminally resolved, so consume any
+                        // parked empty-pool record with a zero figure (there is
+                        // no life figure to narrate — the loss became a mill —
+                        // and a stranded record would be mis-claimed by the
+                        // next same-player loss). Early-return the parked mill
+                        // prompt like the Mill arm above.
+                        Err(LifeChangeError::Deferred(_)) => {
+                            crate::game::turns::note_empty_pool_life_loss_resolved(
+                                state, player_id, 0, events,
+                            );
+                            return Ok(state.waiting_for.clone());
+                        }
+                        Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
+                            return Err(unrepresentable.into());
+                        }
+                    };
                     crate::game::turns::note_empty_pool_life_loss_resolved(
                         state, player_id, actual, events,
                     );
@@ -1157,6 +1269,17 @@ fn handle_replacement_choice_inner(
             };
             state.waiting_for = waiting_for.clone();
 
+            // CR 701.9a + CR 614.6: the replaced discard still happened; record it
+            // now that its move has been delivered, before post-replacement and
+            // `waiting_for`-gated drains run. Gated on the carrier latched before
+            // `continue_replacement` so a carrier installed during this answer
+            // (a different discard's, owed to a later answer) is not consumed here.
+            if parked_single_discard.is_some()
+                && state.pending_single_discard.as_deref().copied() == parked_single_discard
+            {
+                effects::settle_paused_single_discard(state, events);
+            }
+
             let mut replacement_ctx = None;
             if zone_change_object_id.is_some_and(|object_id| {
                 state
@@ -1344,6 +1467,35 @@ fn handle_replacement_choice_inner(
                 }
             }
 
+            // CR 120.3f + CR 120.1 + CR 616.1: a non-combat player-damage leg
+            // whose life loss paused (Horde mill redirect or loss replacements)
+            // owes its post-loss work (the `DamageDealt` event, the CR 120.1
+            // record, the lifelink gain). The loss is fully settled once the
+            // batch drain above retires with no re-park, so drain the stashed
+            // stages here — before outer continuations, matching sync order
+            // (each damage target completes before later instructions resume).
+            // A lifelink gain that parks is owned by the pending replacement
+            // (the drain consumes the stash); propagate its prompt. A
+            // combat-flagged stash is skipped: the combat batch remnant owns
+            // it, and the outer wrapper resumes that remnant below.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state
+                    .pending_damage_post_loss
+                    .as_ref()
+                    .is_some_and(|stashed| !stashed.is_combat)
+                && state.active_batch_delivery().is_none()
+            {
+                let outcome = crate::game::effects::deal_damage::drain_pending_damage_post_loss(
+                    state, events,
+                );
+                if matches!(
+                    outcome,
+                    crate::game::effects::deal_damage::DamagePostLossDrainOutcome::PausedForReplacement
+                ) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
             // CR 614.6 + CR 616.1: settling a batch parked above its member's
             // delivery-tail child exposes that child's counter-removal queue. Finish
             // it here, in the same order as the queue drain above, before any parked
@@ -1400,6 +1552,38 @@ fn handle_replacement_choice_inner(
                         );
                     }
                     effects::PendingDiscardBatchOutcome::Completed => {
+                        effects::drain_pending_continuation(state, events);
+                        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                            waiting_for = state.waiting_for.clone();
+                            super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                                state,
+                                events,
+                                replacement_action_event_start,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Turtle Team-Up: resume a hero-event batch parked by a nested
+            // replacement prompt — the same hook shape as the discard batch
+            // above. Re-pauses re-park through this same hook, so arbitrary
+            // nesting (regen during Mayhem destroys, Leng during Stratagem
+            // discards) composes.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_hero_event.is_some()
+            {
+                match super::boss::drain_pending_hero_event(state, events) {
+                    super::boss::HeroEventDrainOutcome::Idle => {}
+                    super::boss::HeroEventDrainOutcome::PausedForReplacement => {
+                        waiting_for = state.waiting_for.clone();
+                        super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                            state,
+                            events,
+                            replacement_action_event_start,
+                        );
+                    }
+                    super::boss::HeroEventDrainOutcome::Completed => {
                         effects::drain_pending_continuation(state, events);
                         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                             waiting_for = state.waiting_for.clone();
@@ -1637,6 +1821,14 @@ fn handle_replacement_choice_inner(
             ))
         }
         super::replacement::ReplacementResult::Prevented => {
+            // CR 614.6: a prevented move never happened, so the paused discard
+            // owned by this answer is never recorded. A carrier installed by a
+            // substitute during this answer is a different value and survives.
+            if parked_single_discard.is_some()
+                && state.pending_single_discard.as_deref().copied() == parked_single_discard
+            {
+                state.pending_single_discard = None;
+            }
             if let Some(paused) = parked_zone_change_delivery.as_ref() {
                 state.capture_paused_zone_change_delivery(
                     paused.member,
@@ -1933,6 +2125,39 @@ fn handle_replacement_choice_inner(
                     crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
                     | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
                         return Ok(state.waiting_for.clone());
+                    }
+                }
+            }
+            // Turtle Team-Up: resume a hero-event batch parked by a nested
+            // replacement prompt — the Prevented twin of the Execute arm's
+            // hook. Preventing one step (a regeneration shield saving one
+            // Mayhem destroy) modifies only that action (CR 608.2c); the
+            // remaining steps still run. Re-pauses re-park through this same
+            // hook, so nested pauses keep composing.
+            if state.pending_hero_event.is_some() {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                match super::boss::drain_pending_hero_event(state, events) {
+                    super::boss::HeroEventDrainOutcome::Idle => {}
+                    super::boss::HeroEventDrainOutcome::PausedForReplacement => {
+                        super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                            state,
+                            events,
+                            replacement_action_event_start,
+                        );
+                        return Ok(state.waiting_for.clone());
+                    }
+                    super::boss::HeroEventDrainOutcome::Completed => {
+                        effects::drain_pending_continuation(state, events);
+                        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                            super::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
+                                state,
+                                events,
+                                replacement_action_event_start,
+                            );
+                            return Ok(state.waiting_for.clone());
+                        }
                     }
                 }
             }
@@ -5345,6 +5570,7 @@ mod tests {
                         conditional_enter_with_counters: vec![],
                         face_down_profile: None,
                         enters_modified_if: None,
+                        library_shuffle: Default::default(),
                     },
                 ))]
             .into();
@@ -5653,6 +5879,7 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         destination: Zone::Exile,
                         origin: None,
                         target: TargetFilter::Any,

@@ -142,6 +142,7 @@ fn atraxa_choice_fixture() -> (GameState, Vec<ObjectId>, ObjectId, ObjectId) {
     let categories = distinct_card_type_categories();
     let change_zone = Box::new(ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Hand,
             target: TargetFilter::Any,
