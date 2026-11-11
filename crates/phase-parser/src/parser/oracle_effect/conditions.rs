@@ -5446,9 +5446,9 @@ pub(super) enum GatedInstructionPosition {
     /// The first instruction of a chain its entry point proved to be the
     /// ability's resolved root (`ResolvedChainRoot::Proven`: a triggered
     /// ability's body, an activated ability's effect, or a card's first spell
-    /// line on a card without fuse or splice). The engine evaluates its gate on its own resolved node before
-    /// its effect, so a target-controller read sees the targets this
-    /// instruction announced.
+    /// line on a card without fuse or splice). The engine evaluates its gate
+    /// on its own resolved node before its effect, so a target-controller read
+    /// sees the targets this instruction announced.
     ChainRoot,
     /// Anything else, declined. For a later instruction (lowered as a
     /// sub-ability), any mode of a modal body (the engine appends each later
@@ -12348,11 +12348,43 @@ mod tests {
         assert_eq!(draw.condition, None);
     }
 
+    /// CR 602.2 + CR 608.2c: an activated ability's effect resolves as that
+    /// ability's root, so its entry point proves the root and the suffix binds
+    /// on it through full parsing. Synthetic text; nearest printed card:
+    /// Unified Will (the comparison) and Coastal Wizard (a tap-activated
+    /// targeted instruction).
+    #[test]
+    fn target_controller_suffix_on_an_activated_ability_binds() {
+        let effect = "Destroy target artifact";
+        let condition = "its controller controls no creatures";
+        let text = format!("{{T}}: {effect} if {condition}.");
+        let parsed = parse_oracle_text(&text, "Synthetic", &[], &["Creature".to_owned()], &[]);
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{:?}",
+            parsed.parse_warnings
+        );
+        let [root] = parsed.abilities.as_slice() else {
+            panic!("expected one activated ability, got {:?}", parsed.abilities);
+        };
+        assert_eq!(root.kind, AbilityKind::Activated);
+        assert!(
+            matches!(*root.effect, Effect::Destroy { .. }),
+            "{:?}",
+            root.effect
+        );
+        let (seam, _, _) = full_strip(effect, condition);
+        assert!(seam.is_some(), "reach guard: the strip binds at a root");
+        assert_eq!(root.condition, seam);
+    }
+
     /// CR 700.2 + CR 608.2c (final review): every mode of a modal body is
     /// declined. The engine appends each later chosen mode to the earlier one as
     /// a sub-ability and evaluates its gate against the earlier mode's node, so
     /// "Choose two" with a tapped creature in mode 1 would read that creature's
-    /// controller. Synthetic text; the gated mode is Skulking Killer's printed
+    /// controller. Mode bodies are parsed without a resolved-root proof, which
+    /// is what declines them here; the chunk loop's `BodyScope::ModalMode` arm
+    /// is a backstop this test does not isolate. Synthetic text; the gated mode is Skulking Killer's printed
     /// instruction and the nearest printed modal shape is any "Choose two"
     /// spell whose modes each target.
     #[test]
