@@ -467,8 +467,6 @@ pub struct ProtectionStartGrant {
     pub source: ObjectId,
     pub key: ProtectionStartKey,
     pub resolved_quality: crate::types::keywords::ProtectionTarget,
-    /// The static's controller: "you" in "Auras and Equipment you control".
-    pub controller: crate::types::player::PlayerId,
 }
 
 pub use crate::types::layers::ProtectionRiderGrant;

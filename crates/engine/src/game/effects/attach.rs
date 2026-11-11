@@ -2360,10 +2360,20 @@ pub(crate) fn refresh_protection_start_attachment_snapshots(state: &mut GameStat
             if already_snapshotted {
                 continue;
             }
+            // CR 109.5: "you" is the current controller of the object the
+            // static is on, read after this pass's control-changing effects
+            // (layer 2), not the controller the effect was gathered with.
+            let Some(controller) = state
+                .objects
+                .get(&source_id)
+                .map(|source| source.controller)
+            else {
+                continue;
+            };
             let snapshot = capture_protection_start_attachment_snapshot(
                 state,
                 grant.key.host.object_id,
-                grant.controller,
+                controller,
                 &grant.resolved_quality,
             );
             let Some(source) = state.objects.get_mut(&source_id) else {
@@ -2381,11 +2391,12 @@ pub(crate) fn refresh_protection_start_attachment_snapshots(state: &mut GameStat
 }
 
 /// CR 702.16p: move snapshots an older save stored under slot keys to the
-/// occurrence keys. A slot key could only name the source's own static at that
-/// index (no granted static ever matched one), so it migrates to
-/// `ProtectionGrantOccurrence::Static` with the host's current incarnation.
-/// Entries whose host is gone are dropped; the refresh then prunes any that no
-/// active grant claims.
+/// occurrence keys. A slot key that names the source's own static migrates to
+/// `ProtectionGrantOccurrence::Static` with the host's current incarnation. A
+/// key at a slot layer 6 filled with a granted static cannot be mapped to its
+/// grant occurrence: it migrates to a key no grant claims, the refresh prunes
+/// it, and that grant takes a new snapshot (no printed card grants a ridered
+/// static). Entries whose host is gone are dropped.
 fn migrate_legacy_protection_start_snapshots(state: &mut GameState) {
     use crate::game::game_object::ProtectionStartKey;
     use crate::types::layers::ProtectionGrantOccurrence;

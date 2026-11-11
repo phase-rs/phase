@@ -287,6 +287,55 @@ fn cr_702_16p_snapshot_survives_later_ability_removal() {
     );
 }
 
+/// CR 109.5 + CR 702.16p: "you" in Benevolent Blessing's rider ("This effect
+/// doesn't remove Auras and Equipment you control that are already attached
+/// to it.") is Blessing's current controller. P1 casts Steal Enchantment
+/// ("Enchant enchantment / You control enchanted enchantment.") on P0's
+/// Blessing, then Blessing moves to another Grizzly Bears, where its effect
+/// starts applying anew and takes P1's attachments, not P0's. Synthetic: the
+/// move is a direct attach standing in for Enchantment Alteration ("Attach
+/// target Aura attached to a creature or land to another permanent of that
+/// type."), which is not in the test card fixture.
+#[test]
+fn stolen_benevolent_blessing_snapshots_its_new_controllers_attachments() {
+    let mut s = scenario();
+    let first_host = grizzly_bears(&mut s, P0);
+    let second_host = grizzly_bears(&mut s, P1);
+    let p0_pacifism = s.add_real_card(P0, "Pacifism", Zone::Hand, db());
+    let p1_pacifism = s.add_real_card(P1, "Pacifism", Zone::Hand, db());
+    let blessing = s.add_real_card(P0, "Benevolent Blessing", Zone::Hand, db());
+    let steal = s.add_real_card(P1, "Steal Enchantment", Zone::Hand, db());
+    let mut runner = s.build();
+    cast(&mut runner, P0, p0_pacifism, Some(second_host), None);
+    cast(&mut runner, P1, p1_pacifism, Some(second_host), None);
+    cast(&mut runner, P0, blessing, Some(first_host), Some("white"));
+    cast(&mut runner, P1, steal, Some(blessing), None);
+    assert_eq!(
+        runner.state().objects[&blessing].controller,
+        P1,
+        "reach guard: Steal Enchantment took Blessing"
+    );
+
+    attach_to(runner.state_mut(), blessing, second_host);
+    attached(&runner, blessing, second_host);
+    let state = runner.state();
+    assert_eq!(
+        attachment_illegality(state, p1_pacifism, second_host),
+        None,
+        "the new controller's Aura was already attached"
+    );
+    assert_eq!(
+        attachment_illegality(state, blessing, second_host),
+        None,
+        "Blessing is the new controller's own Aura"
+    );
+    assert_eq!(
+        attachment_illegality(state, p0_pacifism, second_host),
+        Some(AttachIllegality::Protection),
+        "the former controller's Aura is not exempt"
+    );
+}
+
 /// CR 702.16m + CR 702.16n ("If the creature has other instances of
 /// protection from the same quality, those instances affect Auras as
 /// normal."): Black Knight's printed protection from white and Flickering

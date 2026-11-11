@@ -11306,7 +11306,6 @@ fn record_protection_start_grant(
             host: ObjectIncarnationRef::from_object(obj),
         },
         resolved_quality: resolved_quality.clone(),
-        controller: effect.controller,
     };
     if !obj.protection_start_grants.contains(&grant) {
         obj.protection_start_grants.push(grant);
