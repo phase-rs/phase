@@ -16712,8 +16712,17 @@ impl GameState {
         // authority builds from its stored candidates, resolving each the way
         // it executes them; a stale candidate, a forged count or a missing
         // owner changes that prompt.
-        if let WaitingFor::ReplacementChoice { player, .. } = &probe.waiting_for {
-            if crate::game::replacement::replacement_choice_waiting_for(*player, &probe)
+        if matches!(probe.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            let Some(pending) = probe.pending_replacement.as_ref() else {
+                return Err("recovery checkpoint prompt lacks its replacement owner".to_string());
+            };
+            if !crate::game::replacement::pending_candidates_are_current(&probe, pending) {
+                return Err(
+                    "recovery checkpoint replacement candidate no longer executes".to_string(),
+                );
+            }
+            let chooser = crate::game::replacement::pending_replacement_chooser(&probe, pending);
+            if crate::game::replacement::replacement_choice_waiting_for(chooser, &probe)
                 != probe.waiting_for
             {
                 return Err(
@@ -16915,10 +16924,13 @@ pub enum PersistedRestoreError {
 }
 
 /// CR 118.12 + CR 701.9a + CR 701.21a: the object-naming prompts a staged
-/// payment can park besides a replacement choice (a discard, a sacrifice or
-/// other cost choice, an effect's zone choice). Each named object must still
-/// exist (a discard card in its player's hand), and a mandatory count must be
-/// reachable from the named objects, before any answer is probed.
+/// payment can park besides a replacement choice. The list is closed: these
+/// are the prompts the cost authority itself parks while paying a cost
+/// (`costs.rs`: a discard, a `PayCost` selection such as a sacrifice, an
+/// effect-cost zone choice); ward and other unless-payment prompts are never
+/// staged. Each named object must still exist (a discard card in its player's
+/// hand), and a mandatory count must be reachable from the named objects,
+/// before any answer is probed.
 fn recovered_prompt_names_live_objects(probe: &GameState) -> bool {
     match &probe.waiting_for {
         WaitingFor::DiscardChoice {

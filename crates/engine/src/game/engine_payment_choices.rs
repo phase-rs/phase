@@ -1199,16 +1199,20 @@ pub(super) fn handle_unless_payment(
         // counter, paid one instruction at a time through the counter-addition
         // payment owner, whatever the count.
         if let Some(owed) = repeat.and_then(std::num::NonZeroU32::new) {
+            let payment = RepeatedDrawUnlessPayment {
+                payer: player,
+                cost,
+                pending_effect,
+                trigger_event,
+                effect_description,
+                remaining,
+            };
+            if repeated_draw_exceeds_one_resolution(state, &payment, owed.get()) {
+                return Err(unrepresentable_repeated_payment());
+            }
             let waiting_for = pay_repeated_draw_unless_cost(
                 state,
-                RepeatedDrawUnlessPayment {
-                    payer: player,
-                    cost,
-                    pending_effect,
-                    trigger_event,
-                    effect_description,
-                    remaining,
-                },
+                payment,
                 owed,
                 Some(payment_event_start),
                 events,
@@ -2121,11 +2125,15 @@ struct RepeatedDrawUnlessPayment {
 /// - a replacement that ends the game (Laboratory Maniac) ends the payment;
 /// - every other instruction changes the game and is performed, all within
 ///   this dispatch with priority withheld, up to
-///   [`SYNCHRONOUS_INSTRUCTION_CEILING`]. A count that would still be changing
-///   the game past it (Hullbreacher creating a Treasure per draw) is beyond
-///   what the engine can represent in one resolution: the choice to pay is
-///   refused and the action rolled back whole, as an unrepresentable life
-///   change is, and the player may still decline.
+///   [`SYNCHRONOUS_INSTRUCTION_CEILING`]. A count that could keep changing the
+///   game past it (Hullbreacher creating a Treasure per draw) is beyond what
+///   the engine can represent in one resolution, so the choice to pay is
+///   refused before any instruction runs
+///   ([`repeated_draw_exceeds_one_resolution`]) and the player may still
+///   decline. The ceiling inside the loop is the backstop for a dispatch that
+///   reaches it anyway (a library of more than the ceiling's cards): that
+///   action is refused and rolled back whole, as an unrepresentable life
+///   change is.
 fn pay_repeated_draw_unless_cost(
     state: &mut GameState,
     payment: RepeatedDrawUnlessPayment,
@@ -2213,10 +2221,7 @@ fn pay_repeated_draw_unless_cost(
         }
         changing_instructions += 1;
         if changing_instructions > SYNCHRONOUS_INSTRUCTION_CEILING {
-            return Err(EngineError::ActionNotAllowed(format!(
-                "a repeated payment that changes the game on more than \
-                 {SYNCHRONOUS_INSTRUCTION_CEILING} instructions is not representable"
-            )));
+            return Err(unrepresentable_repeated_payment());
         }
         quiet_before = quiet.then(|| state.clone());
     }
@@ -2261,6 +2266,38 @@ pub(crate) fn draw_payment_is_parked(state: &GameState) -> bool {
 /// bound (Hullbreacher); this sits far above the first and stops the last
 /// long before the engine's runaway-cascade object ceiling.
 const SYNCHRONOUS_INSTRUCTION_CEILING: u32 = 1_024;
+
+/// The refusal of a repeated payment beyond what one resolution can represent.
+fn unrepresentable_repeated_payment() -> EngineError {
+    EngineError::ActionNotAllowed(format!(
+        "a repeated payment that changes the game on more than \
+         {SYNCHRONOUS_INSTRUCTION_CEILING} instructions is not representable"
+    ))
+}
+
+/// CR 118.11 + CR 614.1: whether paying `owed` instructions could exceed
+/// [`SYNCHRONOUS_INSTRUCTION_CEILING`]: more instructions than the ceiling are
+/// owed, and a draw replacement that performs work of its own applies to the
+/// drawer, so the instructions could keep changing the game without reaching
+/// a fixed point. Decided at the choice to pay, where refusing leaves the
+/// player free to decline.
+fn repeated_draw_exceeds_one_resolution(
+    state: &GameState,
+    payment: &RepeatedDrawUnlessPayment,
+    owed: u32,
+) -> bool {
+    if owed <= SYNCHRONOUS_INSTRUCTION_CEILING {
+        return false;
+    }
+    let AbilityCost::EffectCost { effect } = &payment.cost else {
+        return false;
+    };
+    let Effect::Draw { target, .. } = effect.as_ref() else {
+        return false;
+    };
+    effects::resolve_player_for_context_ref(state, &payment.pending_effect, target)
+        .is_some_and(|drawer| replacement::draw_replacement_performs_work(state, drawer))
+}
 
 /// CR 104.4b + CR 118.11: whether an instruction left the game exactly as it
 /// found it, by the same semantic equality loop detection uses (derived caches

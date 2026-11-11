@@ -20,7 +20,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityCost, Effect, EffectKind, ManaContribution, ManaProduction, QuantityExpr, TargetFilter,
 };
-use engine::types::actions::GameAction;
+use engine::types::actions::{DebugAction, GameAction};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
@@ -2221,4 +2221,83 @@ fn a_payment_past_the_synchronous_ceiling_is_refused_whole() {
         .act(GameAction::PayUnlessCost { pay: false })
         .expect("declining stays legal");
     assert_eq!(zone_of(&runner, vortex), Zone::Graveyard);
+}
+
+/// CR 118.11 + CR 616.1: the same refusal is decided at the choice to pay when
+/// a work-performing replacement applies alongside an optional one. With
+/// Hullbreacher and Obstinate Familiar, the first instruction would ask for an
+/// order; the payment is refused before that, so no answer can later be
+/// refused, and the player declines instead.
+#[test]
+fn a_payment_that_could_pass_the_ceiling_is_refused_before_any_choice() {
+    const AGE: u32 = 1_025;
+    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &STAGED_LIBRARY, |scenario| {
+        scenario.add_creature_from_oracle(P1, "Hullbreacher", 3, 2, HULLBREACHER_ORACLE);
+        scenario.add_creature_from_oracle(
+            P0,
+            "Obstinate Familiar",
+            1,
+            1,
+            OBSTINATE_FAMILIAR_ORACLE,
+        );
+    });
+    advance_through_upkeep(&mut runner);
+    let prompt = runner.state().waiting_for.clone();
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect_err("the payment could change the game past one resolution");
+    assert_eq!(
+        runner.state().waiting_for,
+        prompt,
+        "no replacement prompt was opened"
+    );
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("declining stays legal");
+    assert_eq!(zone_of(&runner, vortex), Zone::Graveyard);
+}
+
+/// CR 616.1f + CR 800.4a: a parked skip prompt whose replacement's source has
+/// left is answered by re-proposing the draw: only the effects that would now
+/// apply are considered, so the draw happens, the payment goes on, and no
+/// answer is refused.
+#[test]
+fn a_skip_prompt_whose_source_left_reproposes_the_draw() {
+    let (mut runner, vortex, familiar) = vortex_board(1, &STAGED_LIBRARY, |scenario| {
+        scenario
+            .add_creature(P0, "Obstinate Familiar", 1, 1)
+            .from_oracle_text(OBSTINATE_FAMILIAR_ORACLE)
+            .id()
+    });
+    advance_through_upkeep(&mut runner);
+    let before = ZoneSizes::of(&runner, P0);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("choosing the draw cost is legal");
+    assert_parked_with_owed(&runner, 1, "the first draw offers the skip");
+    let state = runner.state_mut();
+    state.debug_mode = true;
+    state.format_config.allow_debug_actions = true;
+    runner
+        .act(GameAction::Debug(DebugAction::RemoveObject {
+            object_id: familiar,
+        }))
+        .expect("the sandbox removes Obstinate Familiar");
+    assert_replacement_choice(&runner, "the skip prompt is still parked");
+    let result = runner
+        .act(GameAction::ChooseReplacement {
+            index: APPLY_REPLACEMENT,
+        })
+        .expect("an answer to a prompt whose source left is not refused");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "no skip is offered any more: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        ZoneSizes::of(&runner, P0).hand,
+        before.hand + 2,
+        "both draws happen once the skip no longer applies"
+    );
+    assert!(upkeep_ability_resolved(&result.events, vortex));
 }
