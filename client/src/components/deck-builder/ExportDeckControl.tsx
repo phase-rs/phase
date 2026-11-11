@@ -62,7 +62,7 @@ export function ExportDeckControl({ deck, triggerClassName }: ExportDeckControlP
         title={t("deckList.exportModalTitle")}
         onClose={handleClose}
         maxWidthClassName="max-w-md"
-        bodyClassName="p-6"
+        bodyClassName="overflow-y-auto p-6"
         returnFocusRef={triggerRef}
       >
         <div className="mb-3 flex justify-end">
@@ -86,7 +86,6 @@ export function ExportDeckControl({ deck, triggerClassName }: ExportDeckControlP
           readOnly
           rows={12}
           className="mb-3 w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 font-mono text-sm text-white focus:border-blue-500 focus:outline-none"
-          autoFocus
           onFocus={(e) => e.target.select()}
         />
         <div className="flex justify-between">
