@@ -3545,3 +3545,64 @@ fn vengeance_never_asks_two_players_out_of_apnap_order() {
         ));
     }
 }
+
+/// CR 616.1 + CR 702.89a: a choice can sit inside a replacement applied while
+/// a member is consulted. P2's Grizzly Bears wears P2's Hyena Umbra, so its
+/// armor destroys the Aura instead, and the Aura's own move to P2's graveyard
+/// then needs P2 to choose between Dauthi Voidwalker and Rest in Peace. P1's
+/// creature, later on the battlefield, needs P1's choice. P1 is still asked
+/// first.
+#[test]
+fn vengeance_orders_a_choice_inside_umbra_armor_apnap() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER);
+    scenario.add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE_ORACLE);
+    let bears = scenario.add_creature(p2, "Grizzly Bears", 2, 2).id();
+    let umbra = scenario
+        .add_enchantment_from_oracle(p2, "Hyena Umbra", HYENA_UMBRA)
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let p1_creature = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let vengeance = zero_cost_spell(&mut scenario, "Akroma's Vengeance", AKROMAS_VENGEANCE);
+    let mut runner = scenario.build();
+    // Infrastructure exception: preattach the full-Oracle Aura instead of
+    // casting it; the destruction population is produced by the public cast.
+    engine::game::effects::attach::attach_to(runner.state_mut(), umbra, bears);
+    engine::game::layers::flush_layers(runner.state_mut());
+
+    runner.cast(vengeance).commit();
+    let mut asked = Vec::new();
+    for _ in 0..24 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { player, .. } => {
+                asked.push(player);
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("the asked player answers");
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes");
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert_eq!(
+        asked,
+        vec![P1, p2],
+        "P1's choice comes before P2's (CR 616.1)"
+    );
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&bears].zone,
+        Zone::Battlefield,
+        "the armor saved it"
+    );
+    assert_eq!(state.objects[&umbra].zone, Zone::Exile);
+    assert_eq!(state.objects[&p1_creature].zone, Zone::Exile);
+    assert!(state.resolution_stack.is_empty());
+}

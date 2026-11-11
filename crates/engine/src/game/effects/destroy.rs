@@ -32,8 +32,9 @@ use crate::types::zones::Zone;
 /// The choosers are discovered by the real replacement pipeline, member by
 /// member in announcement order, on a scratch copy of the board staging would
 /// consult (outer Destroy, then the inner Battlefield-to-Graveyard move for an
-/// executed Destroy); a parked choice is recorded and left unanswered, as the
-/// staged batch leaves it while later members wait. A choice that only an
+/// executed Destroy, including a choice parked by a replacement applied along
+/// the way); a parked choice is recorded and left unanswered, as the staged
+/// batch leaves it while later members wait. A choice that only an
 /// answer exposes (CR 101.4d) and the order of one player's own choices
 /// (CR 101.4c) are left to the replacement-boundary scheduler.
 fn apnap_consultation_order(
@@ -45,6 +46,17 @@ fn apnap_consultation_order(
     let mut probe = state.clone();
     let mut scratch = Vec::new();
     let mut choosers = Vec::with_capacity(members.len());
+    // A replacement applied while consulting can itself park a choice: Umbra
+    // armor prevents the host's destruction by destroying the Aura, and the
+    // Aura's own move may ask its owner (CR 616.1). The staged consult parks
+    // that live child at this member's slot, so its chooser is this member's.
+    let parked_chooser = |probe: &GameState| match &probe.waiting_for {
+        crate::types::game_state::WaitingFor::ReplacementChoice { player, .. } => Some(*player),
+        _ => probe
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| pending.choice_player),
+    };
     for &member in members {
         let outer = ProposedEvent::Destroy {
             object_id: member,
@@ -54,8 +66,7 @@ fn apnap_consultation_order(
         };
         let chooser = match replacement::replace_event(&mut probe, outer, &mut scratch) {
             ReplacementResult::NeedsChoice(player) => Some(player),
-            ReplacementResult::Prevented => None,
-            ReplacementResult::Execute(_) => {
+            ReplacementResult::Execute(ProposedEvent::Destroy { .. }) => {
                 let inner = ProposedEvent::zone_change(
                     member,
                     Zone::Battlefield,
@@ -64,11 +75,17 @@ fn apnap_consultation_order(
                 );
                 match replacement::replace_event(&mut probe, inner, &mut scratch) {
                     ReplacementResult::NeedsChoice(player) => Some(player),
-                    ReplacementResult::Execute(_) | ReplacementResult::Prevented => None,
+                    ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
+                        parked_chooser(&probe)
+                    }
                 }
             }
+            // A redirected outer event is final for this member, as in the
+            // staged consult; a prevention may still have parked a child.
+            ReplacementResult::Execute(_) | ReplacementResult::Prevented => parked_chooser(&probe),
         };
         probe.pending_replacement = None;
+        probe.waiting_for = state.waiting_for.clone();
         choosers.push(chooser);
     }
     let apnap = crate::game::players::apnap_order(state);
