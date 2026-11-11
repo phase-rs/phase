@@ -576,9 +576,13 @@ pub(crate) fn eliminate_players(
             && matches!(state.waiting_for, WaitingFor::Priority { .. })
             && state.resolution_stack.active_zone_change_owner_is_parked()
         {
-            let resumed_start = events.len();
+            // The resume runs in its own buffer: a drain takes the buffer it is
+            // handed into its parked carrier when it stops on another prompt,
+            // and emits that carrier's stored events in front of the new ones
+            // when it completes. Its own buffer is exactly what it emitted.
+            let mut resumed = Vec::new();
             if let Err(error) =
-                super::engine::resume_pending_continuation_if_priority(state, events)
+                super::engine::resume_pending_continuation_if_priority(state, &mut resumed)
             {
                 tracing::error!(%error, "a canceled zone-change pause did not resume its tail");
                 debug_assert!(
@@ -586,12 +590,8 @@ pub(crate) fn eliminate_players(
                     "a canceled zone-change pause did not resume its tail: {error}"
                 );
             }
-            super::triggers::collect_unclaimed_triggers_into_deferred(
-                state,
-                events,
-                resumed_start,
-                None,
-            );
+            super::triggers::collect_unclaimed_triggers_into_deferred(state, &resumed, 0, None);
+            events.append(&mut resumed);
         }
 
         if let Some(frame) = staged_optional_sacrifice_decline {

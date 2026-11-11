@@ -16,9 +16,16 @@
 //!    put it onto the battlefield."
 //!   Rebuking Ceremony: "Put two target artifacts on top of their owners'
 //!    libraries."
+//!   Ninth Bridge Patrol: "Whenever another creature you control leaves the
+//!    battlefield, put a +1/+1 counter on this creature."
+//!   Karn, Silver Golem and Traxos, Scourge of Kroog: legendary artifact
+//!    creatures, each its owner's commander in the two-commander row.
 //!
 //! The mutate itself is staged with `merge_object_onto` (mutate casting is not
-//! under test). Brokkos is a legendary creature and the designated commander
+//! under test). When Circuit Mender is on top of Brokkos as the survivor, its
+//! own leaves-the-battlefield ability does not trigger even with nothing parked
+//! (the unparked control is empty), so Ninth Bridge Patrol observes that
+//! departure instead. Brokkos is a legendary creature and the designated commander
 //! (CR 903.3); CR 903.9b offers its owner the command zone when it would be put
 //! into a library.
 
@@ -31,7 +38,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
+use engine::types::game_state::{ActionResult, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -171,26 +178,58 @@ fn save_and_restore(runner: &mut GameRunner) {
     *runner.state_mut() = restored;
 }
 
-/// The controllers of Circuit Mender leaves-the-battlefield triggers waiting on
-/// the stack.
-fn mender_departure_triggers(state: &GameState) -> Vec<PlayerId> {
-    state
+/// The triggered abilities waiting to be put on the stack, as (controller,
+/// Oracle description): those already on the stack plus those its controller is
+/// being asked to order (CR 603.3b).
+fn waiting_triggers(state: &GameState) -> Vec<(PlayerId, String)> {
+    let mut waiting: Vec<(PlayerId, String)> = state
         .stack
         .iter()
-        .filter(|entry| {
-            matches!(
-                &entry.kind,
-                StackEntryKind::TriggeredAbility { description: Some(text), .. }
-                    if text.contains("leaves the battlefield")
-            )
+        .filter_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility {
+                description: Some(text),
+                ..
+            } => Some((entry.controller, text.clone())),
+            _ => None,
         })
-        .map(|entry| entry.controller)
+        .collect();
+    if let WaitingFor::OrderTriggers { player, triggers } = &state.waiting_for {
+        waiting.extend(
+            triggers
+                .iter()
+                .map(|trigger| (*player, trigger.description.clone())),
+        );
+    }
+    waiting
+}
+
+/// The controllers of Circuit Mender's leaves-the-battlefield triggers.
+fn mender_departure_triggers(state: &GameState) -> Vec<PlayerId> {
+    waiting_triggers(state)
+        .into_iter()
+        .filter(|(_, text)| text.contains("leaves the battlefield, draw a card"))
+        .map(|(controller, _)| controller)
         .collect()
 }
 
+/// The controllers of Ninth Bridge Patrol triggers: each one observed one
+/// creature its controller controlled leaving the battlefield.
+fn patrol_triggers(state: &GameState) -> Vec<PlayerId> {
+    waiting_triggers(state)
+        .into_iter()
+        .filter(|(_, text)| text.contains("another creature you control leaves"))
+        .map(|(controller, _)| controller)
+        .collect()
+}
+
+/// The resolution is over: priority, or the ordering of the abilities it
+/// triggered (CR 603.3b), with nothing of it left parked.
 fn resolution_finished(state: &GameState) {
     assert!(
-        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        matches!(
+            state.waiting_for,
+            WaitingFor::Priority { .. } | WaitingFor::OrderTriggers { .. }
+        ),
         "{:?}",
         state.waiting_for
     );
@@ -259,6 +298,7 @@ fn unparked_control_triggers(spell_name: &str, pile_shape: Pile) -> Vec<PlayerId
     let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 7);
     scenario.at_phase(Phase::PreCombatMain);
     let (mender, brokkos) = add_pile(&mut scenario, P1);
+    scenario.add_real_card(P1, "Ninth Bridge Patrol", Zone::Battlefield, db);
     let spell = scenario.add_real_card(P0, spell_name, Zone::Hand, db);
     scenario.with_library_top(P1, &["Library Card A", "Library Card B"]);
     let mut pool = mana(ManaType::Blue, 5);
@@ -268,7 +308,22 @@ fn unparked_control_triggers(spell_name: &str, pile_shape: Pile) -> Vec<PlayerId
     let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, false);
     cast_until_resolved_or_asked(&mut runner, spell, &[pile.survivor]);
     resolution_finished(runner.state());
+    assert_eq!(
+        patrol_triggers(runner.state()),
+        vec![P1],
+        "control: Ninth Bridge Patrol observes the one merged departure once"
+    );
     mender_departure_triggers(runner.state())
+}
+
+/// The unparked control: Circuit Mender's own trigger fires once when it is the
+/// survivor; with Brokkos as the survivor it is empty (see the module note).
+fn assert_control(spell_name: &str, pile_shape: Pile, control: &[PlayerId]) {
+    let expected: &[PlayerId] = match pile_shape {
+        Pile::BrokkosUnderMender => &[P1],
+        Pile::MenderOverBrokkos => &[],
+    };
+    assert_eq!(control, expected, "{spell_name} {pile_shape:?} control");
 }
 
 /// CR 730.3 + CR 701.24a + CR 608.2c: Chaos Warp's owner shuffle runs through a
@@ -280,18 +335,15 @@ fn unparked_control_triggers(spell_name: &str, pile_shape: Pile) -> Vec<PlayerId
 /// non-survivor component and when it opens on the survivor's own incarnation.
 #[test]
 fn chaos_warp_hands_a_parked_component_back_to_the_owner_iteration() {
-    assert_eq!(
-        unparked_control_triggers("Chaos Warp", Pile::BrokkosUnderMender),
-        vec![P1],
-        "control: the unparked merged departure triggers Circuit Mender once"
-    );
     for pile_shape in [Pile::BrokkosUnderMender, Pile::MenderOverBrokkos] {
         let control = unparked_control_triggers("Chaos Warp", pile_shape);
+        assert_control("Chaos Warp", pile_shape, &control);
         for answer_index in [0, 1] {
             let db = shared_card_db().expect("integration card fixture must load");
             let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 7);
             scenario.at_phase(Phase::PreCombatMain);
             let (mender, brokkos) = add_pile(&mut scenario, P1);
+            scenario.add_real_card(P1, "Ninth Bridge Patrol", Zone::Battlefield, db);
             let warp = scenario.add_real_card(P0, "Chaos Warp", Zone::Hand, db);
             scenario.with_library_top(P1, &["Library Card A", "Library Card B"]);
             scenario.with_mana_pool(P0, mana(ManaType::Red, 3));
@@ -370,6 +422,11 @@ fn chaos_warp_hands_a_parked_component_back_to_the_owner_iteration() {
                 control,
                 "{label}: the parked departure is collected exactly as the unparked one"
             );
+            assert_eq!(
+                patrol_triggers(runner.state()),
+                vec![P1],
+                "{label}: Ninth Bridge Patrol observes the one merged departure once"
+            );
         }
     }
 }
@@ -424,9 +481,9 @@ fn rebuking_ceremony_concession_during_the_prompt_places_the_surviving_artifact_
         );
         assert!(
             conceded.events.iter().any(|event| matches!(
-                event,
+                *event,
                 GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Library, .. }
-                    if *object_id == surviving
+                    if object_id == surviving
             )),
             "{label}: the ceremony's own placement moved it in the concession"
         );
@@ -444,6 +501,164 @@ fn rebuking_ceremony_concession_during_the_prompt_places_the_surviving_artifact_
     }
 }
 
+fn concede(runner: &mut GameRunner, player: PlayerId) -> ActionResult {
+    engine::game::engine::apply(
+        runner.state_mut(),
+        player,
+        GameAction::Concede { player_id: player },
+    )
+    .expect("a player may concede at any time")
+}
+
+/// CR 800.4a + CR 117.2e + CR 903.9b: the same concession with no merged
+/// permanent. Rebuking Ceremony targets Traxos, Scourge of Kroog (P2's
+/// commander) and Karn, Silver Golem (P1's commander); Karn moves first and its
+/// owner's command-zone choice parks the batch. P1 concedes: Karn leaves the
+/// game, and the resumed batch reaches Traxos, whose owner's choice parks it
+/// again — the concession hands that prompt to P2 and keeps its own departure
+/// events. Answering it finishes the ceremony.
+#[test]
+fn concession_resume_that_parks_again_opens_the_next_commander_prompt() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let karn = scenario.add_real_card(P1, "Karn, Silver Golem", Zone::Battlefield, db);
+    let traxos = scenario.add_real_card(P2, "Traxos, Scourge of Kroog", Zone::Battlefield, db);
+    let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
+    scenario.with_library_top(P2, &["Library Card A"]);
+    scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
+    let mut runner = scenario.build();
+    for commander in [karn, traxos] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&commander)
+            .expect("commander exists")
+            .is_commander = true;
+    }
+
+    cast_until_resolved_or_asked(&mut runner, ceremony, &[traxos, karn]);
+    assert_commander_prompt(runner.state(), P1, karn);
+
+    let conceded = concede(&mut runner, P1);
+    assert!(
+        matches!(
+            conceded.waiting_for,
+            WaitingFor::ReplacementChoice { player: P2, .. }
+        ),
+        "{:?}",
+        conceded.waiting_for
+    );
+    assert_commander_prompt(runner.state(), P2, traxos);
+    assert_eq!(runner.state().objects[&karn].zone, Zone::Exile);
+    assert!(
+        conceded.events.iter().any(|event| matches!(
+            *event,
+            GameEvent::ZoneChanged { object_id, to: Zone::Exile, .. } if object_id == karn
+        )),
+        "the concession keeps its own departure events"
+    );
+
+    answer(&mut runner, 1);
+    resolution_finished(runner.state());
+    assert_eq!(runner.state().players[2].library.front(), Some(&traxos));
+    assert_eq!(runner.state().objects[&ceremony].zone, Zone::Graveyard);
+}
+
+/// CR 800.4a + CR 117.2e + CR 730.3: Chaos Warp's owner iteration parks on
+/// Brokkos's CR 903.9b prompt and the owner — the prompt's chooser — concedes.
+/// Every component leaves the game with P1, and the owner iteration and its
+/// continuation finish within the concession: nothing is parked when priority
+/// is given.
+#[test]
+fn chaos_warp_owner_concession_during_the_prompt_finishes_before_priority() {
+    for pile_shape in [Pile::BrokkosUnderMender, Pile::MenderOverBrokkos] {
+        let db = shared_card_db().expect("integration card fixture must load");
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let (mender, brokkos) = add_pile(&mut scenario, P1);
+        let warp = scenario.add_real_card(P0, "Chaos Warp", Zone::Hand, db);
+        scenario.with_library_top(P1, &["Library Card A"]);
+        scenario.with_mana_pool(P0, mana(ManaType::Red, 3));
+        let mut runner = scenario.build();
+        let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, true);
+        let label = format!("{pile_shape:?}");
+
+        cast_until_resolved_or_asked(&mut runner, warp, &[pile.survivor]);
+        assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        let conceded = concede(&mut runner, P1);
+
+        assert!(
+            matches!(conceded.waiting_for, WaitingFor::Priority { .. }),
+            "{label}: {:?}",
+            conceded.waiting_for
+        );
+        resolution_finished(runner.state());
+        assert_eq!(
+            runner.state().objects[&warp].zone,
+            Zone::Graveyard,
+            "{label}"
+        );
+        for component in [pile.mender, pile.brokkos] {
+            assert_eq!(
+                runner.state().objects[&component].zone,
+                Zone::Exile,
+                "{label}: CR 800.4a: {component:?} leaves the game with its owner"
+            );
+        }
+    }
+}
+
+/// CR 800.4a + CR 730.3: another seat concedes while the commander's owner is
+/// choosing. P2's surviving artifact leaves the game with P2 and drops out of
+/// the ceremony; the parked component and its owner are untouched, the prompt
+/// stays with P1, and either answer finishes the ceremony with the merged
+/// departure collected once.
+#[test]
+fn another_seat_concession_leaves_the_commander_prompt_and_its_owner_intact() {
+    for answer_index in [0, 1] {
+        let db = shared_card_db().expect("integration card fixture must load");
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let (mender, brokkos) = add_pile(&mut scenario, P1);
+        let surviving = scenario.add_real_card(P2, "Circuit Mender", Zone::Battlefield, db);
+        let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
+        scenario.with_library_top(P1, &["Library Card A"]);
+        scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
+        let mut runner = scenario.build();
+        let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
+        let label = format!("answer {answer_index}");
+
+        cast_until_resolved_or_asked(&mut runner, ceremony, &[surviving, pile.survivor]);
+        assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        concede(&mut runner, P2);
+        assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        assert_eq!(
+            runner.state().objects[&surviving].zone,
+            Zone::Exile,
+            "{label}"
+        );
+
+        answer(&mut runner, answer_index);
+        resolution_finished(runner.state());
+        assert_eq!(
+            runner.state().objects[&ceremony].zone,
+            Zone::Graveyard,
+            "{label}"
+        );
+        assert_eq!(
+            runner.state().objects[&pile.mender].zone,
+            Zone::Library,
+            "{label}"
+        );
+        assert_eq!(
+            mender_departure_triggers(runner.state()),
+            vec![P1],
+            "{label}: one merged permanent left, so its ability triggers once"
+        );
+    }
+}
+
 /// CR 616.1 + CR 730.3: a synthetic member-level replacement first parks the
 /// original permanent's own move. The nearest printed analogue is an optional
 /// move replacement such as Rest in Peace's graveyard redirect; no printed card
@@ -456,21 +671,18 @@ fn rebuking_ceremony_concession_during_the_prompt_places_the_surviving_artifact_
 #[test]
 fn resumed_merged_member_settles_once_whether_its_components_park_or_not() {
     for spell_name in ["Totally Lost", "Chaos Warp"] {
-        assert_eq!(
-            unparked_control_triggers(spell_name, Pile::BrokkosUnderMender),
-            vec![P1],
-            "{spell_name} control: the unparked merged departure triggers Circuit Mender once"
-        );
         for (pile_shape, component_answer) in [
             (Pile::BrokkosUnderMender, None),
             (Pile::MenderOverBrokkos, Some(0)),
             (Pile::MenderOverBrokkos, Some(1)),
         ] {
             let control = unparked_control_triggers(spell_name, pile_shape);
+            assert_control(spell_name, pile_shape, &control);
             let db = shared_card_db().expect("integration card fixture must load");
             let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 7);
             scenario.at_phase(Phase::PreCombatMain);
             let (mender, brokkos) = add_pile(&mut scenario, P1);
+            scenario.add_real_card(P1, "Ninth Bridge Patrol", Zone::Battlefield, db);
             let survivor = match pile_shape {
                 Pile::BrokkosUnderMender => mender,
                 Pile::MenderOverBrokkos => brokkos,
@@ -517,6 +729,11 @@ fn resumed_merged_member_settles_once_whether_its_components_park_or_not() {
                 mender_departure_triggers(runner.state()),
                 control,
                 "{label}: the resumed departure is collected exactly as the unparked one"
+            );
+            assert_eq!(
+                patrol_triggers(runner.state()),
+                vec![P1],
+                "{label}: Ninth Bridge Patrol observes the one merged departure once"
             );
             if component_answer == Some(0) {
                 assert_eq!(
