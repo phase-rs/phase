@@ -3750,7 +3750,10 @@ fn floating_producer_facts_match(a: &GameState, b: &GameState) -> bool {
 
 /// The evidence each of ONE payer's units proves, paired with the SHAPE of the unit that
 /// carries it, in pool order — the unit of comparison for one payer.
-type UnitProducerFact = (crate::types::mana::ManaShape, Option<LKISnapshot>);
+type UnitProducerFact = (
+    crate::types::mana::ManaShape,
+    Option<(LKISnapshot, crate::types::game_state::CapturedTokenBit)>,
+);
 
 /// CR 118.3a + CR 106.1: ONE payer's facts against that same payer's facts — the
 /// payer-relative half of [`floating_producer_facts_match`].
@@ -3891,7 +3894,11 @@ fn spendable_unit_producer_facts(
         .into_iter()
         .zip(facts)
         .map(|(unit, fact)| {
-            let fact = fact.map(|snapshot| canonical_producer_fact(snapshot.lki));
+            // CR 111.1 + CR 106.3 + CR 608.2h: the bit the row captured rides WITH the
+            // snapshot it was written with — past the step boundary this row is its only
+            // carrier, and a token-leaf read answers from it.
+            let fact =
+                fact.map(|snapshot| (canonical_producer_fact(snapshot.lki), snapshot.source_token));
             let (shape, _pip) = unit.into_shape_and_pip();
             (shape, fact)
         })
@@ -12075,6 +12082,42 @@ mod tests {
             !floating_producer_facts_match(&first_pip, &last_pip),
             "CR 118.3a + CR 732.2a: the payment tells the two positions apart, so the \
              comparator must refuse them"
+        );
+    }
+
+    /// CR 111.1 + CR 106.3 + CR 608.2h + CR 732.2a: past the step boundary the retained
+    /// producer row is the ONLY carrier of the token classification it captured with the
+    /// snapshot. Two positions identical except that bit are distinguishable — a token-leaf
+    /// read answers `token` in one and `nontoken` in the other — so no equality path may
+    /// equate them: the comparand (through `PooledManaProducerSnapshot::eq`) and the
+    /// payer-fact conjunct must both refuse.
+    ///
+    /// Revert-probes: dropping `source_token` from `PooledManaProducerSnapshot::eq` makes the
+    /// comparand assertions fail; dropping it from `UnitProducerFact` makes the conjunct
+    /// assertion fail.
+    #[test]
+    fn a_retained_producer_token_bit_distinguishes_the_positions() {
+        use crate::types::game_state::CapturedTokenBit;
+        let mut token = three_pips_of_one_treasure_tenure(&[1]);
+        let mut plain = token.clone();
+        token.pooled_mana_producer_snapshots[0].source_token = CapturedTokenBit::Known(true);
+        plain.pooled_mana_producer_snapshots[0].source_token = CapturedTokenBit::Known(false);
+
+        assert_ne!(
+            token, plain,
+            "reach-guard: the comparand must see the retained bit"
+        );
+        assert!(
+            !floating_producer_facts_match(&token, &plain),
+            "the payer-fact conjunct must compare the retained bit with its snapshot"
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&token, &plain),
+            "a retained token bit either position states differently is not modulo-equal"
+        );
+        assert!(
+            certifying_cover(&token, &plain, PlayerId(0), None).is_none(),
+            "no cover admits a position whose only bit evidence differs"
         );
     }
 

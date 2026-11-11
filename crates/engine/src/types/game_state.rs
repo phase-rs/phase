@@ -1500,6 +1500,11 @@ impl PartialEq for PooledManaProducerSnapshot {
             && self.source_id == other.source_id
             && self.source_incarnation == other.source_incarnation
             && self.lki == other.lki
+            // CR 111.1 + CR 106.3 + CR 608.2h: the token classification the row captured
+            // with the snapshot. Past the step boundary the departure capture is gone and
+            // this row is the ONLY carrier, so two positions differing in it answer a
+            // token-leaf read differently and are not the same position.
+            && self.source_token == other.source_token
     }
 }
 
