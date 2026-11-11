@@ -37,19 +37,16 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
 };
-#[cfg(test)]
 use crate::types::ability::{
-    become_copy_recipient_slot_filter, effect_needs_target_creature_quantity_slot,
-};
-use crate::types::ability::{
-    effect_references_target_player, effect_stack_target_declaration_matching,
-    payer_is_declared_target, AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally,
-    AdditionalCostOrigin, AttachCardinality, AttachSelection, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CostCategory,
-    CountScope, DamageChannel, DigSource, Duration, Effect, EffectOutcomeSignal, FilterProp,
-    GuessOutcome, LibraryPosition, ObjectScope, ParsedCondition, PlayerScope, PtStat, PtValueScope,
-    QuantityExpr, QuantityRef, SharedQuality, SpentColor, StaticCondition, TargetChoiceTiming,
-    TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
+    damage_replacement_source_slot_filter, effect_references_target_player,
+    effect_stack_target_declaration_matching, payer_is_declared_target, AbilityCondition,
+    AbilityDefinition, AbilityKind, AbilityUseTally, AdditionalCostOrigin, AttachCardinality,
+    AttachSelection, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult,
+    Comparator, ControllerRef, CostCategory, CountScope, DamageChannel, DigSource, Duration,
+    Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, LibraryPosition, ObjectScope,
+    ParsedCondition, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+    SpentColor, StaticCondition, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -4367,9 +4364,11 @@ fn cost_category_binds_cost_paid_object(category: CostCategory) -> bool {
 /// spell), or the instruction's declared target (`ParentTarget`). `None` when
 /// the instruction acts on no single object.
 fn trailing_rider_subject(effect_text: &str, ctx: &ParseContext) -> Option<TargetFilter> {
-    match probe_effect_target(effect_text, ctx)?.filter {
+    match effect_target_filter(effect_text, ctx)? {
         filter if super::subject::is_single_object_ref(&filter) => Some(filter),
-        filter if is_declared_target_filter(&filter) => Some(TargetFilter::ParentTarget),
+        filter if !filter.is_context_ref() && !matches!(filter, TargetFilter::Any) => {
+            Some(TargetFilter::ParentTarget)
+        }
         _ => None,
     }
 }
@@ -4857,15 +4856,8 @@ pub(super) fn strip_routed_suffix_conditional(
     if let Some((referent, condition)) =
         parse_target_controller_control_condition_parts(condition_core)
     {
-        let target = declared_single_object_target(effect_prefix, ctx);
-        if !target
-            .as_ref()
-            .is_some_and(|target| referent_is_bound(referent, target))
-        {
-            return (None, text.to_string());
-        }
-        let mut bridge_ctx = ctx.clone();
-        let Some(condition) = static_condition_to_ability_condition(&condition, &mut bridge_ctx)
+        let Some(condition) =
+            bind_target_controller_condition(referent, &condition, effect_prefix, ctx)
         else {
             return (None, text.to_string());
         };
@@ -4876,11 +4868,7 @@ pub(super) fn strip_routed_suffix_conditional(
         // connector), so the generic route parses the whole conjunction. When
         // the referent cannot bind, fail closed before that route can re-home
         // the left operand with an unbound `ParentTargetController`.
-        let target = declared_single_object_target(effect_prefix, ctx);
-        if !target
-            .as_ref()
-            .is_some_and(|target| referent_is_bound(referent, target))
-        {
+        if !target_controller_referent_binds(referent, effect_prefix, ctx) {
             return (None, text.to_string());
         }
     }
@@ -4937,29 +4925,15 @@ pub(super) fn strip_routed_suffix_conditional(
 /// filter is a player-chosen target (not a context reference or the untyped
 /// `Any` fallback). Parses on a throwaway context so the caller's is untouched.
 fn effect_has_declared_target(effect_text: &str, ctx: &ParseContext) -> bool {
-    probe_effect_target(effect_text, ctx)
-        .is_some_and(|probe| is_declared_target_filter(&probe.filter))
+    effect_target_filter(effect_text, ctx)
+        .is_some_and(|filter| !filter.is_context_ref() && !matches!(filter, TargetFilter::Any))
 }
 
-/// CR 115.1: a typed target filter names a player-chosen target unless it is
-/// a context reference or the untyped `Any` fallback.
-fn is_declared_target_filter(filter: &TargetFilter) -> bool {
-    !filter.is_context_ref() && !matches!(filter, TargetFilter::Any)
-}
-
-/// The typed target filter of the effect an instruction lowers to, with the
-/// clause's multi-target spec.
-#[derive(Debug)]
-struct EffectTargetProbe {
-    filter: TargetFilter,
-}
-
-/// Lowers `effect_text` on a throwaway context (the caller's is untouched)
-/// and reads its typed target filter; `None` when the effect has none.
-fn probe_effect_target(effect_text: &str, ctx: &ParseContext) -> Option<EffectTargetProbe> {
+/// The typed target filter of the effect `effect_text` lowers to, parsed on a
+/// throwaway context so the caller's is untouched.
+fn effect_target_filter(effect_text: &str, ctx: &ParseContext) -> Option<TargetFilter> {
     let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
-    let filter = clause.effect.target_filter()?.clone();
-    Some(EffectTargetProbe { filter })
+    clause.effect.target_filter().cloned()
 }
 
 /// CR 115.1 + CR 601.2c: the roles production announces for one effect node,
@@ -4996,11 +4970,35 @@ fn declared_roles_for_node(
         .collect()
 }
 
-/// CR 115.1 + CR 608.2c: every announced role in the clause tree, or `None`
-/// when a node declares an ambiguous cardinality shape (distribute, up-to,
-/// repeat-for, chosen player, target chooser) or a resolution-timed child role.
+/// CR 601.2c + CR 609.7: a node whose enumeration returns early. The source-scoped
+/// damage prevention branch of the phase-ast enumerator returns before the
+/// companion-player and quantity branches that the engine's slot builder falls
+/// through to, so the enumerated set is not proven complete for that node and
+/// the probe declines it (Dromoka's Command).
+fn enumeration_returns_early(effect: &Effect) -> bool {
+    damage_replacement_source_slot_filter(effect).is_some()
+}
+
+/// CR 115.1 + CR 608.2c: every announced role in the head effect and every
+/// descendant definition, or `None` when a node declares an ambiguous
+/// cardinality shape or a resolution-timed child role.
+///
+/// The walk follows `sub_ability`, `else_ability` and `mode_abilities`. That is
+/// a superset of what production announces (it never announces an else branch),
+/// so an extra branch can only cause a harmless over-decline. A coin-flip branch
+/// definition nested inside an effect is not walked: those branches come from
+/// later sentences, not from a clause prefix. The head's own `repeat_for`,
+/// `player_scope` and `target_chooser` are not fields of the parsed clause; the
+/// caller declines them from the printed text (`head_stamps_clause_scope`).
+/// Declined on the head and on every descendant: `multi_target` (every
+/// per-opponent fanout and every `EachDealsDamageEqualToPower` carries it),
+/// `distribute`, `optional_targeting`; on descendants also `repeat_for`,
+/// `player_scope` and `target_chooser`.
 fn announced_object_roles(clause: &super::ParsedEffectClause) -> Option<Vec<TargetFilter>> {
     if clause.multi_target.is_some() || clause.distribute.is_some() || clause.optional_targeting {
+        return None;
+    }
+    if enumeration_returns_early(&clause.effect) {
         return None;
     }
     let mut roles = declared_roles_for_node(&clause.effect, clause.unless_pay.as_ref());
@@ -5016,6 +5014,9 @@ fn announced_object_roles(clause: &super::ParsedEffectClause) -> Option<Vec<Targ
             || definition.player_scope.is_some()
             || definition.target_chooser.is_some()
         {
+            return None;
+        }
+        if enumeration_returns_early(&definition.effect) {
             return None;
         }
         let child_roles =
@@ -5035,15 +5036,57 @@ fn announced_object_roles(clause: &super::ParsedEffectClause) -> Option<Vec<Targ
     Some(roles)
 }
 
-/// CR 115.1d: the effect probe narrowed to one announced object target. The
-/// declaration set comes from the phase-ast enumerator production uses, over
-/// the head and every descendant; a companion player, a payer, a child role,
-/// or any other second role makes the suffix decline.
-fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<EffectTargetProbe> {
-    if !nom_primitives::scan_contains(&effect_text.to_ascii_lowercase(), "target ") {
+/// CR 608.2c: the prefixes and suffixes production peels in the chunk loop
+/// AFTER the suffix-conditional strip, and stamps on the clause's `ClauseIr`
+/// as `repeat_for` / `player_scope` / the optional-effect scopes. The probe
+/// parses the text that still carries them while production later parses the
+/// stripped text, so a head carrying any of them is declined. The detectors
+/// are the production strippers themselves, not a second copy of their grammar.
+fn head_stamps_clause_scope(text: &str) -> bool {
+    let (optional, opponent_may, implicit_scope, _) =
+        super::lower::strip_optional_effect_prefix(text);
+    if optional || opponent_may.is_some() || implicit_scope.is_some() {
+        return true;
+    }
+    let (repeat_for, difference, _) = super::lower::strip_for_each_prefix_with_difference(text);
+    repeat_for.is_some()
+        || difference.is_some()
+        || crate::parser::clause_shell::peel_repeat_count_suffix(text)
+            .0
+            .is_some()
+        || crate::parser::clause_shell::peel_player_scope_subject(text, false)
+            .0
+            .is_some()
+        || super::lower::strip_prepositional_player_scope_subject(text)
+            .0
+            .is_some()
+}
+
+/// CR 115.1 + CR 115.10a + CR 601.2c: every role production announces for the
+/// instruction `effect_text`, read from the head effect and every descendant
+/// through the phase-ast enumerator. `None` when the text does not reach a
+/// readable Stack-timed declaration, so a caller (or a test) that gets `Some`
+/// knows the input parsed and passed every gate in front of the role count.
+///
+/// The gates, in order: the printed text carries the word "target " (every arm
+/// of the timing ladder keys on it, and both production re-timings of an
+/// enchanted/equipped host require its absence); no optional-count quantifier
+/// ("up to", "any number of") precedes any target phrase, whether or not the
+/// clause fixup stamped `multi_target` for this effect kind; the head carries
+/// no clause-scope prefix and no announcer override; the clause lowers to Stack
+/// timing; and no node declares an ambiguous cardinality shape.
+fn stack_announced_roles(effect_text: &str, ctx: &ParseContext) -> Option<Vec<TargetFilter>> {
+    if !nom_primitives::scan_contains(&effect_text.to_ascii_lowercase(), "target ")
+        || super::lower::text_declares_optional_target_count(effect_text)
+        || head_stamps_clause_scope(effect_text)
+    {
         return None;
     }
-    let clause = super::parse_effect_clause(effect_text, &mut ctx.clone_throwaway());
+    let mut probe_ctx = ctx.clone_throwaway();
+    let clause = super::parse_effect_clause(effect_text, &mut probe_ctx);
+    if probe_ctx.target_chooser.is_some() {
+        return None;
+    }
     let timing = super::lower::target_choice_timing_for_parsed(
         &clause,
         effect_text,
@@ -5054,17 +5097,22 @@ fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<E
     if timing != TargetChoiceTiming::Stack {
         return None;
     }
-    let mut roles = announced_object_roles(&clause)?;
+    announced_object_roles(&clause)
+}
+
+/// CR 115.1d: the one announced object target of an instruction, or `None`
+/// when the declaration is not exactly one controller-capable object role. A
+/// companion player, a payer, a child role, or any other second role makes the
+/// suffix decline.
+fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<TargetFilter> {
+    let mut roles = stack_announced_roles(effect_text, ctx)?;
     if roles.len() != 1 {
         return None;
     }
     let filter = roles.pop()?;
-    if !nom_condition::filter_guarantees_object_controller(&filter)
-        || super::is_player_scoped_filter(&filter)
-    {
-        return None;
-    }
-    Some(EffectTargetProbe { filter })
+    (nom_condition::filter_guarantees_object_controller(&filter)
+        && !super::is_player_scoped_filter(&filter))
+    .then_some(filter)
 }
 
 pub(super) fn parse_quantity_comparison(text: &str) -> Option<(Comparator, QuantityExpr)> {
@@ -5287,27 +5335,22 @@ struct DeclaredObjectTarget {
     introduced_controller: Option<ControllerRef>,
 }
 
-/// CR 115.1: the instruction `effect_text` lowers to declares one object
-/// target that can supply a controller (not a context reference, the untyped
-/// `Any` fallback, a player, or a multi-role/multi-target slot). Parsed on a
-/// throwaway context so the caller's is untouched.
+/// CR 115.1: the instruction `effect_text` lowers to declares exactly one
+/// object target that can supply a controller (`probe_declared_target_slot`
+/// owns every guard: not a context reference, not a player, not a multi-role or
+/// multi-target slot). Parsed on a throwaway context so the caller's is
+/// untouched.
 fn declared_single_object_target(
     effect_text: &str,
     ctx: &ParseContext,
 ) -> Option<DeclaredObjectTarget> {
-    let probe = probe_declared_target_slot(effect_text, ctx)?;
-    if !is_declared_target_filter(&probe.filter)
-        || super::is_player_scoped_filter(&probe.filter)
-        || !nom_condition::filter_guarantees_object_controller(&probe.filter)
-    {
-        return None;
-    }
-    let introduced_controller = match &probe.filter {
+    let filter = probe_declared_target_slot(effect_text, ctx)?;
+    let introduced_controller = match &filter {
         TargetFilter::Typed(tf) => tf.controller.clone(),
         _ => None,
     };
     Some(DeclaredObjectTarget {
-        filter: probe.filter,
+        filter,
         introduced_controller,
     })
 }
@@ -5355,27 +5398,38 @@ fn parse_target_controller_control_condition_prefix(
     .map(|(referent, _condition)| referent)
 }
 
+/// CR 608.2c + CR 115.1: whether the referent of a recognized target-controller
+/// condition has an antecedent in the gated instruction's single declared
+/// object target.
+fn target_controller_referent_binds(
+    referent: nom_condition::TargetControllerReferent,
+    effect_text: &str,
+    ctx: &ParseContext,
+) -> bool {
+    declared_single_object_target(effect_text, ctx)
+        .is_some_and(|target| referent_is_bound(referent, &target))
+}
+
 /// CR 608.2c: a trailing condition on the controller of the gated
 /// instruction's single declared object target, returned only when its
 /// subject has an antecedent in that instruction (Skulking Killer, Unified
-/// Will).
+/// Will). This is the one binding seam: the production suffix strip calls it
+/// and so do the tests, so no test-only copy of the branch exists.
 ///
 /// The grammar itself lives in the single condition authority,
-/// `oracle_nom::condition::parse_inner_condition`; this seam keeps only the
-/// effect-side antecedent guard and the typed bridge.
-#[cfg(test)]
-fn parse_target_controller_control_condition_text(
-    condition_text: &str,
+/// `oracle_nom::condition::parse_target_controller_count_condition`; this seam
+/// keeps only the effect-side antecedent guard and the typed bridge.
+fn bind_target_controller_condition(
+    referent: nom_condition::TargetControllerReferent,
+    condition: &StaticCondition,
     effect_text: &str,
     ctx: &ParseContext,
 ) -> Option<AbilityCondition> {
-    let (referent, condition) = parse_target_controller_control_condition_parts(condition_text)?;
-    let target = declared_single_object_target(effect_text, ctx)?;
-    if !referent_is_bound(referent, &target) {
+    if !target_controller_referent_binds(referent, effect_text, ctx) {
         return None;
     }
     let mut bridge_ctx = ctx.clone();
-    static_condition_to_ability_condition(&condition, &mut bridge_ctx)
+    static_condition_to_ability_condition(condition, &mut bridge_ctx)
 }
 
 /// CR 601.2 + CR 608.2c: `parse_condition_text` for a clause in a known parse
@@ -11165,18 +11219,6 @@ mod tests {
         assert!(cond.is_none(), "a creature spell is not a permanent");
     }
 
-    /// CR 115.4: "any other target" admits players, so it cannot prove an
-    /// object controller even when the filter is type-less.
-    #[test]
-    fn any_target_slot_cannot_bind_a_controller() {
-        let ctx = ParseContext::default();
-        let effect = "Deals that much damage to any other target";
-        // "any other target" carries no literal "target " and its filter admits
-        // players; both the printed-target gate and the domain check decline.
-        assert!(probe_declared_target_slot(effect, &ctx).is_none());
-        assert!(declared_single_object_target(effect, &ctx).is_none());
-    }
-
     /// CR 109.2b: "that creature's controller" cannot name a creature spell
     /// on the stack; only the spell noun can.
     #[test]
@@ -11224,273 +11266,6 @@ mod tests {
         assert_eq!(cond, Some(expected));
     }
 
-    /// Fail-closed: the subject must have an antecedent in a declared object
-    /// target slot. Each condition still parses in the shared grammar (reach
-    /// guard), and each effect probe reaches the guard it is meant to exercise:
-    /// the creature row is a declared single object target with no introduced
-    /// opponent, the player row is player-scoped, the multi-target row carries
-    /// `multi_target`, and the untargeted row surfaces no declared slot at all.
-    /// Only then does the full strip decline.
-    ///
-    /// Synthetic rows name their nearest printed analogue: the creature row is
-    /// Skulking Killer's instruction with the opponent qualifier removed, the
-    /// player row is Bump in the Night's player-target frame, and the
-    /// multi-target row is a synthetic multi-target form of Skulking Killer.
-    #[test]
-    fn target_controller_control_condition_declines_without_antecedent() {
-        let ctx = ParseContext {
-            in_trigger: true,
-            ..Default::default()
-        };
-
-        // Single declared object target, no opponent introduced by its own type
-        // phrase: the probe resolves and the antecedent guard is what declines.
-        let effect = "Target creature gets -2/-2 until end of turn";
-        let probe = probe_declared_target_slot(effect, &ctx).expect("creature effect probe");
-        assert!(is_declared_target_filter(&probe.filter));
-        let target =
-            declared_single_object_target(effect, &ctx).expect("a single declared object target");
-        assert_eq!(target.introduced_controller, None);
-        let condition = "that opponent controls no other creatures";
-        assert!(
-            nom_condition::parse_target_controller_count_condition(condition).is_ok(),
-            "reach guard: {condition}"
-        );
-        assert_eq!(
-            parse_target_controller_control_condition_text(condition, effect, &ctx),
-            None,
-            "{effect} if {condition}"
-        );
-
-        // Player target: the announced list is player-only, so the slot probe
-        // surfaces it but the object antecedent declines.
-        let effect = "Target opponent loses 2 life";
-        let probe = probe_effect_target(effect, &ctx).expect("player effect probe");
-        assert!(crate::parser::oracle_effect::is_player_scoped_filter(
-            &probe.filter
-        ));
-        assert!(probe_declared_target_slot(effect, &ctx).is_none());
-        assert!(declared_single_object_target(effect, &ctx).is_none());
-        let condition = "that opponent controls no creatures";
-        assert!(
-            nom_condition::parse_target_controller_count_condition(condition).is_ok(),
-            "reach guard: {condition}"
-        );
-        assert_eq!(
-            parse_target_controller_control_condition_text(condition, effect, &ctx),
-            None,
-            "{effect} if {condition}"
-        );
-
-        // Multi-target slot: a cardinality range has no single target.
-        let effect = "Up to two target creatures an opponent controls get -2/-2 until end of turn";
-        assert!(probe_declared_target_slot(effect, &ctx).is_none());
-        let condition = "that opponent controls no other creatures";
-        assert!(
-            nom_condition::parse_target_controller_count_condition(condition).is_ok(),
-            "reach guard: {condition}"
-        );
-        assert_eq!(
-            parse_target_controller_control_condition_text(condition, effect, &ctx),
-            None,
-            "{effect} if {condition}"
-        );
-
-        // Printed Whitemane Lion: "Return a creature you control to its owner's
-        // hand." The Bounce operand is a resolution choice, so the declared-slot
-        // authority surfaces no target; the guard must decline even though the
-        // operand itself carries a creature filter.
-        let effect = "Return a creature you control to its owner's hand";
-        assert!(probe_declared_target_slot(effect, &ctx).is_none());
-        assert!(declared_single_object_target(effect, &ctx).is_none());
-        let condition = "you control more creatures than its controller";
-        assert!(
-            nom_condition::parse_target_controller_count_condition(condition).is_ok(),
-            "reach guard: {condition}"
-        );
-        assert_eq!(
-            parse_target_controller_control_condition_text(condition, effect, &ctx),
-            None,
-            "{effect} if {condition}"
-        );
-
-        // CR 115.1: the referent's object kind must match the declared slot.
-        // Unified Will's printed "that spell's controller" cannot bind an
-        // artifact, and a creature noun cannot either; a permanent noun can.
-        let effect = "Destroy target artifact";
-        for condition in [
-            "you control more creatures than that spell's controller",
-            "you control more creatures than that creature's controller",
-        ] {
-            assert!(
-                nom_condition::parse_target_controller_count_condition(condition).is_ok(),
-                "reach guard: {condition}"
-            );
-            assert_eq!(
-                parse_target_controller_control_condition_text(condition, effect, &ctx),
-                None,
-                "{effect} if {condition}"
-            );
-        }
-        let condition = "you control more creatures than that permanent's controller";
-        assert!(
-            parse_target_controller_control_condition_text(condition, effect, &ctx).is_some(),
-            "an artifact slot is a permanent"
-        );
-
-        // Fight announces two objects, so "that creature" has no single role.
-        let effect = "Target creature you control fights target creature an opponent controls";
-        assert!(
-            probe_declared_target_slot(effect, &ctx).is_none(),
-            "Fight announces two roles"
-        );
-        let condition = "you control more creatures than that creature's controller";
-        assert_eq!(
-            parse_target_controller_control_condition_text(condition, effect, &ctx),
-            None,
-            "{effect} if {condition}"
-        );
-        // Printed Prize Wall: "You may put a sticker on a nonland permanent you
-        // own." The sticker recipient is a resolution-time choice, so the
-        // timing decision leaves no announced slot.
-        let effect = "Put a sticker on a nonland permanent you own";
-        assert!(probe_declared_target_slot(effect, &ctx).is_none());
-        let condition = "you control more creatures than that permanent's controller";
-        assert_eq!(
-            parse_target_controller_control_condition_text(condition, effect, &ctx),
-            None,
-            "{effect} if {condition}"
-        );
-
-        // Printed Athreos, God of Passage: "…return it to your hand unless
-        // target opponent pays 3 life." A declared unless-payer is announced
-        // before the primary filter, so the object is not the first target.
-        let effect = "Destroy target creature unless target opponent pays 3 life";
-        assert!(
-            probe_declared_target_slot(effect, &ctx).is_none(),
-            "the declared payer is announced first"
-        );
-        let condition = "you control more creatures than that creature's controller";
-        assert_eq!(
-            parse_target_controller_control_condition_text(condition, effect, &ctx),
-            None,
-            "{effect} if {condition}"
-        );
-
-        // Synthetic quantity composition; the nearest printed quantity operand
-        // is Bulwark ("X is the number of cards in target opponent's hand").
-        let effect =
-            "Deals damage to target creature equal to the number of cards in target opponent's hand";
-        let clause =
-            crate::parser::oracle_effect::parse_effect_clause(effect, &mut ctx.clone_throwaway());
-        assert!(effect_needs_target_creature_quantity_slot(&clause.effect));
-        assert_eq!(
-            crate::parser::oracle_effect::lower::target_choice_timing_for_parsed(
-                &clause,
-                effect,
-                None,
-                clause.multi_target.is_some(),
-                super::TargetSelectionMode::Chosen,
-            ),
-            super::TargetChoiceTiming::Stack
-        );
-        assert!(
-            probe_declared_target_slot(effect, &ctx).is_none(),
-            "the target-opponent quantity slot is announced first"
-        );
-
-        // Printed True Polymorph copy operand (the synthetic copy form stays
-        // close to it); the copy recipient is a separate announced role.
-        let effect = "Target artifact you control becomes a copy of target artifact you control";
-        let clause =
-            crate::parser::oracle_effect::parse_effect_clause(effect, &mut ctx.clone_throwaway());
-        assert!(become_copy_recipient_slot_filter(&clause.effect).is_some());
-        assert_eq!(
-            crate::parser::oracle_effect::lower::target_choice_timing_for_parsed(
-                &clause,
-                effect,
-                None,
-                clause.multi_target.is_some(),
-                super::TargetSelectionMode::Chosen,
-            ),
-            super::TargetChoiceTiming::Stack
-        );
-        assert!(
-            probe_declared_target_slot(effect, &ctx).is_none(),
-            "the copy recipient and source are separate roles"
-        );
-
-        // Printed Master's Rebuke: the head is TargetOnly and the damage is a
-        // separately targeted child; the head alone is not the declaration.
-        let effect = "Target creature you control deals damage equal to its power to target creature or planeswalker you don't control";
-        let clause =
-            crate::parser::oracle_effect::parse_effect_clause(effect, &mut ctx.clone_throwaway());
-        assert!(clause.sub_ability.as_ref().is_some_and(|child| {
-            child.target_choice_timing == super::TargetChoiceTiming::Stack
-                && (child.effect.target_filter().is_some() || child.multi_target.is_some())
-        }));
-        assert!(
-            probe_declared_target_slot(effect, &ctx).is_none(),
-            "a separately targeted child is part of the declaration"
-        );
-
-        // Printed Noble Vestige: "Prevent the next 1 damage that would be dealt
-        // to target player or planeswalker this turn." The operand is
-        // Or(Player, Planeswalker), which cannot guarantee an object controller.
-        let effect =
-            "Prevent the next 1 damage that would be dealt to target player or planeswalker this turn";
-        assert!(probe_declared_target_slot(effect, &ctx).is_none());
-        assert!(declared_single_object_target(effect, &ctx).is_none());
-        let condition = "its controller controls no creatures";
-        assert_eq!(
-            parse_target_controller_control_condition_text(condition, effect, &ctx),
-            None,
-            "{effect} if {condition}"
-        );
-
-        // Printed Deathrite Shaman: "Exile target creature card from a
-        // graveyard." A graveyard card has no controller (CR 109.4).
-        let effect = "Exile target creature card from a graveyard";
-        assert!(probe_declared_target_slot(effect, &ctx).is_none());
-        assert!(declared_single_object_target(effect, &ctx).is_none());
-        let condition = "its controller controls no creatures";
-        assert_eq!(
-            parse_target_controller_control_condition_text(condition, effect, &ctx),
-            None,
-            "{effect} if {condition}"
-        );
-
-        // A companion target player is announced before the primary filter
-        // (ability_utils::collect_target_slots_inner), so the object is not the
-        // first target.
-        let effect = "Destroy all creatures target player controls";
-        assert!(
-            probe_declared_target_slot(effect, &ctx).is_none(),
-            "the companion player is announced first"
-        );
-        let condition = "you control more creatures than that creature's controller";
-        assert_eq!(
-            parse_target_controller_control_condition_text(condition, effect, &ctx),
-            None,
-            "{effect} if {condition}"
-        );
-
-        // Printed Fate Transfer: "Move all counters from target creature onto
-        // another target creature." Two announced roles, so "that creature"
-        // names neither uniquely.
-        let effect = "Move all counters from target creature onto another target creature";
-        assert!(
-            probe_declared_target_slot(effect, &ctx).is_none(),
-            "both counters roles are announced"
-        );
-        let condition = "you control more creatures than that creature's controller";
-        assert_eq!(
-            parse_target_controller_control_condition_text(condition, effect, &ctx),
-            None,
-            "{effect} if {condition}"
-        );
-    }
-
     /// CR 109.4 + CR 608.2c: a counted population that already carries a
     /// controller must decline instead of having that qualifier overwritten by
     /// the target-controller injection. Both arms are paired with their
@@ -11517,117 +11292,520 @@ mod tests {
         }
     }
 
-    /// CR 608.2c: the antecedent guard must hold at the full suffix-strip seam,
-    /// not only inside the helper. Every declined shape must leave the clause
-    /// unchanged, including an untargeted operand (Whitemane Lion) whose filter
-    /// is populated but which declares no target slot.
-    #[test]
-    fn target_controller_control_condition_full_strip_declines_without_antecedent() {
-        let mut ctx = ParseContext {
+    fn trigger_ctx() -> ParseContext {
+        ParseContext {
             in_trigger: true,
             ..Default::default()
-        };
-        for (effect, condition) in [
-            (
-                "Target creature gets -2/-2 until end of turn",
-                "that opponent controls no other creatures",
-            ),
-            (
-                "Target opponent loses 2 life",
-                "that opponent controls no creatures",
-            ),
-            (
-                "Up to two target creatures an opponent controls get -2/-2 until end of turn",
-                "that opponent controls no other creatures",
-            ),
-            // A trailing connector makes the whole-text parse fail; the prefix
-            // guard must still decline the unbound referent before the
-            // connective route can re-home it.
-            (
-                "Target opponent loses 2 life",
-                "you control more creatures than that spell's controller and you control a Swamp",
-            ),
-            // Printed Whitemane Lion ("Return a creature you control to its
-            // owner's hand."): the Bounce operand is a resolution choice, so no
-            // declared slot supplies the referent.
-            (
-                "Return a creature you control to its owner's hand",
-                "you control more creatures than its controller",
-            ),
-            // Unified Will's printed noun on an artifact slot is an
-            // incompatible object kind.
-            (
-                "Destroy target artifact",
-                "you control more creatures than that spell's controller",
-            ),
-            // Fight announces two roles; a single "that creature" cannot name
-            // one of them.
-            (
-                "Target creature you control fights target creature an opponent controls",
-                "you control more creatures than that creature's controller",
-            ),
-            // Prize Wall: a resolution-time sticker recipient announces no slot.
-            (
-                "Put a sticker on a nonland permanent you own",
-                "you control more creatures than that permanent's controller",
-            ),
-            // Fate Transfer: two announced roles.
-            (
-                "Move all counters from target creature onto another target creature",
-                "you control more creatures than that creature's controller",
-            ),
-            // True Polymorph copy recipient and source are separate roles.
-            (
-                "Target artifact you control becomes a copy of target artifact you control",
-                "you control more creatures than that creature's controller",
-            ),
-            // Master's Rebuke: a TargetOnly head plus a targeted damage child.
-            (
-                "Target creature you control deals damage equal to its power to target creature or planeswalker you don't control",
-                "you control more creatures than that creature's controller",
-            ),
-            // Synthetic quantity composition (Bulwark analogue).
-            (
-                "Deals damage to target creature equal to the number of cards in target opponent's hand",
-                "you control more creatures than that creature's controller",
-            ),
-            // Athreos: a declared unless-payer is announced first.
-            (
-                "Destroy target creature unless target opponent pays 3 life",
-                "you control more creatures than that creature's controller",
-            ),
-            // Noble Vestige: Or(Player, Planeswalker) has no object controller.
-            (
-                "Prevent the next 1 damage that would be dealt to target player or planeswalker this turn",
-                "its controller controls no creatures",
-            ),
-            // Deathrite Shaman: a graveyard card has no controller.
-            (
-                "Exile target creature card from a graveyard",
-                "its controller controls no creatures",
-            ),
-            // Companion target player announced before the primary filter.
-            (
-                "Destroy all creatures target player controls",
-                "you control more creatures than that creature's controller",
-            ),
-        ] {
-            let text = format!("{effect} if {condition}");
-            let (cond, body) = strip_suffix_conditional(&text, &mut ctx);
-            assert_eq!(cond, None, "the full strip must decline: {text}");
-            assert_eq!(body, text, "the declined text must be unchanged");
         }
+    }
 
-        // One legal declared slot keeps parsing at the same seam.
-        let (cond, body) = strip_suffix_conditional(
-            "Counter target spell if you control more creatures than that spell's controller",
-            &mut ctx,
+    /// Reach guard shared by every decline row: the condition is recognized by
+    /// the shared grammar, and the effect passes every gate in front of the role
+    /// count (it parses, carries a printed "target ", is Stack-timed and has no
+    /// ambiguous cardinality), yielding exactly `expected` announced roles. A
+    /// parse failure or an early gate returns `None` there and fails the row
+    /// instead of satisfying a later `is_none()` vacuously.
+    fn announced_roles_reaching_count(
+        effect: &str,
+        condition: &str,
+        expected: usize,
+    ) -> Vec<TargetFilter> {
+        assert!(
+            parse_target_controller_control_condition_prefix(condition).is_some(),
+            "reach guard: {condition}"
+        );
+        let roles = stack_announced_roles(effect, &trigger_ctx()).unwrap_or_else(|| {
+            panic!("reach guard: `{effect}` must parse to a Stack-timed declaration")
+        });
+        assert_eq!(roles.len(), expected, "{effect}: announced roles {roles:?}");
+        roles
+    }
+
+    /// The production suffix strip over `<effect> if <condition>`: the stripped
+    /// condition, the remaining clause text, and the input text.
+    fn full_strip(effect: &str, condition: &str) -> (Option<AbilityCondition>, String, String) {
+        let text = format!("{effect} if {condition}");
+        let (cond, body) = strip_suffix_conditional(&text, &mut trigger_ctx());
+        (cond, body, text)
+    }
+
+    fn assert_full_strip_declines(effect: &str, condition: &str) {
+        let (cond, body, text) = full_strip(effect, condition);
+        assert_eq!(cond, None, "the full strip must decline: {text}");
+        assert_eq!(body, text, "the declined text must be unchanged");
+    }
+
+    fn assert_full_strip_binds(effect: &str, condition: &str) {
+        let (cond, body, text) = full_strip(effect, condition);
+        assert!(cond.is_some(), "the full strip must bind: {text}");
+        assert_eq!(body, effect, "the effect text must survive the strip");
+    }
+
+    /// The parsed clause and its production timing for a Resolution-time reach
+    /// guard: the input parsed to a real effect (not `Unimplemented`) and the
+    /// timing decision, not a parse failure, is what removes the declaration.
+    fn clause_and_timing(
+        effect: &str,
+    ) -> (
+        crate::parser::oracle_ir::ast::ParsedEffectClause,
+        TargetChoiceTiming,
+    ) {
+        let clause = crate::parser::oracle_effect::parse_effect_clause(
+            effect,
+            &mut trigger_ctx().clone_throwaway(),
         );
         assert!(
-            cond.is_some(),
-            "the printed Unified Will condition must parse"
+            !matches!(clause.effect, Effect::Unimplemented { .. }),
+            "reach guard: `{effect}` must parse"
         );
-        assert_eq!(body, "Counter target spell");
+        let timing = crate::parser::oracle_effect::lower::target_choice_timing_for_parsed(
+            &clause,
+            effect,
+            None,
+            clause.multi_target.is_some(),
+            super::TargetSelectionMode::Chosen,
+        );
+        (clause, timing)
+    }
+
+    /// CR 115.4: "any other target" admits players, so it cannot prove an
+    /// object controller even when the filter is type-less (review 8: Screaming
+    /// Nemesis, "it deals that much damage to any other target").
+    ///
+    /// The probe cannot be the reach path here: the printed suffix text ends in
+    /// "target" with no trailing space, so the literal-"target " gate returns
+    /// before the domain check. The domain check is the second line of defence
+    /// and is exercised through the parsed clause instead: the effect lowers to
+    /// the type-less any-other filter, the production enumerator announces it as
+    /// the one role, and only `!is_any_target_filter` in
+    /// `filter_guarantees_object_controller` keeps it from binding.
+    #[test]
+    fn any_target_slot_cannot_bind_a_controller() {
+        let effect = "Deals that much damage to any other target";
+        let clause = crate::parser::oracle_effect::parse_effect_clause(
+            effect,
+            &mut trigger_ctx().clone_throwaway(),
+        );
+        let filter = clause
+            .effect
+            .target_filter()
+            .cloned()
+            .expect("reach guard: the effect lowers to a typed any-other slot");
+        assert!(
+            crate::types::ability::is_any_target_filter(&filter),
+            "reach guard: {filter:?} is the any-target domain"
+        );
+        assert_eq!(
+            declared_roles_for_node(&clause.effect, None),
+            vec![filter.clone()],
+            "the enumerator announces it as the one role"
+        );
+        assert!(!nom_condition::filter_guarantees_object_controller(&filter));
+        assert!(stack_announced_roles(effect, &trigger_ctx()).is_none());
+        assert_full_strip_declines(effect, "its controller controls no creatures");
+    }
+
+    /// CR 109.4: a single announced role whose domain cannot supply an object
+    /// controller declines. Each row reaches the domain check (it parses, is
+    /// Stack-timed and yields exactly one role), so a parse failure cannot
+    /// satisfy it; ef08040e asserted the same reach through the probe.
+    /// Printed Noble Vestige (a player-or-planeswalker slot), printed Deathrite
+    /// Shaman (a graveyard card), printed Bump in the Night (a player).
+    #[test]
+    fn single_announced_role_outside_a_controller_domain_declines() {
+        let condition = "its controller controls no creatures";
+        for effect in [
+            "Prevent the next 1 damage that would be dealt to target player or planeswalker this turn",
+            "Exile target creature card from a graveyard",
+            "Target opponent loses 3 life",
+        ] {
+            let roles = announced_roles_reaching_count(effect, condition, 1);
+            assert!(
+                !nom_condition::filter_guarantees_object_controller(&roles[0])
+                    || crate::parser::oracle_effect::is_player_scoped_filter(&roles[0]),
+                "{effect}: {:?} must not supply an object controller",
+                roles[0]
+            );
+            assert!(probe_declared_target_slot(effect, &trigger_ctx()).is_none());
+            assert!(declared_single_object_target(effect, &trigger_ctx()).is_none());
+            assert_full_strip_declines(effect, condition);
+        }
+    }
+
+    /// CR 608.2c + CR 115.1: Skulking Killer / Unified Will shapes that must
+    /// keep binding at the full seam (the positives every decline row below is
+    /// the twin of), including a compound clause whose context-ref child must
+    /// not over-decline.
+    #[test]
+    fn single_announced_object_role_still_binds() {
+        let skulking = "Target creature an opponent controls gets -2/-2 until end of turn";
+        announced_roles_reaching_count(skulking, "that opponent controls no other creatures", 1);
+        assert_full_strip_binds(skulking, "that opponent controls no other creatures");
+        let unified = "Counter target spell";
+        announced_roles_reaching_count(
+            unified,
+            "you control more creatures than that spell's controller",
+            1,
+        );
+        assert_full_strip_binds(
+            unified,
+            "you control more creatures than that spell's controller",
+        );
+        // Compound positive: a child that only references the parent target adds
+        // no role (nearest printed analogue: Skulking Killer's pump body).
+        let compound =
+            "Target creature gets -2/-2 until end of turn and gains haste until end of turn";
+        let (clause, _) = clause_and_timing(compound);
+        assert!(clause.sub_ability.is_some(), "reach guard: compound child");
+        announced_roles_reaching_count(compound, "its controller controls no creatures", 1);
+        assert_full_strip_binds(compound, "its controller controls no creatures");
+    }
+
+    /// CR 115.1 + CR 601.2c: every role the production enumerator records for a
+    /// shape reachable from clause text declines at the production suffix strip.
+    /// `roles` is the number of announced roles the row must reach (proving the
+    /// enumerator branch fired, so a role added or dropped there fails here).
+    /// Printed text unless marked synthetic; the damage compositions name their
+    /// nearest printed analogue. Branches with no clause-text producer found
+    /// (damage-replacement roles, mana multi-role, combat-relation slot,
+    /// per-opponent fanout, which the probe never passes `fanout_player` for)
+    /// are not in this table.
+    #[test]
+    fn every_reachable_enumerator_branch_declines_at_the_full_strip() {
+        let object = "its controller controls no creatures";
+
+        let rows: &[(&str, &str, &str, usize)] = &[
+            // paired subjects: printed Trade the Helm
+            (
+                "paired subjects",
+                "Exchange control of target artifact or creature you control and target artifact or creature an opponent controls",
+                object,
+                2,
+            ),
+            // Fight: printed Dromoka's Command mode
+            (
+                "fight",
+                "Target creature you control fights target creature you don't control",
+                object,
+                2,
+            ),
+            // MoveCounters: printed Fate Transfer
+            (
+                "move counters",
+                "Move all counters from target creature onto another target creature",
+                object,
+                2,
+            ),
+            // Attach: printed Brass Squire
+            (
+                "attach",
+                "Attach target Equipment you control to target creature you control",
+                object,
+                2,
+            ),
+            // copy recipient + donor: printed True Polymorph. "that permanent's
+            // controller" matches BOTH slots' kind, so only the two-role count
+            // (the recipient branch) declines it; the noun cannot.
+            (
+                "copy recipient",
+                "Target artifact or creature becomes a copy of another target artifact or creature",
+                "you control more creatures than that permanent's controller",
+                2,
+            ),
+            // quantity slot: synthetic damage composition; the printed operand
+            // analogue is Recurring Insight ("Draw cards equal to the number of
+            // cards in target opponent's hand").
+            (
+                "quantity slot",
+                "Deals damage to target creature equal to the number of cards in target opponent's hand",
+                object,
+                2,
+            ),
+            // head unless-payer: synthetic; the printed payer shape is Athreos,
+            // God of Passage ("unless target opponent pays 3 life").
+            (
+                "declared unless-payer",
+                "Destroy target creature unless target opponent pays 3 life",
+                object,
+                2,
+            ),
+            // child-only companion player: synthetic; nearest printed analogue
+            // Seismic Wave (any-target head replaced by a creature).
+            (
+                "child companion player",
+                "Deals 2 damage to target creature and 1 damage to each nonartifact creature target opponent controls",
+                object,
+                2,
+            ),
+            // targeted child: printed Master's Rebuke
+            (
+                "targeted child",
+                "Target creature you control deals damage equal to its power to target creature or planeswalker you don't control",
+                object,
+                2,
+            ),
+            // companion player alone: printed Ashiok, Sculptor of Fears
+            (
+                "companion player",
+                "Gain control of all creatures target opponent controls",
+                object,
+                1,
+            ),
+        ];
+        for (branch, effect, condition, roles) in rows {
+            announced_roles_reaching_count(effect, condition, *roles);
+            assert!(
+                probe_declared_target_slot(effect, &trigger_ctx()).is_none(),
+                "{branch}: the probe must decline"
+            );
+            assert_full_strip_declines(effect, condition);
+        }
+        // Reach guards the table cannot express: the copy row's slots are both
+        // permanent-kind, so the noun is not what declines it.
+        let copy_roles = announced_roles_reaching_count(rows[4].1, rows[4].2, 2);
+        assert!(copy_roles.iter().all(|role| {
+            nom_condition::referent_noun_matches_slot(
+                nom_condition::ObjectReferentNoun::Permanent,
+                role,
+            )
+        }));
+    }
+
+    /// CR 601.2c + CR 609.7: Dromoka's Command (review 11). The printed mode
+    /// announces ONE role, the damage source (the spell), through the
+    /// enumerator's source-slot branch, and that branch returns before the
+    /// companion and quantity branches the engine builder falls through to. The
+    /// enumerator's set is therefore not proven complete for the node, and the
+    /// probe declines it for that reason; the role count alone (one) would bind.
+    #[test]
+    fn source_scoped_damage_prevention_declines_because_the_enumerator_returns_early() {
+        let effect = "Prevent all damage target instant or sorcery spell would deal this turn";
+        let condition = "you control more creatures than that spell's controller";
+        let clause = crate::parser::oracle_effect::parse_effect_clause(
+            effect,
+            &mut trigger_ctx().clone_throwaway(),
+        );
+        assert!(
+            crate::types::ability::damage_replacement_source_slot_filter(&clause.effect).is_some(),
+            "reach guard: the source-slot branch fires"
+        );
+        let roles = declared_roles_for_node(&clause.effect, None);
+        assert_eq!(roles.len(), 1, "the enumerator records one role");
+        assert!(nom_condition::filter_guarantees_object_controller(
+            &roles[0]
+        ));
+        assert!(announced_object_roles(&clause).is_none());
+        assert_full_strip_declines(effect, condition);
+    }
+
+    /// CR 115.1d + CR 601.2c: `EachDealsDamageEqualToPower` is enumerated as its
+    /// recipient only, while production announces the sources first. It is safe
+    /// only because every construction site stamps `multi_target`, which the
+    /// probe declines. Printed Graceful Takedown (review 8) and a printed
+    /// up-to-two analogue (Allies at Last's shape) pin both halves: the
+    /// enumerator yields ONE role, and the clause carries `multi_target`.
+    #[test]
+    fn each_deals_damage_declines_through_multi_target() {
+        let object = "its controller controls no creatures";
+        for effect in [
+            "Any number of target enchanted creatures you control and up to one other target creature you control each deal damage equal to their power to target creature you don't control",
+            "Up to two target creatures you control each deal damage equal to their power to another target creature",
+        ] {
+            let (clause, timing) = clause_and_timing(effect);
+            assert!(
+                matches!(clause.effect, Effect::EachDealsDamageEqualToPower { .. }),
+                "reach guard: {effect}"
+            );
+            assert_eq!(timing, TargetChoiceTiming::Stack);
+            assert_eq!(
+                declared_roles_for_node(&clause.effect, None).len(),
+                1,
+                "the enumerator records the recipient only"
+            );
+            assert!(clause.multi_target.is_some(), "the construction site sets it");
+            assert!(announced_object_roles(&clause).is_none());
+            assert_full_strip_declines(effect, object);
+        }
+    }
+
+    /// CR 115.6 + CR 601.2c: an optional-count quantifier declines whether or
+    /// not the clause fixup stamped `multi_target` for the effect kind. Counter
+    /// is one of the eight kinds it does not stamp, so the stamped field is blind
+    /// to it; the printed-text rule is not. Nearest printed analogue: Repulsive
+    /// Mutation's "counter up to one target spell".
+    #[test]
+    fn optional_count_declines_for_an_effect_kind_the_fixup_does_not_stamp() {
+        let effect = "Counter up to one target spell";
+        let condition = "you control more creatures than that spell's controller";
+        let (clause, timing) = clause_and_timing(effect);
+        assert!(matches!(clause.effect, Effect::Counter { .. }));
+        assert!(clause.multi_target.is_none(), "reach guard: unstamped");
+        assert_eq!(timing, TargetChoiceTiming::Stack);
+        assert_eq!(declared_roles_for_node(&clause.effect, None).len(), 1);
+        assert!(crate::parser::oracle_effect::lower::text_declares_optional_target_count(effect));
+        assert_full_strip_declines(effect, condition);
+        assert_full_strip_binds("Counter target spell", condition);
+    }
+
+    /// CR 608.2c: a head that production gives a clause scope after the suffix
+    /// strip (optional prefix, "for each" repeat, repeat count) declines; each
+    /// row would otherwise read as one Stack-timed object role.
+    #[test]
+    fn head_clause_scope_declines() {
+        let object = "its controller controls no creatures";
+        for effect in [
+            "You may destroy target creature",
+            "For each opponent, destroy target creature",
+            "Target creature gets -2/-2 until end of turn twice",
+        ] {
+            let (clause, timing) = clause_and_timing(effect);
+            assert_eq!(timing, TargetChoiceTiming::Stack);
+            assert_eq!(
+                declared_roles_for_node(&clause.effect, None).len(),
+                1,
+                "reach guard: one role without the scope gate: {effect}"
+            );
+            assert!(head_stamps_clause_scope(effect));
+            assert_full_strip_declines(effect, object);
+        }
+    }
+
+    /// CR 601.2c + CR 603.3d: a printed announcer override ("that player chooses
+    /// target creature") is a typed `target_chooser` the head clause does not
+    /// carry; the probe reads it from the parse context.
+    #[test]
+    fn target_chooser_override_declines() {
+        let object = "its controller controls no creatures";
+        for effect in [
+            "That player chooses target creature",
+            "Its controller chooses target creature",
+        ] {
+            let mut ctx = trigger_ctx().clone_throwaway();
+            let clause = crate::parser::oracle_effect::parse_effect_clause(effect, &mut ctx);
+            assert!(ctx.target_chooser.is_some(), "reach guard: {effect}");
+            assert_eq!(declared_roles_for_node(&clause.effect, None).len(), 1);
+            assert_full_strip_declines(effect, object);
+        }
+    }
+
+    /// CR 608.2c + CR 115.1: a primary filter scoped to a resolution-time chosen
+    /// player announces no slot (the enumerator's chosen-player gate), so the
+    /// probe sees zero roles and declines instead of binding.
+    #[test]
+    fn chosen_player_scoped_filter_declines() {
+        let ctx = ParseContext {
+            in_trigger: true,
+            relative_player_scope: Some(ControllerRef::ChosenPlayer { index: 0 }),
+            ..Default::default()
+        };
+        let effect = "Destroy target creature they control";
+        let clause =
+            crate::parser::oracle_effect::parse_effect_clause(effect, &mut ctx.clone_throwaway());
+        assert!(
+            matches!(
+                clause.effect.target_filter(),
+                Some(TargetFilter::Typed(tf))
+                    if matches!(tf.controller, Some(ControllerRef::ChosenPlayer { .. }))
+            ),
+            "reach guard: the primary filter is chosen-player scoped"
+        );
+        assert_eq!(stack_announced_roles(effect, &ctx), Some(vec![]));
+        let text = format!("{effect} if its controller controls no creatures");
+        let (cond, body) = strip_suffix_conditional(&text, &mut ctx.clone());
+        assert_eq!(cond, None);
+        assert_eq!(body, text);
+    }
+
+    /// CR 115.1d + CR 115.10a: an enchanted-creature host written without the
+    /// word "target" is re-timed to Resolution by production after the probe's
+    /// view, so the literal-"target " gate must keep it from binding. Without
+    /// the gate the probe reads one Stack-timed object role.
+    #[test]
+    fn host_written_without_target_declines() {
+        let effect = "Destroy enchanted creature";
+        let (clause, timing) = clause_and_timing(effect);
+        assert_eq!(timing, TargetChoiceTiming::Stack, "reach guard");
+        assert_eq!(declared_roles_for_node(&clause.effect, None).len(), 1);
+        assert!(stack_announced_roles(effect, &trigger_ctx()).is_none());
+        assert_full_strip_declines(effect, "its controller controls no creatures");
+    }
+
+    /// CR 608.2c + CR 115.1: the antecedent guard. Each row reaches the guard it
+    /// exercises and then declines at the production strip; the positive twin of
+    /// each stays in `single_announced_object_role_still_binds`.
+    #[test]
+    fn target_controller_control_condition_declines_without_antecedent() {
+        let ctx = trigger_ctx();
+        // Single object target with no opponent introduced by its own type
+        // phrase (Skulking Killer with the qualifier removed).
+        let effect = "Target creature gets -2/-2 until end of turn";
+        let condition = "that opponent controls no other creatures";
+        announced_roles_reaching_count(effect, condition, 1);
+        let target = declared_single_object_target(effect, &ctx).expect("single object target");
+        assert_eq!(target.introduced_controller, None);
+        assert_full_strip_declines(effect, condition);
+
+        // Player target (printed Bump in the Night frame): one role, a player.
+        let effect = "Target opponent loses 3 life";
+        let condition = "that opponent controls no creatures";
+        announced_roles_reaching_count(effect, condition, 1);
+        assert!(declared_single_object_target(effect, &ctx).is_none());
+        assert_full_strip_declines(effect, condition);
+
+        // Multi-target (synthetic multi-target Skulking Killer).
+        let effect = "Up to two target creatures an opponent controls get -2/-2 until end of turn";
+        let condition = "that opponent controls no other creatures";
+        let (clause, timing) = clause_and_timing(effect);
+        assert!(clause.multi_target.is_some(), "reach guard: multi_target");
+        assert_eq!(timing, TargetChoiceTiming::Stack);
+        assert!(stack_announced_roles(effect, &ctx).is_none());
+        assert_full_strip_declines(effect, condition);
+
+        // Printed Whitemane Lion: the bounce operand is a resolution choice (no
+        // printed "target").
+        let effect = "Return a creature you control to its owner's hand";
+        let condition = "you control more creatures than its controller";
+        let (clause, timing) = clause_and_timing(effect);
+        assert!(clause.effect.target_filter().is_some(), "operand populated");
+        // The ladder alone still reads Stack here; the printed text has no
+        // "target ", which is what keeps the operand from being an announcement.
+        assert_eq!(timing, TargetChoiceTiming::Stack, "reach guard");
+        assert!(!nom_primitives::scan_contains(
+            &effect.to_ascii_lowercase(),
+            "target "
+        ));
+        assert!(stack_announced_roles(effect, &ctx).is_none());
+        assert_full_strip_declines(effect, condition);
+
+        // Printed Prize Wall sticker recipient: a resolution-time choice.
+        let effect = "Put a sticker on a nonland permanent you own";
+        let condition = "you control more creatures than that permanent's controller";
+        let (_, timing) = clause_and_timing(effect);
+        assert_eq!(timing, TargetChoiceTiming::Resolution, "reach guard");
+        assert!(stack_announced_roles(effect, &ctx).is_none());
+        assert_full_strip_declines(effect, condition);
+
+        // Referent kind: Unified Will's spell noun and a creature noun cannot
+        // name an artifact slot; a permanent noun can.
+        let effect = "Destroy target artifact";
+        for condition in [
+            "you control more creatures than that spell's controller",
+            "you control more creatures than that creature's controller",
+        ] {
+            announced_roles_reaching_count(effect, condition, 1);
+            assert_full_strip_declines(effect, condition);
+        }
+        assert_full_strip_binds(
+            effect,
+            "you control more creatures than that permanent's controller",
+        );
+
+        // A trailing connector makes the whole-text parse fail; the prefix guard
+        // must still decline the unbound referent.
+        assert_full_strip_declines(
+            "Target opponent loses 3 life",
+            "you control more creatures than that spell's controller and you control a Swamp",
+        );
     }
 
     /// CR 608.2d + CR 107.4 + CR 202.1: Omnath, Locus of All — "you may reveal
