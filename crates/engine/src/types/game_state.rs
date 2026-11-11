@@ -49713,6 +49713,7 @@ mod tests {
             origin: None,
             target: TargetFilter::ParentTarget,
             owner_library: false,
+            library_shuffle: Default::default(),
             enter_transformed: false,
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
