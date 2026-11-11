@@ -30,7 +30,8 @@
 //! from it (Humble), an untap of another permanent (Arbor Elf, Freed from the Real), an
 //! ability that does more than untap (Eater of the Dead, Harsh Deceiver), and
 //! a trigger (Wilderness Reclamation: "At the beginning of your end step, untap
-//! all lands you control."), which goes on the stack with no player act.
+//! all lands you control.", Hardbristle Bandit: "Whenever you commit a crime,
+//! untap this creature."), which goes on the stack with no player act.
 
 use super::support::shared_card_db;
 use engine::ai_support::{
@@ -43,7 +44,7 @@ use engine::analysis::resource::ResourceAxis;
 use engine::database::card_db::CardDatabase;
 use engine::game::effects::attach::attach_to;
 use engine::game::engine::apply_verified_ai_priority_pass;
-use engine::game::layers::flush_layers;
+use engine::game::layers::{evaluate_layers, flush_layers};
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::perf_counters;
 use engine::game::period_confirm::performed_for_tests;
@@ -55,8 +56,8 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::parse_counter_type;
 use engine::types::game_state::{
-    AutoPassMode, AutoPassRequest, CastPaymentMode, ExileLink, ExileLinkKind, LoopDetectionMode,
-    PriorityPassingMode, StackEntryKind, StackResolutionPolicy, TurnBoundary, WaitingFor,
+    AutoPassMode, AutoPassRequest, CastPaymentMode, LoopDetectionMode, PriorityPassingMode,
+    StackEntryKind, StackResolutionPolicy, TurnBoundary, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType};
@@ -719,26 +720,40 @@ fn the_hold_reads_no_hidden_card() {
 
 /// Staff of Compleation, verbatim.
 const STAFF_OF_COMPLEATION: &str = "{T}, Pay 1 life: Destroy target permanent you own.\n{T}, Pay 2 life: Add one mana of any color.\n{T}, Pay 3 life: Proliferate.\n{T}, Pay 4 life: Draw a card.\n{5}: Untap this artifact.";
-/// Soliton, verbatim.
-const SOLITON: &str = "{U}: Untap this creature.";
-/// Celestial Prism, verbatim.
-const CELESTIAL_PRISM: &str = "{2}, {T}: Add one mana of any color.";
 
-/// Exiles `cards` with Myr Welder ("This creature has all activated abilities of
-/// all cards exiled with it."), so it has their activated abilities, and readies
-/// it to tap.
-fn lend_to_welder(runner: &mut GameRunner, welder: ObjectId, cards: &[ObjectId]) {
-    for &exiled_id in cards {
-        move_to_zone(runner.state_mut(), exiled_id, Zone::Exile, &mut Vec::new());
-        runner.state_mut().exile_links.push(ExileLink {
-            exiled_id,
-            source_id: welder,
-            kind: ExileLinkKind::TrackedBySource,
-        });
-    }
-    runner.state_mut().layers_dirty.mark_full();
-    flush_layers(runner.state_mut());
+/// CR 607.2a: Myr Welder activates its "{T}: Exile target artifact card from a
+/// graveyard." on each of `cards` in a graveyard, so it has their activated
+/// abilities ("This creature has all activated abilities of all cards exiled
+/// with it."), and is readied to tap after each.
+fn imprint_with_welder(runner: &mut GameRunner, welder: ObjectId, cards: &[ObjectId]) {
     clear_summoning_sickness(runner, welder);
+    for &card in cards {
+        let exile = runner.state().objects[&welder]
+            .abilities
+            .iter()
+            .position(|ability| {
+                matches!(
+                    &*ability.effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        ..
+                    }
+                )
+            })
+            .expect("Myr Welder has its printed exile ability");
+        runner.activate(welder, exile).target_object(card).resolve();
+        let state = runner.state();
+        assert_eq!(state.objects[&card].zone, Zone::Exile, "reach: exiled");
+        assert!(
+            state
+                .exile_links
+                .iter()
+                .any(|link| link.exiled_id == card && link.source_id == welder),
+            "reach: exiled with the Welder"
+        );
+        runner.state_mut().objects.get_mut(&welder).unwrap().tapped = false;
+    }
+    evaluate_layers(runner.state_mut());
 }
 
 /// A costed source's untap on top: Staff of Compleation ("{T}, Pay 2 life: Add
@@ -751,12 +766,8 @@ fn costed_source_untap(db: &CardDatabase, prism: bool) -> GameRunner {
     let (source, exiled, lands) = if prism {
         let welder = scenario.add_real_card(P0, "Myr Welder", Zone::Battlefield, db);
         let exiled = vec![
-            scenario
-                .add_creature_to_hand_from_oracle(P0, "Soliton", 3, 4, SOLITON)
-                .id(),
-            scenario
-                .add_artifact_to_hand_from_oracle(P0, "Celestial Prism", CELESTIAL_PRISM)
-                .id(),
+            scenario.add_real_card(P0, "Soliton", Zone::Graveyard, db),
+            scenario.add_real_card(P0, "Celestial Prism", Zone::Graveyard, db),
         ];
         let islands: Vec<_> = (0..3)
             .map(|_| scenario.add_real_card(P0, "Island", Zone::Battlefield, db))
@@ -773,7 +784,7 @@ fn costed_source_untap(db: &CardDatabase, prism: bool) -> GameRunner {
     };
     let mut runner = scenario.build();
     if prism {
-        lend_to_welder(&mut runner, source, &exiled);
+        imprint_with_welder(&mut runner, source, &exiled);
     }
     for land in lands {
         tap_for_mana(&mut runner, land);
@@ -823,9 +834,6 @@ fn a_costed_source_is_read_without_running_it() {
     }
 }
 
-/// Springleaf Drum, verbatim.
-const SPRINGLEAF_DRUM: &str =
-    "{T}, Tap an untapped creature you control: Add one mana of any color.";
 /// The Immortal Sun, verbatim.
 const THE_IMMORTAL_SUN: &str = "Players can't activate planeswalkers' loyalty abilities.\nAt the beginning of your draw step, draw an additional card.\nSpells you cast cost {1} less to cast.\nCreatures you control get +1/+1.";
 
@@ -846,12 +854,8 @@ fn welder_drum_hold_work(
     let mut scenario = main_phase_scenario();
     let welder = scenario.add_real_card(P0, "Myr Welder", Zone::Battlefield, db);
     let exiled = [
-        scenario
-            .add_creature_to_hand_from_oracle(P0, "Soliton", 3, 4, SOLITON)
-            .id(),
-        scenario
-            .add_artifact_to_hand_from_oracle(P0, "Springleaf Drum", SPRINGLEAF_DRUM)
-            .id(),
+        scenario.add_real_card(P0, "Soliton", Zone::Graveyard, db),
+        scenario.add_real_card(P0, "Springleaf Drum", Zone::Graveyard, db),
     ];
     let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
     if crowded {
@@ -861,7 +865,7 @@ fn welder_drum_hold_work(
         }
     }
     let mut runner = scenario.build();
-    lend_to_welder(&mut runner, welder, &exiled);
+    imprint_with_welder(&mut runner, welder, &exiled);
     tap_for_mana(&mut runner, island);
     let untap = untap_ability_index(&runner, welder);
     activate(&mut runner, welder, untap, &[]);
@@ -1053,9 +1057,7 @@ fn an_ability_removed_by_a_layer_keeps_the_pass() {
     for humble in [false, true] {
         let mut scenario = main_phase_scenario();
         scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
-        let soliton = scenario
-            .add_creature_from_oracle(P0, "Soliton", 3, 4, SOLITON)
-            .id();
+        let soliton = scenario.add_real_card(P0, "Soliton", Zone::Battlefield, db);
         let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
         let spell = scenario
             .add_spell_to_hand_from_oracle(P0, "Humble", true, HUMBLE)
@@ -1093,13 +1095,6 @@ fn an_ability_removed_by_a_layer_keeps_the_pass() {
     }
 }
 
-/// Mirrored Lotus, verbatim.
-const MIRRORED_LOTUS: &str = "Reflect {0} (As this enters, each opponent may pay {0}. When they do, they create a token copy of this except it lacks this ability.)\n{T}, Exile Mirrored Lotus: Add three mana of any one color.";
-/// Lotus Petal, verbatim.
-const LOTUS_PETAL: &str = "{T}, Sacrifice this artifact: Add one mana of any color.";
-/// Sol Ring, verbatim.
-const SOL_RING: &str = "{T}: Add {C}{C}.";
-
 /// CR 701.21a: Myr Welder with Soliton and Lotus Petal exiled with it can tap
 /// for mana by sacrificing itself, and with Mirrored Lotus by exiling itself,
 /// which leaves nothing for Soliton's untap to untap, so the pass stays. With Sol Ring instead, the same untap holds. The
@@ -1107,24 +1102,20 @@ const SOL_RING: &str = "{T}: Add {C}{C}.";
 #[test]
 fn a_mana_ability_that_consumes_its_source_keeps_the_pass() {
     let Some(db) = shared_card_db() else { return };
-    for (name, text, holds) in [
-        ("Lotus Petal", LOTUS_PETAL, false),
-        ("Mirrored Lotus", MIRRORED_LOTUS, false),
-        ("Sol Ring", SOL_RING, true),
+    for (name, holds) in [
+        ("Lotus Petal", false),
+        ("Mirrored Lotus", false),
+        ("Sol Ring", true),
     ] {
         let mut scenario = main_phase_scenario();
         let welder = scenario.add_real_card(P0, "Myr Welder", Zone::Battlefield, db);
         let exiled = [
-            scenario
-                .add_creature_to_hand_from_oracle(P0, "Soliton", 3, 4, SOLITON)
-                .id(),
-            scenario
-                .add_artifact_to_hand_from_oracle(P0, name, text)
-                .id(),
+            scenario.add_real_card(P0, "Soliton", Zone::Graveyard, db),
+            scenario.add_real_card(P0, name, Zone::Graveyard, db),
         ];
         let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
         let mut runner = scenario.build();
-        lend_to_welder(&mut runner, welder, &exiled);
+        imprint_with_welder(&mut runner, welder, &exiled);
         tap_for_mana(&mut runner, island);
         let untap = untap_ability_index(&runner, welder);
         activate(&mut runner, welder, untap, &[]);
@@ -1433,6 +1424,53 @@ fn wilderness_reclamation_keeps_the_pass() {
         .expect("the trigger is on the stack");
     assert!(matches!(top.kind, StackEntryKind::TriggeredAbility { .. }));
     assert!(recommends_pass(&runner));
+}
+
+/// CR 603.3 + CR 700.13: the same self-untap as an activated ability and as a
+/// trigger, each over an untapped mana source. Basalt Monolith's "{3}: Untap
+/// this artifact.", which P0 activated, holds P0's window. Hardbristle Bandit's
+/// "Whenever you commit a crime, untap this creature." triggers when P0 casts
+/// Inspiration ("Target player draws two cards.") targeting P1, and goes on the stack with no player act, so the
+/// window passes, with the Bandit's "{T}: Add one mana of any color." offered.
+#[test]
+fn an_activated_self_untap_holds_and_a_triggered_one_passes() {
+    let Some(db) = shared_card_db() else { return };
+    let (monolith_runner, _) = untapped_monolith_with_its_untap_on_the_stack(db, false);
+    let top = monolith_runner.state().stack.back().expect("the untap");
+    assert!(matches!(top.kind, StackEntryKind::ActivatedAbility { .. }));
+    assert!(
+        !recommends_pass(&monolith_runner) && !viewer_recommends_pass(&monolith_runner),
+        "Monolith's activated untap holds"
+    );
+
+    let mut scenario = main_phase_scenario();
+    let bandit = scenario.add_real_card(P0, "Hardbristle Bandit", Zone::Battlefield, db);
+    let inspiration = scenario.add_real_card(P0, "Inspiration", Zone::Hand, db);
+    let islands: Vec<_> = (0..4)
+        .map(|_| scenario.add_real_card(P0, "Island", Zone::Battlefield, db))
+        .collect();
+    for _ in 0..2 {
+        scenario.add_real_card(P1, "Island", Zone::Library, db);
+    }
+    let mut runner = scenario.build();
+    clear_summoning_sickness(&mut runner, bandit);
+    // Inspiration's {3}{U} comes from the Islands, floated first.
+    for island in islands {
+        tap_for_mana(&mut runner, island);
+    }
+    runner.cast(inspiration).target_player(P1).commit();
+    assert!(p0_has_priority(&runner));
+    assert_eq!(
+        top_source_name(&runner).as_deref(),
+        Some("Hardbristle Bandit")
+    );
+    let top = runner.state().stack.back().expect("the trigger");
+    assert!(matches!(top.kind, StackEntryKind::TriggeredAbility { .. }));
+    assert!(mana_action(&runner, bandit).is_some() && !is_tapped(&runner, bandit));
+    assert!(
+        recommends_pass(&runner) && viewer_recommends_pass(&runner),
+        "the Bandit's triggered untap keeps the pass"
+    );
 }
 
 /// Only an untap of the ability's own source holds. Arbor Elf's "{T}: Untap

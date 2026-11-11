@@ -1412,9 +1412,10 @@ mod tests {
 
     mod removable_mana_source {
         use super::*;
+        use crate::game::ability_utils::build_resolved_from_def;
         use crate::game::scenario::GameScenario;
         use crate::types::ability::{
-            BounceSelection, ControllerRef, Effect, EffectScope, PlayerFilter, TypedFilter,
+            BounceSelection, ControllerRef, Effect, PlayerFilter, TypedFilter,
         };
         use crate::types::game_state::StackEntryKind;
         use crate::types::mana::ManaColor;
@@ -1527,19 +1528,63 @@ mod tests {
             assert_eq!(verdict(&state, &bounce), StandingPriorityPass::Undecided);
         }
 
-        /// Basalt Monolith: "{3}: Untap this artifact." The fixture's Forest stands in for Monolith:
-        /// the rung reads the entry's kind, its binding and the object's own mana (here a Forest's
-        /// intrinsic {T}: Add {G}).
-        fn untap_itself(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
-            ResolvedAbility::new(
-                Effect::SetTapState {
-                    target: TargetFilter::SelfRef,
-                    scope: EffectScope::Single,
-                    state: TapStateChange::Untap,
-                },
-                vec![],
-                source,
-                controller,
+        /// Basalt Monolith, verbatim.
+        const BASALT_MONOLITH: &str = "This artifact doesn't untap during your untap step.\n{T}: Add {C}{C}{C}.\n{3}: Untap this artifact.";
+        /// Hardbristle Bandit, verbatim.
+        const HARDBRISTLE_BANDIT: &str = "{T}: Add one mana of any color.\nWhenever you commit a crime, untap this creature. This ability triggers only once each turn. (Targeting opponents, anything they control, and/or cards in their graveyards is a crime.)";
+
+        /// An untapped Basalt Monolith for each player, and P0's untapped
+        /// Hardbristle Bandit.
+        fn printed_untaps() -> (GameState, ObjectId, ObjectId, ObjectId) {
+            let mut scenario = GameScenario::new();
+            let monolith = scenario
+                .add_artifact_from_oracle(PlayerId(0), "Basalt Monolith", BASALT_MONOLITH)
+                .id();
+            let opponent_monolith = scenario
+                .add_artifact_from_oracle(PlayerId(1), "Basalt Monolith", BASALT_MONOLITH)
+                .id();
+            let bandit = scenario
+                .add_creature_from_oracle(
+                    PlayerId(0),
+                    "Hardbristle Bandit",
+                    1,
+                    1,
+                    HARDBRISTLE_BANDIT,
+                )
+                .id();
+            let state = scenario.build().state().clone();
+            (state, monolith, opponent_monolith, bandit)
+        }
+
+        /// Monolith's printed "{3}: Untap this artifact.", activated by its
+        /// controller.
+        fn monolith_untap(state: &GameState, monolith: ObjectId) -> StackEntry {
+            let source = &state.objects[&monolith];
+            let untap = source
+                .abilities
+                .iter()
+                .find(|ability| matches!(&*ability.effect, Effect::SetTapState { .. }))
+                .expect("Monolith's printed untap");
+            activated_top(
+                source.controller,
+                monolith,
+                build_resolved_from_def(untap, monolith, source.controller),
+            )
+        }
+
+        /// The Bandit's printed "Whenever you commit a crime, untap this
+        /// creature.", triggered.
+        fn bandit_untap(state: &GameState, bandit: ObjectId) -> StackEntry {
+            let source = &state.objects[&bandit];
+            let untap = source
+                .trigger_definitions
+                .iter_all()
+                .find_map(|entry| entry.definition.execute.as_deref())
+                .expect("the Bandit's printed trigger");
+            top(
+                source.controller,
+                bandit,
+                build_resolved_from_def(untap, bandit, source.controller),
             )
         }
 
@@ -1547,47 +1592,59 @@ mod tests {
         /// untapped, so the window is held until it has been tapped.
         #[test]
         fn own_activated_untap_holds_only_while_its_object_can_tap_for_mana() {
-            let (mut state, forest, _) = board();
-            let untap = activated_top(PlayerId(0), forest, untap_itself(forest, PlayerId(0)));
+            let (mut state, monolith, _, _) = printed_untaps();
+            let untap = monolith_untap(&state, monolith);
             state.stack.push_back(untap.clone());
             assert_eq!(verdict(&state, &untap), StandingPriorityPass::Held);
 
-            state.objects.get_mut(&forest).unwrap().tapped = true;
+            state.objects.get_mut(&monolith).unwrap().tapped = true;
             assert_eq!(verdict(&state, &untap), StandingPriorityPass::Granted);
         }
 
         #[test]
         fn opponent_activated_untap_stays_undecided() {
-            let (state, _, opponent_forest) = board();
-            let untap = activated_top(
-                PlayerId(1),
-                opponent_forest,
-                untap_itself(opponent_forest, PlayerId(1)),
-            );
+            let (mut state, _, opponent_monolith, _) = printed_untaps();
+            let untap = monolith_untap(&state, opponent_monolith);
+            state.stack.push_back(untap.clone());
             assert_eq!(verdict(&state, &untap), StandingPriorityPass::Undecided);
         }
 
         #[test]
         fn full_control_outranks_the_untap_hold() {
-            let (mut state, forest, _) = board();
+            let (mut state, monolith, _, _) = printed_untaps();
             state
                 .priority_passing_modes
                 .insert(PlayerId(0), PriorityPassingMode::FullControl);
-            let untap = activated_top(PlayerId(0), forest, untap_itself(forest, PlayerId(0)));
+            let untap = monolith_untap(&state, monolith);
+            state.stack.push_back(untap.clone());
             assert_eq!(verdict(&state, &untap), StandingPriorityPass::Withheld);
         }
 
         /// CR 603.2 + CR 603.3: a triggered ability goes on the stack with no
-        /// player act, so the same untap keeps the pass.
+        /// player act, so the Bandit's untap of itself keeps the pass while
+        /// the Bandit can tap for mana, as Monolith's activated one would not.
         #[test]
         fn own_triggered_untap_keeps_the_pass_while_its_object_can_tap_for_mana() {
-            let (mut state, forest, _) = board();
-            let activated = activated_top(PlayerId(0), forest, untap_itself(forest, PlayerId(0)));
-            state.stack.push_back(activated.clone());
-            assert_eq!(verdict(&state, &activated), StandingPriorityPass::Held);
+            let (state, monolith, _, bandit) = printed_untaps();
+            let mut activated_state = state.clone();
+            let activated = monolith_untap(&activated_state, monolith);
+            activated_state.stack.push_back(activated.clone());
+            assert_eq!(
+                verdict(&activated_state, &activated),
+                StandingPriorityPass::Held
+            );
 
-            let triggered = top(PlayerId(0), forest, untap_itself(forest, PlayerId(0)));
-            assert_eq!(verdict(&state, &triggered), StandingPriorityPass::Granted);
+            assert!(
+                mana_sources::untap_would_repeat_mana(&state.objects[&bandit], PlayerId(0)),
+                "reach: the Bandit could tap for mana again"
+            );
+            let mut triggered_state = state;
+            let triggered = bandit_untap(&triggered_state, bandit);
+            triggered_state.stack.push_back(triggered.clone());
+            assert_eq!(
+                verdict(&triggered_state, &triggered),
+                StandingPriorityPass::Granted
+            );
         }
 
         /// The classifier keeps the own-object pass for instructions that move
