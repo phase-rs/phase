@@ -6727,14 +6727,14 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
         CastingVariant, CopyChosenStage, DrainStatus, DrawSequenceOrigin, ExiledStopInput, GameRng,
-        GameState, PendingBatchDeliveries, PendingChooseOneOf, PendingCopyTokenResolution,
-        PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
-        PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingPerCategoryZoneChoice,
-        PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil,
-        PendingSpellResolution, PendingVoteBallotIteration, PendingZoneChangeDelivery,
-        PersistedGameState, PostReplacementDrain, RandomDraw, RepeatUntilStopWitness,
-        ResidentDrainPolicy, StackEntry, StackEntryKind, ZoneDeliveryExileTracking,
-        ZoneMoveCompletion,
+        GameState, OfferedBatchCustody, PendingBatchDeliveries, PendingChooseOneOf,
+        PendingCopyTokenResolution, PendingCounterAdditionQueue, PendingCounterMoveQueue,
+        PendingCounterRemovalQueue, PendingEachPlayerCopyChosen, PendingLifeTotalAssignment,
+        PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
+        PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
+        PendingZoneChangeDelivery, PersistedGameState, PostReplacementDrain, RandomDraw,
+        RepeatUntilStopWitness, ResidentDrainPolicy, StackEntry, StackEntryKind,
+        ZoneDeliveryExileTracking, ZoneMoveCompletion,
     };
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
@@ -9141,6 +9141,7 @@ mod tests {
                 effect_kind: EffectKind::CopyTokenOf,
                 source_id: ObjectId(121),
                 referent_set: None,
+                offered_batch: OfferedBatchCustody::Settled,
             },
         );
         crate::game::effects::token_copy::drain_pending_copy_token_resolution(
@@ -9176,6 +9177,7 @@ mod tests {
             effect_kind: EffectKind::CopyTokenOf,
             source_id: ObjectId(122),
             referent_set: None,
+            offered_batch: OfferedBatchCustody::Settled,
         };
         let counter_additions = PendingCounterAdditionQueue {
             remaining: Vec::new(),

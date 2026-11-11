@@ -14,8 +14,8 @@ use crate::types::card::PrintedLoyalty;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CopyTokenEntryTail, GameState, LiminalEntry, PendingCopyTokenBatch, PendingCopyTokenResolution,
-    PendingCounterPostAction, PendingLiminalEntryResume, WaitingFor,
+    CopyTokenEntryTail, GameState, LiminalEntry, OfferedBatchCustody, PendingCopyTokenBatch,
+    PendingCopyTokenResolution, PendingCounterPostAction, PendingLiminalEntryResume, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::proposed_event::{
@@ -466,6 +466,7 @@ pub(crate) fn drive_copy_token_batches(
             effect_kind,
             source_id,
             referent_set: None,
+            offered_batch: OfferedBatchCustody::Settled,
         },
         events,
     );
@@ -498,6 +499,18 @@ fn drain_copy_token_resolution(
     mut pending: PendingCopyTokenResolution,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 614.6 + CR 608.2c: the batch this owner offered was answered, and no delivery handed
+    // its tokens over. The answer replaced its creation with a different one, which has now run
+    // above this owner, so this owner's batch tokens are the tokens that creation published.
+    // Ledger contract: only the batch's own replacement work runs above a parked owner, and
+    // every CreateToken continuation is a substitute, so nothing else wrote the ledger since
+    // that creation completed. Settled first, so a later batch's prompt marks afresh.
+    if !pending.offered_batch.is_settled() {
+        pending.offered_batch = OfferedBatchCustody::Settled;
+        pending
+            .created_ids
+            .extend(state.last_created_token_ids.clone());
+    }
     while let Some(batch) = pending.remaining.pop_front() {
         if batch.count == 0 {
             continue;
@@ -564,6 +577,11 @@ fn drain_copy_token_resolution(
             }
             crate::game::replacement::ReplacementResult::Prevented => {}
             crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+                // CR 614.6 + CR 608.2c: this batch's creation event waits on a replacement
+                // answer. Its tokens are owed to this owner: handed over by the delivery that
+                // creates them, or, when the answer replaces the event with a different
+                // creation, adopted from that creation when this owner resumes.
+                pending.offered_batch = OfferedBatchCustody::AtReplacementPrompt;
                 park_copy_token_after_current_batch(state, pending, stack_depth_before_batch);
                 state.waiting_for =
                     crate::game::replacement::replacement_choice_waiting_for(player, state);
@@ -1256,6 +1274,7 @@ pub(crate) struct CopyTokenApplyStatus {
     pub(crate) completion: CopyTokenApplyCompletion,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CopyTokenApplyCompletion {
     Completed,
     Paused,
@@ -6501,6 +6520,7 @@ mod tests {
             effect_kind: EffectKind::CopyTokenOf,
             source_id,
             referent_set: None,
+            offered_batch: OfferedBatchCustody::Settled,
         });
         let copy = CopyTokenSpec {
             values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
@@ -6572,6 +6592,7 @@ mod tests {
             effect_kind: EffectKind::CopyTokenOf,
             source_id: ObjectId(900),
             referent_set: None,
+            offered_batch: OfferedBatchCustody::Settled,
         });
         (state, [t1, t2, x], [a, b])
     }
@@ -6636,5 +6657,52 @@ mod tests {
         assert_eq!(state.tracked_object_sets[&b], vec![x]);
         assert_eq!(state.chain_tracked_set_id, Some(b));
         assert_eq!(state.last_created_token_ids, vec![t1, t2]);
+    }
+
+    /// CR 614.6 + CR 608.2c: an owner that resumes with its offered batch still marked
+    /// adopts the tokens the replacing creation left in the ledger, after the ones it
+    /// already lists, and settles. A settled owner adopts nothing, and a marked owner whose
+    /// batch was replaced by nothing adopts nothing.
+    #[test]
+    fn resumed_owner_adopts_a_substituted_batch_only_while_marked() {
+        let [earlier, s1, s2] = [ObjectId(31), ObjectId(32), ObjectId(33)];
+        let cases = [
+            (
+                OfferedBatchCustody::AtReplacementPrompt,
+                vec![s1, s2],
+                vec![earlier, s1, s2],
+            ),
+            (OfferedBatchCustody::Settled, vec![s1, s2], vec![earlier]),
+            (
+                OfferedBatchCustody::AtReplacementPrompt,
+                Vec::new(),
+                vec![earlier],
+            ),
+        ];
+        for (offered, ledger, want) in cases {
+            let mut state = GameState::new_two_player(45);
+            state.push_copy_token(PendingCopyTokenResolution {
+                created_ids: vec![earlier],
+                remaining: VecDeque::new(),
+                effect_kind: EffectKind::CopyTokenOf,
+                source_id: ObjectId(900),
+                referent_set: None,
+                offered_batch: offered,
+            });
+            state.last_created_token_ids = ledger.clone();
+            let mut events = Vec::new();
+            drain_pending_copy_token_resolution(&mut state, &mut events);
+
+            assert!(state.active_copy_token().is_none(), "the owner is consumed");
+            assert_eq!(
+                copy_token_of_resolved(&events),
+                1,
+                "REACH-GUARD: the owner completes its instruction"
+            );
+            assert_eq!(
+                state.last_created_token_ids, want,
+                "{offered:?} owner resumed over the ledger {ledger:?}"
+            );
+        }
     }
 }

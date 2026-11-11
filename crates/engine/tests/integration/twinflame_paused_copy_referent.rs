@@ -12,8 +12,14 @@
 //!   replacement ordering (Archelos + Imposing Sovereign, CR 616.1e), an
 //!   as-enters choice (Painter's Servant, CR 614.12a), an "enter as a copy"
 //!   choice (Quicksilver Gargantuan, CR 614.1c + CR 707.5), an optional token
-//!   replacement declined (Jinnie Fay, CR 614.6) and an ordering between token
-//!   replacements (Parallel Lives + Halving Season, CR 616.1e).
+//!   replacement declined (Jinnie Fay, CR 614.6), an ordering between token
+//!   replacements (Parallel Lives + Halving Season, CR 616.1e), and an optional
+//!   token replacement accepted, whose substitute creation's tokens join the
+//!   referent (Jinnie Fay's Cats and Dogs, Moonlit Meditation's and Esix's
+//!   copies; CR 614.6 and Jinnie Fay's ruling, verbatim: "Anything else
+//!   specified in the effect creating the tokens (such as tapped, attacking,
+//!   “That token gains haste,” or “Exile that token at end of combat”) still
+//!   applies.").
 //! - A batch a replacement makes zero creates nothing, so it republishes nothing
 //!   (Kiki-Jiki's "Sacrifice it").
 //! - Token multipliers are in the class (rulings, verbatim):
@@ -30,6 +36,7 @@
 use std::collections::HashSet;
 
 use crate::support::shared_card_db;
+use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{Effect, EffectKind, TargetFilter, TargetRef};
@@ -37,8 +44,8 @@ use engine::types::actions::{GameAction, ReplacementAutoChoice};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    PendingCopyTokenResolution, PersistedGameState, PersistedRestoreFinalization,
-    ReplacementChoiceKind, WaitingFor,
+    OfferedBatchCustody, PendingCopyTokenResolution, PersistedGameState,
+    PersistedRestoreFinalization, ReplacementCandidateSummary, ReplacementChoiceKind, WaitingFor,
 };
 use engine::types::identifiers::{ObjectId, TrackedSetId};
 use engine::types::keywords::Keyword;
@@ -72,6 +79,8 @@ const CLONE_LEGION: &str = "Clone Legion";
 const HALVING_SEASON: &str = "Halving Season";
 const KIKI_JIKI: &str = "Kiki-Jiki, Mirror Breaker";
 const RAISE_THE_ALARM: &str = "Raise the Alarm";
+const MOONLIT_MEDITATION: &str = "Moonlit Meditation";
+const ESIX: &str = "Esix, Fractal Bloom";
 
 /// Targets set up before every other permanent: a creature that "may enter as
 /// a copy of any creature on the battlefield" would otherwise prompt its own
@@ -113,6 +122,7 @@ fn is_paused(runner: &GameRunner) -> bool {
         WaitingFor::ReplacementChoice { .. }
             | WaitingFor::NamedChoice { .. }
             | WaitingFor::CopyTargetChoice { .. }
+            | WaitingFor::ChooseOneOfBranch { .. }
     )
 }
 
@@ -138,6 +148,10 @@ fn copy_token_owner_ids(runner: &GameRunner) -> Option<Vec<ObjectId>> {
 /// the settled priority window.
 struct Driven {
     runner: GameRunner,
+    /// The spell or activated permanent whose copy instruction the row judges:
+    /// its owner's `EffectResolved{CopyTokenOf}` names it. A substitute's own
+    /// copy owner (Moonlit Meditation, Esix) names its replacement's host.
+    producer: ObjectId,
     /// The copied permanents (Twinflame's targets / Saheeli's artifacts).
     sources: Vec<ObjectId>,
     /// Battlefield before the producing action.
@@ -287,26 +301,29 @@ fn settle_with(
     );
     assert!(state.stack.is_empty(), "the stack must be empty");
 
-    // Owner custody: one terminal, after every token it created.
+    // Owner custody: the producer's one terminal, after every token it created.
+    let producer = driven.producer;
+    let is_producer_terminal = |event: &GameEvent| {
+        matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::CopyTokenOf,
+                source_id,
+                ..
+            } if *source_id == producer
+        )
+    };
     let events: Vec<&GameEvent> = driven.all_events().collect();
     let resolved: Vec<usize> = events
         .iter()
         .enumerate()
-        .filter(|(_, event)| {
-            matches!(
-                event,
-                GameEvent::EffectResolved {
-                    kind: EffectKind::CopyTokenOf,
-                    ..
-                }
-            )
-        })
+        .filter(|(_, event)| is_producer_terminal(event))
         .map(|(index, _)| index)
         .collect();
     assert_eq!(
         resolved.len(),
         1,
-        "custody: exactly one EffectResolved{{CopyTokenOf}}"
+        "custody: exactly one EffectResolved{{CopyTokenOf}} for the producer"
     );
     let last_created = events
         .iter()
@@ -321,13 +338,7 @@ fn settle_with(
         .last()
         .expect("at least the producing action");
     assert!(
-        final_action.iter().any(|event| matches!(
-            event,
-            GameEvent::EffectResolved {
-                kind: EffectKind::CopyTokenOf,
-                ..
-            }
-        )),
+        final_action.iter().any(is_producer_terminal),
         "custody: the owner completes in the action that settles the resolution"
     );
     driven
@@ -420,6 +431,7 @@ fn cast_twinflame_with(
     Some(settle_with(
         Driven {
             runner,
+            producer: twinflame,
             sources,
             pre,
             actions,
@@ -451,6 +463,7 @@ fn activate_saheeli(artifacts: &[&str], board: &[(PlayerId, &str)]) -> Option<Dr
     let actions = vec![activation.events().to_vec()];
     Some(settle(Driven {
         runner,
+        producer: saheeli,
         sources,
         pre,
         actions,
@@ -488,6 +501,7 @@ fn cast_clone_legion_with(
     Some(settle_with(
         Driven {
             runner,
+            producer: legion,
             sources,
             pre,
             actions,
@@ -1443,49 +1457,130 @@ fn r16_ordered_token_replacements_one_copy_then_none() {
     );
 }
 
-/// R17's board: P0 controls Kiki-Jiki, Mirror Breaker and a Grizzly Bears, with
-/// Raise the Alarm in hand and {1}{W}; `halving` adds P1's Halving Season.
-fn kiki_jiki_board(halving: bool) -> Option<(GameRunner, ObjectId, ObjectId, ObjectId)> {
-    let db = shared_card_db()?;
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let kiki = scenario.add_real_card(P0, KIKI_JIKI, Zone::Battlefield, db);
-    let bears = scenario.add_real_card(P0, BEARS, Zone::Battlefield, db);
-    let alarm = scenario.add_real_card(P0, RAISE_THE_ALARM, Zone::Hand, db);
-    if halving {
-        scenario.add_real_card(P1, HALVING_SEASON, Zone::Battlefield, db);
-    }
-    scenario.with_mana_pool(
-        P0,
-        vec![
-            ManaUnit::new(ManaType::White, alarm, false, vec![]),
-            ManaUnit::new(ManaType::Colorless, alarm, false, vec![]),
-        ],
-    );
-    let mut runner = scenario.build();
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-    Some((runner, kiki, bears, alarm))
+/// A Kiki-Jiki, Mirror Breaker board: P0 controls Kiki-Jiki and `target`, and
+/// `board` adds the rest. `moonlit` attaches P0's Moonlit Meditation to the
+/// target; `raise_the_alarm` casts Raise the Alarm ({1}{W}) before the
+/// activation, so `LastCreated` names its Soldiers when the copy begins.
+struct KikiJikiBoard {
+    target: &'static str,
+    board: Vec<(PlayerId, &'static str)>,
+    moonlit: bool,
+    raise_the_alarm: bool,
 }
 
-/// What R17's board shows: the Soldiers, the activation's events, LastCreated
-/// once the activation resolved, and the end step's resolution events.
+/// One prompt a Kiki-Jiki run answered: its kind, its candidates' source
+/// names, and the CopyToken frames on the resolution stack when it was raised.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KikiJikiPrompt {
+    kind: &'static str,
+    candidates: Vec<String>,
+    copy_token_frames: usize,
+}
+
+/// What a Kiki-Jiki run shows: the Soldiers, the activation's events (every
+/// answer's included), every prompt answered, the activation's tokens' names
+/// and LastCreated once the activation resolved, and the end step's
+/// resolution events.
 struct KikiJikiRun {
     runner: GameRunner,
+    kiki: ObjectId,
     soldiers: Vec<ObjectId>,
     activation: Vec<GameEvent>,
+    prompts: Vec<KikiJikiPrompt>,
+    token_names: Vec<String>,
     last_created_after_activation: Vec<ObjectId>,
     end_step: Vec<GameEvent>,
 }
 
-/// Cast Raise the Alarm, activate Kiki-Jiki on the Bears, and resolve the next
-/// end step's triggers.
+impl KikiJikiRun {
+    /// Every token the activation created, in `TokenCreated` order.
+    fn created_tokens(&self) -> Vec<ObjectId> {
+        self.activation
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+fn copy_token_frame_count(runner: &GameRunner) -> usize {
+    frame_kinds(runner)
+        .into_iter()
+        .filter(|kind| *kind == FrameKind::CopyToken)
+        .count()
+}
+
+/// R17's driver: Raise the Alarm, then Kiki-Jiki on the Bears; `halving` adds
+/// P1's Halving Season. No prompt is answered.
 fn run_kiki_jiki(halving: bool) -> Option<KikiJikiRun> {
-    let (mut runner, kiki, bears, alarm) = kiki_jiki_board(halving)?;
+    let board = if halving {
+        vec![(P1, HALVING_SEASON)]
+    } else {
+        Vec::new()
+    };
+    run_kiki_jiki_with(
+        KikiJikiBoard {
+            target: BEARS,
+            board,
+            moonlit: false,
+            raise_the_alarm: true,
+        },
+        |_, _, _| None,
+    )
+}
+
+/// Activate Kiki-Jiki on `spec.target`, answer each prompt with `answer` (given
+/// the prompt, the runner and the prompts answered so far; `None` stops
+/// answering), and resolve the next end step's triggers.
+fn run_kiki_jiki_with(
+    spec: KikiJikiBoard,
+    mut answer: impl FnMut(&WaitingFor, &GameRunner, &[KikiJikiPrompt]) -> Option<GameAction>,
+) -> Option<KikiJikiRun> {
+    let db = shared_card_db()?;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // The target first, then Moonlit Meditation while the target is the only
+    // artifact or creature P0 controls, so the Aura's own battlefield entry
+    // attaches it there (CR 303.4f: P0 chooses a legal object to enchant, and
+    // the target is the only one).
+    let target = scenario.add_real_card(P0, spec.target, Zone::Battlefield, db);
+    let moonlit = spec
+        .moonlit
+        .then(|| scenario.add_real_card(P0, MOONLIT_MEDITATION, Zone::Battlefield, db));
+    let kiki = scenario.add_real_card(P0, KIKI_JIKI, Zone::Battlefield, db);
+    for (player, name) in &spec.board {
+        scenario.add_real_card(*player, name, Zone::Battlefield, db);
+    }
+    let alarm = spec
+        .raise_the_alarm
+        .then(|| scenario.add_real_card(P0, RAISE_THE_ALARM, Zone::Hand, db));
+    if let Some(alarm) = alarm {
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::White, alarm, false, vec![]),
+                ManaUnit::new(ManaType::Colorless, alarm, false, vec![]),
+            ],
+        );
+    }
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    if let Some(moonlit) = moonlit {
+        assert_eq!(
+            runner.state().objects[&moonlit].attached_to,
+            Some(AttachTarget::Object(target)),
+            "REACH-GUARD: Moonlit Meditation enchants the target"
+        );
+    }
     let pre: HashSet<ObjectId> = runner.state().battlefield.iter().copied().collect();
-    runner
-        .cast(alarm)
-        .try_resolve()
-        .expect("Raise the Alarm must be castable");
+    if let Some(alarm) = alarm {
+        runner
+            .cast(alarm)
+            .try_resolve()
+            .expect("Raise the Alarm must be castable");
+    }
     let soldiers: Vec<ObjectId> = runner
         .state()
         .battlefield
@@ -1493,32 +1588,64 @@ fn run_kiki_jiki(halving: bool) -> Option<KikiJikiRun> {
         .copied()
         .filter(|id| !pre.contains(id))
         .collect();
-    assert_eq!(
-        soldiers.len(),
-        if halving { 1 } else { 2 },
-        "REACH-GUARD: Raise the Alarm creates its Soldiers (halved by Halving Season)"
-    );
-    assert_eq!(
-        runner.state().last_created_token_ids,
-        soldiers,
-        "REACH-GUARD: before the activation LastCreated names the Soldiers"
-    );
-    let activation = runner
+    if spec.raise_the_alarm {
+        let halving = spec.board.contains(&(P1, HALVING_SEASON));
+        assert_eq!(
+            soldiers.len(),
+            if halving { 1 } else { 2 },
+            "REACH-GUARD: Raise the Alarm creates its Soldiers (halved by Halving Season)"
+        );
+        assert_eq!(
+            runner.state().last_created_token_ids,
+            soldiers,
+            "REACH-GUARD: before the activation LastCreated names the Soldiers"
+        );
+    }
+    let mut actions = vec![runner
         .activate(kiki, 0)
-        .target_object(bears)
+        .target_object(target)
         .try_resolve()
         .expect("Kiki-Jiki's ability must be activatable")
         .events()
-        .to_vec();
+        .to_vec()];
+    let mut prompts: Vec<KikiJikiPrompt> = Vec::new();
+    for _ in 0..MAX_PROMPTS {
+        let waiting = runner.state().waiting_for.clone();
+        if matches!(waiting, WaitingFor::Priority { .. })
+            && runner.state().resolution_stack.is_empty()
+        {
+            break;
+        }
+        let candidates = match &waiting {
+            WaitingFor::ReplacementChoice { candidates, .. } => candidates
+                .iter()
+                .map(|candidate| candidate.source_name.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
+        let prompt = KikiJikiPrompt {
+            kind: waiting.variant_name(),
+            candidates,
+            copy_token_frames: copy_token_frame_count(&runner),
+        };
+        let Some(action) = answer(&waiting, &runner, &prompts) else {
+            break;
+        };
+        prompts.push(prompt);
+        actions.push(runner.act(action).expect("answer must be accepted").events);
+    }
+    let activation: Vec<GameEvent> = actions.iter().flatten().cloned().collect();
     assert!(
         activation.iter().any(|event| matches!(
             event,
             GameEvent::EffectResolved {
                 kind: EffectKind::CopyTokenOf,
+                source_id,
                 ..
-            }
+            } if *source_id == kiki
         )),
-        "REACH-GUARD: the copy instruction resolved"
+        "REACH-GUARD: the copy instruction resolved, prompts {prompts:?}, waiting {:?}",
+        runner.state().waiting_for
     );
     assert!(
         runner
@@ -1529,6 +1656,15 @@ fn run_kiki_jiki(halving: bool) -> Option<KikiJikiRun> {
         "REACH-GUARD: \"Sacrifice it at the beginning of the next end step\" is installed"
     );
     let last_created_after_activation = runner.state().last_created_token_ids.clone();
+    let token_names: Vec<String> = activation
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::TokenCreated { object_id, .. } => {
+                Some(runner.state().objects[object_id].name.clone())
+            }
+            _ => None,
+        })
+        .collect();
     runner.advance_to_combat();
     runner
         .act(GameAction::DeclareAttackers {
@@ -1558,8 +1694,11 @@ fn run_kiki_jiki(halving: bool) -> Option<KikiJikiRun> {
     );
     Some(KikiJikiRun {
         runner,
+        kiki,
         soldiers,
         activation,
+        prompts,
+        token_names,
         last_created_after_activation,
         end_step,
     })
@@ -1658,4 +1797,521 @@ fn r17_control_copy_is_sacrificed_at_the_end_step() {
             "the Soldiers survive the end step"
         );
     }
+}
+
+/// The index of `source`'s accepting answer at an optional replacement prompt.
+fn accept_index(candidates: &[ReplacementCandidateSummary], source: &str) -> usize {
+    candidates
+        .iter()
+        .position(|candidate| candidate.source_name == source && candidate.description != "Decline")
+        .unwrap_or_else(|| {
+            panic!("REACH-GUARD: {source} offers an accepting answer, got {candidates:?}")
+        })
+}
+
+/// The index of `source`'s declining answer at an optional replacement prompt.
+fn decline_index(candidates: &[ReplacementCandidateSummary], source: &str) -> usize {
+    candidates
+        .iter()
+        .position(|candidate| candidate.source_name == source && candidate.description == "Decline")
+        .unwrap_or_else(|| {
+            panic!("REACH-GUARD: {source} offers a Decline answer, got {candidates:?}")
+        })
+}
+
+/// Whether every candidate of a prompt is `source`'s (its accept / decline pair).
+fn only_from(candidates: &[ReplacementCandidateSummary], source: &str) -> bool {
+    candidates
+        .iter()
+        .all(|candidate| candidate.source_name == source)
+}
+
+/// A Kiki-Jiki board whose target is enchanted by P0's Moonlit Meditation.
+fn moonlit_kiki_board(target: &'static str, board: Vec<(PlayerId, &'static str)>) -> KikiJikiBoard {
+    KikiJikiBoard {
+        target,
+        board,
+        moonlit: true,
+        raise_the_alarm: false,
+    }
+}
+
+/// The resolution's copy owner can be left parked at a priority window after
+/// the substitute's last answer, with nothing on the stack; passing priority
+/// resumes it. That is a residual of its own (the owner should complete in the
+/// answer that settles the substitute); these rows judge only what the owner
+/// names once it completes.
+fn pass_stranded_priority(waiting: &WaitingFor, runner: &GameRunner) -> Option<GameAction> {
+    (matches!(waiting, WaitingFor::Priority { .. }) && has_copy_token_frame(runner))
+        .then_some(GameAction::PassPriority)
+}
+
+/// CR 614.6 + CR 608.2c: Kiki-Jiki's "it" is the one token its instruction
+/// created, `want_name`: `LastCreated` names it once the activation resolves,
+/// "Sacrifice it at the beginning of the next end step" sacrifices exactly it,
+/// and P0 keeps exactly `survivors`. Kiki-Jiki's owner completes once, after
+/// that token's `TokenCreated`.
+fn assert_kiki_jiki_sacrifices_its_token(run: &KikiJikiRun, want_name: &str, survivors: &[&str]) {
+    let created = run.created_tokens();
+    assert_eq!(
+        created.len(),
+        1,
+        "REACH-GUARD: one token is created (\"that many\" of Kiki-Jiki's one copy), got \
+         {created:?}, prompts {:?}",
+        run.prompts
+    );
+    let token = created[0];
+    let token_created_at = run
+        .activation
+        .iter()
+        .position(|event| matches!(event, GameEvent::TokenCreated { object_id, .. } if *object_id == token))
+        .expect("REACH-GUARD: the token's TokenCreated");
+    let kiki_terminals: Vec<usize> = run
+        .activation
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::CopyTokenOf,
+                    source_id,
+                    ..
+                } if *source_id == run.kiki
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        kiki_terminals.len(),
+        1,
+        "custody: Kiki-Jiki's copy owner completes once"
+    );
+    assert!(
+        kiki_terminals[0] > token_created_at,
+        "custody: Kiki-Jiki's owner completes after its token is created"
+    );
+    assert_eq!(
+        run.last_created_after_activation, created,
+        "LastCreated names the {want_name} token the instruction created"
+    );
+    assert_eq!(
+        sacrificed(&run.end_step),
+        created,
+        "\"Sacrifice it\" sacrifices the {want_name} token at the next end step"
+    );
+    let state = run.runner.state();
+    let mut p0: Vec<String> = state
+        .battlefield
+        .iter()
+        .filter(|id| state.objects[id].controller == P0)
+        .map(|id| state.objects[id].name.clone())
+        .collect();
+    p0.sort();
+    let mut want: Vec<String> = survivors.iter().map(|name| name.to_string()).collect();
+    want.sort();
+    assert_eq!(p0, want, "P0's battlefield after the end step");
+}
+
+/// R18: Kiki-Jiki copies the Grizzly Bears that P0's Moonlit Meditation
+/// enchants, and P0 accepts Moonlit's "you may instead create that many tokens
+/// that are copies of enchanted permanent". CR 614.6: Kiki-Jiki's creation
+/// never happens and Moonlit's copy is created instead, so that copy is "it"
+/// for "Sacrifice it at the beginning of the next end step".
+#[test]
+fn r18_moonlit_meditation_copy_is_kiki_jikis_it() {
+    let run = run_kiki_jiki_with(
+        moonlit_kiki_board(BEARS, Vec::new()),
+        |waiting, _, prompts| {
+            let WaitingFor::ReplacementChoice { candidates, .. } = waiting else {
+                return None;
+            };
+            prompts.is_empty().then(|| GameAction::ChooseReplacement {
+                index: accept_index(candidates, MOONLIT_MEDITATION),
+            })
+        },
+    );
+    let Some(run) = run else {
+        return;
+    };
+    assert_eq!(
+        run.prompts,
+        vec![KikiJikiPrompt {
+            kind: "ReplacementChoice",
+            candidates: vec![
+                MOONLIT_MEDITATION.to_string(),
+                MOONLIT_MEDITATION.to_string()
+            ],
+            copy_token_frames: 1,
+        }],
+        "REACH-GUARD: one prompt, Moonlit Meditation's, raised with Kiki-Jiki's copy owner parked"
+    );
+    assert_eq!(
+        run.token_names[0], BEARS,
+        "REACH-GUARD: Moonlit's copy is a copy of the enchanted Bears"
+    );
+    assert_kiki_jiki_sacrifices_its_token(&run, "Moonlit", &[KIKI_JIKI, BEARS, MOONLIT_MEDITATION]);
+}
+
+/// R18 sibling: P0 declines Moonlit Meditation, so nothing is replaced and
+/// Kiki-Jiki's own copy is created, named by "it" and sacrificed (CR 614.6).
+#[test]
+fn r18_sibling_declined_moonlit_meditation_keeps_kiki_jikis_copy() {
+    let run = run_kiki_jiki_with(
+        moonlit_kiki_board(BEARS, Vec::new()),
+        |waiting, _, prompts| {
+            let WaitingFor::ReplacementChoice { candidates, .. } = waiting else {
+                return None;
+            };
+            prompts.is_empty().then(|| GameAction::ChooseReplacement {
+                index: decline_index(candidates, MOONLIT_MEDITATION),
+            })
+        },
+    );
+    let Some(run) = run else {
+        return;
+    };
+    assert_eq!(
+        run.prompts.len(),
+        1,
+        "REACH-GUARD: Moonlit Meditation's prompt is the only one, saw {:?}",
+        run.prompts
+    );
+    assert_kiki_jiki_sacrifices_its_token(
+        &run,
+        "Kiki-Jiki",
+        &[KIKI_JIKI, BEARS, MOONLIT_MEDITATION],
+    );
+}
+
+/// The answers on a Kiki-Jiki board with Moonlit Meditation and Jinnie Fay:
+/// order Moonlit Meditation first, accept it, and decline Jinnie Fay on the
+/// modified original event. On Moonlit's own copy event (raised with two
+/// CopyToken owners parked) accept Jinnie Fay when `accept_jinnie`, taking the
+/// Cat branch. `branch_frames` records the frames at each branch prompt.
+fn moonlit_then_jinnie(
+    accept_jinnie: bool,
+    branch_frames: &mut Vec<Vec<FrameKind>>,
+) -> impl FnMut(&WaitingFor, &GameRunner, &[KikiJikiPrompt]) -> Option<GameAction> + '_ {
+    move |waiting, runner, _| match waiting {
+        WaitingFor::ReplacementChoice {
+            candidates, kind, ..
+        } => {
+            let index = match kind {
+                ReplacementChoiceKind::Order => candidates
+                    .iter()
+                    .position(|candidate| candidate.source_name == MOONLIT_MEDITATION)
+                    .expect("REACH-GUARD: the ordering offers Moonlit Meditation"),
+                _ if only_from(candidates, MOONLIT_MEDITATION) => {
+                    accept_index(candidates, MOONLIT_MEDITATION)
+                }
+                _ if accept_jinnie && copy_token_frame_count(runner) == 2 => {
+                    accept_index(candidates, JINNIE)
+                }
+                _ => decline_index(candidates, JINNIE),
+            };
+            Some(GameAction::ChooseReplacement { index })
+        }
+        WaitingFor::ChooseOneOfBranch { .. } => {
+            branch_frames.push(frame_kinds(runner));
+            Some(GameAction::ChooseBranch { index: 0 })
+        }
+        _ => pass_stranded_priority(waiting, runner),
+    }
+}
+
+/// The Jinnie Fay prompt raised on Moonlit Meditation's own copy event, while
+/// Moonlit's copy owner is parked above Kiki-Jiki's.
+fn assert_jinnie_prompted_on_moonlits_copy_event(run: &KikiJikiRun) {
+    assert!(
+        run.prompts
+            .iter()
+            .any(|prompt| prompt.kind == "ReplacementChoice"
+                && prompt.copy_token_frames == 2
+                && prompt.candidates.iter().all(|name| name == JINNIE)),
+        "REACH-GUARD: Jinnie Fay prompts on Moonlit's copy event with two CopyToken owners \
+         parked, saw {:?}",
+        run.prompts
+    );
+}
+
+/// R19: R18's board plus P0's Jinnie Fay. Moonlit Meditation is ordered first
+/// and accepted; Jinnie Fay is declined on the modified event and again on
+/// Moonlit's copy event, which pauses with Moonlit's own copy owner above
+/// Kiki-Jiki's. Moonlit's copy is still Kiki-Jiki's "it" (CR 614.6).
+#[test]
+fn r19_moonlit_copy_paused_inside_a_declined_jinnie_prompt_is_kiki_jikis_it() {
+    let mut branch_frames = Vec::new();
+    let run = run_kiki_jiki_with(
+        moonlit_kiki_board(BEARS, vec![(P0, JINNIE)]),
+        moonlit_then_jinnie(false, &mut branch_frames),
+    );
+    let Some(run) = run else {
+        return;
+    };
+    assert_jinnie_prompted_on_moonlits_copy_event(&run);
+    assert!(
+        branch_frames.is_empty(),
+        "REACH-GUARD: no Jinnie Fay substitution was accepted"
+    );
+    assert_eq!(
+        run.token_names[0], BEARS,
+        "REACH-GUARD: the token is Moonlit's copy of the Bears"
+    );
+    assert_kiki_jiki_sacrifices_its_token(
+        &run,
+        "Moonlit",
+        &[KIKI_JIKI, BEARS, MOONLIT_MEDITATION, JINNIE],
+    );
+}
+
+/// R19b: Kiki-Jiki copies a Triskelion that Moonlit Meditation enchants, under
+/// Hardened Scales and Branching Evolution. Moonlit is accepted; its copy's
+/// "enters with three +1/+1 counters" pauses on the counter ordering with
+/// Moonlit's copy owner above Kiki-Jiki's. The copy is Kiki-Jiki's "it"
+/// (CR 614.6).
+#[test]
+fn r19b_moonlit_copy_paused_on_a_counter_prompt_is_kiki_jikis_it() {
+    let run = run_kiki_jiki_with(
+        moonlit_kiki_board(TRISKELION, counter_board()),
+        |waiting, runner, _| match waiting {
+            WaitingFor::ReplacementChoice { candidates, .. }
+                if only_from(candidates, MOONLIT_MEDITATION) =>
+            {
+                Some(GameAction::ChooseReplacement {
+                    index: accept_index(candidates, MOONLIT_MEDITATION),
+                })
+            }
+            WaitingFor::ReplacementChoice { candidates, .. } => {
+                let index = PREFERENCE
+                    .iter()
+                    .find_map(|preferred| {
+                        candidates
+                            .iter()
+                            .position(|candidate| candidate.source_name == *preferred)
+                    })
+                    .expect("REACH-GUARD: the counter ordering offers Hardened Scales");
+                Some(GameAction::ChooseReplacement { index })
+            }
+            _ => pass_stranded_priority(waiting, runner),
+        },
+    );
+    let Some(run) = run else {
+        return;
+    };
+    assert!(
+        run.prompts
+            .iter()
+            .any(|prompt| prompt.kind == "ReplacementChoice"
+                && prompt.copy_token_frames == 2
+                && prompt.candidates.iter().any(|name| name == HARDENED_SCALES)),
+        "REACH-GUARD: the copy's counter ordering is raised with two CopyToken owners parked, \
+         saw {:?}",
+        run.prompts
+    );
+    assert_eq!(
+        run.token_names[0], TRISKELION,
+        "REACH-GUARD: the token is Moonlit's copy of the Triskelion"
+    );
+    assert_kiki_jiki_sacrifices_its_token(
+        &run,
+        "Moonlit",
+        &[
+            KIKI_JIKI,
+            TRISKELION,
+            MOONLIT_MEDITATION,
+            HARDENED_SCALES,
+            BRANCHING_EVOLUTION,
+        ],
+    );
+}
+
+/// R22: R19's board with Jinnie Fay accepted on Moonlit's copy event (the Cat
+/// branch). Two substitutions: the Cat replaced Moonlit's copy, which replaced
+/// Kiki-Jiki's, so the Cat is "it" (CR 614.6 twice).
+#[test]
+fn r22_jinnie_cat_replacing_moonlits_copy_is_kiki_jikis_it() {
+    let mut branch_frames = Vec::new();
+    let run = run_kiki_jiki_with(
+        moonlit_kiki_board(BEARS, vec![(P0, JINNIE)]),
+        moonlit_then_jinnie(true, &mut branch_frames),
+    );
+    let Some(run) = run else {
+        return;
+    };
+    assert_jinnie_prompted_on_moonlits_copy_event(&run);
+    // The substitute's drain went into the frame beneath Moonlit's copy owner,
+    // which the zero-token delivery of Moonlit's replaced event re-parked on
+    // top: that delivery completed having created nothing.
+    assert_eq!(
+        branch_frames,
+        vec![vec![
+            FrameKind::AbilityContinuation,
+            FrameKind::CopyToken,
+            FrameKind::PostReplacement,
+            FrameKind::CopyToken,
+        ]],
+        "REACH-GUARD: one branch prompt, raised with Moonlit's copy owner on top"
+    );
+    assert_eq!(
+        run.token_names[0], "Cat",
+        "REACH-GUARD: the token is Jinnie Fay's Cat"
+    );
+    assert_kiki_jiki_sacrifices_its_token(
+        &run,
+        "Cat",
+        &[KIKI_JIKI, BEARS, MOONLIT_MEDITATION, JINNIE],
+    );
+}
+
+/// R20: Twinflame on two Grizzly Bears with P0's Esix, Fractal Bloom. Esix is
+/// accepted on the first copy's event and the second Bears is chosen, so the
+/// first batch's token is Esix's copy (CR 614.6), and it is one of "those
+/// tokens" (CR 603.7c). The second batch is created unreplaced: Esix applies
+/// the first time each turn.
+#[test]
+fn r20_esix_copy_joins_those_tokens() {
+    // Each prompt answered: its kind, and the owner's offered batch then.
+    let mut prompts: Vec<(&'static str, Option<OfferedBatchCustody>)> = Vec::new();
+    let driven = cast_twinflame_with(&[BEARS, BEARS], &[(P0, ESIX)], |waiting, driven| {
+        let action = match waiting {
+            WaitingFor::ReplacementChoice { candidates, .. } => GameAction::ChooseReplacement {
+                index: accept_index(candidates, ESIX),
+            },
+            WaitingFor::CopyTargetChoice { .. } => GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(driven.sources[1])),
+            },
+            _ => return pass_stranded_priority(waiting, &driven.runner),
+        };
+        prompts.push((
+            waiting.variant_name(),
+            copy_token_owner(&driven.runner).map(|owner| owner.offered_batch),
+        ));
+        Some(action)
+    });
+    let Some(driven) = driven else {
+        return;
+    };
+    let marked = Some(OfferedBatchCustody::AtReplacementPrompt);
+    assert_eq!(
+        prompts,
+        vec![("ReplacementChoice", marked), ("CopyTargetChoice", marked)],
+        "REACH-GUARD: one Esix prompt and one copy-source choice, each with the owner parked \
+         and its first batch marked"
+    );
+    let tokens = driven.created_tokens();
+    assert_eq!(
+        tokens.iter().collect::<HashSet<_>>().len(),
+        2,
+        "REACH-GUARD: Esix's copy and the second batch's copy, two distinct tokens, got {tokens:?}"
+    );
+    assert_eq!(
+        named(&driven, BEARS),
+        tokens,
+        "REACH-GUARD: both tokens are Grizzly Bears copies"
+    );
+    assert_eq!(
+        driven.runner.state().last_created_token_ids,
+        tokens,
+        "LastCreated lists Esix's copy and the second copy, in TokenCreated order"
+    );
+    let members = assert_referent_is_every_token(&driven);
+    assert_eq!(
+        members, tokens,
+        "the referent lists both copies in TokenCreated order"
+    );
+    assert_end_step_exiles_every_token(driven);
+}
+
+/// R21: Twinflame on two Grizzly Bears with P0's Jinnie Fay, accepted at the
+/// first copy's event with the Cat branch. Jinnie Fay's ruling: "Anything else
+/// specified in the effect creating the tokens ... still applies", so the
+/// Cats are among "those tokens" (CR 614.6). The token-choice seed keeps Jinnie
+/// Fay off the second copy's event, which creates a Bears copy.
+#[test]
+fn r21_jinnie_cat_is_one_of_those_tokens() {
+    r21_jinnie_cat(PauseCarry::Live);
+}
+
+/// R21 through the engine's save/restore pipeline at the Jinnie Fay prompt and
+/// at the branch prompt, while the owner's first batch is marked.
+#[test]
+fn r21_jinnie_cat_is_one_of_those_tokens_across_save_and_restore() {
+    r21_jinnie_cat(PauseCarry::SavedAndRestored);
+}
+
+fn r21_jinnie_cat(carry: PauseCarry) {
+    let mut prompts: Vec<&'static str> = Vec::new();
+    let mut restores = 0;
+    let driven = cast_twinflame_with(&[BEARS, BEARS], &[(P0, JINNIE)], |waiting, driven| {
+        let action = match waiting {
+            WaitingFor::ReplacementChoice { candidates, .. } => GameAction::ChooseReplacement {
+                index: accept_index(candidates, JINNIE),
+            },
+            WaitingFor::ChooseOneOfBranch { .. } => GameAction::ChooseBranch { index: 0 },
+            _ => return pass_stranded_priority(waiting, &driven.runner),
+        };
+        prompts.push(waiting.variant_name());
+        let owner = copy_token_owner(&driven.runner)
+            .cloned()
+            .expect("REACH-GUARD: the CopyToken owner is parked at every Jinnie Fay prompt");
+        assert_eq!(
+            owner.offered_batch,
+            OfferedBatchCustody::AtReplacementPrompt,
+            "the owner's first batch is owed the tokens of whatever replaces its creation"
+        );
+        if let PauseCarry::SavedAndRestored = carry {
+            driven.runner = save_and_restore(&driven.runner);
+            restores += 1;
+            assert_eq!(
+                copy_token_owner(&driven.runner).cloned(),
+                Some(owner),
+                "the owner, its marked batch included, crosses the wire unchanged"
+            );
+            assert_eq!(
+                driven.runner.state().waiting_for,
+                *waiting,
+                "the restored game is at the same prompt"
+            );
+        }
+        Some(action)
+    });
+    let Some(driven) = driven else {
+        return;
+    };
+    assert_eq!(
+        prompts,
+        vec!["ReplacementChoice", "ChooseOneOfBranch"],
+        "REACH-GUARD: one Jinnie Fay prompt and one branch prompt"
+    );
+    if let PauseCarry::SavedAndRestored = carry {
+        assert_eq!(
+            restores, 2,
+            "REACH-GUARD: saved and restored at both prompts"
+        );
+    }
+    let tokens = driven.created_tokens();
+    let bears = named(&driven, BEARS);
+    assert_eq!(
+        bears.len(),
+        1,
+        "REACH-GUARD: the second batch is one Bears copy, got {tokens:?}"
+    );
+    // Measured: the Cat branch creates no Cat ("that many" reads zero), a
+    // count defect outside this row. The row asserts only that whatever the
+    // substitute created is a Cat and is among "those tokens".
+    assert!(
+        tokens
+            .iter()
+            .filter(|id| !bears.contains(id))
+            .all(|id| driven.runner.state().objects[id].name == "Cat"),
+        "every substitute token is Jinnie Fay's Cat, got {tokens:?}"
+    );
+    assert_eq!(
+        driven.runner.state().last_created_token_ids,
+        tokens,
+        "LastCreated lists every created token in TokenCreated order"
+    );
+    assert_referent_is_every_token(&driven);
+    assert_end_step_exiles_every_token(driven);
 }
