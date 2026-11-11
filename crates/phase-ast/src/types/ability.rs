@@ -20708,8 +20708,15 @@ pub enum LibraryShuffleMode {
     TerminalShuffle,
 }
 
+impl LibraryShuffleMode {
+    /// Serde skip-helper: `PerObject` is the default and is omitted from JSON.
+    pub fn is_per_object(&self) -> bool {
+        matches!(self, Self::PerObject)
+    }
+}
+
 fn is_default_library_shuffle_mode(mode: &LibraryShuffleMode) -> bool {
-    matches!(mode, LibraryShuffleMode::PerObject)
+    mode.is_per_object()
 }
 
 /// CR 701.20a + CR 608.2c: How the *set* of matching cards found by an

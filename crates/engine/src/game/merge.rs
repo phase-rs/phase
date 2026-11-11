@@ -54,8 +54,8 @@ use crate::game::game_object::{DisplayIdentity, GameObject, ObjectIncarnationRef
 use crate::game::printed_cards::intrinsic_copiable_values;
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
-    ContinuousModification, CopiableValues, Duration, LibraryPosition, ResolvedAbility,
-    TargetFilter,
+    ContinuousModification, CopiableValues, Duration, Effect, LibraryPosition, LibraryShuffleMode,
+    ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -474,9 +474,8 @@ pub fn split_merged_permanent_on_leave(
 /// zone-change event is ready to deliver. Every component, including the
 /// survivor, is queued in `move_objects_simultaneously_then`: its inherited
 /// `applied` set prevents a replacement already applied to the merged event
-/// from applying again. Its library placement is retained on every request,
-/// including across a paused batch, while still letting a component-specific
-/// replacement (notably CR 903.9b) consult and pause. The batch owns every pause/restart,
+/// from applying again, while still letting a component-specific replacement
+/// (notably CR 903.9b) consult and pause. The batch owns every pause/restart,
 /// so replacement choices cannot clobber one another or expose partial event
 /// output. The survivor moves through the ordinary mover; absorbed components
 /// retain their `from: None` component-delivery event shape.
@@ -484,11 +483,19 @@ pub fn split_merged_permanent_on_leave(
 /// CR 903.9c: when an individual commander component accepts the CR 903.9b
 /// Hand/Library replacement, only that component's request changes to Command;
 /// noncommander components remain routed to their appropriate zones.
+///
+/// CR 701.24a + CR 730.3: a library position reaches the components only when
+/// the move is the move component of a terminal-shuffle operation, where the
+/// position is transient and the chained `Shuffle` randomizes the library
+/// once. Any other library placement leaves each component at the zone
+/// default; the owner's CR 730.3a arrangement of an ordered placement is not
+/// modeled here.
 pub(crate) fn move_merged_permanent_on_leave(
     state: &mut GameState,
     merged_id: ObjectId,
     dest: Zone,
     library_placement: Option<&LibraryPosition>,
+    library_shuffle: LibraryShuffleMode,
     applied: &HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
@@ -525,7 +532,11 @@ pub(crate) fn move_merged_permanent_on_leave(
                     .expect("merged component exists")
                     .split_from_merge_survivor = Some(survivor_successor);
             }
-            ZoneMoveRequest::merged_component(component_id, dest, library_placement.cloned())
+            let placement = match library_shuffle {
+                LibraryShuffleMode::TerminalShuffle => library_placement.cloned(),
+                LibraryShuffleMode::PerObject => None,
+            };
+            ZoneMoveRequest::merged_component(component_id, dest, placement, library_shuffle)
                 .with_replacement_applied(applied.clone())
         })
         .collect();
@@ -566,7 +577,7 @@ pub(crate) fn restore_pre_merge_tokenness_for_leave(state: &mut GameState, merge
 /// object a merged permanent became when it left the battlefield — and a
 /// resolved object is a former survivor with co-located components. A freshly
 /// chosen target (Riftsweeper choosing one exiled card; reanimating one specific
-/// card) carries a current announcement pin and must not over-return.
+/// card) carries no departure evidence for that object and must not over-return.
 pub(crate) fn expand_returned_merge_components(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -574,62 +585,99 @@ pub(crate) fn expand_returned_merge_components(
     target_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
     if matches!(target_filter, TargetFilter::SelfRef) {
-        if recorded_departure(state, ability).is_none() {
+        // CR 701.24a + CR 730.3c: a source's own recorded departure is
+        // followed only by the move component of a terminal-shuffle operation
+        // ("shuffle it into its owner's library"), whose order is randomized.
+        if !is_terminal_shuffle_move(&ability.effect) {
             return resolved;
         }
-        // The survivor may itself have moved again (Cremate responding to a
-        // dies trigger); its recorded siblings remain the successors the effect
-        // can still find (CR 400.7e + CR 609.3).
-        let mut expanded = resolved.clone();
-        for id in selfref_departure_components(state, ability) {
+        let mut expanded = resolved;
+        for id in recorded_departure_components(state, ability) {
             if !expanded.contains(&id) {
                 expanded.push(id);
             }
         }
         return expanded;
     }
-    if !expansion_records_departure(state, ability, target_filter) {
-        return resolved;
-    }
     let mut expanded = resolved.clone();
     for &survivor_id in &resolved {
+        if !referent_records_departure(state, ability, target_filter, survivor_id) {
+            continue;
+        }
         let components = co_split_components(state, survivor_id, &expanded);
         expanded.extend(components);
     }
     expanded
 }
 
-/// CR 730.3c + CR 400.7e + CR 603.7c: Whether this effect references the object
-/// a merged permanent became when it LEFT the battlefield, rather than an object
-/// it merely chose. The filter kind alone cannot answer this: a fresh
-/// `ParentTarget` selection and a flicker continuation carry the same announced
-/// occurrence. Departure provenance is a separate recorded fact:
+/// CR 701.24a: the effect is the move component of a parser-emitted "shuffle
+/// [set] into [library]" operation, marked by its explicit
+/// `LibraryShuffleMode::TerminalShuffle`.
+fn is_terminal_shuffle_move(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
+            ..
+        } | Effect::ChangeZoneAll {
+            destination: Zone::Library,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
+            ..
+        }
+    )
+}
+
+/// CR 730.3c + CR 400.7e + CR 603.7c: Whether this effect found `referent` as
+/// the object a merged permanent became when it LEFT the battlefield, rather
+/// than an object it merely chose. The filter kind alone cannot answer this: a
+/// fresh `ParentTarget` selection and a flicker continuation carry the same
+/// anaphor. The evidence must name this exact object incarnation:
 ///
-/// * `ParentTarget`/`ParentTargetSlot` are departure continuations only when the
-///   referent was pinned by an event/delayed binding (`target_incarnations`) or
-///   by an immediate producer that moved objects (`forwarded_result_context`).
-///   A fresh choice has only positional announcement pins.
+/// * `ParentTarget`/`ParentTargetSlot`: the referent's current incarnation is
+///   pinned by an event/delayed binding (`target_incarnations`) or is a result
+///   of the immediate producer that moved it (`forwarded_result_context`). A
+///   pin or result for any other object is not evidence for this one.
+/// * `TriggeringSource`: the trigger event is this referent's own departure
+///   from the battlefield.
 /// * `TrackedSet`/`TrackedSetFiltered` and `ExiledBySource` are formed by an
-///   earlier move in the chain, and `TriggeringSource` is an event referent;
-///   those already record a departure.
+///   earlier move in the chain; those already record a departure.
 ///
-/// `SelfRef` is answered separately by [`recorded_departure`], which requires
-/// the trigger's own departure event rather than mere incarnation currency.
-pub(crate) fn expansion_records_departure(
+/// `SelfRef` is answered separately by [`recorded_departure_components`],
+/// which requires the trigger's own departure event.
+fn referent_records_departure(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
+    referent: ObjectId,
 ) -> bool {
+    let Some(current) = state
+        .objects
+        .get(&referent)
+        .map(ObjectIncarnationRef::from_object)
+    else {
+        return false;
+    };
     match target_filter {
-        TargetFilter::SelfRef => false,
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
-            !ability.target_incarnations.is_empty()
-                || ability.context.forwarded_result_context.is_some()
+            ability.target_incarnations.contains(&current)
+                || ability
+                    .context
+                    .forwarded_result_context
+                    .as_ref()
+                    .is_some_and(|result| result.object_incarnations.contains(&current))
         }
         TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource => true,
-        TargetFilter::TriggeringSource => state.current_trigger_event.is_some(),
+        TargetFilter::TriggeringSource => matches!(
+            state.current_trigger_event.as_ref(),
+            Some(GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                ..
+            }) if *object_id == referent
+        ),
         _ => false,
     }
 }
@@ -683,63 +731,44 @@ fn leave_successor(survivor: &GameObject) -> ObjectIncarnationRef {
     ObjectIncarnationRef::of(survivor.id, survivor.incarnation + 1)
 }
 
-/// CR 400.7e + CR 730.3c: The self-ref departure this ability's trigger event
-/// recorded: the zone the source moved to and the incarnation its split
-/// components were pinned to.
-struct RecordedDeparture {
-    zone: Zone,
-    successor: ObjectIncarnationRef,
-}
-
-fn recorded_departure(state: &GameState, ability: &ResolvedAbility) -> Option<RecordedDeparture> {
-    let source = ability.trigger_source.as_ref()?;
+/// CR 400.7e + CR 730.3c: the component cards of the merged permanent whose
+/// departure from the battlefield triggered this ability, read once from the
+/// trigger's recorded event: the public zone the source moved to and the
+/// successor incarnation its split components were pinned to. The recorded pin
+/// is a value, so a survivor that moved again (Cremate responding to the dies
+/// trigger) does not hide its sibling; the effect still does as much as
+/// possible (CR 609.3). Empty when the ability was not triggered by its own
+/// source's departure.
+fn recorded_departure_components(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
+    let Some(source) = ability.trigger_source.as_ref() else {
+        return Vec::new();
+    };
     let expected = source.identity.reference;
-    let GameEvent::ZoneChanged {
+    let Some(GameEvent::ZoneChanged {
         object_id,
         from,
         to,
         record,
-        ..
-    } = state.current_trigger_event.as_ref()?
+    }) = state.current_trigger_event.as_ref()
     else {
-        return None;
-    };
-    if *object_id != ability.source_id || *from != Some(Zone::Battlefield) || !to.is_public() {
-        return None;
-    }
-    let recorded = state
-        .zone_changes_this_turn
-        .get(record.turn_zone_change_index)?;
-    if recorded
-        .trigger_source_context()
-        .is_none_or(|event_source| event_source.identity.reference != expected)
-    {
-        return None;
-    }
-    Some(RecordedDeparture {
-        zone: *to,
-        successor: ObjectIncarnationRef::of(expected.object_id, expected.incarnation + 1),
-    })
-}
-
-/// CR 730.3c: the component cards of the merged permanent that just left the
-/// battlefield, independent of the survivor still being findable. The recorded
-/// pin is a value, so a survivor that moved again (Cremate responding to the
-/// dies trigger) does not hide its sibling; the effect still does as much as
-/// possible (CR 609.3).
-pub(crate) fn selfref_departure_components(
-    state: &GameState,
-    ability: &ResolvedAbility,
-) -> Vec<ObjectId> {
-    let Some(departure) = recorded_departure(state, ability) else {
         return Vec::new();
     };
+    if *object_id != ability.source_id || *from != Some(Zone::Battlefield) || !to.is_public() {
+        return Vec::new();
+    }
+    let recorded_by_source = state
+        .zone_changes_this_turn
+        .get(record.turn_zone_change_index)
+        .and_then(|recorded| recorded.trigger_source_context())
+        .is_some_and(|event_source| event_source.identity.reference == expected);
+    if !recorded_by_source {
+        return Vec::new();
+    }
+    let successor = ObjectIncarnationRef::of(expected.object_id, expected.incarnation + 1);
     let mut components: Vec<ObjectId> = state
         .objects
         .iter()
-        .filter(|(_, obj)| {
-            obj.zone == departure.zone && obj.split_from_merge_survivor == Some(departure.successor)
-        })
+        .filter(|(_, obj)| obj.zone == *to && obj.split_from_merge_survivor == Some(successor))
         .map(|(id, _)| *id)
         .collect();
     components.sort_by_key(|id| id.0);

@@ -464,12 +464,12 @@ fn alabaster_death_after_the_survivor_is_exiled_still_shuffles_the_sibling() {
 const AVENGING_ANGEL: &str =
     "Flying\nWhen this creature dies, you may put it on top of its owner's library.";
 
-/// CR 400.7e + CR 401.4 control: a recorded merged departure widens a library
-/// placement only when a chained shuffle randomizes that library. An ordered
-/// "put it on top" has no such shuffle, so the dies trigger places the one
-/// object it found and the absorbed component stays where the split left it.
-/// Placing every component in an owner-chosen order (CR 730.3c + CR 401.4) is
-/// not implemented for this path.
+/// CR 400.7e + CR 701.24a control: a recorded merged departure widens only the
+/// move component of a terminal shuffle (`LibraryShuffleMode::TerminalShuffle`).
+/// An ordered "put it on top" keeps the base placement: the dies trigger places
+/// the one object it found and the absorbed component stays where the split
+/// left it. Placing every component in an owner-chosen order (CR 730.3a +
+/// CR 730.3c) is not implemented for this path (known gap, #10759).
 #[test]
 fn merged_ordered_placement_keeps_the_single_chosen_card() {
     use engine::game::merge::{merge_object_onto, MergeSide};
@@ -522,16 +522,88 @@ fn merged_ordered_placement_keeps_the_single_chosen_card() {
     );
 }
 
+/// SYNTHETIC: Avenging Angel's printed trigger followed by an unrelated
+/// "Then shuffle your library." No printed card pairs a recorded merged
+/// departure's ordered placement with a later shuffle; Avenging Angel is the
+/// nearest printed analogue. CR 701.24a: the later instruction shuffles the
+/// controller's library on its own; it does not make the ordered placement the
+/// move component of a terminal shuffle. Only the move's own
+/// `LibraryShuffleMode` widens a departure (CR 730.3c), so the component stays
+/// in the graveyard and the shuffle happens once.
+const ANGEL_THEN_UNRELATED_SHUFFLE: &str = "Flying\nWhen this creature dies, you may put it on top of its owner's library. Then shuffle your library.";
+
+#[test]
+fn unrelated_later_shuffle_does_not_widen_an_ordered_departure_placement() {
+    use engine::game::merge::{merge_object_onto, MergeSide};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let angel = scenario
+        .add_creature(P0, "Synthetic Shuffling Angel", 3, 3)
+        .from_oracle_text_with_keywords(&["Flying"], ANGEL_THEN_UNRELATED_SHUFFLE)
+        .id();
+    let component = scenario.add_creature(P0, "Gemrazer", 2, 2).id();
+    scenario.with_library_top(P0, &["Top A", "Top B"]);
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.battlefield.retain(|&id| id != component);
+        let mut events = vec![];
+        merge_object_onto(state, component, angel, MergeSide::Top, &mut events);
+    }
+
+    let outcome = runner
+        .cast(murder)
+        .target_object(angel)
+        .accept_optional()
+        .resolve();
+
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    let state = outcome.state();
+    assert!(state.stack.is_empty());
+    assert_eq!(state.objects[&angel].zone, Zone::Library);
+    assert_eq!(
+        state.objects[&component].zone,
+        Zone::Graveyard,
+        "an unrelated later shuffle does not sweep the component into the placement"
+    );
+    assert_eq!(state.players[P0.0 as usize].library.len(), 3);
+    let shuffles = outcome
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } if *player_id == P0
+            )
+        })
+        .count();
+    assert_eq!(shuffles, 1, "the printed shuffle still happens once");
+}
+
 // Full Oracle verified against https://api.scryfall.com/cards/named?exact=Tel-Jilad%20Stylus
 const TEL_JILAD_STYLUS: &str = "{T}: Put target permanent you own on the bottom of your library.";
 
-/// CR 730.3 + CR 701.24a: a merged permanent that is still on the battlefield
-/// leaves as one permanent, and each physical card is put at the instructed
-/// library position. A placement is not a shuffle. The relative order of the
-/// delivered cards is deliberately not asserted: no owner arrangement
-/// (CR 401.4) is offered on this path.
+/// Base-behavior pin, not a rules claim (known gap, tracked in #10759). Tel-Jilad
+/// Stylus is an ordinary placement, not a terminal shuffle, so this branch does
+/// not change how a live merged permanent's cards are delivered: as at
+/// `main`, each physical card (CR 730.3) is delivered at the library's zone
+/// default, which shuffles the owner's library once per card, and no owner
+/// arrangement (CR 730.3a) is offered. Only the move component of a terminal
+/// shuffle carries its position to every component. The relative order of the
+/// cards is not asserted. This test passes unchanged at the merge base.
 #[test]
-fn stylus_puts_each_card_of_a_live_merged_permanent_on_the_bottom_without_a_shuffle() {
+fn stylus_on_a_live_merged_permanent_keeps_the_base_component_delivery() {
     use engine::game::merge::{merge_object_onto, MergeSide};
 
     let mut scenario = GameScenario::new();
@@ -549,46 +621,34 @@ fn stylus_puts_each_card_of_a_live_merged_permanent_on_the_bottom_without_a_shuf
         let mut events = vec![];
         merge_object_onto(state, component, host, MergeSide::Top, &mut events);
     }
-    let library_before: Vec<_> = runner.state().players[P0.0 as usize]
-        .library
-        .iter()
-        .copied()
-        .collect();
-    assert_eq!(library_before.len(), 2);
+    assert_eq!(runner.state().players[P0.0 as usize].library.len(), 2);
 
     let outcome = runner.activate(stylus, 0).target_object(host).resolve();
 
     assert!(
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
-        "the placement settles without a prompt: {:?}",
+        "no arrangement prompt is offered: {:?}",
         outcome.final_waiting_for()
     );
     outcome.assert_zone(&[host, component], Zone::Library);
     let state = outcome.state();
-    let library: Vec<_> = state.players[P0.0 as usize]
-        .library
+    assert_eq!(state.players[P0.0 as usize].library.len(), 4);
+    let shuffled_players: Vec<_> = outcome
+        .events()
         .iter()
-        .copied()
-        .collect();
-    assert_eq!(
-        &library[..2],
-        &library_before[..],
-        "the existing cards keep their order above the placed cards"
-    );
-    let mut placed = library[2..].to_vec();
-    placed.sort_by_key(|id| id.0);
-    let mut expected = vec![host, component];
-    expected.sort_by_key(|id| id.0);
-    assert_eq!(placed, expected, "both physical cards are on the bottom");
-    assert!(
-        !outcome.events().iter().any(|event| matches!(
-            event,
+        .filter_map(|event| match event {
             GameEvent::PlayerPerformedAction {
+                player_id,
                 action: PlayerActionKind::ShuffledLibrary,
                 ..
-            }
-        )),
-        "a placement at a library position does not shuffle"
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shuffled_players,
+        vec![P0, P0],
+        "each card takes the zone-default delivery, as at the merge base"
     );
     assert!(state.stack.is_empty());
 }

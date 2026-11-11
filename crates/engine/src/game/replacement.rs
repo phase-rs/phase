@@ -2191,6 +2191,7 @@ fn discard_applier(
             enter_with_choices: None,
             discard_frame,
             performed_by: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied,
         }),
         other => ApplyResult::Modified(other),

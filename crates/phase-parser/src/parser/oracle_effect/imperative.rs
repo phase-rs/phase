@@ -11183,27 +11183,6 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         Effect::ChangeZoneAll { .. } => TargetFilter::ScopedPlayer,
         _ => TargetFilter::Controller,
     };
-    // CR 608.2c + CR 701.24c: the terminal instruction owns this shuffle,
-    // including when the source can no longer move. A scalar library zone
-    // change would automatically shuffle during delivery as well. Reuse the
-    // existing exact-source placement path to defer randomization until the
-    // one owner shuffle, just as SelfAndZonesToLibrary does above.
-    if matches!(
-        &effect,
-        Effect::ChangeZone {
-            destination: Zone::Library,
-            target: TargetFilter::SelfRef,
-            owner_library: true,
-            ..
-        }
-    ) {
-        effect = Effect::PutAtLibraryPosition {
-            target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
-            position: LibraryPosition::Bottom,
-            arranger: None,
-        };
-    }
     let tracks_owner_population = matches!(&effect, Effect::ChangeZoneAll { .. });
     // A selected graveyard population explicitly owned by the caster or the
     // declared player has one library subject (Dwell on the Past). ParentTarget/
@@ -11231,7 +11210,9 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         // CR 701.24a + CR 701.24d: every parser-emitted compound move into a
         // library appends the terminal `Shuffle` below. Randomizing during
         // delivery as well would shuffle twice (Watery Grasp), so defer to that
-        // single instruction.
+        // single instruction. The source's own move ("shuffle it into its
+        // owner's library": Gandalf, Wandering Wizard; Alabaster Dragon) is the
+        // same operation, and CR 701.24c still shuffles when it cannot move.
         Effect::ChangeZone {
             destination: Zone::Library,
             owner_library: true,

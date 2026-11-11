@@ -44,37 +44,6 @@ pub(super) fn private_zone_selection<'a>(
     Some((choosing_player, source_zone, eligible))
 }
 
-/// CR 730.3c + CR 401.4: whether a recorded merged departure may widen this
-/// placement to every card the merged permanent became. It may only when a
-/// later instruction of the same ability shuffles the library of one of those
-/// cards' owners ("shuffle it into its owner's library"): CR 701.24a randomizes
-/// that library, so the cards have no order for their owner to choose. A top,
-/// bottom or nth-from-top placement with no such shuffle keeps the single
-/// object the instruction found, and so does a shuffle whose player cannot be
-/// resolved to one of those owners.
-fn departure_expansion_is_shuffled(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    arrivals: &[ObjectId],
-) -> bool {
-    let mut next = ability.sub_ability.as_deref();
-    while let Some(node) = next {
-        if let Effect::Shuffle { target } = &node.effect {
-            let shuffles_an_arrival_owner =
-                super::resolve_player_for_context_ref(state, node, target).is_some_and(|player| {
-                    arrivals
-                        .iter()
-                        .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == player))
-                });
-            if shuffles_an_arrival_owner {
-                return true;
-            }
-        }
-        next = node.sub_ability.as_deref();
-    }
-    false
-}
-
 /// Place target card at a specific position in its owner's library. Unlike
 /// ChangeZone { destination: Library } which shuffles the destination library,
 /// this places at a specific position without shuffling.
@@ -153,28 +122,10 @@ pub fn resolve(
     // `resolved_targets` already returns EMPTY for a stale non-triggered
     // `SelfRef` (`ResolvedAbility::self_ref_is_current`); the `[source]` shape is
     // the triggered and `None`/`ParentTarget` fallbacks.
-    // CR 730.3c + CR 609.3: a stale survivor does not suppress the departure's
-    // surviving components; only a departure with nothing left to act on is a
-    // no-op. CR 401.4: that holds only where a chained shuffle randomizes the
-    // library they land in. Without one the placement is ordered, and a stale
-    // source places nothing.
-    let departure_components = crate::game::merge::selfref_departure_components(state, ability);
-    let departure_arrivals: Vec<ObjectId> = departure_components
-        .iter()
-        .copied()
-        .chain(std::iter::once(ability.source_id))
-        .collect();
-    let departure_components =
-        if departure_expansion_is_shuffled(state, ability, &departure_arrivals) {
-            departure_components
-        } else {
-            Vec::new()
-        };
     if resolves_to_source
         && (effective_targets.is_empty()
             || effective_targets == [crate::types::ability::TargetRef::Object(ability.source_id)])
         && !source_is_current
-        && departure_components.is_empty()
     {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::PutAtLibraryPosition,
@@ -324,31 +275,6 @@ pub fn resolve(
             .collect();
     }
 
-    // CR 730.3c + CR 400.7e: a dies trigger's "shuffle it into its owner's
-    // library" lowers to this exact-source placement, not a ChangeZone. When the
-    // source's own departure is recorded, the placement covers every object that
-    // merged permanent became; a fresh choice stays the single chosen card.
-    // CR 401.4: the expansion applies only when a chained shuffle randomizes
-    // the library the cards land in; an ordered placement keeps the objects the
-    // instruction found.
-    let original_population_len = collected_targets.len();
-    let expanded_targets = crate::game::merge::expand_returned_merge_components(
-        state,
-        ability,
-        collected_targets.clone(),
-        &target_filter,
-    );
-    let collected_targets = if expanded_targets.len() > original_population_len
-        && departure_expansion_is_shuffled(state, ability, &expanded_targets)
-    {
-        expanded_targets
-    } else {
-        collected_targets
-    };
-    // CR 730.3c: the same action is taken upon each object the merged permanent
-    // became, so a departure expansion is not a choose-among-candidates prompt.
-    let departure_expanded = collected_targets.len() > original_population_len;
-
     // CR 115.1 + CR 400.2: When the filter specifies a private zone (hand/library)
     // and no targets were pre-selected during casting (because the Oracle text does
     // not say "target"), present an EffectZoneChoice for resolution-time selection.
@@ -356,11 +282,7 @@ pub fn resolve(
     // of your library"), whose prompt demands exactly `count` — and an any-number
     // count — Valakut Awakening ("put any number of cards from your hand on the
     // bottom of your library"), whose prompt accepts 0..=count.
-    let expected = if departure_expanded {
-        collected_targets.len()
-    } else {
-        resolve_quantity_with_targets(state, &count_expr, ability).max(0) as usize
-    };
+    let expected = resolve_quantity_with_targets(state, &count_expr, ability).max(0) as usize;
     // CR 107.1c + CR 608.2d: "put ANY NUMBER of <population> …" carries its
     // player-chosen cardinality as the `UpTo` wrapper (the parser's
     // `LibraryPlacementCardinality::AnyNumber` arm — the same encoding as

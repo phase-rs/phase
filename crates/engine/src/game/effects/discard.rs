@@ -80,6 +80,7 @@ pub(crate) fn complete_discard_to_graveyard(
         enter_with_choices: None,
         discard_frame,
         performed_by: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         applied,
     };
     match replacement::replace_event(state, proposed, events) {

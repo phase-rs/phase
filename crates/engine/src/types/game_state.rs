@@ -4916,6 +4916,13 @@ pub struct PendingChangeZoneIteration {
     /// library" still suppresses auto-shuffle on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 701.24a + CR 730.3: whether `library_placement` is the transient
+    /// position of a terminal-shuffle operation, carried across the pause.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+    )]
+    pub library_shuffle: crate::types::ability::LibraryShuffleMode,
     /// CR 303.4f: Pre-resolved Aura host carried across a paused ChangeZone loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enter_attached_to: Option<AttachTarget>,
@@ -6970,6 +6977,13 @@ pub struct PendingBatchZoneMoveRequest {
     pub performed_by: Option<PlayerId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<LibraryPosition>,
+    /// CR 701.24a + CR 730.3: the parked move is part of a terminal-shuffle
+    /// operation (see `ProposedEvent::ZoneChange::library_shuffle`).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::LibraryShuffleMode::is_per_object"
+    )]
+    pub library_shuffle: crate::types::ability::LibraryShuffleMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exile_duration: Option<Duration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

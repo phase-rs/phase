@@ -514,6 +514,68 @@ fn exile_records_component_backlink_and_continuity_return_collects_all() {
     );
 }
 
+/// CR 730.3c + CR 400.7 + CR 608.2c: departure evidence must name the exact
+/// referent. An ability that carries an unrelated object's pin or an unrelated
+/// forwarded result (an earlier instruction in the chain moved some other
+/// card) has not found the object a merged permanent became; a fresh selection
+/// of that former survivor returns only the selected card. The same evidence
+/// naming the referent itself expands to the whole pile.
+#[test]
+fn unrelated_target_context_is_not_a_departure_of_the_selected_survivor() {
+    use crate::types::ability::{ForwardedResultContext, TargetFilter};
+    let (mut state, host, rider, _p0) = two_creatures();
+    state.battlefield.retain(|&id| id != rider);
+    let mut events = Vec::new();
+    merge_object_onto(&mut state, rider, host, MergeSide::Top, &mut events);
+    crate::game::zones::move_to_zone(&mut state, host, Zone::Exile, &mut events);
+    let unrelated = crate::game::zones::create_object(
+        &mut state,
+        crate::types::identifiers::CardId(9701),
+        PlayerId(0),
+        "Unrelated Card".to_string(),
+        Zone::Graveyard,
+    );
+
+    let mut pinned_elsewhere = fresh_reference(host);
+    pinned_elsewhere.set_target_incarnations_recursive(vec![ObjectIncarnationRef::from_object(
+        &state.objects[&unrelated],
+    )]);
+    let mut forwarded_elsewhere = fresh_reference(host);
+    forwarded_elsewhere.context.forwarded_result_context = Some(Box::new(
+        ForwardedResultContext::from_object_ids(&state, &[unrelated]),
+    ));
+    for (label, ability) in [
+        ("unrelated pin", &pinned_elsewhere),
+        ("unrelated forwarded result", &forwarded_elsewhere),
+    ] {
+        assert_eq!(
+            expand_returned_merge_components(
+                &state,
+                ability,
+                vec![host],
+                &TargetFilter::ParentTarget
+            ),
+            vec![host],
+            "{label}: a fresh selection of the former survivor stays one card"
+        );
+    }
+
+    let mut forwarded_referent = fresh_reference(host);
+    forwarded_referent.context.forwarded_result_context = Some(Box::new(
+        ForwardedResultContext::from_object_ids(&state, &[host]),
+    ));
+    assert_eq!(
+        expand_returned_merge_components(
+            &state,
+            &forwarded_referent,
+            vec![host],
+            &TargetFilter::ParentTarget
+        ),
+        vec![host, rider],
+        "a producer that moved the referent itself records its departure"
+    );
+}
+
 /// CR 730.3c + CR 730.3: the returned components come back as SEPARATE, non-merged
 /// objects, and the survivor back-link clears on battlefield entry.
 #[test]
