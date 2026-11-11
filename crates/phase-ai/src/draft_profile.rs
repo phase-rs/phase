@@ -45,8 +45,8 @@ use serde::{Deserialize, Serialize};
 
 use engine::game::effects::effect::generic_effect_application_filter;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, Effect, PtValue,
-    StaticDefinition, TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect,
+    PtValue, StaticDefinition, TargetFilter, TypeFilter,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
@@ -311,11 +311,12 @@ pub enum RoleReading {
     /// Every printed removal, evasion and fixing shape:
     /// - removal also counts a toughness reduction on another creature
     ///   (CR 704.5f) from an effect or a static, and a static that stops
-    ///   another creature from attacking or blocking, but not a bounce of the
-    ///   source itself;
+    ///   another creature from attacking or blocking, but only an effect that
+    ///   can reach an opposing creature: not a bounce of the source or of
+    ///   your own creature, nor damage only to a player or planeswalker;
     /// - evasion also counts menace, skulk and landwalk (CR 702.14b), CR
-    ///   509.1b blocker restrictions, and effects that make another creature
-    ///   evasive;
+    ///   509.1b blocker restrictions, effects that make the source itself
+    ///   evasive, and effects that make another creature evasive;
     /// - fixing also counts a search of its controller's library for a land.
     Full,
 }
@@ -387,6 +388,29 @@ pub struct ColorCommitment {
     pub note: String,
 }
 
+/// How a demonstrated theme's synergy combines with a set class bonus that
+/// already rewards one of the theme's linked mechanics (see
+/// [`Theme::linked_classes`]). Either way the flat class bonus is not paid
+/// twice; the policies differ in whether a demonstrated pool still raises it.
+///
+/// Like [`RoleReading`], this is a profile-level fact because the profile's
+/// class bonuses were tuned against one policy: switching a profile
+/// re-scores every card whose classes overlap a theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SynergyOverlap {
+    /// The policy the Mirrodin-block scores are tuned against: a card with a
+    /// linked class its set rewards earns no synergy from that theme; the
+    /// class bonus stands in for it.
+    #[default]
+    Suppress,
+    /// The theme pays only its pool-dependent strength in excess of the
+    /// class bonus the card was actually awarded through a linked class. A
+    /// linked class that lost to a higher, unlinked class bonus was never
+    /// paid, so it discounts nothing.
+    Excess,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdaptivePolicy {
     pub mode: String,
@@ -396,6 +420,10 @@ pub struct AdaptivePolicy {
     pub deck_fit: DeckFit,
     pub deck_need_bonus: CappedBonus,
     pub archetype_synergy_bonus: CappedBonus,
+    /// How theme synergy combines with a linked class bonus (see
+    /// [`SynergyOverlap`]).
+    #[serde(default)]
+    pub synergy_overlap: SynergyOverlap,
     pub color_commitment: ColorCommitment,
 }
 
@@ -614,7 +642,7 @@ impl DraftProfile {
             0.0
         };
         let archetype_synergy = if policy.archetype_synergy_bonus.enabled {
-            self.archetype_synergy_bonus(card, pool, &award)
+            self.archetype_synergy_bonus(card, pool, set, &classes, &award)
         } else {
             0.0
         };
@@ -745,31 +773,36 @@ impl DraftProfile {
 
     /// The strongest demonstrated theme this card belongs to, scaled to the
     /// policy cap. A theme counts once it reaches `minimum_signals`; strength
-    /// saturates at twice that.
-    ///
-    /// When the class bonus the card was actually awarded rewards one of the
-    /// theme's linked mechanics, the theme pays only what its pool-dependent
-    /// strength adds beyond that bonus: the flat class bonus is not paid
-    /// twice, but a pool that has demonstrated the theme still raises it. A
-    /// linked class that lost to a higher, unlinked class bonus was never
-    /// paid, so it discounts nothing.
+    /// saturates at twice that. A theme whose linked mechanic the card's
+    /// class bonus already rewards is combined with that bonus under the
+    /// profile's [`SynergyOverlap`] policy.
     fn archetype_synergy_bonus(
         &self,
         card: &ProfileCard<'_>,
         pool: &[ProfileCard<'_>],
+        set: &SetProfile,
+        classes: &BTreeSet<CardClass>,
         award: &ClassAward,
     ) -> f64 {
         let policy = &self.adaptive_draft_policy;
         let minimum = policy.archetype_detection.minimum_signals.max(1);
         let cap = policy.archetype_synergy_bonus.maximum_per_card;
-        let classes = self.classify_card(card);
         self.theme_signals(pool)
             .into_iter()
             .filter(|&(_, signals)| signals >= minimum)
-            .filter(|&(theme, _)| self.is_theme_member(theme, card, &classes))
-            .map(|(theme, signals)| {
+            .filter(|&(theme, _)| self.is_theme_member(theme, card, classes))
+            .filter_map(|(theme, signals)| {
                 let strength = cap * (f64::from(signals) / f64::from(2 * minimum)).min(1.0);
-                (strength - award.paid_through(theme.linked_classes())).max(0.0)
+                let linked = theme.linked_classes();
+                match policy.synergy_overlap {
+                    SynergyOverlap::Suppress => linked
+                        .iter()
+                        .all(|c| !(classes.contains(c) && set.class_bonus.contains_key(c)))
+                        .then_some(strength),
+                    SynergyOverlap::Excess => {
+                        Some((strength - award.paid_through(linked)).max(0.0))
+                    }
+                }
             })
             .fold(0.0, f64::max)
     }
@@ -1039,24 +1072,37 @@ fn static_grants_evasion(def: &StaticDefinition) -> bool {
 
 /// Whether the face is evasive by its own abilities under `reading`: a
 /// printed evasion keyword, or (full reading) a CR 509.1b blocker restriction
-/// scoped to itself.
+/// scoped to itself, or an effect that makes the source itself evasive (Kami
+/// of Tattered Shoji: "Whenever you cast a Spirit or Arcane spell, this
+/// creature gains flying until end of turn").
 fn is_evasive(face: &CardFace, reading: RoleReading) -> bool {
     face.keywords.iter().any(|k| is_evasion_keyword(k, reading))
         || (reading == RoleReading::Full
-            && face
+            && (face
                 .static_abilities
                 .iter()
-                .any(|s| static_affects_self(s) && static_makes_evasive(s)))
+                .any(|s| static_affects_self(s) && static_makes_evasive(s))
+                || collect_face_effects(face)
+                    .into_iter()
+                    .any(|e| effect_makes_evasive(e, EvasionRecipient::Source))))
 }
 
-/// Whether an effect makes a creature other than its source evasive
-/// (CR 509.1b). CR 608.2c: where a `GenericEffect`'s granted static lands is
-/// decided by `generic_effect_application_filter`, the engine's authority for
-/// it — not the outer target slot alone, which is empty on "this creature
-/// gains flying" (Kami of Tattered Shoji). A grant to the source itself is the
-/// source's own evasion, and a grant with no recipient identifies no other
-/// attacker; neither enables another creature.
-fn effect_grants_evasion(effect: &Effect) -> bool {
+/// Who an effect makes evasive (CR 509.1b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvasionRecipient {
+    /// The effect's own source ("this creature gains flying").
+    Source,
+    /// A creature other than the source ("target creature gains flying").
+    Other,
+}
+
+/// Whether `effect` makes `recipient` evasive. CR 608.2c: where a
+/// `GenericEffect`'s granted static lands is decided by
+/// `generic_effect_application_filter`, the engine's authority for it — not
+/// the outer target slot alone, which is empty on "this creature gains
+/// flying" (Kami of Tattered Shoji). A grant with no recipient identifies no
+/// attacker at all.
+fn effect_makes_evasive(effect: &Effect, recipient: EvasionRecipient) -> bool {
     let Effect::GenericEffect {
         static_abilities,
         target,
@@ -1066,8 +1112,13 @@ fn effect_grants_evasion(effect: &Effect) -> bool {
         return false;
     };
     static_abilities.iter().any(|s| {
-        let recipient = generic_effect_application_filter(target.as_ref(), s.affected.as_ref());
-        !matches!(recipient, None | Some(TargetFilter::SelfRef)) && static_makes_evasive(s)
+        let lands_on = match generic_effect_application_filter(target.as_ref(), s.affected.as_ref())
+        {
+            None => return false,
+            Some(TargetFilter::SelfRef) => EvasionRecipient::Source,
+            Some(_) => EvasionRecipient::Other,
+        };
+        lands_on == recipient && static_makes_evasive(s)
     })
 }
 
@@ -1081,7 +1132,7 @@ fn grants_evasion(face: &CardFace, reading: RoleReading) -> bool {
     reading == RoleReading::Full
         && (collect_face_effects(face)
             .into_iter()
-            .any(effect_grants_evasion)
+            .any(|e| effect_makes_evasive(e, EvasionRecipient::Other))
             || face.static_abilities.iter().any(static_grants_evasion))
 }
 
@@ -1098,27 +1149,138 @@ fn is_zero(value: &PtValue) -> bool {
     matches!(value, PtValue::Fixed(0))
 }
 
-/// A toughness reduction aimed at another creature: CR 704.5f puts a creature
-/// with toughness 0 or less into its owner's graveyard, so "-5/-5" is removal.
+/// A toughness reduction that can land on an opposing creature: CR 704.5f
+/// puts a creature with toughness 0 or less into its owner's graveyard, so
+/// "-5/-5" is removal.
 fn is_shrink_removal(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::Pump { toughness, target, .. } | Effect::PumpAll { toughness, target, .. }
-            if is_negative(toughness) && *target != TargetFilter::SelfRef
+            if is_negative(toughness) && may_be_opposing_creature(target)
     )
 }
 
-/// A bounce of the source itself ("return this creature to its owner's
-/// hand"). CR 400.3: it goes to its owner's hand, so it removes nothing from
-/// an opponent: the shared classifier's bounce shape, but not removal.
-fn is_self_bounce(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::Bounce {
-            target: TargetFilter::SelfRef,
-            ..
+/// Whether a removal-shaped effect can reach an opposing creature on the
+/// battlefield. A bounce of the source or of your own creature (CR 400.3:
+/// it goes to its owner's hand) removes nothing from an opponent, and damage
+/// only to a player (CR 120.3a: it causes life loss) or planeswalker touches
+/// no creature. Counter and discard have no battlefield recipient, so they
+/// keep the shared classifier's answer.
+fn reaches_opposing_creature(effect: &Effect) -> bool {
+    match effect {
+        Effect::Destroy { target, .. }
+        | Effect::DealDamage { target, .. }
+        | Effect::Bounce { target, .. }
+        | Effect::Fight { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::DamageAll { target, .. } => may_be_opposing_creature(target),
+        // An exile or graveyard move out of another zone (a graveyard, a
+        // library) takes nothing off the battlefield.
+        Effect::ChangeZone { origin, target, .. } => {
+            matches!(origin, None | Some(Zone::Battlefield)) && may_be_opposing_creature(target)
         }
-    )
+        _ => true,
+    }
+}
+
+/// Whether a type-line constraint admits a creature. A constraint naming only
+/// another card type (artifact, enchantment, land, planeswalker) is aimed at
+/// that type, not at creatures, even where a permanent can carry both.
+fn type_admits_creature(filter: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::Creature
+        | TypeFilter::Permanent
+        | TypeFilter::Card
+        | TypeFilter::Any
+        | TypeFilter::Subtype(_) => true,
+        TypeFilter::Non(inner) => !matches!(**inner, TypeFilter::Creature | TypeFilter::Permanent),
+        TypeFilter::AnyOf(filters) => filters.iter().any(type_admits_creature),
+        TypeFilter::Land
+        | TypeFilter::Artifact
+        | TypeFilter::Enchantment
+        | TypeFilter::Instant
+        | TypeFilter::Sorcery
+        | TypeFilter::Planeswalker
+        | TypeFilter::Battle
+        | TypeFilter::Kindred => false,
+    }
+}
+
+/// Whether `filter` can name a creature an opponent controls. Object
+/// references the AI cannot resolve statically (a parent target, an event
+/// object, the enchanted creature) can be opposing, so they answer yes;
+/// players, the source and objects the controller made or paid answer no.
+fn may_be_opposing_creature(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any => true,
+        TargetFilter::Typed(typed) => {
+            !matches!(typed.controller, Some(ControllerRef::You))
+                && typed.type_filters.iter().all(type_admits_creature)
+        }
+        TargetFilter::Or { filters } => filters.iter().any(may_be_opposing_creature),
+        // CR 109.3: every constraint of an `And` must hold for the match.
+        TargetFilter::And { filters } => filters.iter().all(may_be_opposing_creature),
+        TargetFilter::Not { .. }
+        | TargetFilter::AttachedTo
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSource
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::ChosenCard
+        | TargetFilter::HasChosenName
+        | TargetFilter::Named { .. }
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget => true,
+        // The source, its pair, and objects its controller created or paid.
+        TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::OriginalSource
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::LastCreated
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        // Objects off the battlefield.
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::LastRevealed
+        // Players, and a player-or-planeswalker attack target.
+        | TargetFilter::None
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::Opponent
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTargetController
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
 }
 
 /// Whether a continuous modification lowers the recipient's toughness.
@@ -1158,9 +1320,9 @@ fn has_removal_static(face: &CardFace) -> bool {
 /// Removal-shaped effect or static anywhere on the face, under `reading`.
 ///
 /// The shared classifier `is_direct_removal` decides every ordinary effect.
-/// The full reading narrows it by one exception (a bounce of the source
-/// itself, see [`is_self_bounce`]) and widens it by toughness reductions
-/// (see [`is_shrink_removal`]) and removal statics (see
+/// The full reading narrows it to effects that can reach an opposing
+/// creature (see [`reaches_opposing_creature`]) and widens it by toughness
+/// reductions (see [`is_shrink_removal`]) and removal statics (see
 /// [`has_removal_static`]).
 fn is_removal(face: &CardFace, reading: RoleReading) -> bool {
     let effects = collect_face_effects(face);
@@ -1168,7 +1330,8 @@ fn is_removal(face: &CardFace, reading: RoleReading) -> bool {
         RoleReading::Classic => effects.into_iter().any(is_direct_removal),
         RoleReading::Full => {
             effects.into_iter().any(|effect| {
-                (is_direct_removal(effect) && !is_self_bounce(effect)) || is_shrink_removal(effect)
+                (is_direct_removal(effect) && reaches_opposing_creature(effect))
+                    || is_shrink_removal(effect)
             }) || has_removal_static(face)
         }
     }
@@ -1886,6 +2049,30 @@ mod tests {
             );
         }
         assert!(DraftProfile::for_set("MRD").is_some_and(|p| p.id == "mirrodin-block"));
+        assert_eq!(
+            p.adaptive_draft_policy.synergy_overlap,
+            SynergyOverlap::Excess
+        );
+    }
+
+    /// The two flip cards with a named bonus arrive from the published BOK
+    /// booster sheets under their full "front // flipped" names, and the
+    /// name-keyed lookup is exact.
+    #[test]
+    fn flip_card_bonuses_match_their_published_booster_names() {
+        let p = DraftProfile::kamigawa_block();
+        for name in [
+            "Budoka Pupil // Ichiga, Who Topples Oaks",
+            "Callow Jushi // Jaraku the Interloper",
+        ] {
+            let pick = ProfileCard {
+                name,
+                set_code: "BOK",
+                colors: &[],
+                face: None,
+            };
+            assert_eq!(first_pick(p, &pick).card_bonus, 1.0, "{name}");
+        }
     }
 
     #[test]
@@ -2496,6 +2683,190 @@ mod tests {
     }
 
     #[test]
+    fn mirrodin_class_paid_theme_keeps_its_classic_suppression() {
+        let p = DraftProfile::mirrodin_block();
+        assert_eq!(
+            p.adaptive_draft_policy.synergy_overlap,
+            SynergyOverlap::Suppress
+        );
+        let none: Vec<String> = Vec::new();
+        let blue = vec!["U".to_string()];
+        let manta = oracle_face(serde_json::json!({
+            "name": "Skyreach Manta",
+            "manaCost": "{5}",
+            "manaValue": 5.0,
+            "type": "Artifact Creature — Fish",
+            "types": ["Artifact", "Creature"],
+            "subtypes": ["Fish"],
+            "keywords": ["Sunburst", "Flying"],
+            "power": "0",
+            "toughness": "0",
+            "text": "Sunburst (This creature enters with a +1/+1 counter on it for each color of mana spent to cast it.)\nFlying",
+        }));
+        let engineer = oracle_face(serde_json::json!({
+            "name": "Vedalken Engineer",
+            "manaCost": "{1}{U}",
+            "manaValue": 2.0,
+            "colors": ["U"],
+            "type": "Creature — Vedalken Artificer",
+            "types": ["Creature"],
+            "subtypes": ["Vedalken", "Artificer"],
+            "power": "1",
+            "toughness": "1",
+            "text": "{T}: Add two mana of any one color. Spend this mana only to cast artifact spells or activate abilities of artifacts.",
+        }));
+        let talisman = |name: &str, pair: &str| {
+            oracle_face(serde_json::json!({
+                "name": name,
+                "manaCost": "{2}",
+                "manaValue": 2.0,
+                "type": "Artifact",
+                "types": ["Artifact"],
+                "text": format!("{{T}}: Add {{C}}.\n{{T}}: Add {pair}. This artifact deals 1 damage to you."),
+            }))
+        };
+        let dominance = talisman("Talisman of Dominance", "{U} or {B}");
+        let impulse = talisman("Talisman of Impulse", "{R} or {G}");
+        let pool = [
+            card("Vedalken Engineer", "MRD", &blue, &engineer),
+            card("Talisman of Dominance", "MRD", &none, &dominance),
+            card("Talisman of Impulse", "MRD", &none, &impulse),
+        ];
+        let manta_card = card("Skyreach Manta", "5DN", &none, &manta);
+
+        // Positive guards: the pool demonstrates the Sunburst theme, the
+        // artifact theme does not qualify, and the Manta is paid its
+        // Sunburst class bonus.
+        let signals = p.theme_signals(&pool);
+        assert_eq!(signals[&Theme::SunburstFiveColor], 3);
+        assert!(signals[&Theme::ArtifactAffinity] < 3);
+        let scored = score15(p, &manta_card, &pool, 0.0, 0.0).unwrap();
+        assert_eq!(scored.class_bonus, 1.0, "Sunburst");
+        assert_eq!(
+            scored.archetype_synergy, 0.0,
+            "the Sunburst class bonus stands in for the Sunburst theme"
+        );
+
+        // The same pool under the excess policy would pay the 1.25 theme
+        // strength beyond the 1.0 class bonus: the policy decides it.
+        let mut excess = p.clone();
+        excess.adaptive_draft_policy.synergy_overlap = SynergyOverlap::Excess;
+        let scored = score15(&excess, &manta_card, &pool, 0.0, 0.0).unwrap();
+        assert!((scored.archetype_synergy - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn removal_must_be_able_to_reach_an_opposing_creature() {
+        let p = DraftProfile::kamigawa_block();
+        let blue = vec!["U".to_string()];
+        let red = vec!["R".to_string()];
+        let twisted = oracle_face(serde_json::json!({
+            "name": "Kami of Twisted Reflection",
+            "manaCost": "{1}{U}{U}",
+            "manaValue": 3.0,
+            "colors": ["U"],
+            "type": "Creature — Spirit",
+            "types": ["Creature"],
+            "subtypes": ["Spirit"],
+            "power": "2",
+            "toughness": "2",
+            "text": "Sacrifice this creature: Return target creature you control to its owner's hand.",
+        }));
+        let vortex = oracle_face(serde_json::json!({
+            "name": "Consuming Vortex",
+            "manaCost": "{1}{U}",
+            "manaValue": 2.0,
+            "colors": ["U"],
+            "type": "Instant — Arcane",
+            "types": ["Instant"],
+            "subtypes": ["Arcane"],
+            "keywords": ["Splice"],
+            "text": "Return target creature to its owner's hand.\nSplice onto Arcane {3}{U} (As you cast an Arcane spell, you may reveal this card from your hand and pay its splice cost. If you do, add this card's effects to that spell.)",
+        }));
+        let spike = oracle_face(serde_json::json!({
+            "name": "Lava Spike",
+            "manaCost": "{R}",
+            "manaValue": 1.0,
+            "colors": ["R"],
+            "type": "Sorcery — Arcane",
+            "types": ["Sorcery"],
+            "subtypes": ["Arcane"],
+            "text": "Lava Spike deals 3 damage to target player or planeswalker.",
+        }));
+        let ray = oracle_face(serde_json::json!({
+            "name": "Glacial Ray",
+            "manaCost": "{1}{R}",
+            "manaValue": 2.0,
+            "colors": ["R"],
+            "type": "Instant — Arcane",
+            "types": ["Instant"],
+            "subtypes": ["Arcane"],
+            "keywords": ["Splice"],
+            "text": "Glacial Ray deals 2 damage to any target.\nSplice onto Arcane {1}{R} (As you cast an Arcane spell, you may reveal this card from your hand and pay its splice cost. If you do, add this card's effects to that spell.)",
+        }));
+        // Positive guards: each face exports the shared classifier's removal
+        // shape, so only the recipient decides the outcome.
+        for (name, f) in [
+            ("Kami of Twisted Reflection", &twisted),
+            ("Consuming Vortex", &vortex),
+            ("Lava Spike", &spike),
+            ("Glacial Ray", &ray),
+        ] {
+            assert!(
+                collect_face_effects(f).into_iter().any(is_direct_removal),
+                "{name}: positive guard"
+            );
+        }
+
+        // Negatives: your own creature (CR 400.3) and a player or
+        // planeswalker (CR 120.3a) are not an opposing creature.
+        for (name, colors, f, bonus) in [
+            ("Kami of Twisted Reflection", &blue, &twisted, 0.55),
+            ("Lava Spike", &red, &spike, 0.45),
+        ] {
+            assert!(!classify(f).contains(&CardClass::Removal), "{name}");
+            assert!(!roles(f).contains(&DeckRole::Removal), "{name}");
+            assert!(
+                classify_with(f, RoleReading::Classic).contains(&CardClass::Removal),
+                "{name}: the classic reading keeps the shared classifier's answer"
+            );
+            let scored = first_pick(p, &card(name, "CHK", colors, f));
+            assert_eq!(scored.class_bonus, bonus, "{name}: not the 0.9 Removal");
+        }
+
+        // Positives: the same effect families aimed at any creature.
+        for (name, colors, f) in [
+            ("Consuming Vortex", &blue, &vortex),
+            ("Glacial Ray", &red, &ray),
+        ] {
+            assert!(classify(f).contains(&CardClass::Removal), "{name}");
+            assert!(roles(f).contains(&DeckRole::Removal), "{name}");
+            let scored = first_pick(p, &card(name, "CHK", colors, f));
+            assert_eq!(scored.class_bonus, 0.9, "{name}");
+        }
+
+        // A removal-filled pool: own-creature bounce and player burn do not
+        // consume the Removal need that real removal does.
+        let ray_card = card("Glacial Ray", "CHK", &red, &ray);
+        let need =
+            |pool: &[ProfileCard<'_>]| score15(p, &ray_card, pool, 0.0, 0.0).unwrap().deck_need;
+        let fake: Vec<_> = (0..5)
+            .map(|i| {
+                if i % 2 == 0 {
+                    card("Lava Spike", "CHK", &red, &spike)
+                } else {
+                    card("Kami of Twisted Reflection", "CHK", &blue, &twisted)
+                }
+            })
+            .collect();
+        let real: Vec<_> = (0..5)
+            .map(|_| card("Consuming Vortex", "CHK", &blue, &vortex))
+            .collect();
+        assert_eq!(need(&fake), 2.0, "the Removal role is still empty");
+        assert_eq!(need(&real), 0.0, "five real removal spells meet the target");
+    }
+
+    #[test]
     fn printed_triggered_evasion_grant_is_a_ninjutsu_enabler() {
         let p = DraftProfile::kamigawa_block();
         let blue = vec!["U".to_string()];
@@ -2931,7 +3302,7 @@ mod tests {
     }
 
     #[test]
-    fn self_granted_evasion_is_not_an_enabler_for_another_attacker() {
+    fn self_granted_evasion_is_own_evasion_not_an_enabler_for_another_attacker() {
         let p = DraftProfile::kamigawa_block();
         let white = vec!["W".to_string()];
         let blue = vec!["U".to_string()];
@@ -2961,12 +3332,24 @@ mod tests {
             .expect("positive guard: the trigger exports a GenericEffect grant");
         assert_eq!(grant, (None, Some(TargetFilter::SelfRef)));
         assert!(!grants_evasion(&shoji, RoleReading::Full));
+        // CR 702.9a: the conditional flying is the Kami's own evasion.
+        assert!(is_evasive(&shoji, RoleReading::Full));
+        assert!(
+            !is_evasive(&shoji, RoleReading::Classic),
+            "the classic reading keeps printed keywords only"
+        );
         let classes = classify(&shoji);
-        assert!(!classes.contains(&CardClass::NinjutsuEnabler));
-        assert!(!classes.contains(&CardClass::EvasiveThreat));
-        assert!(!roles(&shoji).contains(&DeckRole::Evasion));
+        assert!(classes.contains(&CardClass::EvasiveThreat));
+        assert!(
+            !classes.contains(&CardClass::NinjutsuEnabler),
+            "five mana is over the enabler mana-value cap"
+        );
+        assert!(roles(&shoji).contains(&DeckRole::Evasion));
         let scored = first_pick(p, &card("Kami of Tattered Shoji", "BOK", &white, &shoji));
-        assert_eq!(scored.class_bonus, 0.4, "Spirit only, not the 0.65 enabler");
+        assert_eq!(
+            scored.class_bonus, 0.55,
+            "evasive threat outranks the 0.4 Spirit award, not the 0.65 enabler"
+        );
 
         // Positive control: Guardian of Solitude (CHK) grants flying to a
         // target creature, so it does enable another attacker.
@@ -3035,7 +3418,9 @@ mod tests {
             "positive guard: the static exports the attack restriction"
         );
         // The Aura's own return ability is a self-bounce, not the removal.
-        assert!(collect_face_effects(&cage).into_iter().all(is_self_bounce));
+        assert!(!collect_face_effects(&cage)
+            .into_iter()
+            .any(reaches_opposing_creature));
 
         for (name, set, colors, f, bonus) in [
             ("Kagemaro's Clutch", "SOK", &black, &clutch, 0.85),

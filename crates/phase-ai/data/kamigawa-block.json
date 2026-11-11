@@ -108,8 +108,8 @@
     "frostwielder": 1.25,
     "ogre marauder": 1.75,
     "ronin cavekeeper": 0.5,
-    "budoka pupil": 1.0,
-    "callow jushi": 1.0,
+    "budoka pupil // ichiga, who topples oaks": 1.0,
+    "callow jushi // jaraku the interloper": 1.0,
     "genju of the cedars": 1.0,
     "genju of the falls": 0.75,
     "genju of the fields": 0.75,
@@ -239,6 +239,7 @@
       "maximum_per_card": 2.5,
       "note": "Apply only when the pool demonstrates the relevant theme. Synergy is incremental and must not duplicate set_class_bonus or card_bonus. Strongest recurring patterns include Spirit/Arcane/Soulshift, Ninja/evasion, and tempo/evasion."
     },
+    "synergy_overlap": "excess",
     "color_commitment": {
       "early_picks": 0.0,
       "middle_picks": 0.5,
