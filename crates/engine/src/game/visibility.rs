@@ -1842,6 +1842,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         .iter_mut()
         .chain(filtered.pending_attack_trigger_events.iter_mut())
         .chain(filtered.deferred_entry_events.iter_mut())
+        .chain(filtered.unsettled_entry_batch_events.iter_mut())
         .chain(
             filtered
                 .consumed_before_priority_trigger_events

@@ -13733,6 +13733,7 @@ fn visit_persisted_live_zone_changed_records(
     // `resolved_rules_journal` snapshots.
     const LIVE_EVENT_CARRIER_FIELDS: &[&str] = &[
         "deferred_entry_events",
+        "unsettled_entry_batch_events",
         "pending_trigger",
         "pending_trigger_event_batch",
         "deferred_triggers",
@@ -23508,6 +23509,16 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_entry_events: Vec<GameEvent>,
 
+    /// CR 603.6a + CR 611.3c: completed battlefield-entry events of an entering
+    /// instruction that is still suspended on one of its own prompts (a
+    /// co-entrant's CR 616.1f ordering or CR 614.12a entry choice). All
+    /// permanents, newcomers included, are checked against the event once it
+    /// has finished, so these wait unmatched. `triggers::settle_entry_batch_scan`
+    /// is the only reader and writer: it releases them to the first observer
+    /// scan that runs after the instruction completes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsettled_entry_batch_events: Vec<GameEvent>,
+
     /// CR 400.7 + CR 403.3 + CR 614.12a: a token that was committed to the battlefield with its
     /// entry EVENTS suppressed and whose CR 400.7 record has NOT been written yet, because the
     /// object is not yet the thing that entered — `BecomeCopy` has not run and/or a mandatory
@@ -33053,6 +33064,7 @@ impl GameState {
             post_replacement_token_choice_applied: None,
             post_replacement_token_substitution_count: None,
             deferred_entry_events: Vec::new(),
+            unsettled_entry_batch_events: Vec::new(),
             pending_token_battlefield_entry: None,
             layers_dirty: LayersDirty::full(),
             layers_read_current_step: layers_read_current_step_unknown(),
@@ -35742,6 +35754,7 @@ impl GameState {
             && self.pending_discard_batch.is_none()
             && self.pending_combat_lifelink.is_none()
             && self.deferred_entry_events.is_empty()
+            && self.unsettled_entry_batch_events.is_empty()
             && self.pending_attack_trigger_events.is_empty()
             && self
                 .combat
@@ -36841,6 +36854,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         replacement_may_cost_paused: _,
         post_replacement_token_choice_applied: _,
         deferred_entry_events: _,
+        unsettled_entry_batch_events: _,
         pending_token_battlefield_entry: _,
         layers_dirty: _,
         layers_read_current_step: _,
@@ -37257,6 +37271,7 @@ impl PartialEq for GameState {
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
             && self.deferred_entry_events == other.deferred_entry_events
+            && self.unsettled_entry_batch_events == other.unsettled_entry_batch_events
             && self.pending_token_battlefield_entry == other.pending_token_battlefield_entry
             && self.layers_dirty == other.layers_dirty
             // `static_gate_truth` is INTENTIONALLY excluded: unlike

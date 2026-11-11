@@ -1748,6 +1748,12 @@ fn apply_action_boundary_core(
     };
     let realized_token_entry =
         effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
+    // CR 603.6a + CR 603.3b: the same convergence for entries of a completed
+    // entering instruction still held by `triggers::settle_entry_batch_scan`:
+    // a handler that settled without reaching the pipeline has not had them
+    // checked, and they are checked before any player receives priority.
+    let settled_entry_batch = matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && triggers::settled_entry_batch_awaits_scan(state);
     // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
     // completed on a route that never reached the pipeline (a spell cast during
     // a resolution, CR 608.2g, finishes its announcement here): the resolving
@@ -1758,6 +1764,7 @@ fn apply_action_boundary_core(
     let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
     if (resumed_parked_root && matches!(result.waiting_for, WaitingFor::Priority { .. }))
         || realized_token_entry
+        || settled_entry_batch
         || owed_spell_final_part_is_due
     {
         if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {

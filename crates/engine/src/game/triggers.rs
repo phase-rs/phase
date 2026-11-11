@@ -649,15 +649,6 @@ enum TriggerCollectionOperation {
     },
 }
 
-/// CR 603.2c: whether a collection session admits "one or more" (batched)
-/// candidates. A parked partial entry batch must not admit them: they are left
-/// to the settled scan so one batch never fires across successive answers.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BatchedCandidatePolicy {
-    Admit,
-    DeferUntilSettled,
-}
-
 /// Applies trigger-collection mutations in their collection order.
 ///
 /// This session intentionally owns no game-state borrow. Ordinary collection
@@ -667,7 +658,6 @@ enum BatchedCandidatePolicy {
 struct TriggerCollectionSession {
     overlay: TriggerCollectionOverlay,
     operation_journal: Option<Vec<TriggerCollectionOperation>>,
-    batched_candidates: BatchedCandidatePolicy,
     /// How many matched triggers this session admitted (`record_match`),
     /// counted before any context is pruned as an auto-inert no-op.
     admitted_matches: usize,
@@ -682,7 +672,6 @@ impl TriggerCollectionSession {
         Self {
             overlay,
             operation_journal: None,
-            batched_candidates: BatchedCandidatePolicy::Admit,
             admitted_matches: 0,
             bulk_member_sources: None,
         }
@@ -696,7 +685,6 @@ impl TriggerCollectionSession {
         Self {
             overlay,
             operation_journal: Some(operation_journal),
-            batched_candidates: BatchedCandidatePolicy::Admit,
             admitted_matches: 0,
             bulk_member_sources: None,
         }
@@ -729,11 +717,6 @@ impl TriggerCollectionSession {
         matched: &MatchedTrigger,
         event: &GameEvent,
     ) -> bool {
-        // CR 603.2c: a parked partial entry batch must not spend firing limits
-        // or record replay witnesses for triggers left to the settled scan.
-        if self.batched_candidates == BatchedCandidatePolicy::DeferUntilSettled && matched.batched {
-            return false;
-        }
         if !matched_trigger_constraint_allows_admission(state, matched, event) {
             return false;
         }
@@ -5928,13 +5911,6 @@ fn collect_pending_triggers_with_collection(
                         TriggerSourceVisit::Observer,
                     );
                     for m in matched {
-                        // Mirror session eligibility without recording firing limits
-                        // or replay witnesses for the deferred batched candidate.
-                        if session.batched_candidates == BatchedCandidatePolicy::DeferUntilSettled
-                            && m.batched
-                        {
-                            continue;
-                        }
                         shadow_matched.insert((obj_id, m.trig_idx));
                     }
                 }
@@ -9467,51 +9443,37 @@ pub(crate) fn park_observer_triggers_if_paused(
     events: &mut Vec<GameEvent>,
     slice_start: usize,
 ) {
-    park_observer_triggers_if_paused_matching(
-        state,
-        events,
-        slice_start,
-        BatchedCandidatePolicy::Admit,
-        |_| true,
-    );
+    park_observer_triggers_if_paused_matching(state, events, slice_start, |_| true);
 }
 
-/// CR 603.2 + CR 603.6a + CR 616.1f: Preserve observers of completed battlefield
-/// entries when a replacement answer pauses on the next choice.
-/// The replacement handler's inner discard collectors already own `Discarded`
-/// events; queued-context witnesses deduplicate only zone changes. Restricting
-/// this outer pass to entries prevents collecting those discard observers twice.
-/// CR 603.2c: Leave "one or more" triggers to the settled scan rather than
-/// splitting one batch across successive replacement answers. The non-final
-/// entrant may still be missed by that scan; this preserves the pre-existing
-/// limitation instead of introducing an additional firing.
+/// CR 603.2 + CR 603.6a + CR 616.1f: the park for a replacement or copy-choice
+/// answer that pauses on the next prompt. Only this answer's battlefield entries
+/// are scanned: the replacement handler's inner discard collectors already own
+/// its `Discarded` events, and queued-context witnesses deduplicate only zone
+/// changes, so a whole-slice pass here would collect those observers twice.
+///
+/// The entries are not matched here while their entering instruction is still
+/// suspended: [`settle_entry_batch_scan`] holds them until it has completed.
 pub(crate) fn park_entry_observer_triggers_if_paused(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     slice_start: usize,
 ) {
-    park_observer_triggers_if_paused_matching(
-        state,
-        events,
-        slice_start,
-        BatchedCandidatePolicy::DeferUntilSettled,
-        |event| {
-            matches!(
-                event,
-                GameEvent::ZoneChanged {
-                    to: Zone::Battlefield,
-                    ..
-                }
-            )
-        },
-    );
+    park_observer_triggers_if_paused_matching(state, events, slice_start, |event| {
+        matches!(
+            event,
+            GameEvent::ZoneChanged {
+                to: Zone::Battlefield,
+                ..
+            }
+        )
+    });
 }
 
 fn park_observer_triggers_if_paused_matching(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     slice_start: usize,
-    batched_candidates: BatchedCandidatePolicy,
     keep: impl Fn(&GameEvent) -> bool,
 ) {
     if triggered_mana_sidecar_owns_local_collection(state) {
@@ -9538,28 +9500,127 @@ fn park_observer_triggers_if_paused_matching(
         &state.consumed_before_priority_trigger_events,
     );
     candidates.retain(keep);
-    let trigger_events = paused_observer_trigger_events(state, candidates);
+    let candidates = paused_observer_trigger_events(state, candidates);
+    let trigger_events = settle_entry_batch_scan(state, candidates);
     if !trigger_events.is_empty() {
-        let mut session = TriggerCollectionSession {
-            batched_candidates,
-            ..TriggerCollectionSession::new(TriggerCollectionOverlay::default())
-        };
-        let mut contexts = collect_pending_triggers_with_collection(
-            state,
-            &trigger_events,
-            LogicalZoneTriggerCollection::Ordinary,
-            &mut session,
-        );
-        if batched_candidates == BatchedCandidatePolicy::DeferUntilSettled {
-            contexts.retain(|ctx| {
-                !ctx.pending
-                    .ability
-                    .triggered_definition()
-                    .is_some_and(fires_once_per_batch)
-            });
-        }
-        state.deferred_triggers.extend(contexts);
+        collect_triggers_into_deferred(state, &trigger_events);
     }
+}
+
+/// CR 603.6a: the ledger identity of a battlefield-entry occurrence. The row
+/// index rather than full event equality, as in
+/// `zones::settle_battlefield_entry_observations`, so later record stamping
+/// cannot make one entry look like two.
+fn battlefield_entry_key(event: &GameEvent) -> Option<(u32, usize, ObjectId)> {
+    match event {
+        GameEvent::ZoneChanged {
+            object_id,
+            to: Zone::Battlefield,
+            record,
+            ..
+        } => Some((
+            record.recorded_turn_number,
+            record.turn_zone_change_index,
+            *object_id,
+        )),
+        _ => None,
+    }
+}
+
+/// CR 608.2c + CR 614.12a + CR 616.1f: is a resolution paused on one of its own
+/// prompts? `pending_replacement` is read as a field because the record is parked
+/// before its wait is installed (see `engine_priority::run_post_action_pipeline`).
+fn resolution_is_suspended(state: &GameState) -> bool {
+    state.pending_replacement.is_some()
+        || (!matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && (!state.resolution_stack.is_empty()
+                || super::engine_resolution_choices::handles(&state.waiting_for)))
+}
+
+/// CR 603.6a + CR 611.3c: has the instruction that put this permanent onto the
+/// battlefield completed? Its observation is written only at an instruction
+/// boundary (`effects::settle_entries_before_instruction`), never while a
+/// co-entering step or a choice of the same instruction is outstanding.
+fn battlefield_entry_is_observed(state: &GameState, event: &GameEvent) -> bool {
+    matches!(
+        event,
+        GameEvent::ZoneChanged { record, .. }
+            if state.battlefield_entry_observation(record).is_some()
+    )
+}
+
+/// CR 603.6a + CR 603.6b + CR 611.3c: the one gate between battlefield-entry
+/// events and the ordinary observer scan.
+///
+/// Each time an event puts one or more permanents onto the battlefield, all
+/// permanents on the battlefield, including the newcomers, are checked for
+/// enters triggers that match it (CR 603.6a), with the continuous effects that
+/// exist once the permanents are there (CR 603.6b + CR 611.3c). One entering
+/// instruction can span several actions: each entrant's replacement choices are
+/// made before it enters (CR 614.12a + CR 616.1f), so an entrant can be on the
+/// battlefield while a co-entrant's prompt is open. Matching it then would read
+/// a battlefield the event has not finished building: a later co-entrant's
+/// trigger suppression or characteristic-changing static would be missed, and a
+/// firing limit could be spent on an event the completed state does not match.
+///
+/// So a battlefield entry that reaches a collector while its resolution is
+/// suspended and its instruction has not completed is held in
+/// `GameState::unsettled_entry_batch_events` instead of being matched. It is
+/// released, ahead of the caller's own events, to the first collector that runs
+/// once the instruction has completed or the resolution is no longer suspended.
+/// That collector matches the whole event in one scan against the completed
+/// state, so batched ("one or more", CR 603.2c) definitions and firing limits
+/// see it once.
+///
+/// Every collector that can be handed an entry of a suspended resolution routes
+/// through here: the post-action scan and both paused-observer helpers. Entries
+/// a logical zone-change owner still retains stay with that owner.
+pub(crate) fn settle_entry_batch_scan(
+    state: &mut GameState,
+    candidates: Vec<GameEvent>,
+) -> Vec<GameEvent> {
+    let suspended = resolution_is_suspended(state);
+    if !suspended && state.unsettled_entry_batch_events.is_empty() {
+        return candidates;
+    }
+    let held = std::mem::take(&mut state.unsettled_entry_batch_events);
+    let held_keys: Vec<_> = held.iter().filter_map(battlefield_entry_key).collect();
+    let (mut scan, still_held): (Vec<_>, Vec<_>) = held
+        .into_iter()
+        .partition(|event| !suspended || battlefield_entry_is_observed(state, event));
+    state.unsettled_entry_batch_events = still_held;
+    let mut owner_retained: Option<Vec<GameEvent>> = None;
+    for event in candidates {
+        let Some(key) = battlefield_entry_key(&event) else {
+            scan.push(event);
+            continue;
+        };
+        // The same occurrence, re-read from a buffer this gate already saw.
+        if held_keys.contains(&key) {
+            continue;
+        }
+        if !suspended || battlefield_entry_is_observed(state, &event) {
+            scan.push(event);
+            continue;
+        }
+        let owner_retained = owner_retained
+            .get_or_insert_with(|| super::engine_priority::retained_logical_zone_events(state));
+        if owner_retained.contains(&event) {
+            scan.push(event);
+        } else {
+            state.unsettled_entry_batch_events.push(event);
+        }
+    }
+    scan
+}
+
+/// CR 117.5 + CR 603.3b: a settled action still holds entries whose observers
+/// have not been checked. They must be before any player receives priority, so
+/// the action boundary runs the scan for handlers that reach no pipeline.
+pub(crate) fn settled_entry_batch_awaits_scan(state: &GameState) -> bool {
+    !state.unsettled_entry_batch_events.is_empty()
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && !resolution_is_suspended(state)
 }
 
 /// CR 603.2 + CR 603.7: Park delayed observer triggers if the action paused
@@ -9632,7 +9693,8 @@ pub(crate) fn collect_and_drain_observer_triggers_if_settled(
         TriggerCollectionRequester::Ordinary,
         &state.consumed_before_priority_trigger_events,
     );
-    let trigger_events = paused_observer_trigger_events(state, candidates);
+    let candidates = paused_observer_trigger_events(state, candidates);
+    let trigger_events = settle_entry_batch_scan(state, candidates);
     if !trigger_events.is_empty() {
         collect_triggers_into_deferred(state, &trigger_events);
     }

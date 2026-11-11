@@ -2133,6 +2133,10 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
 /// before it enters) and is skipped; its replay collects against the realized object.
 /// Idempotent. An entrant that is no longer the exact entered incarnation on the battlefield is
 /// not observed.
+///
+/// CR 603.6a: entrants of the same instruction published in earlier answers
+/// (`unsettled_entry_batch_events`, held by `triggers::settle_entry_batch_scan`) are observed in
+/// the same pass as the ones in `events`, so every co-entrant is read at one boundary.
 pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, events: &[GameEvent]) {
     let parked_entry_keys: Vec<(u32, usize)> = state
         .deferred_entry_events
@@ -2144,8 +2148,10 @@ pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, event
             _ => None,
         })
         .collect();
-    let pending: Vec<(usize, ObjectId, Option<u64>)> = events
+    let pending: Vec<(usize, ObjectId, Option<u64>)> = state
+        .unsettled_entry_batch_events
         .iter()
+        .chain(events.iter())
         .filter_map(|event| match event {
             GameEvent::ZoneChanged { to, record, .. } if *to == Zone::Battlefield => Some(record),
             _ => None,
