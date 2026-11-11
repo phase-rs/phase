@@ -9336,3 +9336,42 @@ fn a_shortened_familiar_take_refuses_the_shorteners_bare_pass() {
     );
     assert!(pass.is_ok(), "an accepted take latches nothing: {pass:?}");
 }
+
+/// CR 104.2a + CR 732.2a: with P1 at 1 after one hand-made cycle, the Altar period's next
+/// repetition wins, so P0 is offered that one repetition and the take ends the game.
+#[test]
+fn a_period_its_first_replayed_repetition_wins_is_offered_one_repetition() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board_at("Zulaport Cutthroat", &[20, 2], db);
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
+    };
+    cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+    settle(&mut runner, &score);
+    let index = ability(runner.state(), altar, true);
+    activate(&mut runner, altar, index);
+    settle(&mut runner, &score);
+    assert_eq!(lives(runner.state()), vec![21, 1]);
+    let WaitingFor::LoopShortcut {
+        schema,
+        predicted_winner,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("no offer: {:?}", latest_verdict(runner.state()));
+    };
+    assert_eq!(
+        (
+            &schema.iteration_count,
+            schema.deliverable_capacity,
+            *predicted_winner
+        ),
+        (&IterationCount::Fixed(1), 1, Some(P0))
+    );
+    take(&mut runner, 1);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    );
+    assert_eq!(lives(runner.state()), vec![22, 0]);
+}

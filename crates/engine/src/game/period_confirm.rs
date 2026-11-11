@@ -2439,16 +2439,27 @@ fn replay_period(frame: &GameState, span: NamedSpan) -> Result<ReplayedPeriod, O
         &mut events,
         None,
         None,
-    )?;
+    );
     frames.push(replay.clone());
     // CR 705.1 + CR 706.1 + CR 400.7: cycles that drew different outcomes differ in what those
     // outcomes made, so the compared cycles start after a lead-in, under one outcome sequence.
     let pinned = (outcomes_admitted() && replay.rng.outcome_draws() != s_n.rng.outcome_draws())
         .then(|| s_n.rng.get_word_pos());
     #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_variables))]
-    let performed = match pinned {
-        None => lead_in,
-        Some(at) => {
+    let performed = match (lead_in, pinned) {
+        (Ok(performed), None) => performed,
+        // CR 104.2a + CR 732.2a: a first repetition its holder won in, under no drawn outcome, is
+        // a shortcut of one repetition.
+        (Err(refusal), None)
+            if matches!(
+                stopped(&replay, holder, &end.seats, refusal.clone()),
+                CycleEnd::HolderWon(_)
+            ) =>
+        {
+            Vec::new()
+        }
+        (Err(refusal), _) => return Err(refusal),
+        (Ok(_), Some(at)) => {
             s_n = replay;
             s_n.rng.set_word_pos(at);
             replay = s_n.clone();
@@ -2470,7 +2481,7 @@ fn replay_period(frame: &GameState, span: NamedSpan) -> Result<ReplayedPeriod, O
     let s_n1 = replay.clone();
     // CR 800.4a: a seat that left in the frame's first repetition leaves a board whose
     // repetitions are not the period the compared cycles repeat.
-    if end.departed(&s_n1) {
+    if end.departed(&s_n1) && s_n1.game_end.is_none() {
         return Err(OfferRefusal::NoRecurrence);
     }
     if let Some(at) = pinned {
@@ -2549,6 +2560,29 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         executed,
         _probe,
     } = replayed;
+    // CR 104.2a + CR 732.2a: the holder won in the first repetition, so that one repetition is the
+    // count the offer states.
+    if s_n1.game_end.is_some() {
+        let points = pinned_decisions_to_points(&choices, frame, holder)
+            .ok_or(OfferRefusal::UnanswerablePrompt)?;
+        let mut count = Count::default();
+        count.note(seats(&s_n), &s_n1, &second);
+        let ending = counted_ending(holder, &s_n, &s_n1, &second).map(|kind| (kind, holder));
+        let pair = Box::new([s_n, s_n1]);
+        let (suggested, repetitions) = (count.survived(holder), count.repetitions);
+        let parts = counted_offer(&pair[..], points, suggested, repetitions, ending);
+        return Ok(counted_confirmation(
+            items,
+            choices,
+            performance,
+            span.reach,
+            count.departures,
+            pair,
+            #[cfg(any(test, feature = "test-support"))]
+            performed,
+            parts,
+        ));
+    }
     // A period whose second cycle did not come round has one pair of frames, read as any pair is;
     // CR 800.4a: so has one a seat left in, whose pair spans a board change.
     let (prior, current) = if second == CycleEnd::CameRound && !end.departed(&replay) {
@@ -2789,7 +2823,6 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
                 Some(&mut frames),
                 &mut Vec::new(),
             )?;
-            let delta = ResourceVector::period(prior, current);
             let pair = Box::new([prior.clone(), current.clone()]);
             let mut count = Count::default();
             count.note(seats(&s_n), &s_n1, &CycleEnd::CameRound);
@@ -2814,26 +2847,17 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
                 count.repetitions,
                 counted_ending(holder, &s_n, &replay, &last).map(|kind| (kind, holder)),
             );
-            let departures = count.departures;
-            return Ok(Confirmation {
-                period: ConfirmedPeriod {
-                    items,
-                    growth: CoveredGrowth::PerformedOnly,
-                    reach: span.reach,
-                    choices,
-                    counted_by: CountedBy::Replay { departures },
-                    performance,
-                    performed: Vec::new(),
-                    recorded: None,
-                    outcomes: Outcomes::Refused,
-                },
-                frames: pair,
-                delta,
-                departure: None,
+            return Ok(counted_confirmation(
+                items,
+                choices,
+                performance,
+                span.reach,
+                count.departures,
+                pair,
                 #[cfg(any(test, feature = "test-support"))]
                 performed,
-                bounded: Some(parts),
-            });
+                parts,
+            ));
         }
     };
     Ok(Confirmation {
@@ -2855,6 +2879,40 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         performed,
         bounded,
     })
+}
+
+/// CR 732.2a + CR 118.3: a period the counting replay counted, offered as `parts` states, with
+/// `pair` the frames its delta is read across.
+#[allow(clippy::too_many_arguments)]
+fn counted_confirmation(
+    items: Vec<PeriodItem>,
+    choices: Vec<PinnedDecision>,
+    performance: Option<PeriodPerformance>,
+    reach: PeriodReach,
+    departures: Vec<PredictedDeparture>,
+    pair: Box<[GameState; 2]>,
+    #[cfg(any(test, feature = "test-support"))] performed: Vec<String>,
+    parts: BoundedOfferParts,
+) -> Confirmation {
+    Confirmation {
+        period: ConfirmedPeriod {
+            items,
+            growth: CoveredGrowth::PerformedOnly,
+            reach,
+            choices,
+            counted_by: CountedBy::Replay { departures },
+            performance,
+            performed: Vec::new(),
+            recorded: None,
+            outcomes: Outcomes::Refused,
+        },
+        delta: ResourceVector::period(&pair[0], &pair[1]),
+        frames: pair,
+        departure: None,
+        #[cfg(any(test, feature = "test-support"))]
+        performed,
+        bounded: Some(parts),
+    }
 }
 
 /// CR 732.2a: whether the cover certified the first of a verdict's two frame pairs; only a
