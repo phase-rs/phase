@@ -5838,9 +5838,8 @@ fn known_zero_counted_source_remains_explicitly_activatable() {
         ("Nyx Lotus", NYX, "{4}"),
     ] {
         let mut s = board();
-        let builder = s
-            .add_artifact_from_oracle(P0, name, text)
-            .with_mana_cost(parse_mtgjson_mana_cost(cost));
+        let mut builder = s.add_artifact_from_oracle(P0, name, text);
+        builder.with_mana_cost(parse_mtgjson_mana_cost(cost));
         let source = if name == "Nyx Lotus" {
             builder.as_legendary().id()
         } else {
