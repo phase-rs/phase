@@ -445,6 +445,8 @@
     "confirmDistribute_other": "Déclarer {{count}} attaquants",
     "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
     "totalsHeading": "Totaux d'attaque",
+    "targetTotal_few": "{{count}} attaquants · {{damage}} blessures",
+    "targetTotal_many": "{{count}} attaquants · {{damage}} blessures",
     "targetTotal_one": "{{count}} attaquant · {{damage}} blessures",
     "targetTotal_other": "{{count}} attaquants · {{damage}} blessures"
   },

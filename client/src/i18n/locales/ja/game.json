@@ -478,6 +478,8 @@
     "confirmDistribute_other": "攻撃クリーチャー{{count}}体を宣言",
     "noCommonTarget": "共通の対象がありません — 分配に切り替えて各攻撃クリーチャーの対象を指定してください。",
     "totalsHeading": "攻撃の合計",
+    "targetTotal_few": "攻撃クリーチャー{{count}}体 · {{damage}}点",
+    "targetTotal_many": "攻撃クリーチャー{{count}}体 · {{damage}}点",
     "targetTotal_one": "攻撃クリーチャー{{count}}体 · {{damage}}点",
     "targetTotal_other": "攻撃クリーチャー{{count}}体 · {{damage}}点"
   },

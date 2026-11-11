@@ -223,6 +223,8 @@
     "splitAttacks": "分配攻击",
     "spread": "分散",
     "spreadEvenly": "均匀分散",
+    "targetTotal_few": "{{count}}个攻击者 · {{damage}}点伤害",
+    "targetTotal_many": "{{count}}个攻击者 · {{damage}}点伤害",
     "targetTotal_one": "{{count}}个攻击者 · {{damage}}点伤害",
     "targetTotal_other": "{{count}}个攻击者 · {{damage}}点伤害",
     "totalsHeading": "攻击合计",

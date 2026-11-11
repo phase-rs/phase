@@ -24,6 +24,7 @@ import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { useBackFaceSpellCost } from "../../hooks/useBackFaceSpellCost.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore, type MobileHandGesture } from "../../stores/uiStore.ts";
@@ -1429,17 +1430,20 @@ function CardInfoPanel({
     s.gameState?.combat?.attackers.find((a) => a.object_id === obj.id),
   );
   const myId = usePlayerId();
+  // `usePlayerId()` answers seat 0 in spectate mode, so the second-person arms are gated on
+  // `useSpectatorMode()`: a spectator reads the third-person copy, never "you".
+  const spectating = useSpectatorMode();
 
   const formatAttackTarget = ({ attack_target: target, defending_player }: AttackerInfo): string => {
     switch (target.type) {
       case "Player":
-        return target.data === myId
+        return !spectating && target.data === myId
           ? t("preview.attacking.you")
           : t("preview.attacking.player", { player: getOpponentDisplayName(target.data) });
       case "Planeswalker": {
         const name = objects?.[String(target.data)]?.name;
         // CR 506.2: the planeswalker's controller is the defending player the engine recorded.
-        return defending_player === myId
+        return !spectating && defending_player === myId
           ? t("preview.attacking.yourPlaneswalker", { name })
           : t("preview.attacking.planeswalker", {
               name,

@@ -445,8 +445,10 @@
     "confirmDistribute_other": "Zadeklaruj {{count}} atakujących",
     "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
     "totalsHeading": "Sumy ataku",
-    "targetTotal_one": "{{count}} atakujący · {{damage}} obrażeń",
-    "targetTotal_other": "{{count}} atakujących · {{damage}} obrażeń"
+    "targetTotal_few": "{{count}} atakujących · obrażenia: {{damage}}",
+    "targetTotal_many": "{{count}} atakujących · obrażenia: {{damage}}",
+    "targetTotal_one": "{{count}} atakujący · obrażenia: {{damage}}",
+    "targetTotal_other": "{{count}} atakujących · obrażenia: {{damage}}"
   },
   "fullControl": {
     "label": "Kontrola",

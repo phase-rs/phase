@@ -1,8 +1,10 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import i18n from "i18next";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AttackTarget, ObjectId, UnblockedAttackPreview } from "../../../adapter/types.ts";
+import polish from "../../../i18n/locales/pl/game.json";
 import { AttackTargetPicker } from "../AttackTargetPicker.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
@@ -639,5 +641,22 @@ describe("AttackTargetPicker — per-attacker legal targets", () => {
     );
     expect(screen.getByRole("button", { name: /Attack Opp 2 \(Player — 20 life\) with 2 creatures/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Attack Opp 3 \(Player — 20 life\) with 2 creatures/ })).toBeInTheDocument();
+  });
+});
+
+describe("AttackTargetPicker — Polish target totals", () => {
+  it("resolves every Polish plural form without falling back to English", () => {
+    // i18next resolves Polish counts to `_one` (1), `_few` (2–4) and `_many` (0, 5+); a missing
+    // form falls back to `fallbackLng: "en"`, not to `_other`.
+    i18n.addResourceBundle("pl", "game", polish, true, true);
+    const t = i18n.getFixedT("pl", "game");
+    const total = (count: number) => t("attackTargetPicker.targetTotal", { count, damage: 3 });
+
+    expect([0, 1, 2, 5].map(total)).toEqual([
+      "0 atakujących · obrażenia: 3",
+      "1 atakujący · obrażenia: 3",
+      "2 atakujących · obrażenia: 3",
+      "5 atakujących · obrażenia: 3",
+    ]);
   });
 });

@@ -815,6 +815,12 @@ describe("CardPreview attack target flag", () => {
   const ATTACKER = 100;
   const NON_ATTACKER = 300;
 
+  afterEach(() => {
+    // The spectator row sets `gameMode`; a leaked "spectate" would suppress every
+    // second-person assertion in the rows that follow.
+    useGameStore.setState({ gameMode: null });
+  });
+
   function previewAttacker(
     previewed: number,
     attackTarget: AttackTarget,
@@ -873,6 +879,20 @@ describe("CardPreview attack target flag", () => {
 
     previewAttacker(ATTACKER, { type: "Planeswalker", data: 202 }, 2);
     expect(screen.getByText("⚔ Attacking Opp 3's planeswalker Jace Beleren")).toBeInTheDocument();
+  });
+
+  it("addresses a spectator in the third person, though seat 0 is their resolved id", () => {
+    // `usePlayerId()` answers seat 0 in spectate mode, so only the spectator gate keeps the
+    // viewer-relative arms from telling a spectator that seat 0's attackers target them.
+    useGameStore.setState({ gameMode: "spectate" });
+    previewAttacker(ATTACKER, { type: "Player", data: 0 }, 0);
+    expect(screen.getByText("⚔ Attacking Opp 1")).toBeInTheDocument();
+    expect(screen.queryByText("⚔ Attacking you")).toBeNull();
+    cleanup();
+
+    previewAttacker(ATTACKER, { type: "Planeswalker", data: 201 }, 0);
+    expect(screen.getByText("⚔ Attacking Opp 1's planeswalker Jace Beleren")).toBeInTheDocument();
+    expect(screen.queryByText(/your planeswalker/)).toBeNull();
   });
 
   it("names the battle being attacked", () => {

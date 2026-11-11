@@ -69,7 +69,15 @@ fn unblocked_attack_preview_reads_combat_damage_authority_per_attacker() {
     let mut runner = scenario.build();
     drive_to_declare_attackers(&mut runner);
 
-    let previews = derive_views(runner.state(), Some(P0)).unblocked_attack_previews;
+    let views = derive_views(runner.state(), Some(P0));
+    // The wire shape the client's `AttackTargetPicker` reads: a serde rename or skip of the map
+    // or its fields would leave the picker showing no projected damage.
+    let wire = serde_json::to_value(&views).expect("derived views serialize");
+    assert_eq!(
+        wire["unblocked_attack_previews"][bears.0.to_string()],
+        serde_json::json!({ "damage": 2, "life_loss": 2 }),
+    );
+    let previews = views.unblocked_attack_previews;
     // Reach guard: the map is keyed by exactly the prompt's attack-eligible creatures.
     assert_eq!(
         previews.keys().copied().collect::<HashSet<_>>(),
@@ -81,7 +89,7 @@ fn unblocked_attack_preview_reads_combat_damage_authority_per_attacker() {
     assert_eq!(previews.get(&crusader), Some(&preview(4, 4)));
     // CR 120.3b: infect damage to a player is poison counters, so no life loss.
     assert_eq!(previews.get(&elf), Some(&preview(1, 0)));
-    // CR 508.1a: a creature that can't attack is not previewed.
+    // CR 508.1c + CR 702.3b: a creature with defender can't attack, so it is not previewed.
     assert!(!previews.contains_key(&wall));
 
     runner
