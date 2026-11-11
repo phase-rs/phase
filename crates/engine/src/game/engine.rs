@@ -12885,15 +12885,21 @@ fn apply_action(
         // CR 800.4a + CR 118.12: a surviving staged payment re-materializes on
         // the base the departure changed (`settle_after_outside_action`). CR
         // 104.3a: the departure itself must survive a fallible payment recovery,
-        // so a recovery that fails, or records an unrepresentable life change,
-        // returns to the departure and retires the payment.
+        // so a recovery that fails, records an unrepresentable life change, or
+        // would leave a checkpoint that does not include the departure returns
+        // to the departure and retires the payment.
         let departed = pre_action.as_ref().map(|_| state.clone());
         let settled = match payment_transaction::settle_after_outside_action(
             state,
             pre_action.as_ref(),
             player_id,
         ) {
-            Ok(settled) if boundary_life_change_failure(state).is_none() => settled,
+            Ok(settled)
+                if boundary_life_change_failure(state).is_none()
+                    && payment_transaction::checkpoint_seats_match(state) =>
+            {
+                settled
+            }
             outcome => {
                 tracing::debug!(
                     error = ?outcome.err(),

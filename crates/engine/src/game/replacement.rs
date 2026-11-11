@@ -1114,17 +1114,9 @@ pub(crate) fn pending_replacement_option_count(
     state: &GameState,
     pending: &PendingReplacement,
 ) -> usize {
+    let executable = executable_candidate_positions(state, pending).len();
     if matches!(pending.proposed, ProposedEvent::EmptyManaPool { .. }) {
-        return pending
-            .candidates
-            .iter()
-            .filter(|rid| {
-                state
-                    .pending_step_end_mana_handlers
-                    .get(rid.index)
-                    .is_some()
-            })
-            .count();
+        return executable;
     }
     let all_search_found_candidates_optional = !pending.search_found_candidates.is_empty()
         && pending
@@ -1132,14 +1124,15 @@ pub(crate) fn pending_replacement_option_count(
             .iter()
             .all(|candidate| candidate.is_optional);
     // An optional replacement's accept and decline both name its candidate
-    // (CR 614.1 + CR 616.1): with no candidate there is no option to offer.
-    if pending.is_optional && pending.candidates.is_empty() {
+    // (CR 614.1 + CR 616.1): with no executable candidate there is no option to
+    // offer.
+    if pending.is_optional && executable == 0 {
         return 0;
     }
     if pending.is_optional || all_search_found_candidates_optional {
-        pending.candidates.len() + 1
+        executable + 1
     } else {
-        pending.candidates.len()
+        executable
     }
 }
 
@@ -1286,8 +1279,9 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                     // `map` (not `filter_map`) guarantees the vec is never
                     // shorter than `candidate_count`, so the frontend index
                     // lookup stays aligned.
-                    p.candidates
-                        .iter()
+                    executable_candidate_positions(state, p)
+                        .into_iter()
+                        .map(|position| &p.candidates[position])
                         .map(|rid| {
                             // CR 616.1 + CR 113.7a (issue #8485): label the option
                             // with the shield's HOST, not with the `ObjectId(0)`
@@ -10198,6 +10192,81 @@ fn optional_decline_is_noop(
 // clippy::result_large_err: see `apply_shield_counter_replacement` — the Err
 // arm carries an inherent `ProposedEvent` from the shared replacement pipeline.
 #[allow(clippy::result_large_err)]
+/// CR 614.1 + CR 615.3: the definition a stored candidate id names, looked up
+/// exactly as [`apply_single_replacement`] looks it up to execute it. Pending
+/// damage prevention shields use the sentinel `ObjectId(0)` and live in the
+/// game-state registry; every other candidate is a definition on its source
+/// object (or the object's liminal projection).
+fn stored_replacement_definition(
+    state: &GameState,
+    rid: ReplacementId,
+) -> Option<&ReplacementDefinition> {
+    if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get(rid.index)
+    } else {
+        state
+            .liminal_entries
+            .get(&rid.source)
+            .map(|entry| entry.object.projected())
+            .or_else(|| state.objects.get(&rid.source))
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+    }
+}
+
+/// CR 614.1 + CR 616.1: whether a stored candidate still names something the
+/// replacement authority executes, resolved in the same order
+/// [`apply_single_replacement`] dispatches it. A rule-derived virtual
+/// replacement is computed from live state by its own applier; granted Dredge
+/// needs its live grant (CR 702.52a); a one-shot combat skip needs its pending
+/// entry; every other candidate needs its stored definition. A candidate that
+/// fails this would only deliver the original event, so it is neither offered
+/// nor admitted.
+pub(crate) fn stored_candidate_executes(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+) -> bool {
+    if matches!(proposed, ProposedEvent::EmptyManaPool { .. }) {
+        return state
+            .pending_step_end_mana_handlers
+            .get(rid.index)
+            .is_some();
+    }
+    if is_granted_dredge_replacement(rid) {
+        return granted_dredge_value(state, rid.source).is_some();
+    }
+    if is_pending_combat_phase_skip_replacement(rid) {
+        return pending_combat_phase_skip_position(rid) < state.pending_combat_phase_skips.len();
+    }
+    if is_compleated_replacement(rid)
+        || is_granted_etb_keyword_replacement(rid)
+        || shield_counter_replacement_kind(rid).is_some()
+        || is_commander_hand_or_library_return_replacement(rid)
+        || is_finality_counter_replacement(rid)
+        || is_umbra_armor_replacement(rid)
+        || is_turn_scoped_combat_skip_replacement(rid)
+    {
+        return true;
+    }
+    stored_replacement_definition(state, rid).is_some()
+}
+
+/// Positions in `pending.candidates` the replacement authority can execute,
+/// in stored order. The options of the prompt, and the candidate an answer
+/// index selects, are these.
+pub(crate) fn executable_candidate_positions(
+    state: &GameState,
+    pending: &PendingReplacement,
+) -> Vec<usize> {
+    pending
+        .candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, rid)| stored_candidate_executes(state, &pending.proposed, **rid))
+        .map(|(position, _)| position)
+        .collect()
+}
+
 fn apply_single_replacement(
     state: &mut GameState,
     mut proposed: ProposedEvent,
@@ -10283,18 +10352,7 @@ fn apply_single_replacement(
         return Err(ApplyResult::Prevented);
     }
 
-    // CR 615.3: Pending damage prevention shields use sentinel ObjectId(0).
-    // Look up from game-state-level registry instead of object replacement_definitions.
-    let repl_def_ref = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
-    } else {
-        state
-            .liminal_entries
-            .get(&rid.source)
-            .map(|entry| entry.object.projected())
-            .or_else(|| state.objects.get(&rid.source))
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
-    };
+    let repl_def_ref = stored_replacement_definition(state, rid);
     // CR 109.5: snapshot the replacing ability's controller HERE, while
     // `repl_def_ref`'s borrow is still live. The stash sites below run after the
     // applier has taken `&mut state`, so they cannot re-read the definition —
@@ -13536,6 +13594,9 @@ fn continue_replacement_impl(
     };
 
     let option_count = pending_replacement_option_count(state, &pending);
+    // CR 616.1: an answer index names one of the candidates the replacement
+    // authority can still execute, in stored order.
+    let executable = executable_candidate_positions(state, &pending);
     if chosen_index >= option_count {
         let affected = pending.proposed.affected_player(state);
         state.pending_replacement = Some(pending);
@@ -13547,7 +13608,7 @@ fn continue_replacement_impl(
 
     // Optional replacement: index 0 = accept, index 1 = decline
     if pending.is_optional {
-        let rid = pending.candidates[0];
+        let rid = pending.candidates[executable[0]];
         if matches!(pending.proposed, ProposedEvent::SearchFound { .. }) {
             // CR 614.5: this replacement gets one opportunity to affect this
             // event. Accept uses the candidate frozen when the prompt was
@@ -13964,9 +14025,9 @@ fn continue_replacement_impl(
         return pipeline_loop(state, proposed, pending.depth + 1, registry, events);
     }
 
-    if chosen_index >= pending.candidates.len() {
+    if chosen_index >= executable.len() {
         if matches!(pending.proposed, ProposedEvent::SearchFound { .. })
-            && chosen_index == pending.candidates.len()
+            && chosen_index == executable.len()
             && !pending.search_found_candidates.is_empty()
             && pending
                 .search_found_candidates
@@ -13988,7 +14049,7 @@ fn continue_replacement_impl(
         return ReplacementResult::Execute(pending.proposed);
     }
 
-    let rid = pending.candidates[chosen_index];
+    let rid = pending.candidates[executable[chosen_index]];
     if matches!(pending.proposed, ProposedEvent::SearchFound { .. }) {
         let Some(bound_index) = pending
             .search_found_candidates
@@ -14152,11 +14213,11 @@ mod tests {
     use super::*;
 
     /// CR 614.1 + CR 616.1: an optional replacement's accept and decline both
-    /// name its candidate, so a pending optional replacement with no candidate
-    /// offers no option at all (the restored-prompt shape review 19 cites);
-    /// with its candidate it offers accept and decline.
+    /// name its candidate. With an executable candidate (a rule-derived one
+    /// here) the prompt offers accept and decline; a candidate whose source and
+    /// definition are gone, or no candidate at all, offers no option.
     #[test]
-    fn an_optional_replacement_without_a_candidate_offers_no_option() {
+    fn an_optional_replacement_offers_options_only_for_an_executable_candidate() {
         let state = GameState::new_two_player(7);
         let mut pending = PendingReplacement {
             proposed: ProposedEvent::Draw {
@@ -14166,10 +14227,7 @@ mod tests {
                 applied: std::collections::HashSet::new(),
             },
             sacrifice_provenance: None,
-            candidates: vec![ReplacementId {
-                source: ObjectId(1),
-                index: 0,
-            }],
+            candidates: vec![finality_counter_replacement_id(ObjectId(1))],
             search_found_candidates: Vec::new(),
             depth: 0,
             is_optional: true,
@@ -14186,6 +14244,15 @@ mod tests {
             unrepresentable_life_change: state.ingress_life_policy(),
         };
         assert_eq!(pending_replacement_option_count(&state, &pending), 2);
+        pending.candidates = vec![ReplacementId {
+            source: ObjectId(999),
+            index: 0,
+        }];
+        assert_eq!(
+            pending_replacement_option_count(&state, &pending),
+            0,
+            "a stale candidate is not offered"
+        );
         pending.candidates.clear();
         assert_eq!(pending_replacement_option_count(&state, &pending), 0);
     }

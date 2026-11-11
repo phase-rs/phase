@@ -507,15 +507,11 @@ pub(crate) fn settle_after_outside_action(
         let mut mirrored = Vec::new();
         crate::game::elimination::concede(&mut shadow, departing, &mut mirrored);
         restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
-        if let Err(error) =
-            settle_impossible_parked_draw(&mut shadow, &mut events, &mut log_entries)
-        {
-            tracing::debug!(
-                ?error,
-                "a recovered payment's parked draw no longer settles after an outside action"
-            );
-            return Ok(None);
-        }
+        // CR 104.3a: the checkpoint can only stay if it includes this departure.
+        // A parked draw that no longer settles on the departed shadow is a
+        // failed recovery; the caller's failed-recovery boundary retires the
+        // checkpoint instead of keeping one from before the departure.
+        settle_impossible_parked_draw(&mut shadow, &mut events, &mut log_entries)?;
         shadow.payment_transaction_replay = false;
         return settle_recovered_outcome(state, transaction, shadow, events, log_entries).map(Some);
     }
@@ -747,6 +743,28 @@ pub(crate) fn retire_terminal_transaction(state: &mut GameState) {
         state.payment_transaction_replay = false;
         state.payment_transaction_just_handled = false;
     }
+}
+
+/// CR 104.3a + CR 800.4a: whether the live recovery checkpoint, if any,
+/// describes the canonical seats: the same players with the same departures.
+/// A checkpoint taken before a departure cannot execute on the board after
+/// it. Checked restore and the concession boundary both enforce this.
+pub(crate) fn checkpoint_seats_match(state: &GameState) -> bool {
+    let Some(checkpoint) = state
+        .payment_transaction
+        .as_deref()
+        .and_then(|transaction| transaction.recovered.as_deref())
+    else {
+        return true;
+    };
+    let seats = |state: &GameState| {
+        state
+            .players
+            .iter()
+            .map(|player| (player.id, player.is_eliminated))
+            .collect::<Vec<_>>()
+    };
+    seats(&checkpoint.state) == seats(state)
 }
 
 /// The one preparation of a recovery checkpoint for execution: its persisted

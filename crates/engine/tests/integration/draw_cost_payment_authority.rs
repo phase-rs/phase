@@ -17,7 +17,7 @@ use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, DiscardSelfScope, Effect,
-    QuantityExpr, ResolvedAbility, TargetFilter,
+    PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
 };
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::events::GameEvent;
@@ -2152,4 +2152,157 @@ fn sandbox_mutations_are_refused_while_a_recovered_payment_is_parked() {
     }
     engine::game::engine::require_explicit_debug_permission(state, P0)
         .expect("read-only diagnostics keep their access check");
+}
+
+/// P0's life gain equal to the cards in P0's hand: harmless on the canonical
+/// board, where the staged payment's drawn card is not yet in hand, and
+/// unrepresentable at `i32::MAX` life once the payment has drawn.
+fn gain_hand_size() -> Effect {
+    Effect::GainLife {
+        amount: QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
+        },
+        player: TargetFilter::Controller,
+    }
+}
+
+/// Four players: P0 pays `PayCost{Composite[Draw 1; Draw 1]}` with `rider`, its
+/// draws Dredge prompts (Stinkweed Imp); Maralen is under P1, muted by P2's
+/// Humility; P3 has nothing. P0 is at `i32::MAX` life with `stack` on the
+/// stack and P0 and P1 auto-passing. P0 declines leg 1's Dredge and P3
+/// concedes, so leg 2's Dredge prompt is parked on a recovery checkpoint.
+fn second_concession_board(rider: Option<Effect>, stack: Vec<StackEntry>) -> GameRunner {
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in 0..4 {
+        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
+    }
+    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+    scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE);
+    scenario.add_creature_from_oracle(P1, "Maralen of the Mornsong", 2, 3, MARALEN_ORACLE);
+    scenario.add_enchantment_from_oracle(PlayerId(2), "Humility", HUMILITY_ORACLE);
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+    let mut root = ResolvedAbility::new(pay_cost(draw_legs(2)), vec![], source, P0);
+    root.sub_ability =
+        rider.map(|effect| Box::new(ResolvedAbility::new(effect, vec![], source, P0)));
+    let state = runner.state_mut();
+    state.players[P0.0 as usize].life = i32::MAX;
+    state.stack = stack.into();
+    for player in [P0, P1] {
+        state.auto_pass.insert(
+            player,
+            AutoPassMode::UntilStackEmpty {
+                initial_stack_len: state.stack.len(),
+                policy: Default::default(),
+            },
+        );
+    }
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining leg 1's Dredge accepts the draw");
+    assert!(is_dredge_prompt_for_p0(state), "leg 2 offers Dredge");
+    apply(
+        state,
+        PlayerId(3),
+        GameAction::Concede {
+            player_id: PlayerId(3),
+        },
+    )
+    .expect("a player can concede at any time");
+    assert!(
+        state
+            .payment_transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.recovered.is_some()),
+        "the first concession parks the prefix on a recovery checkpoint"
+    );
+    runner
+}
+
+/// The second departure, its published event, the retired checkpoint, a
+/// checked save and restore, and the next ordinary action.
+fn assert_second_departure_retires_the_checkpoint(runner: &mut GameRunner) {
+    let published = apply(
+        runner.state_mut(),
+        PlayerId(2),
+        GameAction::Concede {
+            player_id: PlayerId(2),
+        },
+    )
+    .expect("CR 104.3a: the second concession stands");
+    assert!(
+        published.events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerEliminated { player_id } if *player_id == PlayerId(2)
+        )),
+        "the second departure is published"
+    );
+    let state = runner.state();
+    assert!(state.players[2].is_eliminated);
+    assert!(
+        state.payment_transaction.is_none(),
+        "a recovery that cannot include the departure is retired, not kept stale"
+    );
+    let mut restored =
+        checked_round_trip(state).expect("the published state passes checked restore");
+    let WaitingFor::Priority { player } = restored.waiting_for else {
+        panic!("a living player has priority: {:?}", restored.waiting_for);
+    };
+    apply(&mut restored, player, GameAction::PassPriority)
+        .expect("the next ordinary action starts from the departure");
+}
+
+/// CR 104.3a + CR 614.17c: P2's concession removes Humility, so leg 2's
+/// parked draw can no longer happen and settles on the departed checkpoint.
+/// That settlement completes the payment and its auto-pass resolves a life
+/// gain equal to the drawn card, which is unrepresentable at `i32::MAX`: the
+/// recovery fails. The failed-recovery boundary retires the checkpoint
+/// instead of keeping one from before P2 left.
+#[test]
+fn a_second_concession_whose_parked_draw_fails_to_settle_retires_the_checkpoint() {
+    let mut runner =
+        second_concession_board(None, vec![ability_on_stack(201, P0, gain_hand_size())]);
+    assert_second_departure_retires_the_checkpoint(&mut runner);
+}
+
+/// CR 104.3a: the same second concession, with the failure in the payment's
+/// rider instead: settlement records an unrepresentable life gain, and the
+/// concession still publishes the departure and retires the payment.
+#[test]
+fn a_second_concession_whose_rider_is_unrepresentable_retires_the_payment() {
+    let mut runner = second_concession_board(Some(gain_hand_size()), Vec::new());
+    assert_second_departure_retires_the_checkpoint(&mut runner);
+}
+
+/// CR 616.1 + CR 702.52a: a saved Dredge choice whose stored candidate no
+/// longer names a replacement the authority can execute is refused, like an
+/// empty candidate list; the valid save restores and its prompt is answered.
+#[test]
+fn checked_restore_refuses_a_stale_replacement_candidate() {
+    let runner = recovered_dredge_checkpoint();
+    checked_round_trip(runner.state()).expect("reach guard: the checkpoint restores");
+    let mut state = runner.state().clone();
+    let pending = state
+        .payment_transaction
+        .as_mut()
+        .and_then(|transaction| transaction.recovered.as_mut())
+        .and_then(|checkpoint| checkpoint.state.pending_replacement.as_mut())
+        .expect("the checkpoint holds the Dredge choice");
+    let stale = pending
+        .candidates
+        .first_mut()
+        .expect("Dredge is the candidate");
+    stale.source = ObjectId(9_999);
+    assert!(
+        matches!(
+            checked_round_trip(&state),
+            Err(PersistedRestoreError::InvalidPaymentTransaction(_))
+        ),
+        "a candidate whose definition is gone is not admitted"
+    );
 }

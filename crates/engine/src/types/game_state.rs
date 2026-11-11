@@ -16680,14 +16680,7 @@ impl GameState {
         }
         // CR 800.4a: the same seats with the same departed set, under the
         // canonical prompt.
-        let seats = |state: &GameState| -> Vec<(PlayerId, bool)> {
-            state
-                .players
-                .iter()
-                .map(|player| (player.id, player.is_eliminated))
-                .collect()
-        };
-        if seats(nested) != seats(self) {
+        if !crate::game::payment_transaction::checkpoint_seats_match(self) {
             return Err("recovery checkpoint seats or departures differ".to_string());
         }
         if nested.waiting_for != self.waiting_for {
@@ -16715,6 +16708,26 @@ impl GameState {
             return Ok(());
         };
         let probe = crate::game::payment_transaction::hydrated_checkpoint(self, checkpoint);
+        // CR 616.1: a saved replacement prompt is the one the replacement
+        // authority builds from its stored candidates, resolving each the way
+        // it executes them; a stale candidate, a forged count or a missing
+        // owner changes that prompt.
+        if let WaitingFor::ReplacementChoice { player, .. } = &probe.waiting_for {
+            if crate::game::replacement::replacement_choice_waiting_for(*player, &probe)
+                != probe.waiting_for
+            {
+                return Err(
+                    "recovery checkpoint replacement prompt does not match its stored candidates"
+                        .to_string(),
+                );
+            }
+        }
+        if !recovered_prompt_names_live_objects(&probe) {
+            return Err(
+                "recovery checkpoint prompt names objects or a count its choice cannot meet"
+                    .to_string(),
+            );
+        }
         let Some(owner) = probe.waiting_for.acting_players().first().copied() else {
             return Err("recovery checkpoint prompt has no acting player".to_string());
         };
@@ -16899,6 +16912,35 @@ pub enum PersistedRestoreError {
     /// never inferred, so the save is not resumable.
     #[error("persisted copy announcement for {copy_id:?} has targets before its announcing-opponent election and is not resumable")]
     UnelectedCopyAnnouncer { copy_id: ObjectId },
+}
+
+/// CR 118.12 + CR 701.9a + CR 701.21a: the object-naming prompts a staged
+/// payment can park besides a replacement choice (a discard, a sacrifice or
+/// other cost choice, an effect's zone choice). Each named object must still
+/// exist (a discard card in its player's hand), and a mandatory count must be
+/// reachable from the named objects, before any answer is probed.
+fn recovered_prompt_names_live_objects(probe: &GameState) -> bool {
+    match &probe.waiting_for {
+        WaitingFor::DiscardChoice {
+            player,
+            count,
+            cards,
+            up_to,
+            ..
+        } => {
+            let Some(seat) = probe.players.iter().find(|seat| seat.id == *player) else {
+                return false;
+            };
+            cards.iter().all(|card| seat.hand.contains(card)) && (*up_to || cards.len() >= *count)
+        }
+        WaitingFor::PayCost {
+            choices, min_count, ..
+        } => choices.iter().all(|id| probe.objects.contains_key(id)) && choices.len() >= *min_count,
+        WaitingFor::EffectZoneChoice {
+            cards, min_count, ..
+        } => cards.iter().all(|id| probe.objects.contains_key(id)) && cards.len() >= *min_count,
+        _ => true,
+    }
 }
 
 impl PreparedPersistedGameState {
