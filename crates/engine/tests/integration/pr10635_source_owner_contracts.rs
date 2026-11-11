@@ -591,6 +591,57 @@ fn unrelated_later_shuffle_does_not_widen_an_ordered_departure_placement() {
     assert_eq!(shuffles, 1, "the printed shuffle still happens once");
 }
 
+// Oracle text from the repo's card data export.
+const BUTCHER_GHOUL: &str = "Undying (When this creature dies, if it had no +1/+1 counters on it, return it to the battlefield under its owner's control with a +1/+1 counter on it.)";
+
+/// Base-behavior control, not a rules claim. A recorded departure widens only
+/// the move component of a terminal shuffle (CR 701.24a). Undying's return is
+/// not one, so it keeps the merge-base population: the card the trigger names
+/// returns and the absorbed component stays in the graveyard. CR 730.3c would
+/// return each card; that gap predates this branch and is not claimed here.
+/// This test passes unchanged at the merge base.
+#[test]
+fn undying_return_of_a_merged_permanent_keeps_the_base_population() {
+    use engine::game::merge::{merge_object_onto, MergeSide};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ghoul = scenario
+        .add_creature(P0, "Butcher Ghoul", 1, 1)
+        .from_oracle_text_with_keywords(&["Undying"], BUTCHER_GHOUL)
+        .id();
+    let component = scenario.add_creature(P0, "Gemrazer", 4, 4).id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.battlefield.retain(|&id| id != component);
+        let mut events = vec![];
+        merge_object_onto(state, component, ghoul, MergeSide::Top, &mut events);
+    }
+
+    let outcome = runner.cast(murder).target_object(ghoul).resolve();
+
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    let state = outcome.state();
+    assert!(state.stack.is_empty());
+    assert_eq!(
+        state.objects[&ghoul].zone,
+        Zone::Battlefield,
+        "reach guard: the undying trigger resolved and returned the card it names"
+    );
+    assert_eq!(
+        state.objects[&component].zone,
+        Zone::Graveyard,
+        "a non-shuffle return keeps the merge-base population"
+    );
+}
+
 // Full Oracle verified against https://api.scryfall.com/cards/named?exact=Tel-Jilad%20Stylus
 const TEL_JILAD_STYLUS: &str = "{T}: Put target permanent you own on the bottom of your library.";
 

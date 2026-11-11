@@ -5283,6 +5283,40 @@ mod w3_library_placement_tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::resolution::ResolutionFrame;
 
+    /// CR 701.24a + CR 730.3 + CR 616.1: a terminal-shuffle library delivery
+    /// keeps its mode through the parked batch request and onto the proposed
+    /// event a resumed delivery replays, so a merged permanent's components
+    /// still share the transient position after a replacement pause.
+    #[test]
+    fn terminal_shuffle_mode_survives_the_parked_request_round_trip() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(90101),
+            PlayerId(0),
+            "Shuffled Card".to_string(),
+            Zone::Graveyard,
+        );
+        for mode in [
+            LibraryShuffleMode::PerObject,
+            LibraryShuffleMode::TerminalShuffle,
+        ] {
+            let request = ZoneMoveRequest::effect(card, Zone::Library, card)
+                .at_library_position(LibraryPosition::Bottom)
+                .with_library_shuffle(mode);
+            let parked = request.into_pending();
+            assert_eq!(parked.library_shuffle, mode);
+            let resumed = ZoneMoveRequest::from_pending(parked);
+            assert_eq!(resumed.library_shuffle, mode);
+            let delivery =
+                anticipated_zone_change_delivery(&state, &resumed).expect("the card exists");
+            assert!(matches!(
+                delivery.expected_event,
+                ProposedEvent::ZoneChange { library_shuffle, .. } if library_shuffle == mode
+            ));
+        }
+    }
+
     /// Install a board-wide `Moved` replacement: "any object that would be put
     /// into a library is exiled instead" (synthetic — no such card exists in the
     /// pool today, which is why a non-exempt library placement was a guaranteed
