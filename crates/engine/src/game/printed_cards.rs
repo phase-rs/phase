@@ -611,6 +611,30 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
     if let Some(values) = crate::game::flip::flipped_normal_copiable_values(obj) {
         return values;
     }
+    // CR 709.4 + CR 709.5: a Room off the battlefield has both halves combined, and
+    // which half each characteristic is in is a copiable value. On the battlefield
+    // entry has already assigned the doors (`reset_for_battlefield_entry`); elsewhere
+    // the snapshot assigns them the same way.
+    let room_text = (crate::game::room::has_shared_type_line(&obj.base_card_types)
+        && obj.zone != Zone::Battlefield)
+        .then(|| crate::game::room::door_assigned_text(obj));
+    let (trigger_definitions, trigger_printed_origins, static_definitions) = match room_text {
+        Some(text) => (
+            text.triggers,
+            // Empty: each origin derives from the printed reference, as on the object.
+            if text.trigger_printed_origins.is_empty() {
+                base_trigger_printed_origins(obj)
+            } else {
+                Arc::new(text.trigger_printed_origins)
+            },
+            text.statics,
+        ),
+        None => (
+            Arc::clone(&obj.base_trigger_definitions),
+            base_trigger_printed_origins(obj),
+            Arc::clone(&obj.base_static_definitions),
+        ),
+    };
     CopiableValues {
         name: obj.base_name.clone(),
         mana_cost: obj.base_mana_cost.clone(),
@@ -625,10 +649,10 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
         // a copy-effect never mutates the ability set, so refcount sharing
         // is both correct and zero-allocation.
         abilities: Arc::clone(&obj.base_abilities),
-        trigger_definitions: Arc::clone(&obj.base_trigger_definitions),
-        trigger_printed_origins: base_trigger_printed_origins(obj),
+        trigger_definitions,
+        trigger_printed_origins,
         replacement_definitions: copiable_replacement_definitions(obj),
-        static_definitions: Arc::clone(&obj.base_static_definitions),
+        static_definitions,
         // CR 709.5 + CR 709.5b: a Room's per-half identities are copiable —
         // the door-stamped defs above carry both halves' TEXT, this carries
         // both halves' names and costs. `None` for every non-Room source
@@ -1929,7 +1953,13 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
                 }
                 // CR 712.12: Restore layout_kind if it was cleared (e.g. after MDFC
                 // front-face choice). Ensures bounced MDFCs can prompt face choice again.
-                if back_face.layout_kind.is_none() {
+                // CR 111.1 + CR 707.2 + CR 111.10i: a token's stored face is serialized
+                // copiable values, and its layout is part of its double-faced identity —
+                // an Incubator's Phyrexian face, or a copy of one, has none. The display
+                // reference names whatever the token copies (Encouraging Aviator under
+                // Mirrorweave), so inferring from it would make a double-faced token
+                // single-faced.
+                if !obj.is_token && back_face.layout_kind.is_none() {
                     back_face.layout_kind = db
                         .get_by_name(&card_face.name)
                         .and_then(|rules| match &rules.layout {
@@ -1942,8 +1972,7 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
                             // flip permanent's stashed alternative face stays
                             // excluded from the double-faced paths.
                             CardLayout::Flip(..) => Some(LayoutKind::Flip),
-                            // CR 702.xxx: Prepare (Strixhaven) — treat like Adventure for
-                            // back-face layout tracking. Assign when WotC publishes SOS CR update.
+                            // CR 722.2b + CR 722.2c: a preparation card's prepare spell is a stored alternative of one card, so its face keeps the `Prepare` tag (a single-faced alternative, not a double face).
                             CardLayout::Prepare(..) => Some(LayoutKind::Prepare),
                             _ => None,
                         })

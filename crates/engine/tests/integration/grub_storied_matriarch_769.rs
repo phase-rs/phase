@@ -26,11 +26,18 @@
 //! CR 707.2 + CR 613.1: a stored face is that face's copiable values.
 //! CR 707.8a: a token copy of a double-faced object has both faces, up as its
 //! source was, with the copy's exceptions on both (CR 707.9a/b/d).
+//! CR 709.5: a copy whose copied values are a Room's keeps each half's text
+//! under its door, and the gained end-step sacrifice trigger is outside both
+//! doors, so it functions with both doors locked.
+//! CR 709.4: a Room card off the battlefield has both halves' characteristics,
+//! so a token copy of it has each half's text under its own door.
+//! CR 111.10i: an Incubator token is double-faced, and a reloaded copy of one
+//! keeps its stored face's identity.
 
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::derived_views::derive_views;
-use engine::game::game_object::{BackFaceData, RoomDoor};
+use engine::game::game_object::{BackFaceData, RoomDoor, RoomUnlockState};
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -95,6 +102,7 @@ const MIRROR_ROOM: &str = "Mirror Room";
 const FRACTURED_REALM: &str = "Fractured Realm";
 const OPALESCENCE: &str = "Opalescence";
 const GIDEON: &str = "Gideon, Ally of Zendikar";
+const SIN: &str = "Sin, Spira's Punishment";
 
 const AUNTIE_ORACLE: &str = "Menace\nWhenever Grub attacks, you may blight 1. If you do, create a tapped and attacking token that's a copy of the blighted creature, except it has \"At the beginning of the end step, sacrifice this token.\"\nAt the beginning of your first main phase, you may pay {B}. If you do, transform Grub.";
 const NEXUS_ORACLE: &str = "At the beginning of combat on your turn, draw a card. Then you may exile an artifact or creature card from your hand. If you do, create a token that's a copy of the exiled card, except it's a 3/3 Golem artifact creature in addition to its other types.";
@@ -142,6 +150,7 @@ const MIRROR_ROOM_ORACLE: &str = "When you unlock this door, create a token that
 const FRACTURED_REALM_ORACLE: &str = "If a triggered ability of a permanent you control triggers, that ability triggers an additional time.\n(You may cast either half. That door unlocks on the battlefield. As a sorcery, you may pay the mana cost of a locked door to unlock it.)";
 const OPALESCENCE_ORACLE: &str = "Each other non-Aura enchantment is a creature in addition to its other types and has base power and base toughness each equal to its mana value.";
 const GIDEON_ORACLE: &str = "[+1]: Until end of turn, Gideon becomes a 5/5 Human Soldier Ally creature with indestructible that's still a planeswalker. Prevent all damage that would be dealt to him this turn.\n[0]: Create a 2/2 white Knight Ally creature token.\n[−4]: You get an emblem with \"Creatures you control get +1/+1.\"";
+const SIN_ORACLE: &str = "Flying\nWhenever Sin enters or attacks, exile a permanent card from your graveyard at random, then create a tapped token that's a copy of that card. If the exiled card is a land card, repeat this process.";
 const DOUBLING_SEASON_ORACLE: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
 
 /// A board at `phase`, with stocked libraries so a real draw step can't end the
@@ -3403,4 +3412,492 @@ fn a_back_face_up_copy_of_mirror_room_keeps_its_halves_in_printed_order() {
     assert_eq!(obj.zone, Zone::Graveyard);
     assert!(!obj.transformed && !obj.modal_back_face, "CR 712.8a");
     assert_eq!(door_text(&runner, token), (1, 0, 0, 1));
+}
+
+/// Passes priority until the declare-attackers declaration, declining any
+/// optional prompt on the way. `advance_to_combat` can't be used after a cast in
+/// the main phase: it re-enters the main step and re-offers Grub's first-main
+/// trigger.
+fn pass_to_declare_attackers(runner: &mut GameRunner) {
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareAttackers { .. } => return,
+            WaitingFor::Priority { .. } => runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority must succeed"),
+            WaitingFor::OptionalEffectChoice { .. } => runner
+                .act(GameAction::DecideOptionalEffect { accept: false })
+                .expect("declining the optional effect must succeed"),
+            other => panic!("unexpected prompt before declaring attackers: {other:?}"),
+        };
+    }
+    panic!("never reached the declare-attackers step");
+}
+
+/// Casts Grub, Storied Matriarch from hand ({2}{B}) and resolves her and her
+/// enters trigger, which has no Goblin card to return. Then, as setup, flips her
+/// to Grub, Notorious Auntie, able to attack.
+fn cast_grub_as_auntie(runner: &mut GameRunner, grub: ObjectId) {
+    fund(runner, ManaType::Black, 3);
+    runner.cast(grub).commit();
+    both_pass(runner);
+    assert_eq!(runner.state().objects[&grub].zone, Zone::Battlefield);
+    runner.advance_until_stack_empty();
+    settle(runner);
+    assert_settled(runner);
+    flip(runner, grub);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&grub)
+        .expect("Grub exists")
+        .summoning_sick = false;
+}
+
+/// Grub attacks alone; her trigger asks whether to blight.
+fn auntie_attacks(runner: &mut GameRunner, grub: ObjectId) {
+    pass_to_declare_attackers(runner);
+    runner
+        .declare_attackers(&[(grub, AttackTarget::Player(P1))])
+        .expect("the attack must be legal");
+    both_pass(runner);
+}
+
+/// At the end step's first priority `token` is still on the battlefield and its
+/// copy's sacrifice trigger is on the stack, so a token gone after it resolves
+/// was sacrificed by that trigger, not by state-based actions.
+fn assert_sacrifice_trigger_waiting(runner: &GameRunner, token: ObjectId) {
+    assert_eq!(runner.state().phase, Phase::End);
+    assert!(
+        runner.state().battlefield.contains(&token),
+        "reach-guard: the token survives to the end step"
+    );
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == token),
+        "CR 707.9a + CR 709.5: the token's end-step trigger must be on the stack; stack={:?}",
+        runner.state().stack
+    );
+}
+
+/// Mirror Room // Fractured Realm cast as Mirror Room (left half unlocked,
+/// CR 709.5d); Glorious Anthem ("Creatures you control get +1/+1.") and
+/// Opalescence ("Each other non-Aura enchantment is a creature in addition to
+/// its other types and has base power and base toughness each equal to its mana
+/// value.") make the Room and the Anthem creatures. Grub is cast, flipped, and
+/// blights the Room. Returns Grub, the Room, the Anthem, the token and a
+/// Cackling Counterpart in hand.
+fn auntie_copies_an_animated_mirror_room(
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let (mut runner, (room, opalescence, anthem, grub, cackling)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, MIRROR_ROOM, MIRROR_ROOM_ORACLE);
+            assert_oracle(db, FRACTURED_REALM, FRACTURED_REALM_ORACLE);
+            assert_oracle(db, OPALESCENCE, OPALESCENCE_ORACLE);
+            assert_oracle(db, ANTHEM, ANTHEM_ORACLE);
+            assert_oracle(db, AUNTIE, AUNTIE_ORACLE);
+            assert_oracle(db, CACKLING, CACKLING_ORACLE);
+            (
+                scenario.add_real_card(P0, MIRROR_ROOM, Zone::Hand, db),
+                scenario.add_real_card(P0, OPALESCENCE, Zone::Hand, db),
+                scenario.add_real_card(P0, ANTHEM, Zone::Battlefield, db),
+                scenario.add_real_card(P0, MATRIARCH, Zone::Hand, db),
+                scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
+            )
+        });
+    fund(&mut runner, ManaType::Blue, 3);
+    runner.cast(room).modal_back_face(false).resolve();
+    settle(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(runner.state().objects[&room].name, MIRROR_ROOM);
+    fund(&mut runner, ManaType::White, 4);
+    runner.cast(opalescence).resolve();
+    settle(&mut runner);
+    assert_settled(&runner);
+    cast_grub_as_auntie(&mut runner, grub);
+
+    auntie_attacks(&mut runner, grub);
+    // CR 701.68a: under Opalescence the Anthem is a creature P0 controls too.
+    blight(&mut runner, &[grub, room, anthem], room);
+    assert_settled(&runner);
+    let made = tokens(&runner);
+    assert_eq!(made.len(), 1, "reach-guard: Grub's copy of the Room exists");
+    let token = made[0];
+    assert_eq!(
+        runner.state().objects[&token].room_unlocks,
+        Some(RoomUnlockState::default()),
+        "CR 709.5d: the token enters with neither half unlocked"
+    );
+    assert_eq!(
+        door_text(&runner, room),
+        (1, 0, 0, 1),
+        "reach-guard: the Room has Mirror Room's trigger and Fractured Realm's static"
+    );
+    assert_eq!(
+        door_text(&runner, token),
+        door_text(&runner, room),
+        "CR 709.5 + CR 707.2: the copied half stamps are kept"
+    );
+    (runner, grub, room, anthem, token, cackling)
+}
+
+/// CR 707.9a + CR 709.5 + CR 709.5d: Grub's copy of Mirror Room, animated by
+/// Opalescence, enters with both doors locked. "At the beginning of the end step,
+/// sacrifice this token." is an ability the copy gained, not text of either half,
+/// so no door gates it: the token is sacrificed at the end step.
+#[test]
+fn auntie_copy_of_an_animated_mirror_room_is_sacrificed_with_both_doors_locked() {
+    let (mut runner, _grub, room, _anthem, token, _cackling) =
+        auntie_copies_an_animated_mirror_room();
+
+    pass_into(&mut runner, Phase::End);
+    assert_sacrifice_trigger_waiting(&runner, token);
+    runner.advance_until_stack_empty();
+
+    assert_settled(&runner);
+    assert!(
+        tokens(&runner).is_empty(),
+        "CR 707.9a + CR 709.5: the gained trigger functions with both doors locked"
+    );
+    assert_eq!(
+        runner.state().objects[&room].zone,
+        Zone::Battlefield,
+        "only the token is sacrificed"
+    );
+}
+
+/// CR 707.9a: the gained trigger is part of the token's copiable values, so
+/// Cackling Counterpart's copy of Grub's Room token has it outside both doors
+/// too, and both tokens are sacrificed at the end step.
+#[test]
+fn a_copy_of_aunties_room_token_keeps_the_grant_outside_both_doors() {
+    let (mut runner, _grub, _room, _anthem, token, cackling) =
+        auntie_copies_an_animated_mirror_room();
+
+    fund(&mut runner, ManaType::Blue, 3);
+    runner.cast(cackling).target_object(token).resolve();
+    settle(&mut runner);
+    assert_settled(&runner);
+    let second = tokens(&runner)
+        .into_iter()
+        .find(|id| *id != token)
+        .expect("reach-guard: Cackling Counterpart copies the token");
+    assert_eq!(
+        runner.state().objects[&second].room_unlocks,
+        Some(RoomUnlockState::default()),
+        "CR 709.5d: the second token enters with neither half unlocked"
+    );
+    assert_eq!(
+        door_text(&runner, second),
+        (1, 0, 0, 1),
+        "CR 709.5 + CR 707.2: each door's copied text once"
+    );
+
+    pass_into(&mut runner, Phase::End);
+    assert_sacrifice_trigger_waiting(&runner, token);
+    assert_sacrifice_trigger_waiting(&runner, second);
+    for id in [token, second] {
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .filter(|entry| entry.source_id == id)
+                .count(),
+            1,
+            "one sacrifice trigger from each token"
+        );
+    }
+    runner.advance_until_stack_empty();
+
+    assert_settled(&runner);
+    assert!(
+        tokens(&runner).is_empty(),
+        "CR 707.9a: both tokens have the gained trigger outside both doors"
+    );
+}
+
+/// The maintainer's board. CR 707.8a + CR 707.9a + CR 709.5: Mirrorweave ("Each
+/// other creature becomes a copy of target nonlegendary creature until end of
+/// turn.") makes Kessig Prowler a copy of Mirror Room, animated by Opalescence
+/// and kept alive by Gideon, Ally of Zendikar's emblem ("Creatures you control
+/// get +1/+1."). Grub is cast after Mirrorweave resolves (CR 611.2c) and blights
+/// the Prowler. The double-faced token has the sacrifice trigger on both faces,
+/// outside both doors, and is sacrificed at the end step.
+#[test]
+fn auntie_copy_of_a_prowler_mirrorweaved_into_mirror_room_is_sacrificed() {
+    let (mut runner, (room, opalescence, gideon, prowler, weave, grub)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, MIRROR_ROOM, MIRROR_ROOM_ORACLE);
+            assert_oracle(db, FRACTURED_REALM, FRACTURED_REALM_ORACLE);
+            assert_oracle(db, OPALESCENCE, OPALESCENCE_ORACLE);
+            assert_oracle(db, GIDEON, GIDEON_ORACLE);
+            assert_oracle(db, PROWLER, PROWLER_ORACLE);
+            assert_oracle(db, PREDATOR, PREDATOR_ORACLE);
+            assert_oracle(db, MIRRORWEAVE, MIRRORWEAVE_ORACLE);
+            assert_oracle(db, AUNTIE, AUNTIE_ORACLE);
+            (
+                scenario.add_real_card(P0, MIRROR_ROOM, Zone::Hand, db),
+                scenario.add_real_card(P0, OPALESCENCE, Zone::Hand, db),
+                scenario.add_real_card(P0, GIDEON, Zone::Hand, db),
+                scenario.add_real_card(P0, PROWLER, Zone::Hand, db),
+                scenario.add_real_card(P0, MIRRORWEAVE, Zone::Hand, db),
+                scenario.add_real_card(P0, MATRIARCH, Zone::Hand, db),
+            )
+        });
+    fund(&mut runner, ManaType::Blue, 3);
+    runner.cast(room).modal_back_face(false).resolve();
+    settle(&mut runner);
+    assert_settled(&runner);
+    fund(&mut runner, ManaType::White, 4);
+    runner.cast(opalescence).resolve();
+    fund(&mut runner, ManaType::White, 4);
+    runner.cast(gideon).resolve();
+    settle(&mut runner);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: gideon,
+            ability_index: 2,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Gideon's −4 must be legal");
+    both_pass(&mut runner);
+    settle(&mut runner);
+    assert_settled(&runner);
+    fund(&mut runner, ManaType::Green, 1);
+    runner.cast(prowler).resolve();
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&prowler].zone, Zone::Battlefield);
+    fund(&mut runner, ManaType::Blue, 4);
+    runner.cast(weave).target_object(room).resolve();
+    settle(&mut runner);
+    assert_settled(&runner);
+    assert!(
+        runner.state().objects[&prowler]
+            .card_types
+            .subtypes
+            .iter()
+            .any(|s| s == "Room"),
+        "reach-guard: Mirrorweave made the Prowler a copy of the Room"
+    );
+    cast_grub_as_auntie(&mut runner, grub);
+    assert_eq!(
+        runner.state().objects[&grub].name,
+        AUNTIE,
+        "CR 611.2c: Mirrorweave's affected set was fixed before Grub entered"
+    );
+
+    auntie_attacks(&mut runner, grub);
+    blight(&mut runner, &[grub, room, prowler], prowler);
+    assert_settled(&runner);
+    let made = tokens(&runner);
+    assert_eq!(made.len(), 1, "reach-guard: Grub's copy exists");
+    let token = made[0];
+    assert!(
+        is_double_faced_permanent(&runner.state().objects[&token]),
+        "CR 707.8a: a copy of a double-faced permanent is a double-faced token"
+    );
+    assert_eq!(
+        runner.state().objects[&token]
+            .double_faced_token_alternative
+            .as_ref()
+            .map(|half| half.name.as_str()),
+        Some(FRACTURED_REALM),
+        "CR 709.5b: the token keeps the copied Room's other half"
+    );
+    assert_eq!(
+        runner.state().objects[&token].room_unlocks,
+        Some(RoomUnlockState::default()),
+        "CR 709.5d: both doors are locked"
+    );
+    assert_eq!(door_text(&runner, token), (1, 0, 0, 1));
+    assert!(shown_sacrifices_itself(&runner, token));
+    assert!(stored_sacrifices_itself(&runner, token));
+
+    pass_into(&mut runner, Phase::End);
+    assert_sacrifice_trigger_waiting(&runner, token);
+    runner.advance_until_stack_empty();
+
+    assert_settled(&runner);
+    assert!(
+        !runner.state().battlefield.contains(&token),
+        "CR 707.9a + CR 709.5: the gained trigger functions with both doors locked"
+    );
+}
+
+/// CR 709.4 + CR 709.5 + CR 709.5h: Sin, Spira's Punishment ("Whenever Sin enters
+/// or attacks, exile a permanent card from your graveyard at random, then create
+/// a tapped token that's a copy of that card. …") copies the Mirror Room //
+/// Fractured Realm card in P0's graveyard. Off the battlefield that card has both
+/// halves' characteristics, so the token has Mirror Room's trigger under the left
+/// door and Fractured Realm's static under the right door. Unlocking Mirror Room
+/// fires its trigger; unlocking Fractured Realm afterwards fires nothing.
+#[test]
+fn sins_copy_of_mirror_room_from_a_graveyard_has_each_doors_text_once() {
+    let (mut runner, (room, sin, bears)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, MIRROR_ROOM, MIRROR_ROOM_ORACLE);
+        assert_oracle(db, FRACTURED_REALM, FRACTURED_REALM_ORACLE);
+        assert_oracle(db, SIN, SIN_ORACLE);
+        (
+            scenario.add_real_card(P0, MIRROR_ROOM, Zone::Graveyard, db),
+            scenario.add_real_card(P0, SIN, Zone::Hand, db),
+            scenario.add_real_card(P0, BEARS, Zone::Battlefield, db),
+        )
+    });
+    assert_eq!(
+        door_text(&runner, room),
+        (0, 0, 0, 0),
+        "reach-guard: the graveyard card's text is assigned to no door"
+    );
+
+    fund(&mut runner, ManaType::Black, 1);
+    fund(&mut runner, ManaType::Green, 1);
+    fund(&mut runner, ManaType::Blue, 5);
+    runner.cast(sin).commit();
+    both_pass(&mut runner);
+    assert_eq!(runner.state().objects[&sin].zone, Zone::Battlefield);
+    runner.advance_until_stack_empty();
+    settle(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(runner.state().objects[&room].zone, Zone::Exile);
+    let made = tokens(&runner);
+    assert_eq!(made.len(), 1, "reach-guard: Sin copies the exiled card");
+    let token = made[0];
+    assert_eq!(
+        runner.state().objects[&token].room_unlocks,
+        Some(RoomUnlockState::default()),
+        "CR 709.5d: the token enters with neither half unlocked"
+    );
+    assert_eq!(
+        door_text(&runner, token),
+        (1, 0, 0, 1),
+        "CR 709.4 + CR 709.5: each half's text once, under its own door"
+    );
+
+    // Positive reach: Mirror Room's door fires its own trigger.
+    fund(&mut runner, ManaType::Blue, 3);
+    unlock(&mut runner, token, RoomDoor::Left);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "CR 709.5h: unlocking Mirror Room triggers it; got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(bears)],
+        })
+        .expect("targeting the Bears must succeed");
+    both_pass(&mut runner);
+    settle(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(tokens(&runner).len(), 2, "Mirror Room made its Reflection");
+
+    // CR 709.5h: Fractured Realm's door has no trigger to fire.
+    fund(&mut runner, ManaType::Blue, 7);
+    unlock(&mut runner, token, RoomDoor::Right);
+    assert_settled(&runner);
+    assert_eq!(tokens(&runner).len(), 2, "no second Reflection");
+}
+
+/// CR 111.10i + CR 712.16 + CR 707.8a: Converter Beast's Incubator transforms,
+/// Mirrorweave makes it a copy of Encouraging Aviator, and Cackling Counterpart
+/// copies it. The token is double-faced, back face up, with Aviator's values on
+/// its stored front face, which has no printed layout. After the game is saved
+/// and reloaded, the stored face is the same and Cyber Conversion ("Turn target
+/// creature face down. It's a 2/2 Cyberman artifact creature.") does nothing to
+/// the token, while it turns the nontoken Encouraging Aviator face down.
+#[test]
+fn a_reloaded_copy_of_a_transformed_incubator_with_aviators_values_cannot_be_turned_face_down() {
+    let (mut runner, (beast, aviator, weave, cackling, conversions)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, CONVERTER_BEAST, CONVERTER_BEAST_ORACLE);
+            assert_oracle(db, AVIATOR, AVIATOR_ORACLE);
+            assert_oracle(db, MIRRORWEAVE, MIRRORWEAVE_ORACLE);
+            assert_oracle(db, CACKLING, CACKLING_ORACLE);
+            assert_oracle(db, CYBER_CONVERSION, CYBER_CONVERSION_ORACLE);
+            (
+                scenario.add_real_card(P0, CONVERTER_BEAST, Zone::Hand, db),
+                scenario.add_real_card(P0, AVIATOR, Zone::Battlefield, db),
+                scenario.add_real_card(P0, MIRRORWEAVE, Zone::Hand, db),
+                scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
+                [
+                    scenario.add_real_card(P0, CYBER_CONVERSION, Zone::Hand, db),
+                    scenario.add_real_card(P0, CYBER_CONVERSION, Zone::Hand, db),
+                ],
+            )
+        });
+    fund(&mut runner, ManaType::Green, 4);
+    runner.cast(beast).resolve();
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&beast].zone, Zone::Battlefield);
+    let incubator = tokens(&runner)[0];
+    fund(&mut runner, ManaType::Green, 2);
+    activate(&mut runner, incubator);
+    both_pass(&mut runner);
+    settle(&mut runner);
+    assert_settled(&runner);
+    assert!(
+        runner.state().objects[&incubator].transformed,
+        "reach-guard: the Incubator transformed"
+    );
+
+    fund(&mut runner, ManaType::Blue, 4);
+    runner.cast(weave).target_object(aviator).resolve();
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&incubator].name, AVIATOR);
+    fund(&mut runner, ManaType::Blue, 3);
+    runner.cast(cackling).target_object(incubator).resolve();
+    settle(&mut runner);
+    assert_settled(&runner);
+    let token = tokens(&runner)
+        .into_iter()
+        .find(|id| *id != incubator)
+        .expect("reach-guard: Cackling Counterpart copies the Incubator");
+    let obj = &runner.state().objects[&token];
+    assert!(obj.transformed, "CR 707.8a: the copy enters back face up");
+    assert_eq!(
+        (
+            stored_face(&runner, token).name.as_str(),
+            stored_face(&runner, token).layout_kind
+        ),
+        (AVIATOR, None),
+        "reach-guard: the stored front face has Aviator's values and no layout"
+    );
+    assert_eq!(
+        obj.double_faced_token_alternative
+            .as_ref()
+            .map(|face| (face.name.as_str(), face.layout_kind)),
+        Some(("Jump", Some(LayoutKind::Prepare))),
+        "CR 722.2b: the copied prepare spell is kept beside the other face"
+    );
+    assert!(is_double_faced_permanent(obj));
+    let stored_before = stored_face(&runner, token).clone();
+
+    let json = serde_json::to_string(runner.state()).expect("the game serializes");
+    let mut loaded: GameState = serde_json::from_str(&json).expect("the game deserializes");
+    engine::game::printed_cards::rehydrate_game_from_card_db(
+        &mut loaded,
+        load_db().expect("card db"),
+    );
+    let mut runner = GameRunner::from_state(loaded);
+    assert_eq!(
+        stored_face(&runner, token),
+        &stored_before,
+        "CR 111.1 + CR 707.2: the reloaded stored face is the serialized one"
+    );
+
+    fund(&mut runner, ManaType::Blue, 4);
+    runner.cast(conversions[0]).target_object(aviator).resolve();
+    settle(&mut runner);
+    assert_cyber_converted(&runner, aviator);
+    runner.cast(conversions[1]).target_object(token).resolve();
+    settle(&mut runner);
+    assert_not_turned_face_down(&runner, token, AVIATOR, &stored_before);
+    assert_settled(&runner);
 }

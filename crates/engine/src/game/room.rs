@@ -1,5 +1,9 @@
+use std::sync::Arc;
+
 use crate::game::game_object::RoomDoor;
-use crate::types::ability::DoorLockOp;
+use crate::types::ability::{
+    DoorLockOp, StaticDefinition, TriggerDefinition, TriggerPrintedOrigin,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -144,6 +148,102 @@ pub(crate) fn door_text_functions(
         return true;
     }
     obj.room_unlocks.unwrap_or_default().is_unlocked(door)
+}
+
+/// CR 709.4 + CR 709.5 + CR 709.5h: a Room object's own text with each half's
+/// definitions assigned to its door.
+pub(crate) struct DoorAssignedText {
+    pub(crate) triggers: Arc<Vec<TriggerDefinition>>,
+    /// Aligned with `triggers`; empty means each origin is derived from the
+    /// object's printed reference, as on `GameObject::base_trigger_printed_origins`.
+    pub(crate) trigger_printed_origins: Vec<Option<TriggerPrintedOrigin>>,
+    pub(crate) statics: Arc<Vec<StaticDefinition>>,
+}
+
+/// CR 709.4 + CR 709.5 + CR 709.5h: the object's own Room text with each half's
+/// definitions assigned to its door: the live face's unassigned text to
+/// `live_face_door`, the other half's (`stored_alternative_face`) to the other door,
+/// merged only while that door has none of the kind. Single authority for entry
+/// (`GameObject::install_room_door_text`) and for an off-battlefield Room's
+/// copiable values (`printed_cards::intrinsic_copiable_values`).
+///
+/// Idempotent: a `None` stamp is claimed once, and the other half is merged only
+/// while absent, so a Room whose text is already assigned is returned unchanged.
+pub(crate) fn door_assigned_text(obj: &crate::game::game_object::GameObject) -> DoorAssignedText {
+    let live_door = live_face_door(obj);
+    let other_door = match live_door {
+        RoomDoor::Left => RoomDoor::Right,
+        RoomDoor::Right => RoomDoor::Left,
+    };
+    let other_half = crate::game::printed_cards::stored_alternative_face(obj);
+
+    let mut triggers = obj.base_trigger_definitions.as_ref().clone();
+    for definition in triggers.iter_mut() {
+        if definition.room_door.is_none() {
+            definition.room_door = Some(live_door);
+        }
+    }
+    let other_door_triggers_absent = !triggers
+        .iter()
+        .any(|definition| definition.room_door == Some(other_door));
+    let mut trigger_printed_origins = obj.base_trigger_printed_origins.clone();
+    if let Some(back) = other_half.filter(|_| other_door_triggers_absent) {
+        let mut origins = crate::game::printed_cards::base_trigger_printed_origins(obj)
+            .as_ref()
+            .clone();
+        let back_origins =
+            back.trigger_definitions
+                .iter_all()
+                .enumerate()
+                .map(|(printed_occurrence, _)| {
+                    back.trigger_printed_origins
+                        .get(printed_occurrence)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            back.printed_ref
+                                .clone()
+                                .map(|printed_ref| TriggerPrintedOrigin {
+                                    printed_ref,
+                                    printed_occurrence,
+                                })
+                        })
+                });
+        origins.extend(back_origins);
+        triggers.extend(back.trigger_definitions.iter_all().map(|printed| {
+            let mut definition = printed.clone();
+            definition.room_door = Some(other_door);
+            definition
+        }));
+        trigger_printed_origins = origins;
+    }
+
+    // CR 709.5: same assignment for the halves' static abilities — a locked
+    // half doesn't have its rules text, so both halves' statics live
+    // door-stamped in the base set and the functioning gathers decide.
+    let mut statics = obj.base_static_definitions.as_ref().clone();
+    for definition in statics.iter_mut() {
+        if definition.room_door.is_none() {
+            definition.room_door = Some(live_door);
+        }
+    }
+    if let Some(back) = other_half {
+        if !statics
+            .iter()
+            .any(|definition| definition.room_door == Some(other_door))
+        {
+            statics.extend(back.static_definitions.iter_all().map(|printed| {
+                let mut definition = printed.clone();
+                definition.room_door = Some(other_door);
+                definition
+            }));
+        }
+    }
+
+    DoorAssignedText {
+        triggers: Arc::new(triggers),
+        trigger_printed_origins,
+        statics: Arc::new(statics),
+    }
 }
 
 /// CR 709.5b + CR 707.2: the halves the object's OWN printed form provides, in

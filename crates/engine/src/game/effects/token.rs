@@ -2037,9 +2037,8 @@ pub(crate) fn materialize_token_spec_body(
 /// rather than on `GameState`, which is what lets one implementation serve the
 /// liminal build-then-insert ordering and the direct insert-then-build ordering.
 ///
-/// `reset_for_battlefield_entry` touches no copiable characteristic, so running
-/// it after the keyword grant (the liminal order) is equivalent to running it
-/// before (the former direct order).
+/// Entry under `RoomDoorAssignment::CopiableValues` assigns no door, so running it
+/// after the exceptions keeps a CR 707.9a grant outside both doors (CR 709.5).
 pub(crate) fn materialize_token_copy_body(
     object: &mut GameObject,
     copy: &CopyTokenSpec,
@@ -2123,7 +2122,13 @@ pub(crate) fn materialize_token_copy_body(
 
     // CR 400.7 + CR 302.6: Single authority for ETB state. Haste granted via
     // `extra_keywords` is folded in at query time by `has_summoning_sickness`.
-    object.reset_for_battlefield_entry(turn_number, entry_timestamp);
+    // CR 707.2 + CR 709.5 + CR 707.9a: the copiable values assign the doors; an
+    // exception the copy gained stays outside both.
+    object.reset_for_battlefield_entry_with_room_text(
+        turn_number,
+        entry_timestamp,
+        crate::game::game_object::RoomDoorAssignment::CopiableValues,
+    );
     object.tapped = tapped;
 }
 

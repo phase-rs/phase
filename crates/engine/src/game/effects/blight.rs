@@ -42,15 +42,17 @@ fn blightable_creatures(
 
 /// CR 701.68b + CR 608.2d: a player unable to put the counters on a creature
 /// they control can't choose to blight, so the "you may" is an impossible option.
-/// Judged before the offer for the acting player, and for an any-player 'may'
-/// at acceptance for the accepting seat.
+/// Judged before the offer for the acting player, and for an any-player 'may', for
+/// each seat when it is offered and again when it accepts
+/// (`effects::offered_seat_cannot_accept`).
 pub(crate) fn optional_blight_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     let Effect::BlightEffect { count, player } = &ability.effect else {
         return false;
     };
-    // CR 101.4 + CR 608.2c: an any-player "may" is the offered seat's choice, and that seat is
-    // bound only when it accepts (`handle_opponent_may_choice_inner`). Until then there is no
-    // blighting player, and `ScopedPlayer` would fall back to the controller.
+    // CR 101.4 + CR 608.2c: an any-player "may" is the offered seat's choice, judged for each
+    // seat when it is offered and again when it accepts (`effects::offered_seat_cannot_accept`);
+    // an unbound any-player ability has no blighting player yet, and `ScopedPlayer` would fall
+    // back to the controller.
     if ability.optional_for.is_some() && ability.context.accepting_player.is_none() {
         return false;
     }
@@ -655,12 +657,12 @@ mod tests {
         assert!(state.stack.is_empty());
     }
 
-    /// CR 701.68b + CR 101.4 + CR 608.2c: an any-player "may blight" is judged
-    /// for the seat it is offered to, not for the controller. The controller
-    /// cannot blight (no creature) and is still offered first in APNAP order;
-    /// accepting skips them, and the opponent who can blight is offered next.
+    /// CR 701.68b + CR 608.2d + CR 101.4: an any-player "may blight" is judged for
+    /// each seat when it is offered. The controller can't blight (no creature), so
+    /// it can't choose to and is never asked; the opponent who can blight is the
+    /// first seat offered.
     #[test]
-    fn an_any_player_blight_offers_each_seat_and_skips_one_that_cannot() {
+    fn an_any_player_blight_is_offered_only_to_a_seat_that_can_blight() {
         use crate::types::ability::OpponentMayScope;
 
         let mut state = GameState::new_two_player(7);
@@ -672,17 +674,9 @@ mod tests {
             .unwrap();
         assert_offered(
             &state,
-            PlayerId(0),
-            &[PlayerId(1)],
-            "no seat is bound yet, so the controller's empty board decides nothing",
-        );
-
-        accept(&mut state, PlayerId(0));
-        assert_offered(
-            &state,
             PlayerId(1),
             &[],
-            "CR 701.68b: the controller can't choose to blight, so the next seat is offered",
+            "CR 701.68b: the controller can't choose to blight, so the first seat offered is the opponent",
         );
         assert_eq!(state.players[0].life, 20, "no player has blighted yet");
 
@@ -690,15 +684,17 @@ mod tests {
         finish_blight_by(&mut state, PlayerId(1), theirs);
     }
 
-    /// CR 701.68b: when no offered seat can blight, every acceptance is skipped
-    /// and the instruction resolves as declined by all, so the "if a player
-    /// does" rider never runs.
+    /// CR 701.68b + CR 608.2d + CR 101.4: a later seat that can't blight is judged
+    /// at its own turn and is never offered. The controller can blight and is
+    /// offered first, with the opponent still queued; when the controller declines,
+    /// the opponent (no creature) is skipped and no one has blighted.
     #[test]
-    fn an_any_player_blight_with_no_seat_able_to_blight_runs_no_rider() {
+    fn an_any_player_blight_is_not_offered_to_a_later_seat_that_cannot() {
         use crate::types::ability::OpponentMayScope;
 
         let mut state = GameState::new_two_player(7);
         let source = noncreature_source(&mut state);
+        make_creature(&mut state, 2, PlayerId(0));
         let ability = any_seat_blight(source, OpponentMayScope::AnyPlayer);
 
         crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
@@ -707,18 +703,59 @@ mod tests {
             &state,
             PlayerId(0),
             &[PlayerId(1)],
-            "both seats are offered before either is judged",
+            "the controller can blight and is offered; later seats stay queued unjudged",
         );
 
-        accept(&mut state, PlayerId(0));
-        assert_offered(&state, PlayerId(1), &[], "the controller can't blight");
-        accept(&mut state, PlayerId(1));
-
-        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .expect("the offered controller declines");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "CR 701.68b: the opponent can't blight, so it is not offered; got {:?}",
+            state.waiting_for
+        );
         assert!(state.stack.is_empty());
         assert_eq!(
             state.players[0].life, 20,
             "no player blighted, so the rider stays closed"
+        );
+    }
+
+    /// CR 701.68b + CR 608.2d: when no seat can blight, no seat is offered and the
+    /// instruction resolves as declined by all, so the "if a player does" rider
+    /// never runs. Given a creature, the same seat is offered the same ability.
+    #[test]
+    fn an_any_player_blight_no_seat_can_take_is_offered_to_no_one() {
+        use crate::types::ability::OpponentMayScope;
+
+        let mut state = GameState::new_two_player(7);
+        let source = noncreature_source(&mut state);
+        let ability = any_seat_blight(source, OpponentMayScope::AnyPlayer);
+
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "CR 701.68b: no seat can choose to blight, so no one is asked; got {:?}",
+            state.waiting_for
+        );
+        assert!(state.stack.is_empty());
+        assert_eq!(
+            state.players[0].life, 20,
+            "no player blighted, so the rider stays closed"
+        );
+
+        make_creature(&mut state, 3, PlayerId(1));
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .unwrap();
+        assert_offered(
+            &state,
+            PlayerId(1),
+            &[],
+            "a seat that can blight is offered the same ability",
         );
     }
 

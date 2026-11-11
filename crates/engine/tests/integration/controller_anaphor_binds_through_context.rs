@@ -23,19 +23,24 @@
 
 use std::sync::Arc;
 
+use engine::database::card_db::CardDatabase;
+use engine::game::effects::attach::attach_to;
+use engine::game::engine::apply;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, ControllerRef, Effect, EffectKind, OpponentMayScope, TargetChoiceTiming,
-    TargetFilter, TargetRef,
+    TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost};
+use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
@@ -44,6 +49,7 @@ use engine::types::zones::Zone;
 use engine::types::StaticDefinition;
 
 use super::rules::AttackTarget;
+use crate::support::shared_card_db;
 
 const BALEFIRE_DRAGON: &str = "Flying\nWhenever this creature deals combat damage to a player, it deals that much damage to each creature that player controls.";
 
@@ -332,10 +338,10 @@ fn make_unsacrificeable(runner: &mut GameRunner, id: ObjectId) {
     evaluate_layers(runner.state_mut());
 }
 
-/// CR 701.21a + CR 609.3: Sigarda's ruling names this card: a protected player
-/// "can't take that option", so accepting offers nothing and the Demon stays
-/// put, while the next opponent can still take it (P2 reaches the prompt either
-/// way, and its acceptance proves the trigger resolved live).
+/// CR 701.21a + CR 609.3 + CR 608.2d: Sigarda's ruling names this card: a
+/// protected player "can't take that option", so it is not offered, and the Demon
+/// stays put unless the next opponent, who can take it, does (P2 reaches the
+/// prompt either way, and its acceptance proves the trigger resolved live).
 #[test]
 fn sigarda_holder_cannot_take_desecration_demons_option() {
     for p2_accepts in [false, true] {
@@ -355,7 +361,11 @@ fn sigarda_holder_cannot_take_desecration_demons_option() {
         let (prompted, offers) =
             settle_sacrifice_offers(&mut runner, |p| p == P1 || p2_accepts, &[p1_bear, p2_bear]);
 
-        assert_eq!(prompted, vec![P1, P2]);
+        assert_eq!(
+            prompted,
+            vec![P2],
+            "CR 608.2d: the protected player can't take the option, so it is not offered"
+        );
         assert_eq!(
             offers,
             if p2_accepts {
@@ -480,7 +490,8 @@ fn argothian_wurm_acceptor_sacrifices_their_own_land() {
 }
 
 /// CR 608.2d: "sacrifice two creatures" is exact. Two are chosen and sacrificed
-/// before "if a player does" applies; a player with one creature can't take it.
+/// before "if a player does" applies; a player with fewer than two creatures
+/// can't take that option, so it is not offered (P0 controls only the Pangolin).
 #[test]
 fn prowling_pangolin_acceptor_must_sacrifice_exactly_two_creatures() {
     for creatures in [3, 1] {
@@ -497,13 +508,32 @@ fn prowling_pangolin_acceptor_must_sacrifice_exactly_two_creatures() {
             .collect();
         let mut runner = scenario.build();
         cast_free(&mut runner, pangolin);
+        // Reach guard: the Pangolin resolves and its enters trigger goes on the stack.
+        for _ in 0..8 {
+            if runner.state().objects[&pangolin].zone == Zone::Battlefield {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass priority");
+        }
+        assert!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == pangolin),
+            "the Pangolin's enters trigger is on the stack"
+        );
 
         let (prompted, offers) =
             settle_sacrifice_offers(&mut runner, |p| p == P1, &bears[..bears.len().min(2)]);
 
-        assert!(prompted.contains(&P1), "P1 was prompted");
         let state = runner.state();
         if creatures == 3 {
+            assert_eq!(
+                prompted,
+                vec![P1],
+                "CR 608.2d: P0 controls only the Pangolin, so only P1 is offered"
+            );
             assert_eq!(offers.len(), 1);
             assert_eq!(offers[0].1, 2, "exactly two creatures");
             assert!(!state.battlefield.contains(&bears[0]));
@@ -511,6 +541,10 @@ fn prowling_pangolin_acceptor_must_sacrifice_exactly_two_creatures() {
             assert!(state.battlefield.contains(&bears[2]));
             assert_eq!(state.objects[&pangolin].zone, Zone::Graveyard);
         } else {
+            assert!(
+                prompted.is_empty(),
+                "CR 608.2d: no player controls two creatures to sacrifice, so no one is offered"
+            );
             assert!(offers.is_empty(), "one creature can't take the option");
             assert!(state.battlefield.contains(&bears[0]));
             assert!(state.battlefield.contains(&pangolin));
@@ -1692,17 +1726,21 @@ fn reservoir_kraken_on_the_opponents_combat_offers_the_opponents_creatures() {
     assert_eq!(fish_tokens(&runner), 1);
 }
 
-/// CR 608.2c + CR 608.2d + CR 101.4, hostile multi-authority board: three
-/// players, P1's combat, P1's only creature already tapped. The offers run in
-/// APNAP order; the accepting player each time chooses among their own
-/// untapped creatures, so P2, who can, taps P2's creature.
+/// CR 608.2c + CR 608.2d + CR 101.4 + CR 701.26a, hostile multi-authority board:
+/// three players, P1's combat, P1's only creature already tapped. P1 can't tap an
+/// untapped creature, so it isn't offered (CR 608.2d); the accepting player
+/// chooses among their own untapped creatures, so P2, who can, taps P2's creature.
 #[test]
 fn reservoir_kraken_three_players_each_acceptor_chooses_among_their_own_creatures() {
     let (mut runner, board) = kraken_board(3, P1, true, false);
     let p2_bear = board.p2_bear.expect("P2 Bear");
     let drive = drive_kraken_trigger(&mut runner);
 
-    assert_eq!(drive.offered, vec![P1, P2], "reach-guard: APNAP offers");
+    assert_eq!(
+        drive.offered,
+        vec![P2],
+        "CR 608.2d: P1 can't tap an untapped creature, so only P2 is offered"
+    );
     assert!(
         drive.choices.contains(&(P2, vec![p2_bear])),
         "P2 chooses among P2's untapped creatures; choices={:?}",
@@ -1761,6 +1799,406 @@ fn reservoir_kraken_acceptor_may_choose_their_hexproof_creature() {
     assert!(state.objects[&board.p1_bear].tapped);
     assert!(state.objects[&board.kraken].tapped);
     assert_eq!(fish_tokens(&runner), 1);
+}
+
+// ---- CR 608.2d: an any-player optional is offered only to a seat that can take it ----
+
+const CONTROL_MAGIC: &str = "Enchant creature\nYou control enchanted creature.";
+
+const INNOCENT_TRAVELER: &str = "Innocent Traveler";
+
+const INNOCENT_TRAVELER_ORACLE: &str = "At the beginning of your upkeep, any opponent may sacrifice a creature of their choice. If no one does, transform this creature.";
+
+const MALICIOUS_INVADER: &str = "Malicious Invader";
+
+const MALICIOUS_INVADER_ORACLE: &str =
+    "Flying\nThis creature gets +2/+0 as long as an opponent controls a Human.";
+
+/// Asserts the fixture card's Oracle text is `oracle`, so the board is the card
+/// quoted in the test's doc.
+fn assert_oracle(db: &CardDatabase, name: &str, oracle: &str) {
+    assert_eq!(
+        db.get_face_by_name(name)
+            .unwrap_or_else(|| panic!("{name} is in the fixture"))
+            .oracle_text
+            .as_deref(),
+        Some(oracle)
+    );
+}
+
+/// The current `OpponentMayChoice` prompt's seat and queued seats.
+fn offered_seat(runner: &GameRunner) -> (PlayerId, Vec<PlayerId>) {
+    match &runner.state().waiting_for {
+        WaitingFor::OpponentMayChoice {
+            player, remaining, ..
+        } => (*player, remaining.clone()),
+        other => panic!("expected an OpponentMayChoice prompt, got {other:?}"),
+    }
+}
+
+/// The game is back at priority with nothing left to resolve.
+fn assert_priority_settled(runner: &GameRunner) {
+    let state = runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "got {:?}",
+        state.waiting_for
+    );
+    assert!(state.stack.is_empty(), "stack: {:?}", state.stack);
+    assert!(state.active_ability_continuation().is_none());
+}
+
+/// CR 608.2d + CR 701.21a + CR 101.4: Desecration Demon's "any opponent may
+/// sacrifice a creature of their choice" is judged for each opponent when it is
+/// offered. P1 controls no creature, so it can't choose the option and isn't
+/// asked; P2, next in APNAP order, is asked and sacrifices its Bear.
+#[test]
+fn desecration_demon_is_offered_only_to_an_opponent_with_a_creature() {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let demon = scenario
+        .add_creature_from_oracle(P0, "Desecration Demon", 6, 6, DESECRATION_DEMON)
+        .id();
+    let p2_bear = scenario.add_creature(P2, "P2 Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.advance_to_phase(Phase::BeginCombat);
+
+    let (prompted, offers) = settle_sacrifice_offers(&mut runner, |_| true, &[p2_bear]);
+
+    assert_eq!(
+        prompted,
+        vec![P2],
+        "CR 608.2d: P1 controls no creature, so only P2 is offered"
+    );
+    assert_eq!(offers, vec![(vec![p2_bear], 1)], "P2 chooses its own Bear");
+    let state = runner.state();
+    assert!(
+        !state.battlefield.contains(&p2_bear),
+        "P2's Bear is sacrificed"
+    );
+    assert!(state.objects[&demon].tapped, "the Demon is tapped");
+    assert_eq!(plus_one_counters(&runner, demon), 1);
+}
+
+/// CR 608.2d + CR 701.21a + CR 118.12: with no opponent controlling a creature,
+/// no opponent can take Desecration Demon's option, so no one is asked and no
+/// player does: the Demon stays untapped without a counter. The controller's own
+/// Bear does not make an opponent able.
+#[test]
+fn desecration_demon_with_no_opponent_creature_offers_no_one() {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let demon = scenario
+        .add_creature_from_oracle(P0, "Desecration Demon", 6, 6, DESECRATION_DEMON)
+        .id();
+    let p0_bear = scenario.add_creature(P0, "P0 Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.advance_to_phase(Phase::BeginCombat);
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == demon),
+        "reach-guard: the Demon's beginning-of-combat trigger is on the stack"
+    );
+
+    let (prompted, offers) = settle_sacrifice_offers(&mut runner, |_| true, &[p0_bear]);
+
+    assert!(
+        prompted.is_empty(),
+        "CR 608.2d: P1 controls no creature, so no one is offered; prompted={prompted:?}"
+    );
+    assert!(offers.is_empty());
+    assert_priority_settled(&runner);
+    let state = runner.state();
+    assert!(state.battlefield.contains(&p0_bear));
+    assert!(!state.objects[&demon].tapped, "no player sacrificed");
+    assert_eq!(plus_one_counters(&runner, demon), 0);
+}
+
+/// Four players: P0 controls Desecration Demon, P1 owns a Bear that P3 controls
+/// through Control Magic ("Enchant creature / You control enchanted creature.",
+/// P3's own), and P2 controls a Bear. Advances to the beginning of combat, with
+/// P2's offer showing.
+fn demon_with_a_borrowed_creature() -> (GameRunner, ObjectId, ObjectId) {
+    let p3 = PlayerId(3);
+    let mut scenario = GameScenario::new_n_player(4, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let demon = scenario
+        .add_creature_from_oracle(P0, "Desecration Demon", 6, 6, DESECRATION_DEMON)
+        .id();
+    let p1_bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    scenario.add_creature(P2, "P2 Bear", 2, 2);
+    let aura = scenario
+        .add_enchantment_from_oracle(p3, "Control Magic", CONTROL_MAGIC)
+        .with_subtypes(vec!["Aura"])
+        .with_keyword(Keyword::Enchant(TypedFilter::creature().into()))
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), aura, p1_bear);
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&p1_bear].controller,
+        p3,
+        "reach-guard: P3 controls P1's Bear"
+    );
+
+    runner.advance_to_phase(Phase::BeginCombat);
+    pass_until_stack_empty(&mut runner);
+    assert_eq!(
+        offered_seat(&runner),
+        (P2, vec![p3]),
+        "CR 608.2d: P1 controls no creature, so P2 is offered first, with P3 queued"
+    );
+    (runner, demon, p1_bear)
+}
+
+/// CR 104.3a + CR 800.4a: P1 concedes; its Bear leaves the game with it.
+fn p1_concedes(runner: &mut GameRunner, p1_bear: ObjectId) {
+    let before = runner.state().waiting_for.clone();
+    apply(
+        runner.state_mut(),
+        P1,
+        GameAction::Concede { player_id: P1 },
+    )
+    .expect("P1 may concede while another seat decides");
+    let state = runner.state();
+    assert!(
+        state.players.iter().any(|p| p.id == P1 && p.is_eliminated),
+        "P1 has left the game"
+    );
+    assert!(
+        !state.battlefield.contains(&p1_bear),
+        "CR 800.4a: P1's Bear left the game with its owner"
+    );
+    assert_eq!(
+        state.waiting_for, before,
+        "the deciding seat's prompt is unchanged"
+    );
+}
+
+/// CR 608.2d + CR 701.21a + CR 104.3a + CR 800.4a: a seat whose only creature
+/// left the game with its owner while another seat decided can't sacrifice one,
+/// so it can't choose Desecration Demon's option. It is judged when its turn to
+/// be offered comes (leg 1) and again when it accepts (leg 2), and either way no
+/// player does: the Demon stays untapped without a counter.
+#[test]
+fn desecration_demon_is_not_offered_to_an_opponent_whose_creature_left_with_its_owner() {
+    let p3 = PlayerId(3);
+
+    // Leg 1: P1 concedes during P2's prompt; P2 declines; P3 is never asked.
+    let (mut runner, demon, p1_bear) = demon_with_a_borrowed_creature();
+    p1_concedes(&mut runner, p1_bear);
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("P2 declines");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::OpponentMayChoice { player, .. } if player == p3
+        ),
+        "CR 608.2d: P3 controls no creature now, so it is not offered"
+    );
+    assert_priority_settled(&runner);
+    assert!(!runner.state().objects[&demon].tapped);
+    assert_eq!(plus_one_counters(&runner, demon), 0);
+
+    // Leg 2: P2 declines; P1 concedes during P3's prompt; P3's acceptance is judged again.
+    let (mut runner, demon, p1_bear) = demon_with_a_borrowed_creature();
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("P2 declines");
+    assert_eq!(
+        offered_seat(&runner),
+        (p3, vec![]),
+        "P3 controls a creature, so it is offered"
+    );
+    p1_concedes(&mut runner, p1_bear);
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("P3 accepts");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::MultiTargetSelection { .. }
+        ),
+        "CR 608.2d: P3 has no creature to sacrifice, so it can't take the option"
+    );
+    assert_priority_settled(&runner);
+    assert!(!runner.state().objects[&demon].tapped);
+    assert_eq!(plus_one_counters(&runner, demon), 0);
+}
+
+/// CR 102.1 + CR 104.3a + CR 800.4a + CR 608.2d: a player who has left the game
+/// is no longer a player, so "any player may" is not offered to them.
+///
+/// Leg 1, Browbeat ("Any player may have Browbeat deal 5 damage to them. If no
+/// one does, target player draws three cards."), whose damage head has no
+/// seat-bound judgment: P1 concedes during P0's prompt, P0 declines, and only P2
+/// is asked next. No one takes the damage, so P0, the target player, draws three.
+///
+/// Leg 2, Desecration Demon on P2's turn (APNAP order P2, then P1): P1 concedes
+/// during P2's prompt and P2 declines; P1 is never asked.
+#[test]
+fn browbeat_is_not_offered_to_a_player_who_left_the_game() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    assert_oracle(db, "Browbeat", BROWBEAT);
+
+    // Leg 1: Browbeat.
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["P0 Top A", "P0 Top B", "P0 Top C", "P0 Top D"]);
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let browbeat = scenario.add_real_card(P0, "Browbeat", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let library_before = runner.state().players[0].library.len();
+    runner.cast(browbeat).target_player(P0).commit();
+    pass_until_stack_empty(&mut runner);
+    assert_eq!(
+        offered_seat(&runner),
+        (P0, vec![P1, P2]),
+        "reach-guard: P0 is offered first, with P1 and P2 queued"
+    );
+    apply(
+        runner.state_mut(),
+        P1,
+        GameAction::Concede { player_id: P1 },
+    )
+    .expect("P1 may concede while P0 decides");
+    assert!(runner
+        .state()
+        .players
+        .iter()
+        .any(|p| p.id == P1 && p.is_eliminated));
+    assert_eq!(offered_seat(&runner), (P0, vec![P1, P2]));
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("P0 declines");
+    assert_eq!(
+        offered_seat(&runner),
+        (P2, vec![]),
+        "CR 102.1: P1 has left the game, so P2 is offered next"
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("P2 declines");
+    assert_priority_settled(&runner);
+    assert_eq!(
+        runner.state().players[0].library.len(),
+        library_before - 3,
+        "CR 608.2d: no one took the damage, so P0, the target player, draws three"
+    );
+    assert!(
+        runner.state().players.iter().all(|p| p.life == 20),
+        "no player took Browbeat's damage"
+    );
+
+    // Leg 2: Desecration Demon on P2's turn.
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let demon = scenario
+        .add_creature_from_oracle(P0, "Desecration Demon", 6, 6, DESECRATION_DEMON)
+        .id();
+    let p1_bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    scenario.add_creature(P2, "P2 Bear", 2, 2);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P2;
+        state.priority_player = P2;
+        state.waiting_for = WaitingFor::Priority { player: P2 };
+    }
+    runner.advance_to_phase(Phase::BeginCombat);
+    pass_until_stack_empty(&mut runner);
+    assert_eq!(
+        offered_seat(&runner),
+        (P2, vec![P1]),
+        "reach-guard: P2 is offered first on its own turn, with P1 queued"
+    );
+    p1_concedes(&mut runner, p1_bear);
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("P2 declines");
+    assert_priority_settled(&runner);
+    assert!(!runner.state().objects[&demon].tapped);
+    assert_eq!(plus_one_counters(&runner, demon), 0);
+}
+
+/// CR 608.2d + CR 701.21a + CR 118.12 + CR 701.27a: Innocent Traveler // Malicious
+/// Invader. "At the beginning of your upkeep, any opponent may sacrifice a creature
+/// of their choice. If no one does, transform this creature." With no opponent
+/// controlling a creature, no opponent can take the option, so no one is asked,
+/// no one does, and it transforms. Control: an opponent with Grizzly Bears is
+/// asked, declines, and it transforms through the same "If no one does" branch.
+#[test]
+fn innocent_traveler_transforms_when_no_opponent_can_sacrifice() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    assert_oracle(db, INNOCENT_TRAVELER, INNOCENT_TRAVELER_ORACLE);
+    assert_oracle(db, MALICIOUS_INVADER, MALICIOUS_INVADER_ORACLE);
+
+    for p1_has_bears in [false, true] {
+        let mut scenario = GameScenario::new_n_player(2, 7);
+        scenario.at_phase(Phase::End);
+        scenario.with_library_top(P0, &["P0 Top A", "P0 Top B"]);
+        scenario.with_library_top(P1, &["P1 Top A", "P1 Top B"]);
+        let traveler = scenario.add_real_card(P0, INNOCENT_TRAVELER, Zone::Battlefield, db);
+        if p1_has_bears {
+            scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+        }
+        let mut runner = scenario.build();
+        {
+            // P1's end step, so the next upkeep is P0's.
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P1;
+            state.waiting_for = WaitingFor::Priority { player: P1 };
+        }
+        runner.advance_to_phase(Phase::Upkeep);
+        assert_eq!(
+            (runner.state().active_player, runner.state().phase),
+            (P0, Phase::Upkeep),
+            "P0's upkeep; waiting={:?} stack={:?}",
+            runner.state().waiting_for,
+            runner.state().stack
+        );
+        assert!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == traveler),
+            "reach-guard: Innocent Traveler's upkeep trigger is on the stack"
+        );
+
+        let (prompted, offers) = settle_sacrifice_offers(&mut runner, |_| false, &[]);
+
+        if p1_has_bears {
+            assert_eq!(
+                prompted,
+                vec![P1],
+                "P1 controls a creature, so P1 is offered"
+            );
+        } else {
+            assert!(
+                prompted.is_empty(),
+                "CR 608.2d: P1 controls no creature, so no one is offered; prompted={prompted:?}"
+            );
+        }
+        assert!(offers.is_empty());
+        assert_priority_settled(&runner);
+        let obj = &runner.state().objects[&traveler];
+        assert_eq!(
+            obj.name, MALICIOUS_INVADER,
+            "CR 701.27a: no one sacrificed, so it transforms"
+        );
+        assert!(obj.transformed);
+    }
 }
 
 /// The trigger body whose head carries an "any opponent / any player may"

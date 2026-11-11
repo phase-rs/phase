@@ -352,6 +352,18 @@ pub struct CaseState {
     pub solve_condition: SolveCondition,
 }
 
+/// CR 709.5: where a Room object's door assignment comes from as it enters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoomDoorAssignment {
+    /// CR 709.5 + CR 709.5d: a Room card's own printed halves. Entry assigns each
+    /// unassigned definition to the live face's door and installs the other half's text.
+    PrintedHalves,
+    /// CR 707.2 + CR 709.5: the object's base is copiable values, which already say which
+    /// half each characteristic is in. Entry assigns nothing; a definition they leave
+    /// unassigned is in neither half — an ability the copy gained (CR 707.9a).
+    CopiableValues,
+}
+
 /// CR 709.5c: Unlocked designations carried by a Room permanent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomUnlockState {
@@ -3558,7 +3570,25 @@ impl GameObject {
     /// CR 400.7: Reset transient battlefield state when a permanent enters the battlefield.
     /// A permanent entering the battlefield is a new object with no memory of its previous
     /// existence. Callers that need enter_tapped=true override `tapped` after this call.
+    ///
+    /// A Room entering this way is a Room card's own printed halves
+    /// (`RoomDoorAssignment::PrintedHalves`).
     pub fn reset_for_battlefield_entry(&mut self, turn_number: u32, timestamp: u64) {
+        self.reset_for_battlefield_entry_with_room_text(
+            turn_number,
+            timestamp,
+            RoomDoorAssignment::PrintedHalves,
+        );
+    }
+
+    /// CR 400.7: `reset_for_battlefield_entry`, with where a Room's door
+    /// assignment comes from (CR 709.5).
+    pub(crate) fn reset_for_battlefield_entry_with_room_text(
+        &mut self,
+        turn_number: u32,
+        timestamp: u64,
+        room_text: RoomDoorAssignment,
+    ) {
         // CR 400.7: This (re-)entry creates a new object at the same storage id.
         // Bump the incarnation so self-references captured by abilities created
         // for the previous incarnation no longer match this permanent.
@@ -3655,7 +3685,11 @@ impl GameObject {
         }
         if self.card_types.subtypes.iter().any(|s| s == "Room") {
             self.room_unlocks = Some(RoomUnlockState::default());
-            self.install_room_door_text();
+            match room_text {
+                RoomDoorAssignment::PrintedHalves => self.install_room_door_text(),
+                // CR 707.2 + CR 709.5 + CR 707.9a: the copiable values assign the doors.
+                RoomDoorAssignment::CopiableValues => {}
+            }
         }
     }
 
@@ -3672,8 +3706,10 @@ impl GameObject {
     ///
     /// The live face's door follows the cast orientation (`modal_back_face`
     /// records that the right half is showing — the CR 709.5d mapping,
-    /// see `room::live_face_door`). Idempotent: a `None` stamp is claimed
-    /// once, and the other half is merged only while absent.
+    /// see `room::live_face_door`). The assignment itself is
+    /// `room::door_assigned_text`, the single door-assignment authority this
+    /// entry and an off-battlefield Room's copiable values share; it is
+    /// idempotent.
     ///
     /// CR 709.5b + CR 707.8a: the other half is read where the object stores its
     /// alternative characteristics (`printed_cards::stored_alternative_face`). A
@@ -3683,77 +3719,11 @@ impl GameObject {
     /// text, so installing from it would give the token a second copy of a door's
     /// text under the other door.
     fn install_room_door_text(&mut self) {
-        let live_door = crate::game::room::live_face_door(self);
-        let other_door = match live_door {
-            RoomDoor::Left => RoomDoor::Right,
-            RoomDoor::Right => RoomDoor::Left,
-        };
-        let other_half = crate::game::printed_cards::stored_alternative_face(self).cloned();
-        let other_door_triggers_absent = {
-            let base = Arc::make_mut(&mut self.base_trigger_definitions);
-            for definition in base.iter_mut() {
-                if definition.room_door.is_none() {
-                    definition.room_door = Some(live_door);
-                }
-            }
-            !base
-                .iter()
-                .any(|definition| definition.room_door == Some(other_door))
-        };
-        if let Some(back) = other_half.as_ref().filter(|_| other_door_triggers_absent) {
-            let mut origins = crate::game::printed_cards::base_trigger_printed_origins(self)
-                .as_ref()
-                .clone();
-            let back_origins =
-                back.trigger_definitions
-                    .iter_all()
-                    .enumerate()
-                    .map(|(printed_occurrence, _)| {
-                        back.trigger_printed_origins
-                            .get(printed_occurrence)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                back.printed_ref
-                                    .clone()
-                                    .map(|printed_ref| TriggerPrintedOrigin {
-                                        printed_ref,
-                                        printed_occurrence,
-                                    })
-                            })
-                    });
-            origins.extend(back_origins);
-            Arc::make_mut(&mut self.base_trigger_definitions).extend(
-                back.trigger_definitions.iter_all().map(|printed| {
-                    let mut definition = printed.clone();
-                    definition.room_door = Some(other_door);
-                    definition
-                }),
-            );
-            self.base_trigger_printed_origins = origins;
-        }
+        let text = crate::game::room::door_assigned_text(self);
+        self.base_trigger_definitions = text.triggers;
+        self.base_trigger_printed_origins = text.trigger_printed_origins;
         self.materialize_base_trigger_definitions();
-
-        // CR 709.5: same install for the halves' static abilities — a locked
-        // half doesn't have its rules text, so both halves' statics live
-        // door-stamped in the base set and the functioning gathers decide.
-        let base_statics = Arc::make_mut(&mut self.base_static_definitions);
-        for definition in base_statics.iter_mut() {
-            if definition.room_door.is_none() {
-                definition.room_door = Some(live_door);
-            }
-        }
-        if let Some(back) = &other_half {
-            if !base_statics
-                .iter()
-                .any(|definition| definition.room_door == Some(other_door))
-            {
-                base_statics.extend(back.static_definitions.iter_all().map(|printed| {
-                    let mut definition = printed.clone();
-                    definition.room_door = Some(other_door);
-                    definition
-                }));
-            }
-        }
+        self.base_static_definitions = text.statics;
         self.static_definitions = Arc::clone(&self.base_static_definitions).into();
     }
 

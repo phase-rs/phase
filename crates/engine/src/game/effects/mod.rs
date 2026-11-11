@@ -17037,6 +17037,189 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
     }
 }
 
+/// CR 608.2c + CR 101.4: an any-player instruction's "their" is the seat that takes
+/// it. Binds `seat` across the complete local chain; `controller` remains the
+/// controller of the resolving ability. Single seat-binding authority for the offer
+/// (`offered_seat_cannot_accept`) and the acceptance (`handle_opponent_may_choice_inner`).
+pub(crate) fn bind_accepting_seat(ability: &mut ResolvedAbility, seat: PlayerId) {
+    ability.set_scoped_player_recursive(seat);
+    ability.context.accepting_player = Some(seat);
+    // CR 701.21a + CR 608.2c: only a permanent's controller can sacrifice it, so an
+    // accepted "any player/opponent may sacrifice a creature" instruction is performed
+    // by the accepting player. Bind the head's pool to them: the parsed scope
+    // (`Opponent` for Desecration Demon, none for Argothian Wurm) names the offer,
+    // not the sacrificer.
+    if let Effect::Sacrifice {
+        target: TargetFilter::Typed(typed),
+        ..
+    } = &mut ability.effect
+    {
+        typed.controller = Some(ControllerRef::ScopedPlayer);
+    }
+}
+
+/// CR 701.21a + CR 701.26a + CR 608.2d: the permanents a seat could choose for an
+/// accepted any-player sacrifice or single-target tap, and how many it must choose.
+pub(crate) struct SeatSelectionPool {
+    pub(crate) legal: Vec<ObjectId>,
+    pub(crate) required: usize,
+}
+
+/// CR 701.21a + CR 701.26a + CR 608.2d: the selection pool of an any-player
+/// `Sacrifice` or single-target `SetTapState` Tap head, for `seat`, read from the
+/// seat-bound ability (`bind_accepting_seat`). Sacrifice: battlefield permanents the
+/// seat controls that it can sacrifice (CR 701.21a). Tap: untapped ones only
+/// (CR 701.26a). The printed count is exact, so a short pool is empty (CR 608.2d).
+/// `None` for every other effect. It reads neither `optional` nor `optional_for`, so
+/// the offer and the acceptance read one pool.
+pub(crate) fn opponent_may_selection_pool(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    seat: PlayerId,
+) -> Option<SeatSelectionPool> {
+    let (target, require_untapped) = match &ability.effect {
+        Effect::Sacrifice { target, .. } => (target, false),
+        Effect::SetTapState {
+            target,
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+        } => (target, true),
+        _ => return None,
+    };
+    // CR 701.21a: the sacrifice pool is read in the ability's own frame, exactly as
+    // the Sacrifice resolver reads it. CR 608.2c + CR 701.26a: "they" is the bound
+    // seat, read from the ability, so the fan-out and the acceptance read the same
+    // pool.
+    let filter_ctx = if require_untapped {
+        filter::FilterContext::from_ability_with_controller(ability, seat)
+    } else {
+        filter::FilterContext::from_ability(ability)
+    };
+    let legal: Vec<ObjectId> = state
+        .objects
+        .iter()
+        .filter(|(_, obj)| {
+            obj.zone == Zone::Battlefield
+                && obj.controller == seat
+                && (!require_untapped || !obj.tapped)
+                && filter::matches_target_filter(state, obj.id, target, &filter_ctx)
+                // CR 701.21a + CR 609.3: an option to sacrifice is one a player
+                // can't take when the sacrifice can't happen (Sigarda, Host of
+                // Herons).
+                && (require_untapped
+                    || sacrifice::can_sacrifice_for_ability(state, ability, obj.id, seat))
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    // CR 608.2d: the printed count is exact ("sacrifice two creatures"), so a
+    // smaller pool can't perform the option.
+    let required = match &ability.effect {
+        Effect::Sacrifice { count, .. } => {
+            let (count, _) = count.peel_up_to();
+            crate::game::quantity::resolve_quantity_with_targets(state, count, ability).max(1)
+                as usize
+        }
+        _ => 1,
+    };
+    Some(SeatSelectionPool {
+        legal: if legal.len() < required {
+            Vec::new()
+        } else {
+            legal
+        },
+        required,
+    })
+}
+
+/// CR 608.2d + CR 701.68b + CR 701.21a + CR 701.26a: the seat-bound options a seat
+/// can't take — an exact counted graveyard exile it lacks the cards for, a blight
+/// with no creature that can take the counters, or a sacrifice/tap with no legal
+/// pool. The only per-seat feasibility judgment, asked when a seat is offered
+/// (through `next_offerable_seat`) and again when it accepts. `ability` is the
+/// unbound offer; the seat is bound on a clone.
+pub(crate) fn offered_seat_cannot_accept(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    seat: PlayerId,
+) -> bool {
+    let mut bound = ability.clone();
+    bind_accepting_seat(&mut bound, seat);
+    change_zone::exact_scoped_graveyard_exile_is_infeasible(state, &bound) == Some(true)
+        || blight::optional_blight_is_infeasible(state, &bound)
+        || opponent_may_selection_pool(state, &bound, seat)
+            .is_some_and(|pool| pool.legal.is_empty())
+}
+
+/// CR 608.2d + CR 701.68b + CR 101.4: the next seat to offer, judged when it is
+/// offered. CR 104.3a + CR 800.4a: a player can leave the game while another seat
+/// decides, and their objects leave with them, so a seat judged at the fan-out is
+/// judged again at its own turn.
+///
+/// CR 102.1 + CR 800.4a: a seat that has left the game is not a player, so it is
+/// never offered.
+///
+/// Returns the first seat in `seats` (APNAP order, as queued) that can be offered,
+/// and the seats after it, unjudged, since each is judged when its own turn comes.
+/// `None` means no seat is left to offer.
+pub(crate) fn next_offerable_seat(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    seats: &[PlayerId],
+) -> Option<(PlayerId, Vec<PlayerId>)> {
+    seats
+        .iter()
+        .position(|&seat| {
+            crate::game::players::is_alive(state, seat)
+                && !offered_seat_cannot_accept(state, ability, seat)
+        })
+        .map(|index| (seats[index], seats[index + 1..].to_vec()))
+}
+
+/// CR 608.2d + CR 101.4: "If no one does" — no seat took the option. The branch an
+/// any-player optional runs when every seat declined or none could be offered: the
+/// `OptionalEffectPerformed` sub's else branch, or a `Not(OptionalEffectPerformed)`
+/// sub's own reward. Shared by the fan-out (no seat offerable) and the handler
+/// (`resolve_all_declined_opponent_may`).
+pub(crate) fn declined_by_every_seat_branch(ability: &ResolvedAbility) -> Option<ResolvedAbility> {
+    let sub = ability.sub_ability.as_ref()?;
+    if sub
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_optional_effect_performed)
+    {
+        // CR 608.2d: "If a player does, X. If no one does, Y." — no one
+        // performed the optional action, so fire Y (the else branch of the
+        // OptionalEffectPerformed sub).
+        let mut else_resolved = sub.else_ability.as_deref()?.clone();
+        // CR 608.2c: the else branch resolves as the continuation of the
+        // stashed optional ability. Preserve a captured event-context
+        // target (such as the affected player of a replaced Draw) after
+        // the post-replacement drain that supplied it has retired.
+        if else_resolved.targets.is_empty() && !ability.targets.is_empty() {
+            else_resolved.mirror_targets_from(ability);
+        }
+        else_resolved.context = ability.context.clone();
+        else_resolved.set_replacement_applied_recursive(ability.replacement_applied.clone());
+        Some(else_resolved)
+    } else if sub
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_not_optional_effect_performed)
+    {
+        // CR 608.2d + CR 101.4: standalone "If no one does, Y" reward on
+        // an "any opponent/player may" head (Browbeat, Book Burning). The
+        // reward is carried directly on the `Not(OptionalEffectPerformed)`
+        // gated sub. No one performed the optional action, so fire the
+        // sub's effect now. (On accept, the head's own chain resolution
+        // evaluates this same negated condition as false and skips it.)
+        let mut sub_resolved = sub.as_ref().clone();
+        sub_resolved.context = ability.context.clone();
+        Some(sub_resolved)
+    } else {
+        None
+    }
+}
+
 /// CR 608.2d: how a caller supplies the feasibility fact [`upfront_optional_gate`]'s LAST
 /// conjunct needs.
 ///
@@ -23187,35 +23370,44 @@ fn resolve_chain_body(
             let description = ability.description.clone();
             // apnap_order returns ALL living players active-player-first
             // (CR 101.4), so the controller lands in its correct slot.
-            let mut opponent_order: Vec<PlayerId> = crate::game::players::apnap_order(state)
+            let opponent_order: Vec<PlayerId> = crate::game::players::apnap_order(state)
                 .into_iter()
                 .filter(|p| Some(*p) != excluded)
                 .collect();
-            if let Some(first) = opponent_order.first().copied() {
-                let remaining = opponent_order.split_off(1);
-                let hydrated_ability = ability_with_event_context_targets(state, ability);
-                let decision_subject_id =
-                    resolved_optional_decision_subject_id(state, &hydrated_ability);
-                state
-                    .install_direct_choice_frame(
-                        ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                            ability: Box::new(hydrated_ability),
-                            trigger_event: state.current_trigger_event.clone(),
-                            trigger_events: state.current_trigger_events.clone(),
-                            trigger_match_count: state.current_trigger_match_count,
-                            return_result_occurrence: state.active_return_result_occurrence,
-                        }),
-                        WaitingFor::OpponentMayChoice {
-                            player: first,
-                            decision_subject_id,
-                            source_id: ability.source_id,
-                            description,
-                            remaining,
-                        },
-                    )
-                    .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
-                progress = ResolutionProgress::Waiting;
-            }
+            let hydrated_ability = ability_with_event_context_targets(state, ability);
+            // CR 608.2d + CR 701.68b + CR 101.4: each seat is bound and judged when it
+            // is offered, in APNAP order; an unable seat is never asked.
+            let Some((first, remaining)) =
+                next_offerable_seat(state, &hydrated_ability, &opponent_order)
+            else {
+                // CR 608.2d + CR 101.4: no seat can take the option, so no one does —
+                // the existing all-declined completion.
+                return match declined_by_every_seat_branch(&hydrated_ability) {
+                    Some(branch) => resolve_ability_chain_step(state, &branch, events, depth + 1),
+                    None => Ok(progress),
+                };
+            };
+            let decision_subject_id =
+                resolved_optional_decision_subject_id(state, &hydrated_ability);
+            state
+                .install_direct_choice_frame(
+                    ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                        ability: Box::new(hydrated_ability),
+                        trigger_event: state.current_trigger_event.clone(),
+                        trigger_events: state.current_trigger_events.clone(),
+                        trigger_match_count: state.current_trigger_match_count,
+                        return_result_occurrence: state.active_return_result_occurrence,
+                    }),
+                    WaitingFor::OpponentMayChoice {
+                        player: first,
+                        decision_subject_id,
+                        source_id: ability.source_id,
+                        description,
+                        remaining,
+                    },
+                )
+                .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+            progress = ResolutionProgress::Waiting;
             return Ok(progress);
         }
     }
