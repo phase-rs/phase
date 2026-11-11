@@ -80114,6 +80114,55 @@ fn bare_choose_compound_child_inherits_non_controller_subject_timing() {
     }
 }
 
+/// SHAPE: a compound continuation that reads the primary instruction's object ("...
+/// and choose a creature you control other than it") is parsed in the splitter's
+/// anaphoric arm, whose context is rebuilt blank. The chooser of the predicate it
+/// continues still owns its bare choice there: a non-controller subject, an
+/// accepting-player scope and a per-player scope each keep the `Stack` timing the
+/// choice lowered to before the producer existed (pinned as the unchanged
+/// baseline, not as a rules claim: the other player should choose, which
+/// `TargetOnly` cannot express). The controller row is the matched control and
+/// declares `Resolution` (CR 115.10a + CR 608.2d). Synthetic Oracle: no printed card
+/// continues a compound with "choose a <object> you control other than it"; the
+/// nearest printed third-party chooser is Wormfang Crab ("an opponent chooses a
+/// permanent you control other than this creature and exiles it").
+#[test]
+fn bare_choose_anaphoric_compound_continuation_keeps_the_enclosing_chooser() {
+    let continuation_timing = |text: &str| {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let continuation = def
+            .sub_ability
+            .as_deref()
+            .expect("the compound continuation");
+        assert!(
+            matches!(continuation.effect.as_ref(), Effect::TargetOnly { .. }),
+            "{text}: the anaphoric continuation must reach the bare-choice producer: {def:#?}"
+        );
+        continuation.target_choice_timing
+    };
+    let mut mismatches = Vec::new();
+    for text in [
+        "Your opponents exile target creature and choose a creature you control other than it.",
+        "Any opponent may tap target creature and choose a creature you control other than it.",
+        "Each player may tap target creature and choose a creature you control other than it.",
+    ] {
+        let observed = continuation_timing(text);
+        if observed != TargetChoiceTiming::Stack {
+            mismatches.push(format!("{text}: {observed:?}"));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "the enclosing chooser owns the continuation's choice: {mismatches:#?}"
+    );
+    let control = "Exile target creature and choose a creature you control other than it.";
+    assert_eq!(
+        continuation_timing(control),
+        TargetChoiceTiming::Resolution,
+        "{control}"
+    );
+}
+
 /// SHAPE: a non-controller subject's object-and-player choice keeps the timing it
 /// had before the bare-choice change: `Resolution`, declared for every subject.
 /// TargetOnly's resolution chooser only prompts the controller, an existing
@@ -80317,13 +80366,20 @@ fn last_choice_timings(text: &str) -> (Option<TargetChoiceTiming>, Vec<TargetCho
 /// SHAPE: a chunk that names no subject of its own continues the latest subject its
 /// sentence named (CR 608.2c), who makes the choice while the effect is applied
 /// (CR 608.2d), even when the chain carries no player reference for that subject:
-/// a chosen opponent ("An opponent draws a card, then chooses ...") or a plural
+/// a chosen opponent ("An opponent draws a card, then chooses ..."), a plural
 /// subject whose verb does not conjugate ("Your opponents draw a card, then choose
-/// ..."). No Resolution is declared, so each keeps the `Stack` timing it lowered to
-/// before the producer existed. That value is pinned as the unchanged baseline, not
-/// as a rules claim: the opponent should choose, which `TargetOnly` cannot express
-/// (the existing third-party chooser limitation). The matched controls re-assert
-/// the controller with "you" or start a new sentence, and keep `Resolution`.
+/// ..."), an earlier chunk's peeled accepting-player or player scope ("Any
+/// opponent may draw a card, then choose ..."; "Each opponent may ..."), a
+/// subject before a modal "may" or a "do(es) the same" back-reference
+/// (both chunks a special-case branch of the chain loop can consume before the
+/// subject is read), and a conjugated continuation whose subject resolves to no
+/// reference at all ("The monarch draws a card, then chooses ..."; "you" never
+/// takes the conjugated verb, CR 109.5). No Resolution is declared, so each keeps
+/// the `Stack` timing it lowered to before the producer existed. That value is
+/// pinned as the unchanged baseline, not as a rules claim: the other player should
+/// choose, which `TargetOnly` cannot express (the existing third-party chooser
+/// limitation). The matched controls name the controller ("you", "you may") or
+/// start a new sentence, and keep `Resolution`.
 /// Synthetic Oracle: no printed card continues a third-party subject with
 /// "choose(s) a <object> you control"; the nearest printed card for the
 /// third-party chooser is Wormfang Crab ("an opponent chooses a permanent you
@@ -80335,6 +80391,12 @@ fn bare_choose_continuing_an_uncarried_sentence_subject_keeps_stack_timing() {
         "An opponent draws a card, then chooses a creature you control.",
         "An opponent loses 2 life, then chooses a creature you control.",
         "Your opponents draw a card, then choose a creature you control.",
+        "An opponent does the same, then chooses a creature you control.",
+        "Your opponents do the same, then choose a creature you control.",
+        "Your opponents may draw a card, then choose a creature you control.",
+        "Any opponent may draw a card, then choose a creature you control.",
+        "Each opponent may draw a card, then choose a creature you control.",
+        "The monarch draws a card, then chooses a creature you control.",
     ] {
         let observed = last_choice_timings(text);
         if observed != (None, vec![TargetChoiceTiming::Stack]) {
@@ -80350,6 +80412,8 @@ fn bare_choose_continuing_an_uncarried_sentence_subject_keeps_stack_timing() {
     for text in [
         "An opponent draws a card. Choose a creature you control.",
         "Your opponents draw a card, then you choose a creature you control.",
+        "You may draw a card, then choose a creature you control.",
+        "An opponent draws a card. You may draw a card, then choose a creature you control.",
     ] {
         assert_eq!(
             last_choice_timings(text),

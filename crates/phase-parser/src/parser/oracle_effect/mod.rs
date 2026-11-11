@@ -201,7 +201,9 @@ pub(crate) use crate::parser::oracle_ir::context::{
     HeadWindowProbe, ParseContext, PriorZoneChoicePartition, SpellAnaphorBinding, TokenPtFollowup,
     TriggerConditionScope,
 };
-use crate::parser::oracle_ir::context::{BodyScope, PendingTrackedSet, TrackedSetProducer};
+use crate::parser::oracle_ir::context::{
+    BodyScope, ClauseChooser, PendingTrackedSet, TrackedSetProducer,
+};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseId,
     ClauseIr, ClauseIrBuilder, ClausePlacement, DieResultBranchIr, EffectChainIr,
@@ -23210,9 +23212,8 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // CR 608.2d + CR 115.10a: the continuation is part of the same predicate, so a
     // non-controller subject or peeled player scope owns its bare choices too.
     // The non-anaphoric arm already inherits all three through the cloned
-    // context; this keeps the anaphoric arm's blank context from dropping them.
-    // No anaphoric bare-choose phrase parses today, so only the non-anaphoric arm
-    // is exercised by a test.
+    // context; this keeps the anaphoric arm's blank context from dropping them
+    // ("... and choose a creature you control other than it").
     continuation_ctx.clause_subject_chooser = ctx.clause_subject_chooser.clone();
     continuation_ctx.clause_player_scope = ctx.clause_player_scope.clone();
     continuation_ctx.clause_opponent_may_scope = ctx.clause_opponent_may_scope;
@@ -32402,12 +32403,53 @@ impl CarriedPlayerSubject {
     }
 }
 
-/// CR 608.2d + CR 115.10a: the chooser a player subject records in
+/// CR 608.2d + CR 115.10a: the chooser a subject records in
 /// `ParseContext::clause_subject_chooser`. `None` for the controller (the
 /// resolution chooser already prompts them) and for `SelfRef` (a source object
 /// is never a player chooser).
-fn non_controller_subject_chooser(subject: &TargetFilter) -> Option<TargetFilter> {
-    (!matches!(subject, TargetFilter::Controller | TargetFilter::SelfRef)).then(|| subject.clone())
+fn non_controller_subject_chooser(subject: &TargetFilter) -> Option<ClauseChooser> {
+    (!matches!(subject, TargetFilter::Controller | TargetFilter::SelfRef))
+        .then(|| ClauseChooser::Subject(subject.clone()))
+}
+
+/// CR 608.2c + CR 608.2d: the chooser a chunk that names no subject of its own
+/// continues, when that chooser is not proven to be the controller. Reads the
+/// latest chunk of the current sentence among `earlier` (the chunks before it)
+/// that names a subject or peels a player scope ("an opponent draws a card, then
+/// chooses ..."; "your opponents may draw a card, then choose ..."; "an opponent
+/// does the same, then chooses ..."), including a subject `carried_player` keeps
+/// no reference for. It is a pure function of the
+/// chunks' own text, so a chunk that an earlier special-case branch of the chain
+/// loop consumed still counts. `None` when that chunk names the controller ("you
+/// ...", "you may ...") or the source, or when no earlier chunk of the sentence
+/// names one; an object subject is returned too, which keeps the bare choice at
+/// the timing it had before the bare-choice producer existed. Probes a throwaway
+/// context because subject parsing may record target state on it.
+fn sentence_chooser_before(earlier: &[ClauseChunk], ctx: &ParseContext) -> Option<ClauseChooser> {
+    earlier
+        .iter()
+        .rev()
+        .take_while(|chunk| chunk.boundary_after != Some(ClauseBoundary::Sentence))
+        .find_map(|chunk| {
+            let (is_optional, accepting_players, player_scope, rest) =
+                strip_optional_effect_prefix(strip_leading_sequence_connector(&chunk.text).trim());
+            if let Some(scope) = accepting_players {
+                return Some(Some(ClauseChooser::AcceptingPlayers(scope)));
+            }
+            if let Some(scope) = player_scope {
+                return Some(Some(ClauseChooser::Scope(scope)));
+            }
+            if is_optional {
+                // A bare "you may" names the controller.
+                return Some(None);
+            }
+            subject::parse_leading_subject_application(&rest, &mut ctx.clone_throwaway())
+                .or_else(|| {
+                    subject::parse_subject_before_auxiliary(&rest, &mut ctx.clone_throwaway())
+                })
+                .map(|application| non_controller_subject_chooser(&application.affected))
+        })
+        .flatten()
 }
 
 /// CR 608.2c: true when `head`'s leading subject establishes a
@@ -45923,16 +45965,6 @@ fn parse_effect_chain_ir_body(
     // The same slot holds the anchor above (`CarryLifetime::Chain`), so a declared
     // player is carried as one reference.
     let mut carried_player: Option<CarriedPlayerSubject> = None;
-    // CR 608.2c + CR 608.2d: the latest subject, other than the controller or the
-    // source, that a chunk of this sentence named. A later chunk of the sentence
-    // that names no subject of its own continues that subject's instruction ("an
-    // opponent draws a card, then chooses ..."; "your opponents draw a card, then
-    // choose ..."), including a subject `carried_player` keeps no reference for, so
-    // its bare choices are not proven to be the controller's. An object subject is
-    // kept too: the bare choice then keeps the timing it had before the bare-choice
-    // producer existed. A chunk naming the controller ends it, and it never crosses
-    // a sentence boundary.
-    let mut sentence_subject_chooser: Option<TargetFilter> = None;
     let mut declarations: PlayerDeclarations = Vec::new();
     // `chunk_ctx` is rebuilt per chunk, so the group counter threads through this local.
     let mut chain_declared_groups = ctx.next_declared_player_group;
@@ -48997,24 +49029,26 @@ fn parse_effect_chain_ir_body(
         // CR 608.2c + CR 608.2d + CR 115.10a: a conjugated continuation's elided
         // subject is the carried player, who announces this chunk's choices while
         // the effect is applied. A chunk naming no subject of its own otherwise
-        // continues the sentence's latest non-controller subject, carried or not.
-        // Record that subject as the clause's subject chooser so the
+        // continues the sentence's latest non-controller subject or peeled scope,
+        // carried or not; a conjugated continuation with neither still has a
+        // third-person subject, never the controller (CR 109.5).
+        // Record that chooser as the clause's subject chooser so the
         // controller-only bare-choice producer does not declare Resolution for it,
         // exactly as for a printed non-controller subject. `chunk_ctx` is rebuilt
         // per chunk, so the seed ends with this chunk; a nested printed subject
         // overrides it for its own predicate and restores it.
-        let continued_sentence_subject = sentence_subject_chooser
-            .clone()
-            .filter(|_| leading_subject_application.is_none() && !chunk_declares_caster_subject);
+        let continued_chooser = if leading_subject_application.is_none()
+            && !chunk_declares_caster_subject
+        {
+            sentence_chooser_before(&chunks[..chunk_idx], ctx)
+                .or_else(|| continues_elided_subject.then_some(ClauseChooser::ElidedThirdPerson))
+        } else {
+            None
+        };
         ctx.clause_subject_chooser = inherited_player_subject
             .as_ref()
             .and_then(|carried| non_controller_subject_chooser(carried.reference()))
-            .or(continued_sentence_subject);
-        if chunk.boundary_after == Some(ClauseBoundary::Sentence) || chunk_declares_caster_subject {
-            sentence_subject_chooser = None;
-        } else if let Some(application) = leading_subject_application.as_ref() {
-            sentence_subject_chooser = non_controller_subject_chooser(&application.affected);
-        }
+            .or(continued_chooser);
 
         let rejected_search_guard =
             if player_scope.is_none() && opponent_may_scope.is_none() && repeat_for.is_none() {

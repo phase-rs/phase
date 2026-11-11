@@ -4579,6 +4579,26 @@ pub(super) fn parse_leading_subject_application(
     parse_subject_application(&subject_text, ctx)
 }
 
+/// CR 608.2c: the subject of a clause whose predicate opens with an auxiliary
+/// that `extract_subject_text`'s predicate finder does not list: a modal "may"
+/// ("your opponents may draw a card") or the "do(es) the same" back-reference
+/// ("an opponent does the same"). Splits at the first such auxiliary on a word
+/// boundary and parses what precedes it as the subject.
+pub(super) fn parse_subject_before_auxiliary(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<SubjectApplication> {
+    let lower = text.to_lowercase();
+    let (subject_lower, _) = nom_primitives::scan_split_at_phrase(&lower, |i| {
+        alt((tag("may "), tag("does the same"), tag("do the same"))).parse(i)
+    })?;
+    let subject_text = text[..subject_lower.len()].trim();
+    if subject_text.is_empty() {
+        return None;
+    }
+    parse_subject_application(subject_text, ctx)
+}
+
 /// CR 608.2c + CR 701.19c: Resolve the subject of a DAMAGE-form
 /// "[noun] dealt damage this way can't be regenerated [this turn]" clause.
 ///

@@ -29,6 +29,30 @@ use crate::types::zones::Zone;
 /// `Unarmed` (the default, and every standalone parse) records nothing. An
 /// `Armed` probe the parse never settled — a recognizer that returned before
 /// reading its head — means "no head window": it states nothing to distribute.
+/// CR 608.2d + CR 115.10a: who makes the bare choices of the clause being
+/// lowered, when that is not proven to be the ability's controller. `TargetOnly`'s
+/// resolution-time chooser prompts only the controller, so a bare choice owned by
+/// any of these keeps the timing it had before the bare-choice producer existed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClauseChooser {
+    /// A subject other than the controller or the source: printed on the
+    /// predicate ("an opponent chooses ..."), carried by a conjugated
+    /// continuation, or named by an earlier chunk of the same sentence (CR 608.2c).
+    Subject(TargetFilter),
+    /// A player scope peeled from an earlier chunk of the same sentence that this
+    /// subjectless chunk continues ("your opponents may draw a card, then choose
+    /// ...").
+    Scope(PlayerFilter),
+    /// An accepting-player scope peeled from an earlier chunk of the same sentence
+    /// ("any opponent may ..., then choose ...").
+    AcceptingPlayers(OpponentMayScope),
+    /// A conjugated continuation ("..., then chooses ...") whose third-person
+    /// subject the chain resolves to no reference ("an opponent does the same,
+    /// then chooses ..."). "You" refers to the controller (CR 109.5) and never
+    /// takes the conjugated verb, so the chooser is some other player.
+    ElidedThirdPerson,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum HeadWindowProbe {
     #[default]
@@ -607,20 +631,21 @@ pub struct ParseContext {
     /// First-accept-wins optional scope peeled from this chunk ("any ... may").
     /// Like `clause_player_scope`, it prevents a controller-only bare-choice prompt.
     pub clause_opponent_may_scope: Option<OpponentMayScope>,
-    /// CR 608.2d + CR 115.10a: The non-controller subject ("an opponent",
-    /// "target player") whose predicate is being lowered. `TargetOnly`'s
-    /// resolution-time chooser prompts only the ability's controller, so a bare
-    /// choice owned by this subject cannot declare resolution timing. Set by the
-    /// subject-predicate lowering around a printed subject's predicate, and seeded
-    /// by the chain chunk loop for a chunk that names no subject of its own: from
-    /// the carried player subject that a conjugated continuation inherits, or else
-    /// from the latest subject other than the controller or the source that an
-    /// earlier chunk of the same sentence named (CR 608.2c). Inherited by the
-    /// compound continuations that predicate splits into; a continuation with a
-    /// controller subject of its own clears it for that conjunct. `None` outside
-    /// such a predicate. Set and consumed within a single chunk parse; never
-    /// serialized.
-    pub clause_subject_chooser: Option<TargetFilter>,
+    /// CR 608.2d + CR 115.10a: The chooser, other than the ability's controller,
+    /// that owns the bare choices of the predicate being lowered (`ClauseChooser`).
+    /// `TargetOnly`'s resolution-time chooser prompts only the ability's
+    /// controller, so a bare choice owned by it cannot declare resolution timing.
+    /// Set by the subject-predicate lowering around a printed subject's
+    /// predicate, and seeded by the chain chunk loop for a chunk that names no
+    /// subject of its own: from the carried player subject that a conjugated
+    /// continuation inherits; else from the latest subject or peeled scope, other
+    /// than the controller or the source, that an earlier chunk of the same
+    /// sentence names; else, for a conjugated continuation, as an unresolved third
+    /// person (CR 608.2c). Inherited by the compound continuations that predicate
+    /// splits into; a continuation with a controller subject of its own clears it
+    /// for that conjunct. `None` outside such a predicate. Set and consumed within
+    /// a single chunk parse; never serialized.
+    pub clause_subject_chooser: Option<ClauseChooser>,
     /// CR 608.2c + CR 701.16a: Transient per-chunk `repeat_for` lifted from a
     /// fieldless-effect subject-predicate that carries a "for each <filter> …
     /// this way" SUFFIX count (Declaration in Stone's "investigate for each
