@@ -3717,6 +3717,7 @@ fn validate_single_derived_role(
                 state,
                 ability,
                 &state.current_trigger_events,
+                ability.controller,
             );
             Some(
                 (0..ability.targets.len())
@@ -4575,6 +4576,7 @@ fn validate_targets_in_chain_inner(
                             state,
                             &validated,
                             &state.current_trigger_events,
+                            validated.controller,
                         )
                         .contains(companion)
                             && target_is_current_at(&validated, 0, state),
@@ -5085,6 +5087,7 @@ fn companion_target_player_legal_targets(
     state: &GameState,
     ability: &ResolvedAbility,
     trigger_events: &[crate::types::events::GameEvent],
+    controller: PlayerId,
 ) -> Vec<TargetRef> {
     // CR 115.1 + CR 118.12a: a payer declared as a target inside the unless clause
     // ("unless target opponent/target player pays") drives this slot directly — the
@@ -5097,7 +5100,7 @@ fn companion_target_player_legal_targets(
         .map(|m| &m.payer)
         .filter(|&payer| payer_is_declared_target(payer))
     {
-        return targeting::find_legal_targets(state, payer, ability.controller, ability.source_id);
+        return targeting::find_legal_targets(state, payer, controller, ability.source_id);
     }
     ability
         .trigger_source
@@ -5113,12 +5116,7 @@ fn companion_target_player_legal_targets(
             } else {
                 TargetFilter::Player
             };
-            targeting::find_legal_targets(
-                state,
-                &slot_filter,
-                ability.controller,
-                ability.source_id,
-            )
+            targeting::find_legal_targets(state, &slot_filter, controller, ability.source_id)
         })
 }
 
@@ -5138,9 +5136,10 @@ pub(crate) fn companion_target_player_retarget_options(
     state: &GameState,
     ability: &ResolvedAbility,
     trigger_events: &[crate::types::events::GameEvent],
+    controller: PlayerId,
 ) -> Option<Vec<TargetRef>> {
     ability_needs_companion_target_player_slot(ability)
-        .then(|| companion_target_player_legal_targets(state, ability, trigger_events))
+        .then(|| companion_target_player_legal_targets(state, ability, trigger_events, controller))
 }
 
 /// CR 601.2c + CR 115.1: Collect the target slots contributed by `ability` (and
@@ -5634,6 +5633,7 @@ fn collect_target_slots_inner(
                 state,
                 ability,
                 &state.pending_trigger_event_batch,
+                ability.controller,
             );
             if player_targets.is_empty() && !ability.optional_targeting {
                 return Err(no_legal_target_slots());
@@ -7278,14 +7278,23 @@ fn attach_object_binding(
 /// targeted/mass player shapes; the extra `Typed` arm admits the unscoped
 /// empty-type player filter (Teferi's Reproach's chosen opponent), which the
 /// player axis resolves but `is_player_scope` leaves to object enumeration.
-/// Composite `Or`/`And` filters are player-selecting when any leg is.
-fn filter_selects_players(filter: &TargetFilter) -> bool {
+/// A composite `Or` is player-selecting when any leg is, but an object leg
+/// that only reads a target player as its controller anchor is not a selected
+/// player role; an `And` requires every leg, matching the filter evaluator's
+/// conjunction semantics.
+pub(crate) fn filter_selects_players(filter: &TargetFilter) -> bool {
     match filter {
-        // A mixed population ("target player or creature") still has a player
-        // leg, so an explicitly selected player must not be discarded.
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(filter_selects_players)
-        }
+        // A mixed OR population ("target player or creature") still has a
+        // player leg, so an explicitly selected player must not be discarded.
+        // When an object leg only READS a target player as its controller
+        // anchor, the companion slot is announced FIRST; `collect_player_targets`
+        // drops that leading anchor and keeps a player declared for the primary
+        // mixed slot.
+        TargetFilter::Or { filters } => filters.iter().any(filter_selects_players),
+        // An AND population requires EVERY leg to hold, matching
+        // `filter::matches_target_filter`; a mixed player/object conjunction
+        // selects neither a player nor an object population.
+        TargetFilter::And { filters } => filters.iter().all(filter_selects_players),
         TargetFilter::Player
         | TargetFilter::Controller
         | TargetFilter::PlayerMatching { .. }
@@ -7350,6 +7359,22 @@ fn filter_selects_players(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 109.4 + CR 115.1: True when a composite filter contains an object leg
+/// that only reads a target player as its controller anchor. Such an ability
+/// announces the companion player slot BEFORE the primary mixed slot, so the
+/// leading player target is the anchor and must be dropped from the affected
+/// player set.
+fn filter_has_object_player_anchor(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters.iter().any(|leg| {
+            crate::types::ability::filter_references_target_player(leg)
+                && !filter_selects_players(leg)
+        }),
+        TargetFilter::Not { filter } => filter_has_object_player_anchor(filter),
+        _ => false,
+    }
+}
+
 /// Resolve a player-scoped `TargetFilter` to the concrete set of player ids it
 /// affects, for an effect whose targets live on `ability`.
 ///
@@ -7402,7 +7427,7 @@ pub(crate) fn collect_player_targets(
     // well as their creatures). The player-anaphor filters above are exempt
     // because their arms already resolved the exact slot before this point.
     if filter_selects_players(target) {
-        let from_targets: Vec<PlayerId> = ability
+        let mut from_targets: Vec<PlayerId> = ability
             .targets
             .iter()
             .filter_map(|t| match t {
@@ -7410,6 +7435,15 @@ pub(crate) fn collect_player_targets(
                 TargetRef::Object(_) => None,
             })
             .collect();
+        // CR 115.1: the companion player slot is announced before the mixed
+        // primary slot. Drop that leading anchor; a player declared for the
+        // primary mixed slot remains as the selected player role.
+        if filter_has_object_player_anchor(target)
+            && ability_needs_companion_target_player_slot(ability)
+            && !from_targets.is_empty()
+        {
+            from_targets.remove(0);
+        }
         if !from_targets.is_empty() {
             return from_targets;
         }
@@ -8779,6 +8813,7 @@ fn legal_targets_for_selected_slot(
             state,
             declaring_node,
             &state.pending_trigger_event_batch,
+            declaring_node.controller,
         );
     }
     // Each branch computes the raw legal set into `legal`; the per-instance
@@ -15221,8 +15256,12 @@ mod tests {
             mana_multi_role(&single.effect).is_none(),
             "reach guard: this is the SINGLE-role path"
         );
-        let companion_legal =
-            companion_target_player_legal_targets(&state, &single, &state.current_trigger_events);
+        let companion_legal = companion_target_player_legal_targets(
+            &state,
+            &single,
+            &state.current_trigger_events,
+            single.controller,
+        );
         assert!(
             companion_legal.contains(&TargetRef::Player(PlayerId(0))),
             "reach guard: P0 must be a legal companion payer, got {companion_legal:?}"
@@ -16640,6 +16679,7 @@ mod tests {
             &state,
             &ability,
             &state.pending_trigger_event_batch,
+            ability.controller,
         );
         assert_eq!(
             targets.len(),
@@ -16739,6 +16779,59 @@ mod tests {
         assert_eq!(
             collect_player_targets(&state, &ability, &mixed),
             vec![PlayerId(1)]
+        );
+
+        // A mixed AND cannot be satisfied by a player (it must also be a
+        // creature), so the explicit player target is not a valid selection.
+        let mixed_and = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        };
+        assert!(
+            collect_player_targets(&state, &ability, &mixed_and).is_empty(),
+            "a mixed And does not select a player population"
+        );
+
+        // In a mixed Or, a player named only by the object leg's controller
+        // anchor is not the selected player role. The companion slot is first;
+        // only a player declared for the primary mixed slot survives.
+        let anchored_or = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            ],
+        };
+        let anchor_only = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: anchored_or.clone(),
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert!(
+            collect_player_targets(&state, &anchor_only, &anchored_or).is_empty(),
+            "a lone controller anchor must not be consumed as a selected player"
+        );
+        let anchor_and_selected = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: anchored_or.clone(),
+            },
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(0)),
+            ],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert_eq!(
+            collect_player_targets(&state, &anchor_and_selected, &anchored_or),
+            vec![PlayerId(0)],
+            "the primary mixed-slot player must survive the leading anchor"
         );
 
         // A property-only object filter ("cards owned by target player") is not

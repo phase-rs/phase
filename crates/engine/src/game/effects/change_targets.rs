@@ -686,6 +686,7 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
         state,
         active_ability,
         entry_trigger_events,
+        pool_controller,
     ) {
         return players;
     }

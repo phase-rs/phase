@@ -14604,6 +14604,47 @@ fn pump_run_feeds_tracked_set_grant(ability: &ResolvedAbility) -> bool {
     false
 }
 
+/// CR 115.1 + CR 702.26b: the population a phase instruction hands to its
+/// following rider. Explicit object targets are the SELECTED population — a
+/// selected Aura is included even though it phased out indirectly with its host,
+/// while an incidental attachment is not. A mass phase action declares no
+/// object target, so it falls back to the DIRECTLY phased creatures; indirect
+/// attachments ride with their host rather than becoming separate members.
+fn phase_result_objects(ability: &ResolvedAbility, effect_events: &[GameEvent]) -> Vec<ObjectId> {
+    match &ability.effect {
+        Effect::PhaseOut { .. } | Effect::PhaseIn { .. } => {
+            let explicit: Vec<ObjectId> = ability
+                .targets
+                .iter()
+                .filter_map(|target| match target {
+                    TargetRef::Object(id) => Some(*id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect();
+            if explicit.is_empty() {
+                effect_events
+                    .iter()
+                    .filter_map(|event| match event {
+                        GameEvent::PermanentPhasedOut {
+                            object_id,
+                            indirect: false,
+                        } => Some(*object_id),
+                        GameEvent::PermanentPhasedIn { object_id }
+                            if matches!(&ability.effect, Effect::PhaseIn { .. }) =>
+                        {
+                            Some(*object_id)
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                explicit
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn affected_objects_from_events(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -14623,11 +14664,11 @@ fn affected_objects_from_events(
                 }
             })
             .collect(),
-        // CR 702.26b: the permanents that actually changed phase status are the
-        // population a following "they"/"those creatures" instruction names.
-        // Indirect attachment phase-outs are excluded: they follow their host
-        // (CR 702.26g), and the effect's own population is the directly phased
-        // set. Phase-in events carry no indirect marker.
+        // CR 702.26b: the DIRECTLY phased permanents are the mass population
+        // a following "they"/"those creatures" instruction names. An
+        // attachment phased out indirectly with its host is not a separate
+        // member of that population; a selected attachment is carried
+        // separately by `phase_result_objects`' explicit-target branch.
         Effect::PhaseOut { .. } => events
             .iter()
             .filter_map(|event| match event {
@@ -24587,14 +24628,7 @@ fn resolve_chain_body(
     // declared object target. Publish the actual set so a following
     // `ParentTarget` rider ("until end of turn, they can't phase in") binds the
     // creatures that changed status rather than the player-only anchor.
-    let phase_affected_objects = if matches!(
-        &ability.effect,
-        Effect::PhaseOut { .. } | Effect::PhaseIn { .. }
-    ) {
-        affected_objects_from_events(state, ability, &ability.effect, effect_events)
-    } else {
-        Vec::new()
-    };
+    let phase_affected_objects = phase_result_objects(ability, effect_events);
     // CR 608.2c + CR 608.2h: a later instruction may read a public-to-hidden
     // move's last-known controller/owner metadata, without treating the hidden
     // object itself as an available parent referent.
@@ -25938,18 +25972,22 @@ fn resolve_chain_body(
         // CR 608.2c: only a population-shaped continuous rider needs the phase
         // action's resolved set forwarded. A direct `ParentTarget` instruction
         // (Oubliette's "Tap that creature as it phases in") is bound by the
-        // ordinary parent-target propagation and must keep that path.
+        // ordinary parent-target propagation and must keep that path. A
+        // `GenericEffect` target may itself be a `ParentTarget` context ref;
+        // an independently targeted rider (a real filter) is excluded.
         let phase_rider_reads_population = matches!(
             &sub.effect,
             Effect::GenericEffect {
                 static_abilities,
+                target,
                 ..
-            } if static_abilities.iter().any(|static_def| {
-                static_def
-                    .affected
-                    .as_ref()
-                    .is_some_and(filter_refs_parent_target)
-            })
+            } if target.as_ref().is_none_or(filter_refs_parent_target)
+                && static_abilities.iter().any(|static_def| {
+                    static_def
+                        .affected
+                        .as_ref()
+                        .is_some_and(filter_refs_parent_target)
+                })
         );
 
         // CR 608.2c + CR 609.3: A zone-choice partition already bound this sub's
@@ -26079,13 +26117,19 @@ fn resolve_chain_body(
                 attachment_candidates,
             );
             progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
-        } else if !phase_affected_objects.is_empty() && phase_rider_reads_population {
+        } else if matches!(
+            &ability.effect,
+            Effect::PhaseOut { .. } | Effect::PhaseIn { .. }
+        ) && phase_rider_reads_population
+        {
             // CR 608.2c: a phase instruction's resolved population is the
             // antecedent for a following `ParentTarget` continuous rider.
             // Forward the actual objects through the same result-binding
             // authority a forward-result producer uses; `effect.rs`'s
             // inherited-target path then binds one transient effect per phased
-            // permanent.
+            // permanent. Install the context even when the set is EMPTY: a
+            // completed zero-object phase action must bind no rider, not fall
+            // back to the player-only parent target.
             let mut sub_with_context = sub.as_ref().clone();
             apply_parent_chain_context(
                 &mut sub_with_context,
@@ -45371,6 +45415,52 @@ mod tests {
         assert!(
             state.objects.get(&noncreature).unwrap().tapped,
             "non-gained object must not be included in the tracked set"
+        );
+    }
+
+    /// CR 115.1 + CR 702.26b: a phase instruction hands its SELECTED objects
+    /// to a following rider. A selected attachment is kept even when it phased
+    /// out indirectly with its host (Barn); an incidental attachment is not
+    /// (Oubliette). A mass phase action uses only directly phased creatures.
+    #[test]
+    fn phase_result_objects_use_selected_targets_not_incidental_attachments() {
+        let host = ObjectId(1);
+        let aura = ObjectId(2);
+        let direct = GameEvent::PermanentPhasedOut {
+            object_id: host,
+            indirect: false,
+        };
+        let indirect = GameEvent::PermanentPhasedOut {
+            object_id: aura,
+            indirect: true,
+        };
+
+        let selected = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(host), TargetRef::Object(aura)],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        assert_eq!(
+            phase_result_objects(&selected, &[direct.clone(), indirect.clone()]),
+            vec![host, aura],
+            "the selected host and selected Aura must both forward"
+        );
+
+        let mass = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        assert_eq!(
+            phase_result_objects(&mass, &[direct, indirect]),
+            vec![host],
+            "a mass phase action must not add an incidental indirect attachment"
         );
     }
 

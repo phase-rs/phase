@@ -3,6 +3,8 @@
 //!
 //! https://github.com/phase-rs/phase/issues/10266
 
+use engine::game::game_object::PhaseOutCause;
+use engine::game::phasing::phase_out_object;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
@@ -200,6 +202,11 @@ fn teferi_timeless_voyager_restriction_binds_the_phased_creatures() {
         .id();
     let first_opponent_creature = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
     let second_opponent_creature = scenario.add_creature(P1, "Opponent Elf", 1, 1).id();
+    // A noncreature permanent controlled by the opponent: Teferi's creature
+    // filter never phases it out, so it is an unrestricted phase-in control.
+    let control_permanent = scenario
+        .add_artifact_from_oracle(P1, "Control Relic", "")
+        .id();
     let own_creature = scenario.add_creature(P0, "Own Bear", 2, 2).id();
 
     let mut runner = scenario.build();
@@ -222,9 +229,65 @@ fn teferi_timeless_voyager_restriction_binds_the_phased_creatures() {
         "the controller's own creature must remain phased in"
     );
 
-    // Advance to the opponent's untap step: the phased-out creatures would
-    // normally phase in here, but Teferi's active restriction holds them out.
-    runner.advance_to_phase(Phase::Untap);
+    // A control creature phased out WITHOUT Teferi's restriction must phase in
+    // at the same untap. This proves the untap actually ran, rather than the
+    // test stopping at an earlier combat prompt.
+    let mut setup_events = Vec::new();
+    phase_out_object(
+        runner.state_mut(),
+        control_permanent,
+        PhaseOutCause::Directly,
+        &mut setup_events,
+    );
+    assert!(runner.state().objects[&control_permanent].is_phased_out());
+
+    // Drive to the opponent's first upkeep after their untap. Declaring no
+    // attackers handles the combat prompt `advance_to_phase` can stop on.
+    let starting_turn = runner.state().turn_number;
+    for _ in 0..96 {
+        if runner.state().active_player == P1
+            && runner.state().turn_number > starting_turn
+            && runner.state().phase == Phase::Upkeep
+        {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority toward the opponent's untap");
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    })
+                    .expect("declare no attackers");
+            }
+            other => {
+                panic!("unexpected waiting_for while advancing to the opponent's untap: {other:?}")
+            }
+        }
+    }
+    assert_eq!(
+        runner.state().active_player,
+        P1,
+        "the loop must reach the opponent's turn"
+    );
+    assert!(
+        runner.state().turn_number > starting_turn,
+        "the opponent's untap must advance the turn number"
+    );
+    assert_eq!(
+        runner.state().phase,
+        Phase::Upkeep,
+        "the opponent's untap must have completed"
+    );
+    assert!(
+        runner.state().objects[&control_permanent].is_phased_in(),
+        "an unrestricted phased-out permanent must phase in at the opponent's untap"
+    );
     assert!(
         runner.state().objects[&first_opponent_creature].is_phased_out(),
         "the restriction must be bound to the first phased creature"
@@ -236,5 +299,36 @@ fn teferi_timeless_voyager_restriction_binds_the_phased_creatures() {
     assert!(
         runner.state().objects[&own_creature].is_phased_in(),
         "Teferi's restriction must not affect the controller's creature"
+    );
+}
+
+/// CR 608.2c: a completed phase action with an EMPTY affected population must
+/// forward an empty result to a following `ParentTarget` rider. It must not
+/// fall back to the player-only anchor and install a restriction on the player.
+#[test]
+fn teferi_empty_creature_population_binds_no_player_restriction() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let teferi = scenario
+        .add_planeswalker_from_oracle(
+            P0,
+            "Teferi, Timeless Voyager",
+            "Teferi",
+            8,
+            TEFERI_TIMELESS_VOYAGER,
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    runner.activate(teferi, 2).target_player(P1).resolve();
+
+    assert!(
+        !runner.state().players[P1.0 as usize].is_phased_out(),
+        "an empty creature population must not phase the player anchor"
+    );
+    assert!(
+        runner.state().transient_continuous_effects.is_empty(),
+        "an empty phase result must bind no CantPhaseIn rider, got {:?}",
+        runner.state().transient_continuous_effects
     );
 }

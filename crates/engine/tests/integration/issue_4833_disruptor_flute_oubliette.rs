@@ -93,6 +93,12 @@ fn oubliette_keeps_creature_phased_out_until_it_leaves() {
     scenario.at_phase(Phase::PreCombatMain);
 
     let creature = scenario.add_creature(P1, "Target Bear", 2, 2).id();
+    let attached_equipment = scenario
+        .add_creature(P1, "Test Blade", 0, 1)
+        .as_artifact()
+        .with_subtypes(vec!["Equipment"])
+        .from_oracle_text("Equipped creature gets +1/+1.\nEquip {0}")
+        .id();
     for _ in 0..10 {
         scenario.add_card_to_library_top(P0, "Plains");
         scenario.add_card_to_library_top(P1, "Plains");
@@ -111,6 +117,27 @@ fn oubliette_keeps_creature_phased_out_until_it_leaves() {
 
     let mut runner = scenario.build();
     runner.state_mut().debug_mode = true;
+    // Equip is sorcery-speed and the creature is P1's, so borrow P1's turn
+    // just for the production attach path, then restore P0's precombat main.
+    let saved_active = runner.state().active_player;
+    let saved_priority = runner.state().priority_player;
+    let saved_phase = runner.state().phase;
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner
+        .activate(attached_equipment, 0)
+        .target_object(creature)
+        .resolve();
+    runner.state_mut().active_player = saved_active;
+    runner.state_mut().priority_player = saved_priority;
+    runner.state_mut().phase = saved_phase;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+    assert_eq!(
+        runner.state().objects[&attached_equipment].attached_to,
+        Some(creature.into()),
+        "the equipment must be genuinely attached before Oubliette phases the host out"
+    );
     for _ in 0..3 {
         runner.state_mut().players[P0.0 as usize].mana_pool.add(
             engine::types::mana::ManaUnit::new(
@@ -153,6 +180,10 @@ fn oubliette_keeps_creature_phased_out_until_it_leaves() {
     assert!(
         runner.state().objects[&creature].is_phased_out(),
         "Oubliette must phase out the targeted creature on entry"
+    );
+    assert!(
+        runner.state().objects[&attached_equipment].is_phased_out(),
+        "reach guard: the attachment must phase out indirectly with its host"
     );
 
     runner.advance_to_end_step();
@@ -199,5 +230,14 @@ fn oubliette_keeps_creature_phased_out_until_it_leaves() {
     assert!(
         creature_obj.tapped,
         "creature must enter tapped as it phases in this way"
+    );
+    let attachment = &runner.state().objects[&attached_equipment];
+    assert!(
+        attachment.is_phased_in(),
+        "an attachment phased out with its host must phase in with it"
+    );
+    assert!(
+        !attachment.tapped,
+        "the tap rider names only 'that creature', not an attached permanent"
     );
 }

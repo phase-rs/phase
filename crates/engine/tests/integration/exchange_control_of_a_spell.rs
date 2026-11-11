@@ -52,6 +52,14 @@ const PERPLEXING_CHIMERA_TEXT: &str = "Whenever an opponent casts a spell, you m
     control of this creature and that spell. If you do, you may choose new targets for the \
     spell. (If the spell becomes a permanent, you control that permanent.)";
 
+const GALADRIELS_DISMISSAL_TEXT: &str = "Kicker {2}{W} (You may pay an additional {2}{W} as you \
+    cast this spell.)\nTarget creature phases out. If this spell was kicked, each creature target \
+    player controls phases out instead.";
+
+const LEYLINE_OF_SANCTITY_TEXT: &str = "If this card is in your opening hand, you may begin the \
+    game with it on the battlefield.\nYou have hexproof. (You can't be the target of spells or \
+    abilities your opponents control.)";
+
 const SUDDEN_SUBSTITUTION_TEXT: &str = "Split second (As long as this spell is on the stack, \
     players can't cast spells or activate abilities that aren't mana abilities.)\nExchange \
     control of target noncreature spell and target creature. Then the spell's controller may \
@@ -1059,6 +1067,111 @@ fn chimera_retarget_pool_is_built_for_the_new_controller() {
         !pool.contains(&TargetRef::Object(chimera)),
         "the Chimera is P1's after the swap, so it must not be in P0's pool \
          (pool was {pool:?})"
+    );
+}
+
+/// CR 115.7d + CR 702.11c: after Perplexing Chimera steals a kicked
+/// Galadriel's Dismissal, the companion player pool must be built for the
+/// spell's LIVE controller (P0), not the stored caster (P1). P1 controls
+/// Leyline of Sanctity, so P1 cannot be the target of P0's spell while P0 can
+/// choose themselves.
+#[test]
+fn chimera_companion_retarget_uses_the_live_controller() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let chimera = scenario
+        .add_creature_from_oracle(P0, "Perplexing Chimera", 3, 3, PERPLEXING_CHIMERA_TEXT)
+        .id();
+    let p0_creature = scenario.add_creature(P0, "P0 Bear", 2, 2).id();
+    scenario.add_enchantment_from_oracle(P1, "Leyline of Sanctity", LEYLINE_OF_SANCTITY_TEXT);
+    let dismissal = scenario
+        .add_spell_to_hand_from_oracle(P1, "Galadriel's Dismissal", true, GALADRIELS_DISMISSAL_TEXT)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![engine::types::mana::ManaCostShard::White],
+            generic: 0,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    engine::game::layers::flush_layers(runner.state_mut());
+    for _ in 0..4 {
+        runner.state_mut().players[P1.0 as usize]
+            .mana_pool
+            .add(ManaUnit::new(ManaType::White, dismissal, false, vec![]));
+    }
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
+    let mut commit = runner
+        .cast(dismissal)
+        .accept_optional()
+        .target_player(P0)
+        .commit();
+
+    let mut reached = None;
+    for _ in 0..60 {
+        match &commit.state().waiting_for {
+            WaitingFor::RetargetChoice {
+                player,
+                legal_new_targets,
+                ..
+            } => {
+                reached = Some((*player, legal_new_targets.clone()));
+                break;
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                commit
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accepting the Chimera trigger must succeed");
+            }
+            WaitingFor::Priority { .. } => {
+                assert!(
+                    !commit.state().stack.is_empty(),
+                    "the stack emptied before the retarget prompt was raised"
+                );
+                commit
+                    .act(GameAction::PassPriority)
+                    .expect("PassPriority should succeed while draining");
+            }
+            other => panic!("unexpected state while draining to the retarget prompt: {other:?}"),
+        }
+    }
+    let (chooser, pool) = reached.expect("REACH GUARD: the retarget prompt must be raised");
+
+    assert_eq!(
+        commit.state().objects.get(&chimera).unwrap().controller,
+        P1,
+        "REACH GUARD: the Chimera must have swapped to P1"
+    );
+    assert_eq!(chooser, P0, "the live controller chooses the new targets");
+    assert!(
+        pool.contains(&TargetRef::Player(P0)),
+        "the live controller must be able to choose themselves, pool was {pool:?}"
+    );
+    assert!(
+        !pool.contains(&TargetRef::Player(P1)),
+        "Leyline of Sanctity must exclude P1 from the opponent's spell pool, pool was {pool:?}"
+    );
+
+    commit
+        .act(GameAction::RetargetSpell {
+            new_targets: vec![Some(TargetRef::Player(P0))],
+        })
+        .expect("retarget the stolen kicked spell to P0");
+    for _ in 0..60 {
+        if commit.state().stack.is_empty() {
+            break;
+        }
+        commit
+            .act(GameAction::PassPriority)
+            .expect("pass priority while resolving the stolen spell");
+    }
+    assert!(
+        commit.state().objects[&p0_creature].is_phased_out(),
+        "P0's own creature must phase out after choosing themselves"
     );
 }
 

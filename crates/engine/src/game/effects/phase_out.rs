@@ -27,6 +27,7 @@ use crate::types::ability::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 
 /// CR 702.26a: Resolve `Effect::PhaseOut` by phasing out every targeted
 /// permanent (or every permanent matching the effect's mass filter, e.g.
@@ -58,7 +59,15 @@ pub fn resolve(
         phase_out_player(state, *pid, events);
     }
 
-    let object_targets = collect_object_targets(state, ability, &target);
+    // CR 608.2c + CR 115.1: a mixed "target player or creature" announcement
+    // selects ONE role. When the player role was chosen and no object target
+    // was declared, the object leg is not an affected population and must not
+    // be swept from the same filter.
+    let object_targets = if player_role_excludes_object_sweep(ability, &target, &player_targets) {
+        Vec::new()
+    } else {
+        collect_object_targets(state, ability, &target)
+    };
     let target_set: HashSet<ObjectId> = object_targets.iter().copied().collect();
     for oid in object_targets {
         // CR 702.26h: attachments whose host is also in this mass set phase out
@@ -126,8 +135,14 @@ pub fn resolve_phase_in(
     // CR 702.26b: Filter choke point normally excludes phased-out objects, so
     // we can't rely on the standard target expansion for phase-in. Instead,
     // enumerate state.battlefield directly and match the filter manually,
-    // skipping the phased-out exclusion.
-    let targets = collect_phase_in_targets(state, ability, &target);
+    // skipping the phased-out exclusion. CR 608.2c + CR 115.1: a mixed
+    // player/object announcement that selected the player role declares no
+    // object population to phase in.
+    let targets = if player_role_excludes_object_sweep(ability, &target, &player_targets) {
+        Vec::new()
+    } else {
+        collect_phase_in_targets(state, ability, &target)
+    };
     for oid in targets {
         // CR 101.2: an explicit "phase in" effect can't override an active
         // "can't phase in" restriction. The restriction is condition-gated
@@ -157,6 +172,22 @@ fn attachment_host_in_set(state: &GameState, oid: ObjectId, targets: &HashSet<Ob
         .and_then(|obj| obj.attached_to.as_ref())
         .and_then(|t| t.as_object())
         .is_some_and(|host| targets.contains(&host))
+}
+
+/// CR 608.2c + CR 115.1: a mixed player/object announcement selects one role.
+/// When the player role was chosen and the ability declares no object target,
+/// the object leg is not an affected population and must not be swept.
+fn player_role_excludes_object_sweep(
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+    player_targets: &[PlayerId],
+) -> bool {
+    !player_targets.is_empty()
+        && crate::game::ability_utils::filter_selects_players(target)
+        && !ability
+            .targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Object(_)))
 }
 
 /// Resolve the target object set for a `PhaseOut` effect. Explicit
@@ -311,6 +342,42 @@ mod tests {
         assert!(
             state.objects[&yours].is_phased_in(),
             "an untargeted player's creature must remain phased in"
+        );
+    }
+
+    /// CR 608.2c + CR 115.1: a mixed "target player or creature" phrase
+    /// selects ONE role. When the player was selected, the object leg must not
+    /// also be swept as a mass population.
+    #[test]
+    fn phase_out_mixed_player_or_creature_selects_only_the_player() {
+        let mut state = GameState::new_two_player(42);
+        let source = add_creature(&mut state, PlayerId(0), "Mixed Source");
+        let theirs = add_creature(&mut state, PlayerId(1), "Target Bear");
+
+        let ability = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(TypedFilter::creature()),
+                    ],
+                },
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.players[1].is_phased_out(),
+            "the selected player phase-out must run"
+        );
+        assert!(
+            state.objects[&theirs].is_phased_in(),
+            "the unchosen creature leg must not be swept"
         );
     }
 
