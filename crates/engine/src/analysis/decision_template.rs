@@ -1799,12 +1799,13 @@ pub fn aims_survive_the_crossings(
 /// backs, [`validate_recorded_answers`]' RECORDED half against `recorded`, which is `None` on
 /// every other offer.
 ///
-/// Three sites ask that question — `game::engine::handle_declare_shortcut` (the declare
-/// firewall), `game::interaction::materialize_loop_shortcut_response` (the human ingress) and
-/// `game::engine::build_bounded_declaration` (the engine's own publisher) — and a declaration
-/// PUBLISHED under one predicate but ACCEPTED under another is the divergence this exists to
-/// make unrepresentable: `declaration.is_some()` is read by `ai_support::candidates` as "the
-/// declare handler will take this", and only a shared predicate makes that true.
+/// Two sites ask that question, each only on an offer whose period carries no performances —
+/// `game::engine::handle_declare_shortcut` (the declare firewall) and
+/// `game::interaction::materialize_loop_shortcut_response` (the human ingress). The engine's
+/// publishers (`build_bounded_declaration`, and the suggestion filter in `bounded_offer_tail`)
+/// and the firewall's performed-offer arm (`performance_conforms`) ask its pin half,
+/// [`declaration_pins_conform`]; that shared pin predicate is what lets `ai_support::candidates`
+/// read `declaration.is_some()` as "the declare handler will take this".
 ///
 /// # The third question, and the layer it belongs to
 ///
@@ -1821,20 +1822,14 @@ pub fn aims_survive_the_crossings(
 /// while this walk takes `Attributable`, where a refusal rests on this declaration's own
 /// choices.
 ///
-/// # `validated_range` STAYS A PARAMETER, and that is a measurement, not a hedge
+/// # `validated_range` stays a parameter
 ///
-/// The call sites do NOT pass the same range, so folding one in would adopt one site's
-/// semantics for the other:
-///
-/// * the declare firewall and the human ingress each pass
-///   `game::engine::shortcut_validated_range(&count, template)` — the range the ACCEPTED COUNT
-///   will drive;
-/// * the bounded PUBLISHER passes the same helper to [`declaration_pins_conform`] over the
-///   SCHEMA's own `iteration_count` — its own SUGGESTION, which since the suggestion and the ceiling became separate fields is NOT
-///   the widest count a declarer may name (that is `deliverable_capacity`). Ranges nest —
-///   `0..n` re-checks are a superset of `0..m` for `m <= n` — so the publisher's narrower range
-///   is sound only because the handler re-validates at the count actually named, which it does.
-///   Two questions, one helper, two arguments.
+/// Both callers pass `game::engine::shortcut_validated_range(&count, template)`, the range the
+/// ACCEPTED COUNT will drive. [`declaration_pins_conform`], which this delegates to, is also
+/// called by the bounded publishers over the declaration's own count and the suggestion's count,
+/// neither of which is the widest count a declarer may name (that is `deliverable_capacity`).
+/// Ranges nest — `0..n` re-checks are a superset of `0..m` for `m <= n` — so a publisher's
+/// narrower range is sound only because the handler re-validates at the count actually named.
 ///
 /// # Returns `bool`, deliberately
 ///

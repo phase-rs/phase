@@ -7139,9 +7139,8 @@ fn handle_declare_shortcut(
                 // CR 732.2a: validate over the range the ACCEPTED COUNT will drive, not
                 // over the schedule's own period.
                 let validated_range = shortcut_validated_range(&count, Some(t));
-                // Coverage + value legality + aim survival via the shared authority, so the
-                // predicate this handler ACCEPTS under is the same one `build_bounded_declaration`
-                // PUBLISHES under and the human ingress EMITS under. The range is this site's own.
+                // Coverage + value legality + aim survival via the shared authority the human ingress
+                // EMITS under; the publishers share its pin half. The range is this site's own.
                 //
                 // CR 732.2a: this is the layer that decides whether THIS declaration can deliver the
                 // accepted count. It reads the offer's real published points, which is narrower than

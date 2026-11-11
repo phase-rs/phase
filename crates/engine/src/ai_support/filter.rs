@@ -377,9 +377,10 @@ fn pending_spell_root(state: &GameState) -> Option<(SpellRootProvenance, Pending
 ///
 /// Skipping the clone-and-apply here is load-bearing: `PassPriority` is enumerated
 /// at every priority window whose pass `pass_priority_legality` admits
-/// (`candidates::priority_actions_with_probe`) and is never memoized (`legality_equivalence_key`'s catch-all), so before this hatch it paid a
-/// full `GameState` clone *per priority window* — plus the nested `boundary_snapshot`
-/// clone inside `apply_action_boundary_core` — to re-derive an O(1) answer.
+/// (`candidates::priority_actions_with_probe`) and is never memoized
+/// (`legality_equivalence_key`'s catch-all), so before this hatch it paid a full `GameState`
+/// clone *per priority window* — plus the nested `boundary_snapshot` clone inside
+/// `apply_action_boundary_core` — to re-derive an O(1) answer.
 ///
 /// Conservative by design, mirroring `structurally_valid_search_selection`: this
 /// returns `false` — costing one simulation, never a wrong verdict — for every

@@ -1302,7 +1302,8 @@ impl<'a> PlannerServices<'a> {
         candidate: &CandidateAction,
         prompt_answers: PromptAnswerValidation,
     ) -> bool {
-        // PassPriority is always legal during Priority (skip simulation for perf),
+        // During Priority the candidate builder offers PassPriority only where
+        // `pass_priority_legality` admits it (skip simulation for perf),
         // but during ManaPayment it means "finalize payment" which can fail if the
         // player can't actually pay the cost (e.g., Thalia tax makes it unaffordable).
         let pass_always_valid = matches!(
