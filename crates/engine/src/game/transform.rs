@@ -60,34 +60,30 @@ fn transform_instruction_is_noop(state: &GameState, object_id: ObjectId) -> bool
         || !other_face_is_transform_destination(object)
 }
 
-/// CR 701.27c + CR 701.27d: Whether the face stored in `back_face` is one this
-/// permanent can transform into. An absent `back_face` is left to the callers'
-/// own "no back face" handling and so is not judged here.
-///
-/// The stored-face layout is the typed discriminator: Split (CR 709), Flip
-/// (CR 710), Adventurer (CR 715), Omen (CR 720) and preparation (CR 722) cards
-/// keep alternative characteristics in the same `back_face` slot, but they are
-/// single-faced cards, and a token copy of one carries those characteristics as
-/// copiable values (CR 722.2b) without becoming double-faced. A transform keeps
-/// the stored face's layout (`swap_object_faces`); test-built double-faced
-/// fixtures and Incubator tokens often carry no layout at all, so only the
-/// known single-faced layouts are excluded. Independently of layout, a face that
-/// is an instant or sorcery is never a transform destination.
+/// CR 701.27a + CR 701.27c + CR 701.27d: whether `back_face` holds a face this
+/// permanent can transform into: a physical other face (`is_double_faced_permanent` —
+/// so not a Room copy's layout-less half (CR 709.5b), a single-faced card's
+/// alternative characteristics, a face-down stash (CR 712.15a) or a specialize stash;
+/// a merged permanent by its CR 730.2i reading) that isn't an instant or sorcery
+/// face. An absent `back_face` is left to the callers' own 'no back face' handling
+/// and so is not judged here.
 fn other_face_is_transform_destination(object: &crate::game::game_object::GameObject) -> bool {
     use crate::types::card_type::CoreType;
     let Some(face) = object.back_face.as_ref() else {
         return true;
     };
-    // CR 701.27c: a permanent that isn't represented by a double-faced token or
-    // a double-faced card can't transform.
-    let single_faced_layout = layout_is_single_faced_alternative(face.layout_kind);
+    // CR 701.27a + CR 701.27c: only a permanent represented by a double-faced token or a
+    // double-faced card has an other face to turn to — the identity authority, which reads
+    // the object's own state, so a copy effect can't make a single-faced permanent
+    // transformable.
+    let physical_other_face = is_double_faced_permanent(object);
     // CR 701.27d: transforming into an instant or sorcery face does nothing.
     let instant_or_sorcery_face = face
         .card_types
         .core_types
         .iter()
         .any(|core| matches!(core, CoreType::Instant | CoreType::Sorcery));
-    !single_faced_layout && !instant_or_sorcery_face
+    physical_other_face && !instant_or_sorcery_face
 }
 
 /// CR 709 / CR 710 / CR 715 / CR 720 / CR 722: whether a stored face's layout marks a
@@ -1086,6 +1082,131 @@ mod tests {
         assert!(
             disagreements.is_empty(),
             "is_double_faced_permanent disagrees with stored_double_face: {disagreements:#?}"
+        );
+    }
+
+    /// CR 701.27a + CR 701.27c: `can_transform` agrees with the identity authority
+    /// (`is_double_faced_permanent`): only a permanent represented by a double-faced token or a
+    /// double-faced card has an other face to turn to. CR 712.15a: a face-down double-faced
+    /// permanent can't transform. CR 730.2i: a merged permanent containing a double-faced
+    /// component can. CR 701.27d: an instant or sorcery face is never a transform destination.
+    /// Every row is checked and the mismatches are reported together.
+    ///
+    /// Printed shapes: (a) Kessig Prowler // Sinuous Predator; (j) a token copy of Mirror
+    /// Room // Fractured Realm made by Cackling Counterpart; (n) Cackling Counterpart copying a
+    /// Kessig Prowler that Mirrorweave made a copy of the Room; (h) a card manifested by Soul
+    /// Summons; (k) Gemrazer mutated onto Kessig Prowler; (o) the CR 701.27d shape, a stored
+    /// face whose types are Sorcery.
+    ///
+    /// Revert-failing: the layout-only check admitted (j) and (h). (a), (n) and (k) are the
+    /// positive rows; (o) shows the CR 701.27d conjunct is kept.
+    #[test]
+    fn can_transform_requires_a_physical_other_face() {
+        use crate::game::game_object::MergeKind;
+        use crate::types::card::LayoutKind;
+
+        let mut state = GameState::new_two_player(42);
+        let with_face = |state: &mut GameState, name: &str, layout: Option<LayoutKind>| {
+            let id = create_object(
+                state,
+                CardId(3),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+            };
+            obj.base_card_types = obj.card_types.clone();
+            obj.back_face = Some(BackFaceData {
+                name: format!("{name} other face"),
+                layout_kind: layout,
+                card_types: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Creature],
+                    subtypes: vec![],
+                },
+                ..Default::default()
+            });
+            id
+        };
+        let room_type_line = || CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Enchantment],
+            subtypes: vec!["Room".to_string()],
+        };
+        let mut rows: Vec<(&str, ObjectId, bool)> = Vec::new();
+
+        // (a) a transforming double-faced card, front face up.
+        let prowler = setup_dfc(&mut state);
+        state
+            .objects
+            .get_mut(&prowler)
+            .unwrap()
+            .back_face
+            .as_mut()
+            .unwrap()
+            .layout_kind = Some(LayoutKind::Transform);
+        rows.push(("(a) Transform, front face up", prowler, true));
+
+        // (j) a single-faced Room-copy token: printed Room, its other half stored with no layout.
+        let room_copy = with_face(&mut state, "Mirror Room", None);
+        {
+            let obj = state.objects.get_mut(&room_copy).unwrap();
+            obj.is_token = true;
+            obj.base_card_types = room_type_line();
+        }
+        rows.push(("(j) Room copy token, layout-less half", room_copy, false));
+
+        // (n) a double-faced Room copy token: its other face stored, the Room half beside it.
+        let room_faces = with_face(&mut state, "Kessig Prowler", Some(LayoutKind::Transform));
+        {
+            let obj = state.objects.get_mut(&room_faces).unwrap();
+            obj.is_token = true;
+            obj.base_card_types = room_type_line();
+            obj.double_faced_token_alternative = Some(BackFaceData {
+                name: "Fractured Realm".to_string(),
+                ..Default::default()
+            });
+        }
+        rows.push(("(n) double-faced Room copy token", room_faces, true));
+
+        // (h) a face-down double-faced permanent: `back_face` is its face-down stash.
+        let face_down = with_face(&mut state, "Manifested", Some(LayoutKind::Transform));
+        state.objects.get_mut(&face_down).unwrap().face_down = true;
+        rows.push(("(h) face-down double-faced permanent", face_down, false));
+
+        // (k) a Mutate pile over a transforming face.
+        let mutated = with_face(&mut state, "Gemrazer", Some(LayoutKind::Transform));
+        state.objects.get_mut(&mutated).unwrap().merge_kind = Some(MergeKind::Mutate);
+        rows.push(("(k) merged by Mutate over a Transform face", mutated, true));
+
+        // (o) a Transform-layout stored face that is a sorcery.
+        let sorcery_face = with_face(&mut state, "Sorcery Face", Some(LayoutKind::Transform));
+        state
+            .objects
+            .get_mut(&sorcery_face)
+            .unwrap()
+            .back_face
+            .as_mut()
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Sorcery];
+        rows.push(("(o) Transform face that is a sorcery", sorcery_face, false));
+
+        let mismatches: Vec<String> = rows
+            .iter()
+            .filter_map(|(row, id, expected)| {
+                let found = can_transform(&state, *id);
+                (found != *expected).then(|| format!("{row}: expected {expected}, got {found}"))
+            })
+            .collect();
+        assert!(
+            mismatches.is_empty(),
+            "can_transform misclassified: {mismatches:#?}"
         );
     }
 

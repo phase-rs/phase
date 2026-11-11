@@ -501,9 +501,27 @@ fn run_post_action_pipeline_core(
         // transforms (not a state-based action). Run here, after this action's triggers were
         // scanned above: CR 603.10 checks an entry's triggers against the objects immediately
         // after it, so an entering token's own enters triggers see the face it entered with.
-        // Its Transformed events are scanned with this iteration's events, and this
+        // CR 603.10: its Transformed events are checked against the objects as they exist
+        // immediately after the transform, so they are collected before this iteration's SBA
+        // check can remove a transformed permanent or an observer (CR 704.5f + CR 111.7: a
+        // token that dies has ceased to exist when the SBA batch is collected). They are
+        // placed with this iteration's SBA batch below (CR 603.3b + CR 117.5). This
         // iteration's SBA check sees the face it turned to.
         super::day_night::keep_faces_in_agreement(state, events);
+        let mut iteration_contexts = Vec::new();
+        if events.len() > events_before {
+            consumed_trigger_events.extend(std::mem::take(
+                &mut state.consumed_before_priority_trigger_events,
+            ));
+            let transform_events = triggers::filter_already_collected_trigger_events_from(
+                state,
+                events,
+                events_before,
+                &consumed_trigger_events,
+            );
+            iteration_contexts = triggers::collect_pending_triggers(state, &transform_events);
+        }
+        let sba_events_start = events.len();
         sba::check_state_based_actions_in_pass(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             // CR 603.3b + CR 903.9a: an SBA batch can open a resumable
@@ -517,6 +535,11 @@ fn run_post_action_pipeline_core(
             if !matches!(state.waiting_for, WaitingFor::GameOver { .. })
                 && events.len() > events_before
             {
+                // CR 800.4d: a triggered ability that would be controlled by a player who has
+                // left the game isn't put on the stack. The transform contexts were held
+                // outside the queue, so this check's elimination prune didn't reach them.
+                iteration_contexts =
+                    triggers::retire_departed_controller_contexts(state, iteration_contexts);
                 consumed_trigger_events.extend(std::mem::take(
                     &mut state.consumed_before_priority_trigger_events,
                 ));
@@ -524,10 +547,11 @@ fn run_post_action_pipeline_core(
                 let sba_events = triggers::filter_already_collected_trigger_events_from(
                     state,
                     events,
-                    events_before,
+                    sba_events_start,
                     &consumed_trigger_events,
                 );
-                triggers::collect_parked_triggers_into_deferred(state, &sba_events, origin);
+                iteration_contexts.extend(triggers::collect_pending_triggers(state, &sba_events));
+                triggers::queue_parked_trigger_contexts(state, iteration_contexts, origin);
                 // Logical zone-change owners collect ordinary observers only.
                 // Delayed triggers remain entitled to the raw occurrences; the
                 // ordinary queued-context witness must not suppress them.
@@ -543,29 +567,36 @@ fn run_post_action_pipeline_core(
             break;
         }
         if events.len() > events_before {
+            // CR 800.4d: a triggered ability that would be controlled by a player who has
+            // left the game isn't put on the stack. The transform contexts were held
+            // outside the queue, so this check's elimination prune didn't reach them.
+            iteration_contexts =
+                triggers::retire_departed_controller_contexts(state, iteration_contexts);
             consumed_trigger_events.extend(std::mem::take(
                 &mut state.consumed_before_priority_trigger_events,
             ));
             let sba_events = triggers::filter_already_collected_trigger_events_from(
                 state,
                 events,
-                events_before,
+                sba_events_start,
                 &consumed_trigger_events,
             );
+            iteration_contexts.extend(triggers::collect_pending_triggers(state, &sba_events));
             // CR 603.3b: SBA-generated triggers join the terminal batch rather
             // than being ordered before its final cast trigger is collected.
             // CR 117.5 + CR 603.3b: in the pass that ran a spell's final part,
             // they join that resolution's batch the same way.
-            if state.pending_resolution_completion.is_some()
+            let origin = if state.pending_resolution_completion.is_some()
                 || announced_cast_batch
                 || final_part_ran
                 || payment_owned
                 || completed_resolution_batch
             {
-                triggers::collect_triggers_into_deferred(state, &sba_events);
+                triggers::DeferredTriggerBatchOrigin::Ordinary
             } else {
-                hold_pass_triggers(state, &sba_events);
-            }
+                pass_hold_origin(state)
+            };
+            triggers::queue_parked_trigger_contexts(state, iteration_contexts, origin);
             if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 break;
             }
@@ -906,14 +937,15 @@ fn parked_batch_origin(waiting_for: &WaitingFor) -> triggers::DeferredTriggerBat
 /// CR 117.5 + CR 603.3b: hold a pass's triggers for the boundary's one batch.
 /// A resolving spell that still owes its final part owns their placement.
 fn hold_pass_triggers(state: &mut GameState, events: &[GameEvent]) {
+    triggers::collect_parked_triggers_into_deferred(state, events, pass_hold_origin(state));
+}
+
+/// A resolving spell that still owes its final part owns their placement.
+fn pass_hold_origin(state: &GameState) -> triggers::DeferredTriggerBatchOrigin {
     if super::stack::resolving_spell_owes_final_part(state) {
-        triggers::collect_triggers_into_deferred(state, events);
+        triggers::DeferredTriggerBatchOrigin::Ordinary
     } else {
-        triggers::collect_parked_triggers_into_deferred(
-            state,
-            events,
-            triggers::DeferredTriggerBatchOrigin::PriorityBoundary,
-        );
+        triggers::DeferredTriggerBatchOrigin::PriorityBoundary
     }
 }
 

@@ -54,7 +54,8 @@ fn transform_disagreeing_permanents(
 /// entered with; the transform is the next event. The engine collects an action's triggers from
 /// the live object in the post-action pipeline, so this pass runs at the first checkpoint after
 /// that collection, not inside the resolution; no printed "create a token that's a copy of … card"
-/// producer observes the token between the two.
+/// producer observes the token between the two. Its Transformed events are matched before the
+/// next SBA check (CR 603.10; `engine_priority`).
 pub(crate) fn keep_faces_in_agreement(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let Some(designation) = state.day_night else {
         return;
@@ -463,6 +464,59 @@ mod tests {
         let obj = &state.objects[&id];
         assert!(!obj.transformed);
         assert_eq!(obj.name, "Daybound Werewolf");
+    }
+
+    /// CR 701.27c: a token copy of a Room keeps the Room's other half in `back_face` as a
+    /// copiable value with no layout (CR 709.5b). It isn't represented by a double-faced token or
+    /// card, so the designation pass leaves it alone even with daybound and front face up at
+    /// night. R3's printed shape: Cackling Counterpart's copy of Mirror Room // Fractured Realm,
+    /// made a copy of Baneblade Scoundrel by Mirrorweave, at night. DN3 is the sibling with no
+    /// stored slot; DN1 is the positive.
+    #[test]
+    fn a_room_token_with_its_other_half_stored_is_left_alone() {
+        use crate::types::mana::{ManaCost, ManaCostShard};
+
+        let mut state = GameState::new_two_player(42);
+        let id = setup_daybound_creature(&mut state);
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.is_token = true;
+            obj.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Room".to_string()],
+            };
+            obj.back_face = Some(BackFaceData {
+                name: "Fractured Realm".to_string(),
+                mana_cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                    generic: 5,
+                },
+                ..Default::default()
+            });
+        }
+        state.day_night = Some(DayNight::Night);
+        // The pass flushes layers first; flush them here so the reach guard reads the object the
+        // pass reads (a Room with both doors locked has no name, CR 709.5).
+        super::super::layers::flush_layers(&mut state);
+        assert!(
+            face_disagrees_with(&state.objects[&id], DayNight::Night),
+            "reach: the pass considers it"
+        );
+        let name_before = state.objects[&id].name.clone();
+
+        let mut events = Vec::new();
+        keep_faces_in_agreement(&mut state, &mut events);
+
+        assert!(events.is_empty());
+        let obj = &state.objects[&id];
+        assert!(!obj.transformed);
+        assert_eq!(obj.transformation_count, 0);
+        assert_eq!(
+            obj.back_face.as_ref().map(|face| face.name.as_str()),
+            Some("Fractured Realm")
+        );
+        assert_eq!(obj.name, name_before);
     }
 
     /// CR 731.1: with neither day nor night, no face disagrees, so nothing transforms. The row

@@ -43,6 +43,10 @@
 //! night enters front face up, triggers, then transforms.
 //! CR 701.27g: a latched source carries the answer at its observation; the raw face-swap bit
 //! stays for reconstruction.
+//! CR 603.10: a transform's triggers are checked immediately after it, before the state-based
+//! check that may remove its subject. CR 800.4d: one whose controller that check eliminates
+//! isn't put on the stack. CR 701.27a: only a double-faced token or card transforms, so a
+//! single-faced Room copy given daybound stays as it is.
 
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
@@ -69,6 +73,7 @@ use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::resolved_commands::ResolvedRulesCommand;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
@@ -125,6 +130,9 @@ const CELESTUS: &str = "The Celestus";
 const BRUTAL_CATHAR: &str = "Brutal Cathar";
 const MOONRAGE_BRUTE: &str = "Moonrage Brute";
 const ELESH_NORN: &str = "Elesh Norn, Grand Cenobite";
+const CULT: &str = "Cult of the Waxing Moon";
+const ENGINEERED_PLAGUE: &str = "Engineered Plague";
+const ARCANE_ARTISAN: &str = "Arcane Artisan";
 
 const AUNTIE_ORACLE: &str = "Menace\nWhenever Grub attacks, you may blight 1. If you do, create a tapped and attacking token that's a copy of the blighted creature, except it has \"At the beginning of the end step, sacrifice this token.\"\nAt the beginning of your first main phase, you may pay {B}. If you do, transform Grub.";
 const NEXUS_ORACLE: &str = "At the beginning of combat on your turn, draw a card. Then you may exile an artifact or creature card from your hand. If you do, create a token that's a copy of the exiled card, except it's a 3/3 Golem artifact creature in addition to its other types.";
@@ -181,6 +189,10 @@ const MARAUDER_ORACLE: &str = "Whenever this creature becomes blocked, each crea
 const BRUTAL_CATHAR_ORACLE: &str = "Whenever this creature enters or transforms into Brutal Cathar, exile target creature an opponent controls until this creature leaves the battlefield.\nDaybound (If a player casts no spells during their own turn, it becomes night next turn.)";
 const MOONRAGE_BRUTE_ORACLE: &str = "First strike\nWard—Pay 3 life.\nNightbound (If a player casts at least two spells during their own turn, it becomes day next turn.)";
 const ELESH_NORN_ORACLE: &str = "Vigilance\nOther creatures you control get +2/+2.\nCreatures your opponents control get -2/-2.";
+const CULT_ORACLE: &str = "Whenever a permanent you control transforms into a non-Human creature, create a 2/2 green Wolf creature token.";
+const ENGINEERED_PLAGUE_ORACLE: &str =
+    "As this enchantment enters, choose a creature type.\nAll creatures of the chosen type get -1/-1.";
+const ARCANE_ARTISAN_ORACLE: &str = "{2}{U}, {T}: Target player draws a card, then exiles a card from their hand. If a creature card is exiled this way, that player creates a token that's a copy of that card.\nWhen this creature leaves the battlefield, exile all tokens created with it at the beginning of the next end step.";
 const INTO_THE_NIGHT_ORACLE: &str =
     "It becomes night. Discard any number of cards, then draw that many cards plus one.";
 const CELESTUS_ORACLE: &str = "If it's neither day nor night, it becomes day as The Celestus enters.\n{T}: Add one mana of any color.\n{3}, {T}: If it's night, it becomes day. Otherwise, it becomes night. Activate only as a sorcery.\nWhenever day becomes night or night becomes day, you gain 1 life. You may draw a card. If you do, discard a card.";
@@ -3268,6 +3280,38 @@ fn unlock(runner: &mut GameRunner, room: ObjectId, door: RoomDoor) {
     settle(runner);
 }
 
+/// Casts Mirror Room // Fractured Realm as Mirror Room, then Opalescence and Gideon, Ally of
+/// Zendikar, and resolves Gideon's −4, so the Room is a creature and P0 has the emblem that keeps
+/// a fully locked copy of it alive (see `mirror_room_copied_through`).
+fn animate_mirror_room(
+    runner: &mut GameRunner,
+    room: ObjectId,
+    opalescence: ObjectId,
+    gideon: ObjectId,
+) {
+    fund(runner, ManaType::Blue, 3);
+    runner.cast(room).modal_back_face(false).resolve();
+    settle(runner);
+    assert_settled(runner);
+    assert_eq!(runner.state().objects[&room].name, MIRROR_ROOM);
+
+    fund(runner, ManaType::White, 4);
+    runner.cast(opalescence).resolve();
+    fund(runner, ManaType::White, 4);
+    runner.cast(gideon).resolve();
+    settle(runner);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: gideon,
+            ability_index: 2,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Gideon's −4 must be legal");
+    both_pass(runner);
+    settle(runner);
+    assert_settled(runner);
+}
+
 /// The printed Room board for a double-faced copy token whose copied values are
 /// a Room's. Mirror Room // Fractured Realm is cast as Mirror Room, so its left
 /// half is unlocked (CR 709.5d); its "When you unlock this door" trigger has no
@@ -3303,27 +3347,7 @@ fn mirror_room_copied_through(
                 scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
             )
         });
-    fund(&mut runner, ManaType::Blue, 3);
-    runner.cast(room).modal_back_face(false).resolve();
-    settle(&mut runner);
-    assert_settled(&runner);
-    assert_eq!(runner.state().objects[&room].name, MIRROR_ROOM);
-
-    fund(&mut runner, ManaType::White, 4);
-    runner.cast(opalescence).resolve();
-    fund(&mut runner, ManaType::White, 4);
-    runner.cast(gideon).resolve();
-    settle(&mut runner);
-    runner
-        .act(GameAction::ActivateAbility {
-            source_id: gideon,
-            ability_index: 2,
-            payment_mode: CastPaymentMode::Auto,
-        })
-        .expect("Gideon's −4 must be legal");
-    both_pass(&mut runner);
-    settle(&mut runner);
-    assert_settled(&runner);
+    animate_mirror_room(&mut runner, room, opalescence, gideon);
 
     enter(&mut runner, creature);
     fund(&mut runner, ManaType::Blue, 4);
@@ -4722,6 +4746,575 @@ fn feldons_copy_of_brutal_cathar_at_night_survives_an_opposing_minus_two() {
     );
     let obj = &runner.state().objects[&token];
     assert_eq!((obj.power, obj.toughness), (Some(3), Some(3)));
+}
+
+/// The departures from the battlefield of `id` in `events`: the record's name, its toughness and
+/// the zone it went to.
+fn departures(
+    events: &[engine::types::events::GameEvent],
+    id: ObjectId,
+) -> Vec<(String, Option<i32>, Zone)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            engine::types::events::GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                to,
+                record,
+            } if *object_id == id => Some((record.name.clone(), record.toughness, *to)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The number of Wolf tokens Cult of the Waxing Moon's trigger created in `events`.
+fn wolves_created(events: &[engine::types::events::GameEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(event, engine::types::events::GameEvent::TokenCreated { name, .. } if name == "Wolf")
+        })
+        .count()
+}
+
+/// The sources of the `OrderTriggers` prompt, which must be open for `player`.
+fn order_prompt_sources(runner: &GameRunner, player: PlayerId) -> Vec<ObjectId> {
+    match &runner.state().waiting_for {
+        WaitingFor::OrderTriggers {
+            player: prompted,
+            triggers,
+        } if *prompted == player => triggers.iter().map(|trigger| trigger.source_id).collect(),
+        other => panic!("CR 603.3b: {player:?} orders their triggers; got {other:?}"),
+    }
+}
+
+/// Answers the `OrderTriggers` prompt whose sources are `sources`, mapped by source: `first` is
+/// placed first (the bottom of the group, so it resolves last), the rest in prompt order.
+fn order_first(
+    runner: &mut GameRunner,
+    sources: &[ObjectId],
+    first: ObjectId,
+) -> Vec<engine::types::events::GameEvent> {
+    let first_index = sources
+        .iter()
+        .position(|source| *source == first)
+        .expect("the trigger to place first is in the prompt");
+    let order: Vec<usize> = std::iter::once(first_index)
+        .chain((0..sources.len()).filter(|index| *index != first_index))
+        .collect();
+    runner
+        .act(GameAction::OrderTriggers { order })
+        .expect("ordering the triggers must succeed")
+        .events
+}
+
+/// Every player passes priority once, in turn order, returning the events.
+fn each_player_passes(
+    runner: &mut GameRunner,
+    players: usize,
+) -> Vec<engine::types::events::GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..players {
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "got {:?}",
+            runner.state().waiting_for
+        );
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority must succeed")
+                .events,
+        );
+    }
+    events
+}
+
+/// Passes priority until the stack is empty, returning the events.
+fn pass_until_settled(runner: &mut GameRunner) -> Vec<engine::types::events::GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..24 {
+        if runner.state().stack.is_empty() {
+            assert_settled(runner);
+            return events;
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "got {:?}",
+            runner.state().waiting_for
+        );
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority must succeed")
+                .events,
+        );
+    }
+    panic!("the stack never emptied");
+}
+
+fn sorted(mut ids: Vec<ObjectId>) -> Vec<ObjectId> {
+    ids.sort();
+    ids
+}
+
+/// A Feldon of the Third Path board for Cult of the Waxing Moon during the day: P0 has Feldon,
+/// able to activate, Cult of the Waxing Moon, Brutal Cathar the only creature card in the
+/// graveyard and Into the Night in hand; P1 has Elesh Norn, Grand Cenobite. With `plague`, P0
+/// also has Engineered Plague with Werewolf chosen; its effect is symmetric, and P0 controls it
+/// because staging it under P1 leaves priority with P1. Returns Feldon, Into the Night, Cult and
+/// the Norn.
+fn feldon_cathar_cult_board(plague: bool) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let (mut runner, (feldon, night, cult, norn, plague)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            for (name, oracle) in [
+                (FELDON, FELDON_ORACLE),
+                (CULT, CULT_ORACLE),
+                (BRUTAL_CATHAR, BRUTAL_CATHAR_ORACLE),
+                (MOONRAGE_BRUTE, MOONRAGE_BRUTE_ORACLE),
+                (INTO_THE_NIGHT, INTO_THE_NIGHT_ORACLE),
+                (ELESH_NORN, ELESH_NORN_ORACLE),
+                (ENGINEERED_PLAGUE, ENGINEERED_PLAGUE_ORACLE),
+            ] {
+                assert_oracle(db, name, oracle);
+            }
+            scenario.add_real_card(P0, BRUTAL_CATHAR, Zone::Graveyard, db);
+            (
+                scenario.add_real_card(P0, FELDON, Zone::Battlefield, db),
+                scenario.add_real_card(P0, INTO_THE_NIGHT, Zone::Hand, db),
+                scenario.add_real_card(P0, CULT, Zone::Battlefield, db),
+                scenario.add_real_card(P1, ELESH_NORN, Zone::Battlefield, db),
+                plague
+                    .then(|| scenario.add_real_card(P0, ENGINEERED_PLAGUE, Zone::Battlefield, db)),
+            )
+        });
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&feldon)
+        .expect("Feldon exists")
+        .summoning_sick = false;
+    if let Some(plague) = plague {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&plague)
+            .expect("Engineered Plague exists")
+            .chosen_attributes = vec![ChosenAttribute::CreatureType("Werewolf".to_string())];
+    }
+    runner.state_mut().day_night = Some(DayNight::Day);
+    settle(&mut runner);
+    let state = runner.state();
+    assert_eq!(
+        (
+            state.objects[&feldon].power,
+            state.objects[&feldon].toughness
+        ),
+        (Some(0), Some(1)),
+        "reach guard: the Norn's -2/-2 applies to Feldon"
+    );
+    assert_eq!(
+        (state.objects[&cult].power, state.objects[&cult].toughness),
+        (Some(3), Some(2)),
+        "reach guard: the Norn's -2/-2 applies to Cult"
+    );
+    (runner, feldon, night, cult, norn)
+}
+
+/// CR 603.10: "objects that exist immediately after an event are checked to see if the event
+/// matched any trigger conditions". Cult of the Waxing Moon ("Whenever a permanent you control
+/// transforms into a non-Human creature, create a 2/2 green Wolf creature token.") sees Feldon of
+/// the Third Path's token copy of Brutal Cathar ("Whenever this creature enters or transforms into
+/// Brutal Cathar, exile target creature an opponent controls until this creature leaves the
+/// battlefield.") transform into Moonrage Brute at night (CR 702.145c), although the state-based
+/// check that follows puts it into the graveyard: P1's Elesh Norn, Grand Cenobite ("Creatures
+/// your opponents control get -2/-2.") and Engineered Plague ("All creatures of the chosen type
+/// get -1/-1.", Werewolf) make Moonrage Brute 0/0 (CR 704.5f), and the token ceases to exist
+/// (CR 111.7). The token's enters trigger, checked against the face it entered with, goes on the
+/// stack too; it does nothing, because the token left before it resolved (CR 610.3b).
+#[test]
+fn cult_of_the_waxing_moon_sees_feldons_copy_of_brutal_cathar_transform_although_it_dies() {
+    let (mut runner, feldon, night, cult, norn) = feldon_cathar_cult_board(true);
+    cast_into_the_night(&mut runner, night);
+
+    let (mut events, token) = feldon_makes_a_token(&mut runner, feldon);
+    assert_eq!(
+        entry_record_names(&events, token),
+        vec![BRUTAL_CATHAR.to_string()],
+        "reach guard: the token entered as Brutal Cathar"
+    );
+    assert_eq!(
+        transformed_events(&events, token),
+        1,
+        "reach guard: CR 702.145c: the token transformed"
+    );
+    assert_eq!(
+        departures(&events, token),
+        vec![(MOONRAGE_BRUTE.to_string(), Some(0), Zone::Graveyard)],
+        "reach guard: CR 704.5f: Moonrage Brute is 0/0 and dies"
+    );
+    assert!(!runner.state().battlefield.contains(&token));
+
+    let sources = order_prompt_sources(&runner, P0);
+    assert_eq!(
+        sorted(sources.clone()),
+        sorted(vec![cult, token]),
+        "CR 603.10: Cult's trigger and the token's own, each once"
+    );
+    events.extend(order_first(&mut runner, &sources, token));
+    let stack = &runner.state().stack;
+    assert_eq!(stack.len(), 2, "stack: {stack:?}");
+    assert_eq!(
+        stack.iter().filter(|entry| entry.source_id == cult).count(),
+        1
+    );
+    assert_eq!(
+        stack
+            .iter()
+            .filter(|entry| entry.source_id == token)
+            .count(),
+        1
+    );
+
+    events.extend(pass_until_settled(&mut runner));
+    assert_eq!(wolves_created(&events), 1, "Cult creates one Wolf");
+    assert_eq!(
+        runner.state().objects[&norn].zone,
+        Zone::Battlefield,
+        "CR 610.3b: the token left before its trigger resolved, so the Norn isn't exiled"
+    );
+}
+
+/// CR 603.10: the surviving control of the row above. Without Engineered Plague, Feldon of the
+/// Third Path's copy of Brutal Cathar is a 1/1 Moonrage Brute under Elesh Norn, Grand Cenobite,
+/// and stays. Cult of the Waxing Moon sees the same transform and creates a Wolf, and the token's
+/// enters trigger exiles the Norn.
+#[test]
+fn cult_of_the_waxing_moon_sees_feldons_copy_of_brutal_cathar_transform_and_it_survives() {
+    let (mut runner, feldon, night, cult, norn) = feldon_cathar_cult_board(false);
+    cast_into_the_night(&mut runner, night);
+
+    let (mut events, token) = feldon_makes_a_token(&mut runner, feldon);
+    assert_eq!(transformed_events(&events, token), 1);
+    assert!(departures(&events, token).is_empty());
+    let obj = &runner.state().objects[&token];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert_eq!(obj.name, MOONRAGE_BRUTE);
+    assert_eq!(obj.toughness, Some(1));
+
+    let sources = order_prompt_sources(&runner, P0);
+    assert_eq!(sorted(sources.clone()), sorted(vec![cult, token]));
+    events.extend(order_first(&mut runner, &sources, token));
+    assert_eq!(runner.state().stack.len(), 2);
+
+    events.extend(pass_until_settled(&mut runner));
+    assert_eq!(wolves_created(&events), 1, "Cult creates one Wolf");
+    assert_eq!(
+        runner.state().objects[&norn].zone,
+        Zone::Exile,
+        "the token's trigger resolved while it stayed"
+    );
+}
+
+const P2: PlayerId = PlayerId(2);
+
+/// A three-player Arcane Artisan board at night, P0 active: P0 has Arcane Artisan, able to
+/// activate, and Grizzly Bears; P1 has Cult of the Waxing Moon; P2 has a stocked library. With
+/// `p1_loses`, Brutal Cathar is P1's only card in hand and P1's library is empty; otherwise P1's
+/// hand is empty and Brutal Cathar is the only card in P1's library. Returns Arcane Artisan, the
+/// Bears and Cult.
+fn artisan_cult_board(p1_loses: bool) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let db = load_db().expect("card db");
+    assert_oracle(db, ARCANE_ARTISAN, ARCANE_ARTISAN_ORACLE);
+    assert_oracle(db, CULT, CULT_ORACLE);
+    assert_oracle(db, BRUTAL_CATHAR, BRUTAL_CATHAR_ORACLE);
+    let mut scenario = GameScenario::new_n_player(3, 769);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Top One", "Top Two", "Top Three"]);
+    scenario.with_library_top(P2, &["Top One", "Top Two", "Top Three"]);
+    let artisan = scenario.add_real_card(P0, ARCANE_ARTISAN, Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P0, BEARS, Zone::Battlefield, db);
+    let cult = scenario.add_real_card(P1, CULT, Zone::Battlefield, db);
+    let cathar_zone = if p1_loses { Zone::Hand } else { Zone::Library };
+    let cathar = scenario.add_real_card(P1, BRUTAL_CATHAR, cathar_zone, db);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&artisan)
+        .expect("Arcane Artisan exists")
+        .summoning_sick = false;
+    runner.state_mut().day_night = Some(DayNight::Night);
+    settle(&mut runner);
+    let p1 = &runner.state().players[1];
+    if p1_loses {
+        assert_eq!(p1.hand.iter().copied().collect::<Vec<_>>(), vec![cathar]);
+        assert!(p1.library.is_empty(), "reach guard: P1's draw will fail");
+    } else {
+        assert!(p1.hand.is_empty());
+        assert_eq!(p1.library.iter().copied().collect::<Vec<_>>(), vec![cathar]);
+    }
+    (runner, artisan, bears, cult)
+}
+
+/// Activates Arcane Artisan targeting P1 and every player passes once, so it resolves: P1 draws,
+/// then exiles their only card in hand, Brutal Cathar, and creates a token copy of it, which at
+/// night turns into Moonrage Brute (CR 702.145c). Returns the events and the token, read from its
+/// creation event, which P1 controls.
+fn artisan_makes_a_cathar_for_p1(
+    runner: &mut GameRunner,
+    artisan: ObjectId,
+) -> (Vec<engine::types::events::GameEvent>, ObjectId) {
+    fund(runner, ManaType::Blue, 3);
+    activate(runner, artisan);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "Arcane Artisan targets a player; got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P1)],
+        })
+        .expect("targeting P1 must succeed");
+    top_of_stack_from(runner, artisan);
+    let events = each_player_passes(runner, 3);
+    let made: Vec<ObjectId> = events
+        .iter()
+        .filter_map(|event| match event {
+            engine::types::events::GameEvent::TokenCreated {
+                object_id, name, ..
+            } if name == BRUTAL_CATHAR => Some(*object_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        made.len(),
+        1,
+        "reach guard: one token copy of Brutal Cathar"
+    );
+    let token = made[0];
+    let controllers: Vec<PlayerId> = events
+        .iter()
+        .filter_map(|event| match event {
+            engine::types::events::GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                record,
+                ..
+            } if *object_id == token => Some(record.controller),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(controllers, vec![P1], "reach guard: P1 creates the token");
+    assert_eq!(
+        transformed_events(&events, token),
+        1,
+        "reach guard: CR 702.145c: the token transformed"
+    );
+    (events, token)
+}
+
+/// CR 800.4d: "If a triggered ability that would be controlled by a player who has left the game
+/// would be put onto the stack, it isn't put on the stack." Arcane Artisan ("{2}{U}, {T}: Target
+/// player draws a card, then exiles a card from their hand. If a creature card is exiled this way,
+/// that player creates a token that's a copy of that card.") targets P1, whose library is empty
+/// and whose only card in hand is Brutal Cathar ("Whenever this creature enters or transforms
+/// into Brutal Cathar, exile target creature an opponent controls until this creature leaves the
+/// battlefield."). At night the token turns into Moonrage Brute, and P1's Cult of the Waxing Moon
+/// ("Whenever a permanent you control transforms into a non-Human creature, create a 2/2 green
+/// Wolf creature token.") triggers (CR 603.10). The state-based check that follows has P1 lose
+/// for drawing from an empty library (CR 704.5b), and P1 leaves this three-player game, which
+/// goes on (CR 800.4a). Neither Cult's trigger nor the token's is put on the stack.
+#[test]
+fn cult_of_the_waxing_moon_trigger_is_not_put_on_the_stack_for_a_player_who_lost() {
+    let (mut runner, artisan, bears, cult) = artisan_cult_board(true);
+    let (events, token) = artisan_makes_a_cathar_for_p1(&mut runner, artisan);
+    let lost: Vec<PlayerId> = events
+        .iter()
+        .filter_map(|event| match event {
+            engine::types::events::GameEvent::PlayerLost { player_id } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lost, vec![P1], "reach guard: CR 704.5b: P1 loses");
+    let state = runner.state();
+    assert!(state.players[1].is_eliminated);
+    assert!(state.game_end.is_none(), "CR 800.4: the game goes on");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+        "got {:?}",
+        state.waiting_for
+    );
+
+    assert!(
+        !state
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == cult || entry.source_id == token),
+        "CR 800.4d: P1's triggers aren't put on the stack; stack: {:?}",
+        state.stack
+    );
+    assert!(state.stack.is_empty(), "stack: {:?}", state.stack);
+    assert_eq!(wolves_created(&events), 0);
+    assert_eq!(
+        state.objects[&bears].zone,
+        Zone::Battlefield,
+        "CR 800.4d: the token's enters trigger isn't put on the stack either"
+    );
+}
+
+/// The positive pair of the row above: P1 draws Brutal Cathar from a one-card library and
+/// survives, so on the same route Cult of the Waxing Moon's trigger and the token's enters
+/// trigger both go on the stack for P1 (CR 603.10, CR 702.145c, CR 603.3b). Cult creates a Wolf,
+/// and the token's trigger exiles the Grizzly Bears it targets.
+#[test]
+fn cult_of_the_waxing_moon_trigger_on_arcane_artisans_copy_when_its_controller_survives() {
+    let (mut runner, artisan, bears, cult) = artisan_cult_board(false);
+    let (mut events, token) = artisan_makes_a_cathar_for_p1(&mut runner, artisan);
+
+    let sources = order_prompt_sources(&runner, P1);
+    assert_eq!(sorted(sources.clone()), sorted(vec![cult, token]));
+    events.extend(order_first(&mut runner, &sources, token));
+    match &runner.state().waiting_for {
+        WaitingFor::TriggerTargetSelection {
+            player,
+            target_slots,
+            source_id,
+            ..
+        } => {
+            assert_eq!(*player, P1);
+            assert_eq!(*source_id, Some(token));
+            assert_eq!(target_slots.len(), 1);
+            let legal = &target_slots[0].legal_targets;
+            assert_eq!(legal.len(), 2, "legal targets: {legal:?}");
+            assert!(legal.contains(&TargetRef::Object(artisan)));
+            assert!(legal.contains(&TargetRef::Object(bears)));
+        }
+        other => panic!("the token's trigger asks for its target; got {other:?}"),
+    }
+    events.extend(
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(bears)],
+            })
+            .expect("targeting the Bears must succeed")
+            .events,
+    );
+
+    events.extend(pass_until_settled(&mut runner));
+    assert_eq!(wolves_created(&events), 1, "Cult creates one Wolf");
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&artisan].zone, Zone::Battlefield);
+}
+
+/// Cackling Counterpart ("Create a token that's a copy of target creature you control.") copies
+/// Mirror Room // Fractured Realm, cast as Mirror Room and animated by Opalescence, during the
+/// day; then Baneblade Scoundrel enters and Mirrorweave ("Each other creature becomes a copy of
+/// target nonlegendary creature until end of turn.") makes the Room and the token copies of it.
+/// Returns the Room, the token, the Scoundrel and Into the Night, still in hand.
+fn single_faced_mirror_room_token() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let (mut runner, (room, opalescence, gideon, cackling, scoundrel, weave, night)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            for (name, oracle) in [
+                (MIRROR_ROOM, MIRROR_ROOM_ORACLE),
+                (FRACTURED_REALM, FRACTURED_REALM_ORACLE),
+                (OPALESCENCE, OPALESCENCE_ORACLE),
+                (GIDEON, GIDEON_ORACLE),
+                (CACKLING, CACKLING_ORACLE),
+                (SCOUNDREL, SCOUNDREL_ORACLE),
+                (MIRRORWEAVE, MIRRORWEAVE_ORACLE),
+                (INTO_THE_NIGHT, INTO_THE_NIGHT_ORACLE),
+            ] {
+                assert_oracle(db, name, oracle);
+            }
+            (
+                scenario.add_real_card(P0, MIRROR_ROOM, Zone::Hand, db),
+                scenario.add_real_card(P0, OPALESCENCE, Zone::Hand, db),
+                scenario.add_real_card(P0, GIDEON, Zone::Hand, db),
+                scenario.add_real_card(P0, CACKLING, Zone::Hand, db),
+                scenario.add_real_card(P0, SCOUNDREL, Zone::Hand, db),
+                scenario.add_real_card(P0, MIRRORWEAVE, Zone::Hand, db),
+                scenario.add_real_card(P0, INTO_THE_NIGHT, Zone::Hand, db),
+            )
+        });
+    runner.state_mut().day_night = Some(DayNight::Day);
+    animate_mirror_room(&mut runner, room, opalescence, gideon);
+
+    fund(&mut runner, ManaType::Blue, 3);
+    runner.cast(cackling).target_object(room).resolve();
+    settle(&mut runner);
+    assert_settled(&runner);
+    let made = tokens(&runner);
+    assert_eq!(made.len(), 1, "Cackling Counterpart makes one token");
+    let token = made[0];
+    let face = stored_face(&runner, token);
+    assert_eq!(
+        (face.name.as_str(), face.layout_kind),
+        (FRACTURED_REALM, None),
+        "reach guard: CR 709.5b: the token stores the Room's other half with no layout"
+    );
+    let obj = &runner.state().objects[&token];
+    assert!(obj.double_faced_token_alternative.is_none());
+    assert!(
+        !is_double_faced_permanent(obj),
+        "reach guard: the token isn't a double-faced token"
+    );
+
+    fund(&mut runner, ManaType::Black, 4);
+    runner.cast(scoundrel).resolve();
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&scoundrel].name, SCOUNDREL);
+    fund(&mut runner, ManaType::Blue, 4);
+    runner.cast(weave).target_object(scoundrel).resolve();
+    settle(&mut runner);
+    assert_settled(&runner);
+    let obj = &runner.state().objects[&token];
+    assert!(
+        obj.has_keyword(&Keyword::Daybound),
+        "reach guard: Mirrorweave gave the token daybound"
+    );
+    assert!(!obj.transformed && !obj.modal_back_face, "front face up");
+    (runner, room, token, scoundrel, night)
+}
+
+/// CR 701.27a: "Only permanents represented by double-faced tokens and double-faced cards can
+/// transform." CR 701.27c: "If a spell or ability instructs a player to transform a permanent that
+/// isn't represented by a double-faced token or a double-faced card, nothing happens." Cackling
+/// Counterpart's token copy of Mirror Room // Fractured Realm keeps the other half as a copiable
+/// value (CR 709.5b) and is a single-faced token. Mirrorweave makes it a copy of Baneblade
+/// Scoundrel ("Daybound"), so it is daybound and front face up when Into the Night makes it night,
+/// but it doesn't transform. The real Baneblade Scoundrel transforms in the same designation
+/// change (CR 702.145c), and the Mirror Room card, a split card that also became a copy of it, is
+/// left alone.
+#[test]
+fn a_single_faced_room_token_with_daybound_does_not_transform_at_night() {
+    let (mut runner, room, token, scoundrel, night) = single_faced_mirror_room_token();
+    cast_into_the_night(&mut runner, night);
+    assert_eq!(runner.state().day_night, Some(DayNight::Night));
+
+    let obj = &runner.state().objects[&scoundrel];
+    assert!(
+        obj.transformed,
+        "positive reach: CR 702.145c: the Scoundrel transforms"
+    );
+    assert_eq!(obj.transformation_count, 1);
+
+    let obj = &runner.state().objects[&token];
+    assert!(
+        !obj.transformed,
+        "CR 701.27c: the single-faced Room token doesn't transform"
+    );
+    assert_eq!(obj.transformation_count, 0);
+    assert_eq!(stored_face(&runner, token).name, FRACTURED_REALM);
+
+    let obj = &runner.state().objects[&room];
+    assert!(!obj.transformed, "the Mirror Room card is left alone");
+    assert_eq!(obj.transformation_count, 0);
 }
 
 /// CR 702.145c: during the day a daybound token front face up agrees, so Feldon of the Third
