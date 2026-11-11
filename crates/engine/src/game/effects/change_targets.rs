@@ -111,8 +111,8 @@ pub fn resolve(
     let current_targets: Vec<TargetRef> = exposed.iter().map(|b| b.current.clone()).collect();
     let slots: Vec<RetargetSlotAddress> = exposed.iter().map(|b| b.address.clone()).collect();
     debug_assert!(
-        stack_ability.targets.is_empty() || !exposed.is_empty(),
-        "CR 115.7: a non-empty `current_targets` must expose >=1 position"
+        ability_utils::declared_targets_in_chain(&stack_ability).is_empty() || !exposed.is_empty(),
+        "CR 115.7: a declared target must expose >=1 position"
     );
 
     if current_targets.is_empty() {

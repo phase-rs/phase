@@ -2753,7 +2753,9 @@ pub(crate) fn record_root_target_slots(ability: &mut ResolvedAbility) {
     ability.chosen_target_slots = ChosenTargetSlots::Recorded(chain_node_positions(ability));
 }
 
-fn clear_chosen_target_slots(ability: &mut ResolvedAbility) {
+/// CR 115.10a: records that no node of the chain holds a chosen target, so a
+/// value it carries (a delayed ability's creation-time referent) is not one.
+pub(crate) fn clear_chosen_target_slots(ability: &mut ResolvedAbility) {
     ability.chosen_target_slots = ChosenTargetSlots::Recorded(Vec::new());
     for (_, child) in ability.child_links_mut() {
         clear_chosen_target_slots(child);
@@ -12104,12 +12106,15 @@ pub fn chain_retarget_slots(ability: &ResolvedAbility) -> Vec<RetargetSlotBindin
     // Step 3: blanket early-outs — the faithful mirror of
     // `assign_targets_in_chain`'s own early-outs, which assign the node's
     // targets and stop without gating on derivability.
-    if is_per_opponent_target_fanout(base_node) || !chain_has_target_sink(base_node) {
-        return bindings;
+    if !is_per_opponent_target_fanout(base_node) && chain_has_target_sink(base_node) {
+        // Step 4: descend.
+        descend_retarget_slots(base_node, &base_path, &mut bindings, &mut next_run);
     }
-
-    // Step 4: descend.
-    descend_retarget_slots(base_node, &base_path, &mut bindings, &mut next_run);
+    // CR 115.7 + CR 115.10a: only a chosen target can be changed. A value a
+    // node holds without having received it as a choice (a delayed ability's
+    // creation-time referent) is not a target.
+    let undeclared = undeclared_position_addresses(ability);
+    bindings.retain(|binding| !undeclared.contains(&binding.address));
     bindings
 }
 
@@ -12532,6 +12537,35 @@ pub(crate) fn declared_position_addresses(
                         slot,
                     })
                 }));
+            }
+        },
+    );
+    out
+}
+
+/// CR 115.10a: the retarget address of each position a node holds that its
+/// declared positions leave out: a recorded node's values it never received
+/// as a choice. Empty for a chain without a record, whose numbering is every
+/// position a node holds, and for a per-opponent fanout, whose numbering
+/// compacts its slots.
+fn undeclared_position_addresses(ability: &ResolvedAbility) -> Vec<RetargetSlotAddress> {
+    let mut out = Vec::new();
+    walk_declared_slots(
+        ability,
+        DeclaredNumbering::of(ability),
+        &mut |node, path, declared| {
+            if let Some(declared) = declared {
+                if is_per_opponent_target_fanout(node) {
+                    return;
+                }
+                out.extend(
+                    (0..node.targets.len())
+                        .filter(|slot| !declared.positions.contains(slot))
+                        .map(|slot| RetargetSlotAddress {
+                            path: path.to_vec(),
+                            slot,
+                        }),
+                );
             }
         },
     );

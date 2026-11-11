@@ -2104,3 +2104,116 @@ fn lagonna_band_storyteller_reads_its_target_after_the_choice() {
         }
     }
 }
+
+// ── A delayed ability's captured object is not a target ───────────────────
+
+const BOLT_BEND: &str = "This spell costs {3} less to cast if you control a creature with power 4 or greater.\nChange the target of target spell or ability with a single target.";
+const DEFLECTING_SWAT: &str = "If you control a commander, you may cast this spell without paying its mana cost.\nYou may choose new targets for target spell or ability.";
+
+/// Venomous Breath's delayed ability on the stack at end of combat, above it
+/// Murder on B. Returns the runner, the delayed entry, Murder, and the two
+/// retarget spells in P0's hand.
+fn breath_delayed_beside_murder() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let a = s.add_creature(P0, "A", 1, 5).id();
+    let b = s.add_creature(P1, "B", 1, 6).id();
+    // Another creature, so a captured slot would have a new choice.
+    s.add_creature(P0, "C", 1, 5);
+    let breath = free_spell(&mut s, P0, "Venomous Breath", BREATH);
+    let murder = free_spell(&mut s, P0, "Murder", MURDER);
+    let bend = free_spell(&mut s, P0, "Bolt Bend", BOLT_BEND);
+    let swat = free_spell(&mut s, P0, "Deflecting Swat", DEFLECTING_SWAT);
+    s.with_library_top(P0, &["Forest", "Forest", "Forest"]);
+    s.with_library_top(P1, &["Forest", "Forest", "Forest"]);
+    let mut runner = s.build();
+    attack_block(&mut runner, &[a], &[(b, a)]);
+    runner.cast(breath).target_objects(&[a]).resolve();
+    drain(&mut runner);
+    pass_until(&mut runner, "end of combat", |s| {
+        s.phase == Phase::EndCombat
+    });
+    assert_eq!(runner.state().stack.len(), 1, "reach: the delayed ability");
+    let delayed = runner.state().stack[0].id;
+    assert_eq!(
+        runner.state().stack[0].ability().map(|a| a.targets.len()),
+        Some(1),
+        "reach: it carries the captured creature"
+    );
+    runner.cast(murder).target_objects(&[b]).commit();
+    (runner, delayed, murder, bend, swat)
+}
+
+/// Bolt Bend's legal targets: the prompt's, or, when there is one, the
+/// target it was cast with (CR 601.2c: a single legal choice is announced).
+fn bolt_bend_targets(runner: &mut GameRunner, bend: ObjectId) -> Vec<TargetRef> {
+    let card_id = runner.state().objects[&bend].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bend,
+            card_id,
+            targets: vec![],
+            payment_mode: Default::default(),
+        })
+        .expect("cast");
+    match &runner.state().waiting_for {
+        WaitingFor::TargetSelection { target_slots, .. } => target_slots[0].legal_targets.clone(),
+        WaitingFor::Priority { .. } => {
+            let top = runner.state().stack.last().expect("Bolt Bend on the stack");
+            assert_eq!(top.source_id, bend, "reach: Bolt Bend was cast");
+            top.ability().expect("a spell").targets.clone()
+        }
+        other => panic!("target prompt: {other:?}"),
+    }
+}
+
+/// CR 115.9a + CR 115.10a: "with a single target" counts the times an object
+/// was chosen as a target when the ability was put on the stack. Venomous
+/// Breath's delayed ability names "it" and declares no target, so Bolt Bend
+/// can't target it, while Murder, with its one chosen target, can.
+#[test]
+fn a_delayed_ability_with_no_declared_target_has_no_single_target() {
+    let (mut runner, delayed, murder, bend, _) = breath_delayed_beside_murder();
+    let legal = bolt_bend_targets(&mut runner, bend);
+    assert_eq!(
+        legal,
+        vec![TargetRef::Object(murder)],
+        "only Murder has a single target, not the delayed ability {delayed:?}"
+    );
+}
+
+/// CR 115.7 + CR 115.10a: Deflecting Swat can target any ability, but the
+/// delayed ability has no target to choose anew, so Swat resolves with no
+/// retarget prompt. Over Murder, the same Swat asks for Murder's new target.
+#[test]
+fn choosing_new_targets_for_a_delayed_ability_offers_no_target() {
+    for over_murder in [false, true] {
+        let (mut runner, delayed, murder, _, swat) = breath_delayed_beside_murder();
+        let target = if over_murder { murder } else { delayed };
+        runner.cast(swat).target_objects(&[target]).commit();
+        pass_until(&mut runner, "swat resolves", |s| {
+            s.stack.len() == 2
+                || matches!(
+                    s.waiting_for,
+                    WaitingFor::OptionalEffectChoice { .. } | WaitingFor::RetargetChoice { .. }
+                )
+        });
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ) {
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .expect("choose new targets");
+        }
+        assert_eq!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::RetargetChoice { .. }
+            ),
+            over_murder,
+            "over Murder: {over_murder}: whether Swat asks for a new target: {:?}",
+            runner.state().waiting_for
+        );
+    }
+}

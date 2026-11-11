@@ -725,6 +725,9 @@ pub fn resolve(
     };
     delayed_ability.set_target_incarnations_recursive(target_pins);
     delayed_ability.set_unpinned_targets(snapshot_targets);
+    // CR 115.10a: the creation-time referents are not chosen targets; a
+    // target the payload declares is chosen when it triggers (CR 603.3d).
+    crate::game::ability_utils::clear_chosen_target_slots(&mut delayed_ability);
     // CR 608.2b + CR 603.7c: retain an unavailable creation-time announcement
     // on reference-only payloads so firing cannot invent a new antecedent.
     if ability.has_authoritative_empty_binding()

@@ -3657,9 +3657,12 @@ fn stack_ability_matches_filter(
                 return false;
             }
             tf.properties.iter().all(|property| match property {
-                FilterProp::HasSingleTarget => entry
-                    .ability()
-                    .is_some_and(|ability| ability.targets.len() == 1),
+                // CR 115.9a: "with a single target" counts the times an object
+                // or player was chosen as a target when the entry was put on
+                // the stack, not what it holds (CR 115.10a).
+                FilterProp::HasSingleTarget => entry.ability().is_some_and(|ability| {
+                    crate::game::ability_utils::declared_targets_in_chain(ability).len() == 1
+                }),
                 FilterProp::InZone { zone } => *zone == Zone::Stack,
                 _ => true,
             })
