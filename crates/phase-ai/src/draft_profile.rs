@@ -2107,9 +2107,15 @@ mod tests {
             "a premium finisher keeps threat status"
         );
 
+        // A mana/fixing creature never consumes the finisher budget: the
+        // threat count reads role, not pick quality, so copies of the Elder
+        // cannot reduce or eliminate a real finisher's bonus.
         let elders = vec![elder_card; 4];
         let scored = score15(p, &finisher, &elders, 0.0, 0.0).unwrap();
         assert_eq!(scored.threat_need, 1.25);
+        let mixed = vec![elder_card, finisher, elder_card, finisher];
+        let mixed_score = score15(p, &finisher, &mixed, 0.0, 0.0).unwrap();
+        assert_eq!(mixed_score.threat_need, 0.625, "two of four threats held");
         let finishers = vec![finisher; 4];
         let sated = score15(p, &finisher, &finishers, 0.0, 0.0).unwrap();
         assert_eq!(sated.threat_need, 0.0);
