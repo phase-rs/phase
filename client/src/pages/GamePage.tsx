@@ -21,6 +21,7 @@ import type {
   GameFormat,
   MatchConfig,
   ObjectId,
+  PlayDrawPosition,
   SerializedAbilityCost,
   AiDecisionDiagnosticReceipt,
   TakebackEvent,
@@ -2449,6 +2450,31 @@ interface MulliganDecisionPromptProps {
   onChoose: (id: string) => void;
 }
 
+// CR 103.1: engine-provided play/draw label keys; `satisfies` makes a new
+// engine variant a type error here.
+const PLAY_DRAW_LABEL_KEYS = {
+  OnThePlay: "gamePage.mulligan.onThePlay",
+  OnTheDraw: "gamePage.mulligan.onTheDraw",
+} as const satisfies Record<PlayDrawPosition, ParseKeys<"game">>;
+
+/** The viewer's engine-provided opening turn position (CR 103.1). Formats only. */
+function OpeningTurnPosition() {
+  const { t } = useTranslation("game");
+  const playDraw = useGameStore((s) => s.gameState?.derived?.viewer_play_draw);
+  const turnNumber = useGameStore((s) => s.gameState?.derived?.viewer_turn_number);
+  const label = playDraw
+    ? t(PLAY_DRAW_LABEL_KEYS[playDraw])
+    : turnNumber != null
+      ? t("gamePage.mulligan.takeTurn", { turn: turnNumber })
+      : null;
+  if (!label) return null;
+  return (
+    <div className="mt-1 inline-flex w-fit items-center rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-0.5 text-xs font-semibold text-cyan-200">
+      {label}
+    </div>
+  );
+}
+
 interface MulliganPanelProps {
   eyebrow: string;
   title: string;
@@ -2501,6 +2527,7 @@ function MulliganPanel({
               <p className="modal-subtitle max-w-2xl text-slate-400">
                 {subtitle}
               </p>
+              <OpeningTurnPosition />
             </div>
 
             <div className="flex flex-1 flex-col px-2 py-2 lg:px-5 lg:py-5">{children}</div>

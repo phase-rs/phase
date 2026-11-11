@@ -1604,7 +1604,10 @@
       "subtitleKeepWithBottom": "保留这手牌（你需将{{count}}张牌置于牌库底），或再次调度以获得全新的七张牌。",
       "subtitleOpeningFree": "保留这手牌，或进行一次免费调度（无需将牌置于牌库底）。",
       "subtitleOpeningOne": "保留这手牌，或调度以获得全新的七张牌（保留时你需将 1 张牌置于牌库底）。",
-      "usePowder": "使用{{name}}"
+      "usePowder": "使用{{name}}",
+      "onThePlay": "你先手",
+      "onTheDraw": "你后手",
+      "takeTurn": "你在第 {{turn}} 回合行动"
     },
     "opponentDisconnected": {
       "body": "等待对手重新连接…",

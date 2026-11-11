@@ -1222,7 +1222,10 @@
       "subtitleKeepWithBottom": "Keep this hand (you'll put {{count}} on the bottom) or mulligan again for a fresh 7.",
       "subtitleKeepFree": "Keep this hand (free mulligan — no cards to the bottom) or mulligan again for a fresh 7.",
       "subtitleOpeningFree": "Keep this hand or take a free mulligan (no cards to the bottom).",
-      "subtitleOpeningOne": "Keep this hand or mulligan for a fresh 7 (you'll put 1 on the bottom when you keep)."
+      "subtitleOpeningOne": "Keep this hand or mulligan for a fresh 7 (you'll put 1 on the bottom when you keep).",
+      "onThePlay": "You're on the play",
+      "onTheDraw": "You're on the draw",
+      "takeTurn": "You take turn {{turn}}"
     },
     "companion": {
       "eyebrow": "Pre-Game",
