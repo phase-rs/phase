@@ -37,18 +37,19 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
 };
+#[cfg(test)]
 use crate::types::ability::{
-    become_copy_recipient_slot_filter, damage_replacement_target_roles,
-    effect_needs_parent_target_combat_relation_slot, effect_needs_target_creature_quantity_slot,
-    effect_references_target_player, extract_target_filter_from_effect, mana_multi_role,
-    paired_subject_filters, payer_is_declared_target, AbilityCondition, AbilityDefinition,
-    AbilityKind, AbilityUseTally, AdditionalCostOrigin, AttachCardinality, AttachSelection,
-    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator,
-    ControllerRef, CostCategory, CountScope, DamageChannel, DigSource, Duration, Effect,
-    EffectOutcomeSignal, FilterProp, GuessOutcome, LibraryPosition, ObjectScope, ParsedCondition,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SpentColor,
-    StaticCondition, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter,
-    TypedFilter,
+    become_copy_recipient_slot_filter, effect_needs_target_creature_quantity_slot,
+};
+use crate::types::ability::{
+    effect_references_target_player, effect_stack_target_declaration_matching,
+    payer_is_declared_target, AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally,
+    AdditionalCostOrigin, AttachCardinality, AttachSelection, CastManaObjectScope,
+    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef, CostCategory,
+    CountScope, DamageChannel, DigSource, Duration, Effect, EffectOutcomeSignal, FilterProp,
+    GuessOutcome, LibraryPosition, ObjectScope, ParsedCondition, PlayerScope, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, SharedQuality, SpentColor, StaticCondition, TargetChoiceTiming,
+    TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -4961,57 +4962,68 @@ fn probe_effect_target(effect_text: &str, ctx: &ParseContext) -> Option<EffectTa
     Some(EffectTargetProbe { filter })
 }
 
-/// CR 115.1d: the effect probe restricted to one proven mandatory object role.
-///
-/// The antecedent binder accepts only a single announced object target. A
-/// companion player (a target-player reference or a declared unless-payer) is
-/// announced before the primary filter, and the specialized source-role shapes
-/// (Fight, MoveCounters, Attach, damage replacement, paired subjects, mana
-/// multi-role, EachDealsDamageEqualToPower) announce roles the prose projection
-/// cannot order; all of those decline rather than risk binding the wrong slot.
-fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<EffectTargetProbe> {
-    let clause = super::parse_effect_clause(effect_text, &mut ctx.clone_throwaway());
-    // CR 115.1d + CR 115.10a: the timing decision runs before any slot is
-    // read. A resolution-time recipient (Prize Wall's sticker target, an
-    // untargeted bounce) announces no target and cannot supply the antecedent.
-    let timing = super::lower::target_choice_timing_for_parsed(
-        &clause,
-        effect_text,
-        None,
-        clause.multi_target.is_some(),
-        TargetSelectionMode::Chosen,
-    );
-    if timing != TargetChoiceTiming::Stack || clause.multi_target.is_some() {
-        return None;
-    }
-    if clause
-        .unless_pay
-        .as_ref()
-        .is_some_and(|modifier| payer_is_declared_target(&modifier.payer))
-        || effect_references_target_player(&clause.effect)
-        || effect_has_specialized_source_roles(&clause.effect)
-        || clause_has_child_targets(&clause)
+/// CR 115.1 + CR 601.2c: the roles production announces for one effect node,
+/// collected through the phase-ast declaration enumerator. The predicate
+/// records every candidate and returns false so no branch short-circuits.
+fn declared_roles_for_node(
+    effect: &Effect,
+    unless_pay: Option<&crate::types::ability::UnlessPayModifier>,
+) -> Vec<TargetFilter> {
+    // The fanout branch is not reached here (`fanout_player` false): every
+    // per-opponent fanout shape requires `multi_target`, and the caller
+    // declines that outright. A triggered GainControlAll that the engine
+    // excludes from the companion slot records a spurious Player here and is
+    // declined, a conservative false-decline.
+    let companion_player = effect_references_target_player(effect)
+        || unless_pay.is_some_and(|modifier| payer_is_declared_target(&modifier.payer));
+    let roles = std::cell::RefCell::new(Vec::new());
     {
-        return None;
+        let predicate = |filter: &TargetFilter| {
+            roles.borrow_mut().push(filter.clone());
+            false
+        };
+        let _ = effect_stack_target_declaration_matching(
+            effect,
+            || companion_player,
+            || false,
+            &predicate,
+        );
     }
-    let filter = extract_target_filter_from_effect(&clause.effect)?.clone();
-    Some(EffectTargetProbe { filter })
+    roles
+        .into_inner()
+        .into_iter()
+        .filter(|filter| !filter.is_context_ref())
+        .collect()
 }
 
-/// CR 115.1: a separately targeted child ability is announced alongside or
-/// after the head; production descends into declared children, so the head's
-/// single filter is not the whole declaration.
-fn clause_has_child_targets(clause: &super::ParsedEffectClause) -> bool {
+/// CR 115.1 + CR 608.2c: every announced role in the clause tree, or `None`
+/// when a node declares an ambiguous cardinality shape (distribute, up-to,
+/// repeat-for, chosen player, target chooser) or a resolution-timed child role.
+fn announced_object_roles(clause: &super::ParsedEffectClause) -> Option<Vec<TargetFilter>> {
+    if clause.multi_target.is_some() || clause.distribute.is_some() || clause.optional_targeting {
+        return None;
+    }
+    let mut roles = declared_roles_for_node(&clause.effect, clause.unless_pay.as_ref());
     let mut children: Vec<&crate::types::ability::AbilityDefinition> = Vec::new();
     if let Some(child) = clause.sub_ability.as_deref() {
         children.push(child);
     }
     while let Some(definition) = children.pop() {
-        if definition.target_choice_timing == TargetChoiceTiming::Stack
-            && (definition.effect.target_filter().is_some() || definition.multi_target.is_some())
+        if definition.multi_target.is_some()
+            || definition.distribute.is_some()
+            || definition.optional_targeting
+            || definition.repeat_for.is_some()
+            || definition.player_scope.is_some()
+            || definition.target_chooser.is_some()
         {
-            return true;
+            return None;
         }
+        let child_roles =
+            declared_roles_for_node(&definition.effect, definition.unless_pay.as_ref());
+        if !child_roles.is_empty() && definition.target_choice_timing != TargetChoiceTiming::Stack {
+            return None;
+        }
+        roles.extend(child_roles);
         if let Some(child) = definition.sub_ability.as_deref() {
             children.push(child);
         }
@@ -5020,25 +5032,39 @@ fn clause_has_child_targets(clause: &super::ParsedEffectClause) -> bool {
         }
         children.extend(definition.mode_abilities.iter());
     }
-    false
+    Some(roles)
 }
 
-/// CR 115.1 + CR 601.2c: the multi-role shapes whose announced order cannot be
-/// projected from the head effect alone.
-fn effect_has_specialized_source_roles(effect: &Effect) -> bool {
-    damage_replacement_target_roles(effect).is_some()
-        || paired_subject_filters(effect).is_some()
-        || mana_multi_role(effect).is_some()
-        || effect_needs_target_creature_quantity_slot(effect)
-        || effect_needs_parent_target_combat_relation_slot(effect)
-        || become_copy_recipient_slot_filter(effect).is_some()
-        || matches!(
-            effect,
-            Effect::Fight { .. }
-                | Effect::MoveCounters { .. }
-                | Effect::Attach { .. }
-                | Effect::EachDealsDamageEqualToPower { .. }
-        )
+/// CR 115.1d: the effect probe narrowed to one announced object target. The
+/// declaration set comes from the phase-ast enumerator production uses, over
+/// the head and every descendant; a companion player, a payer, a child role,
+/// or any other second role makes the suffix decline.
+fn probe_declared_target_slot(effect_text: &str, ctx: &ParseContext) -> Option<EffectTargetProbe> {
+    if !nom_primitives::scan_contains(&effect_text.to_ascii_lowercase(), "target ") {
+        return None;
+    }
+    let clause = super::parse_effect_clause(effect_text, &mut ctx.clone_throwaway());
+    let timing = super::lower::target_choice_timing_for_parsed(
+        &clause,
+        effect_text,
+        None,
+        clause.multi_target.is_some(),
+        TargetSelectionMode::Chosen,
+    );
+    if timing != TargetChoiceTiming::Stack {
+        return None;
+    }
+    let mut roles = announced_object_roles(&clause)?;
+    if roles.len() != 1 {
+        return None;
+    }
+    let filter = roles.pop()?;
+    if !nom_condition::filter_guarantees_object_controller(&filter)
+        || super::is_player_scoped_filter(&filter)
+    {
+        return None;
+    }
+    Some(EffectTargetProbe { filter })
 }
 
 pub(super) fn parse_quantity_comparison(text: &str) -> Option<(Comparator, QuantityExpr)> {
@@ -11145,11 +11171,21 @@ mod tests {
     fn any_target_slot_cannot_bind_a_controller() {
         let ctx = ParseContext::default();
         let effect = "Deals that much damage to any other target";
-        let probe = probe_declared_target_slot(effect, &ctx).expect("any-target probe");
-        assert!(!nom_condition::filter_guarantees_object_controller(
-            &probe.filter
-        ));
+        // "any other target" carries no literal "target " and its filter admits
+        // players; both the printed-target gate and the domain check decline.
+        assert!(probe_declared_target_slot(effect, &ctx).is_none());
         assert!(declared_single_object_target(effect, &ctx).is_none());
+    }
+
+    /// CR 109.2b: "that creature's controller" cannot name a creature spell
+    /// on the stack; only the spell noun can.
+    #[test]
+    fn creature_noun_declines_a_creature_spell_slot() {
+        let (cond, _) = strip_suffix_conditional(
+            "Counter target creature spell if you control more creatures than that creature's controller",
+            &mut ParseContext::default(),
+        );
+        assert!(cond.is_none(), "a creature spell is not a creature");
     }
 
     /// CR 205.2a + CR 109.4: Disenchant's "destroy target artifact or
@@ -11233,10 +11269,7 @@ mod tests {
         assert!(crate::parser::oracle_effect::is_player_scoped_filter(
             &probe.filter
         ));
-        let role_probe = probe_declared_target_slot(effect, &ctx).expect("announced player role");
-        assert!(!nom_condition::filter_guarantees_object_controller(
-            &role_probe.filter
-        ));
+        assert!(probe_declared_target_slot(effect, &ctx).is_none());
         assert!(declared_single_object_target(effect, &ctx).is_none());
         let condition = "that opponent controls no creatures";
         assert!(
@@ -11372,6 +11405,16 @@ mod tests {
         let clause =
             crate::parser::oracle_effect::parse_effect_clause(effect, &mut ctx.clone_throwaway());
         assert!(become_copy_recipient_slot_filter(&clause.effect).is_some());
+        assert_eq!(
+            crate::parser::oracle_effect::lower::target_choice_timing_for_parsed(
+                &clause,
+                effect,
+                None,
+                clause.multi_target.is_some(),
+                super::TargetSelectionMode::Chosen,
+            ),
+            super::TargetChoiceTiming::Stack
+        );
         assert!(
             probe_declared_target_slot(effect, &ctx).is_none(),
             "the copy recipient and source are separate roles"
@@ -11396,10 +11439,7 @@ mod tests {
         // Or(Player, Planeswalker), which cannot guarantee an object controller.
         let effect =
             "Prevent the next 1 damage that would be dealt to target player or planeswalker this turn";
-        let probe = probe_declared_target_slot(effect, &ctx).expect("noble vestige probe");
-        assert!(!nom_condition::filter_guarantees_object_controller(
-            &probe.filter
-        ));
+        assert!(probe_declared_target_slot(effect, &ctx).is_none());
         assert!(declared_single_object_target(effect, &ctx).is_none());
         let condition = "its controller controls no creatures";
         assert_eq!(
@@ -11411,10 +11451,7 @@ mod tests {
         // Printed Deathrite Shaman: "Exile target creature card from a
         // graveyard." A graveyard card has no controller (CR 109.4).
         let effect = "Exile target creature card from a graveyard";
-        let probe = probe_declared_target_slot(effect, &ctx).expect("deathrite probe");
-        assert!(!nom_condition::filter_guarantees_object_controller(
-            &probe.filter
-        ));
+        assert!(probe_declared_target_slot(effect, &ctx).is_none());
         assert!(declared_single_object_target(effect, &ctx).is_none());
         let condition = "its controller controls no creatures";
         assert_eq!(
@@ -11537,6 +11574,41 @@ mod tests {
             // Fate Transfer: two announced roles.
             (
                 "Move all counters from target creature onto another target creature",
+                "you control more creatures than that creature's controller",
+            ),
+            // True Polymorph copy recipient and source are separate roles.
+            (
+                "Target artifact you control becomes a copy of target artifact you control",
+                "you control more creatures than that creature's controller",
+            ),
+            // Master's Rebuke: a TargetOnly head plus a targeted damage child.
+            (
+                "Target creature you control deals damage equal to its power to target creature or planeswalker you don't control",
+                "you control more creatures than that creature's controller",
+            ),
+            // Synthetic quantity composition (Bulwark analogue).
+            (
+                "Deals damage to target creature equal to the number of cards in target opponent's hand",
+                "you control more creatures than that creature's controller",
+            ),
+            // Athreos: a declared unless-payer is announced first.
+            (
+                "Destroy target creature unless target opponent pays 3 life",
+                "you control more creatures than that creature's controller",
+            ),
+            // Noble Vestige: Or(Player, Planeswalker) has no object controller.
+            (
+                "Prevent the next 1 damage that would be dealt to target player or planeswalker this turn",
+                "its controller controls no creatures",
+            ),
+            // Deathrite Shaman: a graveyard card has no controller.
+            (
+                "Exile target creature card from a graveyard",
+                "its controller controls no creatures",
+            ),
+            // Companion target player announced before the primary filter.
+            (
+                "Destroy all creatures target player controls",
                 "you control more creatures than that creature's controller",
             ),
         ] {
