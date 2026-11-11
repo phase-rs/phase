@@ -488,6 +488,7 @@ pub(crate) fn eliminate_players(
         state.pending_mass_library_order_choice = None;
         // CR 104.1: the game is over; no player-scope sacrifice is owed to a finished game.
         state.pending_player_scope_sacrifice_choice = None;
+        super::turns::abandon_phase_begin_choice(state);
         state.waiting_for = WaitingFor::GameOver { winner };
     } else {
         // CR 800.4a + CR 608.2m + CR 800.4g/800.4h: once every departure,
@@ -562,6 +563,10 @@ pub(crate) fn eliminate_players(
             super::engine_payment_choices::handle_optional_effect_choice(state, false, events)
                 .expect("departed optional sacrifice payer must follow the canonical decline path");
         }
+
+        // CR 800.4j: a step transition held on a departed player's choice is
+        // completed before the triggers below are put on the stack in that step.
+        super::turns::resume_abandoned_phase_begin_choice(state, events);
 
         // CR 603.3b: If prune collapsed an ordering pass into
         // `deferred_triggers` while `waiting_for` is Priority, dispatch now so
@@ -1631,7 +1636,6 @@ fn do_eliminate(
         state.pending_single_discard = None;
         state.replacement_may_cost_paused = false;
         super::replacement::abandon_post_replacement_continuation(state);
-        super::turns::abandon_phase_begin_choice(state);
     }
 
     // A leaving player gains no life: they are no longer a player in the game, so

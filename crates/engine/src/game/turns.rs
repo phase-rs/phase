@@ -355,20 +355,7 @@ fn advance_phase_hop(state: &mut GameState, events: &mut Vec<GameEvent>) -> Phas
     if turn_ends {
         start_next_turn(state, events);
     } else {
-        // CR 614.1b + CR 614.10 + CR 500.11: Route phase/step starts through the
-        // replacement pipeline so condition-gated skip replacements can prevent
-        // the phase. Simple static-based skips (`StaticMode::SkipStep`) still
-        // short-circuit at dedicated call sites (`step_skip`, for untap, upkeep
-        // and draw); this path handles event-context-aware replacements.
-        // CR 508.8: a combat step with nothing attacking is skipped before it
-        // could begin, so it proposes no begin event.
-        let proposed = ProposedEvent::begin_phase(state.active_player, next);
-        let begin = if combat_step_skipped(state, next) {
-            ReplacementResult::Prevented
-        } else {
-            replacement::replace_event(state, proposed, events)
-        };
-        match begin {
+        match propose_step_begin(state, next, events) {
             ReplacementResult::Prevented => {
                 skip_past_prevented_step(state, next);
                 return PhaseHop::Skipped;
@@ -388,6 +375,24 @@ fn advance_phase_hop(state: &mut GameState, events: &mut Vec<GameEvent>) -> Phas
         events,
         apnap_anchor,
     )))
+}
+
+/// CR 614.1b + CR 614.10 + CR 500.11: Route phase/step starts through the
+/// replacement pipeline so condition-gated skip replacements can prevent the
+/// phase. Simple static-based skips (`StaticMode::SkipStep`) still short-circuit
+/// at dedicated call sites (`step_skip`, for untap, upkeep and draw); this path
+/// handles event-context-aware replacements. CR 508.8: a combat step with nothing
+/// attacking is skipped before it could begin, so it proposes no begin event.
+fn propose_step_begin(
+    state: &mut GameState,
+    next: Phase,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    if combat_step_skipped(state, next) {
+        return ReplacementResult::Prevented;
+    }
+    let proposed = ProposedEvent::begin_phase(state.active_player, next);
+    replacement::replace_event(state, proposed, events)
 }
 
 /// CR 500.11: "To skip a step, phase, or turn is to proceed past it as though it
@@ -467,8 +472,34 @@ pub(super) fn resume_phase_begin_choice(
     resume_deferred_step_triggers(state, events).unwrap_or_else(|| state.waiting_for.clone())
 }
 
-/// CR 800.4a: the affected player left with their choice unanswered, so the
-/// transition it held is gone with it.
+/// CR 800.4a + CR 800.4j: the affected player left with their choice unanswered
+/// and the turn continues, so the step the held transition reached is proposed
+/// again to the players still in the game and begins as an answered choice's does.
+pub(super) fn resume_abandoned_phase_begin_choice(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(next) = state
+        .pending_phase_transition_progress
+        .as_ref()
+        .filter(|progress| {
+            progress.drain_state
+                == crate::types::game_state::PhaseTransitionDrainState::AwaitingBeginChoice
+                && state.pending_replacement.is_none()
+        })
+        .map(|progress| progress.next_phase)
+    else {
+        return;
+    };
+    state.waiting_for = match propose_step_begin(state, next, events) {
+        ReplacementResult::NeedsChoice(player) => {
+            replacement::replacement_choice_waiting_for(player, state)
+        }
+        result => resume_phase_begin_choice(state, result, events),
+    };
+}
+
+/// CR 104.1: a finished game owes no transition a parked choice held.
 pub(super) fn abandon_phase_begin_choice(state: &mut GameState) {
     let parked = state
         .pending_phase_transition_progress
@@ -723,11 +754,11 @@ fn enter_phase(
     // record whose answer can never arrive, never a live batch — which is why this
     // clear cannot destroy work in progress. The two doors that can strand one
     // both pass through here: CR 724.1d `end_turn_to_cleanup` and CR 724.2d
-    // `end_combat_phase_to_postcombat`. Without
-    // this, the stale record is drained by `resolve_combat_damage`'s guard on a LATER
-    // turn's combat-damage step, re-emitting that batch's events and then writing
-    // `regular_damage_done` on the new combat — silently skipping that turn's combat
-    // damage (CR 510.2 / CR 510.4).
+    // `end_combat_phase_to_postcombat`. Without this, the stale record is drained
+    // by `resolve_combat_damage`'s guard on a LATER turn's combat-damage step,
+    // re-emitting that batch's events and then writing `regular_damage_done` on
+    // the new combat — silently skipping that turn's combat damage (CR 510.2 /
+    // CR 510.4).
     //
     // What authorises DISCARDING the batch's still-waiting CR 603.3b triggers
     // (neither CR 500.4 nor CR 510.2 addresses them):
@@ -3660,7 +3691,8 @@ enum StepSkip {
 /// CR 500.11 + CR 614.10: the skip, if any, that replaces the beginning of
 /// `step` for the active player. Only the untap, upkeep and draw steps are
 /// decided here. The begin-phase replacement pipeline (CR 614.1b) runs first;
-/// CR 508.8 and CR 724.1d / CR 724.2d skip past a step without entering it. Pure: a pending one-shot skip is reported, not used up.
+/// CR 508.8 and CR 724.1d / CR 724.2d skip past a step without entering it.
+/// Pure: a pending one-shot skip is reported, not used up.
 fn step_skip(state: &GameState, step: Phase) -> Option<StepSkip> {
     let first_draw = match step {
         // CR 103.8: The starting player skips their first-turn draw step only

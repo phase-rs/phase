@@ -7,6 +7,7 @@ use engine::game::combat::AttackTarget;
 use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::ability::Duration;
 use engine::types::actions::GameAction;
 use engine::types::format::{ChallengeDeck, FormatConfig};
 use engine::types::game_state::{GameState, PendingCombatPhaseSkip, WaitingFor};
@@ -23,6 +24,8 @@ const P3: PlayerId = PlayerId(3);
 
 const WOUND_REFLECTION: &str = "At the beginning of each end step, each opponent loses life equal to the life they lost this turn. (Damage causes loss of life.)";
 const RELENTLESS_ASSAULT: &str = "Untap all creatures that attacked this turn. After this main phase, there is an additional combat phase followed by an additional main phase.";
+const MOMENT_OF_SILENCE: &str = "Target player skips their next combat phase this turn.";
+const REVENANT_PATRIARCH: &str = "When this creature enters, if {W} was spent to cast it, target player skips their next combat phase.\nThis creature can't block.";
 const DOOR_TO_NOTHINGNESS: &str = "This artifact enters tapped.\n{W}{W}{U}{U}{B}{B}{R}{R}{G}{G}, {T}, Sacrifice this artifact: Target player loses the game.";
 
 fn mana(types: &[ManaType]) -> Vec<ManaUnit> {
@@ -311,6 +314,123 @@ fn a_departed_active_players_turn_runs_its_added_phases() {
             (P1, Phase::Upkeep)
         );
     }
+}
+
+/// CR 800.4j + CR 616.1 + CR 500.8: when the active player leaves with its choice between the
+/// skips of the combat phase an added phase begins with unanswered, that combat begins and the
+/// added phases run in order.
+#[test]
+fn a_departed_active_players_unanswered_skip_choice_keeps_its_added_phases_in_order() {
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for seat in 0..4u8 {
+        scenario.with_library_top(PlayerId(seat), &["Filler A", "Filler B", "Filler C"]);
+    }
+    let patriarch = scenario
+        .add_creature_to_hand_from_oracle(P0, "Revenant Patriarch", 4, 3, REVENANT_PATRIARCH)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 4,
+        })
+        .id();
+    let moment = scenario
+        .add_spell_to_hand_from_oracle(P0, "Moment of Silence", true, MOMENT_OF_SILENCE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        })
+        .id();
+    let assault = scenario
+        .add_spell_to_hand_from_oracle(P0, "Relentless Assault", false, RELENTLESS_ASSAULT)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+            generic: 2,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let cast = |runner: &mut GameRunner, spell: ObjectId, pool: &[ManaType]| {
+        for unit in mana(pool) {
+            runner.state_mut().players[0].mana_pool.add(unit);
+        }
+        runner.cast(spell).target_player(P0).resolve();
+    };
+    cast(
+        &mut runner,
+        patriarch,
+        &[
+            ManaType::White,
+            ManaType::Black,
+            ManaType::Black,
+            ManaType::Black,
+            ManaType::Black,
+        ],
+    );
+    cast(&mut runner, moment, &[ManaType::White]);
+    cast(&mut runner, assault, &[ManaType::Red; 4]);
+    assert_eq!(runner.state().pending_combat_phase_skips.len(), 2);
+
+    for _ in 0..4 {
+        pass(&mut runner);
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    let mut steps = vec![runner.state().phase];
+    concede(&mut runner, P0);
+    steps.extend(walk(&mut runner, |state| state.active_player == P0).steps);
+    steps.dedup();
+    assert_eq!(
+        steps,
+        [
+            Phase::PreCombatMain,
+            Phase::BeginCombat,
+            Phase::EndCombat,
+            Phase::PostCombatMain,
+            Phase::BeginCombat,
+            Phase::EndCombat,
+            Phase::PostCombatMain,
+            Phase::End
+        ]
+    );
+    assert_eq!(
+        (runner.state().active_player, runner.state().phase),
+        (P1, Phase::Upkeep)
+    );
+}
+
+/// CR 805.4a + CR 805.8 + CR 616.1: when the engine's active player leaves a shared-team turn
+/// with its choice between the team's combat skips unanswered, the teammate now active makes it.
+#[test]
+fn a_remaining_teammate_makes_the_departed_players_skip_choice() {
+    let mut runner = archenemy(archenemy_board());
+    // The skips Blinding Angel's trigger and Moment of Silence record for P2.
+    for duration in [None, Some(Duration::UntilEndOfTurn)] {
+        runner
+            .state_mut()
+            .pending_combat_phase_skips
+            .push(PendingCombatPhaseSkip {
+                player: P2,
+                duration,
+            });
+    }
+    while priority_seat(&runner).is_some() {
+        pass(&mut runner);
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P1, .. }
+    ));
+    concede(&mut runner, P1);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P2, .. }
+    ));
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("CR 616.1: the affected player chooses");
+    assert_eq!(runner.state().phase, Phase::PostCombatMain);
+    assert_eq!(runner.state().pending_combat_phase_skips.len(), 1);
 }
 
 /// CR 805.4a + CR 805.9 + CR 508.1: when the engine's active player leaves a shared-team turn
