@@ -45789,6 +45789,9 @@ fn parse_effect_chain_ir_body(
     // the leading duration a later coordinated chunk of the sentence cannot see.
     let sentence_leading_duration = compute_sentence_leading_duration(&chunks);
     let mut builder = ClauseIrBuilder::new(full_text);
+    // CR 608.2c: the gate a chain root took on its own target's controller,
+    // checked against the finished chain by `keep_own_target_gate_tail_reachable`.
+    let mut own_target_gate: Option<AbilityCondition> = None;
 
     // CR 608.2c + CR 117.3a: "Anchor subject" for chain-level anaphoric
     // inheritance. When a clause in the chain declares an explicit player-scope
@@ -47719,6 +47722,9 @@ fn parse_effect_chain_ir_body(
             (Some(route), Some(suffix_route)) => Some(route.merge(suffix_route)),
             (route, suffix_route) => route.or(suffix_route),
         };
+        if let Some((gate, LeadingConditionRoute::OwnTargetController)) = &suffix_cond {
+            own_target_gate = Some(gate.clone());
+        }
         let suffix_cond = suffix_cond.map(|(condition, _)| condition);
         let guard_condition = condition
             .or(counter_cond)
@@ -51461,6 +51467,10 @@ fn parse_effect_chain_ir_body(
     // default to `Duration::UntilEndOfTurn` (engine convention for
     // `GenericEffect` whose duration field is `None`; the CR baseline per
     // CR 611.2a is "until end of the game", which is not what we want either).
+    // CR 608.2c: over the finished sequence, so every instruction after the
+    // gated root is known.
+    keep_own_target_gate_tail_reachable(builder.clauses_mut(), own_target_gate.as_ref());
+
     let mut clauses = builder.finish();
     try_fold_loses_other_sibling(&mut clauses);
 
@@ -51474,6 +51484,42 @@ fn parse_effect_chain_ir_body(
         in_trigger: ctx.in_trigger,
         repeat_until: pending_repeat_until,
         injected_color_choice: InjectedColorChoice::Permitted,
+    }
+}
+
+/// CR 608.2c: a chain root gated on its own target's controller
+/// ([`LeadingConditionRoute::OwnTargetController`]) must leave every later
+/// instruction reachable "in the order written". On a false gate the engine
+/// runs only the gated node's DIRECT sub, and only when it is an independent
+/// instruction with no condition or one released from the gate (engine
+/// `effects/mod.rs`, the condition-false path of `resolve_chain_body`); the
+/// rest of the chain is reached through it. So the next clause, if any, must
+/// be emitted as its own definition, linked as an independent instruction
+/// (`sub_link_after_boundary`), with no condition of its own unless it was
+/// released from the gate (`settle_trailing_guard`). Otherwise the gated root
+/// becomes an explicit gap.
+fn keep_own_target_gate_tail_reachable(clauses: &mut [ClauseIr], gate: Option<&AbilityCondition>) {
+    let Some(gate) = gate else {
+        return;
+    };
+    let Some((root, tail)) = clauses.split_first_mut() else {
+        return;
+    };
+    if root.condition.as_ref() != Some(gate) {
+        return;
+    }
+    let reachable = tail.first().is_none_or(|next| {
+        sub_link_after_boundary(root.boundary) == SubAbilityLink::SequentialSibling
+            && matches!(next.disposition, ClauseDisposition::Emit { .. })
+            && match next.sibling_condition {
+                SiblingCondition::ReplicatedOrBranch => true,
+                SiblingCondition::Dependent => {
+                    next.condition.is_none() && next.parsed.condition.is_none()
+                }
+            }
+    });
+    if !reachable {
+        root.replace_with_gap("target_controller_gate_tail_unreachable");
     }
 }
 

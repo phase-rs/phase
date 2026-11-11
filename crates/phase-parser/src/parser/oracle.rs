@@ -5986,23 +5986,48 @@ fn parse_normalized_oracle_ir(
     {
         ctx.host_self_reference = Some(crate::types::ability::TargetFilter::AttachedTo);
     }
-    // CR 608.2c: no spell line of a card whose spell is rewritten at cast is
-    // proven to be its spell's resolved root with its printed targets:
+    // CR 608.2c: a card's spell line is proven to be its spell's resolved root,
+    // with its printed targets and nothing the cast adds below it, only when
+    // the card's spell is not rewritten at cast:
     // - fuse (CR 702.102d): the right half follows the left half;
     // - splice (CR 702.47a): the card's text is added to another spell;
     // - gift (CR 702.174j): the gift effect happens first, and the engine wraps
     //   the first spell ability under a `GiftDelivery` root (`synthesize_gift`);
-    // - overload (CR 702.96b): the overloaded spell requires no targets.
-    // Read from the card's own printed keyword lines, typed by the strict
-    // keyword router: a split card's halves reach this parser without their
-    // MTGJSON keyword names, but each half prints its "Fuse" line.
-    let card_spell_root = if normalized_oracle_text.split('\n').any(|line| {
-        let lower = strip_reminder_text(line).trim().to_lowercase();
+    // - overload (CR 702.96b): the overloaded spell requires no targets;
+    // - awaken (CR 702.113a): the awaken spell ability is appended below it;
+    // - an Arcane spell (CR 702.47b): the engine splices onto a spell with the
+    //   splice card's subtype (`eligible_splice_cards`), every printed splice
+    //   subtype is Arcane, and the spliced text is appended below it;
+    // - a second spell paragraph: the engine appends it below the first
+    //   (`combined_spell_ability_def`), with any condition of its own.
+    // The keywords are read from the card's own printed keyword lines, typed by
+    // the strict keyword router: a split card's halves reach this parser without
+    // their MTGJSON keyword names, but each half prints its "Fuse" line.
+    let printed_keyword_lines: Vec<Option<Keyword>> = normalized_oracle_text
+        .split('\n')
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let lower = strip_reminder_text(line).trim().to_lowercase();
+            super::oracle_keyword::parse_router_keyword_fragment(&lower)
+        })
+        .collect();
+    let rewritten_at_cast = printed_keyword_lines.iter().flatten().any(|keyword| {
         matches!(
-            super::oracle_keyword::parse_router_keyword_fragment(&lower),
-            Some(Keyword::Fuse | Keyword::Splice { .. } | Keyword::Gift(_) | Keyword::Overload(_))
+            keyword,
+            Keyword::Fuse
+                | Keyword::Splice { .. }
+                | Keyword::Gift(_)
+                | Keyword::Overload(_)
+                | Keyword::Awaken { .. }
         )
-    }) {
+    });
+    let splice_host = subtypes.iter().any(|s| s.eq_ignore_ascii_case("Arcane"));
+    let other_lines = printed_keyword_lines
+        .iter()
+        .filter(|line| line.is_none())
+        .count()
+        > 1;
+    let card_spell_root = if rewritten_at_cast || splice_host || other_lines {
         ResolvedChainRoot::Unproven
     } else {
         ResolvedChainRoot::Proven

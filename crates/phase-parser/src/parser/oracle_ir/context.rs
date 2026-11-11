@@ -406,16 +406,17 @@ pub enum BodyScope {
 /// a proven root.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ResolvedChainRoot {
-    /// Not proven: the chain may be attached under another node at parse or
-    /// cast time (a nested remainder parse, a mode, a later spell paragraph, a
-    /// fused half, a spliced spell, a gift spell), or lose its targets at cast
-    /// time (an overloaded spell).
+    /// Not proven: the chain may be attached under another node, or have
+    /// another instruction appended below it, at parse or cast time (a nested
+    /// remainder parse, a mode, a spell with a second paragraph, a fused half, a
+    /// spliced card or a splice host, a gift spell, an awaken spell), or lose
+    /// its targets at cast time (an overloaded spell).
     #[default]
     Unproven,
     /// Set by a top-level entry point whose chain is its ability's resolved
-    /// root (a triggered ability's body, an activated ability's effect, a
-    /// card's first spell line on a card without fuse, splice, gift or
-    /// overload).
+    /// root with its printed targets (a triggered ability's body, an activated
+    /// ability's effect, the only spell line of a card whose spell is not
+    /// rewritten at cast).
     Proven,
 }
 

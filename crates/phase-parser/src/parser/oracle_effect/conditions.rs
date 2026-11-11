@@ -332,6 +332,13 @@ pub(crate) enum LeadingConditionRoute {
     /// the gated instruction announces no target of its own. Also names an
     /// `And` / `Or` gate with such a member ([`LeadingConditionRoute::merge`]).
     TargetPtThreshold,
+    /// CR 608.2c: `bind_target_controller_condition` — a trailing gate on the
+    /// controller of the gated chain root's own single target (Skulking Killer,
+    /// Unified Will). The engine runs only the gated root's DIRECT sub when its
+    /// gate is false, and only when that sub is an unconditional independent
+    /// instruction, so the chain must keep anything after the root reachable:
+    /// see `keep_own_target_gate_tail_reachable`.
+    OwnTargetController,
 }
 
 impl LeadingConditionRoute {
@@ -342,7 +349,13 @@ impl LeadingConditionRoute {
     pub(super) fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::General, Self::General) => Self::General,
+            // The P/T threshold guard refuses an instruction that announces its
+            // own target, which every own-target-controller gate's instruction
+            // does, so it subsumes that route's tail guard.
             (Self::TargetPtThreshold, _) | (_, Self::TargetPtThreshold) => Self::TargetPtThreshold,
+            (Self::OwnTargetController, _) | (_, Self::OwnTargetController) => {
+                Self::OwnTargetController
+            }
         }
     }
 }
@@ -4863,7 +4876,10 @@ pub(super) fn strip_routed_suffix_conditional(
         else {
             return (None, text.to_string());
         };
-        return (general(condition), effect_text);
+        return (
+            Some((condition, LeadingConditionRoute::OwnTargetController)),
+            effect_text,
+        );
     } else if let Some(referent) = parse_target_controller_control_condition_prefix(condition_core)
     {
         // The grammar is only a prefix here (a trailing " and " / " or "
@@ -5073,12 +5089,14 @@ struct AnnouncedRoles {
 /// A later printed instruction is appended below the clause's last node
 /// (assembly), and on a false gate the engine runs only the gated node's DIRECT
 /// sub when it is an independent instruction (engine `effects/mod.rs`, the
-/// condition-false path of `resolve_chain_body`). Below a single-node clause
-/// the next instruction is that direct sub, so it still happens "in the order
-/// written"; below a head with a continuation child (a compound such as "gets
-/// -2/-2 and gains haste", or a `TargetOnly` head and its acting child) it sits
-/// under the continuation and would be skipped with it. The suffix therefore
-/// binds only a single-node clause; the other shape stays an explicit gap.
+/// condition-false path of `resolve_chain_body`). Below a head with a
+/// continuation child (a compound such as "gets -2/-2 and gains haste", or a
+/// `TargetOnly` head and its acting child) the next instruction sits under the
+/// continuation and would be skipped with it, so the suffix binds only a
+/// single-node clause and the other shape stays an explicit gap. Below a
+/// single-node clause the next instruction is that direct sub; whether it is
+/// one the false path runs is checked once the chain is finished
+/// (`keep_own_target_gate_tail_reachable`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GatedClauseShape {
     SingleInstruction,
@@ -5474,8 +5492,8 @@ fn parse_target_controller_control_condition_prefix(
 pub(super) enum GatedInstructionPosition {
     /// The first instruction of a chain its entry point proved to be the
     /// ability's resolved root (`ResolvedChainRoot::Proven`: a triggered
-    /// ability's body, an activated ability's effect, or a card's first spell
-    /// line on a card without fuse, splice, gift or overload). The engine
+    /// ability's body, an activated ability's effect, or the only spell line of
+    /// a card whose spell is not rewritten at cast). The engine
     /// evaluates its gate on its own resolved node before its effect, so a
     /// target-controller read sees the targets this instruction announced.
     ChainRoot,
@@ -12002,10 +12020,24 @@ mod tests {
     /// each other creature and each opponent.").
     #[test]
     fn gated_clause_with_a_continuation_child_is_an_explicit_gap() {
+        /// The explicit gap a declined suffix becomes.
+        #[derive(Debug, PartialEq)]
+        enum GapForm {
+            /// The compound splitter keeps the suffix inside an unimplemented child.
+            UnimplementedChild,
+            /// The swallow detector reports it as a `Condition` gap.
+            ConditionWarning,
+        }
         let condition = "that creature's controller controls no other creatures";
-        for effect in [
-            "Target creature gets -2/-2 until end of turn and gains haste until end of turn",
-            "Target creature deals 2 damage to each other creature",
+        for (effect, expected) in [
+            (
+                "Target creature gets -2/-2 until end of turn and gains haste until end of turn",
+                GapForm::UnimplementedChild,
+            ),
+            (
+                "Target creature deals 2 damage to each other creature",
+                GapForm::ConditionWarning,
+            ),
         ] {
             let roles = stack_announced_roles(effect, &trigger_ctx()).expect("reach guard");
             assert_eq!(roles.head.len(), 1, "reach guard: {effect}: one head role");
@@ -12059,9 +12091,6 @@ mod tests {
             for child in &children {
                 assert_eq!(child.condition, None, "{text}: {:?}", child.effect);
             }
-            // The declined suffix is an explicit gap: either the compound
-            // splitter keeps it inside an unimplemented child, or the swallow
-            // detector reports it as a `Condition` gap.
             let gaps: Vec<_> = warnings.iter().filter_map(|w| w.gap()).collect();
             let condition_gap = crate::parser::oracle_ir::diagnostic::ClauseGap::Condition {
                 guard: condition.to_string(),
@@ -12072,8 +12101,14 @@ mod tests {
                     .unimplemented_description()
                     .is_some_and(|fragment| nom_primitives::scan_contains(fragment, condition))
             });
-            assert!(
-                gaps == vec![&condition_gap] || (gaps.is_empty() && unimplemented_suffix),
+            let form = match (gaps.as_slice(), unimplemented_suffix) {
+                ([gap], false) if **gap == condition_gap => Some(GapForm::ConditionWarning),
+                ([], true) => Some(GapForm::UnimplementedChild),
+                _ => None,
+            };
+            assert_eq!(
+                form,
+                Some(expected),
                 "{text}: the suffix must be an explicit gap: {warnings:?} {children:?}"
             );
         }
@@ -12301,7 +12336,9 @@ mod tests {
     ///   `__force_keyword_extract__` sentinel instead of MTGJSON names);
     /// - splice (CR 702.47a): Glacial Ray's printed splice line;
     /// - gift (CR 702.174j): Long River's Pull's printed gift line;
-    /// - overload (CR 702.96b): Cyclonic Rift's printed overload line.
+    /// - overload (CR 702.96b): Cyclonic Rift's printed overload line;
+    /// - awaken (CR 702.113a): Scatter to the Winds' printed awaken line;
+    /// - a splice host (CR 702.47b): the same spell line on an Arcane instant.
     ///
     /// Each spell line is synthetic ("Destroy target enchantment if its
     /// controller controls no creatures."; nearest printed card: Tear, with
@@ -12321,13 +12358,15 @@ mod tests {
         );
 
         let split_face = vec!["__force_keyword_extract__".to_owned()];
-        for (text, keywords) in [
+        let no_subtypes: Vec<String> = Vec::new();
+        for (text, keywords, subtypes) in [
             (
                 format!(
                     "{spell}\nFuse (You may cast one or both halves of this card from your \
                      hand.)"
                 ),
                 split_face,
+                no_subtypes.clone(),
             ),
             (
                 format!(
@@ -12336,6 +12375,7 @@ mod tests {
                      add this card's effects to that spell.)"
                 ),
                 vec!["Splice".to_owned()],
+                no_subtypes.clone(),
             ),
             (
                 format!(
@@ -12343,6 +12383,7 @@ mod tests {
                      If you do, they draw a card before its other effects.)\n{spell}"
                 ),
                 vec!["Gift".to_owned()],
+                no_subtypes.clone(),
             ),
             (
                 format!(
@@ -12350,10 +12391,26 @@ mod tests {
                      cost. If you do, change \"target\" in its text to \"each.\")"
                 ),
                 vec!["Overload".to_owned()],
+                no_subtypes.clone(),
             ),
+            (
+                format!(
+                    "{spell}\nAwaken 3\u{2014}{{4}}{{U}}{{U}} (If you cast this spell for \
+                     {{4}}{{U}}{{U}}, also put three +1/+1 counters on target land you control \
+                     and it becomes a 0/0 Elemental creature with haste. It's still a land.)"
+                ),
+                vec!["Awaken".to_owned()],
+                no_subtypes.clone(),
+            ),
+            (spell.clone(), Vec::new(), vec!["Arcane".to_owned()]),
         ] {
-            let parsed =
-                parse_oracle_text(&text, "Synthetic", &keywords, &["Instant".to_owned()], &[]);
+            let parsed = parse_oracle_text(
+                &text,
+                "Synthetic",
+                &keywords,
+                &["Instant".to_owned()],
+                &subtypes,
+            );
             let definitions = all_chain_definitions(&parsed);
             assert!(
                 definitions.iter().any(|def| matches!(
@@ -12420,13 +12477,53 @@ mod tests {
         );
     }
 
-    /// CR 608.2c: the mirror positive. A card's first spell line is its spell's
-    /// resolved root even when a later printed instruction follows it, so the
-    /// suffix binds on that root and the later instruction stays ungated.
+    /// CR 608.2c: a gated spell line on a card with a second non-keyword line
+    /// is an explicit gap. When a later paragraph is emitted as its own spell
+    /// ability (Azorius Ploy's printed shape: two targeted paragraphs), the
+    /// engine appends it below the first at cast (`combined_spell_ability_def`)
+    /// with any condition of its own, which a false gate would skip; the first
+    /// line is parsed before the second, so the card-level proof declines any
+    /// second non-keyword line. That is conservative for this synthetic row,
+    /// whose two lines the parser joins into one chain with an unconditional
+    /// tail. The reach guard proves the first line alone binds.
+    #[test]
+    fn target_controller_suffix_on_a_spell_with_a_second_paragraph_is_an_explicit_gap() {
+        let condition = "its controller controls no creatures";
+        let first = format!("Destroy target artifact if {condition}.");
+        let (alone, warnings) = parse_single_ability(&first, "Synthetic", &["Instant"], &[]);
+        assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+        assert!(
+            alone.condition.is_some(),
+            "reach guard: the line alone binds"
+        );
+
+        let text = format!(
+            "{first}\nPrevent all combat damage that would be dealt to target creature this \
+             turn."
+        );
+        let parsed = parse_oracle_text(&text, "Synthetic", &[], &["Instant".to_owned()], &[]);
+        let definitions = all_chain_definitions(&parsed);
+        assert!(
+            definitions.iter().any(|def| matches!(
+                &*def.effect,
+                Effect::Destroy { target, .. } if !target.is_context_ref()
+            )),
+            "reach guard: the targeted line parsed: {definitions:?}"
+        );
+        for def in &definitions {
+            assert_eq!(def.condition, None, "{:?}", def.effect);
+        }
+        assert_only_condition_gap(&parsed, condition);
+    }
+
+    /// CR 608.2c: the mirror positive. A card's only spell line is its spell's
+    /// resolved root, and an unconditional later sentence on it is the root's
+    /// independent next instruction, which a false gate still runs, so the
+    /// suffix binds on the root and the later instruction stays ungated.
     /// Synthetic text; nearest printed card: Unified Will.
     #[test]
-    fn target_controller_suffix_on_the_first_spell_line_binds() {
-        let text = "Destroy target artifact if its controller controls no creatures.\nDraw a card.";
+    fn target_controller_suffix_on_the_only_spell_line_binds() {
+        let text = "Destroy target artifact if its controller controls no creatures. Draw a card.";
         let parsed = parse_oracle_text(text, "Synthetic", &[], &["Instant".to_owned()], &[]);
         assert!(
             parsed.parse_warnings.is_empty(),
@@ -12456,6 +12553,66 @@ mod tests {
             draw.effect
         );
         assert_eq!(draw.condition, None);
+        assert_eq!(
+            draw.sub_link,
+            crate::types::ability::SubAbilityLink::SequentialSibling,
+            "the draw is the root's independent next instruction"
+        );
+    }
+
+    /// CR 608.2c: a later instruction that a false gate would not run makes the
+    /// gated root an explicit gap. Into the Roil's printed kicked tail ("If this
+    /// spell was kicked, draw a card.") carries its own condition, so on a false
+    /// gate the engine would drop it with the gated root. Synthetic text:
+    /// Skulking Killer's printed instruction and suffix with Into the Roil's
+    /// printed kicker line and kicked tail. The reach guard parses the same text
+    /// with an unconditional tail and asserts it binds.
+    #[test]
+    fn target_controller_suffix_with_a_conditional_tail_is_an_explicit_gap() {
+        let gated = "Target creature an opponent controls gets -2/-2 until end of turn if that \
+                     opponent controls no other creatures.";
+        let kicker = "Kicker {1}{U} (You may pay an additional {1}{U} as you cast this spell.)";
+
+        let (bound, warnings) = parse_single_ability(
+            &format!("{kicker}\n{gated} Draw a card."),
+            "Synthetic",
+            &["Instant"],
+            &[],
+        );
+        assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+        assert!(
+            bound.condition.is_some(),
+            "reach guard: an unconditional tail binds"
+        );
+
+        let text = format!("{kicker}\n{gated} If this spell was kicked, draw a card.");
+        let (root, warnings) = parse_single_ability(&text, "Synthetic", &["Instant"], &[]);
+        let [tail] = sub_chain(&root)[..] else {
+            panic!(
+                "reach guard: expected the kicked tail, got {:?}",
+                root.sub_ability
+            );
+        };
+        assert!(
+            matches!(*tail.effect, Effect::Draw { .. }) && tail.condition.is_some(),
+            "reach guard: the tail is a conditional draw: {tail:?}"
+        );
+        assert_eq!(
+            tail.sub_link,
+            crate::types::ability::SubAbilityLink::SequentialSibling,
+            "reach guard: the tail is an independent instruction"
+        );
+        assert_eq!(root.condition, None, "{text}");
+        assert!(
+            root.effect
+                .unimplemented_description()
+                .is_some_and(|fragment| nom_primitives::scan_contains(
+                    fragment,
+                    "that opponent controls no other creatures"
+                )),
+            "the gated instruction must be an explicit gap: {:?} {warnings:?}",
+            root.effect
+        );
     }
 
     /// CR 602.2 + CR 608.2c: an activated ability's effect resolves as that
