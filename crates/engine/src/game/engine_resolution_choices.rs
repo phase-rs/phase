@@ -2272,69 +2272,25 @@ pub(super) fn handle_resolution_choice(
             GameAction::ChooseEntryAttackTarget { target },
         ) => {
             // CR 508.4: the entering creature's controller chooses one of the
-            // engine-issued defending players, planeswalkers, or battles. The
-            // move itself was paused before delivery, so the approved event is
-            // delivered here with the chosen defender.
+            // engine-issued defending players, planeswalkers, or battles.
+            // `entry_attack_target_defender` applies CR 508.4a if it went stale.
             if !valid_targets.contains(&target) {
                 return Err(EngineError::InvalidAction(
                     "entry attack target is not one of the offered destinations".to_string(),
                 ));
             }
-            // CR 508.4: a zone-change delivery paused before the move keeps
-            // its family so the approved event carries every entry modifier.
-            // Token and other direct entries have no parked family; they
-            // attach the attacker exactly as before.
-            let has_parked_family = state
-                .active_change_zone_frame()
-                .and_then(|frame| frame.pending.as_ref())
-                .and_then(|pending| pending.paused_current.as_ref())
-                .is_some_and(|paused| {
-                    paused.member.object_id == object_id && paused.terminal_completion.is_none()
-                })
-                || state
-                    .active_batch_delivery()
-                    .and_then(|pending| pending.paused_current.as_ref())
-                    .is_some_and(|paused| {
-                        paused.member.object_id == object_id && paused.terminal_completion.is_none()
-                    })
-                || state.pending_entry_attack_event.is_some();
-            if !has_parked_family {
-                state.waiting_for = WaitingFor::Priority { player };
-                if let Some(defending_player) =
-                    crate::game::combat::entry_attack_target_defender(state, player, target)
-                {
-                    crate::game::combat::enter_attacking_at_target(
-                        state,
-                        object_id,
-                        defending_player,
-                        target,
-                    );
-                }
-                return Ok(ResolutionChoiceOutcome::WaitingFor(
-                    finish_with_continuation(state, player, events),
-                ));
+            state.waiting_for = WaitingFor::Priority { player };
+            if let Some(defending_player) =
+                crate::game::combat::entry_attack_target_defender(state, player, target)
+            {
+                crate::game::combat::enter_attacking_at_target(
+                    state,
+                    object_id,
+                    defending_player,
+                    target,
+                );
             }
-            let waiting = crate::game::zone_pipeline::resume_paused_entry_attack_choice(
-                state, object_id, target, events,
-            )?;
-            match waiting {
-                WaitingFor::EntryAttackTargetChoice {
-                    object_id: parked_object,
-                    ..
-                } if parked_object == object_id && state.pending_entry_attack_event.is_none() => {
-                    // The resumed delivery completed without surfacing a new
-                    // prompt: return to the ordinary boundary.
-                    state.waiting_for = WaitingFor::Priority { player };
-                    ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(
-                        state, player, events,
-                    ))
-                }
-                other => {
-                    // The resumed delivery parked again (nested replacement,
-                    // host, or the NEXT batch member's own defender choice).
-                    ResolutionChoiceOutcome::WaitingFor(other)
-                }
-            }
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
             WaitingFor::ScryChoice { player, cards },
@@ -6868,6 +6824,7 @@ pub(super) fn handle_resolution_choice(
                 is_cost_payment,
                 enters_modified_if,
                 duration,
+                performed_by,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -7539,7 +7496,9 @@ pub(super) fn handle_resolution_choice(
                         let ctx = effects::change_zone::ChangeZoneIterationCtx {
                             source_id,
                             controller: player,
-                            performed_by: player,
+                            // CR 608.2c: the performer resolved before the
+                            // pause; a save without it credits the chooser.
+                            performed_by: performed_by.unwrap_or(player),
                             origin: Some(origin),
                             destination: dest_zone,
                             enter_transformed,
@@ -7570,13 +7529,6 @@ pub(super) fn handle_resolution_choice(
                                 ctx.destination,
                                 ctx.source_id,
                                 ctx.face_down_in_exile,
-                                ctx.enters_under_player,
-                                member.enter_tapped,
-                                member.enters_attacking,
-                                ctx.enter_transformed,
-                                &member.enter_with_counters,
-                                ctx.face_down_profile.as_ref(),
-                                ctx.enter_attached_to,
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
@@ -8102,13 +8054,6 @@ pub(super) fn handle_resolution_choice(
                                 ctx.destination,
                                 ctx.source_id,
                                 ctx.face_down_in_exile,
-                                ctx.enters_under_player,
-                                member.enter_tapped,
-                                member.enters_attacking,
-                                ctx.enter_transformed,
-                                &member.enter_with_counters,
-                                ctx.face_down_profile.as_ref(),
-                                ctx.enter_attached_to,
                             );
                         let delivery_start = events.len();
                         match effects::change_zone::process_one_zone_move_with_terminal(
@@ -13104,6 +13049,7 @@ mod tests {
         let execute = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination,
@@ -13200,6 +13146,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination,
@@ -13334,6 +13281,7 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Exile,
@@ -14013,6 +13961,7 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
@@ -14327,6 +14276,7 @@ mod tests {
         );
         let printed_destination = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
@@ -15297,6 +15247,7 @@ mod tests {
         ));
 
         let waiting = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![eligible],
             count: 1,
@@ -15408,6 +15359,7 @@ mod tests {
                 rider.set_optional_effect_performed_recursive(!pick);
                 state.park_ability_continuation(PendingContinuation::new(Box::new(rider), &state));
                 let waiting = WaitingFor::EffectZoneChoice {
+                    performed_by: None,
                     player: PlayerId(0),
                     cards: vec![eligible],
                     count: 1,
@@ -16045,6 +15997,7 @@ mod random_result_resolution_context_tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(origin),
                 destination,

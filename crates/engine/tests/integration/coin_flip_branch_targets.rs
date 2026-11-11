@@ -789,9 +789,9 @@ fn coin_branch_stack_persistence_is_strict_and_current_bindings_execute() {
         let error = serde_json::from_value::<ResolutionStateWire>(malformed)
             .expect_err("missing stack binding is never reconstructed")
             .to_string();
-        // CR 601.2c + CR 608.2b: versions through 10 predate announced
-        // outcome bindings. Version 11 introduced the required shape, so its
-        // missing bindings stay malformed even after unrelated wire bumps.
+        // CR 601.2c + CR 608.2b: every pre-current wire version (<= 10) cannot
+        // prove the outcome bindings announced at cast, so a carrier-less coin
+        // ability is refused as incompatible; the current version is malformed.
         let expected = if version <= 10 {
             "RESTORE_INCOMPATIBLE_COIN_BRANCH_BINDINGS:"
         } else {

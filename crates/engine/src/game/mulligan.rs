@@ -1739,6 +1739,7 @@ mod tests {
         let mut begin_game = AbilityDefinition::new(
             AbilityKind::BeginGame,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SelfRef,

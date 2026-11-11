@@ -143,6 +143,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
         // overload corpus uses this only for hidden-zone exile where these
         // modifiers have no semantics.
         Effect::ChangeZone {
+            actor: _,
             origin,
             destination,
             target,
@@ -163,6 +164,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
             face_down_profile: _, // dropped: overload corpus is hidden-zone exile, never face-down entry
             enters_modified_if: _, // dropped: hidden-zone exile, moved-object enter gate has no semantics (CR 614.12)
         } => Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin,
             destination,
             target,
@@ -309,6 +311,7 @@ mod tests {
     fn change_zone_becomes_change_zone_all() {
         use crate::types::ability::ControllerRef;
         let mut def = leaf(Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
@@ -361,6 +364,7 @@ mod tests {
     #[test]
     fn change_zone_self_ref_not_promoted() {
         let mut def = leaf(Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
@@ -401,6 +405,7 @@ mod tests {
         use crate::types::ability::ControllerRef;
         use crate::types::mana::ManaCost;
         let self_exile = leaf(Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
@@ -430,6 +435,7 @@ mod tests {
         let mut root = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,

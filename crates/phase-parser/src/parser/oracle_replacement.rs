@@ -1089,6 +1089,7 @@ fn parse_search_found_replacement(original: &str, lower: &str) -> Option<Replace
     let execute = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: parsed.exile.destination,
             target: parsed.exile.target,
@@ -1278,6 +1279,7 @@ fn parse_self_enters_pay_cost_replacement(
     let decline = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Graveyard,
             target: TargetFilter::SelfRef,
@@ -7577,6 +7579,7 @@ fn parse_creature_die_exile_replacement(
         let mut exile_self = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 destination: Zone::Exile,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -7724,6 +7727,7 @@ fn parse_creature_enter_wasnt_cast_exile_replacement(
     let exile_self = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             destination: Zone::Exile,
             origin: None,
             target: TargetFilter::SelfRef,
@@ -7975,6 +7979,7 @@ fn self_die_exile_anaphor_execute(
     let mut exile_self = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             destination: Zone::Exile,
             origin: None,
             target: TargetFilter::SelfRef,
@@ -8517,6 +8522,7 @@ fn parse_graveyard_redirect_replacement(
     let redirect = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             destination,
             origin: None,
             target: TargetFilter::SelfRef,

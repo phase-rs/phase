@@ -571,6 +571,13 @@ expression: "&ir"
                 "parsed": {
                   "effect": {
                     "type": "ChangeZoneAll",
+                    "actor": {
+                      "Player": {
+                        "player": {
+                          "type": "ParentTargetController"
+                        }
+                      }
+                    },
                     "origin": "Hand",
                     "destination": "Library",
                     "target": {

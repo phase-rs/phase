@@ -6397,7 +6397,6 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-            interrupted_entry: None,
         });
         let live_prompt = WaitingFor::DiscardChoice {
             player: PlayerId(0),
@@ -7628,6 +7627,7 @@ mod tests {
         }
         fn change_zone(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin,
                 destination,
@@ -11619,6 +11619,7 @@ mod tests {
         // `state.exile_links` (see `change_zone::execute_zone_move`).
         let etb = ResolvedAbility::new(
             Ef::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,

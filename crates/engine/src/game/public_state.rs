@@ -852,6 +852,7 @@ mod tests {
         ability.multi_target = Some(crate::types::ability::MultiTargetSpec::unlimited(0));
         state.park_ability_continuation(PendingContinuation::new(Box::new(ability), &state));
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             enters_modified_if: None,
             player: PlayerId(0),
             cards: vec![ObjectId(5), ObjectId(11)],

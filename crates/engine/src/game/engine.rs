@@ -12579,28 +12579,15 @@ fn apply_action(
         return Ok(ActionResult::applied(vec![], state.waiting_for.clone()));
     }
 
-    // CR 104.3a: Concede bypasses WaitingFor dispatch. CR 800.4a + CR 603.6c:
-    // the departure owns collection of its own events. CR 608.2m + CR 704.3:
-    // when it resumes a begun family, that suffix still owes the ordinary
-    // SBA/trigger convergence before any trigger placement or priority.
+    // CR 104.3a: A player may concede at any time. Concede bypasses the WaitingFor
+    // dispatch entirely — there is no priority/state check. Eliminating the player
+    // performs CR 800.4a object cleanup and advances `waiting_for` if the conceder
+    // owned it (see `elimination::concede`), and queues what the departure triggered
+    // (CR 603.6c), since no pipeline scans this action's events.
     if let GameAction::Concede { player_id } = action {
         let mut events = Vec::new();
-        let resumed_from = super::elimination::concede(state, player_id, &mut events)?;
-        let mut result = ActionResult::applied(events, state.waiting_for.clone());
-        if let Some(scan_from) = resumed_from {
-            // The departure already collected the prefix, including delayed
-            // observers. The shared canonical-tail pass bounds both scans.
-            let waiting_for = engine_priority::run_post_action_pipeline_for_canonical_tail(
-                state,
-                &mut result.events,
-                scan_from,
-                &result.waiting_for,
-                None,
-            )?;
-            state.waiting_for = waiting_for.clone();
-            result.waiting_for = waiting_for;
-        }
-        return Ok(result);
+        super::elimination::concede(state, player_id, &mut events);
+        return Ok(ActionResult::applied(events, state.waiting_for.clone()));
     }
 
     // Debug actions bypass WaitingFor dispatch — gated on debug_mode flag
@@ -16244,16 +16231,6 @@ fn apply_non_priority_pass_action(
                     grants,
                 } => (enchant_filter.clone(), grants.clone()),
                 _ => {
-                    // CR 303.4f: an entering Aura's host was chosen before its
-                    // delivery; deliver the parked approved event with it.
-                    if state.pending_aura_entry.is_some() {
-                        let waiting = super::zone_pipeline::resume_paused_aura_entry_choice(
-                            state,
-                            chosen.clone(),
-                            &mut events,
-                        )?;
-                        return Ok(ActionResult::applied(events, waiting));
-                    }
                     // CR 303.4f + CR 701.3b: attach through the entering-Aura
                     // authority, so the CR 701.3a gate judges the same entrant
                     // the host list was offered for. Seams that park none get
@@ -29701,28 +29678,30 @@ mod resolving_carrier_settle_tests {
                     scenario
                         .add_creature(p2, name, 1, 1)
                         .with_replacement_definition(
-                            ReplacementDefinition::new(ReplacementEvent::Moved)
-                                .destination_zone(Zone::Graveyard)
-                                .execute(AbilityDefinition::new(
-                                    AbilityKind::Spell,
-                                    Effect::ChangeZone {
-                                        library_shuffle: Default::default(),
-                                        destination: Zone::Exile,
-                                        origin: None,
-                                        target: TargetFilter::SelfRef,
-                                        owner_library: false,
-                                        enter_transformed: false,
-                                        enters_under: None,
-                                        enter_tapped: EtbTapState::Unspecified,
-                                        enters_attacking: false,
-                                        up_to: false,
-                                        enter_with_counters: vec![],
-                                        conditional_enter_with_counters: vec![],
-                                        face_down_profile: None,
-                                        enters_modified_if: None,
-                                    },
-                                )),
-                        );
+                        ReplacementDefinition::new(ReplacementEvent::Moved)
+                            .destination_zone(Zone::Graveyard)
+                            .execute(AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::ChangeZone {
+                                    actor:
+                                        crate::types::ability::LibraryInstructionActor::Controller,
+                                    library_shuffle: Default::default(),
+                                    destination: Zone::Exile,
+                                    origin: None,
+                                    target: TargetFilter::SelfRef,
+                                    owner_library: false,
+                                    enter_transformed: false,
+                                    enters_under: None,
+                                    enter_tapped: EtbTapState::Unspecified,
+                                    enters_attacking: false,
+                                    up_to: false,
+                                    enter_with_counters: vec![],
+                                    conditional_enter_with_counters: vec![],
+                                    face_down_profile: None,
+                                    enters_modified_if: None,
+                                },
+                            )),
+                    );
                 }
             }
             let mut runner = scenario.build();

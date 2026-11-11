@@ -27757,7 +27757,6 @@ mod entry_projection_tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-            interrupted_entry: None,
         };
 
         // An answer pins the boundary before it changes the proposal.

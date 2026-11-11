@@ -35024,6 +35024,7 @@ fn choice_of_fortunes_shuffles_the_sought_set_into_the_library() {
     assert_eq!(
         *optional.effect,
         Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Library,
             target: TargetFilter::TrackedSet {

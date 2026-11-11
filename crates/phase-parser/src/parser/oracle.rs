@@ -743,6 +743,7 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
         AbilityKind::BeginGame,
         // CR 103.6a: the card is put onto the battlefield from the opening hand.
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             destination: Zone::Battlefield,
             target: TargetFilter::SelfRef,
@@ -5184,6 +5185,7 @@ fn apply_etb_exile_ltb_return(
                 // CR 110.2a: the printed "under its/their owner's control" overrides the
                 // instructing-player default; enters_under: None resolves to the owner.
                 *execute.effect = Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin: Some(Zone::Exile),
                     destination: Zone::Battlefield,
                     target: TargetFilter::ExiledBySource,

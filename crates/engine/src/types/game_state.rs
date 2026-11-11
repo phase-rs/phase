@@ -4883,14 +4883,7 @@ pub struct PendingChangeZoneIteration {
     /// path still carries its chooser here, not an independently captured owner.
     pub controller: PlayerId,
     /// Instruction performer, captured independently across every pause.
-    /// Required on current carriers: the controller no longer determines it.
-    /// Versioned v1–v11 admission copies the recorded controller when this field
-    /// is absent: deployed writers used that captured player for both the family
-    /// controller and the move performer. The saved family controller, duration
-    /// and replacement anchor are preserved, not reconstructed from a live object,
-    /// resolving entry or continuation. This retains the historical attribution
-    /// even when a current instruction would name a different acting player.
-    /// An explicit actor is never overwritten.
+    /// Required: a missing actor cannot safely be inferred from the controller.
     pub performed_by: PlayerId,
     pub origin: Option<crate::types::zones::Zone>,
     pub destination: crate::types::zones::Zone,
@@ -5815,32 +5808,6 @@ pub struct PendingSingleDiscard {
 /// The companion `GameState::clause_minimum_snapshot` persists with this batch:
 /// a save taken mid-pause must resume the same CR 608.2h application with its
 /// original frozen value, rather than determine it again after restore.
-/// CR 508.4: the fully approved entering event and its exact delivery
-/// identity parked at the defender choice.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct PendingEntryAttackEvent {
-    pub event: ProposedEvent,
-    pub member: ObjectIncarnationRef,
-    pub source_id: Option<ObjectId>,
-    pub duration: Option<crate::types::ability::Duration>,
-    pub exile_controller: Option<PlayerId>,
-    pub track_exiled_by_source: bool,
-    pub library_placement: Option<crate::types::ability::LibraryPosition>,
-}
-
-/// CR 303.4f: the approved entering-Aura event parked at the host choice,
-/// before the object moves. A departure at the chooser's prompt leaves the
-/// Aura in its origin zone (CR 800.4b).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct PendingAuraEntry {
-    pub event: ProposedEvent,
-    pub source_id: ObjectId,
-    pub duration: Option<crate::types::ability::Duration>,
-    pub exile_controller: Option<PlayerId>,
-    pub track_exiled_by_source: bool,
-    pub library_placement: Option<crate::types::ability::LibraryPosition>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingDiscardBatch {
     /// The discarding seat whose batch paused.
@@ -18352,6 +18319,15 @@ pub enum WaitingFor {
         /// the `face_down_profile` / `enters_modified_if` carry-through above.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration: Option<crate::types::ability::Duration>,
+        /// CR 608.2c: the player who performs the chosen `ChangeZone` move,
+        /// resolved from the effect's `actor` before the pause, so the
+        /// multi-candidate selection credits the same player the
+        /// single-candidate and random shortcuts do. It is not the chooser: the
+        /// prompt's `player` still makes the choice. `None` (other effect kinds,
+        /// and saves written before this field) keeps the chooser as the
+        /// performer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        performed_by: Option<PlayerId>,
     },
     /// Player chooses which drawn-this-turn hand cards to put on top of their
     /// library. Each unchosen required card is kept by paying life.
@@ -25692,20 +25668,6 @@ declare_game_state! {
     /// box.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_discard_batch: Option<Box<PendingDiscardBatch>>,
-    /// CR 508.4: the fully approved entering event parked at the defender
-    /// choice, before the object moves. Transient: the pausing caller takes it
-    /// into its paused delivery so counters/tapped/attacking/controller facts
-    /// survive the answer instead of being reconstructed from the pre-consult
-    /// request.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_entry_attack_event: Option<Box<PendingEntryAttackEvent>>,
-    /// CR 303.4f: approved Aura entry parked before the host choice.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_aura_entry: Option<Box<PendingAuraEntry>>,
-    /// Event index where a concession's staged batch suffix begins, so the
-    /// canonical tail scans exactly the unscanned drain output.
-    #[serde(skip)]
-    pub concession_suffix_scan_from: Option<usize>,
     /// Turtle Team-Up: a hero-choice batch parked mid-application by a nested
     /// replacement prompt (regeneration, Library of Leng). Boxed like its
     /// `pending_discard_batch` sibling — `GameState` moves by value under a
@@ -29700,12 +29662,6 @@ pub struct PendingReplacement {
         skip_serializing_if = "UnrepresentablePolicy::is_ignore_impossible"
     )]
     pub unrepresentable_life_change: UnrepresentablePolicy,
-    /// CR 800.4f: when a nested replacement park overwrites this record while
-    /// an optional entry payment is still being accepted, the interrupted
-    /// outer record rides here so a departure at the nested prompt can settle
-    /// the unpaid entry instead of losing the cost context.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interrupted_entry: Option<Box<PendingReplacement>>,
 }
 
 /// Who owns a player-resource change (life, player counter, energy) whose final
@@ -32597,45 +32553,6 @@ impl GameState {
     /// [`Self::capture_paused_zone_change_delivery`], but matched by
     /// [`PendingZoneChangeDelivery::captures_resumed`] so a controller/counter
     /// override or a CR 614.6 zone redirect does not defeat the key comparison.
-    /// CR 800.4f: the accepted cost was not paid, so the paused entry is
-    /// prevented without delivering its event. Terminalizes the exact paused
-    /// member as `Remained` so the owning family can drain.
-    /// CR 800.4b: terminalize a paused batch member whose Aura-host chooser
-    /// is gone. The member remains in its origin zone and the batch tail
-    /// resumes afterward.
-    pub(crate) fn prevent_paused_batch_zone_change_delivery(
-        &mut self,
-        member: ObjectIncarnationRef,
-        approved_event: &ProposedEvent,
-    ) -> bool {
-        let Some(paused) = self
-            .active_batch_delivery_mut()
-            .and_then(|owner| owner.paused_current.as_mut())
-            .filter(|paused| paused.captures(member, approved_event))
-        else {
-            return false;
-        };
-        let _ = paused.settle_delivery(&[], ZoneMoveCompletion::Remained);
-        true
-    }
-
-    pub(crate) fn prevent_paused_zone_change_delivery(
-        &mut self,
-        member: ObjectIncarnationRef,
-        approved_event: &ProposedEvent,
-    ) -> bool {
-        let Some(paused) = self
-            .active_change_zone_frame_mut()
-            .and_then(|frame| frame.pending.as_mut())
-            .and_then(|owner| owner.paused_current.as_mut())
-            .filter(|paused| paused.captures(member, approved_event))
-        else {
-            return false;
-        };
-        let _ = paused.settle_delivery(&[], ZoneMoveCompletion::Remained);
-        true
-    }
-
     pub fn capture_resumed_paused_zone_change_delivery(
         &mut self,
         member: ObjectIncarnationRef,
@@ -34237,9 +34154,6 @@ impl GameState {
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
-            pending_entry_attack_event: None,
-            pending_aura_entry: None,
-            concession_suffix_scan_from: None,
             pending_hero_event: None,
             pending_horde_reveal: None,
             pending_damage_post_loss: None,
@@ -38398,9 +38312,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     object-growth lives in `objects` (stripped+compared by `eq_except_growable`), so
         //     excluding this single-object identity field cannot hide growth.
         resolution_source_relatch: _,
-        pending_entry_attack_event: _,
-        pending_aura_entry: _,
-        concession_suffix_scan_from: _,
     } = s;
 }
 
@@ -53709,6 +53620,7 @@ mod tests {
             discard_frame: None,
         }));
         variants.push(Box::new(WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![ObjectId(1)],
             count: 1,
@@ -54619,6 +54531,7 @@ mod tests {
             arranger: None,
         };
         let wf = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![ObjectId(1), ObjectId(2)],
             count: 1,
@@ -55418,6 +55331,7 @@ mod tests {
     #[test]
     fn effect_zone_choice_modern_shape_roundtrips_with_player_id() {
         let wf = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![],
             count: 1,
@@ -55462,6 +55376,62 @@ mod tests {
         );
         let parsed: WaitingFor = serde_json::from_str(&json).expect("roundtrip");
         assert_eq!(parsed, wf);
+    }
+
+    /// CR 608.2c: the performer carried on a `ChangeZone` selection round-trips
+    /// on the wire and is omitted when absent; a save written before the field
+    /// existed decodes it as `None`, which the resume reads as "the chooser
+    /// performs", the behaviour that save was written under.
+    #[test]
+    fn effect_zone_choice_performer_roundtrips_and_defaults_when_missing() {
+        let wf = |performed_by| WaitingFor::EffectZoneChoice {
+            performed_by,
+            player: PlayerId(0),
+            cards: vec![ObjectId(7)],
+            count: 1,
+            min_count: 1,
+            up_to: false,
+            source_id: ObjectId(10),
+            effect_kind: crate::types::ability::EffectKind::ChangeZone,
+            zone: Zone::Hand,
+            destination: Some(Zone::Exile),
+            enter_tapped: EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+            face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            count_param: 0,
+            library_position: None,
+            mass_library_order: None,
+            is_cost_payment: false,
+            enters_modified_if: None,
+            duration: None,
+        };
+        let carried = wf(Some(PlayerId(1)));
+        let json = serde_json::to_value(&carried).expect("serialize");
+        assert_eq!(json["data"]["performed_by"], serde_json::json!(1));
+        assert_eq!(
+            serde_json::from_value::<WaitingFor>(json.clone()).expect("roundtrip"),
+            carried
+        );
+
+        let mut legacy = json;
+        legacy["data"]
+            .as_object_mut()
+            .expect("tagged payload")
+            .remove("performed_by");
+        assert_eq!(
+            serde_json::from_value::<WaitingFor>(legacy).expect("a pre-field save decodes"),
+            wf(None)
+        );
+        assert!(serde_json::to_value(wf(None)).expect("serialize")["data"]
+            .get("performed_by")
+            .is_none());
     }
 
     #[test]
@@ -57884,7 +57854,6 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: policy,
-            interrupted_entry: None,
         }
     }
 

@@ -11,11 +11,11 @@ use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CounterCostRootSubtree, DeferredLifeCostResume, GameState, PendingChangeZoneIteration,
-    PendingCostMoveResume, PendingCounterPostAction, PendingReplacement, PendingZoneChangeDelivery,
-    TokenEntryEventEmission, UnrepresentablePolicy, WaitingFor,
+    CounterCostRootSubtree, DeferredLifeCostResume, GameState, PendingCostMoveResume,
+    PendingCounterPostAction, PendingReplacement, TokenEntryEventEmission, UnrepresentablePolicy,
+    WaitingFor,
 };
-use crate::types::identifiers::{LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
@@ -40,178 +40,6 @@ use super::effects::token::apply_create_token_after_replacement;
 use super::engine::EngineError;
 use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use super::sacrifice::{apply_sacrifice_after_replacement, SacrificeApply};
-
-/// CR 800.4f + CR 608.2m: an accepted replacement payment belongs to the
-/// exact entry that raised it, not to a later prompt for the same player.
-pub(crate) struct DepartingEntryPayment {
-    group: LogicalZoneChangeGroupId,
-    controller: PlayerId,
-    member: ObjectIncarnationRef,
-    proposal: ProposedEvent,
-    payer: PlayerId,
-}
-
-impl DepartingEntryPayment {
-    fn is_unpaid_owner(replacement: &PendingReplacement, payer: PlayerId) -> bool {
-        replacement.is_optional
-            && replacement.may_cost_paid
-            && replacement.choice_player == Some(payer)
-    }
-
-    fn paused_event_matches(paused: &PendingZoneChangeDelivery, event: &ProposedEvent) -> bool {
-        paused.expected_event == *event
-            || matches!(
-                event,
-                ProposedEvent::ZoneChange {
-                    object_id,
-                    to: Zone::Battlefield,
-                    ..
-                } if *object_id == paused.member.object_id
-            )
-    }
-
-    /// CR 800.4f: the direct prompt is the outer accepted cost; a nested park
-    /// keeps the interrupted outer record on the active replacement.
-    fn owned_prompt(
-        state: &GameState,
-        payer: PlayerId,
-    ) -> Option<(&PendingChangeZoneIteration, &PendingZoneChangeDelivery)> {
-        if state.waiting_for.acting_player() != Some(payer) {
-            return None;
-        }
-        let pending = state.active_change_zone_frame()?.pending.as_ref()?;
-        let paused = pending.paused_current.as_ref()?;
-        if paused.terminal_completion.is_some()
-            || !matches!(
-                paused.expected_event,
-                ProposedEvent::ZoneChange {
-                    to: Zone::Battlefield,
-                    ..
-                }
-            )
-        {
-            return None;
-        }
-        let replacement = state.pending_replacement.as_ref()?;
-        if Self::is_unpaid_owner(replacement, payer)
-            && replacement.parks_delivery(&paused.expected_event)
-        {
-            return Some((pending, paused));
-        }
-        let mut interrupted = replacement.interrupted_entry.as_deref();
-        while let Some(outer) = interrupted {
-            if Self::is_unpaid_owner(outer, payer)
-                && Self::paused_event_matches(paused, outer.delivery_boundary_event())
-            {
-                return Some((pending, paused));
-            }
-            interrupted = outer.interrupted_entry.as_deref();
-        }
-        None
-    }
-
-    /// An active child or another payer's replacement is deliberately excluded.
-    pub(crate) fn owns_prompt(state: &GameState, payer: PlayerId) -> bool {
-        Self::owned_prompt(state, payer).is_some()
-    }
-
-    /// Capture before departure teardown can replace the payment prompt.
-    pub(crate) fn capture(state: &GameState, payer: PlayerId) -> Option<Self> {
-        let (pending, paused) = Self::owned_prompt(state, payer)?;
-        Some(Self {
-            group: pending.logical_zone_change_group.logical_group_id,
-            controller: pending.controller,
-            member: paused.member,
-            proposal: paused.expected_event.clone(),
-            payer,
-        })
-    }
-
-    /// CR 800.4f: called while the payer is still alive, before the departure
-    /// sweep can cancel the paused entry. The unpaid entry is prevented (the
-    /// object stays where it is), and the interrupted cost records are dropped
-    /// so no leave path moves the object or resumes the discard.
-    pub(crate) fn prevent(&self, state: &mut GameState) -> bool {
-        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return false;
-        }
-        let family_ok = state
-            .active_change_zone_frame()
-            .and_then(|frame| frame.pending.as_ref())
-            .is_some_and(|pending| {
-                pending.logical_zone_change_group.logical_group_id == self.group
-                    && pending.controller == self.controller
-                    && pending.paused_current.as_ref().is_some_and(|paused| {
-                        paused.captures(self.member, &self.proposal)
-                            && paused.terminal_completion.is_none()
-                    })
-            });
-        let payment_ok = state
-            .pending_replacement
-            .as_ref()
-            .is_some_and(|replacement| {
-                Self::is_unpaid_owner(replacement, self.payer) || {
-                    let mut outer = replacement.interrupted_entry.as_deref();
-                    let mut found = false;
-                    while let Some(entry) = outer {
-                        if Self::is_unpaid_owner(entry, self.payer) {
-                            found = true;
-                            break;
-                        }
-                        outer = entry.interrupted_entry.as_deref();
-                    }
-                    found
-                }
-            });
-        if !family_ok || !payment_ok {
-            return false;
-        }
-        if !state.prevent_paused_zone_change_delivery(self.member, &self.proposal) {
-            return false;
-        }
-        state.pending_replacement = None;
-        state.pending_discard_batch = None;
-        state.pending_cost_move_resume = None;
-        state.replacement_may_cost_paused = false;
-        // Drop the accepted cost's queued continuation as well: it would
-        // otherwise deliver the entry this prevention just canceled.
-        state.abandon_active_post_replacement_drains();
-        true
-    }
-
-    /// Finishes the unpaid settlement after the departure sweep: the family
-    /// drain runs before the next priority boundary.
-    pub(crate) fn finish(
-        &self,
-        state: &mut GameState,
-        events: &mut Vec<GameEvent>,
-    ) -> Result<bool, EngineError> {
-        // CR 104.3a: a terminal concession must stay terminal. The unpaid
-        // entry is already prevented; never replace GameOver with priority or
-        // resume the family after the game ended.
-        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return Ok(false);
-        }
-        let player = if super::players::is_alive(state, state.active_player) {
-            state.active_player
-        } else {
-            super::players::next_player(state, state.active_player)
-        };
-        state.waiting_for = WaitingFor::Priority { player };
-        super::engine::resume_pending_continuation_if_priority(state, events)?;
-        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return Ok(true);
-        }
-        if let WaitingFor::Priority { player } = state.waiting_for {
-            if !super::players::is_alive(state, player) {
-                state.waiting_for = WaitingFor::Priority {
-                    player: super::players::next_player(state, player),
-                };
-            }
-        }
-        Ok(true)
-    }
-}
 
 /// CR 101.4 + CR 616.1: In a Prevented replacement-resume arm, resume a parked
 /// `EachPlayerCopyChosen` walk once its inner copy/counter primitive has fully
@@ -714,51 +542,44 @@ fn handle_replacement_choice_inner(
                     // moved, so its classification is `Remained`, the exact path
                     // sees only the child, and the occurrence-level walk (gated on
                     // `Moved`) records nothing for the parent.
-                    let pre_delivery_prompt = matches!(
-                        state.waiting_for,
-                        WaitingFor::EntryAttackTargetChoice { .. }
-                            | WaitingFor::ReturnAsAuraTarget { .. }
-                    );
-                    if !pre_delivery_prompt {
-                        if let Some(paused) = parked_zone_change_delivery.as_ref() {
-                            let completion =
-                                crate::game::zone_pipeline::zone_move_completion_from_delivery(
-                                    paused.member,
-                                    &events[delivery_start..],
-                                );
-                            // Exact boundary match first (the historical path every
-                            // shipped park uses), then the occurrence-level match for a
-                            // resume whose approved event carries the chosen
-                            // replacement's modifications (controller/counter override
-                            // or a CR 614.6 zone redirect).
-                            let matched = state.capture_paused_zone_change_delivery(
+                    if let Some(paused) = parked_zone_change_delivery.as_ref() {
+                        let completion =
+                            crate::game::zone_pipeline::zone_move_completion_from_delivery(
                                 paused.member,
-                                &paused.expected_event,
+                                &events[delivery_start..],
+                            );
+                        // Exact boundary match first (the historical path every
+                        // shipped park uses), then the occurrence-level match for a
+                        // resume whose approved event carries the chosen
+                        // replacement's modifications (controller/counter override
+                        // or a CR 614.6 zone redirect).
+                        let matched = state.capture_paused_zone_change_delivery(
+                            paused.member,
+                            &paused.expected_event,
+                            &events[delivery_start..],
+                            completion,
+                        ) || (completion
+                            == crate::types::game_state::ZoneMoveCompletion::Moved
+                            && state.capture_resumed_paused_zone_change_delivery(
+                                paused.member,
+                                &event_for_capture,
                                 &events[delivery_start..],
                                 completion,
-                            ) || (completion
-                                == crate::types::game_state::ZoneMoveCompletion::Moved
-                                && state.capture_resumed_paused_zone_change_delivery(
-                                    paused.member,
-                                    &event_for_capture,
-                                    &events[delivery_start..],
-                                    completion,
-                                ));
-                            if matched
-                                && matches!(
-                                    &delivery,
-                                    crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_)
-                                )
-                            {
-                                // CR 614.6: the replaced move's terminal `ZoneChanged` is
-                                // already in this slice, so the forwarded-result marker
-                                // settles against the same record the Done path uses.
-                                effects::settle_replaced_forwarded_zone_delivery(
-                                    state,
-                                    paused.member,
-                                    &events[delivery_start..],
-                                );
-                            }
+                            ));
+                        if matched
+                            && matches!(
+                                &delivery,
+                                crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_)
+                            )
+                        {
+                            // CR 614.6: the replaced move's terminal `ZoneChanged` is
+                            // already in this slice, so the forwarded-result marker
+                            // settles against the same record the Done path uses.
+                            effects::settle_replaced_forwarded_zone_delivery(
+                                state,
+                                paused.member,
+                                &events[delivery_start..],
+                            );
                         }
                     }
                     match delivery {
@@ -5105,7 +4926,6 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-            interrupted_entry: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
 
@@ -5714,6 +5534,7 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         destination: Zone::Exile,
                         origin: None,
                         target: TargetFilter::SelfRef,
@@ -5785,7 +5606,6 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-            interrupted_entry: None,
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
         state.priority_player = PlayerId(0);
@@ -6037,6 +5857,7 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         destination: Zone::Exile,
                         origin: None,

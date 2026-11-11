@@ -36,6 +36,7 @@ const MOX_DIAMOND_ORACLE: &str =
 fn enter_via_change_zone(runner_state: &mut engine::types::game_state::GameState, card: ObjectId) {
     let ability = ResolvedAbility::new(
         engine::types::ability::Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Hand),
             destination: Zone::Battlefield,
             target: TargetFilter::SpecificObject { id: card },

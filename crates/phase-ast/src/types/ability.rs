@@ -10843,6 +10843,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
         | Effect::TargetOnly { target }
         | Effect::GainControl { target }
         | Effect::ChangeZone {
+            actor: _,
             origin: _,
             destination: _,
             target,
@@ -20540,10 +20541,13 @@ impl LegacyPaymentCost {
 // Effect enum -- typed variants, zero HashMap
 // ---------------------------------------------------------------------------
 
-/// CR 608.2c: who performs an instruction that acts on a player's library.
-/// The controller of the spell or ability follows its instructions, unless the
-/// instruction names its subject — and a subject acting on "their library" is
-/// the player whose library it is.
+/// CR 608.2c: who performs an instruction that acts on a player's library
+/// (`ExileTop`) or moves objects between zones (`ChangeZone`,
+/// `ChangeZoneAll`). The controller of the spell or ability follows its
+/// instructions, unless the instruction names its subject — and a subject
+/// acting on "their library" is the player whose library it is. Zone moves
+/// carry only `Controller` or `Player`; `declared_target` surfaces a player
+/// target only for `ExileTop`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum LibraryInstructionActor {
     /// "Exile the top card of target player's library" — the controller acts.
@@ -22494,6 +22498,14 @@ pub enum Effect {
         cant_regenerate: bool,
     },
     ChangeZone {
+        /// CR 608.2c: who performs this move — the player the parser bound
+        /// as the subject of the instruction's verb ("that player exiles …"),
+        /// or the controller when the instruction has no subject.
+        #[serde(
+            default,
+            skip_serializing_if = "LibraryInstructionActor::is_controller"
+        )]
+        actor: LibraryInstructionActor,
         #[serde(default)]
         origin: Option<Zone>,
         destination: Zone,
@@ -22560,6 +22572,14 @@ pub enum Effect {
         enters_modified_if: Option<TargetFilter>,
     },
     ChangeZoneAll {
+        /// CR 608.2c: who performs this move — the player the parser bound
+        /// as the subject of the instruction's verb ("that player exiles …"),
+        /// or the controller when the instruction has no subject.
+        #[serde(
+            default,
+            skip_serializing_if = "LibraryInstructionActor::is_controller"
+        )]
+        actor: LibraryInstructionActor,
         #[serde(default)]
         origin: Option<Zone>,
         destination: Zone,
@@ -48241,6 +48261,7 @@ mod tests {
     #[test]
     fn change_zone_owner_library_serde_roundtrip() {
         let effect = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Library,
@@ -48698,6 +48719,7 @@ mod tests {
     /// Helper: build a minimal `Effect::ChangeZone` with `enters_under` set.
     fn change_zone_with_enters_under(enters_under: Option<ControllerRef>) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
@@ -50349,6 +50371,7 @@ mod static_condition_traversal_tests {
         };
         assert_eq!(library_shuffle, LibraryShuffleMode::PerObject);
         let legacy_json = serde_json::to_value(Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Library,
             target: TargetFilter::None,
@@ -50368,6 +50391,7 @@ mod static_condition_traversal_tests {
         );
 
         let terminal = Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Graveyard),
             destination: Zone::Library,
             target: TargetFilter::Controller,

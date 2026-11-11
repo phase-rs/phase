@@ -15315,6 +15315,7 @@ fn spell_graveyard_replacement_def(
 /// body for the exile and hand graveyard-replacement riders.
 fn self_ref_change_zone(destination: Zone) -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         destination,
         origin: None,
@@ -20601,6 +20602,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
                             library_shuffle: Default::default(),
                             destination: Zone::Exile,
                             origin: None,

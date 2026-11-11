@@ -854,6 +854,11 @@ pub struct ParseContext {
     /// `chain_prior_targeted_player(builder.clauses())`; `false` on every
     /// standalone parse and on the first chunk of every chain.
     pub chain_prior_targeted_player: bool,
+    /// CR 608.2c: an earlier clause of this same effect chain exists, so a
+    /// player it named can be the nearer antecedent of a later "that player".
+    /// Seeded per chunk in the chunk loop; `false` on every standalone parse
+    /// and on the first chunk of every chain.
+    pub chain_prior_clause: bool,
     /// CR 601.2c + CR 608.2c: the object-target FILTER declared by the nearest
     /// EARLIER clause of this same effect chain — the antecedent a later
     /// clause's demonstrative anaphor ("that token", "that artifact") can name.

@@ -2151,6 +2151,7 @@ fn pay_ability_cost_inner(
                 state.last_effect_count = Some(count as i32);
             } else {
                 state.waiting_for = WaitingFor::EffectZoneChoice {
+                    performed_by: None,
                     player,
                     cards: eligible,
                     count,

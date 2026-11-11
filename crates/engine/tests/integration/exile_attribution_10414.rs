@@ -7,16 +7,17 @@
 //! hand", "target opponent exiles a creature they control", "each opponent
 //! exiles a card from their hand"), that subject performs the move — the
 //! controller of the spell or ability performs only the unsubjected case
-//! (CR 608.2c).
+//! (CR 608.2c). The parser carries the subject as the zone effect's `actor`;
+//! no row's attribution is read from the shape of its filter.
 //!
 //! Rows, each with a verbatim Oracle text and a paired positive reach-guard:
 //!   * R1 — Strategic Betrayal: a subject-form MASS leg records the subject
 //!     (`resolve_all` member loop).
 //!   * R2 — Skullcap Snail: a subject-form PICK records the subject
 //!     (single-eligible shortcut in `resolve`).
-//!   * R7 — Rahilda, Wanted Cutthroat: a library-owned subject filter is NOT
-//!     the subject's exile — "their library" names whose library it is, so the
-//!     caster still performs it (the `move_performer` library gate).
+//!   * R7 — Rahilda, Wanted Cutthroat: a library-owned filter is NOT the
+//!     subject's exile — "their library" names whose library it is, and the
+//!     imperative clause has no subject, so the caster performs it.
 //!   * R3 — Froghemoth: an announced-target move stays caster-performed even
 //!     though the filter names another player's graveyard.
 //!   * R5 — Tormod's Crypt: a player-valued filter ("target player's
@@ -31,9 +32,8 @@
 //!     the subject form and records that player.
 //!   * R10 — Mudhole: a public-action subject-form mass exile that parks on an
 //!     optional `ReplacementChoice` records the subject for paused and resumed
-//!     members. Three-player departure rows distinguish the subject from the
-//!     resolving family's controller with an explicitly typed continuation
-//!     witness; that witness is not part of Mudhole's printed Oracle. A real
+//!     members. An explicitly typed continuation witness, not part of
+//!     Mudhole's printed Oracle, shows the family completes. A real
 //!     Aethersnatch transfer also distinguishes both from the original caster.
 //!     Current saves keep the subject performer separate. Deployed v11 saves
 //!     preserve their recorded controller as both family and historical actor.
@@ -44,13 +44,19 @@
 //!   * R11 — Rona, Tolarian Obliterator: another player's Lightning Bolt emits
 //!     the real damage trigger, which randomly exiles one of two hand cards.
 //!     The printed optional land tail is explicitly declined.
+//!   * Reference kinds: one printed card per player reference the parser
+//!     stamps — Fiend of the Shadows (`TriggeringPlayer`), Bane of Bala Ged
+//!     (`DefendingPlayer`), Arcane Artisan (`DeclaredPlayer`), Elkin Lair
+//!     (`ScopedPlayer`), Wildfire Devils (`Typed { ChosenPlayer }`). Where the
+//!     move can prompt, the single-candidate shortcut and the interactive
+//!     selection must credit the same player. (`ParentTargetOwner` is a
+//!     resolver unit row in `change_zone.rs`: no printed card stamped with it
+//!     exiles.)
 //!
-//! Class premise for R8/R9: every parsed `ChangeZoneAll` scoped by
-//! `ParentTargetController` is a subjectless sweep (Declaration in Stone,
-//! Deputy of Detention, Eradicate, Counterbore, Legions to Ashes), and every
-//! parsed `ChangeZone` scoped by it is a subject-form pick (Ashiok, Nightmare
-//! Muse -3; Isildur's Fateful Strike; Azula, Cunning Usurper; Struggle for
-//! Sanity's "That player exiles a card from it, then you exile a card from it").
+//! R8 and R9 share the `ParentTargetController` scope; only the sentence
+//! differs. Declaration in Stone's sweep is imperative, so its actor stays
+//! `Controller`; Ashiok's "then that player exiles a card from their hand" has
+//! a subject, so its actor is that player.
 //!
 //! Revert sensitivity is stated per test. The gameplay readers of `exiled_by` are
 //! `casting::exile_permission_pool` (guarded by
@@ -140,6 +146,23 @@ const RONA_TOLARIAN_OBLITERATOR: &str = "Trample\nWhenever a source deals damage
 /// Lightning Bolt `{R}` Instant — verbatim Oracle text.
 const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
 
+/// Fiend of the Shadows `{3}{B}{B}` Creature — Vampire Wizard 3/3 — verbatim
+/// Oracle text.
+const FIEND_OF_THE_SHADOWS: &str = "Flying\nWhenever this creature deals combat damage to a player, that player exiles a card from their hand. You may play that card for as long as it remains exiled.\nSacrifice a Human: Regenerate this creature.";
+
+/// Elkin Lair `{3}{R}` World Enchantment — verbatim Oracle text.
+const ELKIN_LAIR: &str = "At the beginning of each player's upkeep, that player exiles a card at random from their hand. The player may play that card this turn. At the beginning of the next end step, if the player hasn't played the card, they put it into their graveyard.";
+
+/// Arcane Artisan `{2}{U}` Creature — Human Wizard 0/3 — verbatim Oracle text.
+const ARCANE_ARTISAN: &str = "{2}{U}, {T}: Target player draws a card, then exiles a card from their hand. If a creature card is exiled this way, that player creates a token that's a copy of that card.\nWhen this creature leaves the battlefield, exile all tokens created with it at the beginning of the next end step.";
+
+/// Bane of Bala Ged `{7}` Creature — Eldrazi 7/5 — verbatim Oracle text.
+const BANE_OF_BALA_GED: &str =
+    "Whenever this creature attacks, defending player exiles two permanents they control.";
+
+/// Wildfire Devils `{3}{R}` Creature — Devil 4/2 — verbatim Oracle text.
+const WILDFIRE_DEVILS: &str = "When this creature enters and at the beginning of your upkeep, choose a player at random. That player exiles an instant or sorcery card from their graveyard. Copy that card. You may cast the copy without paying its mana cost.";
+
 const AJANIS_PRIDEMATE: &str = "Whenever you gain life, put a +1/+1 counter on this creature.";
 
 // ---------------------------------------------------------------------------
@@ -205,39 +228,91 @@ fn exile_count(runner: &GameRunner) -> usize {
 /// at this point is one these rows answer up front, so it is declined.
 fn drive_to_priority(runner: &mut GameRunner) {
     for _ in 0..60 {
-        match &runner.state().waiting_for {
-            WaitingFor::OrderTriggers { triggers, .. } => {
-                runner
-                    .act(GameAction::OrderTriggers {
-                        order: (0..triggers.len()).collect(),
-                    })
-                    .expect("trigger ordering is accepted");
-            }
-            WaitingFor::OptionalEffectChoice { .. } => {
-                runner
-                    .act(GameAction::DecideOptionalEffect { accept: false })
-                    .expect("declining an optional instruction is accepted");
-            }
-            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
-                runner
-                    .act(GameAction::SelectTargets {
-                        targets: Vec::new(),
-                    })
-                    .expect("declining the trigger's targets is accepted");
-            }
-            WaitingFor::Priority { .. } => {
-                if runner.state().stack.is_empty() {
-                    return;
-                }
-                runner
-                    .act(GameAction::PassPriority)
-                    .expect("priority pass is accepted");
-            }
-            other => panic!("unexpected prompt while driving resolution: {other:?}"),
+        if drive_step(runner) {
+            return;
         }
     }
     panic!(
         "drive_to_priority did not settle: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// One step of [`drive_to_priority`]; `true` once the stack is empty and a
+/// priority window is open.
+fn drive_step(runner: &mut GameRunner) -> bool {
+    match &runner.state().waiting_for {
+        WaitingFor::OrderTriggers { triggers, .. } => {
+            runner
+                .act(GameAction::OrderTriggers {
+                    order: (0..triggers.len()).collect(),
+                })
+                .expect("trigger ordering is accepted");
+        }
+        WaitingFor::OptionalEffectChoice { .. } => {
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: false })
+                .expect("declining an optional instruction is accepted");
+        }
+        WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+            runner
+                .act(GameAction::SelectTargets {
+                    targets: Vec::new(),
+                })
+                .expect("declining the trigger's targets is accepted");
+        }
+        WaitingFor::Priority { .. } => {
+            if runner.state().stack.is_empty() {
+                return true;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("priority pass is accepted");
+        }
+        other => panic!("unexpected prompt while driving resolution: {other:?}"),
+    }
+    false
+}
+
+/// The zone-choice prompts a run answered, as `(chooser, performer)`.
+type ZoneChoicePrompts = Vec<(PlayerId, Option<PlayerId>)>;
+
+/// [`drive_to_priority`], answering each zone-choice prompt with its first
+/// offered cards. Returns the prompts answered.
+fn drive_answering_zone_choices(runner: &mut GameRunner) -> ZoneChoicePrompts {
+    let mut answered = Vec::new();
+    for _ in 0..60 {
+        if let WaitingFor::EffectZoneChoice {
+            player,
+            cards,
+            count,
+            performed_by,
+            ..
+        } = &runner.state().waiting_for
+        {
+            answered.push((*player, *performed_by));
+            let chosen = cards.iter().copied().take(*count).collect();
+            runner
+                .act(GameAction::SelectCards { cards: chosen })
+                .expect("the zone choice accepts its first offered cards");
+            continue;
+        }
+        // An optional follow-up pick ("you may cast the copy") is declined.
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseFromZoneChoice { up_to: true, .. }
+        ) {
+            runner
+                .act(GameAction::SelectCards { cards: Vec::new() })
+                .expect("an optional pick accepts no cards");
+            continue;
+        }
+        if drive_step(runner) {
+            return answered;
+        }
+    }
+    panic!(
+        "drive_answering_zone_choices did not settle: {:?}",
         runner.state().waiting_for
     );
 }
@@ -403,8 +478,8 @@ fn skullcap_snail_pick_records_the_subject() {
 /// random." "Their" names whose library it is, not who acts: the caster exiles.
 /// The pick is random, so it takes the random-single shortcut.
 ///
-/// Revert sensitivity: applying the blanket `filter_controller` rule to this
-/// shape records `Some(P1)` and fails; base behavior (`Some(P0)`) passes.
+/// Revert sensitivity: crediting the player whose library the filter reads
+/// records `Some(P1)` and fails; base behavior (`Some(P0)`) passes.
 #[test]
 fn rahilda_library_owner_filter_stays_caster_performed() {
     assert_parses_clean(
@@ -608,9 +683,9 @@ fn tormods_crypt_player_filter_stays_caster_performed() {
 /// from their hand." The fan-out rebinds the controller per seat, so each
 /// seat's own exile is its own.
 ///
-/// Revert sensitivity: this row preserves an already-correct behavior through
-/// the same gate (the fan-out's seat controller is the performer, and the
-/// library gate does not fire on a hand filter).
+/// Revert sensitivity: this row preserves an already-correct behavior: the
+/// fan-out rebinds the controller to each seat, and the default actor is that
+/// controller.
 #[test]
 fn yaroks_fenlurker_fan_out_keeps_per_seat_attribution() {
     assert_parses_clean("Yarok's Fenlurker", &[], &["Creature"], YAROKS_FENLURKER);
@@ -668,7 +743,8 @@ fn clues_controlled(runner: &GameRunner, player: PlayerId) -> usize {
 /// the spell's controller follows the instruction (CR 608.2c), so the caster
 /// exiles both. The announced target is the caster's exile too (CR 601.2c).
 ///
-/// Revert sensitivity: without the sweep rule the twin records `Some(P1)`.
+/// Revert sensitivity: crediting the player whose creatures the filter sweeps
+/// records `Some(P1)` for the twin.
 #[test]
 fn declaration_in_stone_sweep_stays_caster_performed() {
     assert_parses_clean(
@@ -730,8 +806,8 @@ fn declaration_in_stone_sweep_stays_caster_performed() {
 /// same `ParentTargetController` scope as R8's sweep but has a subject
 /// ("that player"), so that player performs the exile.
 ///
-/// Revert sensitivity: records `Some(P0)` against the base, and `Some(P0)`
-/// against a sweep rule that does not distinguish a pick from a sweep.
+/// Revert sensitivity: records `Some(P0)` against the base, where the
+/// controller performed every move.
 #[test]
 fn ashiok_minus_three_pick_records_that_player() {
     let mut scenario = GameScenario::new();
@@ -849,6 +925,7 @@ fn mudhole_replacement_fixture_with_response(
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: engine::types::ability::LibraryInstructionActor::Controller,
                         library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Graveyard,
@@ -1460,127 +1537,6 @@ fn subject_exile_restore_keeps_explicit_actor_and_current_missing_actor_is_stric
     }
 }
 
-/// CR 800.4a + CR 800.4g: losing the instruction's subject removes that
-/// player's cards, not the surviving controller's resolving family.
-/// The typed P2 benefit discriminates completion from silent abandonment;
-/// Mudhole's own final part alone would not distinguish those outcomes.
-#[test]
-fn mudhole_subject_departure_preserves_the_surviving_family_continuation() {
-    let (mut runner, lands, relic, mudhole) = mudhole_replacement_fixture(true);
-    runner.cast(mudhole).target_player(P1).resolve();
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice {
-            player: P1,
-            kind: ReplacementChoiceKind::OptionalBranch,
-            ..
-        }
-    ));
-    runner
-        .act(GameAction::ChooseReplacement { index: 1 })
-        .expect("decline the first replacement");
-
-    // The first member really moved under P1's authority; the resumed member
-    // must have reached its own actual replacement prompt before departure.
-    let exiled: Vec<_> = lands
-        .into_iter()
-        .filter(|land| zone(&runner, *land) == Zone::Exile)
-        .collect();
-    assert_eq!(exiled.len(), 1);
-    assert_eq!(exiled_by(&runner, exiled[0]), Some(P1));
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice {
-            player: P1,
-            kind: ReplacementChoiceKind::OptionalBranch,
-            ..
-        }
-    ));
-    assert_eq!(runner.life(P2), 20, "the continuation has not run yet");
-    runner
-        .act(GameAction::Concede { player_id: P1 })
-        .expect("the subject concedes at the actual replacement prompt");
-
-    assert!(runner.state().players[P1.0 as usize].is_eliminated);
-    assert!(!runner.state().players[P0.0 as usize].is_eliminated);
-    assert!(!runner.state().players[P2.0 as usize].is_eliminated);
-    assert_eq!(
-        runner.life(P2),
-        23,
-        "P1's departure must not discard P0's surviving continuation"
-    );
-    // CR 603.2: the resumed life-gain event must reach its real printed observer.
-    drive_to_priority(&mut runner);
-    assert_pridemate_counters(&runner, 1);
-    assert_resolution_finished(&runner);
-    assert_eq!(zone(&runner, mudhole), Zone::Graveyard);
-    for card in lands.into_iter().chain([relic]) {
-        assert_eq!(
-            zone(&runner, card),
-            Zone::Exile,
-            "P1-owned cards leave the game with P1"
-        );
-    }
-}
-
-/// CR 608.2m: already-begun resolution finishes even when its controller's
-/// spell leaves the game (CR 800.4a). The surviving subject still answers their
-/// actual choices; neither disappearance of the spell nor its controller
-/// suppresses the later typed instruction or its printed observer.
-#[test]
-fn mudhole_begun_resolution_finishes_after_controller_departure_and_subject_answers() {
-    let (mut runner, lands, relic, mudhole) = mudhole_replacement_fixture(true);
-    runner.cast(mudhole).target_player(P1).resolve();
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice {
-            player: P1,
-            kind: ReplacementChoiceKind::OptionalBranch,
-            ..
-        }
-    ));
-    runner
-        .act(GameAction::Concede { player_id: P0 })
-        .expect("the original controller concedes during begun resolution");
-    assert!(runner.state().players[P0.0 as usize].is_eliminated);
-    assert!(!runner.state().players[P1.0 as usize].is_eliminated);
-    assert!(!runner.state().players[P2.0 as usize].is_eliminated);
-    assert_eq!(
-        zone(&runner, mudhole),
-        Zone::Exile,
-        "P0's spell leaves the game"
-    );
-    assert_eq!(
-        runner.life(P2),
-        20,
-        "the surviving subject still owes choices"
-    );
-    assert_pridemate_counters(&runner, 0);
-    for _ in lands {
-        assert!(matches!(
-            runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { player: P1, .. }
-        ));
-        runner
-            .act(GameAction::ChooseReplacement { index: 1 })
-            .expect("the surviving subject declines the actual optional replacement");
-    }
-    drive_to_priority(&mut runner);
-    assert_resolution_finished(&runner);
-    assert_eq!(
-        runner.life(P2),
-        23,
-        "the begun family's typed tail finishes once"
-    );
-    assert_pridemate_counters(&runner, 1);
-    for land in lands {
-        assert_eq!(zone(&runner, land), Zone::Exile);
-        assert_eq!(exiled_by(&runner, land), Some(P1));
-    }
-    assert_eq!(zone(&runner, relic), Zone::Graveyard);
-    assert_eq!(zone(&runner, mudhole), Zone::Exile);
-}
-
 // ---------------------------------------------------------------------------
 // R11 — Rona's real damage trigger binds the Random pick to the damage source.
 // ---------------------------------------------------------------------------
@@ -1667,4 +1623,241 @@ fn rona_damage_trigger_random_pick_records_the_damage_source_controller() {
     assert_eq!(zone(&runner, remaining[0]), Zone::Hand);
     assert_eq!(exiled_by(&runner, exiled[0]), Some(P1));
     assert_eq!(exile_count(&runner), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Actor reference kinds. Each row runs a printed card whose subject the parser
+// binds as a different player reference, and where a choice prompt exists it
+// runs both the single-candidate shortcut and the interactive selection, which
+// must credit the same performer (CR 608.2c). Revert sensitivity: crediting
+// `ability.controller` instead of the parsed actor (the pre-fix performer)
+// records P0 on every row.
+// ---------------------------------------------------------------------------
+
+/// The P1 cards in `candidates` that ended in exile.
+fn exiled_among(runner: &GameRunner, candidates: &[ObjectId]) -> Vec<ObjectId> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|card| zone(runner, *card) == Zone::Exile)
+        .collect()
+}
+
+fn assert_routes_credit(
+    label: &str,
+    routes: Vec<(GameRunner, Vec<ObjectId>, ZoneChoicePrompts)>,
+    performer: PlayerId,
+) {
+    let mut prompted = false;
+    for (runner, candidates, prompts) in routes {
+        let exiled = exiled_among(&runner, &candidates);
+        assert!(
+            !exiled.is_empty(),
+            "{label}: a candidate is exiled; prompts {prompts:?}"
+        );
+        for card in exiled {
+            assert_eq!(
+                exiled_by(&runner, card),
+                Some(performer),
+                "{label}: the instruction's subject is the exiling player; prompts {prompts:?}"
+            );
+        }
+        for (_, carried) in &prompts {
+            assert_eq!(
+                *carried,
+                Some(performer),
+                "{label}: the selection prompt carries the same performer"
+            );
+        }
+        // Recorded for the CR 608.2d chooser follow-up (#10691); not asserted here.
+        println!("{label}: (chooser, performer) per prompt: {prompts:?}");
+        prompted |= !prompts.is_empty();
+    }
+    assert!(prompted, "{label}: one route reached the selection prompt");
+}
+
+/// `TriggeringPlayer`: "Whenever this creature deals combat damage to a player,
+/// that player exiles a card from their hand." One held card takes the
+/// single-candidate shortcut; two reach the selection prompt.
+#[test]
+fn triggering_player_subject_credits_the_damaged_player_on_both_routes() {
+    assert_parses_clean(
+        "Fiend of the Shadows",
+        &["Flying", "Regenerate"],
+        &["Creature"],
+        FIEND_OF_THE_SHADOWS,
+    );
+    let route = |held: usize| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let cards: Vec<ObjectId> = (0..held)
+            .map(|i| scenario.add_card_to_hand(P1, &format!("P1 Held Card {i}")))
+            .collect();
+        let fiend = scenario
+            .add_creature_from_oracle(P0, "Fiend of the Shadows", 3, 3, FIEND_OF_THE_SHADOWS)
+            .id();
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(fiend, AttackTarget::Player(P1))])
+            .expect("Fiend of the Shadows attacks");
+        runner.combat_damage();
+        let prompts = drive_answering_zone_choices(&mut runner);
+        (runner, cards, prompts)
+    };
+    assert_routes_credit("Fiend of the Shadows", vec![route(1), route(2)], P1);
+}
+
+/// `DefendingPlayer`: "Whenever this creature attacks, defending player exiles
+/// two permanents they control." One permanent takes the shortcut; three reach
+/// the selection prompt, whose chooser this change leaves as it was. The row
+/// does not depend on how many are exiled: today's parse drops "two" (the
+/// card's known count misparse), and the row holds either way.
+#[test]
+fn defending_player_subject_credits_the_defender_on_both_routes() {
+    assert_parses_clean("Bane of Bala Ged", &[], &["Creature"], BANE_OF_BALA_GED);
+    let route = |permanents: usize| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let cards: Vec<ObjectId> = (0..permanents)
+            .map(|i| {
+                scenario
+                    .add_creature(P1, &format!("P1 Permanent {i}"), 1, 1)
+                    .id()
+            })
+            .collect();
+        let bane = scenario
+            .add_creature_from_oracle(P0, "Bane of Bala Ged", 7, 5, BANE_OF_BALA_GED)
+            .id();
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(bane, AttackTarget::Player(P1))])
+            .expect("Bane of Bala Ged attacks");
+        let prompts = drive_answering_zone_choices(&mut runner);
+        (runner, cards, prompts)
+    };
+    assert_routes_credit("Bane of Bala Ged", vec![route(1), route(3)], P1);
+}
+
+/// `DeclaredPlayer`: "Target player draws a card, then exiles a card from their
+/// hand." The carried subject binds the declared target. With an empty hand
+/// the drawn card is the only candidate; with one held card there are two.
+#[test]
+fn declared_player_subject_credits_the_target_on_both_routes() {
+    assert_parses_clean("Arcane Artisan", &[], &["Creature"], ARCANE_ARTISAN);
+    let route = |held: usize| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut cards: Vec<ObjectId> = (0..held)
+            .map(|i| scenario.add_card_to_hand(P1, &format!("P1 Held Card {i}")))
+            .collect();
+        scenario.with_library_top(P1, &["P1 Drawn Card"]);
+        scenario.with_mana_pool(
+            P0,
+            (0..2)
+                .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+                .chain(std::iter::once(ManaUnit::new(
+                    ManaType::Blue,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                )))
+                .collect(),
+        );
+        let artisan = scenario
+            .add_creature_from_oracle(P0, "Arcane Artisan", 0, 3, ARCANE_ARTISAN)
+            .id();
+        let mut runner = scenario.build();
+        cards.push(runner.state().players[P1.0 as usize].library[0]);
+        let index = activated_index(&runner, artisan);
+        runner.activate(artisan, index).target_player(P1).resolve();
+        let prompts = drive_answering_zone_choices(&mut runner);
+        (runner, cards, prompts)
+    };
+    assert_routes_credit("Arcane Artisan", vec![route(0), route(1)], P1);
+}
+
+/// `ScopedPlayer`: "At the beginning of each player's upkeep, that player exiles
+/// a card at random from their hand." A random pick has no selection prompt.
+#[test]
+fn scoped_player_subject_credits_the_upkeep_player() {
+    // Reach-guard: the exile clause parses with the stamped subject. Elkin
+    // Lair's later play-permission and end-step sentences are unsupported
+    // today, so the whole-card guard used elsewhere does not apply.
+    let parsed = parse_oracle_text(
+        ELKIN_LAIR,
+        "Elkin Lair",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let exile = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("the upkeep trigger has a body");
+    assert!(
+        matches!(
+            &*exile.effect,
+            Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Player {
+                    player: TargetFilter::ScopedPlayer
+                },
+                destination: Zone::Exile,
+                ..
+            }
+        ),
+        "the upkeep trigger opens with the subject's exile; got {:?}",
+        exile.effect
+    );
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let cards: Vec<ObjectId> = (0..2)
+        .map(|i| scenario.add_card_to_hand(P1, &format!("P1 Held Card {i}")))
+        .collect();
+    scenario.add_enchantment_from_oracle(P0, "Elkin Lair", ELKIN_LAIR);
+    let mut runner = scenario.build();
+    runner.advance_to_upkeep();
+    assert_eq!(
+        runner.state().active_player,
+        P1,
+        "reach: P1's upkeep, P0's world enchantment"
+    );
+    drive_to_priority(&mut runner);
+    let exiled = exiled_among(&runner, &cards);
+    assert_eq!(exiled.len(), 1, "one of P1's two cards is exiled at random");
+    assert_eq!(
+        exiled_by(&runner, exiled[0]),
+        Some(P1),
+        "the upkeep player exiles their own card"
+    );
+}
+
+/// `Typed { ChosenPlayer }`: "choose a player at random. That player exiles an
+/// instant or sorcery card from their graveyard." Both players hold instants,
+/// so the exile is the random choice's; the seed picks P1. One instant takes
+/// the shortcut; two reach the selection prompt.
+#[test]
+fn chosen_player_subject_credits_the_chosen_player_on_both_routes() {
+    assert_parses_clean("Wildfire Devils", &[], &["Creature"], WILDFIRE_DEVILS);
+    let route = |instants: usize| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let cards: Vec<ObjectId> = (0..instants)
+            .map(|i| {
+                scenario
+                    .add_spell_to_graveyard(P1, &format!("P1 Grave Instant {i}"), true)
+                    .id()
+            })
+            .collect();
+        scenario.add_spell_to_graveyard(P0, "P0 Grave Instant", true);
+        let devils = scenario
+            .add_creature_to_hand_from_oracle(P0, "Wildfire Devils", 4, 2, WILDFIRE_DEVILS)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(devils).resolve();
+        let prompts = drive_answering_zone_choices(&mut runner);
+        (runner, cards, prompts)
+    };
+    assert_routes_credit("Wildfire Devils", vec![route(1), route(2)], P1);
 }

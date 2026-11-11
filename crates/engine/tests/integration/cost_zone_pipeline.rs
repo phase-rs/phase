@@ -49,6 +49,7 @@ fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefin
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 destination: redirected_to,
                 origin: None,
@@ -1002,7 +1003,6 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: Default::default(),
-        interrupted_entry: None,
     });
     state.waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
@@ -5188,7 +5188,6 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: Default::default(),
-        interrupted_entry: None,
     });
     runner.state_mut().waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
@@ -14400,6 +14399,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
     ] {
         let mut runner = GameRunner::from_state(base_state.clone());
         runner.state_mut().waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: P0,
             cards: vec![hand_first, library_first, hand_second, library_second],
             count: 4,

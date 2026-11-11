@@ -5993,6 +5993,7 @@ fn bind_search_found_definition(
     }
     let execute = definition.execute.as_deref()?;
     let Effect::ChangeZone {
+        actor: _,
         origin,
         destination,
         target,
@@ -12029,7 +12030,6 @@ fn park_entry_controller_choice(
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: state.ingress_life_policy(),
-        interrupted_entry: None,
     });
     state.waiting_for = WaitingFor::EntryControllerChoice { player, candidates };
     ReplacementResult::NeedsChoice(player)
@@ -12205,7 +12205,6 @@ fn park_as_enters_named_choice(
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: state.ingress_life_policy(),
-        interrupted_entry: None,
     });
     raise_as_enters_named_choice(state, object_id, choice, events)
 }
@@ -12416,7 +12415,6 @@ fn park_as_enters_pay_choice(
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: state.ingress_life_policy(),
-        interrupted_entry: None,
     });
     raise_as_enters_pay_choice(state, rid.source, choice, events)
 }
@@ -13152,13 +13150,6 @@ fn pipeline_loop(
                 };
                 let search_found_candidates =
                     snapshot_search_found_candidates(state, &proposed, &candidates);
-                // CR 800.4f: a nested park must not lose an outer accepted
-                // MayCost entry; carry it so departure can settle unpaid.
-                let interrupted_entry = state
-                    .pending_replacement
-                    .take()
-                    .filter(|outer| outer.is_optional && outer.may_cost_paid)
-                    .map(Box::new);
                 state.pending_replacement = Some(PendingReplacement {
                     proposed,
                     sacrifice_provenance: None,
@@ -13183,7 +13174,6 @@ fn pipeline_loop(
                     may_cost_remaining: None,
                     delivery_boundary: None,
                     unrepresentable_life_change: state.ingress_life_policy(),
-                    interrupted_entry,
                 });
                 return replay_pending_replacement(state, affected, events);
             }
@@ -13233,13 +13223,6 @@ fn pipeline_loop(
             let affected = proposed.affected_player(state);
             let search_found_candidates =
                 snapshot_search_found_candidates(state, &proposed, &candidates);
-            // CR 800.4f: keep an outer accepted MayCost entry across this
-            // nested mandatory ordering park.
-            let interrupted_entry = state
-                .pending_replacement
-                .take()
-                .filter(|outer| outer.is_optional && outer.may_cost_paid)
-                .map(Box::new);
             state.pending_replacement = Some(PendingReplacement {
                 proposed,
                 sacrifice_provenance: None,
@@ -13262,7 +13245,6 @@ fn pipeline_loop(
                 may_cost_remaining: None,
                 delivery_boundary: None,
                 unrepresentable_life_change: state.ingress_life_policy(),
-                interrupted_entry,
             });
             return replay_pending_replacement(state, affected, events);
         } else {
@@ -13555,10 +13537,7 @@ fn continue_replacement_impl(
         let reparked_library_placement = pending.library_placement.clone();
         let reparked_sacrifice_provenance = pending.sacrifice_provenance;
         let reparked_choice_player = pending.choice_player;
-        // The payment's proposal is marked applied below before it can park.
-        // Retain the owner's original boundary even when it was not yet boxed;
-        // otherwise the accepted-cost sub-choice loses its exact parent.
-        let reparked_delivery_boundary = Some(Box::new(pending.delivery_boundary_event().clone()));
+        let reparked_delivery_boundary = pending.delivery_boundary.clone();
         let reparked_unrepresentable_life_change = pending.unrepresentable_life_change;
         let mut proposed = pending.proposed.clone();
         if chosen_index == 0 {
@@ -13696,7 +13675,6 @@ fn continue_replacement_impl(
                     // the predecessor's stamp (a boxed cost-move resume restores it
                     // unchanged).
                     unrepresentable_life_change: reparked_unrepresentable_life_change,
-                    interrupted_entry: None,
                 };
                 if let Some(crate::types::game_state::PendingCostMoveResume::ReplacementMayCost {
                     outer_replacement: parked_outer,
@@ -14457,6 +14435,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination,
@@ -14711,6 +14690,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination,
@@ -15939,6 +15919,7 @@ mod tests {
         ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination,
@@ -17064,7 +17045,6 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-            interrupted_entry: None,
         });
 
         let WaitingFor::ReplacementChoice {
@@ -17130,7 +17110,6 @@ mod tests {
                 may_cost_remaining: None,
                 delivery_boundary: None,
                 unrepresentable_life_change: Default::default(),
-                interrupted_entry: None,
             });
 
             let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -17217,7 +17196,6 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-            interrupted_entry: None,
         });
 
         let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -18216,6 +18194,7 @@ mod tests {
         let return_to_hand = AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Hand,
@@ -20293,6 +20272,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
@@ -22711,7 +22691,6 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-            interrupted_entry: None,
         });
 
         let waiting_for = replacement_choice_waiting_for(PlayerId(0), &state);
@@ -26951,6 +26930,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
@@ -26984,6 +26964,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,

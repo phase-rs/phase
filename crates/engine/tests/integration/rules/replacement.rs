@@ -626,6 +626,7 @@ fn resolve_transformed_entry_under(
 ) {
     let resolved = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,

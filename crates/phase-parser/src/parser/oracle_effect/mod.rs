@@ -3609,6 +3609,7 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
     let exile_effect = AbilityDefinition::new(
         kind,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: TargetFilter::SelfRef,
@@ -3738,6 +3739,7 @@ pub fn leave_battlefield_exile_replacement() -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -4187,6 +4189,7 @@ fn parse_enter_from_zone_redirect_replacement(norm_lower: &str) -> Option<Effect
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination,
                 target: TargetFilter::SelfRef,
@@ -6812,6 +6815,7 @@ fn try_parse_self_name_exile(
     let rest = TextPair::new(rest_orig, rest_lower);
     if rest.original.trim().eq_ignore_ascii_case(card_name) {
         return Some(parsed_clause(Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Exile,
             target: TargetFilter::SelfRef,
@@ -6874,6 +6878,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             other => other,
         };
         Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: mass_target,
@@ -6888,6 +6893,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         }
     } else {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             // Creatures leave the battlefield; spells leave the stack (issue #4384).
             origin: None,
             destination: Zone::Exile,
@@ -6998,6 +7004,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let return_effect = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::TriggeringSource,
@@ -9189,6 +9196,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
         sub_ability: Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::Any,
@@ -14475,6 +14483,7 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<ParsedEffectClause> {
         clause.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::LastCreated,
@@ -16207,6 +16216,7 @@ fn try_parse_owner_of_target_shuffle(
     let target = extract_owner_of_target(tp, ctx)?;
 
     Some(imperative::with_shuffle_sub_ability(Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: None,
         destination: Zone::Library,
         target,
@@ -18443,6 +18453,7 @@ fn build_aura_attach_clause(
     // The effect-chain assembler recognizes the typed nested anaphora and sets
     // that flag during ordinary lowering.
     let mut root = parsed_clause(Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: Some(Zone::Graveyard),
         destination: Zone::Battlefield,
         target: root_target,
@@ -19603,6 +19614,7 @@ fn parse_threshold_land_balance_ir(
     let delivery = AbilityDefinition::new(
         kind,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target: TargetFilter::ParentTarget,
@@ -19849,6 +19861,7 @@ fn parse_uneven_land_search_ir(
     let delivery = AbilityDefinition::new(
         kind,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Library),
             destination,
             target: TargetFilter::ParentTarget,
@@ -22142,6 +22155,7 @@ fn try_parse_put_one_exiled_card_into_hand(
     clause.sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Exile),
             destination: Zone::Hand,
             target: TargetFilter::Any,
@@ -22189,6 +22203,7 @@ fn try_parse_return_opponent_choice_from_graveyard(text: &str) -> Option<ParsedE
     clause.sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Hand,
             target: TargetFilter::Any,
@@ -25594,6 +25609,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
     // Routing the terminal node through the common constructor keeps compound
     // and single-subject forms on the same prospective-subject authority.
     let sub_effect = Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: None,
         destination: Zone::Library,
         target: second,
@@ -25624,6 +25640,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
 
     // Build ChangeZone for the first subject as the primary effect
     let primary_effect = Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: None,
         destination: Zone::Library,
         target: first,
@@ -30866,6 +30883,13 @@ fn lower_subject_predicate_ast_body(
                         }
                     }
                     sync_player_into_nested_shuffle_sub(&mut clause, &TargetFilter::ParentTarget);
+                    // CR 608.2c: the targeted subject performs the nested move;
+                    // inside the wrapper it is the parent target.
+                    stamp_subject_actor(
+                        &mut clause.effect,
+                        clause.sub_ability.as_deref_mut(),
+                        &TargetFilter::ParentTarget,
+                    );
                     let mut sub_ability =
                         AbilityDefinition::new(AbilityKind::Spell, clause.effect.clone());
                     sub_ability.sub_ability = clause.sub_ability;
@@ -30992,6 +31016,14 @@ fn lower_subject_predicate_ast_body(
                 }
             }
             inject_subject_target(&mut clause.effect, &subject, original_clause);
+            // CR 608.2c: the subject performs the zone moves its verb produced.
+            if let Some(player) = subject_performer(&subject, ctx) {
+                stamp_subject_actor(
+                    &mut clause.effect,
+                    clause.sub_ability.as_deref_mut(),
+                    &player,
+                );
+            }
             inject_subject_into_shared_token_sequence(&mut clause, &subject, original_clause);
             if let Some(subject_filter) = subject.target.as_ref().or(subject.affected.as_ref()) {
                 sync_player_into_nested_shuffle_sub(&mut clause, subject_filter);
@@ -32663,6 +32695,7 @@ fn lower_subject_exile_objects(
             });
     // CR 608.2f: the listed objects are exiled by one simultaneous action.
     let exile_all = Effect::ChangeZoneAll {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: None,
         destination: Zone::Exile,
         target: TargetFilter::TrackedSet {
@@ -32689,6 +32722,12 @@ fn lower_subject_exile_objects(
         target: owner_target.clone(),
     });
     clause.sub_ability = Some(Box::new(chain));
+    // CR 608.2c: the subject player exiles the listed objects.
+    stamp_subject_actor(
+        &mut clause.effect,
+        clause.sub_ability.as_deref_mut(),
+        &TargetFilter::DeclaredPlayer { group },
+    );
     clause
 }
 
@@ -32802,6 +32841,93 @@ fn bind_player_recipient_to_possessive_actor(effect: &mut Effect, actor: &Target
     }
 }
 
+/// CR 608.2c: the player a subject phrase names — its announced target, else
+/// the player it affects — or `None` when the subject names objects. The
+/// carried player is a player by construction, though `ParentTarget` can also
+/// name an object and so fails the shared predicate.
+fn subject_player_reference(subject: &SubjectPhraseAst) -> Option<TargetFilter> {
+    let filter = subject
+        .target
+        .clone()
+        .or_else(|| subject.affected.clone())?;
+    (target_filter_can_target_player(&filter)
+        || (subject.inherits_parent && filter == TargetFilter::ParentTarget))
+        .then_some(filter)
+}
+
+/// CR 608.2c: the player a leading subject proves to be the performer of its
+/// zone moves. A "that player" that fell back to the trigger event's player
+/// (no trigger scope and no player declared by the effect binds it, see
+/// `subject.rs`) is that player only when it opens the effect. After an earlier
+/// clause the nearer antecedent can be a player the parser does not bind —
+/// "defending player reveals the top card of their library. … that player puts
+/// it into their hand" (Goblin Guide), "each player reveals …" (Conundrum
+/// Sphinx) — so the stamp declines and the controller default stays.
+fn subject_performer(subject: &SubjectPhraseAst, ctx: &ParseContext) -> Option<TargetFilter> {
+    let player = subject_player_reference(subject)?;
+    let unproven_trigger_event_player = ctx.chain_prior_clause
+        && ctx.subject.is_some()
+        && ctx.relative_player_scope.is_none()
+        && subject.player_anaphor == Some(nom_target::PlayerAnaphor::ThatPlayer)
+        && player == TargetFilter::TriggeringPlayer;
+    (!unproven_trigger_event_player).then_some(player)
+}
+
+/// CR 608.2c: the player named as the grammatical subject of a conjugated
+/// zone-move verb ("that player exiles a card from their hand", "target player
+/// exiles all land cards from their graveyard") performs that move. Bind the
+/// parsed subject reference as the `actor` of every `ChangeZone` /
+/// `ChangeZoneAll` in the finished clause chain the subject governs: the root
+/// effect and its `sub_ability` chain, including each node's modes and else
+/// branch. An actor an inner clause already bound is left as is.
+///
+/// Only subject lowering calls this: the subject-predicate path, a subject
+/// carried to the next conjugated verb, and a subject's list of exiled
+/// objects. An imperative clause has no subject ("Exile target player's graveyard", "exile a nonland card from their
+/// library at random"), so its controller performs the move whatever player its
+/// filter names. A "you" subject is the default `Controller` actor and is not
+/// restated.
+fn stamp_subject_actor(
+    effect: &mut Effect,
+    sub_ability: Option<&mut AbilityDefinition>,
+    subject: &TargetFilter,
+) {
+    if matches!(subject, TargetFilter::Controller) {
+        return;
+    }
+    stamp_zone_move_actor(effect, subject);
+    // CR 603.12: a reflexive "when you do" ability is a separate ability with
+    // its own subject, so neither it nor what it registers is stamped; the
+    // shared walk prunes those below the first link (`OwnResolutionOnly`).
+    let Some(def) = sub_ability.filter(|def| {
+        !def.condition
+            .as_ref()
+            .is_some_and(AbilityCondition::has_when_you_do_marker)
+    }) else {
+        return;
+    };
+    let _ = crate::types::ability_visit::nodes_mut::visit_ability_def_scoped(
+        def,
+        crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+        &mut |node| {
+            if let crate::types::ability_visit::DefinitionNodeMut::Ability(def) = node {
+                stamp_zone_move_actor(def.effect.as_mut(), subject);
+            }
+            std::ops::ControlFlow::Continue(())
+        },
+    );
+}
+
+fn stamp_zone_move_actor(effect: &mut Effect, subject: &TargetFilter) {
+    if let Effect::ChangeZone { actor, .. } | Effect::ChangeZoneAll { actor, .. } = effect {
+        if actor.is_controller() {
+            *actor = crate::types::ability::LibraryInstructionActor::Player {
+                player: subject.clone(),
+            };
+        }
+    }
+}
+
 fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, original_clause: &str) {
     // Issue #6965: no bound subject and no target means there is nothing to
     // rebind — return rather than fabricate a filter.
@@ -32835,10 +32961,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
             return;
         }
     }
-    // The carried player is a player by construction, though `ParentTarget` can
-    // also name an object and so fails the shared predicate.
-    let subject_names_player = target_filter_can_target_player(&subject_filter)
-        || (subject.inherits_parent && subject_filter == TargetFilter::ParentTarget);
+    let subject_names_player = subject_player_reference(subject).is_some();
     // CR 603.6 + CR 120.1: "that creature/permanent deals damage equal to
     // its power..." in an ETB trigger makes the triggering object, not the
     // trigger source permanent, the damage source. Keep the parsed damage
@@ -39969,6 +40092,7 @@ fn rewrite_plural_library_recall_to_tracked_set(effect: &mut Effect) {
     } = effect
     {
         *effect = Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: *origin,
             destination: Zone::Library,
             target: tracked_set_filter(),
@@ -44632,6 +44756,7 @@ fn parse_for_each_attacker_copy_blocker_ir(
     let exile = AbilityDefinition::new(
         kind,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: TargetFilter::LastCreated,
@@ -44785,6 +44910,7 @@ fn parse_return_target_and_same_name_from_your_graveyard_ir(
         .clause(
             first_source,
             parsed_clause(Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination,
                 target,
@@ -44811,6 +44937,7 @@ fn parse_return_target_and_same_name_from_your_graveyard_ir(
         .clause(
             second_source,
             parsed_clause(Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Graveyard),
                 destination,
                 target: TargetFilter::Typed(TypedFilter::default().properties(vec![
@@ -45284,6 +45411,7 @@ fn parse_reciprocal_graveyard_choice_ir(text: &str, kind: AbilityKind) -> Option
     let mut tail = AbilityDefinition::new(
         kind,
         Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             target: TargetFilter::TrackedSet {
@@ -48761,6 +48889,7 @@ fn parse_effect_chain_ir_body(
             // "you may cast that card" driver to a graveyard-chosen target.
             chain_prior_chosen_target: chain_prior_chosen_target_filter,
             chain_prior_targeted_player,
+            chain_prior_clause: !builder.clauses().is_empty(),
             // CR 608.2c + CR 400.7: seed the zone published by an earlier
             // "choose card(s) in <zone>" producer so this chunk's "put those
             // cards onto the battlefield" anaphor binds its `TrackedSet` move to
@@ -49647,11 +49776,15 @@ fn parse_effect_chain_ir_body(
                     )
                 })
                 .flatten();
-            inject_subject_target(
-                &mut clause.effect,
-                &carried.subject_phrase(declared_player),
-                normalized_text,
-            );
+            let subject = carried.subject_phrase(declared_player);
+            inject_subject_target(&mut clause.effect, &subject, normalized_text);
+            if let Some(player) = subject_player_reference(&subject) {
+                stamp_subject_actor(
+                    &mut clause.effect,
+                    clause.sub_ability.as_deref_mut(),
+                    &player,
+                );
+            }
         }
         if nom_primitives::scan_contains(&text.to_lowercase(), "villainous choice") {
             if let (Effect::ChooseOneOf { chooser, .. }, Some(scope)) =
@@ -51967,6 +52100,7 @@ fn try_parse_put_zone_change_parts(
                 let random_order = scan_contains_phrase(after.lower, "in a random order");
                 return Some((
                     Effect::ChangeZoneAll {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
                         origin,
                         destination,
                         target,
@@ -51987,6 +52121,7 @@ fn try_parse_put_zone_change_parts(
             }
             return Some((
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin,
                     destination,
                     target,
@@ -54011,6 +54146,9 @@ pub mod test_helpers {
 
 #[cfg(test)]
 mod reveal_this_way_tests;
+
+#[cfg(test)]
+mod subject_actor_tests;
 
 #[cfg(test)]
 mod gendered_still_type_tests {

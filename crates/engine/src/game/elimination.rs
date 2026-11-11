@@ -167,90 +167,18 @@ pub fn eliminate_players_simultaneously(
 
 /// CR 104.3a + CR 800.4a: A player concedes and leaves the game.
 ///
-/// The departure collects its own triggers (CR 603.2 + CR 603.6c). If it
-/// cancels a member of a begun resolution, resume that exact family and return
-/// the start of its event segment for the caller's ordinary SBA/trigger pass.
-/// The caller owns rollback if resumption or that convergence pass fails.
-/// CR 303.4f + CR 800.4b: settle a parked Aura-host entry before its chooser
-/// leaves, so the approved entry is not delivered and the family tail resumes.
-fn prevent_aura_host_entry(state: &mut GameState, departing: PlayerId) -> bool {
-    let awaiting = matches!(
-        state.waiting_for,
-        WaitingFor::ReturnAsAuraTarget { player, .. } if player == departing
-    );
-    if !awaiting {
-        return false;
-    }
-    let parked = state
-        .pending_aura_entry
-        .as_ref()
-        .and_then(|pending| match &pending.event {
-            crate::types::ProposedEvent::ZoneChange { object_id, .. } => state
-                .objects
-                .get(object_id)
-                .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
-                .map(|member| (member, pending.event.clone())),
-            _ => None,
-        });
-    let Some((member, event)) = parked else {
-        return false;
-    };
-    let _ = state.prevent_paused_batch_zone_change_delivery(member, &event);
-    let _ = state.prevent_paused_zone_change_delivery(member, &event);
-    state.pending_aura_entry = None;
-    true
-}
-
-pub fn concede(
-    state: &mut GameState,
-    player: PlayerId,
-    events: &mut Vec<GameEvent>,
-) -> Result<Option<usize>, super::engine::EngineError> {
-    let departing_entry_payment =
-        super::engine_replacement::DepartingEntryPayment::capture(state, player);
-    // CR 303.4f: an Aura's host is chosen as it enters, so a departing
-    // chooser settles the held entry before the sweep can deliver it.
-    let prevented_aura_host = prevent_aura_host_entry(state, player);
-    // CR 800.4f: prevent an interrupted unpaid entry before the leave sweep
-    // can cancel its paused member and route the object through replacements.
-    let prevented_payment = departing_entry_payment
-        .as_ref()
-        .is_some_and(|payment| payment.prevent(state));
-    let resume_canceled_change_zone = eliminate_players(
+/// A concession is an action of its own, not part of a resolution or a
+/// state-based action check, so no post-action pipeline scans the events it
+/// produces. The departure collects the abilities they trigger itself (CR 603.2):
+/// a leaves-the-battlefield observer sees the conceding player's permanents leave
+/// the game (CR 603.6c).
+pub fn concede(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
+    eliminate_players(
         state,
         &[player],
         DepartureTriggers::CollectedByDeparture,
         events,
     );
-    let batch_scan = state.concession_suffix_scan_from.take();
-    let scan_from = batch_scan.unwrap_or(events.len());
-    let settled_payment = prevented_aura_host
-        || if prevented_payment {
-            match departing_entry_payment.as_ref() {
-                Some(payment) => payment.finish(state, events)?,
-                None => false,
-            }
-        } else {
-            false
-        };
-    if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-        return Ok(Some(scan_from));
-    }
-    // CR 704.3 + 704.5f: the staged batch drain can leave zero-toughness
-    // permanents needing SBAs before the next priority.
-    super::sba::check_state_based_actions(state, events);
-    if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-        return Ok(Some(scan_from));
-    }
-    if !resume_canceled_change_zone && !settled_payment && batch_scan.is_none() {
-        return Ok(None);
-    }
-    // The canonical tail owns SBA/trigger convergence for the unscanned drain.
-    if batch_scan.is_some() {
-        return Ok(Some(scan_from));
-    }
-    super::engine::resume_pending_continuation_if_priority(state, events)?;
-    Ok(Some(scan_from))
 }
 
 /// CR 603.2 + CR 603.6c: who collects the triggered abilities a departure's own
@@ -263,26 +191,19 @@ pub(crate) enum DepartureTriggers {
     /// A post-action pass in progress scans the events and places the waiting queue at its
     /// own settle (CR 117.5).
     PlacedByPass,
-    /// The departure queues its own triggers (a concession, CR 104.3a);
-    /// a resumed family's ordinary pipeline must not scan that prefix again.
+    /// Nothing scans the departure's events after it returns (a concession,
+    /// CR 104.3a), so the departure queues their triggers itself.
     CollectedByDeparture,
 }
 
-/// Returns whether the concession caller owes a canceled member's family
-/// resumption. Caller-scanned departures resume in place under their own pass.
 pub(crate) fn eliminate_players(
     state: &mut GameState,
     players_to_eliminate: &[PlayerId],
     departure_triggers: DepartureTriggers,
     events: &mut Vec<GameEvent>,
-) -> bool {
+) {
     let first_event = events.len();
     let first_record = state.zone_changes_this_turn.len();
-    let initial_entry_attack = matches!(
-        state.waiting_for,
-        WaitingFor::EntryAttackTargetChoice { .. }
-    )
-    .then(|| state.waiting_for.clone());
     let mut eliminated_any = false;
     let mut leaving_set = HashSet::new();
     // CR 733: the CR 800.4a stack step is batch-scoped over the whole
@@ -358,135 +279,6 @@ pub(crate) fn eliminate_players(
         )
     });
 
-    /// Why the parked family is waiting on a prompt the departing player owns.
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum InterruptedChangeZonePause {
-        ParkedReplacement,
-        AuraHostPrompt,
-        EntryAttackTargetChoice,
-    }
-    struct InterruptedChangeZone {
-        group: crate::types::identifiers::LogicalZoneChangeGroupId,
-        controller: PlayerId,
-        member: ObjectIncarnationRef,
-        proposal: crate::types::proposed_event::ProposedEvent,
-        pause: InterruptedChangeZonePause,
-    }
-
-    // CR 800.4a + CR 608.2c: retain the exact parked family and delivery before
-    // teardown. A departed member is removed; a surviving member whose entry
-    // controller leaves instead completes as Remained through the zone boundary.
-    // CR 303.4f + CR 508.4: a host pick or an entering attacker's defender pick
-    // is the family's own pause even though it carries no replacement record.
-    // Its delivery already entered before the prompt, so the remaining members
-    // still owe their ordinary resume once the departed chooser's prompt is
-    // dropped — otherwise the family would silently strand.
-    let interrupted_change_zone = state
-        .active_change_zone_frame()
-        .and_then(|frame| frame.pending.as_ref())
-        .and_then(|pending| {
-            let paused = pending.paused_current.as_ref()?;
-            let pause = if state
-                .pending_replacement
-                .as_ref()
-                .is_some_and(|replacement| replacement.parks_delivery(&paused.expected_event))
-            {
-                InterruptedChangeZonePause::ParkedReplacement
-            } else {
-                match &state.waiting_for {
-                    WaitingFor::ReturnAsAuraTarget {
-                        player,
-                        returned_id,
-                        ..
-                    } if leaving_set.contains(player)
-                        && *returned_id == paused.member.object_id
-                        && paused.count
-                            == crate::types::game_state::PausedZoneChangeDeliveryCount::AlreadyCounted
-                        && paused.terminal_completion
-                            == Some(crate::types::game_state::ZoneMoveCompletion::Moved) =>
-                    {
-                        InterruptedChangeZonePause::AuraHostPrompt
-                    }
-                    WaitingFor::EntryAttackTargetChoice {
-                        player,
-                        object_id,
-                        ..
-                    } if leaving_set.contains(player)
-                        && *object_id == paused.member.object_id
-                        && paused.terminal_completion.is_none() =>
-                    {
-                        InterruptedChangeZonePause::EntryAttackTargetChoice
-                    }
-                    _ => return None,
-                }
-            };
-            Some(InterruptedChangeZone {
-                group: pending.logical_zone_change_group.logical_group_id,
-                controller: pending.controller,
-                member: paused.member,
-                proposal: paused.expected_event.clone(),
-                pause,
-            })
-        });
-    let canceled_change_zone_is_resumable = |state: &GameState| {
-        interrupted_change_zone
-            .as_ref()
-            .is_some_and(|captured| {
-                state
-                    .active_change_zone_frame()
-                    .and_then(|frame| frame.pending.as_ref())
-                    .is_some_and(|pending| {
-                        let paused_ok = match (captured.pause, pending.paused_current.as_ref()) {
-                            // CR 800.4a: the leave sweep may retire the exact
-                            // undelivered member (its owner left), leaving an
-                            // empty family with no pause. That family still owes
-                            // its ordinary drain before priority.
-                            (_, None) => {
-                                pending.remaining.is_empty()
-                                    || matches!(
-                                        captured.pause,
-                                        InterruptedChangeZonePause::ParkedReplacement
-                                    )
-                            }
-                            (InterruptedChangeZonePause::ParkedReplacement, Some(paused)) => {
-                                paused.captures(captured.member, &captured.proposal)
-                                    && paused.terminal_completion
-                                        == Some(
-                                            crate::types::game_state::ZoneMoveCompletion::Remained,
-                                        )
-                            }
-                            (InterruptedChangeZonePause::AuraHostPrompt, Some(paused)) => {
-                                paused.captures(captured.member, &captured.proposal)
-                                    && paused.count
-                                        == crate::types::game_state::PausedZoneChangeDeliveryCount::AlreadyCounted
-                                    && paused.terminal_completion
-                                        == Some(
-                                            crate::types::game_state::ZoneMoveCompletion::Moved,
-                                        )
-                            }
-                            (InterruptedChangeZonePause::EntryAttackTargetChoice, Some(paused)) => {
-                                paused.captures(captured.member, &captured.proposal)
-                                    && paused.terminal_completion.is_none()
-                            }
-                        };
-                        pending.logical_zone_change_group.logical_group_id == captured.group
-                            && pending.controller == captured.controller
-                            && paused_ok
-                    })
-            })
-            && state.pending_replacement.is_none()
-            && matches!(state.waiting_for, WaitingFor::Priority { .. })
-    };
-
-    let departing_entry_payment = state
-        .waiting_for
-        .acting_player()
-        .filter(|payer| {
-            departure_triggers != DepartureTriggers::CollectedByDeparture
-                && leaving_set.contains(payer)
-        })
-        .and_then(|payer| super::engine_replacement::DepartingEntryPayment::capture(state, payer));
-
     let interrupted_ordinary_search = state
         .pending_scoped_library_search
         .is_none()
@@ -555,7 +347,7 @@ pub(crate) fn eliminate_players(
     }
 
     if !eliminated_any {
-        return false;
+        return;
     }
     mark_left_game_departures_simultaneous(state, events, first_event, first_record);
     let departure_end = events.len();
@@ -875,85 +667,11 @@ pub(crate) fn eliminate_players(
             debug_assert!(false, "team tap payment elimination resume failed: {error}");
         }
 
-        // CR 117.2e + CR 508.4: a batch member parked on its entering-attacker
-        // choice keeps the batch and its continuation live. A departing
-        // chooser's member is Remained and the batch tail resumes here.
-        if let Some(WaitingFor::EntryAttackTargetChoice { player, .. }) =
-            initial_entry_attack.clone()
-        {
-            if (players_to_eliminate.contains(&player) || !players::is_alive(state, player))
-                && state.active_batch_delivery().is_some()
-            {
-                if let Some(sidecar) = state.pending_entry_attack_event.take() {
-                    let _ = state
-                        .prevent_paused_batch_zone_change_delivery(sidecar.member, &sidecar.event);
-                }
-                let next = players::next_player(state, player);
-                state.waiting_for = WaitingFor::Priority { player: next };
-                state.concession_suffix_scan_from = Some(events.len());
-                for _ in 0..4 {
-                    if state.active_batch_delivery().is_none()
-                        || !matches!(state.waiting_for, WaitingFor::Priority { .. })
-                    {
-                        break;
-                    }
-                    super::zone_pipeline::drain_pending_batch_deliveries(state, events);
-                }
-            }
-        }
         if let Some(waiting_pid) = state.waiting_for.acting_player() {
             if !players::is_alive(state, waiting_pid) {
                 let next = players::next_player(state, waiting_pid);
                 state.waiting_for = WaitingFor::Priority { player: next };
             }
-        }
-        // A parked entry choice whose chooser is gone no longer has an answer;
-        // its family is settled by the leave sweep, so drop the transient
-        // approved events rather than let a stale prompt event leak.
-        if !matches!(
-            state.waiting_for,
-            WaitingFor::EntryAttackTargetChoice { .. }
-        ) {
-            state.pending_entry_attack_event = None;
-        }
-        if !matches!(state.waiting_for, WaitingFor::ReturnAsAuraTarget { .. }) {
-            let had_parked_aura = state.pending_aura_entry.is_some();
-            let _ = prevent_aura_host_entry(
-                state,
-                state
-                    .waiting_for
-                    .acting_player()
-                    .unwrap_or(state.active_player),
-            );
-            if had_parked_aura && state.active_batch_delivery().is_some() {
-                super::zone_pipeline::drain_pending_batch_deliveries(state, events);
-            }
-        }
-
-        // CR 800.4f + CR 608.2m: settle the captured entry payment through its
-        // ordinary unpaid replacement branch after every departure. A
-        // concession does this in its fallible, prefix-bounded caller instead.
-        if departure_triggers != DepartureTriggers::CollectedByDeparture {
-            if let Some(payment) = departing_entry_payment.as_ref() {
-                if payment.prevent(state) {
-                    payment
-                        .finish(state, events)
-                        .expect("a departed entry payer follows the ordinary unpaid branch");
-                }
-            }
-        }
-
-        // CR 800.4a + CR 608.2c + CR 608.2m: removing a paused member is not
-        // abandonment of its begun family, even if its controller left. A
-        // caller-owned pass resumes here; a concession defers fallible resume
-        // and convergence until all its other departure work is finished.
-        if departure_triggers != DepartureTriggers::CollectedByDeparture
-            && !matches!(state.waiting_for, WaitingFor::GameOver { .. })
-            && canceled_change_zone_is_resumable(state)
-        {
-            super::engine::resume_pending_continuation_if_priority(state, events)
-                .expect("a canceled ChangeZone pause resumes at its ordinary boundary");
-            drain_or_clear_deferred_triggers_after_elimination(state, departure_triggers, events);
         }
 
         // CR 800.4a + CR 608.2m + CR 608.2n: a paused spell the departure sweeps
@@ -1036,10 +754,6 @@ pub(crate) fn eliminate_players(
     // CR 800.4a: the departure's events belong to the departure, not to a
     // surviving player's paused announcement.
     super::announcement_triggers::disown_events_through(state, events.len());
-    // Recheck the captured family's exact identity at handoff: departure
-    // settlement may have exposed a new child or installed another prompt.
-    departure_triggers == DepartureTriggers::CollectedByDeparture
-        && canceled_change_zone_is_resumable(state)
 }
 
 /// CR 103.5 + CR 800.4a: Prune eliminated players from the in-flight
@@ -1689,19 +1403,10 @@ fn do_eliminate(
     // CR 800.4a + CR 616.1: Capture the parked replacement chooser before
     // cast-abandonment teardown can replace its prompt with priority.
     let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
-    let departing_entry_payment =
-        super::engine_replacement::DepartingEntryPayment::owns_prompt(state, player);
-
-    // CR 800.4b + CR 117.2e: a surviving owner's parked entry cannot enter
-    // under this departed controller. Capture and terminalize its exact
-    // delivery before any teardown can consume the replacement record or
-    // replace its latched prompt. The begun family stays for its ordinary
-    // resume/convergence boundary after every departure has settled.
-    let terminalized_departed_entry =
-        super::zone_pipeline::terminalize_paused_entry_for_departed_controller(state, player);
 
     abandon_source_bound_resolution_prompt(state, player, leaving_set, events);
     retire_pending_zone_change_contexts_owned_by(state, player);
+    abandon_change_zone_family_for_controller(state, player, leaving_set, events);
 
     crate::game::planechase::preserve_phenomenon_stack_abilities_for_handoff(state, planar_handoff);
 
@@ -1861,11 +1566,10 @@ fn do_eliminate(
         grants.retain(|(_, grant)| grant.grantee != player && grant.controller != player);
     }
 
-    // CR 800.4a + CR 616.1 + CR 704.4: abandon a parked replacement choice this
-    // leaving player was answering unless its exact logical entry has already
-    // completed as Remained through the shared zone boundary above. A CR 616.1
-    // replacement-order (or optional MayCost sub-choice) is otherwise held in
-    // `state.pending_replacement` and resumed ONLY via ChooseReplacement
+    // CR 800.4a + CR 616.1 + CR 704.4: Abandon a parked replacement choice this
+    // leaving player was answering. A CR 616.1 replacement-order (or optional
+    // MayCost / MayCost sub-choice re-park) is held in `state.pending_replacement`
+    // and resumed ONLY via `(WaitingFor::ReplacementChoice, ChooseReplacement)`
     // (engine.rs) or that sub-choice's own resolution — both re-enter
     // `continue_replacement`. If the player who must answer leaves the game, the
     // choice is unanswerable: the post-loop reconcile rewrite advances
@@ -1888,12 +1592,15 @@ fn do_eliminate(
     // the stack-owned Connive re-entry). The resume drain also touches OTHER resolution
     // slots on a normal answer (e.g. `pending_phase_transition_progress`,
     // `pending_team_draw_step`, `pending_continuation`); those are intentionally
-    // NOT cleared here. An active ChangeZone entry that must remain under
-    // CR 800.4b was terminalized before teardown and keeps its begun family;
-    // do not consume any new child replacement that later teardown installed.
-    // A player-scope sacrifice batch similarly resumes for the remaining
-    // players through `settle_player_scope_sacrifice_after_departure` once
-    // every departure has settled.
+    // NOT cleared here. Stranding some of them is its own PRE-EXISTING soft-lock
+    // (PPT gates `auto_advance`; `pending_continuation` gates the deferred-trigger
+    // drain) that predates this PR and is NOT the reported regression; repairing
+    // them correctly requires resuming the interrupted APNAP queue for the
+    // remaining players (not field-nulling), tracked as a separate follow-up. This
+    // fix deliberately addresses only the CR 704.4 SBA-freeze introduced by the
+    // `pending_replacement` guard. A player-scope sacrifice batch parked on this
+    // choice is the exception: `settle_player_scope_sacrifice_after_departure`
+    // resumes it for the remaining players once every departure has settled.
     // CR 800.4a: Tear down choices and continuations owned by the leaving player.
     // CR 616.1: SearchFound owns an outer per-card batch, and a replacement-
     // selected zone move may own a nested batch completion. The
@@ -1917,11 +1624,7 @@ fn do_eliminate(
                 .expect("eliminated search batch must own the active frame");
         }
     }
-    if !terminalized_departed_entry
-        && !departing_entry_payment
-        && state.pending_replacement.is_some()
-        && leaving_is_latched_chooser
-    {
+    if state.pending_replacement.is_some() && leaving_is_latched_chooser {
         state.pending_replacement = None;
         // CR 800.4a: a paused frameless single-card discard belongs to the
         // abandoned choice of the leaving player; left behind it would go stale.
@@ -2304,6 +2007,36 @@ fn finish_abandoned_source_bound_resolution_carrier(
         state,
         crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
     );
+}
+
+/// CR 800.4a: A paused ChangeZone iteration is a single resolving family's
+/// owner. Dropping only its prompt would let an unrelated later resume consume
+/// the captured source context, so abandonment removes the owner and its tail
+/// together. `PendingBatchDeliveries` is intentionally not included: it is a
+/// shared per-object batch and retains the existing prune/resume rules.
+fn abandon_change_zone_family_for_controller(
+    state: &mut GameState,
+    player: PlayerId,
+    leaving_set: &HashSet<PlayerId>,
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(pending) = state
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+    else {
+        return;
+    };
+    if pending.controller != player {
+        return;
+    }
+
+    let _ = state
+        .take_active_change_zone_frame()
+        .expect("elimination cannot consume a buried ChangeZone frame");
+    finish_abandoned_source_bound_resolution_carrier(state, leaving_set, events);
+    state.waiting_for = WaitingFor::Priority {
+        player: players::next_player(state, player),
+    };
 }
 
 /// CR 104.2a: A player wins if all opponents have left. CR 104.3g: A team loses if all members have lost.
@@ -2788,7 +2521,6 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-            interrupted_entry: None,
         }
     }
 
@@ -3116,9 +2848,23 @@ mod tests {
         let mut events = Vec::new();
         eliminate_player(&mut state, PlayerId(1), &mut events);
 
+        let iteration = state
+            .active_change_zone_frame()
+            .and_then(|frame| frame.pending.as_ref())
+            .expect("living controller keeps the change-zone family");
+        assert!(iteration.paused_current.is_none());
+        assert_eq!(
+            iteration
+                .remaining
+                .iter()
+                .map(|member| member.object_id)
+                .collect::<Vec<_>>(),
+            vec![surviving]
+        );
         assert!(state.pending_replacement.is_none());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 
+        crate::game::effects::drain_pending_continuation(&mut state, &mut events);
         assert!(state.active_change_zone_frame().is_none());
         assert_eq!(state.objects[&leaving].zone, Zone::Exile);
         assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);
@@ -4298,7 +4044,6 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-            interrupted_entry: None,
         });
         // Latched chooser identity — the fix's key. C = P2.
         state.waiting_for = WaitingFor::ReplacementChoice {
@@ -4444,7 +4189,6 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-            interrupted_entry: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -4502,7 +4246,6 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-            interrupted_entry: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -4552,7 +4295,6 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-            interrupted_entry: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -4632,7 +4374,6 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-            interrupted_entry: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),

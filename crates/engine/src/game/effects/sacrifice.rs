@@ -580,6 +580,7 @@ pub fn resolve(
         // size for safety; the branch above handles the mandatory-all case.
         let choice_count = count.min(eligible.len());
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: chooser,
             cards: eligible,
             count: choice_count,

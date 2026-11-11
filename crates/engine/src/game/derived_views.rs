@@ -1079,8 +1079,6 @@ fn client_state_wire_value(state: &GameState) -> serde_json::Result<serde_json::
     // authorities, never client schema.
     root.remove("pending_triggered_mana_resume");
     root.remove("pending_trigger_construction_priority_recipient");
-    root.remove("pending_entry_attack_event");
-    root.remove("pending_aura_entry");
     // Same defense in depth for the original Cube multiset: undealt entries and
     // their copy counts are pack-generation input the viewer filter also drops.
     root.remove("booster_pack_pool");

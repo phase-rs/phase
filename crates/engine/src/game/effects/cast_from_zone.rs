@@ -504,6 +504,7 @@ fn open_private_zone_cast_selection(
     // live, so the resume's finalize-time re-evaluation is correct.
     crate::game::effects::append_to_pending_continuation(state, Some(Box::new(stash)));
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: ability.controller,
         cards: eligible,
         count: 1,
@@ -638,6 +639,7 @@ fn open_linked_exile_cast_selection(
     }
     crate::game::effects::append_to_pending_continuation(state, Some(Box::new(stash)));
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: ability.controller,
         cards: pool,
         count: 1,
@@ -5923,6 +5925,7 @@ mod tests {
         );
         ability.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
@@ -5963,6 +5966,7 @@ mod tests {
 
     fn parent_target_move(destination: Zone) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination,
@@ -6286,6 +6290,7 @@ mod tests {
         let mut grant = paid_during_resolution_grant(source, target);
         let mut destination_rider = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
@@ -6407,6 +6412,7 @@ mod tests {
         let mut grant = paid_during_resolution_grant(source, ObjectId(9212));
         let mut destination_rider = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,

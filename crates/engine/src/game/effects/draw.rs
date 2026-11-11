@@ -2319,6 +2319,7 @@ mod tranche4_draw_pipeline_tests {
         let redirect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,
@@ -2395,6 +2396,7 @@ mod tranche4_draw_pipeline_tests {
         let redirect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,

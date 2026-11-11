@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "Separate paused ChangeZone instruction performer from controller-relative resolution and exile-duration authority; preserve deployed legacy controller and duration records while copying their historical actor, and converge resumed concessions through ordinary SBA and trigger settlement"
+  "reason": "Carry the parsed instruction actor on ChangeZone and ChangeZoneAll and the resolved performer on the EffectZoneChoice prompt; separate the paused ChangeZone instruction performer from controller-relative family and exile-duration authority, migrating deployed v11 saves with their recorded controller as the historical actor"
 }
