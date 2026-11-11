@@ -298,16 +298,13 @@
     "skip": "点击跳过",
     "continue": "点击继续",
     "you": "你",
-    "youPlayFirst": "你先行",
-    "playerPlaysFirst": "{{name}} 先行",
+    "youWonRoll": "你赢得了掷骰",
+    "playerWonRoll": "{{name}} 赢得了掷骰",
     "heads": "正面",
     "tails": "反面",
     "coinFlip": "掷硬币",
     "wonCoinFlip": "{{name}} 掷赢了",
     "lostCoinFlip": "{{name}} 掷输了",
-    "turnOrder": "回合顺序",
-    "turnOrderItem": "第 {{turn}} 回合：{{name}}",
-    "youTakeTurn": "你在第 {{turn}} 回合行动",
     "ignoredDie": "已忽略"
   },
   "chrome": {

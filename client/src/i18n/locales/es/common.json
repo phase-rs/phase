@@ -298,16 +298,13 @@
     "skip": "Toca para omitir",
     "continue": "Toca para continuar",
     "you": "Tú",
-    "youPlayFirst": "Juegas primero",
-    "playerPlaysFirst": "{{name}} juega primero",
+    "youWonRoll": "Ganaste la tirada",
+    "playerWonRoll": "{{name}} ganó la tirada",
     "heads": "Cara",
     "tails": "Cruz",
     "coinFlip": "Lanzamiento de moneda",
     "wonCoinFlip": "{{name}} ganó el lanzamiento",
     "lostCoinFlip": "{{name}} perdió el lanzamiento",
-    "turnOrder": "Orden de turnos",
-    "turnOrderItem": "Turno {{turn}}: {{name}}",
-    "youTakeTurn": "Juegas el turno {{turn}}",
     "ignoredDie": "Ignorado"
   },
   "chrome": {

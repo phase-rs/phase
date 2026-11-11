@@ -495,10 +495,6 @@ pub struct TurnOrderSlotView {
     /// display classification rather than comparing player IDs themselves.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_viewer: bool,
-    /// Whether this projected slot is the game's starting player. It is only
-    /// true while that player is also the current turn representative.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub is_starting_player: bool,
 }
 
 /// CR 103.1 + CR 103.1a: whether the viewer's side takes the first turn of a
@@ -2428,7 +2424,6 @@ fn turn_order_views(
                 turns_from_now: slot_index,
                 turn_number: slot_index + 1,
                 is_viewer: viewer == Some(player),
-                is_starting_player: slot_index == 0 && player == state.current_starting_player,
             }
         })
         .collect();
@@ -5342,7 +5337,6 @@ mod tests {
                     turns_from_now: 0,
                     turn_number: 1,
                     is_viewer: false,
-                    is_starting_player: true,
                 },
                 TurnOrderSlotView {
                     player: PlayerId(0),
@@ -5350,7 +5344,6 @@ mod tests {
                     turns_from_now: 1,
                     turn_number: 2,
                     is_viewer: false,
-                    is_starting_player: false,
                 },
             ],
             "same player can be both NOW and NEXT when an extra turn is queued"

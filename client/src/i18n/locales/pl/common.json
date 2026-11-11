@@ -298,16 +298,13 @@
     "skip": "Dotknij, aby pominąć",
     "continue": "Dotknij, aby kontynuować",
     "you": "Ty",
-    "youPlayFirst": "Zaczynasz",
-    "playerPlaysFirst": "{{name}} zaczyna",
+    "youWonRoll": "Wygrywasz rzut",
+    "playerWonRoll": "{{name}} wygrywa rzut",
     "heads": "Orzeł",
     "tails": "Reszka",
     "coinFlip": "Rzut monetą",
     "wonCoinFlip": "{{name}} wygrywa rzut monetą",
     "lostCoinFlip": "{{name}} przegrywa rzut monetą",
-    "turnOrder": "Kolejność tur",
-    "turnOrderItem": "Tura {{turn}}: {{name}}",
-    "youTakeTurn": "Rozgrywasz turę {{turn}}",
     "ignoredDie": "Zignorowany"
   },
   "chrome": {
