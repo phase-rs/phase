@@ -447,6 +447,54 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
     actions
 }
 
+/// CR 605.3a + CR 701.26b + CR 122.1d: whether untapping `source` gives `player`
+/// its mana a second time, a priority hint read from `source` alone (it takes
+/// no game state): whether it is a phased-in permanent, its controller, tap
+/// state, counters and effective abilities, with no other object,
+/// static or cost leg consulted and nothing activated, paid or copied. `source`
+/// must be untapped with no stun counter (an untap would remove the counter
+/// instead), and have, among its effective abilities, a {T} mana ability whose
+/// cost doesn't move it off the battlefield (Treasure, Lotus Petal, Mirrored
+/// Lotus). Effective means after layers: a basic land type's intrinsic "{T}:
+/// Add" is there (CR 305.6), and an ability a layer-6 effect removed (Humble)
+/// isn't (CR 613.1f). Whatever that leaves
+/// unchecked (summoning sickness, an activation prohibition or restriction, a
+/// cost leg such as Celestial Prism's {2} or Springleaf Drum's creature to tap)
+/// counts toward holding, so the hold can stop once where a use turns out
+/// impossible, and never passes one the source's own mana ability allows. The
+/// live activation stays the authority on what can actually be activated.
+pub(crate) fn untap_would_repeat_mana(
+    source: &crate::game::game_object::GameObject,
+    player: PlayerId,
+) -> bool {
+    // CR 702.26b: a phased-out permanent is treated as though it doesn't exist.
+    if !source.is_phased_in_permanent()
+        || source.controller != player
+        || source.tapped
+        || source
+            .counters
+            .get(&crate::types::counter::CounterType::Stun)
+            .is_some_and(|stun| *stun > 0)
+    {
+        return false;
+    }
+    source.abilities.iter().any(|ability| {
+        ability.kind == AbilityKind::Activated
+            && mana_abilities::is_mana_ability(ability)
+            && has_tap_component(&ability.cost)
+            && mana_abilities::is_renewable_mana_ability(ability)
+            && !cost_has_component(&ability.cost, |component| {
+                matches!(
+                    component,
+                    AbilityCost::Exile {
+                        filter: Some(TargetFilter::SelfRef),
+                        ..
+                    }
+                )
+            })
+    })
+}
+
 /// The `TapLandForMana` rows [`activatable_mana_actions_for_player`] emits for
 /// one land, without sweeping the rest of the battlefield.
 ///
