@@ -1986,8 +1986,7 @@ fn fold_one_of(acc: &mut NodeAcc, costs: &[AbilityCost]) {
 
 /// CR 106.1+: enumerate every nonzero [`ResourceVector`] component of `net` as a
 /// signed `(ResourceAxis, amount)` pair — the input to the produces/requires
-/// derivation. Adding a `ResourceVector` field without extending this walk is a
-/// compile error via [`AxisKey::from`]'s exhaustiveness.
+/// derivation.
 fn net_axis_components(net: &ResourceVector) -> Vec<(ResourceAxis, i64)> {
     let mut out = Vec::new();
     for (i, &n) in net.mana.iter().enumerate() {

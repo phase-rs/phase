@@ -104,11 +104,12 @@ use crate::types::ability::{
     ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementCondition, ResolvedAbility,
     StaticCondition, TargetFilter, TokenAttackDestination, TrackedAnaphorSource, TriggerCondition,
     TriggerConstraint, TriggerDefinition, TriggerLimitSpend, TypedFilter, UnlessPayModifier,
-    ZoneChangeClause, ZoneChoiceCandidateSource,
+    UnlessPayScaling, ZoneChangeClause, ZoneChoiceCandidateSource,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::keywords::{DisguiseCost, Keyword};
 use crate::types::statics::CastFrequency;
+use crate::types::triggers::AttackTargetFilter;
 
 /// The three independent classification axes, accumulated over one AST walk.
 /// `true` on an axis means "reads (or may read) that dimension"; the fail-safe
@@ -288,6 +289,16 @@ pub(crate) enum ScanMode {
     Conservative,
     /// Descend a mode-divergent arm's payload (CR 732.2a firewall only).
     LoopFirewall,
+}
+
+/// Which part of a trigger or replacement definition a scan reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DefinitionPart {
+    /// Every field.
+    Whole,
+    /// CR 603.2 + CR 603.4 + CR 614.1: what decides whether it applies (its event, filters and
+    /// condition), without the payload it would carry out.
+    Gate,
 }
 
 /// How a given `scan_target_filter` CALL SITE reads its filter — the census
@@ -1750,7 +1761,11 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             ScanMode::Conservative => Axes::CONSERVATIVE,
             ScanMode::LoopFirewall => {
                 let mut acc = scan_target_filter(recipient, target_ctx, mode);
-                acc = acc.or(scan_trigger_definition(trigger, mode));
+                acc = acc.or(scan_trigger_definition(
+                    trigger,
+                    mode,
+                    DefinitionPart::Whole,
+                ));
                 acc
             }
         },
@@ -4367,7 +4382,11 @@ fn scan_object_scope(x: &ObjectScope) -> Axes<'_> {
 /// [`ability_definition_axes`] and [`resolved_ability_axes`] use: a FUTURE
 /// `TriggerDefinition` field fails to compile here until it is classified as
 /// scanned or read-free. Every `_` binding below carries its justification.
-fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes<'_> {
+fn scan_trigger_definition(
+    t: &TriggerDefinition,
+    mode: ScanMode,
+    part: DefinitionPart,
+) -> Axes<'_> {
     let TriggerDefinition {
         // ---- read-bearing: scanned into `acc` below ----
         execute,
@@ -4464,6 +4483,10 @@ fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes<'_> {
         // (CR 113.2c + CR 603.2h), not a matcher; it reaches no filter or quantity.
         limit_leader_offset: _,
     } = t;
+    let (execute, unless_pay) = match part {
+        DefinitionPart::Whole => (execute.as_deref(), unless_pay.as_ref()),
+        DefinitionPart::Gate => (None, None),
+    };
 
     let mut acc = Axes::NONE;
     if let Some(exec) = execute {
@@ -5096,7 +5119,7 @@ fn scan_delayed_trigger_condition(c: &DelayedTriggerCondition, mode: ScanMode) -
         // many-field structure. `expiry` is the CR 603.7b stated-duration axis, not a
         // read.
         DelayedTriggerCondition::WheneverEvent { trigger, expiry: _ } => {
-            scan_trigger_definition(trigger, mode)
+            scan_trigger_definition(trigger, mode, DefinitionPart::Whole)
         }
         // CR 603.2: TWO matchers of equal authority, and `or_trigger` is the drop
         // point — a `{ trigger, .. }` destructure compiles, passes every
@@ -5107,9 +5130,9 @@ fn scan_delayed_trigger_condition(c: &DelayedTriggerCondition, mode: ScanMode) -
             or_trigger,
             lifetime: _,
         } => {
-            let mut acc = scan_trigger_definition(trigger, mode);
+            let mut acc = scan_trigger_definition(trigger, mode, DefinitionPart::Whole);
             if let Some(t) = or_trigger {
-                acc = acc.or(scan_trigger_definition(t, mode));
+                acc = acc.or(scan_trigger_definition(t, mode, DefinitionPart::Whole));
             }
             acc
         }
@@ -5140,7 +5163,9 @@ fn scan_duration(x: &Duration, mode: ScanMode) -> Axes<'_> {
         Duration::UntilOpponentBecomesMonarch => Axes::NONE,
         // CR 611.2a: the event is a trigger description, scanned as the
         // `WhenNextEvent` delayed-trigger payload is.
-        Duration::UntilEvent { event } => scan_trigger_definition(event, mode),
+        Duration::UntilEvent { event } => {
+            scan_trigger_definition(event, mode, DefinitionPart::Whole)
+        }
         Duration::UntilNextStepOf { player, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_player_scope(player));
@@ -5272,6 +5297,15 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
             sibling: SiblingReads::None,
             projected: true,
             history: HistoryReads::NONE,
+        },
+        // CR 508.1h: a flat or per-attacker tax counts the declared attackers, no history.
+        StaticCondition::UnlessPay {
+            cost: _,
+            scaling: UnlessPayScaling::Flat | UnlessPayScaling::PerAffectedCreature,
+            defended,
+        } => Axes {
+            history: attack_defended_history(defended.as_ref()),
+            ..Axes::CONSERVATIVE
         },
         StaticCondition::UnlessPay { .. } => Axes::CONSERVATIVE,
         StaticCondition::Unrecognized { text: _ } => Axes::NONE,
@@ -7038,7 +7072,7 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         // descend a granted TRIGGER body (GrantTrigger) — the same move, and the
         // same reason, as the `GrantAbility` arm directly above. See
         // `scan_trigger_definition` for the per-field scanned/read-free split.
-        ContinuousModification::GrantTrigger { trigger } => scan_trigger_definition(trigger, mode),
+        ContinuousModification::GrantTrigger { trigger } => scan_trigger_definition(trigger, mode, DefinitionPart::Whole),
         // fail-closed CONSERVATIVE: inner payloads with no walker.
         ContinuousModification::CopyValues { .. }
         // CR 707.2c (Metamorphic Alteration): the copy-marker stands in for a
@@ -7146,11 +7180,22 @@ fn scan_resolved_continuous_static(
         room_door: _,
         granting_object: _,
     } = sd;
-    if per_player_condition.is_some() || attack_defended.is_some() {
+    let attack_restriction = matches!(
+        static_mode,
+        crate::types::statics::StaticMode::CantAttack
+            | crate::types::statics::StaticMode::CantAttackOrBlock
+    );
+    if per_player_condition.is_some() || (attack_defended.is_some() && !attack_restriction) {
         return Axes::CONSERVATIVE;
     }
     let mut acc = match static_mode {
         crate::types::statics::StaticMode::Continuous => Axes::NONE,
+        // CR 508.1c: an attack restriction reads history only through its defended filter.
+        crate::types::statics::StaticMode::CantAttack
+        | crate::types::statics::StaticMode::CantAttackOrBlock => Axes {
+            history: attack_defended_history(attack_defended.as_ref()),
+            ..Axes::CONSERVATIVE
+        },
         // CR 601.2f: a cost modification reads the spells it applies to and its count; a
         // fixed amount reads nothing.
         crate::types::statics::StaticMode::ModifyCost {
@@ -7273,11 +7318,18 @@ pub(crate) fn delayed_trigger_reads_growing_class_for_loop(
 }
 
 // CR 732.2a: the history each live definition reads, for the history cover. Every entry point
-// scans its whole definition in `LoopFirewall` mode, so an unscanned field is a compile error.
+// scans in `LoopFirewall` mode over a destructure with no `..`, so an unscanned field is a
+// compile error.
 
 /// The history a trigger definition reads: its condition, constraint, matchers and body.
 pub(crate) fn trigger_definition_history(def: &TriggerDefinition) -> HistoryReads {
-    scan_trigger_definition(def, ScanMode::LoopFirewall).history
+    scan_trigger_definition(def, ScanMode::LoopFirewall, DefinitionPart::Whole).history
+}
+
+/// The history a trigger definition reads to decide whether it triggers (CR 603.2 + CR 603.4):
+/// [`trigger_definition_history`] without its body and resolution-time payment.
+pub(crate) fn trigger_definition_gate_history(def: &TriggerDefinition) -> HistoryReads {
+    scan_trigger_definition(def, ScanMode::LoopFirewall, DefinitionPart::Gate).history
 }
 
 /// The history a stack entry's intervening-if condition reads (CR 603.4).
@@ -7346,6 +7398,27 @@ fn scan_activation_restriction(
     }
 }
 
+/// The history an attack restriction's or tax's defended filter reads.
+fn attack_defended_history(defended: Option<&AttackTargetFilter>) -> HistoryReads {
+    match defended {
+        // CR 508.6: "a player it has already attacked this turn".
+        Some(AttackTargetFilter::PlayerAttackedBySourceThisTurn) => {
+            HistoryReads::of(HistoryMember::CreatureAttackedDefendersThisTurn)
+        }
+        None
+        | Some(
+            AttackTargetFilter::Player
+            | AttackTargetFilter::Planeswalker
+            | AttackTargetFilter::PlayerOrPlaneswalker
+            | AttackTargetFilter::Battle
+            | AttackTargetFilter::Owner
+            | AttackTargetFilter::OwnerOrPlaneswalker
+            | AttackTargetFilter::PlayerOrPermanents
+            | AttackTargetFilter::Monarch,
+        ) => HistoryReads::NONE,
+    }
+}
+
 /// The history a functioning static ability reads.
 pub(crate) fn static_definition_history(
     def: &crate::types::ability::StaticDefinition,
@@ -7359,7 +7432,15 @@ pub(crate) fn replacement_definition_history(
     def: &crate::types::ability::ReplacementDefinition,
     rider: Option<&ResolvedAbility>,
 ) -> HistoryReads {
-    replacement_definition_axes(def, rider, ScanMode::LoopFirewall).history
+    replacement_definition_axes(def, rider, ScanMode::LoopFirewall, DefinitionPart::Whole).history
+}
+
+/// The history a replacement effect reads to decide whether it applies (CR 614.1): its event
+/// filters and condition, without what it would do instead.
+pub(crate) fn replacement_definition_gate_history(
+    def: &crate::types::ability::ReplacementDefinition,
+) -> HistoryReads {
+    replacement_definition_axes(def, None, ScanMode::LoopFirewall, DefinitionPart::Gate).history
 }
 
 /// CR 614.1: a replacement definition's reads, destructured with no `..`.
@@ -7367,6 +7448,7 @@ fn replacement_definition_axes<'a>(
     def: &'a crate::types::ability::ReplacementDefinition,
     rider: Option<&'a ResolvedAbility>,
     mode: ScanMode,
+    part: DefinitionPart,
 ) -> Axes<'a> {
     use crate::types::ability::{DamageModification, PreventionFormula, ReplacementMode};
     let crate::types::ability::ReplacementDefinition {
@@ -7416,6 +7498,20 @@ fn replacement_definition_axes<'a>(
         ensure_token_specs: _,
     } = def;
     let mut acc = Axes::NONE;
+    for filter in [valid_card, damage_source_filter].into_iter().flatten() {
+        acc = acc.or(scan_target_filter(
+            filter,
+            FilterReadContext::SnapshotOrEvent,
+            mode,
+        ));
+    }
+    if let Some(condition) = condition {
+        acc = acc.or(scan_replacement_condition(condition, mode));
+    }
+    match part {
+        DefinitionPart::Whole => {}
+        DefinitionPart::Gate => return acc,
+    }
     if let Some(execute) = execute {
         acc = acc.or(ability_definition_axes(execute, mode));
     }
@@ -7436,18 +7532,12 @@ fn replacement_definition_axes<'a>(
             }
         }
     }
-    for filter in [valid_card, damage_source_filter, redirect_target]
-        .into_iter()
-        .flatten()
-    {
+    if let Some(filter) = redirect_target {
         acc = acc.or(scan_target_filter(
             filter,
             FilterReadContext::SnapshotOrEvent,
             mode,
         ));
-    }
-    if let Some(condition) = condition {
-        acc = acc.or(scan_replacement_condition(condition, mode));
     }
     if let Some(controller) = enters_under {
         acc = acc.or(scan_controller_ref(controller));
@@ -8363,6 +8453,49 @@ mod tests {
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    /// CR 508.6: an attack restriction reads the attack history only when its defended filter
+    /// names "a player it has already attacked this turn".
+    #[test]
+    fn attack_restriction_history_comes_from_its_defended_filter() {
+        use crate::parser::oracle_static::parse_static_line_multi;
+        // Bloodthirster, Port Razer.
+        let repeat = parse_static_line_multi(
+            "This creature can't attack a player it has already attacked this turn.",
+        );
+        assert!(!repeat.is_empty());
+        for def in &repeat {
+            assert_eq!(def.mode, StaticMode::CantAttack);
+            assert!(static_definition_history(def)
+                .reads(HistoryMember::CreatureAttackedDefendersThisTurn));
+        }
+        // Propaganda; Vow of Duty's restriction line.
+        let propaganda = parse_static_line_multi(
+            "Creatures can't attack you unless their controller pays {2} for each creature they control that's attacking you.",
+        );
+        assert!(propaganda
+            .iter()
+            .any(|def| def.mode == StaticMode::CantAttack
+                && matches!(
+                    def.condition,
+                    Some(StaticCondition::UnlessPay {
+                        scaling: UnlessPayScaling::PerAffectedCreature,
+                        ..
+                    })
+                )));
+        let vow = parse_static_line_multi(
+            "Enchanted creature gets +2/+2, has vigilance, and can't attack you or planeswalkers you control.",
+        );
+        assert!(vow.iter().any(|def| def.mode == StaticMode::CantAttack
+            && def.attack_defended == Some(AttackTargetFilter::PlayerOrPlaneswalker)));
+        for def in propaganda.iter().chain(&vow) {
+            assert_eq!(
+                static_definition_history(def),
+                HistoryReads::NONE,
+                "{def:?}"
+            );
+        }
+    }
 
     /// The parsed abilities of a printed creature card from its verbatim Oracle text.
     fn printed_creature(name: &str, oracle: &str) -> crate::parser::oracle::ParsedAbilities {
@@ -12186,7 +12319,7 @@ mod tests {
             valid_card: Some(f),
             ..bello_granted_trigger()
         };
-        let axes = scan_trigger_definition(&def, ScanMode::LoopFirewall);
+        let axes = scan_trigger_definition(&def, ScanMode::LoopFirewall, DefinitionPart::Whole);
         assert!(
             !axes.event,
             "a matcher selects WHICH event fires (CR 603.2); it is not the \
@@ -12420,7 +12553,8 @@ mod tests {
         let filter = event_reading_census_filter();
         nondegenerate!(&filter);
         let payload = class_reading_trigger();
-        let payload_axes = scan_trigger_definition(&payload, ScanMode::LoopFirewall);
+        let payload_axes =
+            scan_trigger_definition(&payload, ScanMode::LoopFirewall, DefinitionPart::Whole);
         assert!(
             payload_axes.sibling.is_read(),
             "payload DEGENERATE: the trigger fixture the delegating cases carry must scan \
@@ -12535,7 +12669,7 @@ mod tests {
 
         let alt = class_reading_trigger();
         assert!(
-            scan_trigger_definition(&alt, ScanMode::LoopFirewall)
+            scan_trigger_definition(&alt, ScanMode::LoopFirewall, DefinitionPart::Whole)
                 .sibling
                 .is_read(),
             "population is DEGENERATE: the alternate matcher must itself read the growing \

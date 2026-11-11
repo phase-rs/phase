@@ -37,6 +37,7 @@ mod delayed_trigger_continuation;
 mod delayed_trigger_occurrence_fanout;
 mod demilich_helbrute_graveyard_exile_cost;
 mod demon_of_fates_design;
+mod departed_active_player_priority;
 mod descendants_path_shared_creature_type_gate;
 mod desperate_futurescribe_instead;
 mod destroy_redirect_to_battlefield_delivery_tail;

@@ -298,6 +298,7 @@ mod loop_shortcut_drain_boards;
 mod loop_shortcut_mana_engine;
 mod loop_shortcut_offer_writer_census;
 mod loop_shortcut_ranking;
+mod loop_shortcut_real_dumps;
 mod loop_shortcut_seat_pin_census;
 mod loop_shortcut_shortening;
 mod love_on_the_battlefield_combat_counters;

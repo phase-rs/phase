@@ -5896,12 +5896,14 @@ pub(crate) fn clear_frame_bookkeeping(s: &mut GameState) {
 
 /// CR 732.2a: the object-growth producer's certification of its three settle frames — their
 /// normalization, the minted class, and the recurrence cover — with what the cover admitted as
-/// growth; `floors` are the frames' stack floors when the replay derived them.
+/// growth; `floors` are the frames' stack floors when the replay derived them, and `executed`
+/// scopes the history read to the sources the replay carried out (`None` reads every definition).
 pub(crate) fn certify_object_growth_frames(
     frames: [&GameState; 3],
     normalize: impl Fn(&GameState) -> GameState,
     caster: PlayerId,
     floors: Option<[usize; 3]>,
+    executed: Option<&crate::analysis::resource::ExecutedSources>,
 ) -> (
     crate::analysis::resource::ObjectGrowthVerdict,
     crate::analysis::resource::CoveredGrowth,
@@ -5919,7 +5921,11 @@ pub(crate) fn certify_object_growth_frames(
     let rises_held = |verdict: ObjectGrowthVerdict| match verdict {
         ObjectGrowthVerdict::ResourceRecurrence(Some(
             crate::analysis::resource::RecurrenceCover::GrowthRead,
-        )) if !crate::analysis::resource::growth_read_rises_match([&cs_n, &cs_n1, &cs_n2]) => {
+        )) if !crate::analysis::resource::growth_read_rises_match(
+            [&cs_n, &cs_n1, &cs_n2],
+            executed,
+        ) =>
+        {
             ObjectGrowthVerdict::ResourceRecurrence(None)
         }
         verdict => verdict,
@@ -5941,7 +5947,7 @@ pub(crate) fn certify_object_growth_frames(
         let Some((mut fodder, _k)) = derived_fodder_class(&first.0, &first.1) else {
             let covers = |(prior, current): &(GameState, GameState), floors| {
                 crate::analysis::resource::resource_recurrence_covers(
-                    prior, current, caster, floors,
+                    prior, current, caster, floors, executed,
                 )
             };
             let (verdict, _) =
@@ -5989,12 +5995,14 @@ pub(crate) fn certify_object_growth_frames(
                 &cs_n1,
                 caster,
                 first_floors,
+                executed,
             );
             let second = crate::analysis::resource::resource_recurrence_covers(
                 &cs_n1,
                 &cs_n2,
                 caster,
                 second_floors,
+                executed,
             );
             let (verdict, growth) = PairCover::of_pairs(first, second);
             (rises_held(verdict), growth)
@@ -6020,6 +6028,7 @@ pub fn certify_object_growth_frames_for_tests(
         [&views[0], &views[1], &views[2]],
         |frame| super::period_confirm::normalize_cast_frame(frame, casts),
         caster,
+        None,
         None,
     )
     .0

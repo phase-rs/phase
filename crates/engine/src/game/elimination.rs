@@ -1713,6 +1713,14 @@ fn do_eliminate(
     crate::game::planechase::finish_player_left_game_handoff(state, planar_handoff, events);
 
     state.auto_pass.remove(&player);
+    // CR 800.4a + CR 117.4 + CR 805.5b: a player who has left is not among the players who pass
+    // in succession; a side still in the game keeps its pass under its living representative.
+    if state.priority_passes.remove(&player) {
+        let representative = super::topology::priority_pass_representative(state, player);
+        if representative != player && players::is_alive(state, representative) {
+            state.priority_passes.insert(representative);
+        }
+    }
     state.planar_die_actions_this_turn.remove(&player);
 
     // CR 725.4: If the monarch leaves the game, the active player becomes the monarch.

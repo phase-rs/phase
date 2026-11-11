@@ -103,17 +103,16 @@ fn each_seats_energy_is_measured_from_its_own_reserve() {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("P0 activates its Hub");
-    if matches!(
+    assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ChooseManaColor { .. }
-    ) {
-        runner
-            .act(GameAction::ChooseManaColor {
-                choice: ManaChoice::SingleColor(ManaType::Red),
-                count: 1,
-            })
-            .expect("P0 chooses red");
-    }
+    ));
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Red),
+            count: 1,
+        })
+        .expect("P0 chooses red");
     let f2 = runner.state().clone();
 
     let raw = |state: &engine::types::game_state::GameState| {

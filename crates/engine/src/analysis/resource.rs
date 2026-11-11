@@ -638,7 +638,8 @@ pub struct ResourceVector {
     /// CR 701.21: sacrifice triggers this window. **Event-fed.**
     pub sac_triggers: i64,
 
-    /// CR 122.1: counters on battlefield objects by `(kind, object class)`.
+    /// CR 122.1: counters by `(kind, object class)`. A snapshot reads battlefield objects only;
+    /// Engine B's projected nets also key player energy and poison under [`ObjectClass::Player`].
     /// **State-readable.**
     #[serde(with = "map_key_pairs")]
     pub counters: BTreeMap<(CounterClass, ObjectClass), i64>,
@@ -5390,7 +5391,7 @@ pub(crate) fn fodder_growth_cover_refusals(
     let mut refusals = Vec::new();
     let pf = flush_clone(prior);
     let mut cf = flush_clone(current);
-    let reads = frame_history_reads(&pf, &cf);
+    let reads = frame_history_reads(&pf, &cf, None);
     let restored = draws_restored(&pf, &cf, caster, reads);
     let drew = restored.is_some();
     if let Some(restored) = restored {
@@ -5588,14 +5589,15 @@ pub(crate) fn resource_recurrence_covers(
     current: &GameState,
     caster: PlayerId,
     floors: Option<(usize, usize)>,
+    executed: Option<&ExecutedSources>,
 ) -> Option<PairCover> {
     let buried = floors.map(|(fp, fc)| (buried_ids(prior, fp), buried_ids(current, fc)));
     let buried = buried.as_ref();
-    if let Some((growth, cover)) = certifying_cover(prior, current, caster, buried) {
+    if let Some((growth, cover)) = certifying_cover(prior, current, caster, buried, executed) {
         return Some(PairCover::Certified(growth, cover));
     }
     let (prior, current) = without_spend(prior, current, caster)?;
-    certifying_cover(&prior, &current, caster, buried).map(|_| PairCover::Spend)
+    certifying_cover(&prior, &current, caster, buried, executed).map(|_| PairCover::Spend)
 }
 
 /// The entries below `floor`, by id, so a later removal from the frame cannot shift which are
@@ -5670,6 +5672,7 @@ fn buried_growth_covers(
     current: &GameState,
     caster: PlayerId,
     (bp, bc): &(Vec<ObjectId>, Vec<ObjectId>),
+    executed: Option<&ExecutedSources>,
 ) -> bool {
     bp.len() <= bc.len()
         && !above_floor_reads_buried(prior, bp)
@@ -5679,6 +5682,7 @@ fn buried_growth_covers(
             &without_buried(current, bc),
             caster,
             None,
+            executed,
         )
         .is_some()
 }
@@ -5732,6 +5736,7 @@ fn certifying_cover(
     current: &GameState,
     caster: PlayerId,
     buried: Option<&(Vec<ObjectId>, Vec<ObjectId>)>,
+    executed: Option<&ExecutedSources>,
 ) -> Option<(CoveredGrowth, RecurrenceCover)> {
     if loop_states_equal_modulo_resources(prior, current) {
         return Some((CoveredGrowth::Mintable, RecurrenceCover::Equal));
@@ -5758,26 +5763,26 @@ fn certifying_cover(
     if departure {
         return Some((CoveredGrowth::PerformedOnly, RecurrenceCover::Departure));
     }
-    if history_covers(prior, current) {
+    if history_covers(prior, current, executed) {
         return Some((CoveredGrowth::EQUALIZED_HISTORY, RecurrenceCover::History));
     }
-    if turn_cycle_covers(prior, current, caster) {
+    if turn_cycle_covers(prior, current, caster, executed) {
         return Some((CoveredGrowth::EQUALIZED_HISTORY, RecurrenceCover::TurnCycle));
     }
-    if library_departures_cover(prior, current, caster) {
+    if library_departures_cover(prior, current, caster, executed) {
         return Some((
             CoveredGrowth::EQUALIZED_HISTORY,
             RecurrenceCover::LibraryDepartures,
         ));
     }
-    if growth_read_covers(prior, current) {
+    if growth_read_covers(prior, current, executed) {
         return Some((
             CoveredGrowth::EQUALIZED_HISTORY,
             RecurrenceCover::GrowthRead,
         ));
     }
     buried
-        .filter(|buried| buried_growth_covers(prior, current, caster, buried))
+        .filter(|buried| buried_growth_covers(prior, current, caster, buried, executed))
         .map(|_| (CoveredGrowth::PerformedOnly, RecurrenceCover::StackGrowth))
 }
 
@@ -6077,13 +6082,26 @@ impl HistoryReads {
 /// CR 732.2a + CR 732.1b: `current` covers `prior` once the history members it grew are
 /// equalized, when each grown member is attributed and no live surface of either frame reads
 /// it, and the equalized copy passes the equality or counter-growth disjunct.
-pub(crate) fn history_covers(prior: &GameState, current: &GameState) -> bool {
-    history_covers_reading(prior, current, frame_history_reads(prior, current))
+pub(crate) fn history_covers(
+    prior: &GameState,
+    current: &GameState,
+    executed: Option<&ExecutedSources>,
+) -> bool {
+    history_covers_reading(
+        prior,
+        current,
+        frame_history_reads(prior, current, executed),
+    )
 }
 
 /// The history members a live surface of either frame reads.
-fn frame_history_reads(prior: &GameState, current: &GameState) -> HistoryReads {
-    live_history_reads(&flush_clone(prior)).or(live_history_reads(&flush_clone(current)))
+fn frame_history_reads(
+    prior: &GameState,
+    current: &GameState,
+    executed: Option<&ExecutedSources>,
+) -> HistoryReads {
+    live_history_reads(&flush_clone(prior), executed)
+        .or(live_history_reads(&flush_clone(current), executed))
 }
 
 /// [`history_covers`] under the live reads `reads`.
@@ -6259,7 +6277,7 @@ fn floating_replacement_can_name_object(
 /// [`history_covers`] for the integration suite.
 #[cfg(any(test, feature = "test-support"))]
 pub fn history_covers_for_tests(prior: &GameState, current: &GameState) -> bool {
-    history_covers(prior, current)
+    history_covers(prior, current, None)
 }
 
 /// CR 500.1 + CR 504.1 + CR 732.2a: `current` covers `prior` once the caster's own turns between
@@ -6270,7 +6288,12 @@ pub fn history_covers_for_tests(prior: &GameState, current: &GameState) -> bool 
 /// keeps its turn stamps' relation to its frame's turn and its summoning sickness (CR 302.6). Then
 /// no live surface may read a grown turn member, and the equalized copy must pass the comparand or
 /// the history cover.
-pub(crate) fn turn_cycle_covers(prior: &GameState, current: &GameState, caster: PlayerId) -> bool {
+pub(crate) fn turn_cycle_covers(
+    prior: &GameState,
+    current: &GameState,
+    caster: PlayerId,
+    executed: Option<&ExecutedSources>,
+) -> bool {
     use strum::IntoEnumIterator;
     let Some(turns) = current
         .turn_number
@@ -6331,7 +6354,7 @@ pub(crate) fn turn_cycle_covers(prior: &GameState, current: &GameState, caster: 
             HistoryMember::PlayersWhoDiscardedCardThisTurn,
             HistoryMember::PlayerGraveyards,
         ];
-        let reads = *read.insert(frame_history_reads(prior, current));
+        let reads = *read.insert(frame_history_reads(prior, current, executed));
         if DISCARDS.iter().any(|member| reads.reads(*member))
             || discards_restored(prior, &mut copy, caster, &discarded).is_none()
         {
@@ -6344,7 +6367,7 @@ pub(crate) fn turn_cycle_covers(prior: &GameState, current: &GameState, caster: 
     let grown: Vec<HistoryMember> = HistoryMember::iter()
         .filter(|member| member.turn_cycle() && member.equalize(&mut copy, prior))
         .collect();
-    let reads = read.unwrap_or_else(|| frame_history_reads(prior, current));
+    let reads = read.unwrap_or_else(|| frame_history_reads(prior, current, executed));
     if grown.iter().any(|member| reads.reads(*member)) {
         return false;
     }
@@ -6489,8 +6512,13 @@ fn draws_restored(
 /// judged as in [`set_aside_unread_trigger_events`]: the restored copy passes the equality or
 /// counter-growth disjunct or the history cover, alone or with a certified instructed library
 /// departure stripped from both frames.
-fn library_departures_cover(prior: &GameState, current: &GameState, caster: PlayerId) -> bool {
-    let reads = frame_history_reads(prior, current);
+fn library_departures_cover(
+    prior: &GameState,
+    current: &GameState,
+    caster: PlayerId,
+    executed: Option<&ExecutedSources>,
+) -> bool {
+    let reads = frame_history_reads(prior, current, executed);
     let Some(mut copy) = draws_restored(prior, current, caster, reads) else {
         return false;
     };
@@ -6519,10 +6547,14 @@ fn library_departures_cover(prior: &GameState, current: &GameState, caster: Play
 /// CR 732.2a + CR 613.4c: the history members other than the turn cycle's that `current` grew
 /// from `prior` and that only a functioning static reads, which changes the static's effect each
 /// repetition.
-fn growth_read_members(prior: &GameState, current: &GameState) -> Vec<HistoryMember> {
+fn growth_read_members(
+    prior: &GameState,
+    current: &GameState,
+    executed: Option<&ExecutedSources>,
+) -> Vec<HistoryMember> {
     use strum::IntoEnumIterator;
-    let reads = live_history_reads_by_kind(&flush_clone(prior));
-    let later = live_history_reads_by_kind(&flush_clone(current));
+    let reads = live_history_reads_by_kind(&flush_clone(prior), executed);
+    let later = live_history_reads_by_kind(&flush_clone(current), executed);
     let (statics, others) = (
         reads.statics.or(later.statics),
         reads.others.or(later.others),
@@ -6542,14 +6574,18 @@ fn growth_read_members(prior: &GameState, current: &GameState) -> Vec<HistoryMem
 /// CR 732.2a + CR 613.4c: `current` covers `prior` once the history members only a functioning
 /// static reads are equalized, each having grown, beside the history the history cover equalizes,
 /// and the stack triggers whose resolution reads no event have their events set aside.
-fn growth_read_covers(prior: &GameState, current: &GameState) -> bool {
-    let read = growth_read_members(prior, current);
+fn growth_read_covers(
+    prior: &GameState,
+    current: &GameState,
+    executed: Option<&ExecutedSources>,
+) -> bool {
+    let read = growth_read_members(prior, current, executed);
     if read.is_empty() || read.iter().any(|member| member.rise(prior, current) <= 0) {
         return false;
     }
-    let others = live_history_reads_by_kind(&flush_clone(prior))
+    let others = live_history_reads_by_kind(&flush_clone(prior), executed)
         .others
-        .or(live_history_reads_by_kind(&flush_clone(current)).others);
+        .or(live_history_reads_by_kind(&flush_clone(current), executed).others);
     let mut copy = current.clone();
     if !equalize_history(&mut copy, prior, [prior, current], others)
         || prior.stack.len() != copy.stack.len()
@@ -6589,11 +6625,14 @@ fn set_aside_unread_trigger_events(copy: &mut GameState, prior: &GameState) {
 
 /// CR 732.2a: each history member only a static reads grows by as much in the second pair of
 /// `frames` as in the first, so the period repeats at a constant rise.
-pub(crate) fn growth_read_rises_match(frames: [&GameState; 3]) -> bool {
+pub(crate) fn growth_read_rises_match(
+    frames: [&GameState; 3],
+    executed: Option<&ExecutedSources>,
+) -> bool {
     let [s_n, s_n1, s_n2] = frames;
-    growth_read_members(s_n, s_n1)
+    growth_read_members(s_n, s_n1, executed)
         .into_iter()
-        .chain(growth_read_members(s_n1, s_n2))
+        .chain(growth_read_members(s_n1, s_n2, executed))
         .all(|member| member.rise(s_n, s_n1) == member.rise(s_n1, s_n2))
 }
 
@@ -6769,10 +6808,22 @@ fn collapse_inserted_unit_run(copy: &mut GameState, prior: &GameState) -> bool {
 }
 
 /// CR 732.2a: every history member a live surface of `state` reads — each stack entry, and off
-/// the stack every functioning definition, scanned whole.
-fn live_history_reads(state: &GameState) -> HistoryReads {
-    let reads = live_history_reads_by_kind(state);
+/// the stack every functioning definition, scanned whole unless `executed` scopes it.
+fn live_history_reads(state: &GameState, executed: Option<&ExecutedSources>) -> HistoryReads {
+    let reads = live_history_reads_by_kind(state, executed);
     reads.statics.or(reads.others)
+}
+
+/// CR 732.2a: the objects whose abilities a replayed period carried out: each stack entry's
+/// source that left the stack between two frames, and each source an activation, replacement or
+/// mana ability names. Object-level, so a superset of the definitions that acted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ExecutedSources(pub(crate) BTreeSet<ObjectId>);
+
+impl ExecutedSources {
+    fn contains(&self, id: ObjectId) -> bool {
+        self.0.contains(&id)
+    }
 }
 
 /// The history members live surfaces read, split by whether a static ability reads them.
@@ -6783,8 +6834,23 @@ struct LiveHistoryReads {
 }
 
 /// [`live_history_reads`], with the functioning static abilities' reads apart.
-fn live_history_reads_by_kind(state: &GameState) -> LiveHistoryReads {
+///
+/// Under `Some(executed)`, a definition whose object did not act in the period contributes only
+/// what decides whether it would act; statics, stack entries, transient effects and delayed
+/// triggers are read whole.
+fn live_history_reads_by_kind(
+    state: &GameState,
+    executed: Option<&ExecutedSources>,
+) -> LiveHistoryReads {
     use crate::game::ability_scan as scan;
+    let acted = |id: ObjectId| executed.is_none_or(|executed| executed.contains(id));
+    let trigger_reads = |id: ObjectId, def: &crate::types::ability::TriggerDefinition| {
+        if acted(id) {
+            scan::trigger_definition_history(def)
+        } else {
+            scan::trigger_definition_gate_history(def)
+        }
+    };
     let mut reads = HistoryReads::NONE;
     let mut statics = HistoryReads::NONE;
     for entry in state.stack.iter() {
@@ -6808,31 +6874,33 @@ fn live_history_reads_by_kind(state: &GameState) -> LiveHistoryReads {
                 active.definition,
                 obj.zone,
             ) {
-                reads = reads.or(scan::trigger_definition_history(active.definition));
+                reads = reads.or(trigger_reads(obj.id, active.definition));
             }
         }
         if obj.is_phased_out() {
             continue;
         }
         for def in crate::game::triggers::granted_keyword_triggers_in_zone(state, obj) {
-            reads = reads.or(scan::trigger_definition_history(&def));
+            reads = reads.or(trigger_reads(obj.id, &def));
         }
         for def in obj.static_definitions.iter_all() {
             if crate::game::functioning_abilities::static_functions_in_zone(obj, def) {
                 statics = statics.or(scan::static_definition_history(def));
             }
         }
-        if obj.zone == Zone::Battlefield {
+        // CR 602.2 + CR 732.2a: an ability nobody activated is not in the period's sequence.
+        if obj.zone == Zone::Battlefield && acted(obj.id) {
             for def in obj.abilities.iter() {
                 reads = reads.or(scan::ability_definition_history(def));
             }
         }
     }
-    for (_source, _idx, def) in loop_window_replacement_defs(state) {
-        reads = reads.or(scan::replacement_definition_history(
-            def,
-            state.replacement_rider(def),
-        ));
+    for (source, _idx, def) in loop_window_replacement_defs(state) {
+        reads = reads.or(if source.is_none_or(|source| acted(source.id)) {
+            scan::replacement_definition_history(def, state.replacement_rider(def))
+        } else {
+            scan::replacement_definition_gate_history(def)
+        });
     }
     for effect in &state.transient_continuous_effects {
         reads = reads.or(scan::transient_effect_history(effect));
@@ -22355,7 +22423,7 @@ mod tests {
         let (prior, current, reordered) =
             beside(no_mint_pair_with_departure(PlayerId(1), Zone::Graveyard));
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None, None),
             Some(PairCover::Certified(
                 CoveredGrowth::PerformedOnly,
                 RecurrenceCover::Departure
@@ -22367,7 +22435,7 @@ mod tests {
             "reach: the no-mint frames differ only before projection"
         );
         assert_eq!(
-            resource_recurrence_covers(&prior, &reordered, PlayerId(0), None),
+            resource_recurrence_covers(&prior, &reordered, PlayerId(0), None, None),
             None
         );
 
@@ -22402,7 +22470,7 @@ mod tests {
         let mut prior = GameState::new_two_player(42);
         cover_library_card(&mut prior, 900, PlayerId(1));
         assert_eq!(
-            resource_recurrence_covers(&prior, &prior.clone(), PlayerId(0), None),
+            resource_recurrence_covers(&prior, &prior.clone(), PlayerId(0), None, None),
             Some(PairCover::Certified(
                 CoveredGrowth::Mintable,
                 RecurrenceCover::Equal
@@ -22412,7 +22480,7 @@ mod tests {
 
         let (prior, current) = no_mint_pair_with_departure(PlayerId(1), Zone::Graveyard);
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None, None),
             Some(PairCover::Certified(
                 CoveredGrowth::PerformedOnly,
                 RecurrenceCover::Departure
@@ -22421,7 +22489,7 @@ mod tests {
 
         let (prior, current) = no_mint_pair_with_departure(PlayerId(0), Zone::Graveyard);
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None, None),
             Some(PairCover::Certified(
                 CoveredGrowth::PerformedOnly,
                 RecurrenceCover::Departure
@@ -22431,7 +22499,7 @@ mod tests {
         let (prior, mut current) = no_mint_pair_with_departure(PlayerId(0), Zone::Graveyard);
         recorded_as_drawn(&mut current, PlayerId(0));
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None, None),
             None
         );
 
@@ -22443,7 +22511,7 @@ mod tests {
             .counters
             .insert(CounterType::Plus1Plus1, 1);
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None, None),
             None,
             "an arrival carrying a counter is not inert"
         );
@@ -22452,7 +22520,7 @@ mod tests {
         cover_library_card(&mut prior, 901, PlayerId(1));
         cover_library_card(&mut current, 901, PlayerId(1));
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None, None),
             Some(PairCover::Certified(
                 CoveredGrowth::PerformedOnly,
                 RecurrenceCover::Departure
@@ -22466,7 +22534,7 @@ mod tests {
             .counters
             .insert(CounterType::Stun, 1);
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None, None),
             None,
             "the strip relieves only the certified ids"
         );
@@ -22517,7 +22585,7 @@ mod tests {
         let caster = PlayerId(0);
         let (prior, current) = spend_pair();
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, caster, None),
+            resource_recurrence_covers(&prior, &current, caster, None, None),
             Some(PairCover::Certified(
                 CoveredGrowth::Mintable,
                 RecurrenceCover::Equal
@@ -22543,7 +22611,7 @@ mod tests {
             let (prior, mut current) = spend_pair();
             spend(&mut current);
             assert_eq!(
-                resource_recurrence_covers(&prior, &current, caster, None),
+                resource_recurrence_covers(&prior, &current, caster, None, None),
                 Some(PairCover::Spend),
                 "the caster's permanent {how}"
             );
@@ -22552,7 +22620,7 @@ mod tests {
         let (prior, mut current) = spend_pair();
         set_tapped(&mut current, 801, true);
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, caster, None),
+            resource_recurrence_covers(&prior, &current, caster, None, None),
             None,
             "another player's permanent became tapped"
         );
@@ -22560,7 +22628,7 @@ mod tests {
         let (mut prior, current) = spend_pair();
         set_tapped(&mut prior, 800, true);
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, caster, None),
+            resource_recurrence_covers(&prior, &current, caster, None, None),
             None,
             "the caster's permanent became untapped"
         );
@@ -22574,7 +22642,7 @@ mod tests {
             .counters
             .insert(CounterType::Stun, 1);
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, caster, None),
+            resource_recurrence_covers(&prior, &current, caster, None, None),
             None,
             "the remainder still differs"
         );
@@ -22585,7 +22653,7 @@ mod tests {
             battlefield_creature(frame, 800, 0);
         }
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, caster, None),
+            resource_recurrence_covers(&prior, &current, caster, None, None),
             Some(PairCover::Certified(
                 CoveredGrowth::PerformedOnly,
                 RecurrenceCover::Departure
@@ -22594,7 +22662,7 @@ mod tests {
         );
         set_tapped(&mut current, 800, true);
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, caster, None),
+            resource_recurrence_covers(&prior, &current, caster, None, None),
             Some(PairCover::Spend),
             "the departure arm admits the remainder"
         );
@@ -22707,19 +22775,19 @@ mod tests {
                 "reach: the caster's library is stored at another seat only when shared"
             );
             assert!(
-                turn_cycle_covers(&prior, &current, caster),
+                turn_cycle_covers(&prior, &current, caster, None),
                 "shared={shared}: a top draw is equalized"
             );
             let (prior, mut current) = turn_cycle_pair(format.clone(), caster, 0);
             let rest = current.library_of_mut(caster);
             rest.swap(0, 1);
             assert!(
-                !turn_cycle_covers(&prior, &current, caster),
+                !turn_cycle_covers(&prior, &current, caster, None),
                 "shared={shared}: a reordered library beside the draw is refused"
             );
             let (prior, current) = turn_cycle_pair(format, caster, 1);
             assert!(
-                !turn_cycle_covers(&prior, &current, caster),
+                !turn_cycle_covers(&prior, &current, caster, None),
                 "shared={shared}: a draw from below the top is refused"
             );
         }
@@ -22755,13 +22823,13 @@ mod tests {
                 "Island {drawn}"
             );
             assert!(
-                library_departures_cover(&prior, &current, caster),
+                library_departures_cover(&prior, &current, caster, None),
                 "Island {drawn}"
             );
         }
         let (prior, current) = in_step_draw(2);
         assert!(library_departures_restored(&prior, &current, caster).is_none());
-        assert!(!library_departures_cover(&prior, &current, caster));
+        assert!(!library_departures_cover(&prior, &current, caster, None));
     }
 
     /// CR 401.2: in the caster's hidden view its library cards are known only by where they lie,
@@ -22894,17 +22962,22 @@ mod tests {
     fn a_growth_read_repeats_only_at_a_constant_rise() {
         let frames = [0, 1, 2, 4].map(moraug_frame);
         assert!(
-            !history_covers(&frames[0], &frames[1]),
+            !history_covers(&frames[0], &frames[1], None),
             "reach: the static reads it"
         );
-        assert!(growth_read_covers(&frames[0], &frames[1]));
-        assert!(!growth_read_covers(&frames[1], &frames[1]), "nothing grew");
-        assert!(growth_read_rises_match([
-            &frames[0], &frames[1], &frames[2]
-        ]));
-        assert!(!growth_read_rises_match([
-            &frames[0], &frames[1], &frames[3]
-        ]));
+        assert!(growth_read_covers(&frames[0], &frames[1], None));
+        assert!(
+            !growth_read_covers(&frames[1], &frames[1], None),
+            "nothing grew"
+        );
+        assert!(growth_read_rises_match(
+            [&frames[0], &frames[1], &frames[2]],
+            None
+        ));
+        assert!(!growth_read_rises_match(
+            [&frames[0], &frames[1], &frames[3]],
+            None
+        ));
     }
 
     /// CR 603.2c: Bess, Soul Nourisher's batched record of a move this turn already made is stale;
@@ -23093,16 +23166,23 @@ mod tests {
         let prior = with_sets(&[(1, &[900])]);
         assert!(history_covers(
             &prior,
-            &with_sets(&[(1, &[900]), (2, &[900])])
+            &with_sets(&[(1, &[900]), (2, &[900])]),
+            None
         ));
-        assert!(history_covers(&prior, &with_sets(&[(1, &[900]), (2, &[])])));
+        assert!(history_covers(
+            &prior,
+            &with_sets(&[(1, &[900]), (2, &[])]),
+            None
+        ));
         assert!(!history_covers(
             &prior,
-            &with_sets(&[(1, &[900]), (2, &[901])])
+            &with_sets(&[(1, &[900]), (2, &[901])]),
+            None
         ));
         assert!(!history_covers(
             &prior,
-            &with_sets(&[(1, &[901]), (2, &[])])
+            &with_sets(&[(1, &[901]), (2, &[])]),
+            None
         ));
     }
 
@@ -24789,6 +24869,7 @@ mod tests {
             current,
             PlayerId(0),
             &(buried_ids(prior, fp), buried_ids(current, fc)),
+            None,
         )
     }
 
@@ -24840,7 +24921,8 @@ mod tests {
         };
         let (prior, current, floors) = with_draw(None);
         assert_eq!(
-            certifying_cover(&prior, &current, PlayerId(0), Some(&floors)).map(|(_, cover)| cover),
+            certifying_cover(&prior, &current, PlayerId(0), Some(&floors), None)
+                .map(|(_, cover)| cover),
             Some(RecurrenceCover::StackGrowth)
         );
         let (prior, current, floors) = with_draw(Some((102, 104)));
@@ -24848,7 +24930,8 @@ mod tests {
             &prior,
             &current,
             PlayerId(0),
-            &floors
+            &floors,
+            None
         ));
     }
 
@@ -24894,12 +24977,14 @@ mod tests {
             ),
             PlayerId(0),
             Some((1, 3)),
+            None,
         );
         let exact = resource_recurrence_covers(
             &with_x(vec![buried(10)], Zone::Battlefield),
             &with_x(vec![buried(10), spell_x(), buried(3)], Zone::Stack),
             PlayerId(0),
             Some((1, 3)),
+            None,
         );
         assert_eq!((taller, exact), (None, Some(PairCover::Spend)));
     }
@@ -25790,7 +25875,7 @@ mod tests {
         state
             .pending_damage_replacements
             .push(ReplacementDefinition::new(ReplacementEvent::DamageDone));
-        assert!(!live_history_reads(&state).reads(HistoryMember::PlayerTurnsTaken));
+        assert!(!live_history_reads(&state, None).reads(HistoryMember::PlayerTurnsTaken));
         let id = state.install_replacement_continuation(ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Ref {
@@ -25804,7 +25889,7 @@ mod tests {
         ));
         state.pending_damage_replacements[0] =
             ReplacementDefinition::new(ReplacementEvent::DamageDone).runtime_execute(id);
-        assert!(live_history_reads(&state).reads(HistoryMember::PlayerTurnsTaken));
+        assert!(live_history_reads(&state, None).reads(HistoryMember::PlayerTurnsTaken));
     }
 
     #[test]

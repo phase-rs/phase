@@ -19,7 +19,8 @@ use crate::analysis::loop_check::{classify_win_kind, LoopCertificate, WinKind};
 use crate::analysis::resource::{
     certify_instructed_library_departure, driving_resources_non_decreasing_carried, frame_without,
     survived_repetitions, CertifiedInstructedDeparture, CleanupPair, CounterClass, CoveredGrowth,
-    ObjectClass, ObjectGrowthVerdict, PredictedDeparture, RecurrenceCover, ResourceVector,
+    ExecutedSources, ObjectClass, ObjectGrowthVerdict, PredictedDeparture, RecurrenceCover,
+    ResourceVector,
 };
 use crate::game::engine::{
     announced_target_pins, apply_for_seat_with_mode, certify_object_growth_frames,
@@ -507,6 +508,9 @@ fn top_of_stack(state: &GameState) -> Option<TopOfStack> {
 struct FrameEnd {
     reach: PeriodReach,
     depth: usize,
+    /// CR 800.4a: the frame's stack entries, each with the seats whose departure removes it (its
+    /// controller and its object's owner).
+    entries: Vec<(ObjectId, [PlayerId; 2])>,
     holder: PlayerId,
     top: Option<TopOfStack>,
     /// CR 800.4a: the seats in the game where the run of repetitions began.
@@ -601,7 +605,19 @@ impl FrameEnd {
     fn of(frame: &GameState, holder: PlayerId, reach: PeriodReach) -> Self {
         Self {
             reach,
+            // Absolute: CR 800.4a can shrink the stack beneath it.
             depth: frame.stack.len(),
+            entries: frame
+                .stack
+                .iter()
+                .map(|entry| {
+                    let owner = frame
+                        .objects
+                        .get(&entry.id)
+                        .map_or(entry.controller, |object| object.owner);
+                    (entry.id, [entry.controller, owner])
+                })
+                .collect(),
             holder,
             top: top_of_stack(frame),
             seats: seats(frame),
@@ -612,6 +628,24 @@ impl FrameEnd {
     /// CR 800.4a: whether a seat living where the run began has left the game at `state`.
     fn departed(&self, state: &GameState) -> bool {
         left_since(&self.seats, state)
+    }
+
+    /// CR 800.4a: the frame's entries that left the stack with a seat that has since left.
+    fn gone_beneath(&self, state: &GameState) -> usize {
+        self.entries
+            .iter()
+            .filter(|(id, removers)| {
+                !state.stack.iter().any(|entry| entry.id == *id)
+                    && removers.iter().any(|seat| {
+                        self.seats.contains(seat) && !crate::game::players::is_alive(state, *seat)
+                    })
+            })
+            .count()
+    }
+
+    /// The frame's depth as `state`'s stack stands for it: its height plus what CR 800.4a took.
+    fn depth_at(&self, state: &GameState) -> usize {
+        state.stack.len() + self.gone_beneath(state)
     }
 
     /// CR 732.2a: performs one repetition of `items` from `replay` and classifies how it ended.
@@ -659,7 +693,7 @@ impl FrameEnd {
         };
         window
             && matches!(state.waiting_for, WaitingFor::Priority { player } if player == self.holder)
-            && state.stack.len() >= self.depth
+            && self.depth_at(state) >= self.depth
             && top_of_stack(state) == self.top
     }
 }
@@ -1597,7 +1631,8 @@ fn replay_cycle_ordered(
                 continue;
             };
             let item = &items[at];
-            if item.seat == player && item.play == Some((replay.stack.len(), PromptClass::Priority))
+            if item.seat == player
+                && item.play == Some((end.depth_at(replay), PromptClass::Priority))
             {
                 let action = rebound(item, replay);
                 step(
@@ -1649,7 +1684,7 @@ fn replay_cycle_ordered(
                     continue;
                 }
                 let item = &items[at];
-                if item.play == Some((replay.stack.len(), PromptClass::Other)) {
+                if item.play == Some((end.depth_at(replay), PromptClass::Other)) {
                     let action = rebound(item, replay);
                     step(
                         replay,
@@ -2291,6 +2326,8 @@ struct ReplayedPeriod {
     second: CycleEnd,
     /// The outcome position each compared cycle starts from, when the replay drew an outcome.
     pinned: Option<u128>,
+    /// The sources the replayed cycles carried out.
+    executed: ExecutedSources,
     /// Every frame above is read inside the probe.
     _probe: SimulationProbeGuard,
 }
@@ -2392,16 +2429,18 @@ fn replay_period(frame: &GameState, span: NamedSpan) -> Result<ReplayedPeriod, O
     let end = FrameEnd::of(&s_n, holder, span.reach);
     let mut replay = s_n.clone();
     let mut choices = Vec::new();
+    let (mut frames, mut events) = (Vec::new(), Vec::new());
     let lead_in = replay_cycle_ordered(
         &mut replay,
         &items,
         &end,
         &mut choices,
-        None,
-        &mut Vec::new(),
+        Some(&mut frames),
+        &mut events,
         None,
         None,
     )?;
+    frames.push(replay.clone());
     // CR 705.1 + CR 706.1 + CR 400.7: cycles that drew different outcomes differ in what those
     // outcomes made, so the compared cycles start after a lead-in, under one outcome sequence.
     let pinned = (outcomes_admitted() && replay.rng.outcome_draws() != s_n.rng.outcome_draws())
@@ -2414,16 +2453,18 @@ fn replay_period(frame: &GameState, span: NamedSpan) -> Result<ReplayedPeriod, O
             s_n.rng.set_word_pos(at);
             replay = s_n.clone();
             choices.clear();
-            replay_cycle_ordered(
+            let performed = replay_cycle_ordered(
                 &mut replay,
                 &items,
                 &end,
                 &mut choices,
+                Some(&mut frames),
+                &mut events,
                 None,
-                &mut Vec::new(),
                 None,
-                None,
-            )?
+            )?;
+            frames.push(replay.clone());
+            performed
         }
     };
     let s_n1 = replay.clone();
@@ -2439,10 +2480,11 @@ fn replay_period(frame: &GameState, span: NamedSpan) -> Result<ReplayedPeriod, O
         &mut replay,
         &items,
         &mut Vec::new(),
-        None,
-        &mut Vec::new(),
+        Some(&mut frames),
+        &mut events,
         None,
     );
+    frames.push(replay.clone());
     Ok(ReplayedPeriod {
         holder,
         items,
@@ -2457,8 +2499,31 @@ fn replay_period(frame: &GameState, span: NamedSpan) -> Result<ReplayedPeriod, O
         replay,
         second,
         pinned,
+        executed: executed_sources(&frames, &events),
         _probe: probe,
     })
+}
+
+/// CR 732.2a: the sources a replay carried out: each stack entry's source that left the stack
+/// between two of its priority frames, and each source an activation, replacement or mana ability
+/// event names.
+fn executed_sources(frames: &[GameState], events: &[GameEvent]) -> ExecutedSources {
+    let resolved = frames.windows(2).flat_map(|pair| {
+        pair[0]
+            .stack
+            .iter()
+            .filter(|entry| !pair[1].stack.iter().any(|next| next.id == entry.id))
+            .map(|entry| entry.source_id)
+    });
+    let named = events.iter().filter_map(|event| match event {
+        GameEvent::AbilityActivated { source_id, .. }
+        | GameEvent::KeywordAbilityActivated { source_id, .. }
+        | GameEvent::NinjutsuActivated { source_id, .. }
+        | GameEvent::ReplacementApplied { source_id, .. }
+        | GameEvent::ManaAbilityProduced { source_id, .. } => Some(*source_id),
+        _ => None,
+    });
+    ExecutedSources(resolved.chain(named).collect())
 }
 
 /// CR 732.2a: confirms the span `span` of the current trace as a period `frame`'s priority
@@ -2481,6 +2546,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         mut replay,
         second,
         pinned: _,
+        executed,
         _probe,
     } = replayed;
     // A period whose second cycle did not come round has one pair of frames, read as any pair is;
@@ -2495,6 +2561,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         |state| normalize_period_frame(state, &items, &Written::NONE),
         holder,
         Some(floors),
+        Some(&executed),
     );
     // CR 732.2a: one count per offer. Something of its proposer's own falling makes the period
     // the counting replay's; any other period with a loss axis is the threshold authority's.
@@ -2841,6 +2908,7 @@ pub(crate) fn mandatory_period_holds(
             |state| normalize_period_frame(state, &items, &Written::NONE),
             seat,
             Some(floors),
+            None,
         )
         .0;
         buried_growth |=
@@ -3398,6 +3466,7 @@ pub(crate) fn decision_points(
                     normalize,
                     seat,
                     Some(floors),
+                    None,
                 )
                 .0
                 .certifies()

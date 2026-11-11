@@ -82,6 +82,16 @@ fn step_bound_phase(waiting_for: &WaitingFor) -> Option<Phase> {
 
 pub fn sync_waiting_for(state: &mut GameState, waiting_for: &WaitingFor) {
     state.waiting_for = waiting_for.clone();
+    // CR 800.4j: the active player who left would receive priority, so the next player in turn
+    // order does; the installs naming it open a window with no pass recorded (CR 117.3a /
+    // CR 117.3b).
+    if let WaitingFor::Priority { player } = state.waiting_for {
+        if player == state.active_player && !super::players::is_alive(state, player) {
+            state.waiting_for = WaitingFor::Priority {
+                player: super::engine::living_priority_seat(state),
+            };
+        }
+    }
     // CR 703.1: a turn-based action happens automatically when its own step
     // begins or ends, so a prompt that is a player's answer to one is answerable
     // only during that step. Installing one outside that step produces a

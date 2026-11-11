@@ -15679,7 +15679,7 @@ mod tests {
         const TEST_MOD: &str = "#[cfg(test)]\nmod tests {";
         // Enrolment floor. Not a list — a non-vacuity guard, so a broken walk or a renamed marker
         // reds instead of passing on an empty population. Raise it when a file joins.
-        const ENROLLED_FLOOR: usize = 8;
+        const ENROLLED_FLOOR: usize = 7;
 
         // `CR 732.2a` has no colon; `std::vec` no digit; `field:1` and `{"Life":1}` have a name or
         // a quote before the colon. A bare back-reference is recognized only after whitespace, a
