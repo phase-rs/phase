@@ -5491,6 +5491,132 @@ mod tests {
         );
     }
 
+    /// CR 104.3a: "A player who concedes leaves the game immediately." The
+    /// concession commits at the engine's action boundary; when its follow-up
+    /// auto-pass resolves an unrepresentable life gain, that follow-up is
+    /// discarded and the session still publishes the departure and its events.
+    /// The next ordinary action starts without any concession state and is
+    /// rejected by the same failing tail.
+    #[test]
+    fn a_concession_with_a_failing_follow_up_is_published_by_the_session() {
+        use engine::types::ability::{QuantityExpr, TargetFilter};
+        use engine::types::game_state::{AutoPassMode, StackEntry, StackEntryKind};
+
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr
+            .create_game_n_players(
+                make_deck(),
+                None,
+                "Host".to_string(),
+                None,
+                3,
+                MatchConfig::default(),
+                None,
+            )
+            .expect("a three-player game");
+        let (token1, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let (token2, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let tokens = [token0, token1, token2];
+        keep_opening_hands(&mgr, &code, &tokens);
+
+        let (holder, conceder) = {
+            let mut session = mgr.try_session(&code).unwrap();
+            let state = &mut session.state;
+            let holder = state.active_player;
+            let conceder = state
+                .players
+                .iter()
+                .map(|player| player.id)
+                .find(|id| *id != holder)
+                .expect("another seat");
+            state.waiting_for = WaitingFor::Priority { player: holder };
+            state.priority_player = holder;
+            state.players[usize::from(holder.0)].life = i32::MAX - 1;
+            state.stack = vec![StackEntry {
+                id: ObjectId(9_001),
+                source_id: ObjectId(9_001),
+                controller: holder,
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: ObjectId(9_001),
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 2 },
+                            player: TargetFilter::Controller,
+                        },
+                        vec![],
+                        ObjectId(9_001),
+                        holder,
+                    )),
+                },
+            }]
+            .into();
+            let living: Vec<_> = state
+                .players
+                .iter()
+                .map(|player| player.id)
+                .filter(|id| *id != conceder)
+                .collect();
+            for player in living {
+                state.auto_pass.insert(
+                    player,
+                    AutoPassMode::UntilStackEmpty {
+                        initial_stack_len: 1,
+                        policy: Default::default(),
+                    },
+                );
+            }
+            (holder, conceder)
+        };
+
+        let handled = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &tokens[usize::from(conceder.0)],
+                GameAction::Concede {
+                    player_id: conceder,
+                },
+                None,
+            )
+            .expect("CR 104.3a: the concession is published");
+        assert!(
+            handled.result.events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerEliminated { player_id } if *player_id == conceder
+            )),
+            "the departure event is published with the action"
+        );
+        {
+            let session = mgr.try_session(&code).unwrap();
+            assert!(session.state.players[usize::from(conceder.0)].is_eliminated);
+            assert_eq!(
+                session.state.stack.len(),
+                1,
+                "the failed tail is discarded whole"
+            );
+            assert_eq!(
+                session.state.players[usize::from(holder.0)].life,
+                i32::MAX - 1
+            );
+        }
+
+        mgr.try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &tokens[usize::from(holder.0)],
+                GameAction::PassPriority,
+                None,
+            )
+            .expect_err("the next ordinary action owns no concession and is rejected");
+        let session = mgr.try_session(&code).unwrap();
+        assert_eq!(
+            session.state.stack.len(),
+            1,
+            "the rejected action is restored"
+        );
+        assert!(!session.state.players[usize::from(holder.0)].is_eliminated);
+    }
+
     /// S1. A game concession is admitted during a vote and reports the
     /// withdrawal; every other action stays frozen.
     #[test]
