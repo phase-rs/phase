@@ -7238,6 +7238,9 @@ pub(crate) fn restricting_block_pairings(
             .iter()
             .flat_map(restricting_block_pairings)
             .collect(),
+        TargetFilter::TrackedSetFiltered { filter, .. } => restricting_block_pairings(filter),
+        // A negation or a disjunction doesn't restrict (above); every other
+        // filter names objects without a history relation of its own.
         _ => Vec::new(),
     }
 }

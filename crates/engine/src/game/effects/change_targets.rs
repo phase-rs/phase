@@ -84,9 +84,12 @@ pub fn resolve(
     // submission provably cannot write, which is the unanswerable-prompt shape
     // `retarget_prompt_softlock.rs` exists to prevent. `Single`/`ForcedTo`
     // therefore keep BASE's exposure exactly: the BASE-exposed prefix, which
-    // `chain_retarget_slots` guarantees equals `stack_ability.targets` (equal
-    // in VALUE under `AdditionalCostPaidInstead` delegation, where the root
-    // mirrors the delegated sub).
+    // `chain_retarget_slots` guarantees equals the declared positions of
+    // `stack_ability.targets` (equal in VALUE under `AdditionalCostPaidInstead`
+    // delegation, where the root mirrors the delegated sub). CR 115.10a: a value
+    // the base holds without having received it as a choice is not exposed;
+    // when the base declares nothing, the prefix is the first node that does,
+    // one group the bare `ChooseTarget` still addresses unambiguously.
     //
     // SCOPE SELECTS THE EXPOSED PREFIX, NOT A POOL AUTHORITY. Every exposed
     // position — under every scope — gets its pool from the same one
@@ -111,8 +114,12 @@ pub fn resolve(
     let current_targets: Vec<TargetRef> = exposed.iter().map(|b| b.current.clone()).collect();
     let slots: Vec<RetargetSlotAddress> = exposed.iter().map(|b| b.address.clone()).collect();
     debug_assert!(
-        ability_utils::declared_targets_in_chain(&stack_ability).is_empty() || !exposed.is_empty(),
-        "CR 115.7: a declared target must expose >=1 position"
+        !ability_utils::declared_position_addresses(&stack_ability)
+            .iter()
+            .flatten()
+            .any(|address| address.path.is_empty())
+            || !exposed.is_empty(),
+        "CR 115.7: a root's declared target must expose >=1 position"
     );
 
     if current_targets.is_empty() {

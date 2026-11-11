@@ -3657,11 +3657,14 @@ fn stack_ability_matches_filter(
                 return false;
             }
             tf.properties.iter().all(|property| match property {
-                // CR 115.9a: "with a single target" counts the times an object
-                // or player was chosen as a target when the entry was put on
-                // the stack, not what it holds (CR 115.10a).
+                // CR 115.9a / CR 115.9c: "with a single target" counts what was
+                // chosen as a target when the entry was put on the stack, as the
+                // requirement says, not what it holds (CR 115.10a). Shared with
+                // the spell arm (`single_target_count`).
                 FilterProp::HasSingleTarget => entry.ability().is_some_and(|ability| {
-                    crate::game::ability_utils::declared_targets_in_chain(ability).len() == 1
+                    super::filter::single_target_count(filter).is_some_and(|count| {
+                        count.admits(&super::ability_utils::declared_targets_in_chain(ability))
+                    })
                 }),
                 FilterProp::InZone { zone } => *zone == Zone::Stack,
                 _ => true,
