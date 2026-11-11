@@ -2396,8 +2396,11 @@ impl PrintedTargetWord {
 /// last known information, and followers that need the host itself do nothing
 /// (`effects::resolve_chain_body`). A chain with any other follower, one that
 /// acts on its own subject or reads the host some other way (as a damage
-/// source or a count), keeps its stack-time target, as do donor shapes
-/// ("becomes a copy of", "gains all activated abilities of" the host).
+/// source, or as a number through an object scope), keeps its stack-time
+/// target, as do donor shapes ("becomes a copy of", "gains all activated
+/// abilities of" the host). A host read through a filter-embedded
+/// `ObjectCount { controller: ParentTargetController }` is not seen here;
+/// Observed Stasis is refused earlier, by rule 3.
 pub(crate) fn convert_terminal_attachment_host_reference(
     def: &mut AbilityDefinition,
     printed: PrintedTargetWord,
@@ -2427,8 +2430,8 @@ pub(crate) fn convert_terminal_attachment_host_reference(
 /// CR 608.2c: a node after a host instruction that announces no choice of its
 /// own and names exactly the host — "it" / "that permanent" (`ParentTarget`),
 /// "its controller" / "that land's controller" (`ParentTargetController`) or
-/// "its owner" (`ParentTargetOwner`) — in its operand slot and in every other
-/// object slot it carries, and reads no object some other way
+/// "its owner" (`ParentTargetOwner`) — in its operand slot and in every slot
+/// `effect_parent_ref_slots` surfaces, and reads no object some other way
 /// (`reads_object_beyond_slots`).
 fn is_parent_anaphor_follower(node: &AbilityDefinition) -> bool {
     node.else_ability.is_none()

@@ -2291,20 +2291,30 @@ pub(crate) enum ResolutionHostBinding {
     /// The live host, bound (pinned to its incarnation) into the node's targets.
     Bound(Box<ResolvedAbility>),
     /// CR 115.10a + CR 303.4b + CR 301.5f + CR 400.7: the node names its
-    /// source's host, but there is no provable live host and no last known
-    /// one — the source is attached to nothing, the host no longer meets the
-    /// description or is phased out, or nothing records what the source was
-    /// attached to. The instruction does nothing; it must
-    /// never fall back to a filter scan ("any creature with an Aura attached")
-    /// or to an object reusing a departed host's storage id.
+    /// source's host, but nothing proves which object that is — the source is
+    /// attached to nothing, or nothing records what it was attached to. The
+    /// instruction does nothing, and neither does any instruction after it that
+    /// reads the host, its controller or its owner; none may fall back to a
+    /// filter scan ("any creature with an Aura attached") or to an object
+    /// reusing a departed host's storage id.
     Absent,
-    /// CR 608.2h + CR 400.7: the source and the host it was last attached to
-    /// have both left the battlefield. The instruction does nothing, exactly as
-    /// `Absent`; the snapshot is the host's last known information, pinned to
-    /// the incarnation that left (so it names no current object), for the
-    /// instructions after it that read only its controller or owner ("that
-    /// land's controller").
-    Departed(Box<crate::types::ability::CostPaidObjectSnapshot>),
+    /// The node names its source's host and the game knows which object that
+    /// is, but the instruction cannot act on it, so it does nothing, exactly as
+    /// `Absent`. The snapshot is the host's information for the instructions
+    /// after it that read only its controller or owner ("that land's
+    /// controller", "its owner's library"):
+    ///
+    /// - CR 608.2h + CR 400.7: the source and the host it was last attached to
+    ///   have both left the battlefield — the host's last known information,
+    ///   pinned to the incarnation that left, so it names no current object.
+    /// - CR 702.26b: the host is still on the battlefield but phased out
+    ///   (treated as though it does not exist), or it no longer meets the
+    ///   recipient's description ("enchanted *creature*") — the live host's
+    ///   current information, pinned to its current incarnation.
+    ///
+    /// CR 701.24c: a kept "shuffle ... into its owner's library" still shuffles
+    /// that library although the head moved nothing.
+    Unaffectable(Box<crate::types::ability::CostPaidObjectSnapshot>),
 }
 
 /// CR 115.10a + CR 608.2c: binds the host of a resolution-timed "enchanted /
@@ -2333,11 +2343,27 @@ pub(crate) fn bind_resolution_attachment_hosts(
             bound.replace_target_occurrences(vec![(TargetRef::Object(host.object_id), Some(host))]);
             ResolutionHostBinding::Bound(Box::new(bound))
         }
-        HostProvenance::Live(_) | HostProvenance::Unknown => ResolutionHostBinding::Absent,
+        // CR 702.26b + CR 608.2h: a phased-out host, or one that no longer
+        // meets the description, is still the known host: its controller and
+        // owner are read from its current information.
+        HostProvenance::Live(host) => {
+            state
+                .objects
+                .get(&host.object_id)
+                .map_or(ResolutionHostBinding::Absent, |object| {
+                    ResolutionHostBinding::Unaffectable(Box::new(
+                        crate::types::ability::CostPaidObjectSnapshot::capture(
+                            object,
+                            object.snapshot_public_characteristics(),
+                        ),
+                    ))
+                })
+        }
+        HostProvenance::Unknown => ResolutionHostBinding::Absent,
         HostProvenance::Departed { host, record } => {
             let record = &state.zone_changes_this_turn[record];
             debug_assert_eq!(record.object_id, host, "a host departure names the host");
-            ResolutionHostBinding::Departed(Box::new(
+            ResolutionHostBinding::Unaffectable(Box::new(
                 crate::types::ability::CostPaidObjectSnapshot::from_departure_record(record),
             ))
         }

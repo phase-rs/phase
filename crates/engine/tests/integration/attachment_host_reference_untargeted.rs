@@ -2960,3 +2960,78 @@ fn dramatic_accusation_shuffles_a_departed_hosts_owners_library() {
         s.player_actions_this_turn
     );
 }
+
+/// CR 701.24c + CR 702.26b + CR 608.2h: the enchanted creature phases out in
+/// response (the Aura phases out with it, indirectly), so the ability's head
+/// cannot affect it — a phased-out permanent is treated as though it doesn't
+/// exist — yet the owner's library is shuffled all the same. CR 701.24c makes
+/// the randomization unconditional on the objects being in the zone they were
+/// expected to be in; the host never left the battlefield, so its owner (P1, not
+/// the activator) is known. Companion to the departed-host test above.
+#[test]
+fn dramatic_accusation_shuffles_a_phased_out_hosts_owners_library() {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    sc.with_library_top(P1, &["Bears Card A", "Bears Card B", "Bears Card C"]);
+    let host = sc.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let aura = aura_on_battlefield(&mut sc, P0, "Dramatic Accusation", DRAMATIC_ACCUSATION);
+    let slip = sc
+        .add_spell_to_hand_from_oracle(P1, "Slip Out the Back", true, SLIP_OUT_THE_BACK)
+        .with_mana_cost(free_cost())
+        .id();
+    sc.with_mana_pool(P0, pool(2, 0));
+    let mut runner = sc.build();
+    attach(&mut runner, aura, host);
+
+    let index = ability_index(&runner, aura, |e| matches!(e, Effect::ChangeZone { .. }));
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: aura,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the activation is legal");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ) {
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P1
+        ),
+        "reach: P1 holds priority with the ability on the stack"
+    );
+
+    p1_responds(&mut runner, slip, host);
+    let s = runner.state();
+    assert!(
+        !s.objects[&host].is_phased_in(),
+        "reach: the host phased out"
+    );
+    assert!(
+        !s.objects[&aura].is_phased_in(),
+        "reach: the Aura phased out with it (indirect phasing)"
+    );
+    assert_eq!(
+        s.stack.len(),
+        1,
+        "reach: the ability is still on the stack after its source phased out"
+    );
+
+    drive_until(&mut runner, aura, false, stack_settled);
+    let s = runner.state();
+    assert_eq!(
+        s.objects[&host].zone,
+        Zone::Battlefield,
+        "the head could not affect a phased-out host"
+    );
+    assert!(
+        s.player_actions_this_turn
+            .contains(&(P1, PlayerActionKind::ShuffledLibrary)),
+        "the owner's library is shuffled anyway (CR 701.24c): {:?}",
+        s.player_actions_this_turn
+    );
+}

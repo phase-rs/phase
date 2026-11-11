@@ -16710,7 +16710,7 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         crate::game::targeting::ResolutionHostBinding::NotApplicable
         | crate::game::targeting::ResolutionHostBinding::Bound(_) => {}
         crate::game::targeting::ResolutionHostBinding::Absent
-        | crate::game::targeting::ResolutionHostBinding::Departed(_) => return true,
+        | crate::game::targeting::ResolutionHostBinding::Unaffectable(_) => return true,
     }
     match &ability.effect {
         Effect::PutSticker { .. } => stickers::optional_is_infeasible(state, ability),
@@ -21995,19 +21995,20 @@ fn resolve_chain_body(
     // "it" / "that land's controller". With no live host they must never fall
     // back to the ability's source or to any other object, so the chain is
     // pruned before anything dispatches: with no information about the host,
-    // every instruction that depends on it goes; with only its last known
-    // information (`Departed`), the ones that need the object itself go and
-    // the ones that read only its controller or owner stay, reading that
-    // snapshot (`departed_host_context`).
+    // every instruction that depends on it goes; with a known host the head
+    // cannot act on (`Unaffectable`: departed, phased out, or no longer
+    // matching), the ones that need the object itself go and the ones that
+    // read only its controller or owner stay, reading that snapshot
+    // (`unaffectable_host_context`).
     let host_binding = crate::game::targeting::bind_resolution_attachment_hosts(state, ability);
     let host_effect_impossible = match &host_binding {
         crate::game::targeting::ResolutionHostBinding::Absent
-        | crate::game::targeting::ResolutionHostBinding::Departed(_) => true,
+        | crate::game::targeting::ResolutionHostBinding::Unaffectable(_) => true,
         crate::game::targeting::ResolutionHostBinding::NotApplicable
         | crate::game::targeting::ResolutionHostBinding::Bound(_) => false,
     };
     let host_bound;
-    let mut departed_host_context = None;
+    let mut unaffectable_host_context = None;
     let ability = match host_binding {
         crate::game::targeting::ResolutionHostBinding::Bound(bound) => {
             host_bound = *bound;
@@ -22021,8 +22022,8 @@ fn resolve_chain_body(
             );
             &host_bound
         }
-        crate::game::targeting::ResolutionHostBinding::Departed(snapshot) => {
-            departed_host_context = Some(*snapshot);
+        crate::game::targeting::ResolutionHostBinding::Unaffectable(snapshot) => {
+            unaffectable_host_context = Some(*snapshot);
             host_bound =
                 without_unavailable_host_followers(ability, MissingParentReferent::HostObject);
             &host_bound
@@ -24667,13 +24668,14 @@ fn resolve_chain_body(
                 .then(|| library_move_metadata_context_from_events(state, effect_events))
                 .flatten()
         })
-        // CR 608.2h: a departed host's last known information, for the
-        // metadata-only instructions its pruned chain kept. CR 701.24c: a kept
+        // CR 608.2h: an unaffectable host's information (last known for a
+        // departed host, current for a phased-out or no-longer-matching one),
+        // for the metadata-only instructions its pruned chain kept. CR 701.24c: a kept
         // instruction that shuffles the host owner's library still randomizes
         // it — the objects it would shuffle in need not be in the zone they
         // were expected to be in, so the shuffle is never contingent on the
         // move that the pruned head could no longer perform.
-        .or(departed_host_context);
+        .or(unaffectable_host_context);
     let amassed_army_object = amassed_army_context_from_events(state, &events[events_before..]);
 
     // CR 610.3a / CR 610.3b + CR 118.12: a bounded zone move refused because its "until"
@@ -27153,9 +27155,10 @@ enum MissingParentReferent {
     /// known information: every instruction that reads the host goes, its
     /// controller and owner included, and so does a grant to it.
     HostObjectAndMetadata,
-    /// CR 608.2h: a departed host whose last known information names its
-    /// controller and owner: only the instructions that need the object itself
-    /// go, a grant to it included.
+    /// CR 608.2h + CR 702.26b: a known host the instruction cannot act on
+    /// (departed, phased out, or no longer matching) whose information names
+    /// its controller and owner: only the instructions that need the object
+    /// itself go, a grant to it included.
     HostObject,
 }
 
@@ -27320,7 +27323,7 @@ fn without_missing_forward_result_dependencies(
 }
 
 /// CR 608.2c + CR 608.2h: a resolution-bound host instruction with no live host
-/// (`ResolutionHostBinding::Absent` / `Departed`): the same node with every
+/// (`ResolutionHostBinding::Absent` / `Unaffectable`): the same node with every
 /// instruction after it that depends on what is `missing` pruned, so none can
 /// fall back to the ability's source or to another object.
 fn without_unavailable_host_followers(
