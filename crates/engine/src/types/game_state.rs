@@ -24072,14 +24072,14 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_entry_events: Vec<GameEvent>,
 
-    /// CR 603.6a + CR 611.3c: completed battlefield-entry events whose action
-    /// stopped while a co-entrant's entry was still being made (its CR 616.1
-    /// ordering, CR 707.5 copy choice or CR 614.12a entry choice). All
-    /// permanents, newcomers included, are checked against the event once it
-    /// has finished, so these wait unmatched. `triggers::settle_entry_batch_scan`
-    /// is the only writer: it releases them to the first observer scan that runs
-    /// once no entry is in progress, their entry has been observed, or the
-    /// action has settled. `zones::settle_battlefield_entry_observations` reads
+    /// CR 603.6a + CR 611.3c: battlefield-entry events of an entering
+    /// instruction that had not completed when its action stopped while a
+    /// co-entrant's entry was still being made (its CR 616.1 ordering, CR 707.5
+    /// copy choice or CR 614.12a entry choice). All permanents, newcomers
+    /// included, are checked against the event once it has finished, so these
+    /// wait unmatched. `triggers::settle_entry_batch_scan` is the only writer:
+    /// it releases them to the first observer scan that runs once no entry is
+    /// in progress, their instruction has completed, or the action has settled. `zones::settle_battlefield_entry_observations` reads
     /// them so their entrants are observed with the last co-entrant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unsettled_entry_batch_events: Vec<GameEvent>,
@@ -25440,6 +25440,14 @@ declare_game_state! {
     /// every viewer projection.
     #[serde(default, skip_serializing_if = "im::OrdMap::is_empty")]
     pub battlefield_entry_observations: im::OrdMap<usize, TriggerSourceContext>,
+    /// CR 608.2c + CR 603.6a: how many of `zone_changes_this_turn`'s rows were recorded by
+    /// instructions that had completed at the last instruction boundary
+    /// (`effects::settle_entries_before_instruction` past its pending-choice guard, whether or
+    /// not that boundary deferred the entry observations). Every battlefield entry below it is a
+    /// completed entry event, so `triggers::settle_entry_batch_scan` never holds it. Cleared with
+    /// the ledger.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub completed_instruction_zone_changes: usize,
     /// CR 603.2c: Batched zone-change triggers already collected for
     /// `(definition_ref, recorded_turn_number, turn_zone_change_index)`. Prevents a second
     /// `process_triggers` pass over the same `ZoneChanged` events from
@@ -34122,6 +34130,7 @@ impl GameState {
             sacrificed_permanents_this_turn: im::Vector::new(),
             zone_changes_this_turn: im::Vector::new(),
             battlefield_entry_observations: im::OrdMap::new(),
+            completed_instruction_zone_changes: 0,
             batched_zone_change_trigger_fired: im::HashSet::new(),
             battlefield_entries_this_turn: im::Vector::new(),
             damage_dealt_this_turn: im::Vector::new(),
@@ -38085,6 +38094,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         sacrificed_permanents_this_turn: _,
         zone_changes_this_turn: _,
         battlefield_entry_observations: _,
+        completed_instruction_zone_changes: _,
         batched_zone_change_trigger_fired: _,
         battlefield_entries_this_turn: _,
         damage_dealt_this_turn: _,
@@ -38505,6 +38515,7 @@ impl PartialEq for GameState {
             && self.sacrificed_permanents_this_turn == other.sacrificed_permanents_this_turn
             && self.zone_changes_this_turn == other.zone_changes_this_turn
             && self.battlefield_entry_observations == other.battlefield_entry_observations
+            && self.completed_instruction_zone_changes == other.completed_instruction_zone_changes
             && self.batched_zone_change_trigger_fired == other.batched_zone_change_trigger_fired
             && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
             && self.damage_dealt_this_turn == other.damage_dealt_this_turn

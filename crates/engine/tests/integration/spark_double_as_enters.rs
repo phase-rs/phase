@@ -2199,6 +2199,80 @@ mod feldon_tokens {
         assert_eq!(draws, 0, "the Myr entered as a 2/1");
     }
 
+    const GIMBAL: &str = "Artifact creatures you control have trample.\nAt the beginning of your end step, create a 0/0 red Gremlin artifact creature token. Put X +1/+1 counters on it, where X is the number of differently named artifact tokens you control.";
+
+    /// CR 603.6a + CR 608.2c: Gimbal, Gremlin Prodigy's Gremlin enters as a 0/0;
+    /// the counters come from the next instruction, which stops on the CR 616.1
+    /// order of Hardened Scales and Branching Evolution. That prompt belongs to
+    /// the counter event, not to the entry, so the entry is matched as it
+    /// happened: Soul Warden ("Whenever another creature enters, you gain 1
+    /// life.") sees it, and Elemental Bond ("Whenever a creature you control with
+    /// power 3 or greater enters, draw a card.") does not.
+    #[test]
+    fn a_later_instructions_replacement_prompt_does_not_hold_a_completed_entry() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario
+            .add_creature_from_oracle(P0, "Gimbal, Gremlin Prodigy", 4, 4, GIMBAL)
+            .with_subtypes(vec!["Gremlin", "Artificer"])
+            .as_legendary();
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION);
+        scenario.add_enchantment_from_oracle(P0, "Elemental Bond", ELEMENTAL_BOND);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let mut runner = scenario.build();
+        let library = runner.state().players[0].library.len();
+        let life = runner.life(P0);
+        // Both players pass: the end step begins with Gimbal's trigger on the stack.
+        runner.act(GameAction::PassPriority).unwrap();
+        runner.act(GameAction::PassPriority).unwrap();
+        assert_eq!(runner.state().phase, Phase::End);
+        assert_eq!(runner.state().stack.len(), 1);
+        runner.advance_until_stack_empty();
+        // Reach guard: the Gremlin has entered and the counter instruction stopped
+        // on the order of its replacements.
+        let gremlin = runner
+            .state()
+            .objects
+            .values()
+            .find(|object| object.is_token && object.name == "Gremlin")
+            .map(|object| object.id)
+            .expect("the Gremlin token entered");
+        assert_eq!(runner.state().objects[&gremlin].zone, Zone::Battlefield);
+        let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+            panic!(
+                "required the counter order, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == scales)
+            .expect("Hardened Scales is offered");
+        runner.act(GameAction::ChooseReplacement { index }).unwrap();
+        assert_token_entry_complete(&mut runner);
+        // Scales first, then Branching Evolution: (1 + 1) doubled.
+        assert_eq!(
+            runner.state().objects[&gremlin]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&4)
+        );
+        assert_eq!(
+            runner.life(P0) - life,
+            1,
+            "positive control: Soul Warden matches the Gremlin's entry once"
+        );
+        assert_eq!(
+            runner.state().players[0].library.len(),
+            library,
+            "the Gremlin entered as a 0/0: Elemental Bond does not draw"
+        );
+    }
+
     #[test]
     fn t8_triskelion_self_counters_and_spark_share_one_scales_application() {
         let (mut scenario, feldon) = setup();

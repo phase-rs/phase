@@ -5265,6 +5265,9 @@ fn settle_entries_before_instruction(
     if waits_for_resolution_choice(&state.waiting_for) || state.pending_replacement.is_some() {
         return;
     }
+    // CR 608.2c + CR 603.6a: every instruction before `next` has completed, so every entry
+    // recorded so far is a completed entry event, whether or not its observation is deferred.
+    state.completed_instruction_zone_changes = state.zone_changes_this_turn.len();
     if entry_observation_deferred(state, next, completed) {
         return;
     }

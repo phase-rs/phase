@@ -9661,17 +9661,18 @@ fn battlefield_entry_in_progress(state: &GameState) -> bool {
         || !state.deferred_entry_events.is_empty()
 }
 
-/// CR 603.6a + CR 611.3c: has the instruction that put this permanent onto the
-/// battlefield been seen to complete? Its observation is written only at an
-/// instruction boundary (`effects::settle_entries_before_instruction`), never
-/// while a co-entering step or a choice of the same instruction is outstanding.
-/// One direction only: a boundary can defer the observation
-/// (`entry_observation_deferred`), so an entry without one may still be complete.
-fn battlefield_entry_is_observed(state: &GameState, event: &GameEvent) -> bool {
+/// CR 608.2c + CR 603.6a: has the instruction that put this permanent onto the
+/// battlefield completed? An instruction boundary
+/// (`effects::settle_entries_before_instruction`) has passed since it was
+/// recorded (`GameState::completed_instruction_zone_changes`), or it was
+/// recorded on an earlier turn. Neither happens while a co-entering step or a
+/// choice of the same instruction is outstanding.
+fn battlefield_entry_instruction_completed(state: &GameState, event: &GameEvent) -> bool {
     matches!(
         event,
         GameEvent::ZoneChanged { record, .. }
-            if state.battlefield_entry_observation(record).is_some()
+            if record.recorded_turn_number < state.turn_number
+                || record.turn_zone_change_index < state.completed_instruction_zone_changes
     )
 }
 
@@ -9691,15 +9692,16 @@ fn battlefield_entry_is_observed(state: &GameState, event: &GameEvent) -> bool {
 ///
 /// So a battlefield entry that reaches a collector while its action has not
 /// settled and another battlefield entry is still being made
-/// ([`battlefield_entry_in_progress`]), and that has no observation, is held in
+/// ([`battlefield_entry_in_progress`]), and whose entering instruction has not
+/// completed ([`battlefield_entry_instruction_completed`]), is held in
 /// `GameState::unsettled_entry_batch_events` instead of being matched. It is
 /// released, ahead of the caller's own events, to the first collector that runs
-/// once no entry is in progress, the entry has been observed, or the action has
-/// settled. That collector matches the whole event in one scan against the
+/// once no entry is in progress, its instruction has completed, or the action
+/// has settled. That collector matches the whole event in one scan against the
 /// completed state, so batched ("one or more", CR 603.2c) definitions and
-/// firing limits see it once. A pause for a later instruction's own choice
-/// holds nothing: entries reaching it are matched there, as before, against
-/// the state the instruction left.
+/// firing limits see it once. An entry whose instruction has completed is
+/// never held: a later instruction's pause, a replacement prompt included,
+/// matches it there, as before.
 ///
 /// The collectors that run as an action pauses or settles route through here:
 /// the post-action scan, and [`collect_action_end_triggers_into_deferred`] for
@@ -9721,7 +9723,7 @@ pub(crate) fn settle_entry_batch_scan(
     let held_keys: Vec<_> = held.iter().filter_map(battlefield_entry_key).collect();
     let (mut scan, still_held): (Vec<_>, Vec<_>) = held
         .into_iter()
-        .partition(|event| !unsettled || battlefield_entry_is_observed(state, event));
+        .partition(|event| !unsettled || battlefield_entry_instruction_completed(state, event));
     state.unsettled_entry_batch_events = still_held;
     let mut owner_retained: Option<Vec<GameEvent>> = None;
     for event in candidates {
@@ -9733,7 +9735,7 @@ pub(crate) fn settle_entry_batch_scan(
         if held_keys.contains(&key) {
             continue;
         }
-        if !unsettled || battlefield_entry_is_observed(state, &event) {
+        if !unsettled || battlefield_entry_instruction_completed(state, &event) {
             scan.push(event);
             continue;
         }
@@ -46287,7 +46289,9 @@ pub mod tests {
         park_co_entrant_mid_entry(&mut state);
         park_observer_triggers_if_paused(&mut state, &mut events, 0);
         assert!(state.battlefield_entry_observation(&record).is_none());
-        // The boundary runs in a later answer, whose buffer does not hold the entry.
+        // The boundary runs in a later answer, whose buffer does not hold the entry:
+        // it records the completed instructions' ledger rows and observes the entrants.
+        state.completed_instruction_zone_changes = state.zone_changes_this_turn.len();
         crate::game::zones::settle_battlefield_entry_observations(&mut state, &[]);
         assert!(
             state.battlefield_entry_observation(&record).is_some(),
