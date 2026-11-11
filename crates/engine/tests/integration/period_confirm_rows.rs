@@ -9412,8 +9412,14 @@ fn a_repetition_that_wins_on_a_flip_is_refused_as_random() {
         .map(|(index, _)| index)
         .nth(1)
         .expect("Freed from the Real's untap ability");
-    let at_p1 =
-        |action: &GameAction| i32::from(format!("{action:?}").contains("Player(PlayerId(1))"));
+    let at_p1 = |action: &GameAction| {
+        i32::from(matches!(
+            action,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1))
+            }
+        ))
+    };
     activate(&mut runner, goblin, tap);
     settle(&mut runner, &at_p1);
     assert_eq!(

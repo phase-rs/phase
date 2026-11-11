@@ -687,7 +687,15 @@ pub(crate) fn eliminate_players(
                     // CR 509.1 + CR 805.10d + CR 509.2a: the remaining defending players still
                     // declare blockers, and once none remains the declaration completes.
                     WaitingFor::DeclareBlockers { .. } => {
-                        super::engine_combat::next_blocker_or_finish_declaration(state, events).ok()
+                        super::engine_combat::next_blocker_or_finish_declaration(state, events)
+                            .map(Some)
+                            .unwrap_or_else(|error| {
+                                debug_assert!(
+                                    false,
+                                    "blocker declaration completion failed after a departure: {error}"
+                                );
+                                None
+                            })
                     }
                     // CR 510.2 + CR 805.10f: the remaining assignments are announced before
                     // combat damage is dealt, with no priority in between.
