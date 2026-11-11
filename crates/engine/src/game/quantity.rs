@@ -10437,7 +10437,11 @@ mod tests {
             .get_mut(&cast_object)
             .unwrap()
             .mana_spent_source_snapshots
-            .push(ManaSpentSourceSnapshot { source_id, lki });
+            .push(ManaSpentSourceSnapshot {
+                source_id,
+                lki,
+                source_token: crate::types::game_state::CapturedTokenBit::Unknown,
+            });
     }
 
     #[test]

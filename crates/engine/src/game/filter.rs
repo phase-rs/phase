@@ -6309,10 +6309,16 @@ pub(crate) fn mana_spent_source_matches(
     source_filter: &TargetFilter,
     ctx: &FilterContext<'_>,
 ) -> bool {
-    matches_target_filter_on_lki_snapshot(
+    // CR 111.1 + CR 106.3 + CR 608.2h: the fact states the bit its producer held
+    // when it made the mana, so the token leaves answer from it. It is captured
+    // ON the fact because the departure it came from is step-scoped, and a cast
+    // record can be read after that boundary.
+    matches_target_filter_on_stated_lki(
         state,
         snapshot.source_id,
         &snapshot.lki,
+        None,
+        snapshot.source_token.bit(),
         source_filter,
         ctx,
     )
@@ -25217,6 +25223,49 @@ mod tests {
                 &ctx,
             ),
             "the unpinned door names no epoch, so it still refuses both leaves"
+        );
+    }
+
+    /// CR 111.1 + CR 106.3 + CR 608.2h: a source-qualified mana predicate answers
+    /// the token leaves from the bit captured ON the spent-mana fact.
+    ///
+    /// The fact has to state it: the producer's departure capture is keyed by an
+    /// epoch that rolls over at a step boundary, and a cast record (which carries
+    /// these snapshots) is read long after that. `ManaSpentSourceSnapshot` is the
+    /// single fact both folds of the question read.
+    ///
+    /// Revert-probe: leaving the bit unstated (`Unknown`, the pre-field shape)
+    /// makes both assertions fail — the leaf refuses, and a `NonToken` filter
+    /// stops admitting a real artifact's mana too.
+    #[test]
+    fn a_spent_mana_source_states_its_token_bit() {
+        use crate::types::game_state::{CapturedTokenBit, ManaSpentSourceSnapshot};
+
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Mana Source");
+        let treasure = add_creature(&mut state, PlayerId(0), "Treasure");
+        let lki = state.objects[&treasure].snapshot_for_mana_spent();
+
+        let ctx = FilterContext::from_source(&state, source);
+        let matches = |bit: CapturedTokenBit, prop: FilterProp| {
+            let snapshot = ManaSpentSourceSnapshot {
+                source_id: treasure,
+                lki: lki.clone(),
+                source_token: bit,
+            };
+            super::mana_spent_source_matches(&state, &snapshot, &prop_filter(prop), &ctx)
+        };
+        assert!(
+            matches(CapturedTokenBit::Known(false), FilterProp::NonToken),
+            "a real artifact's mana matches `nontoken`"
+        );
+        assert!(
+            !matches(CapturedTokenBit::Known(true), FilterProp::NonToken),
+            "and a token producer's does not"
+        );
+        assert!(
+            matches(CapturedTokenBit::Known(true), FilterProp::Token),
+            "a token producer's mana matches `token`"
         );
     }
 

@@ -53,8 +53,8 @@ use super::conditions::{
 };
 use super::filter::{
     matches_target_filter, matches_target_filter_on_damage_record_source,
-    matches_target_filter_on_departed_lki_at_incarnation, spell_record_matches_filter,
-    FilterContext,
+    matches_target_filter_on_departed_lki_at_incarnation, matches_target_filter_on_stated_lki,
+    spell_record_matches_filter, FilterContext,
 };
 use super::game_object::GameObject;
 use super::speed::{
@@ -4007,14 +4007,15 @@ fn event_is_suppressed_by_static_triggers_cached(
             let Some(trigger_source) = trigger_source else {
                 continue;
             };
-            // CR 608.2h: the suppressor's context names the incarnation this
-            // snapshot was taken under, so the token bit answers from that
-            // epoch's departure capture.
-            if !matches_target_filter_on_departed_lki_at_incarnation(
+            // CR 111.1 + CR 115.9 + CR 608.2h: the suppressor's context latched
+            // the bit with this snapshot, so that latch answers rather than the
+            // step-scoped departure capture.
+            if !matches_target_filter_on_stated_lki(
                 state,
                 trigger_source.identity.reference.object_id,
                 &trigger_source.lki,
-                trigger_source.identity.reference.incarnation,
+                None,
+                Some(trigger_source.is_token),
                 trigger_source_filter,
                 &filter_ctx,
             ) {
@@ -12528,13 +12529,17 @@ fn trigger_source_matches_doubler_filter(
     if source_is_still_on_battlefield {
         matches_target_filter(state, trigger.source_id, filter, &filter_context)
     } else {
-        // CR 608.2h: the context names the incarnation it captured, so the token
-        // bit answers from that epoch's departure capture.
-        matches_target_filter_on_departed_lki_at_incarnation(
+        // CR 111.1 + CR 115.9 + CR 608.2h: the context LATCHED the bit beside
+        // this snapshot (`TriggerSourceContext::is_token`), and the latch outlives
+        // the step-scoped departure capture, so it is the answer here — the same
+        // authority `filter::source_subject_matches_filter` uses for its Latched
+        // arm.
+        matches_target_filter_on_stated_lki(
             state,
             trigger.source_id,
             &source_context.lki,
-            source_context.identity.reference.incarnation,
+            None,
+            Some(source_context.is_token),
             filter,
             &filter_context,
         )
@@ -13012,13 +13017,17 @@ fn latched_scope_plan_matches(
                 && relative
                     .iter()
                     .all(|property| latched_relative_matches(state, watcher, *property, doubler))
-                // CR 608.2h: the latched context names the incarnation it
-                // captured, so the token bit answers from that epoch.
-                && matches_target_filter_on_departed_lki_at_incarnation(
+                // CR 111.1 + CR 115.9 + CR 608.2h: the latched context states
+                // the bit it observed. Reading the step-scoped departure capture
+                // instead would refuse once the step rolls over — and
+                // `LatchedScopePlan::Not` above would then invert that refusal
+                // into a MATCH.
+                && matches_target_filter_on_stated_lki(
                     state,
                     watcher.identity.reference.object_id,
                     &watcher.lki,
-                    watcher.identity.reference.incarnation,
+                    None,
+                    Some(watcher.is_token),
                     characteristics,
                     &FilterContext::neutral(),
                 )
@@ -42445,8 +42454,13 @@ pub mod tests {
             obj.colors_spent_to_cast.add(ManaColor::White, 2);
             obj.mana_spent_to_cast_amount = 2;
             let lki = obj.snapshot_for_mana_spent();
-            obj.mana_spent_source_snapshots
-                .push(crate::types::game_state::ManaSpentSourceSnapshot { source_id: id, lki });
+            obj.mana_spent_source_snapshots.push(
+                crate::types::game_state::ManaSpentSourceSnapshot {
+                    source_id: id,
+                    lki,
+                    source_token: crate::types::game_state::CapturedTokenBit::Unknown,
+                },
+            );
         }
 
         clear_post_collection_transients(&mut state);
@@ -56849,6 +56863,109 @@ mod object_sweep_sharing_tests {
             &[ids[0], ids[3], ids[4]],
             clear_post_collection_transients,
             reference_clear_post_collection_transients,
+        );
+    }
+}
+
+#[cfg(test)]
+mod latched_token_scope_tests {
+    //! CR 111.1 + CR 115.9 + CR 603.2d + CR 608.2h: the doubler-scope door reads
+    //! the bit its LATCHED context captured, not the step-scoped departure
+    //! capture — which is gone the moment the step rolls over, and whose
+    //! `LatchedScopePlan::Not` inversion would turn a refusal into a match.
+
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+    use crate::types::events::LatchedTriggerDoubler;
+    use crate::types::identifiers::CardId;
+
+    fn prop(prop: FilterProp) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().properties(vec![prop]))
+    }
+
+    /// A watcher context latched while its source WAS a token, read after the
+    /// departure capture that belonged to its epoch has been dropped.
+    #[test]
+    fn a_latched_watcher_states_its_token_bit_to_the_scope_plan() {
+        use crate::types::statics::TriggerCause;
+
+        let mut state = GameState::new_two_player(7);
+        let watcher_id = create_object(
+            &mut state,
+            CardId(980),
+            PlayerId(0),
+            "Latched Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&watcher_id).unwrap().is_token = true;
+        let snapshot = state
+            .objects
+            .get(&watcher_id)
+            .unwrap()
+            .snapshot_for_zone_change(watcher_id, Some(Zone::Battlefield), Zone::Graveyard);
+        let watcher = snapshot
+            .trigger_source_context()
+            .cloned()
+            .expect("the snapshot latches a source context");
+        assert!(watcher.is_token, "fixture precondition: latched as a token");
+
+        // CR 514.2 + CR 608.2h: the departure capture a later step would have
+        // read is gone; the LATCH is what survives with the pending trigger.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, watcher_id, Zone::Graveyard, &mut events);
+        state.departure_token_by_incarnation.clear();
+        state.lki_by_incarnation.clear();
+
+        let doubler_id = create_object(
+            &mut state,
+            CardId(981),
+            PlayerId(0),
+            "Doubler".to_string(),
+            Zone::Battlefield,
+        );
+        let doubler_snapshot = state
+            .objects
+            .get(&doubler_id)
+            .unwrap()
+            .snapshot_for_zone_change(doubler_id, Some(Zone::Battlefield), Zone::Graveyard);
+        let doubler = LatchedTriggerDoubler {
+            source: doubler_snapshot
+                .trigger_source_context()
+                .cloned()
+                .expect("the doubler latches its own context"),
+            cause: TriggerCause::CreatureAttacking,
+            affected: None,
+        };
+        let plan = |characteristics: TargetFilter| LatchedScopePlan::Typed {
+            controller: None,
+            relative: Vec::new(),
+            characteristics,
+        };
+
+        assert!(
+            latched_scope_plan_matches(&state, &watcher, &plan(prop(FilterProp::Token)), &doubler),
+            "the latched token answers `token` after its epoch's capture is gone"
+        );
+        assert!(
+            !latched_scope_plan_matches(
+                &state,
+                &watcher,
+                &plan(prop(FilterProp::NonToken)),
+                &doubler
+            ),
+            "and does not answer `nontoken`"
+        );
+        // CR 603.2d: the inversion this closes. A refusal here is not
+        // fail-closed once negated — it becomes a MATCH.
+        assert!(
+            !latched_scope_plan_matches(
+                &state,
+                &watcher,
+                &LatchedScopePlan::Not(Box::new(plan(prop(FilterProp::Token)))),
+                &doubler
+            ),
+            "`Not(token)` must be false for a latched token, not an inverted refusal"
         );
     }
 }

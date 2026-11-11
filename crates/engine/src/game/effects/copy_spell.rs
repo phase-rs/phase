@@ -1750,6 +1750,7 @@ mod tests {
                 crate::types::game_state::ManaSpentSourceSnapshot {
                     source_id: ObjectId(10),
                     lki,
+                    source_token: crate::types::game_state::CapturedTokenBit::Unknown,
                 },
             );
             obj.card_types.core_types = vec![CoreType::Planeswalker];

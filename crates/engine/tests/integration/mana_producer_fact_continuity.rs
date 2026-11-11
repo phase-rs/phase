@@ -4653,6 +4653,7 @@ fn live_treasure_paid_spell() -> (GameState, ObjectId, ObjectId) {
     obj.mana_spent_source_snapshots = vec![ManaSpentSourceSnapshot {
         source_id: treasure,
         lki,
+        source_token: engine::types::game_state::CapturedTokenBit::Unknown,
     }];
     (state, spell, source)
 }

@@ -23853,10 +23853,12 @@ mod tests {
             ManaSpentSourceSnapshot {
                 source_id: treasure_id,
                 lki: state.objects[&treasure_id].snapshot_for_mana_spent(),
+                source_token: crate::types::game_state::CapturedTokenBit::Unknown,
             },
             ManaSpentSourceSnapshot {
                 source_id: treasure_id,
                 lki: state.objects[&treasure_id].snapshot_for_mana_spent(),
+                source_token: crate::types::game_state::CapturedTokenBit::Unknown,
             },
         ];
         state.objects.insert(creature_id, spell);

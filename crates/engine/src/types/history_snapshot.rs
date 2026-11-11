@@ -720,6 +720,7 @@ mod tests {
         let snapshot = crate::types::game_state::ManaSpentSourceSnapshot {
             source_id: ObjectId(41),
             lki: lki.clone(),
+            source_token: crate::types::game_state::CapturedTokenBit::Unknown,
         };
 
         // Compact spelling.

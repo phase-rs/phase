@@ -3293,6 +3293,8 @@ fn mana_spent_source_snapshots_round_trip_and_stay_backward_compatible() {
                 attachments: Vec::new(),
                 intensity: 0,
             },
+            // CR 106.3: the fixture's Treasure is a real artifact, not a token.
+            source_token: engine::types::game_state::CapturedTokenBit::Known(false),
         }]),
         ..Default::default()
     };

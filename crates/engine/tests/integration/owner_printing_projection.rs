@@ -777,6 +777,7 @@ fn lki_and_side_tables_follow_the_name() {
             .map(|source| ManaSpentSourceSnapshot {
                 source_id: source,
                 lki: state.objects[&source].snapshot_for_mana_spent(),
+                source_token: engine::types::game_state::CapturedTokenBit::Unknown,
             })
             .to_vec();
         state

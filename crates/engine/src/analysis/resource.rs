@@ -11512,6 +11512,7 @@ mod tests {
             Some(vec![crate::types::game_state::ManaSpentSourceSnapshot {
                 source_id: treasure,
                 lki: state.objects[&treasure].snapshot_for_mana_spent(),
+                source_token: crate::types::game_state::CapturedTokenBit::Unknown,
             }]);
         record
     }

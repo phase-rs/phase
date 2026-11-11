@@ -4194,7 +4194,7 @@ fn redact_payment_source_snapshots(
     hidden_ids: &HashSet<ObjectId>,
 ) {
     for snapshot in snapshots.iter_mut() {
-        let crate::types::game_state::ManaSpentSourceSnapshot { source_id, lki } = snapshot;
+        let crate::types::game_state::ManaSpentSourceSnapshot { source_id, lki, .. } = snapshot;
         if hidden_ids.contains(source_id) {
             redact_lki_snapshot(lki);
         }
@@ -5472,6 +5472,7 @@ mod tests {
         let snapshot = |source_id: ObjectId, lki: &LKISnapshot| ManaSpentSourceSnapshot {
             source_id,
             lki: lki.clone(),
+            source_token: crate::types::game_state::CapturedTokenBit::Unknown,
         };
 
         // A fully-hidden cast: the spell object and the only mana source are both hidden.
@@ -6269,10 +6270,12 @@ mod tests {
             ManaSpentSourceSnapshot {
                 source_id: hidden_source,
                 lki: state.objects[&hidden_source].snapshot_for_mana_spent(),
+                source_token: crate::types::game_state::CapturedTokenBit::Unknown,
             },
             ManaSpentSourceSnapshot {
                 source_id: public_source,
                 lki: state.objects[&public_source].snapshot_for_mana_spent(),
+                source_token: crate::types::game_state::CapturedTokenBit::Unknown,
             },
         ];
         for id in [paid, departed] {
@@ -7172,6 +7175,7 @@ mod tests {
             .mana_spent_source_snapshots = vec![ManaSpentSourceSnapshot {
             source_id: public_source,
             lki: state.objects[&public_source].snapshot_for_mana_spent(),
+            source_token: crate::types::game_state::CapturedTokenBit::Unknown,
         }];
         let linked = seed_linked_exile_members(&mut state, owner, paid);
         let hidden_member = linked[0].exiled_id;
@@ -7334,10 +7338,12 @@ mod tests {
             ManaSpentSourceSnapshot {
                 source_id: hidden_source,
                 lki: state.objects[&hidden_source].snapshot_for_mana_spent(),
+                source_token: crate::types::game_state::CapturedTokenBit::Unknown,
             },
             ManaSpentSourceSnapshot {
                 source_id: public_source,
                 lki: state.objects[&public_source].snapshot_for_mana_spent(),
+                source_token: crate::types::game_state::CapturedTokenBit::Unknown,
             },
         ];
         state

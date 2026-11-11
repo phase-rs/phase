@@ -252,6 +252,7 @@ mod tests {
                 crate::types::game_state::ManaSpentSourceSnapshot {
                     source_id: prototype,
                     lki,
+                    source_token: crate::types::game_state::CapturedTokenBit::Unknown,
                 },
             );
         }

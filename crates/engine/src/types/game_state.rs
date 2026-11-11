@@ -1408,6 +1408,19 @@ pub struct ManaSpentSourceSnapshot {
     /// would otherwise ride every `StateUpdate` frame.
     #[serde(with = "crate::types::history_snapshot::compact_history_lki")]
     pub lki: LKISnapshot,
+    /// CR 111.1 + CR 106.3 + CR 608.2h: whether the source WAS a token when it
+    /// produced the mana it paid with, captured with the snapshot above.
+    ///
+    /// The snapshot cannot state it (CR 707.2 keeps token-ness out of the copiable
+    /// projection `LKISnapshot` carries), and a source-qualified predicate can name
+    /// it ("mana from a nontoken source"). The departure capture is keyed by the
+    /// epoch the unit was pinned to, and that capture rolls over at a step
+    /// boundary, so a cast record read later needs the bit ON the fact. `Unknown`
+    /// is the state of a unit whose producer fact named no bit (a payload written
+    /// before this field, a pooled producer row): the leaf then refuses instead of
+    /// guessing, and no current-format write leaves it unstated.
+    #[serde(default, skip_serializing_if = "CapturedTokenBit::is_unknown")]
+    pub source_token: CapturedTokenBit,
 }
 
 /// CR 106.3 + CR 106.4: the producer fact of a mana unit that is still floating
@@ -19186,11 +19199,18 @@ impl GameState {
                 Some(
                     PendingCostMoveResume::Cast { player, .. }
                     | PendingCostMoveResume::SacrificeForCost { player, .. }
-                    | PendingCostMoveResume::CounterCostRemovalPayment { player, .. },
+                    | PendingCostMoveResume::CounterCostRemovalPayment { player, .. }
+                    // CR 701.59: a collect-evidence cost can hold a CAST
+                    // (`CollectEvidenceResume::Casting`), and the root states the
+                    // player the resume credits, so it is read like the other
+                    // cast-holding roots.
+                    | PendingCostMoveResume::CollectEvidencePayment { player, .. },
                 ) => Some(*player),
                 Some(
-                    PendingCostMoveResume::CollectEvidencePayment { .. }
-                    | PendingCostMoveResume::ActivationMillPayment { .. }
+                    // CR 701.59: a mill cost parks ACTIVATIONS only
+                    // (`activation_ability_index` is `Some` on its pending), so no
+                    // cast carrier is ever resumed through it.
+                    PendingCostMoveResume::ActivationMillPayment { .. }
                     | PendingCostMoveResume::WardSacrificePayment { .. }
                     | PendingCostMoveResume::ReplacementMayCost { .. }
                     | PendingCostMoveResume::Foretell { .. }
@@ -40129,7 +40149,10 @@ impl GameState {
             lki_incarnations(lki, f);
             attachment_incarnations(attachments, f);
             linked_exile_incarnations(linked_exile_snapshot, f);
-            for ManaSpentSourceSnapshot { source_id: _, lki } in mana_spent_source_snapshots {
+            for ManaSpentSourceSnapshot {
+                source_id: _, lki, ..
+            } in mana_spent_source_snapshots
+            {
                 lki_incarnations(lki, f);
             }
             if let Some(CostPaidObjectSnapshot {
@@ -53192,6 +53215,58 @@ mod tests {
             .is_none());
     }
 
+    /// CR 700.14 + CR 601.2h + CR 701.59: the payer a CAST-holding collect-evidence
+    /// root STATES is the payer its continuation credits.
+    ///
+    /// `pending_cast_resume_player` is read from the resume root rather than assumed
+    /// from the cast's controller, because a save that states a different player there
+    /// credits that player (`expend_credits_for_cast`). A collect-evidence cost can
+    /// hold a cast (`CollectEvidenceResume::Casting`), so its root belongs with the
+    /// other cast-holding roots rather than in the no-payer fallback.
+    ///
+    /// Revert-probe: leaving the arm in the fallback answers the cast's controller
+    /// (P0) and fails the assertion.
+    #[test]
+    fn a_collect_evidence_root_states_the_payer_its_cast_credits() {
+        use crate::types::ability::{Effect, QuantityExpr, TargetFilter};
+
+        let mut state = GameState::new_two_player(7);
+        let pending = PendingCast::new(
+            ObjectId(1),
+            CardId(1),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(5),
+                PlayerId(0),
+            ),
+            crate::types::mana::ManaCost::NoCost,
+        );
+        assert_eq!(
+            pending.ability.controller,
+            PlayerId(0),
+            "fixture precondition: the cast's controller is P0"
+        );
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::CollectEvidencePayment {
+            player: PlayerId(1),
+            chosen: Vec::new(),
+            paused_at_index: 0,
+            resume: Box::new(CollectEvidenceResume::Casting {
+                pending_cast: Box::new(pending.clone()),
+                source: SpellCostSource::Other,
+            }),
+        });
+
+        assert_eq!(
+            state.pending_cast_resume_player(PendingCastOwner::CostMove, &pending),
+            PlayerId(1),
+            "the root's stated payer is what the resume credits, not the controller"
+        );
+    }
+
     /// CR 400.7 + CR 104.4b: a restored payload is UNTRUSTED, and its two
     /// departure tables are serialized independently, so a capture can name an
     /// epoch whose last-known information is gone. Loop normalization must place
@@ -54143,6 +54218,7 @@ mod tests {
             context.mana_spent_source_snapshots = vec![ManaSpentSourceSnapshot {
                 source_id: x,
                 lki: context.lki.clone(),
+                source_token: crate::types::game_state::CapturedTokenBit::Unknown,
             }];
             context.granting_object = Some(reference);
             let event = GameEvent::ZoneChanged {

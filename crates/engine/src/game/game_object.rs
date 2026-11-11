@@ -4655,6 +4655,7 @@ mod tests {
             .push(crate::types::game_state::ManaSpentSourceSnapshot {
                 source_id: obj.id,
                 lki,
+                source_token: crate::types::game_state::CapturedTokenBit::Unknown,
             });
     }
 
@@ -4692,6 +4693,7 @@ mod tests {
                     crate::types::game_state::ManaSpentSourceSnapshot {
                         source_id: obj.id,
                         lki,
+                        source_token: crate::types::game_state::CapturedTokenBit::Unknown,
                     },
                 );
             }),

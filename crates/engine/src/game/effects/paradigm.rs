@@ -279,8 +279,13 @@ mod tests {
                 .add(crate::types::mana::ManaColor::White, 2);
             obj.mana_spent_to_cast_amount = 2;
             obj.phyrexian_life_paid = 1;
-            obj.mana_spent_source_snapshots
-                .push(crate::types::game_state::ManaSpentSourceSnapshot { source_id, lki });
+            obj.mana_spent_source_snapshots.push(
+                crate::types::game_state::ManaSpentSourceSnapshot {
+                    source_id,
+                    lki,
+                    source_token: crate::types::game_state::CapturedTokenBit::Unknown,
+                },
+            );
         }
         // Production arming path — creates the ParadigmSource exile link that
         // `cast_paradigm_copy` validates.

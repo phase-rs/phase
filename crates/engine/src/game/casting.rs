@@ -24942,30 +24942,74 @@ fn mana_spent_source_snapshot(
     unit: &crate::types::mana::ManaUnit,
 ) -> Option<crate::types::game_state::ManaSpentSourceSnapshot> {
     use crate::game::game_object::ObjectIncarnationRefExt as _;
+    use crate::types::game_state::CapturedTokenBit;
 
-    let lki = match unit.source_incarnation_ref() {
+    // CR 111.1 + CR 106.3: the bit the producer held when it made the mana,
+    // captured beside the snapshot from the SAME source — the live row, the
+    // pinned epoch's departure capture, or the storage-id-keyed pair. A producer
+    // fact that names none of them leaves `Unknown`, which the leaf refuses.
+    let (lki, source_token) = match unit.source_incarnation_ref() {
         Some(pinned) => match state.objects.get(&pinned.object_id).filter(|source| {
             crate::types::identifiers::ObjectIncarnationRef::from_object(source) == pinned
         }) {
-            Some(source) => source.snapshot_for_mana_spent(),
+            Some(source) => (
+                source.snapshot_for_mana_spent(),
+                CapturedTokenBit::Known(source.is_token),
+            ),
             None => {
-                super::filter::exit_lki_for_incarnation(state, pinned.object_id, pinned.incarnation)
-                    .cloned()
-                    .or_else(|| {
-                        super::mana_payment::pooled_mana_producer_snapshot(pooled_index, unit)
-                            .cloned()
-                    })?
+                let exit_lki = super::filter::exit_lki_for_incarnation(
+                    state,
+                    pinned.object_id,
+                    pinned.incarnation,
+                );
+                // CR 608.2h: the capture the SAME departure recorded for that
+                // epoch. A pooled producer row below supplies no bit — the epoch
+                // it was produced at is gone with the step — so that unit's leaf
+                // refuses rather than guessing.
+                let exit_bit = exit_lki.and_then(|_| {
+                    state
+                        .departure_token_by_incarnation
+                        .get(&pinned.object_id)
+                        .and_then(|history| history.get(&pinned.incarnation))
+                        .copied()
+                });
+                let lki = exit_lki.cloned().or_else(|| {
+                    super::mana_payment::pooled_mana_producer_snapshot(pooled_index, unit).cloned()
+                })?;
+                let source_token =
+                    exit_bit.map_or(CapturedTokenBit::Unknown, CapturedTokenBit::Known);
+                (lki, source_token)
             }
         },
-        None => state
-            .objects
-            .get(&unit.source_id)
-            .map(crate::game::game_object::GameObject::snapshot_for_mana_spent)
-            .or_else(|| state.lki_cache.get(&unit.source_id).cloned())?,
+        None => {
+            let live = state
+                .objects
+                .get(&unit.source_id)
+                .map(crate::game::game_object::GameObject::snapshot_for_mana_spent);
+            let source_token = match live {
+                Some(_) => CapturedTokenBit::Known(
+                    state
+                        .objects
+                        .get(&unit.source_id)
+                        .is_some_and(|source| source.is_token),
+                ),
+                // CR 608.2h: the storage-id-keyed pair was written by the same
+                // departure as the cached snapshot this branch reads.
+                None => state
+                    .departure_token_cache
+                    .get(&unit.source_id)
+                    .map_or(CapturedTokenBit::Unknown, |is_token| {
+                        CapturedTokenBit::Known(*is_token)
+                    }),
+            };
+            let lki = live.or_else(|| state.lki_cache.get(&unit.source_id).cloned())?;
+            (lki, source_token)
+        }
     };
     Some(crate::types::game_state::ManaSpentSourceSnapshot {
         source_id: unit.source_id,
         lki,
+        source_token,
     })
 }
 
