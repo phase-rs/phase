@@ -29,7 +29,7 @@ use engine::types::game_state::{
     CastPaymentMode, CastingVariant, ReplacementCandidateSummary, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
-use engine::types::keywords::Keyword;
+use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::{Player, PlayerId};
@@ -46,6 +46,7 @@ const CHILL: &str = "Creeping Chill deals 3 damage to each opponent and you gain
 const SHAKE: &str =
     "Shake the Foundations deals 1 damage to each creature without flying.\nDraw a card.";
 const PYROCLASM: &str = "Pyroclasm deals 2 damage to each creature.";
+const FLAME_RIFT: &str = "Flame Rift deals 4 damage to each player.";
 const FLAME_SLASH: &str = "Flame Slash deals 4 damage to target creature.";
 const HYMN: &str = "Kicker {W} (You may pay an additional {W} as you cast this spell.)\nHurloon Battle Hymn deals 4 damage to target creature or planeswalker. If this spell was kicked, you gain 4 life.";
 const AARDVARK_SLOTH: &str =
@@ -996,8 +997,79 @@ fn a_later_instruction_runs_once_at_an_order_park() {
     }
 }
 
+/// Flame Rift: "deals 4 damage to each player." P0's Nefarious Lich asks which 4 of P0's 6
+/// graveyard cards to exile, and P1's 4 meets P1's Nefarious Lich and Force Bubble, an order P1
+/// chooses (CR 616.1). One prompt stands at a time: P0 answers first (CR 616.1: "choices are
+/// made in APNAP order"), and P1's order prompt follows that answer instead of replacing it
+/// (CR 608.2c).
+#[test]
+fn a_riders_prompt_holds_the_next_players_order_prompt() {
+    let mut scenario = scenario();
+    for index in 0..6 {
+        scenario.add_creature_to_graveyard(P0, &format!("P0 Filler {index}"), 1, 1);
+    }
+    scenario.add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH);
+    nefarious_lich(&mut scenario, 5);
+    let bubble = force_bubble(&mut scenario, P1);
+    let spell = sorcery(&mut scenario, "Flame Rift", FLAME_RIFT);
+    let mut runner = scenario.build();
+    let mut events = cast(&mut runner, spell, vec![]);
+
+    assert_eq!(zone_prompt(&runner), (4, 6));
+    assert_eq!(player(&runner, P1).graveyard.len(), 5);
+    assert_eq!(counters(&runner, bubble, &depletion()), 0);
+    assert!(runner.state().pending_replacement.is_none());
+    take_offered(&mut runner, &mut events);
+    assert_eq!(player(&runner, P0).graveyard.len(), 2);
+
+    assert_prompt_is_replacement_choice(&runner);
+    choose_source(&mut runner, &mut events, bubble);
+    // Force Bubble took all 4 as depletion counters, so its own trigger sacrificed it; P1's
+    // graveyard is the 5 cards Nefarious Lich didn't exile, and Force Bubble.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        GameEvent::CounterAdded { object_id, count: 4, .. } if *object_id == bubble
+    )));
+    assert_eq!(zone(&runner, bubble), Zone::Graveyard);
+    assert_eq!(player(&runner, P1).graveyard.len(), 6);
+    assert_eq!((life(&runner, P0), life(&runner, P1)), (20, 20));
+    assert!(resolved(&events, EffectKind::DamageEachPlayer));
+    assert_at_rest(&runner);
+
+    // Creeping Chill, with two opponents: "deals 3 damage to each opponent and you gain 3
+    // life." P1's Nefarious Lich asks which 3 cards; P2's 3 meets P2's Nefarious Lich and Force
+    // Bubble. The gain is the spell's next instruction (CR 608.2c): it follows both answers, once.
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    nefarious_lich(&mut scenario, 4);
+    for index in 0..5 {
+        scenario.add_creature_to_graveyard(p2, &format!("P2 Filler {index}"), 1, 1);
+    }
+    scenario.add_enchantment_from_oracle(p2, "Nefarious Lich", NEFARIOUS_LICH);
+    let bubble = force_bubble(&mut scenario, p2);
+    let spell = sorcery(&mut scenario, "Creeping Chill", CHILL);
+    let mut runner = scenario.build();
+    let mut events = cast(&mut runner, spell, vec![]);
+
+    assert_eq!(zone_prompt(&runner), (3, 4));
+    assert_eq!(life(&runner, P0), 20);
+    take_offered(&mut runner, &mut events);
+    assert_eq!(player(&runner, P1).graveyard.len(), 1);
+    assert_eq!(life(&runner, P0), 20);
+
+    assert_prompt_is_replacement_choice(&runner);
+    choose_source(&mut runner, &mut events, bubble);
+    assert_eq!(counters(&runner, bubble, &depletion()), 3);
+    assert_eq!(player(&runner, p2).graveyard.len(), 5);
+    assert_eq!(life(&runner, P0), 23);
+    assert_eq!(life_gains(&events), 1);
+    assert_at_rest(&runner);
+}
+
 /// Pyroclasm: "deals 2 damage to each creature." A rider's prompt doesn't stop the other
-/// recipients, whichever is dealt damage first (CR 120.3, CR 608.2d).
+/// recipients, whichever is dealt damage first (CR 120.3, CR 608.2d): one dealt after Dralnu
+/// waits behind its sacrifice answer (CR 608.2c), and is dealt once it is given.
 #[test]
 fn a_riders_prompt_does_not_stop_the_other_recipients() {
     for bear_first in [false, true] {
@@ -1011,14 +1083,44 @@ fn a_riders_prompt_does_not_stop_the_other_recipients() {
         let mut events = cast(&mut runner, spell, vec![]);
 
         assert_eq!(zone_prompt(&runner), (2, 4));
-        assert_eq!(damage(&runner, bear), 2);
+        let before_answer = if bear_first { 2 } else { 0 };
+        assert_eq!(
+            damage(&runner, bear),
+            before_answer,
+            "bear first {bear_first}"
+        );
         assert_eq!(damage(&runner, id), 0);
         take_offered(&mut runner, &mut events);
         assert_eq!(damage(&runner, bear), 2);
         assert_at_rest(&runner);
     }
 
+    // A later creature that needs its own answer: P0's Phytohydra under Mending Hands, whose 2
+    // meets the shield and the substitution (CR 616.1). Its order prompt follows Dralnu's
+    // sacrifice answer instead of replacing it (CR 608.2c).
     let mut scenario = scenario();
+    let id = dralnu(&mut scenario, P1);
+    let hydra = phytohydra(&mut scenario, P0);
+    lands(&mut scenario, P1, 3);
+    let hands = instant(&mut scenario, "Mending Hands", MENDING_HANDS);
+    let spell = sorcery(&mut scenario, "Pyroclasm", PYROCLASM);
+    let mut runner = scenario.build();
+    cast(&mut runner, hands, vec![object_target(hydra)]);
+    let mut events = cast(&mut runner, spell, vec![]);
+
+    assert_eq!(zone_prompt(&runner), (2, 4));
+    assert!(runner.state().pending_replacement.is_none());
+    take_offered(&mut runner, &mut events);
+    assert_eq!(damage(&runner, id), 0);
+    assert_eq!(player(&runner, P1).graveyard.len(), 2);
+    assert_prompt_is_replacement_choice(&runner);
+    choose_not_shield(&mut runner, &mut events);
+    assert_eq!(plus_counters(&runner, hydra), 2);
+    assert_eq!(damage(&runner, hydra), 0);
+    assert!(resolved(&events, EffectKind::DamageAll));
+    assert_at_rest(&runner);
+
+    let mut scenario = self::scenario();
     dralnu(&mut scenario, P1);
     let hydra = phytohydra(&mut scenario, P0);
     lands(&mut scenario, P1, 3);
@@ -1897,9 +1999,9 @@ const MASTER_OF_THE_WILD_HUNT: &str = "At the beginning of your upkeep, create a
 /// controller chooses among any number of those Wolves." The division is chosen while the
 /// ability resolves (CR 608.2d), and the chosen portions are one batch. Wolf A and Wolf B are
 /// each under their own Test of Faith, with Hardened Scales and Doubling Season: Wolf A's
-/// counters ask an order (CR 616.1) and leave the prompt standing while the division goes on to
-/// Wolf B and Wolf C; Wolf B's counters wait behind Wolf A's (CR 608.2c, CR 615.5). One
-/// prevented damage is one counter event either way, so each Wolf gets (1 + 1) × 2 = 4.
+/// counters ask an order (CR 616.1), and the rest of the division (Wolf B, then Wolf C) waits
+/// behind that answer (CR 608.2c, CR 615.5). One prevented damage is one counter event either
+/// way, so each Wolf gets (1 + 1) × 2 = 4.
 #[test]
 fn a_resolution_time_division_keeps_its_later_riders_behind_a_paused_one() {
     let mut scenario = self::scenario();
@@ -1960,9 +2062,9 @@ fn a_resolution_time_division_keeps_its_later_riders_behind_a_paused_one() {
     );
     assert_prompt_is_replacement_choice(&runner);
     assert_eq!(
-        damage(&runner, c),
-        1,
-        "the division went on past the prompt"
+        (damage(&runner, b), damage(&runner, c)),
+        (0, 0),
+        "the division waits behind the prompt"
     );
     let mut orders = Vec::new();
     while matches!(
@@ -1980,6 +2082,7 @@ fn a_resolution_time_division_keeps_its_later_riders_behind_a_paused_one() {
     );
     assert_eq!((damage(&runner, a), damage(&runner, b)), (0, 0));
     assert_eq!(plus_counters(&runner, c), 0);
+    assert_eq!(damage(&runner, c), 1);
     assert_eq!(prevented(&events), 2);
     assert_eq!(
         runner.state().waiting_for,
@@ -2635,6 +2738,34 @@ fn a_substitution_is_ordered_against_a_prevention_shield() {
     }
 }
 
+/// Pyroclasm at a Phytohydra with protection from everything. Protection's prevention
+/// (CR 702.16e: "Any damage that would be dealt by sources that have the stated quality to a
+/// permanent or player with protection is prevented.") and Phytohydra's substitution both apply,
+/// so its controller chooses one (CR 616.1).
+///
+/// strict-failure: protection prevents the damage before the substitution is offered, so P0 is
+/// never asked and gets no counters; choosing Phytohydra first gives 2. Phytohydra reports
+/// unsupported for it (`ResolverFeature:structural:damage_substitution_choice_incomplete`).
+#[test]
+fn protection_prevents_ahead_of_a_substitutions_choice() {
+    let mut scenario = scenario();
+    let hydra = scenario
+        .add_creature_from_oracle(P0, "Phytohydra", 1, 1, PHYTOHYDRA)
+        .with_keyword(Keyword::Protection(ProtectionTarget::Everything))
+        .id();
+    let spell = sorcery(&mut scenario, "Pyroclasm", PYROCLASM);
+    let mut runner = scenario.build();
+    let events = cast(&mut runner, spell, vec![]);
+
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, GameEvent::ReplacementApplied { .. })));
+    assert_eq!(prevented(&events), 1);
+    assert_eq!(plus_counters(&runner, hydra), 0);
+    assert_eq!(damage(&runner, hydra), 0);
+    assert_at_rest(&runner);
+}
+
 /// "dealt to you" and "dealt to this creature" name only their recipient (CR 614.1a).
 #[test]
 fn a_substitution_covers_only_its_recipient() {
@@ -2944,8 +3075,12 @@ fn two_force_bubbles_take_all_of_a_combat_batch_on_one() {
 }
 
 /// Force Bubble: "You can't split the damage between them." Answering every prompt with one
-/// Bubble is the legal path. The prompt count is deliberately unasserted: the ruling wants one,
-/// and the engine offers one per source (Command Zone #140).
+/// Bubble is the legal path.
+///
+/// strict-failure: the ruling says "damage from multiple sources that happens at one time (such
+/// as combat damage) gives one choice, not one per source", and the engine asks once per Dragon:
+/// two prompts where the card gives one. Force Bubble reports unsupported for it
+/// (`ResolverFeature:structural:damage_substitution_choice_incomplete`).
 #[test]
 fn a_repeated_answer_puts_a_noncombat_batch_on_one_force_bubble() {
     let mut scenario = scenario();
@@ -2975,13 +3110,16 @@ fn a_repeated_answer_puts_a_noncombat_batch_on_one_force_bubble() {
     settle(&mut runner, &mut vec![player_target(P1)], &mut events);
 
     assert_prompt_is_replacement_choice(&runner);
+    let mut prompts = 0;
     while matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ) {
+        prompts += 1;
         choose_source(&mut runner, &mut events, first);
     }
 
+    assert_eq!(prompts, 2);
     assert_eq!(counters(&runner, first, &depletion()), 3);
     assert_eq!(counters(&runner, second, &depletion()), 0);
     assert_eq!(life(&runner, P1), 20);
