@@ -467,7 +467,7 @@ fn an_unaffordable_target_reversal_keeps_the_loop_period_and_mana_undo_window() 
         .id();
     mana(&mut s, P0, 1);
     let mut r = s.build();
-    r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
+    r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::Interactive;
     tap_land_for_mana(&mut r, land);
     let before = state_without_revision(&r);
     let trace_before = trace_entries(r.state());
@@ -591,7 +591,7 @@ fn a_settled_lock_with_no_election_accepts_the_activation_exactly_once() {
         )
         .id();
     let mut r = s.build();
-    r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
+    r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::Interactive;
     tap_land_for_mana(&mut r, land);
 
     act(
@@ -650,7 +650,7 @@ fn a_settlement_election_accepts_the_activation_once_on_its_resume() {
     mana(&mut s, P0, 5);
     let mut r = s.build();
     unsick(&mut r, src);
-    r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
+    r.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::Interactive;
     act(
         &mut r,
         GameAction::ActivateAbility {
@@ -1965,7 +1965,7 @@ fn a_divided_activation_is_accepted_at_its_settlement_lock_after_the_split() {
         "{2}: Engine deals 2 damage divided as you choose among one or two targets. Create a 1/1 white Soldier creature token.",
         true,
     );
-    b.runner.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
+    b.runner.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::Interactive;
     let bear = b.bear.unwrap();
     start(&mut b);
     act(

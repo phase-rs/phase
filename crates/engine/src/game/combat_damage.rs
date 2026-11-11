@@ -1858,13 +1858,6 @@ pub(crate) fn apply_combat_damage(
     sub_step: CombatDamageSubStep,
 ) -> CombatDamageBatch {
     let mut events = Vec::new();
-    // CR 510.2 + CR 732.2a: the pre-batch life totals, so the loop-detection ring can be
-    // invalidated on the DAMAGE EVENT rather than on a `WaitingFor` window that an
-    // unblocked attacker never opens. Snapshotted per batch, not hoisted: first-strike
-    // and regular damage are two separate CR 510.2 events (`:131` / `:188`) and a
-    // double-strike attacker must be caught at the first, not only the second. See
-    // `GameState::invalidate_loop_ring_on_unobserved_life_move`.
-    let lives_before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
 
     // --- Phase A: Collect proposed damage events (CR 510.2) ---
     // Gated assignments (0-damage, protection, prohibition) contribute nothing
@@ -1990,7 +1983,6 @@ pub(crate) fn apply_combat_damage(
             batch_events: events,
             damage_to_players: Vec::new(),
             prevention_tally,
-            lives_before,
             sub_step,
             phase_c_remnant: Some(PendingCombatPhaseCRemnant {
                 remaining: legs[index + 1..].to_vec(),
@@ -2029,7 +2021,6 @@ pub(crate) fn apply_combat_damage(
             batch_events: events,
             damage_to_players,
             prevention_tally,
-            lives_before,
             sub_step,
             phase_c_remnant: None,
         },
@@ -2070,12 +2061,6 @@ fn drain_combat_lifelink(
             Err(ReplacementDeferred::ReplacementChoice) => {
                 let waiting_for = state.waiting_for.clone();
                 let events = record.batch_events.clone();
-                // CR 732.2a: the batch has already moved life (CR 120.3a damage,
-                // and any earlier source's gain). Invalidate now as well as at
-                // completion, against the SAME pre-batch snapshot, so the ring is
-                // not stale for the duration of an arbitrarily long player pause.
-                // The guard only ever CLEARS, so the paired calls are idempotent.
-                state.invalidate_loop_ring_on_unobserved_life_move(&record.lives_before);
                 state.pending_combat_lifelink = Some(Box::new(record));
                 return CombatDamageBatch::Paused {
                     events,
@@ -2109,20 +2094,6 @@ fn drain_combat_lifelink(
     // the last gain, so no rider continuation can ever run while a CR 616.1
     // prompt is open, and after nothing else can stamp `last_effect_count`.
     fire_combat_prevention_riders(state, &record.prevention_tally, &mut record.batch_events);
-    // CR 510.2 + CR 732.2a: the simultaneous batch is the EVENT the loop-ring life
-    // prohibition keys on, and this is the last statement that can move life in it.
-    // The batch moves life in three places and only a call here sees all three:
-    // Phase C's `apply_damage_after_replacement` (CR 120.3a), the per-source
-    // lifelink gains above, and a prevention rider's `runtime_execute` (CR 615.5).
-    // `lives_before` is the PRE-BATCH snapshot carried in the record. On a resume
-    // this window arithmetically spans the paused source's own gain, which
-    // `engine_replacement.rs` applied before the drain was re-entered — but that
-    // span has no observable consequence: `apply()` has already cleared
-    // `loop_detect_ring` on the answering `ChooseReplacement`, which sits in
-    // neither its action exemption list nor `WaitingFor::is_forced_cascade_window`.
-    // MEASURED, not inferred. The load-bearing call is the PAUSE-path one above,
-    // reached under the exempt `PassPriority`.
-    state.invalidate_loop_ring_on_unobserved_life_move(&record.lives_before);
     CombatDamageBatch::Complete(record.batch_events)
 }
 

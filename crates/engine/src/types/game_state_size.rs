@@ -109,8 +109,8 @@
 //!
 //! `GameState` re-measured on x86_64-unknown-linux-gnu (`nightly-2026-04-19`) at
 //! 14,896 B with the tracked-set member origins (`tracked_set_member_origins`,
-//! 24 B), the loop-detection held window and decision tally (`loop_detect_held`,
-//! 8 B, and `loop_decision_tally`, 40 B) and the loop shortcut's rising ∞ axes
+//! 24 B), the loop-detection held window (8 B) and decision tally
+//! (`loop_decision_tally`, 40 B) and the loop shortcut's rising ∞ axes
 //! (`unbounded_rising`, 24 B); none of those fields is a large rarely-populated
 //! one, so the ceiling is 14,896.next_multiple_of(256) + 256 = 15,360.
 //!
@@ -118,7 +118,7 @@
 //! 15,376 B when the Horde stack merged main through `bf584d6b`: the branch's
 //! Horde bookkeeping (~110 B of small fields, already counted at 15,072 here)
 //! unioned with main's new small fields since the merge base (`un_actions`,
-//! `loop_detect_held`, `players_who_flipped_coins_this_turn`, minus the
+//! the loop-detection held window, `players_who_flipped_coins_this_turn`, minus the
 //! removed `unbounded_loop_enablers`). Each side holds under 15,360 alone —
 //! the branch at 15,072 on this builder, main green in CI where this assert
 //! runs on every 64-bit build — and the union crosses by 16 B. No single

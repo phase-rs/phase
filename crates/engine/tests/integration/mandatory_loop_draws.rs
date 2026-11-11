@@ -198,7 +198,6 @@ struct Run {
     max_entries_per_action: usize,
     reveals: usize,
     reveals_at_half: usize,
-    max_ring: usize,
     /// Times each prompt other than priority was answered.
     prompts: BTreeMap<&'static str, usize>,
     /// Priority beats at which P0's Mountain stood untapped on the battlefield.
@@ -510,8 +509,7 @@ fn run_observed(
         p0_mountain,
     } = build(board, mode)?;
 
-    let (mut entries, mut entries_at_half, mut reveals, mut reveals_at_half, mut max_ring) =
-        (0, 0, 0, 0, 0);
+    let (mut entries, mut entries_at_half, mut reveals, mut reveals_at_half) = (0, 0, 0, 0);
     let mut token_entries = 0;
     let (mut max_entries_per_action, mut out_beats, mut remembered) = (0, 0, false);
     let mut max_shields = 0usize;
@@ -526,7 +524,6 @@ fn run_observed(
         let state = runner.state();
         observe(state);
         let mut yield_first = None;
-        max_ring = max_ring.max(state.loop_detect_ring.len());
         max_shields = max_shields.max(
             state
                 .pending_damage_replacements
@@ -726,7 +723,6 @@ fn run_observed(
         max_entries_per_action,
         reveals,
         reveals_at_half,
-        max_ring,
         prompts,
         out_beats,
         max_shields,
@@ -1016,11 +1012,6 @@ fn worldgorger_with_an_optional_action_is_not_a_draw() {
             return;
         };
         assert_out_offer(&run, &format!("{drive:?}"));
-        assert!(
-            run.max_ring >= 2,
-            "{drive:?}: reach: the loop accumulated a ring, max {}",
-            run.max_ring
-        );
     }
     for drive in EVERY_DRIVE {
         let Some(run) = run(board, LoopDetectionMode::Off, drive, 40) else {
@@ -2072,15 +2063,13 @@ fn a_mandatory_growth_loop_whose_every_trigger_order_continues_is_a_draw() {
     }
 }
 
-/// CR 608.1 + CR 732.2a: a window whose stack shrinks and then returns to its depth keeps its
-/// samples across the shrinking beat.
+/// CR 104.4b: a window whose stack shrinks and then returns to its depth is still a drawn loop.
 #[test]
-fn a_shrinking_beat_inside_a_returning_window_keeps_the_ring() {
+fn a_shrinking_beat_inside_a_returning_window_is_still_drawn() {
     let Some(run) = run(LUMBERKNOT, LoopDetectionMode::Interactive, Drive::Pass, 60) else {
         return;
     };
     assert_eq!(run.terminal, Terminal::GameOver(None));
-    assert!(run.max_ring > 4, "max ring {}", run.max_ring);
 }
 
 /// CR 732.2b: Poison-Tip Archer drains P0 at each Dragon death. With nothing P0 can do, P1 wins

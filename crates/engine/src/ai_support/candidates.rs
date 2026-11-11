@@ -10839,7 +10839,7 @@ mod tests {
     /// `DeclineShortcut`.**
     ///
     /// CR 732.2a. The declare candidate carries the ENGINE's own published declaration, so an
-    /// offer that has none (a seat that never answered, or a `LoopAnswer::Conflicted` latch) must
+    /// offer that has none (a point with no recorded answer) must
     /// fail closed rather than hand the search layer a fabricated pin set — which
     /// `handle_declare_shortcut` would then refuse, i.e. an action that looks legal and is not.
     ///

@@ -12882,7 +12882,6 @@ mod tests {
                 }],
                 damage_to_players: Vec::new(),
                 prevention_tally: Vec::new(),
-                lives_before: vec![20, 20],
                 sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
                 phase_c_remnant: None,
             }));
@@ -14015,7 +14014,7 @@ mod tests {
     ///
     /// # This path is UNREACHABLE through today's publisher, and the row says so
     ///
-    /// `record_trigger_target_answer` mints `ByIdentity` only for `TargetRef::Object`, and the
+    /// `announced_target_pins` mints `ByIdentity` only for `TargetRef::Object`, and the
     /// bounded publisher's own conjuncts (`TargetAnnouncement::Chosen`, and player-valued legal
     /// sets on every tracked board — measured `any ByIdentity pin? false` on all five drives)
     /// keep object pins out of a published slot today. The row exists so a publisher relaxation

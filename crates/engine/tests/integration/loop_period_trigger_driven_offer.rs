@@ -616,7 +616,7 @@ fn each_apply_evaluates_the_loop_shortcut_at_most_once() {
         }
         for (index, apply) in applies.iter().enumerate() {
             assert!(
-                apply.cost.object_growth_calls <= 1 && apply.cost.reconcile_calls <= 1,
+                apply.cost.object_growth_calls <= 1,
                 "{board:?}: apply {index} evaluated the shortcut more than once; {:?}",
                 apply.cost
             );

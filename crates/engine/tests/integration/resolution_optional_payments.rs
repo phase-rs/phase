@@ -11,7 +11,7 @@ use engine::types::ability::{
 use engine::types::actions::{GameAction, ResolutionOptionalPaymentChoice};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    AutoMayChoice, LoopDetectSample, MayTriggerAutoChoiceKey, MayTriggerOrigin, WaitingFor,
+    AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -860,29 +860,15 @@ fn resolution_optional_oneof_uses_paycost_player_reference() {
 }
 
 #[test]
-fn resolution_optional_oneof_decline_clears_loop_ring_and_cannot_replay() {
+fn resolution_optional_oneof_decline_cannot_replay() {
     let (mut runner, source, cards) = runner_with_hand(1);
     let life = runner.state().players[P0.0 as usize].life;
     let ability = optional_payment(source, vec![discard()]);
     resolve_ability_chain(runner.state_mut(), &ability, &mut Vec::new(), 0).unwrap();
-    let sampled = runner.state().clone();
-    runner
-        .state_mut()
-        .loop_detect_ring
-        .push_back(std::sync::Arc::new(LoopDetectSample {
-            normalized: sampled.clone(),
-            live: sampled,
-            tally: Default::default(),
-            trace_at: None,
-        }));
     let decline = GameAction::ChooseResolutionOptionalPaymentBranch {
         choice: ResolutionOptionalPaymentChoice::Decline,
     };
     apply(runner.state_mut(), P0, decline.clone()).expect("decline is legal");
-    assert!(
-        runner.state().loop_detect_ring.is_empty(),
-        "the optional-payment window can precede a life payment, so its answer must clear the ring"
-    );
     assert_eq!(runner.state().players[P0.0 as usize].life, life);
     assert!(runner.state().players[P0.0 as usize]
         .hand
@@ -893,7 +879,7 @@ fn resolution_optional_oneof_decline_clears_loop_ring_and_cannot_replay() {
 }
 
 #[test]
-fn resolution_optional_phyrexian_payment_clears_ring_before_observable_life_move() {
+fn resolution_optional_phyrexian_payment_moves_life_during_the_answer() {
     let (mut runner, source, _) = runner_with_hand(0);
     let life = runner.state().players[P0.0 as usize].life;
     let ability = optional_payment(
@@ -906,16 +892,6 @@ fn resolution_optional_phyrexian_payment_clears_ring_before_observable_life_move
         }],
     );
     resolve_ability_chain(runner.state_mut(), &ability, &mut Vec::new(), 0).unwrap();
-    let sampled = runner.state().clone();
-    runner
-        .state_mut()
-        .loop_detect_ring
-        .push_back(std::sync::Arc::new(LoopDetectSample {
-            normalized: sampled.clone(),
-            live: sampled,
-            tally: Default::default(),
-            trace_at: None,
-        }));
 
     apply(
         runner.state_mut(),
@@ -925,10 +901,6 @@ fn resolution_optional_phyrexian_payment_clears_ring_before_observable_life_move
         },
     )
     .expect("choose the Phyrexian payment branch");
-    assert!(
-        runner.state().loop_detect_ring.is_empty(),
-        "the ring must be cleared before the selected branch can move life"
-    );
     assert_eq!(
         runner.state().players[P0.0 as usize].life,
         life + 1,

@@ -6,29 +6,38 @@
 
 use std::sync::Arc;
 
+use engine::ai_support::legal_actions_for_viewer;
+use engine::analysis::decision_template::IterationCount;
+use engine::analysis::resource::ResourceAxis;
+use engine::database::card_db::CardDatabase;
+use engine::game::casting::can_cast_object_now;
 use engine::game::deck_loading::DeckEntry;
 use engine::game::engine::apply;
 use engine::game::interaction::{bind_interaction_authority, derive_viewer_interaction};
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::turn_control::{authorized_submitters, turn_decision_maker};
 use engine::game::turns::advance_phase;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::game::EngineError;
-use engine::types::ability::ControlWindow;
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::format::{FormatConfig, SideboardPolicy};
 use engine::types::game_state::{
-    ActivePlayerControl, GameEnd, GameState, LoopDetectionMode, PlayerDeckPool,
-    ScheduledTurnControl, WaitingFor,
+    GameEnd, GameState, LoopDetectionMode, PlayerDeckPool, WaitingFor,
 };
+use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
     InteractionOpportunityResponse, InteractionResponseSpec, InteractionSessionId,
 };
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::match_config::{DeckCardCount, MatchConfig, MatchPhase, MatchType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
+
+use crate::support::shared_card_db;
 
 const P2: PlayerId = PlayerId(2);
 
@@ -419,102 +428,158 @@ fn control_ends_when_a_bo1_game_ends_in_a_draw() {
     );
 }
 
-// A self-refilling drain: P0 gains life, each opponent loses 1, that loss gains
-// P0 1 back. Local copies rather than a shared constant — the module idiom here;
-// `grep -rln 'Whenever you gain life, each opponent loses 1 life' crates/engine/tests/integration/`
-// lists the modules that carry them.
-const DRAIN_CLERIC: &str = "Whenever you gain life, each opponent loses 1 life.";
-const BLOOD_SIPPER: &str = "Whenever an opponent loses life, you gain 1 life.";
-const KICKOFF: &str = "You gain 1 life.";
+const REVITALIZE: &str = "You gain 3 life.\nDraw a card.";
+const BEDEVIL: &str = "Destroy target artifact, creature, or planeswalker.";
 
-/// CR 104.1 + CR 723.1 + CR 100.4 through the production entry point: a
-/// CR 732.2a loop crown ends player control with the game, and its
-/// best-of-three goes on to sideboarding with each seat answering its own
-/// prompt.
-///
-/// Seats: **P0** is the active player, the drain engine's owner, the crown's
-/// winner, and the CR 723 effect's `target_player`. **P1** is the seat the drain
-/// takes life from, and the CR 723 `controller`. That orientation is forced:
-/// `effective_authority_for_player` derives the controlled seat as
-/// `semantic_player == active_player` and never reads `target_player`, so a latch
-/// whose controller is the active seat is indistinguishable from no latch.
-#[test]
-fn a_loop_crown_ends_player_control_and_reaches_sideboarding() {
-    let mut scenario = GameScenario::new_n_player(2, 7);
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 20);
-    scenario.with_life(P1, 6);
-    scenario.add_creature_from_oracle(P0, "Test Drain Cleric", 2, 2, DRAIN_CLERIC);
-    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
-    let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
-        .id();
-    let mut runner = scenario.build();
+fn card_db() -> &'static CardDatabase {
+    shared_card_db().expect("the committed integration card fixture")
+}
 
-    // Order matters: `install_match` projects `MatchConfig::loop_detection` onto
-    // `state.loop_detection`, and `Off` is its default — arming first would be
-    // silently reset and the board would die by natural CR 704.5a SBA instead
-    // of the crown.
-    install_match(runner.state_mut(), MatchType::Bo3, 2);
-    runner.state_mut().loop_detection = LoopDetectionMode::On;
-
-    {
-        let state = runner.state_mut();
-        state.scheduled_turn_controls.push(ScheduledTurnControl {
-            target_player: P0,
-            controller: P1,
-            timestamp: 1,
-            grant_extra_turn_after: false,
-            window: ControlWindow::NextTurn,
-        });
-        state.active_full_turn_control = Some(ActivePlayerControl {
-            controller: P1,
-            timestamp: 1,
-        });
-        state.turn_decision_controller = Some(P1);
-        state.turn_decision_control_timestamp = Some(1);
-        // With the latch installed, `authorized_submitter_for_player(state, P0)`
-        // is P1, and every `WaitingFor::Priority` arm of the action reducer
-        // compares that against `priority_player` — left at P0 the first cast
-        // returns `NotYourPriority` and the drive never reaches a beat.
-        state.priority_player = P1;
+/// Passes each window and declares no attackers or blockers until `reached` holds.
+fn pass_until(runner: &mut GameRunner, reached: impl Fn(&GameState) -> bool) {
+    for _ in 0..400 {
+        if reached(runner.state()) {
+            return;
+        }
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            other => panic!("unexpected prompt on the way: {other:?}"),
+        };
+        runner.act(action).expect("pass the turn along");
     }
+    panic!("never reached; at {:?}", runner.state().waiting_for);
+}
 
+fn main_phase_of(seat: PlayerId) -> impl Fn(&GameState) -> bool {
+    move |state| {
+        state.active_player == seat
+            && state.phase == Phase::PreCombatMain
+            && state.stack.is_empty()
+            && matches!(state.waiting_for, WaitingFor::Priority { .. })
+    }
+}
+
+/// A board at P0's precombat main where P1 holds Worst Fears and eight Swamps to cast it, and
+/// every seat has cards to draw.
+fn worst_fears_board(seats: u8) -> (GameScenario, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(seats, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    for seat in 0..seats {
+        for _ in 0..5 {
+            scenario.add_card_to_library_top(PlayerId(seat), MAIN_CARD);
+        }
+    }
+    for _ in 0..8 {
+        scenario.add_basic_land(P1, ManaColor::Black);
+    }
+    let worst_fears = scenario.add_real_card(P1, "Worst Fears", Zone::Hand, card_db());
+    (scenario, worst_fears)
+}
+
+/// CR 723.1: P1 casts Worst Fears at P0 in its own main phase, and play passes into P0's next
+/// turn, which P1 controls.
+fn into_worst_fears_turn(runner: &mut GameRunner, worst_fears: ObjectId) {
+    pass_until(runner, main_phase_of(P1));
+    runner.cast(worst_fears).target_player(P0).resolve();
+    pass_until(runner, |state| {
+        main_phase_of(P0)(state) && state.turn_decision_controller == Some(P1)
+    });
     assert_eq!(
         authorized_submitters(runner.state()),
         vec![P1],
         "reach guard: CR 723.1 control is live and routes away from the active seat"
     );
-    assert_eq!(
-        runner.state().turn_decision_controller,
-        Some(P1),
-        "reach guard: the latch is installed before the drive"
-    );
+}
 
-    runner.cast(kickoff).resolve();
+/// P0's Revitalize, whose 3 life starts its controller's drain.
+fn add_revitalize(scenario: &mut GameScenario) -> ObjectId {
+    scenario.add_basic_land(P0, ManaColor::White);
+    scenario.add_basic_land(P0, ManaColor::White);
+    scenario
+        .add_spell_to_hand_from_oracle(P0, "Revitalize", true, REVITALIZE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 1,
+        })
+        .id()
+}
+
+/// Passes priority and orders trigger groups as listed, answering every trigger target with
+/// `aim`, until a prompt outside those.
+fn drive(runner: &mut GameRunner, aim: Option<PlayerId>) {
     for _ in 0..2000 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::Priority { .. } => {
-                if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
+        let result = match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+            WaitingFor::OrderTriggers { triggers, .. } => runner.act(GameAction::OrderTriggers {
+                order: (0..triggers.len()).collect(),
+            }),
+            WaitingFor::TriggerTargetSelection { .. } if aim.is_some() => {
+                runner.act(GameAction::SelectTargets {
+                    targets: aim.map(TargetRef::Player).into_iter().collect(),
+                })
             }
-            WaitingFor::OrderTriggers { triggers, .. } => {
-                let order: Vec<usize> = (0..triggers.len()).collect();
-                if runner.act(GameAction::OrderTriggers { order }).is_err() {
-                    break;
-                }
-            }
-            _ => break,
+            _ => return,
+        };
+        if result.is_err() {
+            return;
         }
     }
+}
+
+/// CR 104.1 + CR 723.1 + CR 723.5 + CR 100.4 through the production entry point: P1 casts
+/// Worst Fears at P0 and, on P0's controlled turn, casts P0's Revitalize beside Marauding
+/// Blight-Priest ("Whenever you gain life, each opponent loses 1 life.") and Exquisite Blood
+/// ("Whenever an opponent loses life, you gain that much life."). The mandatory drain is decided
+/// by the loop detector, whose replay submits P0's choices as P1, so the CR 732.2a crown ends
+/// the game — and player control with it — and the best-of-three goes on to sideboarding.
+#[test]
+fn a_loop_crown_ends_player_control_and_reaches_sideboarding() {
+    let (mut scenario, worst_fears) = worst_fears_board(2);
+    scenario.with_life(P1, 6);
+    scenario.add_real_card(P0, "Marauding Blight-Priest", Zone::Battlefield, card_db());
+    scenario.add_real_card(P0, "Exquisite Blood", Zone::Battlefield, card_db());
+    let revitalize = add_revitalize(&mut scenario);
+    let mut runner = scenario.build();
+    // `install_match` projects `MatchConfig::loop_detection` (default `Off`) onto the state, so
+    // the detector is armed after it.
+    install_match(runner.state_mut(), MatchType::Bo3, 2);
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+
+    into_worst_fears_turn(&mut runner, worst_fears);
+    assert_eq!(runner.state().turn_decision_controller, Some(P1));
+    runner.cast(revitalize).resolve();
+    drive(&mut runner, None);
 
     let state = runner.state();
     assert!(
-        state.players.iter().find(|p| p.id == P1).unwrap().life > 0,
+        state.players[1].life > 0,
         "reach guard: the CR 732.2a crown ended it early, not a natural CR 704.5a death"
     );
     assert_eq!(state.game_end, Some(GameEnd { winner: Some(P0) }));
+    let marked = state
+        .unbounded_resources
+        .get(&P0)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        marked.contains(&ResourceAxis::Life(P0)) && marked.contains(&ResourceAxis::Life(P1)),
+        "{marked:?}"
+    );
+    assert!(
+        state
+            .unbounded_rising
+            .get(&P0)
+            .is_some_and(|rising| rising.contains(&ResourceAxis::Life(P0))),
+        "{:?}",
+        state.unbounded_rising
+    );
     assert_eq!(state.match_phase, MatchPhase::BetweenGames);
     assert!(
         matches!(
@@ -541,4 +606,92 @@ fn a_loop_crown_ends_player_control_and_reaches_sideboarding() {
         "{:?}",
         runner.state().waiting_for
     );
+}
+
+/// CR 723.5 + CR 732.2a: on P0's turn under P1's Worst Fears, P1 casts P0's Revitalize beside
+/// Sanguine Bond ("Whenever you gain life, target opponent loses that much life.") and Exquisite
+/// Blood, aiming the drain at P2. The loop is offered to P0 as its controller is the one who
+/// may break it: each repetition takes 3, so P2 at 17 falls in 6 and P1 at 20 in 7 more, 13.
+#[test]
+fn a_breakable_loop_during_a_controlled_turn_is_offered() {
+    let (mut scenario, worst_fears) = worst_fears_board(3);
+    scenario.add_real_card(P0, "Sanguine Bond", Zone::Battlefield, card_db());
+    scenario.add_real_card(P0, "Exquisite Blood", Zone::Battlefield, card_db());
+    let revitalize = add_revitalize(&mut scenario);
+    let mut runner = scenario.build();
+    install_match(runner.state_mut(), MatchType::Bo3, 3);
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+
+    into_worst_fears_turn(&mut runner, worst_fears);
+    runner.cast(revitalize).target_player(P2).resolve();
+    drive(&mut runner, Some(P2));
+
+    let state = runner.state();
+    let WaitingFor::LoopShortcut {
+        proposer,
+        predicted_winner,
+        schema,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("no offer: {:?}", state.waiting_for);
+    };
+    assert_eq!((*proposer, *predicted_winner), (P0, Some(P0)));
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(13));
+    assert_eq!(
+        state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
+        [26, 20, 17]
+    );
+}
+
+/// CR 723.5 + CR 605.3a: on P0's turn under P1's Worst Fears, P0's Bedevil off two Swamps and
+/// Graven Cairns ("{T}: Add {C}. / {B/R}, {T}: Add {B}{B}, {B}{R}, or {R}{R}.") is listed for P1
+/// and castable: the filter-land payment witness submits P0's mana abilities as P1.
+#[test]
+fn a_filter_land_cast_is_listed_for_the_controller_of_the_turn() {
+    let (mut scenario, worst_fears) = worst_fears_board(2);
+    let bedevil = add_bedevil_board(&mut scenario);
+    let mut runner = scenario.build();
+    into_worst_fears_turn(&mut runner, worst_fears);
+    assert_bedevil_listed(runner.state(), P1, bedevil);
+}
+
+/// CR 601.2g + CR 605.3a: the same Bedevil board on P0's own uncontrolled turn. Listing the cast
+/// runs the filter-land witness on a clone taken inside the simulated cast's action.
+#[test]
+fn a_filter_land_cast_is_listed_on_an_uncontrolled_turn() {
+    let (mut scenario, _) = worst_fears_board(2);
+    let bedevil = add_bedevil_board(&mut scenario);
+    let runner = scenario.build();
+    assert_eq!(authorized_submitters(runner.state()), vec![P0]);
+    assert_bedevil_listed(runner.state(), P0, bedevil);
+}
+
+fn add_bedevil_board(scenario: &mut GameScenario) -> ObjectId {
+    scenario.add_basic_land(P0, ManaColor::Black);
+    scenario.add_basic_land(P0, ManaColor::Black);
+    scenario.add_real_card(P0, "Graven Cairns", Zone::Battlefield, card_db());
+    scenario.add_vanilla(P1, 2, 2);
+    scenario
+        .add_spell_to_hand_from_oracle(P0, "Bedevil", true, BEDEVIL)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::Black,
+                ManaCostShard::Black,
+                ManaCostShard::Red,
+            ],
+            generic: 0,
+        })
+        .id()
+}
+
+fn assert_bedevil_listed(state: &GameState, viewer: PlayerId, bedevil: ObjectId) {
+    let (actions, _, _) = legal_actions_for_viewer(state, viewer);
+    assert!(
+        actions.iter().any(
+            |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == bedevil)
+        ),
+        "Bedevil is listed for {viewer:?}"
+    );
+    assert!(can_cast_object_now(state, P0, bedevil));
 }

@@ -108,7 +108,7 @@ fn drive(runner: &mut GameRunner, cap: usize, stall_on_order: bool) -> (usize, W
 
 #[test]
 fn n3_growing_cascade_three_player_live_win_on() {
-    let (mut runner, kickoff) = setup(LoopDetectionMode::On);
+    let (mut runner, kickoff) = setup(LoopDetectionMode::Interactive);
     // Resolve the kick-off lifegain, seeding the μ=2 mutual amplifying cascade.
     let _ = runner.cast(kickoff).resolve();
     let (beats, wf) = drive(&mut runner, 500, true);

@@ -1022,3 +1022,124 @@ fn precast_shortcut_is_not_offered_in_shared_team_formats() {
         WaitingFor::PrecastCopyShortcutOffer { .. }
     ));
 }
+
+fn main_phase_of(state: &GameState, seat: PlayerId) -> bool {
+    state.active_player == seat
+        && state.phase == Phase::PreCombatMain
+        && state.stack.is_empty()
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+}
+
+fn pass_until(runner: &mut GameRunner, reached: impl Fn(&GameState) -> bool) {
+    for _ in 0..400 {
+        if reached(runner.state()) {
+            return;
+        }
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            other => panic!("unexpected prompt on the way: {other:?}"),
+        };
+        runner.act(action).expect("pass the turn along");
+    }
+    panic!("never reached; at {:?}", runner.state().waiting_for);
+}
+
+/// P0's next turn after P1's, with Chain of Smog drawn into an otherwise empty hand; under
+/// `worst_fears`, P1 cast Worst Fears at P0 on its own turn and controls that turn (CR 723.1).
+fn chain_turn(worst_fears: bool) -> (GameRunner, ObjectId) {
+    let db = crate::support::shared_card_db().expect("the committed integration card fixture");
+    let mut scenario = GameScenario::new_n_player(3, 4_242);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(
+        P0,
+        "Witherbloom Apprentice",
+        Zone::Battlefield,
+        witherbloom_db(),
+    );
+    scenario
+        .add_spell_to_library_top(P0, "Chain of Smog", false)
+        .from_oracle_text(CHAIN_OF_SMOG);
+    for seat in [P1, P2] {
+        scenario.with_library_top(seat, &["Swamp", "Swamp", "Swamp"]);
+    }
+    scenario.add_bolt_to_hand(P1);
+    for _ in 0..8 {
+        scenario.add_real_card(P1, "Swamp", Zone::Battlefield, db);
+    }
+    let fears = scenario.add_real_card(P1, "Worst Fears", Zone::Hand, db);
+    let mut runner = scenario.build();
+    pass_until(&mut runner, |state| main_phase_of(state, P1));
+    if worst_fears {
+        runner.cast(fears).target_player(P0).resolve();
+    }
+    pass_until(&mut runner, |state| main_phase_of(state, P0));
+    let hand = &runner.state().players[0].hand;
+    assert_eq!(hand.len(), 1, "reach guard: P0 holds only the drawn Chain");
+    let chain = hand[0];
+    (runner, chain)
+}
+
+/// CR 723.5 + CR 732.2a: under P1's Worst Fears, P0's Chain of Smog shortcut is proposed, P1
+/// shortens it at its own breakpoint and P2 accepts; the shortened prefix is replayed with P0's
+/// choices submitted by P1, reaching P1's priority exactly as on an uncontrolled turn.
+#[test]
+fn a_shortened_precast_route_materializes_during_a_controlled_turn() {
+    for worst_fears in [true, false] {
+        let (mut runner, chain) = chain_turn(worst_fears);
+        let controller = if worst_fears { P1 } else { P0 };
+        assert_eq!(
+            runner.state().turn_decision_controller,
+            worst_fears.then_some(P1)
+        );
+        assert_eq!(
+            engine::game::turn_control::authorized_submitters(runner.state()),
+            vec![controller]
+        );
+        let epoch = cast_to_offer(&mut runner, chain);
+        runner
+            .act(GameAction::PrecastCopyShortcut {
+                epoch,
+                response: PrecastCopyShortcutResponse::Propose { route_id: epoch },
+            })
+            .expect("P0 proposes the route");
+        let breakpoint = match runner.state().waiting_for.clone() {
+            WaitingFor::RespondToPrecastCopyShortcut {
+                player: P1,
+                breakpoint_ids,
+                ..
+            } => breakpoint_ids[0],
+            other => panic!("expected P1's response, got {other:?}"),
+        };
+        runner
+            .act(GameAction::PrecastCopyShortcut {
+                epoch,
+                response: PrecastCopyShortcutResponse::Shorten {
+                    breakpoint_id: breakpoint,
+                },
+            })
+            .expect("P1 shortens at its own breakpoint");
+        let accept = match runner.state().waiting_for.clone() {
+            WaitingFor::RespondToPrecastCopyShortcut {
+                player: P2, epoch, ..
+            } => GameAction::PrecastCopyShortcut {
+                epoch,
+                response: PrecastCopyShortcutResponse::Accept,
+            },
+            other => panic!("expected P2's response, got {other:?}"),
+        };
+        let accepted = runner.act(accept);
+        assert!(accepted.is_ok(), "worst_fears={worst_fears}: {accepted:?}");
+        assert_eq!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        );
+        assert!(runner.state().priority_passes.contains(&P0));
+    }
+}

@@ -7139,7 +7139,7 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
 /// CR 601.2c: one shape per point kind, whoever submitted it. `materialize_loop_shortcut_response`
 /// decodes a submitted player candidate on a `Targets` point into
 /// `Scheduled(Constant(Ranking::one(AnnouncementSubject::Seat(..))))` — the same value
-/// `game::engine::record_trigger_target_answer` journals for an announced seat — and an OBJECT
+/// `game::engine::announced_target_pins` emits for an announced seat — and an OBJECT
 /// candidate on the SAME point into `TargetPin::ByIdentity`, unchanged.
 ///
 /// # Discrimination

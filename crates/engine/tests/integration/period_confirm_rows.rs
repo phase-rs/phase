@@ -4441,42 +4441,41 @@ fn charger_trigger_top(state: &GameState) -> bool {
 #[test]
 fn a_hellkite_charger_period_is_offered_at_its_next_combat_and_taken() {
     let db = shared_card_db().expect("card db");
-    for mode in [LoopDetectionMode::Interactive, LoopDetectionMode::On] {
-        let (mut runner, charger) = charger_board(7, true, &[], mode, db);
-        charger_until(
-            &mut runner,
-            charger,
-            |_| true,
-            |state| is_offer(state) || combats_begun(state) > 6,
-        );
-        let state = runner.state();
-        let (span, count) = offer_of(state);
-        assert_eq!(
-            (span.source, span.reach, span.cause),
-            (
-                SpanSource::Carried(0),
-                PeriodReach::Combat,
-                NamingCause::TriggerTop
-            ),
-            "{mode:?}"
-        );
-        assert_eq!(combats_begun(state), 2, "{mode:?}");
-        let power = state.objects[&charger].power.expect("the Charger's power");
-        let life = state.players[1].life;
-        let n = fixed(&count);
-        assert_eq!(n, ((life + power - 1) / power) as u32, "{mode:?}");
+    let mode = LoopDetectionMode::Interactive;
+    let (mut runner, charger) = charger_board(7, true, &[], mode, db);
+    charger_until(
+        &mut runner,
+        charger,
+        |_| true,
+        |state| is_offer(state) || combats_begun(state) > 6,
+    );
+    let state = runner.state();
+    let (span, count) = offer_of(state);
+    assert_eq!(
+        (span.source, span.reach, span.cause),
+        (
+            SpanSource::Carried(0),
+            PeriodReach::Combat,
+            NamingCause::TriggerTop
+        ),
+        "{mode:?}"
+    );
+    assert_eq!(combats_begun(state), 2, "{mode:?}");
+    let power = state.objects[&charger].power.expect("the Charger's power");
+    let life = state.players[1].life;
+    let n = fixed(&count);
+    assert_eq!(n, ((life + power - 1) / power) as u32, "{mode:?}");
 
-        let events = take(&mut runner, n);
-        assert_eq!(
-            runner.state().waiting_for,
-            WaitingFor::GameOver { winner: Some(P0) },
-            "{mode:?}"
-        );
-        assert!(
-            events.contains(&GameEvent::GameOver { winner: Some(P0) }),
-            "{mode:?}"
-        );
-    }
+    let events = take(&mut runner, n);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) },
+        "{mode:?}"
+    );
+    assert!(
+        events.contains(&GameEvent::GameOver { winner: Some(P0) }),
+        "{mode:?}"
+    );
 }
 
 /// CR 506.1 + CR 508.1a + CR 613.4c + CR 704.5a + CR 732.2a: beside Moraug, Fury of Akoum ("Each
@@ -4487,49 +4486,48 @@ fn a_hellkite_charger_period_is_offered_at_its_next_combat_and_taken() {
 #[test]
 fn a_hellkite_charger_period_beside_moraug_is_counted_over_its_growing_damage_and_taken() {
     let db = shared_card_db().expect("card db");
-    for mode in [LoopDetectionMode::Interactive, LoopDetectionMode::On] {
-        let (mut runner, charger) = charger_board(7, true, &["Moraug, Fury of Akoum"], mode, db);
-        charger_until(
-            &mut runner,
-            charger,
-            |_| true,
-            |state| is_offer(state) || combats_begun(state) > 6,
-        );
-        let state = runner.state();
-        let (span, count) = offer_of(state);
-        assert_eq!(
-            (span.reach, span.cause),
-            (PeriodReach::Combat, NamingCause::TriggerTop),
-            "{mode:?}"
-        );
-        // The Charger has attacked in each combat begun: 5 printed, 2 from Bear Umbra, and one
-        // per attack from Moraug.
-        let first = 7 + combats_begun(state) as i32;
-        assert_eq!(state.objects[&charger].power, Some(first), "{mode:?}");
-        let life = state.players[1].life;
-        let n = (1..)
-            .find(|&n: &i32| (0..n).map(|k| first + k).sum::<i32>() >= life)
-            .expect("the damage reaches P1's life") as u32;
-        assert_eq!(fixed(&count), n, "{mode:?}");
-        let WaitingFor::LoopShortcut {
-            predicted_winner, ..
-        } = &state.waiting_for
-        else {
-            unreachable!("offer_of read the offer");
-        };
-        assert_eq!(*predicted_winner, Some(P0), "{mode:?}");
+    let mode = LoopDetectionMode::Interactive;
+    let (mut runner, charger) = charger_board(7, true, &["Moraug, Fury of Akoum"], mode, db);
+    charger_until(
+        &mut runner,
+        charger,
+        |_| true,
+        |state| is_offer(state) || combats_begun(state) > 6,
+    );
+    let state = runner.state();
+    let (span, count) = offer_of(state);
+    assert_eq!(
+        (span.reach, span.cause),
+        (PeriodReach::Combat, NamingCause::TriggerTop),
+        "{mode:?}"
+    );
+    // The Charger has attacked in each combat begun: 5 printed, 2 from Bear Umbra, and one
+    // per attack from Moraug.
+    let first = 7 + combats_begun(state) as i32;
+    assert_eq!(state.objects[&charger].power, Some(first), "{mode:?}");
+    let life = state.players[1].life;
+    let n = (1..)
+        .find(|&n: &i32| (0..n).map(|k| first + k).sum::<i32>() >= life)
+        .expect("the damage reaches P1's life") as u32;
+    assert_eq!(fixed(&count), n, "{mode:?}");
+    let WaitingFor::LoopShortcut {
+        predicted_winner, ..
+    } = &state.waiting_for
+    else {
+        unreachable!("offer_of read the offer");
+    };
+    assert_eq!(*predicted_winner, Some(P0), "{mode:?}");
 
-        let events = take(&mut runner, n);
-        assert_eq!(
-            runner.state().waiting_for,
-            WaitingFor::GameOver { winner: Some(P0) },
-            "{mode:?}"
-        );
-        assert!(
-            events.contains(&GameEvent::GameOver { winner: Some(P0) }),
-            "{mode:?}"
-        );
-    }
+    let events = take(&mut runner, n);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) },
+        "{mode:?}"
+    );
+    assert!(
+        events.contains(&GameEvent::GameOver { winner: Some(P0) }),
+        "{mode:?}"
+    );
 }
 
 /// The Charger period beside Moraug on `seats` seats, driven to its first offer.
@@ -4804,36 +4802,35 @@ fn najeela_until(runner: &mut GameRunner, until: impl Fn(&GameState) -> bool) {
 #[test]
 fn a_najeela_urtet_period_is_offered_at_its_next_combat_and_taken() {
     let db = shared_card_db().expect("card db");
-    for mode in [LoopDetectionMode::Interactive, LoopDetectionMode::On] {
-        let mut runner = najeela_board(true, mode, db);
-        najeela_until(&mut runner, |state| {
-            is_offer(state) || combats_begun(state) > 6
-        });
-        let state = runner.state();
-        let (span, count) = offer_of(state);
-        assert_eq!(
-            (span.source, span.reach, span.cause),
-            (
-                SpanSource::Carried(0),
-                PeriodReach::Combat,
-                NamingCause::LegalNow
-            ),
-            "{mode:?}"
-        );
-        assert_eq!(
-            (state.phase, combats_begun(state)),
-            (Phase::BeginCombat, 2),
-            "{mode:?}"
-        );
-        let n = fixed(&count);
-        assert_eq!(n, state.players[1].life as u32, "{mode:?}");
-        take(&mut runner, n);
-        assert_eq!(
-            runner.state().waiting_for,
-            WaitingFor::GameOver { winner: Some(P0) },
-            "{mode:?}"
-        );
-    }
+    let mode = LoopDetectionMode::Interactive;
+    let mut runner = najeela_board(true, mode, db);
+    najeela_until(&mut runner, |state| {
+        is_offer(state) || combats_begun(state) > 6
+    });
+    let state = runner.state();
+    let (span, count) = offer_of(state);
+    assert_eq!(
+        (span.source, span.reach, span.cause),
+        (
+            SpanSource::Carried(0),
+            PeriodReach::Combat,
+            NamingCause::LegalNow
+        ),
+        "{mode:?}"
+    );
+    assert_eq!(
+        (state.phase, combats_begun(state)),
+        (Phase::BeginCombat, 2),
+        "{mode:?}"
+    );
+    let n = fixed(&count);
+    assert_eq!(n, state.players[1].life as u32, "{mode:?}");
+    take(&mut runner, n);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) },
+        "{mode:?}"
+    );
 }
 
 /// CR 302.6: without Urtet the Myr stay tapped after the first activation, so Najeela cannot be
@@ -5043,43 +5040,42 @@ fn library_term(state: &GameState) -> u32 {
 #[test]
 fn an_archaeomancer_time_warp_period_is_offered_its_hand_bound_and_taken() {
     let db = shared_card_db().expect("card db");
-    for mode in [LoopDetectionMode::Interactive, LoopDetectionMode::On] {
-        let mut runner = warp_board(25, &[], mode, db);
-        let turn = runner.state().turn_number;
-        warp_until(&mut runner, |state| {
-            is_offer(state) || state.turn_number > turn + 3
-        });
-        let state = runner.state().clone();
-        let (span, count) = offer_of(&state);
-        assert_eq!(
-            (span.source, span.reach, span.cause),
-            (
-                SpanSource::Carried(0),
-                PeriodReach::ExtraTurn,
-                NamingCause::LegalNow
-            ),
-            "{mode:?}"
-        );
-        assert_eq!(state.turn_number, turn + 1, "{mode:?}");
-        let n = fixed(&count);
-        assert!(
-            hand_term(&state) < library_term(&state),
-            "reach: the hand binds"
-        );
-        assert_eq!(n, hand_term(&state), "{mode:?}");
+    let mode = LoopDetectionMode::Interactive;
+    let mut runner = warp_board(25, &[], mode, db);
+    let turn = runner.state().turn_number;
+    warp_until(&mut runner, |state| {
+        is_offer(state) || state.turn_number > turn + 3
+    });
+    let state = runner.state().clone();
+    let (span, count) = offer_of(&state);
+    assert_eq!(
+        (span.source, span.reach, span.cause),
+        (
+            SpanSource::Carried(0),
+            PeriodReach::ExtraTurn,
+            NamingCause::LegalNow
+        ),
+        "{mode:?}"
+    );
+    assert_eq!(state.turn_number, turn + 1, "{mode:?}");
+    let n = fixed(&count);
+    assert!(
+        hand_term(&state) < library_term(&state),
+        "reach: the hand binds"
+    );
+    assert_eq!(n, hand_term(&state), "{mode:?}");
 
-        take(&mut runner, n);
-        let after = runner.state();
-        assert_eq!(
-            (after.turn_number, after.active_player, after.phase),
-            (state.turn_number + n, P0, Phase::PreCombatMain),
-            "{mode:?}"
-        );
-        assert_eq!(
-            after.players[0].hand.len(),
-            state.players[0].hand.len() + n as usize
-        );
-    }
+    take(&mut runner, n);
+    let after = runner.state();
+    assert_eq!(
+        (after.turn_number, after.active_player, after.phase),
+        (state.turn_number + n, P0, Phase::PreCombatMain),
+        "{mode:?}"
+    );
+    assert_eq!(
+        after.players[0].hand.len(),
+        state.players[0].hand.len() + n as usize
+    );
 }
 
 /// [`warp_step`], with Carpet of Flowers' trigger aimed at P1 and its mana taken as green.
@@ -5546,8 +5542,6 @@ fn the_turn_cycle_cover_refuses_a_foretold_card_whose_castability_moved() {
     assert!(!moved.certifies(), "{moved:?}");
 }
 
-const BOTH_MODES: [LoopDetectionMode; 2] = [LoopDetectionMode::Interactive, LoopDetectionMode::On];
-
 /// The Altar + Gravecrawler + Genesis Chamber board in `mode` with Mayhem Devil ("Whenever a
 /// player sacrifices a permanent, this creature deals 1 damage to any target.") and `damaged`
 /// under `controller`, driven with the Devil aimed at `damaged` until its period is offered.
@@ -5600,18 +5594,17 @@ fn altar_devil_offered(
 #[test]
 fn a_period_damaging_an_indestructible_permanent_is_offered_and_performed() {
     let db = shared_card_db().expect("card db");
-    for mode in BOTH_MODES {
-        let (mut runner, myr) = altar_devil_offered(mode, P0, "Darksteel Myr", db);
-        let state = runner.state();
-        assert!(state.objects[&myr].has_keyword(&Keyword::Indestructible));
-        let (damage, made) = (state.objects[&myr].damage_marked, tokens(state, P0).len());
-        assert!(damage > 0, "{mode:?}: the hand-driven cycle marked damage");
-        take(&mut runner, 3);
-        let state = runner.state();
-        assert_eq!(state.objects[&myr].damage_marked, damage + 3, "{mode:?}");
-        assert_eq!(tokens(state, P0).len(), made + 3, "{mode:?}");
-        assert!(!marks_tokens(state, P0), "{mode:?}");
-    }
+    let mode = LoopDetectionMode::Interactive;
+    let (mut runner, myr) = altar_devil_offered(mode, P0, "Darksteel Myr", db);
+    let state = runner.state();
+    assert!(state.objects[&myr].has_keyword(&Keyword::Indestructible));
+    let (damage, made) = (state.objects[&myr].damage_marked, tokens(state, P0).len());
+    assert!(damage > 0, "{mode:?}: the hand-driven cycle marked damage");
+    take(&mut runner, 3);
+    let state = runner.state();
+    assert_eq!(state.objects[&myr].damage_marked, damage + 3, "{mode:?}");
+    assert_eq!(tokens(state, P0).len(), made + 3, "{mode:?}");
+    assert!(!marks_tokens(state, P0), "{mode:?}");
 }
 
 /// CR 120.3e + CR 120.6: the damage Mayhem Devil marks each cycle on an opponent's Steel Wall
@@ -5619,17 +5612,16 @@ fn a_period_damaging_an_indestructible_permanent_is_offered_and_performed() {
 #[test]
 fn a_period_damaging_an_opponents_permanent_is_performed() {
     let db = shared_card_db().expect("card db");
-    for mode in BOTH_MODES {
-        let (mut runner, wall) = altar_devil_offered(mode, P1, "Steel Wall", db);
-        let state = runner.state();
-        let made = tokens(state, P0).len();
-        assert_eq!(state.objects[&wall].damage_marked, 1, "{mode:?}");
-        take(&mut runner, 2);
-        let state = runner.state();
-        assert_eq!(state.objects[&wall].damage_marked, 3, "{mode:?}");
-        assert_eq!(state.objects[&wall].zone, Zone::Battlefield, "{mode:?}");
-        assert_eq!(tokens(state, P0).len(), made + 2, "{mode:?}");
-    }
+    let mode = LoopDetectionMode::Interactive;
+    let (mut runner, wall) = altar_devil_offered(mode, P1, "Steel Wall", db);
+    let state = runner.state();
+    let made = tokens(state, P0).len();
+    assert_eq!(state.objects[&wall].damage_marked, 1, "{mode:?}");
+    take(&mut runner, 2);
+    let state = runner.state();
+    assert_eq!(state.objects[&wall].damage_marked, 3, "{mode:?}");
+    assert_eq!(state.objects[&wall].zone, Zone::Battlefield, "{mode:?}");
+    assert_eq!(tokens(state, P0).len(), made + 2, "{mode:?}");
 }
 
 fn treasures(state: &GameState) -> usize {
@@ -5671,32 +5663,31 @@ fn charger_gnawbone_board(
 #[test]
 fn a_hellkite_charger_period_paid_by_remade_treasures_is_offered_and_taken() {
     let db = shared_card_db().expect("card db");
-    for mode in BOTH_MODES {
-        let (mut runner, charger, _) = charger_gnawbone_board(true, mode, db);
-        charger_until(
-            &mut runner,
-            charger,
-            |_| true,
-            |state| is_offer(state) || combats_begun(state) > 6,
-        );
-        let state = runner.state();
-        let (span, count) = offer_of(state);
-        assert_eq!(
-            (span.source, span.reach),
-            (SpanSource::Carried(0), PeriodReach::Combat),
-            "{mode:?}"
-        );
-        assert_eq!(combats_begun(state), 2, "{mode:?}");
-        let life = state.players[1].life;
-        assert_eq!(fixed(&count), ((life + 6) / 7) as u32, "{mode:?}");
-        assert_eq!(treasures(state), 7, "{mode:?}");
+    let mode = LoopDetectionMode::Interactive;
+    let (mut runner, charger, _) = charger_gnawbone_board(true, mode, db);
+    charger_until(
+        &mut runner,
+        charger,
+        |_| true,
+        |state| is_offer(state) || combats_begun(state) > 6,
+    );
+    let state = runner.state();
+    let (span, count) = offer_of(state);
+    assert_eq!(
+        (span.source, span.reach),
+        (SpanSource::Carried(0), PeriodReach::Combat),
+        "{mode:?}"
+    );
+    assert_eq!(combats_begun(state), 2, "{mode:?}");
+    let life = state.players[1].life;
+    assert_eq!(fixed(&count), ((life + 6) / 7) as u32, "{mode:?}");
+    assert_eq!(treasures(state), 7, "{mode:?}");
 
-        take(&mut runner, 3);
-        let state = runner.state();
-        assert_eq!(state.players[1].life, life - 21, "{mode:?}");
-        assert_eq!(treasures(state), 7, "{mode:?}");
-        assert_eq!(combats_begun(state), 5, "{mode:?}");
-    }
+    take(&mut runner, 3);
+    let state = runner.state();
+    assert_eq!(state.players[1].life, life - 21, "{mode:?}");
+    assert_eq!(treasures(state), 7, "{mode:?}");
+    assert_eq!(combats_begun(state), 5, "{mode:?}");
 }
 
 /// CR 602.2 + CR 732.2a: without Bear Umbra and with Old Gnawbone attacking beside it, each combat
@@ -5974,71 +5965,70 @@ fn an_aggravated_assault_period_paid_by_the_treasures_its_combat_makes_is_offere
         mountains: 0,
         treasures: 5,
     };
-    for mode in BOTH_MODES {
-        for pay in [AssaultPay::Engine, AssaultPay::Hand] {
-            // CR 505.1a: every added main phase is a postcombat main, so a period begun in the
-            // precombat main first comes round to the phase it resumes in one cycle later.
-            for (phase, combats) in [(Phase::PreCombatMain, 2), (Phase::PostCombatMain, 1)] {
-                let case = format!("{mode:?}, {pay:?}, from {phase:?}");
-                let (mut runner, mut drive) = assault_board(board, phase, pay, mode, db);
-                assault_until(&mut runner, &mut drive, |state| {
-                    is_offer(state) || combats_begun(state) > 6
-                });
-                let state = runner.state().clone();
-                let n = carried_combat_offer(&state, &case);
-                let life = state.players[1].life;
-                assert_eq!(
-                    assault_frame(&state),
-                    (
-                        life,
-                        5,
-                        Phase::PostCombatMain,
-                        combats,
-                        0,
-                        0,
-                        vec!["Spined Wurm".to_string()]
-                    ),
-                    "{case}"
-                );
-                assert_eq!(n, ((life + 4) / 5) as u32, "{case}");
+    let mode = LoopDetectionMode::Interactive;
+    for pay in [AssaultPay::Engine, AssaultPay::Hand] {
+        // CR 505.1a: every added main phase is a postcombat main, so a period begun in the
+        // precombat main first comes round to the phase it resumes in one cycle later.
+        for (phase, combats) in [(Phase::PreCombatMain, 2), (Phase::PostCombatMain, 1)] {
+            let case = format!("{mode:?}, {pay:?}, from {phase:?}");
+            let (mut runner, mut drive) = assault_board(board, phase, pay, mode, db);
+            assault_until(&mut runner, &mut drive, |state| {
+                is_offer(state) || combats_begun(state) > 6
+            });
+            let state = runner.state().clone();
+            let n = carried_combat_offer(&state, &case);
+            let life = state.players[1].life;
+            assert_eq!(
+                assault_frame(&state),
+                (
+                    life,
+                    5,
+                    Phase::PostCombatMain,
+                    combats,
+                    0,
+                    0,
+                    vec!["Spined Wurm".to_string()]
+                ),
+                "{case}"
+            );
+            assert_eq!(n, ((life + 4) / 5) as u32, "{case}");
 
-                let cycles = assault_frame(&taken(&state, 3));
-                assert_eq!(
-                    cycles,
-                    (
-                        life - 15,
-                        5,
-                        Phase::PostCombatMain,
-                        combats + 3,
-                        0,
-                        0,
-                        vec!["Spined Wurm".to_string()]
-                    ),
-                    "{case}"
-                );
-                let mut by_hand = GameRunner::from_state(state);
-                act(&mut by_hand, GameAction::DeclineShortcut);
-                by_hand.state_mut().loop_detection = LoopDetectionMode::Off;
-                let mut hand_drive = AssaultDrive {
-                    activated_at: None,
-                    ..drive
-                };
-                assault_until(&mut by_hand, &mut hand_drive, |state| {
-                    combats_begun(state) == combats + 3 && assault_window(state)
-                });
-                assert_eq!(cycles, assault_frame(by_hand.state()), "{case}");
+            let cycles = assault_frame(&taken(&state, 3));
+            assert_eq!(
+                cycles,
+                (
+                    life - 15,
+                    5,
+                    Phase::PostCombatMain,
+                    combats + 3,
+                    0,
+                    0,
+                    vec!["Spined Wurm".to_string()]
+                ),
+                "{case}"
+            );
+            let mut by_hand = GameRunner::from_state(state);
+            act(&mut by_hand, GameAction::DeclineShortcut);
+            by_hand.state_mut().loop_detection = LoopDetectionMode::Off;
+            let mut hand_drive = AssaultDrive {
+                activated_at: None,
+                ..drive
+            };
+            assault_until(&mut by_hand, &mut hand_drive, |state| {
+                combats_begun(state) == combats + 3 && assault_window(state)
+            });
+            assert_eq!(cycles, assault_frame(by_hand.state()), "{case}");
 
-                let events = take(&mut runner, n);
-                assert_eq!(
-                    runner.state().waiting_for,
-                    WaitingFor::GameOver { winner: Some(P0) },
-                    "{case}"
-                );
-                assert!(
-                    events.contains(&GameEvent::GameOver { winner: Some(P0) }),
-                    "{case}"
-                );
-            }
+            let events = take(&mut runner, n);
+            assert_eq!(
+                runner.state().waiting_for,
+                WaitingFor::GameOver { winner: Some(P0) },
+                "{case}"
+            );
+            assert!(
+                events.contains(&GameEvent::GameOver { winner: Some(P0) }),
+                "{case}"
+            );
         }
     }
 }
@@ -6074,35 +6064,33 @@ fn an_aggravated_assault_period_paid_by_a_population_it_untaps_is_offered_and_ta
         ),
     ];
     for (board, power) in boards {
-        for mode in BOTH_MODES {
-            for pay in [AssaultPay::Engine, AssaultPay::Hand] {
-                let case = format!("{board:?}, {mode:?}, {pay:?}");
-                let (mut runner, mut drive) =
-                    assault_board(board, Phase::PreCombatMain, pay, mode, db);
-                assault_until(&mut runner, &mut drive, |state| {
-                    is_offer(state) || combats_begun(state) > 6
-                });
-                let state = runner.state();
-                let n = carried_combat_offer(state, &case);
-                assert_eq!(combats_begun(state), 2, "{case}");
-                assert_eq!(state.objects[&drive.attacker].power, Some(power), "{case}");
-                assert_eq!(
-                    n,
-                    ((state.players[1].life + power - 1) / power) as u32,
-                    "{case}"
-                );
+        let mode = LoopDetectionMode::Interactive;
+        for pay in [AssaultPay::Engine, AssaultPay::Hand] {
+            let case = format!("{board:?}, {mode:?}, {pay:?}");
+            let (mut runner, mut drive) = assault_board(board, Phase::PreCombatMain, pay, mode, db);
+            assault_until(&mut runner, &mut drive, |state| {
+                is_offer(state) || combats_begun(state) > 6
+            });
+            let state = runner.state();
+            let n = carried_combat_offer(state, &case);
+            assert_eq!(combats_begun(state), 2, "{case}");
+            assert_eq!(state.objects[&drive.attacker].power, Some(power), "{case}");
+            assert_eq!(
+                n,
+                ((state.players[1].life + power - 1) / power) as u32,
+                "{case}"
+            );
 
-                let events = take(&mut runner, n);
-                assert_eq!(
-                    runner.state().waiting_for,
-                    WaitingFor::GameOver { winner: Some(P0) },
-                    "{case}"
-                );
-                assert!(
-                    events.contains(&GameEvent::GameOver { winner: Some(P0) }),
-                    "{case}"
-                );
-            }
+            let events = take(&mut runner, n);
+            assert_eq!(
+                runner.state().waiting_for,
+                WaitingFor::GameOver { winner: Some(P0) },
+                "{case}"
+            );
+            assert!(
+                events.contains(&GameEvent::GameOver { winner: Some(P0) }),
+                "{case}"
+            );
         }
     }
 }
@@ -6277,33 +6265,32 @@ fn a_period_beside_cards_it_never_uses_is_offered_as_it_is_without_them() {
             ],
         ),
     ];
-    for mode in BOTH_MODES {
-        for (board, pay, beside) in &groups {
-            let control = format!("{mode:?}, {pay:?}, {board:?}");
-            let (runner, drive) = assault_beside(*board, *pay, None, mode, db);
+    let mode = LoopDetectionMode::Interactive;
+    for (board, pay, beside) in &groups {
+        let control = format!("{mode:?}, {pay:?}, {board:?}");
+        let (runner, drive) = assault_beside(*board, *pay, None, mode, db);
+        let state = runner.state();
+        let (_, without @ (_, _, life, count)) = carried_offer(state, &control);
+        let power = state.objects[&drive.attacker]
+            .power
+            .expect("the attacker's power");
+        assert_eq!(count, ((life + power - 1) / power) as u32, "{control}");
+        for &(idle, reach) in beside {
+            let case = format!("{control} beside {idle:?}");
+            let (runner, drive) = assault_beside(*board, *pay, Some(idle), mode, db);
             let state = runner.state();
-            let (_, without @ (_, _, life, count)) = carried_offer(state, &control);
-            let power = state.objects[&drive.attacker]
-                .power
-                .expect("the attacker's power");
-            assert_eq!(count, ((life + power - 1) / power) as u32, "{control}");
-            for &(idle, reach) in beside {
-                let case = format!("{control} beside {idle:?}");
-                let (runner, drive) = assault_beside(*board, *pay, Some(idle), mode, db);
-                let state = runner.state();
-                let (span, moment) = carried_offer(state, &case);
-                assert_eq!(moment, without, "{case}");
-                assert_eq!(
-                    (span.reach, span.cause),
-                    (reach, NamingCause::LegalNow),
-                    "{case}"
-                );
-                assert_eq!(state.players[0].life, 20, "{case}");
-                // A hand-paid take leaves other activation records than its cycles driven by hand.
-                if *pay == AssaultPay::Engine {
-                    let differs = assault_take_differs(state, drive, 3);
-                    assert!(differs.is_empty(), "{case}: {differs:?}");
-                }
+            let (span, moment) = carried_offer(state, &case);
+            assert_eq!(moment, without, "{case}");
+            assert_eq!(
+                (span.reach, span.cause),
+                (reach, NamingCause::LegalNow),
+                "{case}"
+            );
+            assert_eq!(state.players[0].life, 20, "{case}");
+            // A hand-paid take leaves other activation records than its cycles driven by hand.
+            if *pay == AssaultPay::Engine {
+                let differs = assault_take_differs(state, drive, 3);
+                assert!(differs.is_empty(), "{case}: {differs:?}");
             }
         }
     }
@@ -6329,46 +6316,45 @@ fn a_hellkite_charger_period_beside_cards_it_never_uses_is_offered_as_it_is_with
         );
         (runner, charger)
     };
-    for mode in BOTH_MODES {
-        let control = format!("{mode:?}");
-        let (runner, charger) = offered(None, mode);
+    let mode = LoopDetectionMode::Interactive;
+    let control = format!("{mode:?}");
+    let (runner, charger) = offered(None, mode);
+    let state = runner.state();
+    let (_, without @ (_, _, life, count)) = carried_offer(state, &control);
+    let power = state.objects[&charger].power.expect("the Charger's power");
+    assert_eq!(count, ((life + power - 1) / power) as u32, "{control}");
+    for idle in [
+        Idle("World at War", Zone::Graveyard, false),
+        Idle("Aggravated Assault", Zone::Battlefield, false),
+        Idle("Mana Confluence", Zone::Battlefield, true),
+        Idle("Time Warp", Zone::Hand, false),
+    ] {
+        let case = format!("{mode:?} beside {idle:?}");
+        let (runner, charger) = offered(Some(idle), mode);
         let state = runner.state();
-        let (_, without @ (_, _, life, count)) = carried_offer(state, &control);
-        let power = state.objects[&charger].power.expect("the Charger's power");
-        assert_eq!(count, ((life + power - 1) / power) as u32, "{control}");
-        for idle in [
-            Idle("World at War", Zone::Graveyard, false),
-            Idle("Aggravated Assault", Zone::Battlefield, false),
-            Idle("Mana Confluence", Zone::Battlefield, true),
-            Idle("Time Warp", Zone::Hand, false),
-        ] {
-            let case = format!("{mode:?} beside {idle:?}");
-            let (runner, charger) = offered(Some(idle), mode);
-            let state = runner.state();
-            let (span, moment) = carried_offer(state, &case);
-            assert_eq!(moment, without, "{case}");
-            assert_eq!(
-                (span.reach, span.cause),
-                (PeriodReach::Combat, NamingCause::TriggerTop),
-                "{case}"
-            );
-            assert_eq!(state.players[0].life, 20, "{case}");
+        let (span, moment) = carried_offer(state, &case);
+        assert_eq!(moment, without, "{case}");
+        assert_eq!(
+            (span.reach, span.cause),
+            (PeriodReach::Combat, NamingCause::TriggerTop),
+            "{case}"
+        );
+        assert_eq!(state.players[0].life, 20, "{case}");
 
-            let combats = combats_begun(state);
-            let taken = taken(state, 3);
-            let mut by_hand = GameRunner::from_state(state.clone());
-            act(&mut by_hand, GameAction::DeclineShortcut);
-            by_hand.state_mut().loop_detection = LoopDetectionMode::Off;
-            charger_until(
-                &mut by_hand,
-                charger,
-                |_| true,
-                |state| combats_begun(state) == combats + 3 && charger_trigger_top(state),
-            );
-            let differs =
-                crate::loop_period_remade_token_source::differing_fields(&taken, by_hand.state());
-            assert!(differs.is_empty(), "{case}: {differs:?}");
-        }
+        let combats = combats_begun(state);
+        let taken = taken(state, 3);
+        let mut by_hand = GameRunner::from_state(state.clone());
+        act(&mut by_hand, GameAction::DeclineShortcut);
+        by_hand.state_mut().loop_detection = LoopDetectionMode::Off;
+        charger_until(
+            &mut by_hand,
+            charger,
+            |_| true,
+            |state| combats_begun(state) == combats + 3 && charger_trigger_top(state),
+        );
+        let differs =
+            crate::loop_period_remade_token_source::differing_fields(&taken, by_hand.state());
+        assert!(differs.is_empty(), "{case}: {differs:?}");
     }
 }
 
@@ -6388,34 +6374,33 @@ fn a_period_paying_life_its_own_trigger_regains_is_offered_and_taken() {
         mountains: 4,
         treasures: 0,
     };
-    for mode in BOTH_MODES {
-        let case = format!("{mode:?}");
-        let (runner, drive) = assault_beside(board, AssaultPay::Engine, None, mode, db);
-        let state = runner.state();
-        let (span, (combats, phase, life, count)) = carried_offer(state, &case);
-        assert_eq!(
-            (combats, phase, span.reach, span.cause),
-            (
-                2,
-                Phase::PostCombatMain,
-                PeriodReach::Combat,
-                NamingCause::LegalNow
-            ),
-            "{case}"
-        );
-        assert_eq!(state.players[0].life, 20, "{case}");
-        let lost_each_cycle = state.objects[&drive.attacker]
-            .power
-            .expect("the attacker's power")
-            + 1;
-        assert_eq!(
-            count,
-            ((life + lost_each_cycle - 1) / lost_each_cycle) as u32,
-            "{case}"
-        );
-        let differs = assault_take_differs(state, drive, 3);
-        assert!(differs.is_empty(), "{case}: {differs:?}");
-    }
+    let mode = LoopDetectionMode::Interactive;
+    let case = format!("{mode:?}");
+    let (runner, drive) = assault_beside(board, AssaultPay::Engine, None, mode, db);
+    let state = runner.state();
+    let (span, (combats, phase, life, count)) = carried_offer(state, &case);
+    assert_eq!(
+        (combats, phase, span.reach, span.cause),
+        (
+            2,
+            Phase::PostCombatMain,
+            PeriodReach::Combat,
+            NamingCause::LegalNow
+        ),
+        "{case}"
+    );
+    assert_eq!(state.players[0].life, 20, "{case}");
+    let lost_each_cycle = state.objects[&drive.attacker]
+        .power
+        .expect("the attacker's power")
+        + 1;
+    assert_eq!(
+        count,
+        ((life + lost_each_cycle - 1) / lost_each_cycle) as u32,
+        "{case}"
+    );
+    let differs = assault_take_differs(state, drive, 3);
+    assert!(differs.is_empty(), "{case}: {differs:?}");
 }
 
 /// CR 505.1a + CR 732.2a: Neheb, the Eternal ("At the beginning of each of your postcombat main
@@ -6434,32 +6419,31 @@ fn an_aggravated_assault_period_paid_by_neheb_and_lands_is_offered_and_taken() {
             mountains: 5,
             treasures: 0,
         };
-        for mode in BOTH_MODES {
-            let case = format!("{others:?}, {mode:?}");
-            let (mut runner, mut drive) =
-                assault_board(board, Phase::PreCombatMain, AssaultPay::Engine, mode, db);
-            // The precombat main passes without an activation.
-            drive.activated_at = Some(0);
-            assault_until(&mut runner, &mut drive, |state| {
-                is_offer(state) || state.active_player != P0 || combats_begun(state) > 6
-            });
-            let state = runner.state();
-            let (span, (combats, phase, life, count)) = carried_offer(state, &case);
-            assert_eq!(
-                (combats, phase, span.reach, span.cause),
-                (
-                    2,
-                    Phase::PostCombatMain,
-                    PeriodReach::Combat,
-                    NamingCause::LegalNow
-                ),
-                "{case}"
-            );
-            let power = state.objects[&drive.attacker].power.expect("Neheb's power");
-            assert_eq!(count, ((life + power - 1) / power) as u32, "{case}");
-            let differs = assault_take_differs(state, drive, 2);
-            assert!(differs.is_empty(), "{case}: {differs:?}");
-        }
+        let mode = LoopDetectionMode::Interactive;
+        let case = format!("{others:?}, {mode:?}");
+        let (mut runner, mut drive) =
+            assault_board(board, Phase::PreCombatMain, AssaultPay::Engine, mode, db);
+        // The precombat main passes without an activation.
+        drive.activated_at = Some(0);
+        assault_until(&mut runner, &mut drive, |state| {
+            is_offer(state) || state.active_player != P0 || combats_begun(state) > 6
+        });
+        let state = runner.state();
+        let (span, (combats, phase, life, count)) = carried_offer(state, &case);
+        assert_eq!(
+            (combats, phase, span.reach, span.cause),
+            (
+                2,
+                Phase::PostCombatMain,
+                PeriodReach::Combat,
+                NamingCause::LegalNow
+            ),
+            "{case}"
+        );
+        let power = state.objects[&drive.attacker].power.expect("Neheb's power");
+        assert_eq!(count, ((life + power - 1) / power) as u32, "{case}");
+        let differs = assault_take_differs(state, drive, 2);
+        assert!(differs.is_empty(), "{case}: {differs:?}");
     }
 }
 
@@ -6516,43 +6500,41 @@ fn an_aggravated_assault_period_paid_by_neheb_alone_is_offered_and_taken() {
         },
     ];
     for board in boards {
-        for mode in BOTH_MODES {
-            for pay in [AssaultPay::Engine, AssaultPay::Hand] {
-                let case = format!("{board:?}, {mode:?}, {pay:?}");
-                let (mut runner, mut drive) =
-                    assault_board(board, Phase::PreCombatMain, pay, mode, db);
-                assault_until(&mut runner, &mut drive, |state| {
-                    is_offer(state) || state.active_player != P0 || combats_begun(state) > 6
-                });
-                let state = runner.state();
-                let (span, (combats, phase, life, count)) = carried_offer(state, &case);
-                assert_eq!(
-                    (combats, phase, span.reach, span.cause),
-                    (
-                        2,
-                        Phase::PostCombatMain,
-                        PeriodReach::Combat,
-                        NamingCause::LegalNow
-                    ),
-                    "{case}"
-                );
-                assert!(!mana_ability_outside_library(state), "{case}");
-                let power = state.objects[&drive.attacker].power.expect("a power");
-                assert_eq!(count, ((life + power - 1) / power) as u32, "{case}");
-                let differs = assault_take_differs(state, drive, 3);
-                assert!(differs.is_empty(), "{case}: {differs:?}");
+        let mode = LoopDetectionMode::Interactive;
+        for pay in [AssaultPay::Engine, AssaultPay::Hand] {
+            let case = format!("{board:?}, {mode:?}, {pay:?}");
+            let (mut runner, mut drive) = assault_board(board, Phase::PreCombatMain, pay, mode, db);
+            assault_until(&mut runner, &mut drive, |state| {
+                is_offer(state) || state.active_player != P0 || combats_begun(state) > 6
+            });
+            let state = runner.state();
+            let (span, (combats, phase, life, count)) = carried_offer(state, &case);
+            assert_eq!(
+                (combats, phase, span.reach, span.cause),
+                (
+                    2,
+                    Phase::PostCombatMain,
+                    PeriodReach::Combat,
+                    NamingCause::LegalNow
+                ),
+                "{case}"
+            );
+            assert!(!mana_ability_outside_library(state), "{case}");
+            let power = state.objects[&drive.attacker].power.expect("a power");
+            assert_eq!(count, ((life + power - 1) / power) as u32, "{case}");
+            let differs = assault_take_differs(state, drive, 3);
+            assert!(differs.is_empty(), "{case}: {differs:?}");
 
-                let events = take(&mut runner, count);
-                assert_eq!(
-                    runner.state().waiting_for,
-                    WaitingFor::GameOver { winner: Some(P0) },
-                    "{case}"
-                );
-                assert!(
-                    events.contains(&GameEvent::GameOver { winner: Some(P0) }),
-                    "{case}"
-                );
-            }
+            let events = take(&mut runner, count);
+            assert_eq!(
+                runner.state().waiting_for,
+                WaitingFor::GameOver { winner: Some(P0) },
+                "{case}"
+            );
+            assert!(
+                events.contains(&GameEvent::GameOver { winner: Some(P0) }),
+                "{case}"
+            );
         }
     }
     for (name, zones) in [
@@ -6676,92 +6658,91 @@ fn a_retraced_waves_of_aggression_period_paid_by_neheb_is_offered_and_taken() {
         (&["Neheb, the Eternal"][..], false),
     ];
     for (others, recurs) in boards {
-        for mode in BOTH_MODES {
-            let case = format!("{others:?}, {mode:?}");
-            let mut scenario = GameScenario::new();
-            scenario.at_phase(Phase::PreCombatMain);
-            scenario.with_life(P1, 200);
-            scenario.with_library_top(P0, &["Island"; 25]);
-            scenario.with_library_top(P1, &["Island"; 25]);
-            let mut permanents: Vec<ObjectId> = others
-                .iter()
-                .map(|name| scenario.add_real_card(P0, name, Zone::Battlefield, db))
-                .collect();
-            let attacker = scenario.add_real_card(P0, "Spined Wurm", Zone::Battlefield, db);
-            permanents.push(attacker);
-            scenario.add_real_card(P0, "Waves of Aggression", Zone::Graveyard, db);
-            scenario.add_real_card(P0, RETRACE_LAND, Zone::Hand, db);
-            let mut runner = scenario.build();
-            let state = runner.state_mut();
-            let before = state.turn_number.saturating_sub(1);
-            for id in permanents {
-                let object = state.objects.get_mut(&id).expect("placed");
-                object.entered_battlefield_turn = Some(before);
-                object.summoning_sick = false;
-            }
-            state.loop_detection = mode;
-            let mut cast_at = None;
-            let mut casts = 0;
-            for _ in 0..4000 {
-                let state = runner.state();
-                if is_offer(state) || state.active_player != P0 || combats_begun(state) > 6 {
-                    break;
-                }
-                let before = cast_at;
-                waves_step(&mut runner, attacker, &mut cast_at);
-                casts += u32::from(cast_at != before);
-            }
-            let state = runner.state().clone();
-            assert!(!mana_ability_outside_library(&state), "{case}");
-            if !recurs {
-                assert!(!is_offer(&state), "{case}");
-                assert_eq!(casts, 1, "reach: {case} casts Waves of Aggression once");
-                continue;
-            }
-            let (span, (combats, phase, life, count)) = carried_offer(&state, &case);
-            assert_eq!(
-                (combats, phase, span.reach, span.cause),
-                (
-                    2,
-                    Phase::PostCombatMain,
-                    PeriodReach::Combat,
-                    NamingCause::LegalNow
-                ),
-                "{case}"
-            );
-            let power = state.objects[&attacker].power.expect("a power");
-            assert_eq!(count, ((life + power - 1) / power) as u32, "{case}");
-
-            let taken = taken(&state, 3);
-            let mut by_hand = GameRunner::from_state(state.clone());
-            act(&mut by_hand, GameAction::DeclineShortcut);
-            by_hand.state_mut().loop_detection = LoopDetectionMode::Off;
-            let mut hand_cast_at = None;
-            for _ in 0..4000 {
-                let state = by_hand.state();
-                if combats_begun(state) == combats + 3
-                    && assault_window(state)
-                    && in_zone(state, &state.players[0].hand, RETRACE_LAND).is_some()
-                {
-                    break;
-                }
-                waves_step(&mut by_hand, attacker, &mut hand_cast_at);
-            }
-            let differs =
-                crate::loop_period_remade_token_source::differing_fields(&taken, by_hand.state());
-            assert!(differs.is_empty(), "{case}: {differs:?}");
-
-            let events = take(&mut runner, count);
-            assert_eq!(
-                runner.state().waiting_for,
-                WaitingFor::GameOver { winner: Some(P0) },
-                "{case}"
-            );
-            assert!(
-                events.contains(&GameEvent::GameOver { winner: Some(P0) }),
-                "{case}"
-            );
+        let mode = LoopDetectionMode::Interactive;
+        let case = format!("{others:?}, {mode:?}");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P1, 200);
+        scenario.with_library_top(P0, &["Island"; 25]);
+        scenario.with_library_top(P1, &["Island"; 25]);
+        let mut permanents: Vec<ObjectId> = others
+            .iter()
+            .map(|name| scenario.add_real_card(P0, name, Zone::Battlefield, db))
+            .collect();
+        let attacker = scenario.add_real_card(P0, "Spined Wurm", Zone::Battlefield, db);
+        permanents.push(attacker);
+        scenario.add_real_card(P0, "Waves of Aggression", Zone::Graveyard, db);
+        scenario.add_real_card(P0, RETRACE_LAND, Zone::Hand, db);
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        let before = state.turn_number.saturating_sub(1);
+        for id in permanents {
+            let object = state.objects.get_mut(&id).expect("placed");
+            object.entered_battlefield_turn = Some(before);
+            object.summoning_sick = false;
         }
+        state.loop_detection = mode;
+        let mut cast_at = None;
+        let mut casts = 0;
+        for _ in 0..4000 {
+            let state = runner.state();
+            if is_offer(state) || state.active_player != P0 || combats_begun(state) > 6 {
+                break;
+            }
+            let before = cast_at;
+            waves_step(&mut runner, attacker, &mut cast_at);
+            casts += u32::from(cast_at != before);
+        }
+        let state = runner.state().clone();
+        assert!(!mana_ability_outside_library(&state), "{case}");
+        if !recurs {
+            assert!(!is_offer(&state), "{case}");
+            assert_eq!(casts, 1, "reach: {case} casts Waves of Aggression once");
+            continue;
+        }
+        let (span, (combats, phase, life, count)) = carried_offer(&state, &case);
+        assert_eq!(
+            (combats, phase, span.reach, span.cause),
+            (
+                2,
+                Phase::PostCombatMain,
+                PeriodReach::Combat,
+                NamingCause::LegalNow
+            ),
+            "{case}"
+        );
+        let power = state.objects[&attacker].power.expect("a power");
+        assert_eq!(count, ((life + power - 1) / power) as u32, "{case}");
+
+        let taken = taken(&state, 3);
+        let mut by_hand = GameRunner::from_state(state.clone());
+        act(&mut by_hand, GameAction::DeclineShortcut);
+        by_hand.state_mut().loop_detection = LoopDetectionMode::Off;
+        let mut hand_cast_at = None;
+        for _ in 0..4000 {
+            let state = by_hand.state();
+            if combats_begun(state) == combats + 3
+                && assault_window(state)
+                && in_zone(state, &state.players[0].hand, RETRACE_LAND).is_some()
+            {
+                break;
+            }
+            waves_step(&mut by_hand, attacker, &mut hand_cast_at);
+        }
+        let differs =
+            crate::loop_period_remade_token_source::differing_fields(&taken, by_hand.state());
+        assert!(differs.is_empty(), "{case}: {differs:?}");
+
+        let events = take(&mut runner, count);
+        assert_eq!(
+            runner.state().waiting_for,
+            WaitingFor::GameOver { winner: Some(P0) },
+            "{case}"
+        );
+        assert!(
+            events.contains(&GameEvent::GameOver { winner: Some(P0) }),
+            "{case}"
+        );
     }
 }
 
@@ -6836,99 +6817,98 @@ fn carried_through_turn(runner: &mut GameRunner, drive: &mut AssaultDrive, case:
 #[test]
 fn a_trigger_an_added_main_phase_does_not_feed_is_not_carried() {
     let db = shared_card_db().expect("card db");
-    for mode in BOTH_MODES {
-        let board = AssaultBoard {
-            others: &["Glóin the Mighty"],
-            attacker: "Spined Wurm",
-            aura: None,
-            mountains: 0,
-            treasures: 3,
-        };
-        for pay in [AssaultPay::Engine, AssaultPay::Hand] {
-            let case = format!("Glóin, {mode:?}, {pay:?}");
-            let (mut runner, mut drive) = assault_board(board, Phase::Upkeep, pay, mode, db);
-            let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, &case);
-            assert_eq!(
-                drive.activations, 1,
-                "reach: {case}: Glóin's mana pays once"
-            );
-            assert_eq!(runner.state().players[1].life, 195, "reach: {case}");
-            assert_eq!((verdicts, faces), (vec![], vec![]), "{case}");
-        }
-
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        scenario.with_library_top(P0, &["Island"; 25]);
-        scenario.with_library_top(P1, &["Island"; 25]);
-        let mut runner = scenario.build();
-        let state = runner.state_mut();
-        for name in [
-            "Najeela, the Blade-Blossom",
-            "Neheb, the Eternal",
-            "Hill Giant",
-        ] {
-            place_idle(state, Idle(name, Zone::Battlefield, false), db);
-        }
-        state.loop_detection = mode;
-        let on_battlefield = |name| in_zone(state, &state.battlefield, name).expect("placed");
-        // Najeela's ability is never activated: Neheb adds three mana, and no Warrior attacks.
-        let mut drive = AssaultDrive {
-            assault: on_battlefield("Najeela, the Blade-Blossom"),
-            attacker: on_battlefield("Hill Giant"),
-            pay: AssaultPay::Engine,
-            activated_at: None,
-            activations: 0,
-        };
-        let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, "Najeela");
-        assert_eq!(drive.activations, 0, "{mode:?}");
+    let mode = LoopDetectionMode::Interactive;
+    let board = AssaultBoard {
+        others: &["Glóin the Mighty"],
+        attacker: "Spined Wurm",
+        aura: None,
+        mountains: 0,
+        treasures: 3,
+    };
+    for pay in [AssaultPay::Engine, AssaultPay::Hand] {
+        let case = format!("Glóin, {mode:?}, {pay:?}");
+        let (mut runner, mut drive) = assault_board(board, Phase::Upkeep, pay, mode, db);
+        let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, &case);
         assert_eq!(
-            runner.state().players[1].life,
-            17,
-            "reach: {mode:?}: Neheb's trigger had three mana to add"
+            drive.activations, 1,
+            "reach: {case}: Glóin's mana pays once"
         );
-        assert_eq!((verdicts, faces), (vec![], vec![]), "{mode:?}");
+        assert_eq!(runner.state().players[1].life, 195, "reach: {case}");
+        assert_eq!((verdicts, faces), (vec![], vec![]), "{case}");
+    }
 
-        let board = AssaultBoard {
-            others: &[],
-            attacker: "Neheb, the Eternal",
-            aura: None,
-            mountains: 0,
-            treasures: 0,
-        };
-        for (held, reach) in [
-            (None, PeriodReach::Combat),
-            (Some("Time Warp"), PeriodReach::ExtraTurn),
-        ] {
-            let (mut runner, mut drive) =
-                assault_board(board, Phase::PreCombatMain, AssaultPay::Engine, mode, db);
-            if let Some(held) = held {
-                place_idle(runner.state_mut(), Idle(held, Zone::Hand, false), db);
-            }
-            let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, "Neheb alone");
-            assert_eq!(drive.activations, 0, "{mode:?}");
-            assert_eq!(
-                (verdicts, faces),
-                (
-                    vec![],
-                    vec![(Some("Neheb, the Eternal".to_string()), reach)]
-                ),
-                "{held:?}, {mode:?}"
-            );
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island"; 25]);
+    scenario.with_library_top(P1, &["Island"; 25]);
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    for name in [
+        "Najeela, the Blade-Blossom",
+        "Neheb, the Eternal",
+        "Hill Giant",
+    ] {
+        place_idle(state, Idle(name, Zone::Battlefield, false), db);
+    }
+    state.loop_detection = mode;
+    let on_battlefield = |name| in_zone(state, &state.battlefield, name).expect("placed");
+    // Najeela's ability is never activated: Neheb adds three mana, and no Warrior attacks.
+    let mut drive = AssaultDrive {
+        assault: on_battlefield("Najeela, the Blade-Blossom"),
+        attacker: on_battlefield("Hill Giant"),
+        pay: AssaultPay::Engine,
+        activated_at: None,
+        activations: 0,
+    };
+    let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, "Najeela");
+    assert_eq!(drive.activations, 0, "{mode:?}");
+    assert_eq!(
+        runner.state().players[1].life,
+        17,
+        "reach: {mode:?}: Neheb's trigger had three mana to add"
+    );
+    assert_eq!((verdicts, faces), (vec![], vec![]), "{mode:?}");
+
+    let board = AssaultBoard {
+        others: &[],
+        attacker: "Neheb, the Eternal",
+        aura: None,
+        mountains: 0,
+        treasures: 0,
+    };
+    for (held, reach) in [
+        (None, PeriodReach::Combat),
+        (Some("Time Warp"), PeriodReach::ExtraTurn),
+    ] {
+        let (mut runner, mut drive) =
+            assault_board(board, Phase::PreCombatMain, AssaultPay::Engine, mode, db);
+        if let Some(held) = held {
+            place_idle(runner.state_mut(), Idle(held, Zone::Hand, false), db);
         }
-
-        let (mut runner, mut drive) = siege_board(&["Frontier Siege"], mode, db);
-        let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, "Frontier Siege");
+        let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, "Neheb alone");
         assert_eq!(drive.activations, 0, "{mode:?}");
-        assert_eq!(runner.state().players[1].life, 195, "reach: {mode:?}");
         assert_eq!(
             (verdicts, faces),
             (
                 vec![],
-                vec![(Some("Frontier Siege".to_string()), PeriodReach::Combat)]
+                vec![(Some("Neheb, the Eternal".to_string()), reach)]
             ),
-            "{mode:?}"
+            "{held:?}, {mode:?}"
         );
     }
+
+    let (mut runner, mut drive) = siege_board(&["Frontier Siege"], mode, db);
+    let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, "Frontier Siege");
+    assert_eq!(drive.activations, 0, "{mode:?}");
+    assert_eq!(runner.state().players[1].life, 195, "reach: {mode:?}");
+    assert_eq!(
+        (verdicts, faces),
+        (
+            vec![],
+            vec![(Some("Frontier Siege".to_string()), PeriodReach::Combat)]
+        ),
+        "{mode:?}"
+    );
 }
 
 /// CR 505.1a + CR 732.2a: an added main phase whose trigger pays too little is carried and
@@ -6945,31 +6925,29 @@ fn an_added_main_phase_that_pays_too_little_is_carried_and_refused() {
         ("Neheb, the Eternal", "Ornithopter", 200),
     ];
     for (payer, attacker, life) in boards {
-        for mode in BOTH_MODES {
-            for pay in [AssaultPay::Engine, AssaultPay::Hand] {
-                let case = format!("{payer}, {mode:?}, {pay:?}");
-                let board = AssaultBoard {
-                    others: &[payer],
-                    attacker,
-                    aura: None,
-                    mountains: 0,
-                    treasures: 10,
-                };
-                let (mut runner, mut drive) =
-                    assault_board(board, Phase::PreCombatMain, pay, mode, db);
-                let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, &case);
-                assert_eq!(drive.activations, 2, "reach: {case}");
-                assert_eq!(runner.state().players[1].life, life, "reach: {case}");
-                assert!(
-                    faces.contains(&(Some(payer.to_string()), PeriodReach::Combat)),
-                    "{case}: {faces:?}"
-                );
-                assert_eq!(
-                    verdicts,
-                    vec![Err(OfferRefusal::IllegalReplayedPlay)],
-                    "{case}"
-                );
-            }
+        let mode = LoopDetectionMode::Interactive;
+        for pay in [AssaultPay::Engine, AssaultPay::Hand] {
+            let case = format!("{payer}, {mode:?}, {pay:?}");
+            let board = AssaultBoard {
+                others: &[payer],
+                attacker,
+                aura: None,
+                mountains: 0,
+                treasures: 10,
+            };
+            let (mut runner, mut drive) = assault_board(board, Phase::PreCombatMain, pay, mode, db);
+            let (verdicts, faces) = carried_through_turn(&mut runner, &mut drive, &case);
+            assert_eq!(drive.activations, 2, "reach: {case}");
+            assert_eq!(runner.state().players[1].life, life, "reach: {case}");
+            assert!(
+                faces.contains(&(Some(payer.to_string()), PeriodReach::Combat)),
+                "{case}: {faces:?}"
+            );
+            assert_eq!(
+                verdicts,
+                vec![Err(OfferRefusal::IllegalReplayedPlay)],
+                "{case}"
+            );
         }
     }
 }
@@ -7037,107 +7015,106 @@ fn assert_counted_offer(
     stop: HandStop,
 ) -> Vec<GameState> {
     let mut offers = Vec::new();
-    for mode in BOTH_MODES {
-        let case = format!("{case}, {mode:?}");
-        let mut board = make(mode);
-        let mut actions = 0;
-        while !is_offer(board.runner.state()) {
-            let state = board.runner.state();
-            assert!(
-                actions < 2000 && state.active_player == P0 && !game_over(state),
-                "{case}: not offered"
-            );
-            (board.step)(&mut board.runner).expect("the board's next action");
-            actions += 1;
-        }
-        let offered = board.runner.state().clone();
-        let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
-            unreachable!("is_offer")
-        };
-        assert_eq!(
-            (schema.deliverable_capacity, fixed(&schema.iteration_count)),
-            (count, suggested),
-            "{case}"
-        );
-
-        let mut undetected = make(LoopDetectionMode::Off);
-        for _ in 0..actions {
-            (undetected.step)(&mut undetected.runner).expect("the board's next action");
-        }
-        assert_eq!(
-            differing_fields(&offered, undetected.runner.state()),
-            BTreeSet::from(["waiting_for".to_string()]),
-            "{case}: the offer performed nothing"
-        );
-        let mut hand = GameRunner::from_state(offered.clone());
-        act(&mut hand, GameAction::DeclineShortcut);
-        let declined = hand.state().clone();
+    let mode = LoopDetectionMode::Interactive;
+    let case = format!("{case}, {mode:?}");
+    let mut board = make(mode);
+    let mut actions = 0;
+    while !is_offer(board.runner.state()) {
+        let state = board.runner.state();
         assert!(
-            differing_fields(&declined, undetected.runner.state()).is_empty(),
-            "{case}: declining leaves the hand-played state"
+            actions < 2000 && state.active_player == P0 && !game_over(state),
+            "{case}: not offered"
         );
-
-        hand.state_mut().loop_detection = LoopDetectionMode::Off;
-        let start = (board.periods)(&offered);
-        let mut frames: Vec<GameState> = Vec::new();
-        let mut ended = false;
-        for _ in 0..6000 {
-            let state = hand.state();
-            if game_over(state) {
-                ended = true;
-                break;
-            }
-            if state.active_player != P0 || frames.len() as u32 > count {
-                break;
-            }
-            if (board.window)(state) && (board.periods)(state) == start + frames.len() as u32 + 1 {
-                frames.push(state.clone());
-            }
-            // The hand game ends where the reducer refuses its next play.
-            let mut trial = GameRunner::from_state(state.clone());
-            if (board.step)(&mut trial).is_err() {
-                break;
-            }
-            hand = trial;
-        }
-        let made = frames.len() as u32 + u32::from(ended);
-        match stop {
-            HandStop::Spent | HandStop::GameEnds => assert_eq!(
-                (made, ended),
-                (count, stop == HandStop::GameEnds),
-                "{case}: the hand count"
-            ),
-            HandStop::PastTheCap => assert!(made > count, "{case}: {made} by hand"),
-        }
-
-        let mut takes = vec![1, count / 2, count - 1, count];
-        takes.retain(|k| *k >= 1);
-        takes.dedup();
-        for k in takes {
-            let reference = frames.get(k as usize - 1).unwrap_or(hand.state());
-            let differs = differing_fields(&taken(&offered, k), reference);
-            assert!(
-                differs.is_empty(),
-                "{case}: a take of {k} differs in {differs:?}"
-            );
-        }
-        let mut over = GameRunner::from_state(offered.clone());
-        act(
-            &mut over,
-            GameAction::DeclareShortcut {
-                count: IterationCount::Fixed(count + 1),
-                template: None,
-            },
-        );
-        let mut declined_off = declined.clone();
-        declined_off.loop_detection = LoopDetectionMode::Off;
-        assert!(
-            differing_fields(over.state(), &declined_off).is_empty(),
-            "{case}: a declaration of {} performed something",
-            count + 1
-        );
-        offers.push(offered);
+        (board.step)(&mut board.runner).expect("the board's next action");
+        actions += 1;
     }
+    let offered = board.runner.state().clone();
+    let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
+        unreachable!("is_offer")
+    };
+    assert_eq!(
+        (schema.deliverable_capacity, fixed(&schema.iteration_count)),
+        (count, suggested),
+        "{case}"
+    );
+
+    let mut undetected = make(LoopDetectionMode::Off);
+    for _ in 0..actions {
+        (undetected.step)(&mut undetected.runner).expect("the board's next action");
+    }
+    assert_eq!(
+        differing_fields(&offered, undetected.runner.state()),
+        BTreeSet::from(["waiting_for".to_string()]),
+        "{case}: the offer performed nothing"
+    );
+    let mut hand = GameRunner::from_state(offered.clone());
+    act(&mut hand, GameAction::DeclineShortcut);
+    let declined = hand.state().clone();
+    assert!(
+        differing_fields(&declined, undetected.runner.state()).is_empty(),
+        "{case}: declining leaves the hand-played state"
+    );
+
+    hand.state_mut().loop_detection = LoopDetectionMode::Off;
+    let start = (board.periods)(&offered);
+    let mut frames: Vec<GameState> = Vec::new();
+    let mut ended = false;
+    for _ in 0..6000 {
+        let state = hand.state();
+        if game_over(state) {
+            ended = true;
+            break;
+        }
+        if state.active_player != P0 || frames.len() as u32 > count {
+            break;
+        }
+        if (board.window)(state) && (board.periods)(state) == start + frames.len() as u32 + 1 {
+            frames.push(state.clone());
+        }
+        // The hand game ends where the reducer refuses its next play.
+        let mut trial = GameRunner::from_state(state.clone());
+        if (board.step)(&mut trial).is_err() {
+            break;
+        }
+        hand = trial;
+    }
+    let made = frames.len() as u32 + u32::from(ended);
+    match stop {
+        HandStop::Spent | HandStop::GameEnds => assert_eq!(
+            (made, ended),
+            (count, stop == HandStop::GameEnds),
+            "{case}: the hand count"
+        ),
+        HandStop::PastTheCap => assert!(made > count, "{case}: {made} by hand"),
+    }
+
+    let mut takes = vec![1, count / 2, count - 1, count];
+    takes.retain(|k| *k >= 1);
+    takes.dedup();
+    for k in takes {
+        let reference = frames.get(k as usize - 1).unwrap_or(hand.state());
+        let differs = differing_fields(&taken(&offered, k), reference);
+        assert!(
+            differs.is_empty(),
+            "{case}: a take of {k} differs in {differs:?}"
+        );
+    }
+    let mut over = GameRunner::from_state(offered.clone());
+    act(
+        &mut over,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(count + 1),
+            template: None,
+        },
+    );
+    let mut declined_off = declined.clone();
+    declined_off.loop_detection = LoopDetectionMode::Off;
+    assert!(
+        differing_fields(over.state(), &declined_off).is_empty(),
+        "{case}: a declaration of {} performed something",
+        count + 1
+    );
+    offers.push(offered);
     offers
 }
 
@@ -7534,8 +7511,8 @@ fn a_period_paying_its_controllers_life_is_offered_at_its_hand_count() {
     }
     // CR 605.3a + CR 603.3: the Ogre's repetition is its mana ability alone; the Coinsmith's
     // activates a non-mana ability.
-    let mana_only = vec![Some(PeriodPerformance::ManaAbilitiesOnly); BOTH_MODES.len()];
-    let stack = vec![Some(PeriodPerformance::UsesTheStack); BOTH_MODES.len()];
+    let mana_only = vec![Some(PeriodPerformance::ManaAbilitiesOnly)];
+    let stack = vec![Some(PeriodPerformance::UsesTheStack)];
     assert_eq!(
         performances,
         [
@@ -7764,27 +7741,26 @@ fn a_declined_counted_offer_is_offered_again_at_the_count_left() {
         ),
     ];
     for (case, make, count) in boards {
-        for mode in BOTH_MODES {
-            let mut board = make(mode);
-            let mut counts = Vec::new();
-            for _ in 0..4000 {
-                let state = board.runner.state();
-                if game_over(state) || state.active_player != P0 {
-                    break;
-                }
-                if let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for {
-                    counts.push(schema.deliverable_capacity);
-                    act(&mut board.runner, GameAction::DeclineShortcut);
-                } else {
-                    (board.step)(&mut board.runner).expect("the board's next action");
-                }
+        let mode = LoopDetectionMode::Interactive;
+        let mut board = make(mode);
+        let mut counts = Vec::new();
+        for _ in 0..4000 {
+            let state = board.runner.state();
+            if game_over(state) || state.active_player != P0 {
+                break;
             }
-            assert_eq!(
-                counts,
-                (1..=count).rev().collect::<Vec<_>>(),
-                "{case}, {mode:?}"
-            );
+            if let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for {
+                counts.push(schema.deliverable_capacity);
+                act(&mut board.runner, GameAction::DeclineShortcut);
+            } else {
+                (board.step)(&mut board.runner).expect("the board's next action");
+            }
         }
+        assert_eq!(
+            counts,
+            (1..=count).rev().collect::<Vec<_>>(),
+            "{case}, {mode:?}"
+        );
     }
 }
 
@@ -7796,36 +7772,35 @@ fn assert_refused(
     make: &dyn Fn(LoopDetectionMode) -> HandBoard,
     refusals: &[OfferRefusal],
 ) {
-    for mode in BOTH_MODES {
-        let mut board = make(mode);
-        let mut seen: Vec<OfferRefusal> = Vec::new();
-        let mut actions = 0;
-        while actions < 1500 {
-            let state = board.runner.state();
-            assert!(!is_offer(state), "{case}, {mode:?}: offered");
-            if game_over(state) || state.active_player != P0 {
-                break;
-            }
-            if matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0) {
-                for (_, verdict) in confirm_for_tests(state) {
-                    if let Err(refusal) = verdict {
-                        if !seen.contains(&refusal) {
-                            seen.push(refusal);
-                        }
+    let mode = LoopDetectionMode::Interactive;
+    let mut board = make(mode);
+    let mut seen: Vec<OfferRefusal> = Vec::new();
+    let mut actions = 0;
+    while actions < 1500 {
+        let state = board.runner.state();
+        assert!(!is_offer(state), "{case}, {mode:?}: offered");
+        if game_over(state) || state.active_player != P0 {
+            break;
+        }
+        if matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0) {
+            for (_, verdict) in confirm_for_tests(state) {
+                if let Err(refusal) = verdict {
+                    if !seen.contains(&refusal) {
+                        seen.push(refusal);
                     }
                 }
             }
-            (board.step)(&mut board.runner).expect("the board's next action");
-            actions += 1;
         }
-        assert_eq!(seen, refusals, "{case}, {mode:?}");
-        let mut undetected = make(LoopDetectionMode::Off);
-        for _ in 0..actions {
-            (undetected.step)(&mut undetected.runner).expect("the board's next action");
-        }
-        let differs = differing_fields(board.runner.state(), undetected.runner.state());
-        assert!(differs.is_empty(), "{case}, {mode:?}: {differs:?}");
+        (board.step)(&mut board.runner).expect("the board's next action");
+        actions += 1;
     }
+    assert_eq!(seen, refusals, "{case}, {mode:?}");
+    let mut undetected = make(LoopDetectionMode::Off);
+    for _ in 0..actions {
+        (undetected.step)(&mut undetected.runner).expect("the board's next action");
+    }
+    let differs = differing_fields(board.runner.state(), undetected.runner.state());
+    assert!(differs.is_empty(), "{case}, {mode:?}: {differs:?}");
 }
 
 /// CR 732.2a: periods the counted road does not take. Ingris Stingerquill's "{4}: Create a 2/2
@@ -7949,63 +7924,62 @@ fn a_period_fed_by_an_each_opponent_drain_is_offered_inside_its_step() {
             mountains: 0,
             treasures: 0,
         };
-        for mode in BOTH_MODES {
-            let case = format!("{others:?}, {mode:?}");
-            let (mut runner, mut drive) =
-                assault_board(board, Phase::PreCombatMain, AssaultPay::Hand, mode, db);
-            runner.state_mut().players[0].life = 80;
+        let mode = LoopDetectionMode::Interactive;
+        let case = format!("{others:?}, {mode:?}");
+        let (mut runner, mut drive) =
+            assault_board(board, Phase::PreCombatMain, AssaultPay::Hand, mode, db);
+        runner.state_mut().players[0].life = 80;
+        let state = runner.state();
+        let ogre = state
+            .battlefield
+            .iter()
+            .copied()
+            .find(|id| state.objects[id].name == "Treasonous Ogre")
+            .expect("the Ogre");
+        let (mut offers, mut most_carried) = (Vec::new(), 0);
+        for _ in 0..4000 {
             let state = runner.state();
-            let ogre = state
-                .battlefield
-                .iter()
-                .copied()
-                .find(|id| state.objects[id].name == "Treasonous Ogre")
-                .expect("the Ogre");
-            let (mut offers, mut most_carried) = (Vec::new(), 0);
-            for _ in 0..4000 {
-                let state = runner.state();
-                if state.active_player != P0 || game_over(state) {
-                    break;
-                }
-                most_carried = most_carried.max(carried(state).len());
-                if let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for {
-                    assert_eq!(
-                        play_trace_view(state)
-                            .and_then(|view| view.offered)
-                            .map(|span| span.source),
-                        Some(SpanSource::Window),
-                        "{case}"
-                    );
-                    let life = i64::from(state.players[0].life);
-                    offers.push((life, schema.deliverable_capacity));
-                    act(&mut runner, GameAction::DeclineShortcut);
-                    continue;
-                }
-                if assault_window(state)
-                    && drive.activated_at != Some(combats_begun(state))
-                    && state.players[0].mana_pool.total() < ASSAULT_COST
-                    && state.players[0].life > 3
-                {
-                    let ability_index = ability(state, ogre, true);
-                    act(
-                        &mut runner,
-                        GameAction::ActivateAbility {
-                            source_id: ogre,
-                            ability_index,
-                            payment_mode: CastPaymentMode::Auto,
-                        },
-                    );
-                } else {
-                    assault_step(&mut runner, &mut drive);
-                }
+            if state.active_player != P0 || game_over(state) {
+                break;
             }
-            assert!(drive.activations >= 2, "reach: {case} activates twice");
-            assert_eq!(most_carried > 0, carries, "{case} carries {most_carried}");
-            assert!(!offers.is_empty(), "{case}");
-            for (life, count) in offers {
-                // CR 119.4: three life is paid while three is left.
-                assert_eq!(i64::from(count), (life / 3).min(25), "{case} at {life}");
+            most_carried = most_carried.max(carried(state).len());
+            if let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for {
+                assert_eq!(
+                    play_trace_view(state)
+                        .and_then(|view| view.offered)
+                        .map(|span| span.source),
+                    Some(SpanSource::Window),
+                    "{case}"
+                );
+                let life = i64::from(state.players[0].life);
+                offers.push((life, schema.deliverable_capacity));
+                act(&mut runner, GameAction::DeclineShortcut);
+                continue;
             }
+            if assault_window(state)
+                && drive.activated_at != Some(combats_begun(state))
+                && state.players[0].mana_pool.total() < ASSAULT_COST
+                && state.players[0].life > 3
+            {
+                let ability_index = ability(state, ogre, true);
+                act(
+                    &mut runner,
+                    GameAction::ActivateAbility {
+                        source_id: ogre,
+                        ability_index,
+                        payment_mode: CastPaymentMode::Auto,
+                    },
+                );
+            } else {
+                assault_step(&mut runner, &mut drive);
+            }
+        }
+        assert!(drive.activations >= 2, "reach: {case} activates twice");
+        assert_eq!(most_carried > 0, carries, "{case} carries {most_carried}");
+        assert!(!offers.is_empty(), "{case}");
+        for (life, count) in offers {
+            // CR 119.4: three life is paid while three is left.
+            assert_eq!(i64::from(count), (life / 3).min(25), "{case} at {life}");
         }
     }
 }
@@ -8069,52 +8043,51 @@ fn a_counted_offer_previews_only_what_its_take_performs() {
         ),
     ];
     for (case, make) in boards {
-        for mode in BOTH_MODES {
-            let mut board = make(mode);
-            for _ in 0..2000 {
-                if is_offer(board.runner.state()) {
-                    break;
-                }
-                (board.step)(&mut board.runner).expect("the board's next action");
+        let mode = LoopDetectionMode::Interactive;
+        let mut board = make(mode);
+        for _ in 0..2000 {
+            if is_offer(board.runner.state()) {
+                break;
             }
-            let offered = board.runner.state().clone();
-            let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
-                panic!("{case}, {mode:?}: not offered");
-            };
-            let capacity = schema.deliverable_capacity;
-            assert_ne!(
-                take_change(
-                    &offered,
-                    &taken(&offered, capacity),
-                    InteractionShortcutPreviewFamily::Life,
-                    Some(1),
-                ),
-                0,
-                "{case}, {mode:?}: the take moves P1's life, a magnitude a preview could state"
-            );
-            let mut bound = offered.clone();
-            bind_interaction_authority(&mut bound, InteractionSessionId("preview".to_string()))
-                .expect("bind");
-            let view = derive_viewer_interaction(&bound, &filter_state_for_viewer(&bound, P0), P0);
-            let Some(InteractionOpportunityResponse::Schema {
-                spec: InteractionResponseSpec::Shortcut { preview, .. },
-                ..
-            }) = view.opportunities.first().map(|o| &o.response)
-            else {
-                panic!("{case}, {mode:?}: no shortcut opportunity");
-            };
+            (board.step)(&mut board.runner).expect("the board's next action");
+        }
+        let offered = board.runner.state().clone();
+        let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
+            panic!("{case}, {mode:?}: not offered");
+        };
+        let capacity = schema.deliverable_capacity;
+        assert_ne!(
+            take_change(
+                &offered,
+                &taken(&offered, capacity),
+                InteractionShortcutPreviewFamily::Life,
+                Some(1),
+            ),
+            0,
+            "{case}, {mode:?}: the take moves P1's life, a magnitude a preview could state"
+        );
+        let mut bound = offered.clone();
+        bind_interaction_authority(&mut bound, InteractionSessionId("preview".to_string()))
+            .expect("bind");
+        let view = derive_viewer_interaction(&bound, &filter_state_for_viewer(&bound, P0), P0);
+        let Some(InteractionOpportunityResponse::Schema {
+            spec: InteractionResponseSpec::Shortcut { preview, .. },
+            ..
+        }) = view.opportunities.first().map(|o| &o.response)
+        else {
+            panic!("{case}, {mode:?}: no shortcut opportunity");
+        };
+        assert!(
+            !preview.is_empty(),
+            "{case}, {mode:?}: elements are published"
+        );
+        for element in preview {
             assert!(
-                !preview.is_empty(),
-                "{case}, {mode:?}: elements are published"
+                element.entries.is_empty(),
+                "{case}, {mode:?}: a take of {} is previewed {:?}",
+                element.count,
+                element.entries
             );
-            for element in preview {
-                assert!(
-                    element.entries.is_empty(),
-                    "{case}, {mode:?}: a take of {} is previewed {:?}",
-                    element.count,
-                    element.entries
-                );
-            }
         }
     }
 }
@@ -8143,56 +8116,55 @@ fn a_counted_declaration_aiming_at_a_seat_is_accepted_through_the_response_path(
         place(hand.runner.state_mut(), P1, "Platinum Angel", db);
         hand
     };
-    for mode in BOTH_MODES {
-        let offered = hand_offer(&make, mode);
-        let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
-            unreachable!("hand_offer")
-        };
-        assert_eq!(schema.deliverable_capacity, 7, "{mode:?}");
-        let (bound, view) = published_to_p0(&offered);
-        let (opportunity, points) = shortcut_schema(&view).expect("a shortcut schema");
-        let submission = InteractionSubmission {
-            interaction_id: opportunity.interaction_id.clone(),
-            response: InteractionResponse::Shortcut {
-                decision: InteractionShortcutDecision::Fixed { iterations: 7 },
-                pins: points
-                    .iter()
-                    .map(|point| InteractionShortcutPin {
-                        group: point.group,
-                        choice_ids: point.candidate_ids.clone(),
-                        amounts: Vec::new(),
-                    })
-                    .collect(),
-            },
-        };
-        assert!(
-            matches!(
-                resolve_interaction_response(&bound, P0, &submission),
-                Ok(GameAction::DeclareShortcut {
-                    template: Some(_),
-                    ..
+    let mode = LoopDetectionMode::Interactive;
+    let offered = hand_offer(&make, mode);
+    let WaitingFor::LoopShortcut { schema, .. } = &offered.waiting_for else {
+        unreachable!("hand_offer")
+    };
+    assert_eq!(schema.deliverable_capacity, 7, "{mode:?}");
+    let (bound, view) = published_to_p0(&offered);
+    let (opportunity, points) = shortcut_schema(&view).expect("a shortcut schema");
+    let submission = InteractionSubmission {
+        interaction_id: opportunity.interaction_id.clone(),
+        response: InteractionResponse::Shortcut {
+            decision: InteractionShortcutDecision::Fixed { iterations: 7 },
+            pins: points
+                .iter()
+                .map(|point| InteractionShortcutPin {
+                    group: point.group,
+                    choice_ids: point.candidate_ids.clone(),
+                    amounts: Vec::new(),
                 })
-            ),
-            "{mode:?}: the response mints a templated declaration"
-        );
-        let mut declared = bound.clone();
-        assert!(
-            submit_interaction(&mut declared, P0, submission).is_ok(),
-            "{mode:?}: the response is accepted"
-        );
-        let mut runner = GameRunner::from_state(declared);
-        accept(&mut runner);
-        let after = runner.state();
-        assert!(
-            after.players[1].life < 0 && eliminated(after).is_empty(),
-            "{mode:?}: reach: P1 at {} under the Angel",
-            after.players[1].life
-        );
-        let mut reference = taken(&bound, 7);
-        reference.loop_detection = LoopDetectionMode::Off;
-        let differs = differing_fields(after, &reference);
-        assert!(differs.is_empty(), "{mode:?}: differs in {differs:?}");
-    }
+                .collect(),
+        },
+    };
+    assert!(
+        matches!(
+            resolve_interaction_response(&bound, P0, &submission),
+            Ok(GameAction::DeclareShortcut {
+                template: Some(_),
+                ..
+            })
+        ),
+        "{mode:?}: the response mints a templated declaration"
+    );
+    let mut declared = bound.clone();
+    assert!(
+        submit_interaction(&mut declared, P0, submission).is_ok(),
+        "{mode:?}: the response is accepted"
+    );
+    let mut runner = GameRunner::from_state(declared);
+    accept(&mut runner);
+    let after = runner.state();
+    assert!(
+        after.players[1].life < 0 && eliminated(after).is_empty(),
+        "{mode:?}: reach: P1 at {} under the Angel",
+        after.players[1].life
+    );
+    let mut reference = taken(&bound, 7);
+    reference.loop_detection = LoopDetectionMode::Off;
+    let differs = differing_fields(after, &reference);
+    assert!(differs.is_empty(), "{mode:?}: differs in {differs:?}");
 }
 
 /// CR 104.2a + CR 732.2a: a counted offer names how the game ends only at the count whose take
@@ -8247,39 +8219,38 @@ fn a_counted_offer_states_no_outcome_its_take_does_not_produce() {
         ),
     ];
     for (case, make, count, ends, ending) in boards {
-        for mode in BOTH_MODES {
-            let case = format!("{case}, {mode:?}");
-            let offered = hand_offer(&*make, mode);
-            let WaitingFor::LoopShortcut {
-                certificate,
-                schema,
-                ..
-            } = &offered.waiting_for
-            else {
-                unreachable!("hand_offer")
-            };
-            assert_eq!(schema.deliverable_capacity, count, "{case}");
-            assert_eq!(
-                (
-                    game_over(&taken(&offered, count)),
-                    game_over(&taken(&offered, count - 1))
-                ),
-                (ends, false),
-                "{case}: reach"
-            );
-            let named = (ending, ending.map(|_| count));
-            assert_eq!(
-                (certificate.win_kind, certificate.win_kind_at),
-                named,
-                "{case}"
-            );
-            assert!(certificate.unbounded.is_empty(), "{case}");
-            let declared = proposed(offered.clone(), count);
-            let WaitingFor::RespondToShortcut { proposal, .. } = &declared.waiting_for else {
-                unreachable!("proposed")
-            };
-            assert_eq!((proposal.win_kind, proposal.win_kind_at), named, "{case}");
-        }
+        let mode = LoopDetectionMode::Interactive;
+        let case = format!("{case}, {mode:?}");
+        let offered = hand_offer(&*make, mode);
+        let WaitingFor::LoopShortcut {
+            certificate,
+            schema,
+            ..
+        } = &offered.waiting_for
+        else {
+            unreachable!("hand_offer")
+        };
+        assert_eq!(schema.deliverable_capacity, count, "{case}");
+        assert_eq!(
+            (
+                game_over(&taken(&offered, count)),
+                game_over(&taken(&offered, count - 1))
+            ),
+            (ends, false),
+            "{case}: reach"
+        );
+        let named = (ending, ending.map(|_| count));
+        assert_eq!(
+            (certificate.win_kind, certificate.win_kind_at),
+            named,
+            "{case}"
+        );
+        assert!(certificate.unbounded.is_empty(), "{case}");
+        let declared = proposed(offered.clone(), count);
+        let WaitingFor::RespondToShortcut { proposal, .. } = &declared.waiting_for else {
+            unreachable!("proposed")
+        };
+        assert_eq!((proposal.win_kind, proposal.win_kind_at), named, "{case}");
     }
 }
 

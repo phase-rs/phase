@@ -20,16 +20,8 @@
 //! (and the volatile stack id, see `resource::project_out_resources`), or covers that board
 //! by growth, while every living player but one loses life or gains poison each cycle, it
 //! shortcuts to the forced loss instead
-//! of halting on the resource ceiling. PR-3 (Option C) scans a persisted bounded ring
-//! of post-resolution snapshots (`GameState::loop_detect_ring`), maintained at the
-//! post-pipeline frame of `game::engine::pass_priority_once_with_pipeline` (after
-//! `run_post_action_pipeline` places refilling triggers, CR 603.3) and scanned at the
-//! single SBA-reconciliation seam — so the win path
-//! fires LIVE under the default per-beat `apply(PassPriority)` drive (the production
-//! frontend default), which runs `reconcile_terminal_result` after every beat. Note
-//! `run_auto_pass_loop` does NOT call `reconcile_terminal_result` inside its internal
-//! iterations, so its net-progress grind still runs to the natural CR 704.5a death;
-//! the per-beat drive is the accelerated path.
+//! of halting on the resource ceiling. The confirmer (`game::period_confirm`) calls it on
+//! the frames of a replayed period.
 //!
 //! # The detection rule (CR 732.2a — the shortcut, not the draw)
 //!
@@ -443,9 +435,9 @@ pub fn detect_loop(
     })
 }
 
-/// CR 732.2a + CR 704.5a: the reducer's winner test over a ring frame and the live board.
+/// CR 732.2a + CR 704.5a: the reducer's winner test over a replayed frame and the live board.
 ///
-/// Given a ring frame whose board `cycle_end` repeats (modulo monotone resources AND the
+/// Given a frame whose board `cycle_end` repeats (modulo monotone resources AND the
 /// volatile stack id, see [`crate::analysis::resource::project_out_resources`]) or covers by
 /// growth, decide whether every living player but one loses life or gains poison each cycle
 /// toward a determinate loss and, if so, name the one who does not.
@@ -622,56 +614,14 @@ pub(crate) fn live_mandatory_loop_winner(
 }
 
 /// CR 704.5a + CR 104.4a: the loop's winner (the sole strict non-faller) must never
-/// dip below its prior life at ANY per-resolution ring frame. Named for the winner,
+/// dip below its prior life at ANY frame it is handed. Named for the winner,
 /// NOT the loop's controller: a mandatory-loop trigger can be controlled by a faller,
 /// so the controller is not necessarily the player this guard protects — the winner
 /// (the one non-faller) is. A transient intra-cycle dip that recovers to a
 /// non-negative NET delta would still kill the winner via the CR 704.5a SBA at low
 /// absolute life before the extrapolated win — a net-delta check cannot see it.
-/// Per-resolution granularity IS SBA granularity here, but NOT because ring frames are
-/// consecutive resolutions — they are not, and never were. The shipped CR 603.3b
-/// `OrderTriggers` exemption already retains the ring across a non-sampling beat, and
-/// `WaitingFor::is_forced_cascade_window` extends that to every forced pre-priority window
-/// (CR 603.3d / CR 603.5 + CR 608.2 / CR 903.9a / CR 704.5j / CR 310.11 / CR 703.1 +
-/// CR 117.3a). The invariant this guard actually needs is weaker:
-/// **every point at which CR 704.5a could fire is either sampled or clears the ring.**
-/// CR 704.3 fixes those points: SBAs are checked whenever a player would get priority,
-/// and every such point arrives as `WaitingFor::Priority`, which is deliberately not a
-/// forced-cascade window and therefore samples or clears. The retained windows are
-/// exempt for three DIFFERENT reasons, and the weaker invariant is what covers all
-/// three:
-/// the between-resolutions members (CR 603.3b / CR 603.3d / CR 903.9a / CR 704.5j /
-/// CR 310.11) sit inside the CR 704.3 fixpoint itself, where no life total moves; the
-/// MID-resolution member (`OptionalEffectChoice`, CR 603.5 + CR 608.2) is a pause in the
-/// middle of a resolution, where life absolutely can move — but CR 608.2 performs no SBA
-/// check mid-resolution, so a life change there is not a CR 704.5a point being skipped,
-/// it is a life change that the very next CR 704.3 check (a `Priority` window) observes;
-/// the TURN-BASED members (CR 703.1 + CR 117.3a — untap CR 502.3, declare attackers
-/// CR 508.1/508.1g, declare blockers CR 509.1, cleanup discard CR 514.1) precede the
-/// step's own grant of priority (CR 508.2 is the explicit case), and the DECLARATION
-/// itself moves no life: untapping, declaring, exerting/enlisting and discarding change
-/// no life, and anything that WOULD (an attack trigger) uses the stack and therefore
-/// resolves at an observed `Priority` beat.
-/// That is a claim about the declaration only, and the two life-moving neighbours it
-/// deliberately excludes are why the class is drawn where it is:
-/// * CR 508.1h / CR 509.1d put the declaration's COSTS in a separate sub-step
-///   ("Costs may include paying mana, tapping permanents, sacrificing permanents,
-///   discarding cards, and so on"), and a Phyrexian symbol in an attack or block tax is
-///   paid with 2 life (CR 107.4f) — measured in-code: `engine_combat::handle_pay_combat_tax`
-///   pays through `casting::pay_unless_cost`, which settles `life_payments` via
-///   `life_costs::pay_life_as_cost`. So declaring CAN move life, at
-///   `WaitingFor::CombatTaxPayment` — which is deliberately NOT a member and therefore
-///   clears the ring.
-/// * `AssignCombatDamage` / `AssignBlockerDamage` are likewise NOT members despite being
-///   turn-based (CR 510.1c / CR 510.1d): CR 510.2 deals the assigned damage with no
-///   intervening priority. That window-keyed exclusion is necessary but NOT sufficient,
-///   because the window opens only for a damage DIVISION choice — an unblocked attacker
-///   deals CR 510.2 damage with no window at all. The sufficient guard is event-keyed:
-///   `GameState::invalidate_loop_ring_on_unobserved_life_move`, called from
-///   `game::combat_damage::apply_combat_damage`.
-///
 /// So the guard requires `life[winner]` non-decreasing across the matched window (prior
-/// frame → every subsequent ring frame → the live state). A winner never draws from an
+/// frame → every subsequent frame → the live state). A winner never draws from an
 /// empty library here: `live_mandatory_loop_winner` refuses a cycle in which any living
 /// player's library shrinks.
 pub(crate) fn winner_life_never_dips(frames: &[&GameState], winner: PlayerId) -> bool {
@@ -695,7 +645,7 @@ pub(crate) fn winner_life_never_dips(frames: &[&GameState], winner: PlayerId) ->
 
 /// CR 704.3 (one SBA batch) + CR 800.4a + CR 104.2a: the R5-B2 simultaneity floor,
 /// seam half. With ≥2 fallers, every faller's `player.life` must be pairwise-equal at
-/// EVERY ring frame (incl. the live state); combined with the predicate's equal
+/// EVERY frame (incl. the live state); combined with the predicate's equal
 /// per-cycle deltas, all fallers stay pairwise-equal at every extrapolated frame and
 /// therefore cross lethal in the SAME resolution's CR 704.3 SBA batch. The single
 /// CR 104.2a elimination is then terminal ("happens immediately and overrides all

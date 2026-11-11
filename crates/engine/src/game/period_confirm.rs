@@ -22,10 +22,10 @@ use crate::analysis::resource::{
     ObjectClass, ObjectGrowthVerdict, PredictedDeparture, RecurrenceCover, ResourceVector,
 };
 use crate::game::engine::{
-    announced_target_pins, apply, certify_object_growth_frames, clear_frame_bookkeeping,
-    counted_offer, has_no_loss_axis, minted_battlefield_ids, object_decision_source,
-    period_sign_check, pinnable_mana_color, pinned_decisions_to_points, proliferate_pins,
-    replay_bounded_offer, PeriodSign, SimulationProbeGuard,
+    announced_target_pins, apply_for_seat_with_mode, certify_object_growth_frames,
+    clear_frame_bookkeeping, counted_offer, has_no_loss_axis, minted_battlefield_ids,
+    object_decision_source, period_sign_check, pinnable_mana_color, pinned_decisions_to_points,
+    proliferate_pins, replay_bounded_offer, PeriodSign, PublicFinalizeMode, SimulationProbeGuard,
 };
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::mana_payment::{select_convoke_taps, ConvokeTapOrder};
@@ -1054,7 +1054,7 @@ fn step(
     let before = outcomes_admitted().then(|| BeforeStep::of(replay));
     let from = events.len();
     events.extend(
-        apply(replay, seat, action)
+        apply_for_seat_with_mode(replay, seat, action, PublicFinalizeMode::Immediate)
             .map_err(|error| match error {
                 crate::game::engine::EngineError::LifeChangeUnrepresentable { player } => {
                     OfferRefusal::LifeChangeUnrepresentable { player }
@@ -1508,7 +1508,7 @@ fn decision_paths(prompt: &GameState, limit: usize) -> Option<(PromptKey, Vec<Ke
     for answer in answers {
         let mut next = prompt.clone();
         let action = answer_action(&next, &answer)?;
-        apply(&mut next, seat, action).ok()?;
+        apply_for_seat_with_mode(&mut next, seat, action, PublicFinalizeMode::Immediate).ok()?;
         let tails = if next.waiting_for.option_point().is_some() {
             decision_paths(&next, limit)?.1
         } else {
@@ -3873,6 +3873,7 @@ pub fn performed_for_tests(state: &GameState) -> Option<Result<Vec<String>, Offe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::engine::apply;
     use crate::types::actions::DebugAction;
     use crate::types::game_state::{
         AutoPassMode, StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionPolicy,
@@ -4406,6 +4407,29 @@ mod tests {
             assert_ne!(targets[0], targets[1], "{order:?}");
         }
         assert_eq!(decision_paths(&prompt, 3), None);
+    }
+
+    /// CR 723.5: a controlled seat's answers are submitted by its controller, so the paths of
+    /// a prompt under turn control are the uncontrolled prompt's.
+    #[test]
+    fn decision_paths_under_turn_control_are_the_seats_own_paths() {
+        let free = exiler_order_prompt(2);
+        let mut controlled = free.clone();
+        controlled.turn_decision_controller = Some(PlayerId(1));
+        controlled.turn_decision_control_timestamp = Some(1);
+        controlled.active_full_turn_control = Some(crate::types::game_state::ActivePlayerControl {
+            controller: PlayerId(1),
+            timestamp: 1,
+        });
+        assert_eq!(controlled.waiting_for.acting_player(), Some(PlayerId(0)));
+        assert_eq!(
+            crate::game::turn_control::authorized_submitter(&controlled),
+            Some(PlayerId(1))
+        );
+        let paths = |prompt: &GameState| decision_paths(prompt, ORDER_EDGES).map(|(_, p)| p);
+        let free_paths = paths(&free).expect("the uncontrolled prompt has paths");
+        assert_eq!(free_paths.len(), 4);
+        assert_eq!(paths(&controlled), Some(free_paths));
     }
 
     /// CR 104.4b: a target choice offering one more creature than the start's is another point,

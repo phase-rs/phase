@@ -2206,9 +2206,8 @@ pub(crate) fn drive_offline_marwyn_sword(db: &CardDatabase) -> Option<LoopCertif
 
 // ===========================================================================
 // Live drain-cascade drivers. These drive the REAL per-beat `apply(PassPriority)`
-// reducer (not the offline `detect_loop` harness) so the persisted
-// `loop_detect_ring` accumulation and the reconcile-seam win shortcut are
-// exercised end-to-end.
+// reducer (not the offline `detect_loop` harness) so the reconcile-seam loop
+// outcomes are exercised end-to-end.
 // ===========================================================================
 
 /// Build an N-player board with the named permanents installed on P0, each opponent
@@ -2245,7 +2244,7 @@ pub(crate) fn build_drain_board_n(
         // (default-OFF) detector ON. Without this the reconcile-seam shortcut and the
         // loop-detection ring sampler are both gated off and no drain cascade would be
         // shortcut to its GameOver — see `GameState::loop_detection`.
-        state.loop_detection = crate::types::game_state::LoopDetectionMode::On;
+        state.loop_detection = crate::types::game_state::LoopDetectionMode::Interactive;
     }
     let mut ids = Vec::new();
     {
@@ -2302,7 +2301,6 @@ pub(crate) struct BeatTrace {
     pub(crate) beat: usize,
     pub(crate) wf: WaitingFor,
     pub(crate) stack_len: usize,
-    pub(crate) ring_len: usize,
     /// Life total of every seat (index = `PlayerId`), snapshotted this beat. A `Vec`
     /// (not `p0_life`/`p1_life`) so the multiplayer regressions read 3- and 4-player
     /// tables without assuming a fixed count.
@@ -2337,7 +2335,6 @@ pub(crate) fn drive_pass_priority(board: &mut ComboBoard, max_beats: usize) -> V
             beat,
             wf: s.waiting_for.clone(),
             stack_len: s.stack.len(),
-            ring_len: s.loop_detect_ring.len(),
             lives: s.players.iter().map(|p| p.life).collect(),
         });
         if matches!(
@@ -2387,7 +2384,6 @@ pub(crate) fn drive_with_trigger_ordering(
             beat,
             wf: s.waiting_for.clone(),
             stack_len: s.stack.len(),
-            ring_len: s.loop_detect_ring.len(),
             lives: s.players.iter().map(|p| p.life).collect(),
         });
         if matches!(

@@ -46388,7 +46388,7 @@ pub mod tests {
             amount: 1,
             new_total: crate::types::events::LifeTotalReading::default(),
         });
-        for mode in [LoopDetectionMode::Off, LoopDetectionMode::On] {
+        for mode in [LoopDetectionMode::Off, LoopDetectionMode::Interactive] {
             for ability in [pr625_sound_ability(), pr625_sibling_mutable_ability()] {
                 let mut state = setup();
                 state.loop_detection = mode;
@@ -46471,7 +46471,7 @@ pub mod tests {
 
         // ON arm — must auto-resolve.
         let mut on = setup();
-        on.loop_detection = LoopDetectionMode::On;
+        on.loop_detection = LoopDetectionMode::Interactive;
         let on_group = vec![
             pr625_no_input_trigger(
                 &mut on,
@@ -46659,7 +46659,7 @@ pub mod tests {
             new_total: crate::types::events::LifeTotalReading::default(),
         });
         let mut on = setup();
-        on.loop_detection = LoopDetectionMode::On;
+        on.loop_detection = LoopDetectionMode::Interactive;
         let group = vec![
             pr625_no_input_trigger(
                 &mut on,

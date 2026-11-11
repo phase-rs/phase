@@ -21,8 +21,8 @@
 //! 1. **The `TargetPin::Player` occurrences the walk finds are pinned per file, by identity
 //!    and multiplicity.** The instrument counts constructions and match arms alike, so what
 //!    separates them is the disposition each site carries below. The two producers are
-//!    named individually — `game::engine::record_trigger_target_answer` (the engine's own
-//!    CR 601.2c announcement journal) and
+//!    named individually — `game::engine::announced_target_pins` (the engine's own
+//!    CR 601.2c announcement) and
 //!    `game::interaction::materialize_loop_shortcut_response` (the human ingress of the same
 //!    point kind). Naming them individually is the point: a census asserting only a TOTAL
 //!    production count would stay green with EITHER producer reverted, since a revert removes
@@ -179,7 +179,7 @@ fn production_sites(needle: &str) -> Vec<Site> {
 ///
 /// # Discrimination — TWO independent revert-probes, one per producer
 ///
-/// * restore `game::engine::record_trigger_target_answer`'s `TargetRef::Player(pl)` arm to
+/// * restore `game::engine::announced_target_pins`'s `TargetRef::Player` arm to
 ///   `Some(TargetPin::Player(*pl))` ⇒ `engine/src/game/engine.rs` gains an unclassified
 ///   `TargetPin::Player` construction ⇒ the pinned site list below FAILS with its file:line;
 /// * restore `game::interaction::materialize_loop_shortcut_response`'s
@@ -210,7 +210,7 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
     // production scope changes the compared value, and multiplicity is counted per OCCURRENCE,
     // not per line, so a construction co-located with an existing one on the same line still
     // moves the compared value. That includes a further `engine.rs` hit from reverting
-    // `record_trigger_target_answer`, and a further `interaction.rs` hit from reverting
+    // `announced_target_pins`, and a further `interaction.rs` hit from reverting
     // `materialize_loop_shortcut_response`. The walk visits three roots only
     // (`engine/src`, `server-core/src`, `phase-ai/src`), so a construction added in a crate
     // outside them — `engine-wasm`, `seat-reducer` and `phase-server` all depend on the engine —
@@ -377,8 +377,7 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
             ("engine/src/types/actions.rs", 1),
         ],
         "the TARGET-class spelling must be CONSTRUCTED by BOTH producers — `game/engine.rs` \
-         (`record_trigger_target_answer`, which journals an announced seat for the \
-         loop-detection window) and `game/interaction.rs` \
+         (`announced_target_pins`, which pins an announced seat) and `game/interaction.rs` \
          (`materialize_loop_shortcut_response`) — beside its READ sites: \
          `evaluate_schedule`'s CR 601.2c resolver arm in `analysis/decision_template.rs` and \
          the wildcard-free redaction arm in `game/visibility.rs`, and `GameAction`'s object-id \

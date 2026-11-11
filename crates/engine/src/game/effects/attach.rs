@@ -225,10 +225,8 @@ fn resolve_attachment_ids<'a>(
             .or_else(|| resolve_object_filter(state, ability, attachment_filter, target_slots))
             .into_iter()
             .collect()
-    } else if matches!(
-        attachment_filter,
-        TargetFilter::TriggeringSource | TargetFilter::AttachedTo
-    ) && attachment_referent_departed(state, ability, attachment_filter)
+    } else if matches!(attachment_filter, TargetFilter::TriggeringSource)
+        && attachment_referent_departed(state, ability, attachment_filter)
     {
         // CR 400.7: the event's object is the attachment only as the incarnation the event named.
         Vec::new()
@@ -1746,7 +1744,7 @@ fn attachment_referent_departed(
         TargetFilter::OriginalSource => trigger_source,
         TargetFilter::GrantingObject { bound } => bound.or(ability.context.granting_object),
         // CR 400.7: the incarnation the firing event recorded for its object.
-        TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
+        TargetFilter::TriggeringSource => {
             match crate::game::targeting::resolve_event_context_target(
                 state,
                 filter,

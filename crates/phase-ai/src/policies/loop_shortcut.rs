@@ -1026,7 +1026,7 @@ mod tests {
     const SLOT_BOUND: u32 = 9;
 
     /// A CR 601.2c target schedule pinning each slot onto its seat at every repetition — the
-    /// TARGET-class spelling `record_trigger_target_answer` journals.
+    /// TARGET-class spelling `announced_target_pins` emits.
     fn seat_declaration(pins: &[(&DecisionSlot, PlayerId)]) -> DecisionTemplate {
         let sources: Vec<_> = pins.iter().map(|(slot, _)| slot.source.clone()).collect();
         DecisionTemplate {
@@ -1709,44 +1709,43 @@ mod tests {
         use engine::types::game_state::LoopDetectionMode;
 
         let db = integration_card_db();
-        for mode in [LoopDetectionMode::On, LoopDetectionMode::Interactive] {
-            for (p1, axes, declares) in [
-                (
-                    &["Energy Field"][..],
-                    vec![ResourceAxis::CombatPhases],
-                    false,
-                ),
-                (
-                    &[][..],
-                    vec![ResourceAxis::CombatPhases, ResourceAxis::Life(P1)],
-                    true,
-                ),
-            ] {
-                let state = assault_confluence_offer(&db, mode, p1);
-                let certificate = certificate_of(&state);
+        let mode = LoopDetectionMode::Interactive;
+        for (p1, axes, declares) in [
+            (
+                &["Energy Field"][..],
+                vec![ResourceAxis::CombatPhases],
+                false,
+            ),
+            (
+                &[][..],
+                vec![ResourceAxis::CombatPhases, ResourceAxis::Life(P1)],
+                true,
+            ),
+        ] {
+            let state = assault_confluence_offer(&db, mode, p1);
+            let certificate = certificate_of(&state);
+            assert_eq!(
+                certificate
+                    .per_cycle
+                    .as_ref()
+                    .map(|signature| match signature {
+                        PeriodSignature::EveryRepetition(period)
+                        | PeriodSignature::OneRepetition(period) => {
+                            period.delta.unbounded_axes_for(P0)
+                        }
+                    }),
+                Some(axes),
+                "{mode:?} {p1:?}: the published signature"
+            );
+            for difficulty in [AiDifficulty::VeryEasy, AiDifficulty::Easy] {
+                let config = create_config(difficulty, Platform::Native);
+                let mut rng = SmallRng::seed_from_u64(0);
+                let action = choose_action(&state, P0, &config, &mut rng);
                 assert_eq!(
-                    certificate
-                        .per_cycle
-                        .as_ref()
-                        .map(|signature| match signature {
-                            PeriodSignature::EveryRepetition(period)
-                            | PeriodSignature::OneRepetition(period) => {
-                                period.delta.unbounded_axes_for(P0)
-                            }
-                        }),
-                    Some(axes),
-                    "{mode:?} {p1:?}: the published signature"
+                    matches!(action, Some(GameAction::DeclareShortcut { .. })),
+                    declares,
+                    "{mode:?} {p1:?} {difficulty:?}: {action:?}"
                 );
-                for difficulty in [AiDifficulty::VeryEasy, AiDifficulty::Easy] {
-                    let config = create_config(difficulty, Platform::Native);
-                    let mut rng = SmallRng::seed_from_u64(0);
-                    let action = choose_action(&state, P0, &config, &mut rng);
-                    assert_eq!(
-                        matches!(action, Some(GameAction::DeclareShortcut { .. })),
-                        declares,
-                        "{mode:?} {p1:?} {difficulty:?}: {action:?}"
-                    );
-                }
             }
         }
     }
@@ -1854,63 +1853,62 @@ mod tests {
         use engine::types::phase::Phase;
 
         let db = integration_card_db();
-        for mode in [LoopDetectionMode::On, LoopDetectionMode::Interactive] {
-            let mut scenario = GameScenario::new();
-            scenario.at_phase(Phase::PreCombatMain);
-            scenario.with_life(P0, 20);
-            let monolith = scenario.add_real_card(P0, "Basalt Monolith", Zone::Battlefield, &db);
-            let artifact = scenario.add_real_card(P0, "Power Artifact", Zone::Battlefield, &db);
-            scenario.add_real_card(P0, "Plains", Zone::Battlefield, &db);
-            scenario.add_real_card(P0, "Darksteel Colossus", Zone::Hand, &db);
-            scenario.add_real_card(P1, "Burning-Tree Shaman", Zone::Battlefield, &db);
-            scenario.with_library_top(P0, &["Wastes"; 10]);
-            scenario.with_library_top(P1, &["Wastes"; 10]);
-            let mut runner = scenario.build();
-            runner.state_mut().loop_detection = mode;
-            engine::game::effects::attach::attach_to(runner.state_mut(), artifact, monolith);
-            let abilities = [
-                activated_ability(runner.state(), monolith, true),
-                activated_ability(runner.state(), monolith, false),
-            ];
-            let state = activate_to_offer(runner, monolith, &abilities);
+        let mode = LoopDetectionMode::Interactive;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, 20);
+        let monolith = scenario.add_real_card(P0, "Basalt Monolith", Zone::Battlefield, &db);
+        let artifact = scenario.add_real_card(P0, "Power Artifact", Zone::Battlefield, &db);
+        scenario.add_real_card(P0, "Plains", Zone::Battlefield, &db);
+        scenario.add_real_card(P0, "Darksteel Colossus", Zone::Hand, &db);
+        scenario.add_real_card(P1, "Burning-Tree Shaman", Zone::Battlefield, &db);
+        scenario.with_library_top(P0, &["Wastes"; 10]);
+        scenario.with_library_top(P1, &["Wastes"; 10]);
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = mode;
+        engine::game::effects::attach::attach_to(runner.state_mut(), artifact, monolith);
+        let abilities = [
+            activated_ability(runner.state(), monolith, true),
+            activated_ability(runner.state(), monolith, false),
+        ];
+        let state = activate_to_offer(runner, monolith, &abilities);
 
-            assert_eq!(
-                offer_period(&state).0.performance(),
-                Some(PeriodPerformance::UsesTheStack),
-                "{mode:?}"
+        assert_eq!(
+            offer_period(&state).0.performance(),
+            Some(PeriodPerformance::UsesTheStack),
+            "{mode:?}"
+        );
+        assert_eq!(
+            proposer_axes(&state),
+            Some(vec![ResourceAxis::Mana(ManaType::Colorless)]),
+            "{mode:?}"
+        );
+        let schema = schema_of(&state).clone();
+        assert_eq!(
+            kind_of(&verdict_for(
+                &state,
+                &offered_declare(&state, schema.iteration_count.clone())
+            )),
+            "loop_shortcut_bounded_declare_progress",
+            "{mode:?}"
+        );
+        assert_eq!(
+            kind_of(&verdict_for(
+                &state,
+                &offered_declare(&state, IterationCount::Fixed(schema.deliverable_capacity))
+            )),
+            "loop_shortcut_declare_eliminates_proposer",
+            "{mode:?}"
+        );
+        for action in non_searching_choices(&state) {
+            assert!(
+                matches!(
+                    &action,
+                    Some(GameAction::DeclareShortcut { count, .. })
+                        if *count == schema.iteration_count
+                ),
+                "{mode:?}: {action:?}"
             );
-            assert_eq!(
-                proposer_axes(&state),
-                Some(vec![ResourceAxis::Mana(ManaType::Colorless)]),
-                "{mode:?}"
-            );
-            let schema = schema_of(&state).clone();
-            assert_eq!(
-                kind_of(&verdict_for(
-                    &state,
-                    &offered_declare(&state, schema.iteration_count.clone())
-                )),
-                "loop_shortcut_bounded_declare_progress",
-                "{mode:?}"
-            );
-            assert_eq!(
-                kind_of(&verdict_for(
-                    &state,
-                    &offered_declare(&state, IterationCount::Fixed(schema.deliverable_capacity))
-                )),
-                "loop_shortcut_declare_eliminates_proposer",
-                "{mode:?}"
-            );
-            for action in non_searching_choices(&state) {
-                assert!(
-                    matches!(
-                        &action,
-                        Some(GameAction::DeclareShortcut { count, .. })
-                            if *count == schema.iteration_count
-                    ),
-                    "{mode:?}: {action:?}"
-                );
-            }
         }
     }
 
@@ -1926,37 +1924,36 @@ mod tests {
         use engine::types::phase::Phase;
 
         let db = integration_card_db();
-        for mode in [LoopDetectionMode::On, LoopDetectionMode::Interactive] {
-            let mut scenario = GameScenario::new();
-            scenario.at_phase(Phase::PreCombatMain);
-            scenario.with_life(P0, 80);
-            let ogre = scenario.add_real_card(P0, "Treasonous Ogre", Zone::Battlefield, &db);
-            scenario.with_library_top(P0, &["Wastes"; 10]);
-            scenario.with_library_top(P1, &["Wastes"; 10]);
-            let mut runner = scenario.build();
-            runner.state_mut().loop_detection = mode;
-            let ability = activated_ability(runner.state(), ogre, true);
-            let state = activate_to_offer(runner, ogre, &[ability]);
+        let mode = LoopDetectionMode::Interactive;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, 80);
+        let ogre = scenario.add_real_card(P0, "Treasonous Ogre", Zone::Battlefield, &db);
+        scenario.with_library_top(P0, &["Wastes"; 10]);
+        scenario.with_library_top(P1, &["Wastes"; 10]);
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = mode;
+        let ability = activated_ability(runner.state(), ogre, true);
+        let state = activate_to_offer(runner, ogre, &[ability]);
 
-            assert_eq!(
-                offer_period(&state).0.performance(),
-                Some(PeriodPerformance::ManaAbilitiesOnly),
-                "{mode:?}"
-            );
-            assert_eq!(
-                proposer_axes(&state),
-                Some(vec![ResourceAxis::Mana(ManaType::Red)]),
-                "{mode:?}"
-            );
-            let count = schema_of(&state).iteration_count.clone();
-            assert_eq!(
-                kind_of(&verdict_for(&state, &offered_declare(&state, count))),
-                "loop_shortcut_declare_buys_only_mana_and_combats",
-                "{mode:?}"
-            );
-            for action in non_searching_choices(&state) {
-                assert_eq!(action, Some(GameAction::DeclineShortcut), "{mode:?}");
-            }
+        assert_eq!(
+            offer_period(&state).0.performance(),
+            Some(PeriodPerformance::ManaAbilitiesOnly),
+            "{mode:?}"
+        );
+        assert_eq!(
+            proposer_axes(&state),
+            Some(vec![ResourceAxis::Mana(ManaType::Red)]),
+            "{mode:?}"
+        );
+        let count = schema_of(&state).iteration_count.clone();
+        assert_eq!(
+            kind_of(&verdict_for(&state, &offered_declare(&state, count))),
+            "loop_shortcut_declare_buys_only_mana_and_combats",
+            "{mode:?}"
+        );
+        for action in non_searching_choices(&state) {
+            assert_eq!(action, Some(GameAction::DeclineShortcut), "{mode:?}");
         }
     }
 

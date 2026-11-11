@@ -288,37 +288,12 @@ pub(crate) use verdict_memo::{FrameIx, PeriodVerdicts, ProbeBudget};
 /// this thread; [`loop_detect_cost`] hands back a snapshot the caller owns.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LoopDetectCost {
-    /// The sampler's normalized clone (`GameState::record_loop_detect_sample`).
-    pub sample_normalize_ns: u64,
-    pub sample_normalize_calls: u32,
-    /// The sampler's second, un-normalized clone.
-    pub sample_live_ns: u64,
-    pub sample_live_calls: u32,
-    /// The reconcile bridge as a whole — the CONTAINER of the five reduction sites it
-    /// reaches (`mandatory`, `winner_scan`, `bounded_offer` and the two ring walks), so the
-    /// parts have something to be a share of and the bridge's own interior is visible
-    /// rather than absorbed. Excluded from any leaf sum for exactly that reason; the
-    /// sampler's two sites and `object_growth` sit OUTSIDE it.
-    pub reconcile_ns: u64,
-    pub reconcile_calls: u32,
     /// CR 732.5: the mandatory-vs-optional probe, per living seat.
     pub mandatory_ns: u64,
     pub mandatory_calls: u32,
-    /// Path A — the determinate-lethal-winner ring scan.
-    pub winner_scan_ns: u64,
-    pub winner_scan_calls: u32,
-    /// Path D — the bounded-cycle offer mint.
-    pub bounded_offer_ns: u64,
-    pub bounded_offer_calls: u32,
-    /// Path C's ring walk under an out verdict.
-    pub recurrence_scan_optional_ns: u64,
-    pub recurrence_scan_optional_calls: u32,
     /// The recorded road, below the reconcile block.
     pub object_growth_ns: u64,
     pub object_growth_calls: u32,
-    /// The sampler's two clone calls, counted rather than timed.
-    pub sampler_normalized_clones: u32,
-    pub sampler_live_clones: u32,
     /// The `normalize_for_loop()` that opens `project_out_resources` — the compare side's
     /// clone budget, minted twice per comparison.
     pub projected_clones: u32,
@@ -331,9 +306,9 @@ pub struct LoopDetectCost {
 }
 
 /// [`LoopDetectCost::parts`]' rows: site name, nanoseconds, calls.
-type TimedSites = [(&'static str, u64, u32); 8];
+type TimedSites = [(&'static str, u64, u32); 2];
 /// [`LoopDetectCost::clones`]' rows: site name, count.
-type CloneSites = [(&'static str, u32); 7];
+type CloneSites = [(&'static str, u32); 5];
 
 impl LoopDetectCost {
     /// Both report arrays out of ONE no-`..` destructure, which is what makes them
@@ -348,24 +323,10 @@ impl LoopDetectCost {
     #[deny(clippy::unneeded_field_pattern)]
     fn classify(&self) -> (TimedSites, CloneSites) {
         let Self {
-            sample_normalize_ns,
-            sample_normalize_calls,
-            sample_live_ns,
-            sample_live_calls,
-            reconcile_ns,
-            reconcile_calls,
             mandatory_ns,
             mandatory_calls,
-            winner_scan_ns,
-            winner_scan_calls,
-            bounded_offer_ns,
-            bounded_offer_calls,
-            recurrence_scan_optional_ns,
-            recurrence_scan_optional_calls,
             object_growth_ns,
             object_growth_calls,
-            sampler_normalized_clones,
-            sampler_live_clones,
             projected_clones,
             compares_equal_modulo_resources,
             compares_cover_modulo_growth_scoped,
@@ -374,26 +335,10 @@ impl LoopDetectCost {
         } = *self;
         (
             [
-                (
-                    "sample_normalize",
-                    sample_normalize_ns,
-                    sample_normalize_calls,
-                ),
-                ("sample_live", sample_live_ns, sample_live_calls),
-                ("reconcile", reconcile_ns, reconcile_calls),
                 ("mandatory", mandatory_ns, mandatory_calls),
-                ("winner_scan", winner_scan_ns, winner_scan_calls),
-                ("bounded_offer", bounded_offer_ns, bounded_offer_calls),
-                (
-                    "recurrence_scan_optional",
-                    recurrence_scan_optional_ns,
-                    recurrence_scan_optional_calls,
-                ),
                 ("object_growth", object_growth_ns, object_growth_calls),
             ],
             [
-                ("sampler_normalized_clones", sampler_normalized_clones),
-                ("sampler_live_clones", sampler_live_clones),
                 ("projected_clones", projected_clones),
                 (
                     "compares_equal_modulo_resources",
@@ -416,14 +361,14 @@ impl LoopDetectCost {
     }
 
     /// The timed sites, one entry per site: name, nanoseconds, calls.
-    pub fn parts(&self) -> [(&'static str, u64, u32); 8] {
+    pub fn parts(&self) -> TimedSites {
         self.classify().0
     }
 
     /// The count-only sites, one entry per site. Deliberately a separate accessor from
     /// [`LoopDetectCost::parts`]: a duration-less axis inside that array would make its
     /// two-axis contract unanswerable for half its entries.
-    pub fn clones(&self) -> [(&'static str, u32); 7] {
+    pub fn clones(&self) -> CloneSites {
         self.classify().1
     }
 
@@ -9991,7 +9936,6 @@ fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usiz
 #[cfg(test)]
 mod tests {
     use crate::game::game_object::ObjectIncarnationRefExt;
-    use std::sync::Arc;
 
     /// CR 704.3 + CR 704.5a: reading a charge stream one stretch at a time gives the answer of
     /// stepping through it one repetition at a time
@@ -10257,25 +10201,6 @@ mod tests {
         crate::game::engine::apply(state, actor, action.clone())
             .map(|_| ())
             .map_err(|e| format!("apply err ({action:?}): {e:?}"))
-    }
-
-    /// A frozen-set LOWER BOUND computed INDEPENDENTLY of the function under test: the
-    /// longest common prefix, by object id, of every window frame's stack and `current`'s.
-    ///
-    /// Sound because it is a strictly weaker computation than the predicate it bounds —
-    /// `certified_period_touch` freezes an id iff it sits at the SAME INDEX in every window
-    /// frame, and every position inside a common prefix satisfies that by construction. It
-    /// is a prefix scan that stops at the first disagreement, not a per-index filter over
-    /// the whole stack, so it cannot degenerate into `f(x) == f(x)` against the callee.
-    fn frozen_lower_bound(window: &[&GameState], current: &GameState) -> usize {
-        (0..current.stack.len())
-            .take_while(|&i| {
-                let id = current.stack[i].id;
-                window
-                    .iter()
-                    .all(|f| f.stack.get(i).map(|e| e.id) == Some(id))
-            })
-            .count()
     }
 
     /// The two 4p dumps every row in this module drives with the GENERIC policy
@@ -10660,47 +10585,6 @@ mod tests {
             "CR 122.1: a Stun counter is NOT in `is_monotone_loop_resource`'s class, so the \
              projection preserves it and the pair must REJECT"
         );
-    }
-
-    /// Drive one dump through `apply()` until `pred` accepts the board, returning the beat
-    /// index and that board.
-    ///
-    /// The beat is SEARCHED by its construction requirements, never hardcoded — a hardcoded
-    /// index is a fixture that drifts silently when the drive policy moves. `None` ⇒ no beat
-    /// within `max_beats` satisfied them, which every caller turns into a loud failure rather
-    /// than a vacuous pass.
-    fn drive_dump_until(
-        gz: &[u8],
-        max_beats: usize,
-        pred: impl Fn(&GameState) -> bool,
-    ) -> Option<(usize, GameState)> {
-        let mut state = dump_state(gz);
-        for beat in 0..max_beats {
-            if pred(&state) {
-                return Some((beat, state));
-            }
-            if dump_drive_one_beat(&mut state).is_err() {
-                return None;
-            }
-        }
-        None
-    }
-
-    /// The construction requirement shared by every row that needs a REAL certified window
-    /// carrying a non-empty observed-frozen prefix: a usable ring AND a newest candidate pair
-    /// whose common prefix is index-stable.
-    ///
-    /// ⚠ The `&live[live.len() - 2..]` slice hard-codes `span == 1`: it is exact only while
-    /// the selected beat's ring is two frames, and would read a half period SILENTLY — not
-    /// loudly — if the sampling rate ever grew that ring, because a half period is a
-    /// non-degenerate window with non-empty domains. Rows that need a span-correct window use
-    /// [`newest_item4_window`] instead.
-    fn has_frozen_window(state: &GameState) -> bool {
-        if state.loop_detect_ring.len() < 2 {
-            return false;
-        }
-        let live: Vec<&GameState> = state.loop_detect_ring.iter().map(|f| &f.live).collect();
-        frozen_lower_bound(&live[live.len() - 2..], state) > 0
     }
 
     fn test_trigger_ref(state: &GameState, object_id: ObjectId) -> TriggerDefinitionRef {
@@ -12725,8 +12609,7 @@ mod tests {
     /// published `DecisionPoint` stands for one such choice. When exactly one legal assignment
     /// exists, the announcing player makes none — `triggers::prepare_trigger_targets` routes
     /// this predicate's `Ok(Some(..))` straight to `AutoAssigned`, so no
-    /// `WaitingFor::TriggerTargetSelection` is raised, so `record_trigger_target_answer` (whose
-    /// only two call sites are that prompt's reducer arms) never runs. A point published here
+    /// `WaitingFor::TriggerTargetSelection` is raised and no answer is given. A point published here
     /// would demand a `predictability_gate` answer no writer can produce, and since the gate's
     /// `required` set is every published point, one such point leaves the offer with no
     /// declaration the engine can publish.
@@ -13530,8 +13413,8 @@ mod tests {
     ///   shape). `ability_utils::auto_select_targets_for_ability` early-returns `Ok(None)`
     ///   whenever ANY slot carries a chooser, so the count half is false even with exactly ONE
     ///   legal assignment — arm (a2) is that exact board. The prompt is raised for the
-    ///   CHOOSER, `record_trigger_target_answer` journals under the seat that answered, and
-    ///   every consumer reads `loop_answer(slot, proposer)` ⇒ an unanswerable published point,
+    ///   CHOOSER, so the answer is that seat's while every consumer reads the proposer's ⇒ an
+    ///   unanswerable published point,
     ///   which is the undeclarable-offer condition the bounded offer exists to remove.
     /// * **(b) `TargetSelectionMode::Random`** — routed to `random_select_targets_for_ability`
     ///   and then `AutoAssigned`, so no prompt is ever raised, and the pin RELIEVES gate (3):
@@ -13634,7 +13517,7 @@ mod tests {
         assert!(
             entry_publishes_pin_slots(&chooser_3p, &chooser_3p.stack[2], PlayerId(0)).is_none(),
             "CR 601.2c: P1 announces this target, so no point the PROPOSER could answer is \
-             published — a published one is unanswerable at `loop_answer(slot, proposer)` and \
+             published — a published one is unanswerable for the proposer and \
              one unanswerable point makes the WHOLE offer undeclarable"
         );
         assert_eq!(
@@ -16604,641 +16487,6 @@ mod tests {
         state
     }
 
-    /// Candidate windows for the cast proof, each paired with its EXPECTED
-    /// `is_forced_cascade_window` membership.
-    ///
-    /// The `bool` is what makes drift loud in BOTH directions, and it exists because the
-    /// obligation must not be derived by FILTERING this list through the very predicate
-    /// under test: deleting a member would then silently shrink the proof obligation and
-    /// leave the row green. With an expected-membership column, deleting a member
-    /// fails its `true` row and adding one of the listed non-members fails its `false`
-    /// row. The list is the authority; the predicate is the thing being measured against
-    /// it. A member absent from here is still simply never proved — see the `ponytail:`
-    /// note on the caller for that residual and its upgrade path.
-    ///
-    /// `on_board` must be objects that really exist ON THE BATTLEFIELD in the caller's
-    /// state and `in_hand` a card that really exists in hand: the turn-based windows
-    /// carry object references the per-viewer legal-action enumerator dereferences, and
-    /// each reference has a zone the window implies — untap candidates, the exerting /
-    /// enlisting attacker and the enlist-eligible creature are battlefield permanents
-    /// (CR 502.3 / CR 508.1g), while `DiscardToHandSize` names cards in hand (CR 514.1).
-    /// Passing a hand card as an untap candidate measures a window no rules path can
-    /// produce.
-    ///
-    /// Same requirement, one level deeper: a window whose payload the enumerator needs
-    /// but the fixture leaves at `Default::default()` produces ZERO actions of any kind,
-    /// so "it enumerates no cast" is inert rather than measured. `attacker` is an
-    /// OPPOSING battlefield creature the caller has also entered into `state.combat`, so
-    /// the CR 509.1 window offers a real block. The caller's per-window reach-guard is
-    /// what keeps that requirement enforced instead of documented.
-    fn cast_proof_candidate_windows(
-        on_board: [ObjectId; 2],
-        in_hand: ObjectId,
-        attacker: ObjectId,
-        exert_permission: TriggerDefinitionRef,
-    ) -> Vec<(&'static str, crate::types::game_state::WaitingFor, bool)> {
-        use crate::types::game_state::WaitingFor;
-        vec![
-            (
-                "Priority{active} — CR 704.3 SBA point; NOT exempt, and the positive control",
-                WaitingFor::Priority {
-                    player: PlayerId(0),
-                },
-                false,
-            ),
-            (
-                "Priority{non-active} — same, and the sampler's ring-clearing arm",
-                WaitingFor::Priority {
-                    player: PlayerId(1),
-                },
-                false,
-            ),
-            (
-                "RedistributeLifeTotals — a window that CAN MOVE LIFE, so never exempt",
-                WaitingFor::RedistributeLifeTotals {
-                    player: PlayerId(0),
-                    options: Vec::new(),
-                },
-                false,
-            ),
-            (
-                "AssignCombatDamage — turn-based (CR 510.1) but CR 510.2 deals the damage \
-                 with no intervening priority, so it MOVES LIFE",
-                WaitingFor::AssignCombatDamage {
-                    player: PlayerId(0),
-                    attacker_id: on_board[0],
-                    total_damage: 2,
-                    blockers: Vec::new(),
-                    assignment_modes: Vec::new(),
-                    trample: None,
-                    defending_player: PlayerId(1),
-                    attack_target: crate::game::combat::default_attack_target(),
-                    pw_loyalty: None,
-                    pw_controller: None,
-                },
-                false,
-            ),
-            (
-                "CombatTaxPayment — CR 508.1j / CR 509.1f cost sub-step; a Phyrexian tax \
-                 symbol is paid with 2 life (CR 107.4f), so it MOVES LIFE",
-                WaitingFor::CombatTaxPayment {
-                    player: PlayerId(0),
-                    context: crate::types::game_state::CombatTaxContext::Attacking,
-                    total_cost: crate::types::mana::ManaCost::Cost {
-                        shards: vec![crate::types::mana::ManaCostShard::PhyrexianWhite],
-                        generic: 0,
-                    },
-                    per_creature: Vec::new(),
-                    pending: crate::types::game_state::CombatTaxPending::Attack {
-                        attacks: Vec::new(),
-                        bands: Vec::new(),
-                    },
-                },
-                false,
-            ),
-            (
-                "OrderTriggers (CR 603.3b)",
-                WaitingFor::OrderTriggers {
-                    player: PlayerId(0),
-                    // TWO summaries, matching the two-trigger group the caller puts in
-                    // `state.pending_trigger_order`: `order_triggers_candidates` is keyed
-                    // on this length and yields nothing at length 0, and
-                    // `handle_order_triggers` rejects any order whose length disagrees
-                    // with the pending group. CR 603.3b needs a real choice — with ONE
-                    // trigger `begin_trigger_ordering` auto-orders the group
-                    // (`g.triggers.len() <= 1 => g.ordered = true`) and
-                    // `build_next_order_triggers_prompt` only ever returns an UNORDERED
-                    // group, so no rules path opens this window over a singleton and
-                    // `order: [0]` is the only legal answer rather than an ordering.
-                    // The two members must also differ, or the order-independence check
-                    // auto-orders them too; each `description` mirrors the group's
-                    // `PendingTrigger.description`, which is what the real builder copies
-                    // into the summary.
-                    triggers: vec![
-                        crate::types::game_state::PendingTriggerSummary {
-                            source_id: on_board[0],
-                            source_name: "Test Bear 0".to_string(),
-                            description: "you gain 1 life".to_string(),
-                        },
-                        crate::types::game_state::PendingTriggerSummary {
-                            source_id: on_board[1],
-                            source_name: "Test Bear 1".to_string(),
-                            description: "you gain 2 life".to_string(),
-                        },
-                    ],
-                },
-                true,
-            ),
-            (
-                "TriggerTargetSelection (CR 603.3d)",
-                WaitingFor::TriggerTargetSelection {
-                    player: PlayerId(0),
-                    trigger_controller: None,
-                    trigger_event: None,
-                    trigger_events: Vec::new(),
-                    target_slots: Vec::new(),
-                    mode_labels: Vec::new(),
-                    target_constraints: Vec::new(),
-                    // CR 603.3d: one legal target for the current slot. The enumerator
-                    // for this window maps `current_legal_targets` directly to
-                    // `ChooseTarget`, so an empty progress makes the window offer nothing
-                    // at all and the cast-zero below unreadable.
-                    selection: crate::types::game_state::TargetSelectionProgress {
-                        current_legal_targets: vec![TargetRef::Object(on_board[0])],
-                        ..Default::default()
-                    },
-                    source_id: None,
-                    description: None,
-                },
-                true,
-            ),
-            (
-                "OptionalEffectChoice (CR 603.5 + CR 608.2d)",
-                WaitingFor::OptionalEffectChoice {
-                    player: PlayerId(0),
-                    decision_subject_id: None,
-                    source_id: on_board[0],
-                    description: None,
-                    may_trigger_key: None,
-                    same_card_may_trigger_choice_available: false,
-                },
-                true,
-            ),
-            (
-                "CommanderZoneChoice (CR 903.9a)",
-                WaitingFor::CommanderZoneChoice {
-                    player: PlayerId(0),
-                    commander_id: ObjectId(2),
-                    current_zone: Zone::Graveyard,
-                },
-                true,
-            ),
-            (
-                "ChooseLegend (CR 704.5j)",
-                WaitingFor::ChooseLegend {
-                    player: PlayerId(0),
-                    legend_name: "Delianfel, Prayerful Herald".to_string(),
-                    candidates: on_board.to_vec(),
-                },
-                true,
-            ),
-            (
-                "BattleProtectorChoice (CR 310.11 + CR 704.5x)",
-                WaitingFor::BattleProtectorChoice {
-                    player: PlayerId(0),
-                    battle_id: ObjectId(5),
-                    candidates: vec![PlayerId(1)],
-                },
-                true,
-            ),
-            // CR 703.1 turn-based members. CR 117.3a puts every one of them strictly
-            // before the active player receives priority, so CR 117.1a / CR 305.1 bar
-            // a cast or land play at each just as they do at the SBA members above.
-            (
-                "UntapChoice (CR 502.3 + CR 117.3a)",
-                WaitingFor::UntapChoice {
-                    player: PlayerId(0),
-                    // CR 502.3 untaps PERMANENTS: the candidates must be on the
-                    // battlefield, not a card in hand.
-                    candidates: on_board.to_vec(),
-                    chosen_not_to_untap: Vec::new(),
-                },
-                true,
-            ),
-            (
-                "ChooseUntapSubset (CR 502.3)",
-                WaitingFor::ChooseUntapSubset {
-                    player: PlayerId(0),
-                    group: on_board.to_vec(),
-                    // CR 502.3 cap. `max: 1` over a 2-permanent group keeps the
-                    // variant's `group.len() > max` invariant AND admits a real
-                    // non-empty choice — with `max: 0` the only legal selection is the
-                    // empty one, so "this window enumerates no cast" would be a
-                    // degenerate zero rather than a measured one.
-                    max: 1,
-                },
-                true,
-            ),
-            (
-                "DeclareAttackers (CR 508.1)",
-                WaitingFor::DeclareAttackers {
-                    player: PlayerId(0),
-                    valid_attacker_ids: on_board.to_vec(),
-                    // CR 506.2: in a two-player game the NONACTIVE player is the defending
-                    // player, and only that player (plus their planeswalkers and the
-                    // battles they protect) may be attacked. `default_attack_target()` is
-                    // `Player(PlayerId(0))`, i.e. P0's own creatures attacking P0, which
-                    // the simulation filter rejects for every non-empty proposal. The
-                    // guard below then passes on the decline alone — the window offers only
-                    // `[DeclareAttackers { attacks: [], bands: [] }]`. The opposing seat is
-                    // what makes it offer a GENUINE attack.
-                    valid_attack_targets: vec![crate::game::combat::AttackTarget::Player(
-                        PlayerId(1),
-                    )],
-                    valid_attack_targets_by_attacker: None,
-                    attacker_constraints: Default::default(),
-                },
-                true,
-            ),
-            (
-                "ExertChoice (CR 508.1g + CR 701.43d)",
-                WaitingFor::ExertChoice {
-                    player: PlayerId(0),
-                    // CR 701.43d exerts an ATTACKING permanent.
-                    attacker: on_board[0],
-                    permission: exert_permission,
-                    remaining: Vec::new(),
-                },
-                true,
-            ),
-            (
-                "EnlistChoice (CR 508.1g + CR 702.154b)",
-                WaitingFor::EnlistChoice {
-                    player: PlayerId(0),
-                    attacker: on_board[0],
-                    // CR 702.154a taps another untapped creature you control — a
-                    // battlefield permanent, and a DIFFERENT one from the attacker.
-                    eligible: vec![on_board[1]],
-                    remaining: Vec::new(),
-                },
-                true,
-            ),
-            (
-                "DeclareBlockers (CR 509.1)",
-                WaitingFor::DeclareBlockers {
-                    player: PlayerId(0),
-                    valid_blocker_ids: on_board.to_vec(),
-                    // CR 509.1a: a real "this creature may block that attacker" pairing.
-                    // `blocker_actions` enumerates block proposals strictly from this
-                    // map, so an empty map leaves only the decline (the empty
-                    // declaration): with `state.combat` present but this map empty, the guard
-                    // below passes on the decline alone. Populating it is what makes the
-                    // window offer a GENUINE block, which is what the cast-zero is measured
-                    // against.
-                    valid_block_targets: on_board
-                        .iter()
-                        .map(|&blocker| (blocker, vec![attacker]))
-                        .collect(),
-                    block_requirements: Default::default(),
-                    blocker_constraints: Default::default(),
-                    must_be_blocked_targets: Default::default(),
-                    block_capacities: Default::default(),
-                },
-                true,
-            ),
-            (
-                "DiscardToHandSize (CR 514.1 + CR 514.3)",
-                WaitingFor::DiscardToHandSize {
-                    player: PlayerId(0),
-                    count: 1,
-                    // CR 514.1 discards from HAND — the one window whose object
-                    // reference is correctly a hand card.
-                    cards: vec![in_hand],
-                },
-                true,
-            ),
-            (
-                "RevealChoice, non-optional with one eligible card (CR 608.2d)",
-                reveal_choice(vec![in_hand], false),
-                true,
-            ),
-            (
-                "RevealChoice, optional with one card — declining is a real choice",
-                reveal_choice(vec![in_hand], true),
-                false,
-            ),
-            (
-                "RevealChoice, non-optional with two cards (CR 608.2d — the ring survives the choice)",
-                reveal_choice(vec![in_hand, on_board[0]], false),
-                true,
-            ),
-            (
-                "RevealChoice, non-optional with no card",
-                reveal_choice(Vec::new(), false),
-                false,
-            ),
-        ]
-    }
-
-    fn reveal_choice(cards: Vec<ObjectId>, optional: bool) -> crate::types::game_state::WaitingFor {
-        crate::types::game_state::WaitingFor::RevealChoice {
-            player: PlayerId(0),
-            cards,
-            filter: crate::types::ability::default_target_filter_any(),
-            optional,
-            decline_runs_continuation: false,
-        }
-    }
-
-    /// The `cast_card_ids: Some(&[])` proof, pinned as a row.
-    ///
-    /// CR 117.1a (a spell is cast only with priority) and CR 305.1 (a land is played
-    /// only with priority) say no cast or land-play can happen at a window where
-    /// nobody holds priority. This row measures that claim against the engine's own
-    /// legal-action enumerator instead of trusting it: on ONE board it enumerates the
-    /// deliberate class (`CastSpell` / `PlayLand` / `ActivateAbility`) at a `Priority`
-    /// window and at every window `is_forced_cascade_window` currently exempts.
-    ///
-    /// The exempt set is DERIVED from a candidate list that includes non-members, rather
-    /// than hardcoded. That is what keeps the revert-probe live: widening the predicate
-    /// widens what this row has to prove. With a hardcoded exempt-only list, adding
-    /// `Priority` to the class leaves this row green, because the legal-action enumerator
-    /// never consults the predicate.
-    ///
-    /// FAILS LOUDLY ON CLASS DRIFT IN BOTH DIRECTIONS. Deriving the obligation by FILTERING
-    /// the candidate list through `is_forced_cascade_window` — the predicate under test — is
-    /// itself a hole, because deleting a member just shrinks the loop. Each candidate
-    /// therefore carries its EXPECTED membership and that expectation is asserted before the
-    /// cast proof runs, so DELETING a member fails its `true` row and ADDING any
-    /// enumerated non-member fails its `false` row.
-    ///
-    /// ponytail: a brand-new `WaitingFor` variant added to the predicate but to no list
-    /// is still silent. Closing that needs an exhaustive 127-arm `WaitingFor` destructure;
-    /// deliberately not built, because the load-bearing non-members are enumerated here
-    /// and `is_forced_cascade_window`'s FAIL-CLOSED fall-through makes a forgotten variant
-    /// a conservative miss rather than a soundness hole. Upgrade path if that changes:
-    /// mirror `types::game_state::_gamestate_partition_is_total`'s no-`..` destructure
-    /// over `WaitingFor` so the build breaks when a variant is added.
-    ///
-    /// The class includes the CR 703.1 turn-based actions (CR 502.3 untap, CR 508.1 /
-    /// CR 508.1g declare attackers + exert/enlist, CR 509.1 declare blockers, CR 514.1
-    /// cleanup discard), and none of them enumerates a
-    /// `CastSpell` / `PlayLand` / `ActivateAbility`. So `cast_card_ids: Some(&[])` still
-    /// holds for a window retained across a turn boundary: untapping, declaring,
-    /// exerting/enlisting and discarding to hand size are not casts, and CR 117.3a
-    /// grants nobody the priority CR 117.1a / CR 305.1 require.
-    ///
-    /// NON-VACUITY — a zero from an instrument that cannot return non-zero:
-    /// the `Priority` arm runs FIRST and is asserted NON-EMPTY on the same board, so
-    /// the zeros below are proved zeros, not an inert enumerator. The exempt set is
-    /// also asserted non-empty, so "no exempt window admits a cast" cannot pass by the
-    /// class being empty.
-    ///
-    /// ⚠️ SCOPE LIMIT (stated, not implied): this row enumerates the legal actions
-    /// available **at** a window. It therefore cannot see the `apply_action` bypass
-    /// class — the handful of `GameAction`s that early-return before the ring clear
-    /// (`ReorderHand`, `Concede`, `Debug`, `GrantDebugPermission`,
-    /// `RevokeDebugPermission`, `CancelAutoPass`, `SetPhaseStops`,
-    /// `SetPriorityPassingMode`). That class is discharged separately by enumeration:
-    /// none of those actions casts a spell or plays a land, so the proof is unaffected.
-    ///
-    /// REVERT-PROBE: add `WaitingFor::Priority { .. }` to `is_forced_cascade_window`'s
-    /// `matches!` ⇒ a `Priority` window becomes "exempt", casts become admissible
-    /// inside a retained window, and the `Some(&[])` proof this row pins is false.
-    #[test]
-    fn no_exempt_window_admits_a_cast() {
-        use crate::types::actions::GameAction;
-        use crate::types::game_state::WaitingFor;
-
-        let mut state = GameState::new_two_player(42);
-        state.turn_number = 2;
-        state.phase = Phase::PreCombatMain;
-        state.active_player = PlayerId(0);
-        state.priority_player = PlayerId(0);
-        state.waiting_for = WaitingFor::Priority {
-            player: PlayerId(0),
-        };
-        // A land in hand makes the deliberate class REACHABLE on this board (CR 305.1 + CR 305.2:
-        // main phase, empty stack, the active player holds priority, land drop unused).
-        // It is also the ONLY correct object for `DiscardToHandSize` (CR 514.1 discards
-        // from hand) — every other window below names a battlefield permanent.
-        let in_hand = crate::game::zones::create_object(
-            &mut state,
-            CardId(701),
-            PlayerId(0),
-            "Forest".to_string(),
-            Zone::Hand,
-        );
-        state
-            .objects
-            .get_mut(&in_hand)
-            .unwrap()
-            .card_types
-            .core_types
-            .push(CoreType::Land);
-        // Two real battlefield creatures. CR 502.3 untap candidates, the CR 508.1g
-        // exerting attacker and its CR 702.154a enlist-eligible partner are all
-        // permanents; passing the hand card for those built windows no rules path can
-        // produce, and the per-viewer enumerator dereferences every one of them.
-        let on_board = [0u64, 1].map(|i| {
-            let id = crate::game::zones::create_object(
-                &mut state,
-                CardId(710 + i),
-                PlayerId(0),
-                format!("Test Bear {i}"),
-                Zone::Battlefield,
-            );
-            let obj = state.objects.get_mut(&id).unwrap();
-            obj.card_types.core_types.push(CoreType::Creature);
-            obj.base_card_types = obj.card_types.clone();
-            obj.power = Some(2);
-            obj.toughness = Some(2);
-            obj.base_power = Some(2);
-            obj.base_toughness = Some(2);
-            id
-        });
-
-        // CR 509.1a: a real attacking creature CONTROLLED BY THE OPPONENT and
-        // entered into `state.combat`, so the CR 509.1 window below is answerable. The
-        // blocker-action enumerator runs every proposal through the engine's own
-        // `handle_declare_blockers`, which errors out with "No combat state (attackers
-        // not declared)" when `state.combat` is `None` — every candidate is then filtered
-        // away and the window offers nothing at all.
-        let attacker = crate::game::zones::create_object(
-            &mut state,
-            CardId(730),
-            PlayerId(1),
-            "Test Ogre".to_string(),
-            Zone::Battlefield,
-        );
-        {
-            let obj = state.objects.get_mut(&attacker).unwrap();
-            obj.card_types.core_types.push(CoreType::Creature);
-            obj.base_card_types = obj.card_types.clone();
-            obj.power = Some(2);
-            obj.toughness = Some(2);
-            obj.base_power = Some(2);
-            obj.base_toughness = Some(2);
-        }
-        state.combat = Some(crate::game::combat::CombatState {
-            attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
-                attacker,
-                PlayerId(0),
-            )],
-            ..Default::default()
-        });
-
-        // CR 603.3b: one unordered group, matching the two-summary `OrderTriggers`
-        // window. `handle_order_triggers` reads the group (not the window) for the
-        // permutation length and rejects the submission outright without it, so the
-        // window's candidates would be filtered out and its zero rendered inert.
-        //
-        // TWO members, and DIFFERENT ones. `begin_trigger_ordering` auto-orders any
-        // group that is a singleton or `group_is_order_independent`, and only an
-        // unordered group ever becomes a prompt — so a one-trigger group, or two
-        // triggers with identical normalized abilities, is a window no rules path can
-        // open. Distinct life amounts make the group order-dependent by the engine's
-        // own conservative identity check, which is the reachable shape. Both stay
-        // inert: no targets, no modes, no resolution choice.
-        let inert_life_trigger = |source_id, value, description: &str| {
-            // `single` (not a struct literal) supplies the CR 603.7 firing identity:
-            // `TriggerFiring::Ordinary`. A literal would leave the field's `#[default]`
-            // `UnknownLegacy`, which is reserved for persisted records whose install
-            // receipt cannot be reconstructed — never for a freshly built trigger.
-            crate::game::triggers::PendingTriggerContext::single(
-                crate::game::triggers::PendingTrigger {
-                    source_id,
-                    controller: PlayerId(0),
-                    condition: None,
-                    ability: Box::new(ResolvedAbility::new(
-                        Effect::GainLife {
-                            amount: QuantityExpr::Fixed { value },
-                            player: TargetFilter::Controller,
-                        },
-                        vec![],
-                        source_id,
-                        PlayerId(0),
-                    )),
-                    timestamp: 0,
-                    target_constraints: Vec::new(),
-                    distribute: None,
-                    trigger_event: None,
-                    modal: None,
-                    mode_abilities: Vec::new(),
-                    // The real prompt builder COPIES this into the summary
-                    // (`description.clone().unwrap_or_default()`), so a `None` here
-                    // under a described summary is a state the engine cannot produce.
-                    description: Some(description.to_string()),
-                    may_trigger_origin: None,
-                    subject_match_count: None,
-                    die_result: None,
-                    provenance: None,
-                },
-            )
-        };
-        state.pending_trigger_order = Some(crate::types::game_state::PendingTriggerOrder {
-            groups: vec![crate::types::game_state::TriggerOrderGroup {
-                controller: PlayerId(0),
-                triggers: vec![
-                    inert_life_trigger(on_board[0], 1, "you gain 1 life"),
-                    inert_life_trigger(on_board[1], 2, "you gain 2 life"),
-                ],
-                ordered: false,
-            }],
-            resume_after_ordering: None,
-        });
-
-        let deliberate = |s: &GameState| -> Vec<GameAction> {
-            crate::ai_support::legal_actions(s)
-                .into_iter()
-                .filter(|a| {
-                    matches!(
-                        a,
-                        GameAction::CastSpell { .. }
-                            | GameAction::PlayLand { .. }
-                            | GameAction::ActivateAbility { .. }
-                    )
-                })
-                .collect()
-        };
-
-        // POSITIVE CONTROL, asserted before any zero is read.
-        let at_priority = deliberate(&state);
-        assert!(
-            !at_priority.is_empty(),
-            "reach-guard: the enumerator must return a deliberate action at a Priority \
-             window on this board, else every zero below is an inert instrument"
-        );
-
-        // CLASS-DRIFT GATE, run before the cast proof: every candidate's membership must
-        // be what the list says it is. A deleted member reds its `true` row here; an
-        // added non-member reds its `false` row.
-        // CR 508.1g: This optional-cost control needs an actual functioning
-        // permission on an attacking source, rather than an arbitrary object ID.
-        state
-            .objects
-            .get_mut(&on_board[0])
-            .unwrap()
-            .install_trigger_base_definitions(Arc::new(vec![TriggerDefinition::new(
-                crate::types::triggers::TriggerMode::Exerted,
-            )
-            .valid_card(TargetFilter::SelfRef)]))
-            .expect("materialize the permission before binding its occurrence");
-        state.combat.as_mut().unwrap().attackers.push(
-            crate::game::combat::AttackerInfo::attacking_player(on_board[0], PlayerId(1)),
-        );
-        let exert_permission = crate::game::functioning_abilities::active_trigger_definitions(
-            &state,
-            &state.objects[&on_board[0]],
-        )
-        .next()
-        .expect("functioning attack permission")
-        .definition_ref;
-        assert_eq!(
-            exert_permission.source,
-            crate::types::identifiers::ObjectIncarnationRef::from_object(
-                &state.objects[&on_board[0]]
-            )
-        );
-        assert!(!matches!(
-            &exert_permission.occurrence,
-            crate::types::ability::TriggerDefinitionOccurrenceRef::Unmaterialized
-        ));
-        let candidates =
-            cast_proof_candidate_windows(on_board, in_hand, attacker, exert_permission);
-        for (why, window, expected_member) in &candidates {
-            assert_eq!(
-                window.is_forced_cascade_window(),
-                *expected_member,
-                "CLASS DRIFT — `is_forced_cascade_window` disagrees with the candidate \
-                 table on {why}. Expected member = {expected_member}."
-            );
-        }
-        let (members, non_members): (usize, usize) = candidates.iter().fold(
-            (0, 0),
-            |(m, n), (_, _, e)| if *e { (m + 1, n) } else { (m, n + 1) },
-        );
-        assert!(
-            members > 0 && non_members > 0,
-            "reach-guard: both halves of the table must be populated — a one-sided table \
-             is satisfiable by a constant predicate; got {members} members / \
-             {non_members} non-members"
-        );
-
-        for (why, window, expected_member) in candidates {
-            if !expected_member {
-                continue;
-            }
-            state.phase = match &window {
-                WaitingFor::DeclareAttackers { .. }
-                | WaitingFor::ExertChoice { .. }
-                | WaitingFor::EnlistChoice { .. } => Phase::DeclareAttackers,
-                WaitingFor::DeclareBlockers { .. } => Phase::DeclareBlockers,
-                _ => Phase::PreCombatMain,
-            };
-            state.waiting_for = window;
-            // PER-WINDOW REACH-GUARD. The zero below is only evidence if the enumerator
-            // is live AT THIS WINDOW. A member whose fixture is under-populated (a
-            // `Default::default()` where the enumerator needs real data) yields zero
-            // deliberate actions because it yields zero actions AT ALL — an inert
-            // instrument, not a measured absence. `OrderTriggers` (no `pending_trigger_order`
-            // group ⇒ no valid permutation), `TriggerTargetSelection` (empty
-            // `current_legal_targets`) and `DeclareBlockers` (`state.combat: None` ⇒ every
-            // proposal rejected by the simulation filter) are each one under-population away
-            // from being exactly that.
-            assert!(
-                !crate::ai_support::legal_actions(&state).is_empty(),
-                "{why} must offer at least one legal answer, else the zero below is inert"
-            );
-            let found = deliberate(&state);
-            assert!(
-                found.is_empty(),
-                "{why} holds no priority (CR 117.1a / CR 305.1), so it must admit no \
-                 CastSpell/PlayLand/ActivateAbility; got {found:?}"
-            );
-        }
-    }
-
     // -----------------------------------------------------------------------
     // CR 704 elimination bound
     // -----------------------------------------------------------------------
@@ -17878,8 +17126,8 @@ mod tests {
     }
 
     /// A declaration pinning each `(slot, seats)` pair to a CR 601.2c target schedule over
-    /// seats, one ranking per step — the TARGET-class spelling `record_trigger_target_answer`
-    /// journals. One seat is a constant pin; more are a round-robin.
+    /// seats, one ranking per step — the TARGET-class spelling `announced_target_pins`
+    /// emits. One seat is a constant pin; more are a round-robin.
     fn seat_schedule_declaration(pins: &[(&DecisionSlot, &[u8])]) -> DecisionTemplate {
         let step = |seat: &u8| {
             crate::analysis::decision_template::Ranking::one(
@@ -21180,85 +20428,6 @@ mod tests {
                  only two plain (non-`+= 1`) production assignments write THROWAWAY CLONES \
                  (`effects/prepare.rs`'s simulated clone and `normalize_for_loop`'s comparand). \
                  Revived: {revivals:?}"
-            );
-        }
-    }
-
-    /// R27 (a2) — THE SEAM: EVERY BOARD `certified_period_touch` HANDS THE CLASSIFIER IS AN
-    /// UN-NORMALIZED EVALUATION BOARD.
-    ///
-    /// CR 732.2a + CR 104.4b. Announcement and resolution are evaluated against the frame that
-    /// CARRIES the pair; a `normalize_for_loop` product zeroes `next_object_id`, so a
-    /// resolution evaluated against one allocates `ObjectId(0)` over a live object. The window
-    /// carrier is therefore the sample's `live` half, never its `normalized` half.
-    ///
-    /// The matched pair is the two halves of the SAME ring, one argument apart — the
-    /// `.normalized` arm is executed here as an instrument-liveness control, so the `!= 0`
-    /// assertion cannot be true for want of a board that could fail it.
-    #[test]
-    fn r27_a2_every_announced_pair_carries_an_unnormalized_evaluation_board() {
-        for (name, gz) in TRACKED_DUMPS {
-            let (beat, board) = drive_dump_until(gz, 80, has_frozen_window).unwrap_or_else(|| {
-                panic!("REACH-GUARD [{name}]: no driven beat carried a usable window")
-            });
-            assert_ne!(
-                board.next_object_id, 0,
-                "[{name}] beat {beat}: the LIVE board's allocator cursor must be non-zero, \
-                 else the axis this row is keyed to cannot discriminate"
-            );
-
-            let live: Vec<&GameState> = board.loop_detect_ring.iter().map(|f| &f.live).collect();
-            let norm: Vec<&GameState> = board
-                .loop_detect_ring
-                .iter()
-                .map(|f| &f.normalized)
-                .collect();
-            let touch = certified_period_touch(
-                &live[live.len() - 2..],
-                &board,
-                PeriodCertification::BoardCovered,
-            );
-            assert!(
-                !touch.announced.is_empty(),
-                "[{name}] beat {beat}: REACH-GUARD — the announced half must be non-empty, \
-                 else the universal below quantifies over nothing"
-            );
-            assert!(
-                touch
-                    .announced
-                    .iter()
-                    .all(|(frame, _)| frame.next_object_id != 0),
-                "[{name}] beat {beat}: (a2) every carrying frame must be an EVALUATION board. \
-                 {} of {} announced pairs carry a zeroed allocator cursor",
-                touch
-                    .announced
-                    .iter()
-                    .filter(|(f, _)| f.next_object_id == 0)
-                    .count(),
-                touch.announced.len()
-            );
-
-            // ── INSTRUMENT-LIVENESS CONTROL: the normalized carrier, one argument apart ──
-            let control = certified_period_touch(
-                &norm[norm.len() - 2..],
-                &board,
-                PeriodCertification::BoardCovered,
-            );
-            assert_eq!(
-                control.announced.len(),
-                touch.announced.len(),
-                "[{name}] the control must observe the SAME announcements — normalization \
-                 preserves every `StackEntry.id` (R17 arm 3), so only the CARRIER differs"
-            );
-            assert!(
-                control
-                    .announced
-                    .iter()
-                    .filter(|(_, e)| board.stack.iter().all(|s| s.id != e.id))
-                    .all(|(frame, _)| frame.next_object_id == 0),
-                "[{name}] the control arm must really carry ZEROED boards for the pairs whose \
-                 carrying frame is a RING frame; if it did not, the (a2) assertion above \
-                 would be true of any board and would prove nothing"
             );
         }
     }

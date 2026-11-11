@@ -283,53 +283,29 @@ fn a_pre_field_certificate_loads_with_no_rising_seat() {
 
 /// A synthetic drain, not a printed board ("Whenever you gain life, each opponent loses 1 life."
 /// and "Whenever an opponent loses life, you gain 1 life."): P0's life rises and P1's falls
-/// (CR 704.5a), so on both crowning producers only P0 reads ∞. A counted take of Marauding
+/// (CR 704.5a), so on the mandatory crown only P0 reads ∞. A counted take of Marauding
 /// Blight-Priest's drain ends the game with nothing marked unbounded.
 #[test]
 fn crowned_drains_read_only_the_gaining_seat_as_unbounded() {
-    type Crown = fn() -> GameRunner;
-    let crowns: [(&str, Crown); 2] = [
-        ("On", || {
-            let (mut runner, kickoff) = setup_2p_drain(LoopDetectionMode::On);
-            let _ = runner.cast(kickoff).resolve();
-            let _ = drive_collect(&mut runner, 500);
-            runner
-        }),
-        ("mandatory Interactive", || {
-            let (mut runner, kickoff) = setup_2p_drain(LoopDetectionMode::Interactive);
-            let _ = runner.cast(kickoff).resolve();
-            let _ = drive_collect(&mut runner, 500);
-            runner
-        }),
-    ];
-    for (route, crown) in crowns {
-        let runner = crown();
-        let state = runner.state();
-        assert_eq!(
-            state.waiting_for,
-            WaitingFor::GameOver { winner: Some(P0) },
-            "{route}"
-        );
-        let marked = state
-            .unbounded_resources
-            .get(&P0)
-            .cloned()
-            .unwrap_or_default();
-        assert!(
-            marked.contains(&ResourceAxis::Life(P0)) && marked.contains(&ResourceAxis::Life(P1)),
-            "{route}: {marked:?}"
-        );
-        assert_eq!(
-            state.unbounded_rising,
-            BTreeMap::from([(P0, BTreeSet::from([ResourceAxis::Life(P0)]))]),
-            "{route}"
-        );
-        assert_eq!(
-            derive_views(state, None).life_magnitude,
-            unbounded(&[P0]),
-            "{route}"
-        );
-    }
+    let (mut runner, kickoff) = setup_2p_drain(LoopDetectionMode::Interactive);
+    let _ = runner.cast(kickoff).resolve();
+    let _ = drive_collect(&mut runner, 500);
+    let state = runner.state();
+    assert_eq!(state.waiting_for, WaitingFor::GameOver { winner: Some(P0) });
+    let marked = state
+        .unbounded_resources
+        .get(&P0)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        marked.contains(&ResourceAxis::Life(P0)) && marked.contains(&ResourceAxis::Life(P1)),
+        "{marked:?}"
+    );
+    assert_eq!(
+        state.unbounded_rising,
+        BTreeMap::from([(P0, BTreeSet::from([ResourceAxis::Life(P0)]))])
+    );
+    assert_eq!(derive_views(state, None).life_magnitude, unbounded(&[P0]));
 
     let (mut runner, wine, _bolt, _priest) = setup_2p_blight_priest_drain();
     let _ = runner.cast(wine).resolve();

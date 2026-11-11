@@ -280,20 +280,6 @@ pub(super) fn grid_template(
 /// the planted `LoopChoice` ephemeral template is gone, survivors
 /// `[(TriggerOrdering, persistent)]` and the count drops `2 → 1` ⇒ the first assertion fails.
 ///
-/// # The CR 603.5 journal half is pinned on the f4 dump, and that is a MEASURED constraint
-///
-/// The contrast this carrier lives inside is "the template survives, the answer journal does
-/// not". The journal half is asserted by
-/// `fantastic_four_bounded_loop::r3a_the_accepted_drive_ends_at_the_priority_point_with_the_window_cleared`
-/// — with the `> 0` reach-guard that makes it non-vacuous — and NOT here. THE REASON IS THE
-/// BOARD, NOT VISIBILITY, and the distinction matters to whoever reads this next: the READER
-/// accessors are `pub` and reachable from this binary — `natural_balance.rs` calls
-/// `runner.state().loop_answers_recorded()` (`:648`) and `runner.state().loop_answer(..)`
-/// (`:654`). Only the WRITER, `GameState::record_loop_answer`, is `pub(crate)`, and the journal
-/// field with it. What makes an assertion here vacuous is that this file's synthetic board
-/// drives no answer through `apply()` at all, so `loop_answers_recorded() == 0` would be a
-/// negative with no reachable paired positive — not an unreachable accessor.
-///
 /// # The hostile arm is MULTI-AUTHORITY, and it says so structurally
 ///
 /// `viewer_has_private_access_to_player` is

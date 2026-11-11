@@ -295,39 +295,6 @@ pub enum UnlessPaymentOption {
     Decline,
 }
 
-/// The observed answer to ONE published decision slot, from ONE seat, across the current
-/// loop-detection window. Journalled under the key `(DecisionSlot, PlayerId)`
-/// (`GameState::record_loop_answer`), so a seat can only ever answer for itself and the
-/// CHOICE POINT keeps the two slots one source can publish (CR 601.2c target, CR 603.5 "may")
-/// in two entries rather than collapsing them into one latched conflict.
-///
-/// CR 732.2a says a shortcut proposal describes "a sequence of game choices, for all
-/// players, that may be legally taken based on the current game state and the predictable
-/// results of the sequence of choices", and that this sequence "may be a non-repetitive
-/// series of choices, a loop that repeats a specified number of times, multiple loops, or
-/// nested loops, and may even cross multiple turns". A series whose answers DIFFER between
-/// iterations is therefore not, by itself, the conditional action the rule bars; what the
-/// rule actually bars is narrower — "It can't include conditional actions, where the
-/// outcome of a game event determines the next action a player takes."
-///
-/// This engine refuses on a differing answer anyway. That is an ENGINE-CAPABILITY LIMIT,
-/// DELIBERATELY MORE CONSERVATIVE THAN CR 732.2a REQUIRES — not a rule the CR states.
-/// [`DecisionTemplate`] pins exactly one `MayChoice` per published slot per cycle, so a
-/// non-uniform series has no representation here; it is the same "a choice a player could
-/// only make reactively is one they cannot pin" disposition [`predictability_gate`]'s
-/// CR 732.2a firewall doc already records. Failing to offer is the fail-closed direction:
-/// strictly fewer offers, never a wrong pin.
-// `Copy` is DROPPED here (and nowhere else): `LoopAnswerValue::Targets` carries a `Vec`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LoopAnswer {
-    /// Every observed iteration answered this (slot, seat) pair identically.
-    Uniform(LoopAnswerValue),
-    /// Two observed iterations of the same (slot, seat) pair disagreed. Latched:
-    /// never returns to `Uniform`. See the type doc — the refusal this produces is this
-    /// engine's conservative policy, NOT a CR 732.2a mandate.
-    Conflicted,
-}
-
 /// The VALUE of one observed answer. Variants are distinct CR choice KINDS — the same axis
 /// [`PinnedDecision`] and [`DecisionPointKind`] already partition, and under the same
 /// CR 732.2a umbrella ("a sequence of game choices, for all players") that makes each of
@@ -335,17 +302,6 @@ pub enum LoopAnswer {
 /// observation-side projection of that kind space (2 of the 6 [`DecisionPointKind`]
 /// variants), TOTALIZED at the consumer's wildcard-free `(DecisionPointKind,
 /// LoopAnswerValue)` match — not an exhaustive peer of either.
-///
-/// Parameterizing [`LoopAnswer::Uniform`] rather than adding a `UniformTargets` sibling is
-/// deliberate: a `X`/`TargetX` sibling pair is CLAUDE.md's sibling-cluster smell, and it
-/// would put the KIND axis on the same enum level as the LATCH axis (`Uniform` vs
-/// `Conflicted`), which is the layer conflation CLAUDE.md's enum-design rule forbids.
-///
-/// DELIBERATELY DERIVES NO `Serialize`/`Deserialize`, exactly as [`LoopAnswer`] does: the
-/// `#[serde(skip)]` on `GameState::loop_answer_journal` is enforced AT COMPILE TIME by the
-/// absence of that derive, and adding one here would silently re-open persistence of a
-/// transient window. ([`TargetPin`] and [`MayChoiceOption`] do derive it; the bar lives on
-/// the two enums above them, which is where it was put.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoopAnswerValue {
     /// CR 603.5: take the optional action, or decline it.
@@ -715,8 +671,8 @@ pub enum TargetPin {
     /// spelling: [`AnnouncementSubject::Seat`] inside a [`Ranking`] inside
     /// [`TargetPin::Scheduled`], judged by `game::targeting::player_is_legal_target`. Both
     /// TARGET-class producers emit that spelling —
-    /// `game::engine::record_trigger_target_answer` (the engine's own CR 601.2c
-    /// announcement journal) and `game::interaction::materialize_loop_shortcut_response`
+    /// `game::engine::announced_target_pins` (the engine's own CR 601.2c
+    /// announcement) and `game::interaction::materialize_loop_shortcut_response`
     /// (the human ingress of the same point kind). The spelling IS the provenance, so the
     /// authority is selected by what the answer IS, never by who submitted it.
     Player(PlayerId),
@@ -1020,11 +976,9 @@ fn resolve_target(
         // variant alone. `TargetPin::Player` is the CHOICE class (this arm, existence only);
         // a CR 601.2c TARGET-class seat is `AnnouncementSubject::Seat` inside a `Ranking`
         // inside `TargetPin::Scheduled`, resolved by the arm below through
-        // `targeting::player_is_legal_target`. Along the `record_loop_answer` route,
-        // `game::engine::record_trigger_target_answer` did produce a TARGET-class
-        // `TargetPin::Player` from a `WaitingFor::TriggerTargetSelection` announcement. That
-        // producer, and the human ingress of the same point kind
-        // (`game::interaction::materialize_loop_shortcut_response`), now emit the ranked
+        // `targeting::player_is_legal_target`. The engine's announcement producer
+        // (`game::engine::announced_target_pins`) and the human ingress of the same point kind
+        // (`game::interaction::materialize_loop_shortcut_response`) emit the ranked
         // spelling. So no IN-PROCESS producer can reach this arm with a target any more, and
         // "not live today" is now an enforced property rather than a census result — pinned
         // by `tests/integration/loop_shortcut_seat_pin_census.rs`.

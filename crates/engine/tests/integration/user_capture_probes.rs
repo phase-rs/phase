@@ -159,17 +159,16 @@ fn dina_drive_one_beat(state: &mut GameState) -> Result<String, String> {
 }
 
 /// Drives IN PLACE (`&mut`), so the caller can inspect the board the drive stopped on — the
-/// offer's proposer, the ring depth, the window's plays — instead of only the beat.
+/// offer's proposer, the window's plays — instead of only the beat.
 ///
 /// Returns the beat the drive stopped on.
 fn dina_drive_and_report(state: &mut GameState, label: &str, beats: u32) -> Option<u32> {
     eprintln!(
-        "[{label}] START turn={} active={} wf={} stack={} ring={} seq={} life={:?}",
+        "[{label}] START turn={} active={} wf={} stack={} seq={} life={:?}",
         state.turn_number,
         state.active_player.0,
         wf_label(&state.waiting_for),
         state.stack.len(),
-        state.loop_detect_ring.len(),
         play_seats(state).len(),
         state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
     );
@@ -186,10 +185,9 @@ fn dina_drive_and_report(state: &mut GameState, label: &str, beats: u32) -> Opti
         match dina_drive_one_beat(state) {
             Ok(act) => {
                 eprintln!(
-                    "[{label}] beat {beat:3} {before:>26} -> {:<26} stack={} ring={} seq={} life={:?} act={}",
+                    "[{label}] beat {beat:3} {before:>26} -> {:<26} stack={} seq={} life={:?} act={}",
                     wf_label(&state.waiting_for),
                     state.stack.len(),
-                    state.loop_detect_ring.len(),
                     play_seats(state).len(),
                     state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
                     &act.chars().take(40).collect::<String>()
@@ -202,22 +200,17 @@ fn dina_drive_and_report(state: &mut GameState, label: &str, beats: u32) -> Opti
         }
     }
     eprintln!(
-        "[{label}] END fired={fired:?} wf={} ring={} seq={} life={:?}",
+        "[{label}] END fired={fired:?} wf={} seq={} life={:?}",
         wf_label(&state.waiting_for),
-        state.loop_detect_ring.len(),
         play_seats(state).len(),
         state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
     );
     fired
 }
 
-/// (beat the offer fired at, ring depth, life vector) — the axes the two arms are compared on.
-fn offer_signature(state: &GameState, fired: Option<u32>) -> (Option<u32>, usize, Vec<i32>) {
-    (
-        fired,
-        state.loop_detect_ring.len(),
-        state.players.iter().map(|p| p.life).collect(),
-    )
+/// (beat the offer fired at, life vector) — the axes the two arms are compared on.
+fn offer_signature(state: &GameState, fired: Option<u32>) -> (Option<u32>, Vec<i32>) {
+    (fired, state.players.iter().map(|p| p.life).collect())
 }
 
 /// ARM D1 — the capture as PRODUCTION loads it, with no play trace, so this is the state every
@@ -282,7 +275,7 @@ fn the_user_captures_offer_is_reached_with_its_driving_period_cleared() {
 /// what the running game held. Only that play differs from ARM D1.
 ///
 /// **THE FIX BAR, on the user's own capture.** The drive must reach the SAME offer the trace-free
-/// control reaches, at the same beat, with the same ring depth and the same life vector: a play
+/// control reaches, at the same beat, with the same life vector: a play
 /// another seat made describes no sequence this proposer takes (CR 732.2a), so it is inert.
 #[test]
 fn the_user_captures_offer_is_reached_with_its_own_foreign_period_live() {
@@ -304,7 +297,7 @@ fn the_user_captures_offer_is_reached_with_its_own_foreign_period_live() {
 
     // IN-ROW REACH-GUARD, not inherited from ARM D1's: the equality below compares this arm to a
     // control re-driven HERE, so on a board where NEITHER side reaches an offer both sides are
-    // `(None, (None, ring, life))` and the assertion passes having measured nothing. ARM D1's own
+    // `(None, (None, life))` and the assertion passes having measured nothing. ARM D1's own
     // guard cannot cover that — a `#[test]` that is skipped, filtered, or reds independently
     // leaves this row still "green". The control must PROVABLY reach the offer in this process.
     assert!(
@@ -324,8 +317,8 @@ fn the_user_captures_offer_is_reached_with_its_own_foreign_period_live() {
         (proposer, offer_signature(&state, fired)),
         (control_proposer, offer_signature(&control, control_fired)),
         "CR 732.2a THE FIX BAR: with an opponent's activation in the window's trace, the \
-         proposer's own bounded offer must be reached at the same beat, with the same ring \
-         depth and the same life vector, as the trace-free control"
+         proposer's own bounded offer must be reached at the same beat, with the same life \
+         vector, as the trace-free control"
     );
 }
 

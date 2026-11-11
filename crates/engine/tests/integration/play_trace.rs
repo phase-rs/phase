@@ -2018,7 +2018,7 @@ fn play_trace_names_the_base_window_population_sprout_swarm_lumaret() {
     let mut state = restore_dump(include_bytes!(
         "../fixtures/witherbloom_sprout_lumaret_4p.json.gz"
     ));
-    state.loop_detection = LoopDetectionMode::On;
+    state.loop_detection = LoopDetectionMode::Interactive;
     let mut runner = GameRunner::from_state(state);
     let mut named_before = play_trace_view(runner.state()).map_or(0, |view| view.named.len());
     let mut commit = runner

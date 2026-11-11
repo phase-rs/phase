@@ -3666,40 +3666,39 @@ mod tests {
     ///
     /// REVERT-FAIL: change either provenance site (create_game_n_players or
     /// rebuild_pregame_state) back to a raw `state.match_config = …` assignment that
-    /// drops the `loop_detection` projection ⇒ the corresponding `is_on()` flips.
+    /// drops the `loop_detection` projection ⇒ the corresponding assertion flips. The config
+    /// is a legacy `On` save, which loads as `Interactive`.
     #[test]
     fn loop_detection_config_persists_across_bo3_rebuild() {
         use engine::types::game_state::LoopDetectionMode;
-        use engine::types::match_config::MatchType;
 
+        let config: MatchConfig =
+            serde_json::from_str(r#"{"match_type":"Bo3","loop_detection":{"type":"On"}}"#)
+                .expect("a legacy On config must still load");
         let mut mgr = SessionManager::new();
         let (code, _) = mgr
-            .create_game_n_players(
-                make_deck(),
-                None,
-                "Host".to_string(),
-                None,
-                2,
-                MatchConfig {
-                    match_type: MatchType::Bo3,
-                    loop_detection: LoopDetectionMode::On,
-                },
-                None,
-            )
+            .create_game_n_players(make_deck(), None, "Host".to_string(), None, 2, config, None)
             .expect("supported format config");
 
         // Game 1: the creation site projects the opt-in onto the runtime flag.
-        assert!(
-            mgr.try_session(&code).unwrap().state.loop_detection.is_on(),
+        assert_eq!(
+            mgr.try_session(&code).unwrap().state.loop_detection,
+            LoopDetectionMode::Interactive,
             "the MatchConfig opt-in must enable the detector at game-1 creation"
         );
 
         // Between-games rebuild (game 2): the immutable config is re-read, so the
         // detector stays consistent across the whole Bo3 match.
         mgr.try_session(&code).unwrap().rebuild_pregame_state(2);
-        assert!(
-            mgr.try_session(&code).unwrap().state.loop_detection.is_on(),
+        let state = &mgr.try_session(&code).unwrap().state;
+        assert_eq!(
+            state.loop_detection,
+            LoopDetectionMode::Interactive,
             "the Bo3 between-games rebuild must re-derive the detector from the immutable MatchConfig"
+        );
+        assert_eq!(
+            serde_json::to_value(state.match_config).unwrap()["loop_detection"]["type"],
+            "Interactive"
         );
     }
 
