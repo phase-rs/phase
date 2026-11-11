@@ -948,6 +948,12 @@ pub(crate) fn park_triggers_until_priority(state: &mut GameState, events: &[Game
     triggers::collect_parked_triggers_into_deferred(state, events, origin);
     // Claim for the ordinary collector so a paused announcement carrier
     // does not re-collect these events (CR 603.2c, CR 733.1).
+    // NOTE: This claim uses local indices (0..events.len()) which match the
+    // global buffer indices only for the first touch action in a sequence.
+    // Subsequent touches have mismatched occurrences, but the announcement
+    // carrier staging via `announcement_event_scope` prevents double-collection
+    // in practice for the common case. A proper fix would require global buffer
+    // access at claim time.
     super::announcement_triggers::claim_ordinary_collected_span(state, events, 0, events.len());
 }
 
