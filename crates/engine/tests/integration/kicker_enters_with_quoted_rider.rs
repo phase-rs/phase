@@ -256,10 +256,11 @@ fn degavolver_unkicked_gets_neither_counters_nor_grant() {
 /// DUAL-KICKER COLLISION (CR 702.33d + CR 616.1f). Both kickers paid, so BOTH
 /// replacements apply: all three +1/+1 counters (2 black + 1 red), first
 /// strike from the red half, and an activatable "Pay 3 life: Regenerate" from
-/// the black half. Each half's grant wrapper heads its execute chain, so
-/// neither half's counters fold into the entry event; both continuations defer
-/// and the drain must preserve both — dropping either loses a rider and its
-/// counters. Exercises replacement ordering across both halves.
+/// the black half. Each half's grant wrapper heads its execute chain; the
+/// grants ride the event (`enter_with_grants`, in application order) with
+/// the folded counters, and delivery installs every one — stashing each
+/// whole chain instead would lose the second rider to the single-slot
+/// KeepResident drain. Exercises replacement ordering across both halves.
 #[test]
 fn degavolver_both_kickers_keep_all_counters_and_both_grants() {
     let (mut runner, degavolver) = degavolver_ready();
