@@ -24,7 +24,8 @@ use super::oracle_effect::{
 };
 use super::oracle_ir::ast::parsed_clause;
 use super::oracle_ir::context::{
-    ConditionObjectAntecedent, ParseContext, TriggerConditionScope, TriggerZoneChangeProvenance,
+    ConditionObjectAntecedent, ParseContext, ResolvedChainRoot, TriggerConditionScope,
+    TriggerZoneChangeProvenance,
 };
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::{
@@ -2223,31 +2224,20 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     extract_illegal_targets_disposition(&effect_for_parse);
                 let (chain_text, ir) = match disposition {
                     IllegalTargetsDisposition::DoesNotResolve => {
-                        let ir = parse_effect_chain_ir_ability_root(
-                            &stripped_text,
-                            AbilityKind::Spell,
-                            &mut effect_ctx,
-                        );
+                        let ir = parse_trigger_body_chain_ir(&stripped_text, &mut effect_ctx);
                         (stripped_text, ir)
                     }
                     IllegalTargetsDisposition::StillResolves => {
                         // Parse the stripped chain on a clone: it is committed only if kept.
                         let mut stripped_ctx = effect_ctx.clone();
-                        let ir = parse_effect_chain_ir_ability_root(
-                            &stripped_text,
-                            AbilityKind::Spell,
-                            &mut stripped_ctx,
-                        );
+                        let ir = parse_trigger_body_chain_ir(&stripped_text, &mut stripped_ctx);
                         if chain_creates_reflexive_ability(&lower_effect_chain_ir(&ir)) {
                             // CR 603.12 + CR 608.2b: a reflexive node is a separate ability
                             // with its own targets; the root stamp would not govern it. Fail
                             // closed: re-parse the unstripped body so the sentence stays a
                             // strict failure and the disposition stays the default.
-                            let ir = parse_effect_chain_ir_ability_root(
-                                &effect_for_parse,
-                                AbilityKind::Spell,
-                                &mut effect_ctx,
-                            );
+                            let ir =
+                                parse_trigger_body_chain_ir(&effect_for_parse, &mut effect_ctx);
                             (effect_for_parse.to_string(), ir)
                         } else {
                             effect_ctx = stripped_ctx;
@@ -2478,6 +2468,17 @@ pub(crate) fn reflexive_event_trigger(
             uses_tracked_set: false,
         },
     )
+}
+
+/// CR 603.1 + CR 608.2c: parse a triggered ability's body, which resolves as
+/// that ability's root node, handing the chain parse the resolved-root proof
+/// ([`ResolvedChainRoot`]). The proof is cleared afterwards even when the parse
+/// never reached a chain body, because `ctx` outlives this one parse.
+fn parse_trigger_body_chain_ir(text: &str, ctx: &mut ParseContext) -> EffectChainIr {
+    ctx.resolved_chain_root = ResolvedChainRoot::Proven;
+    let ir = parse_effect_chain_ir_ability_root(text, AbilityKind::Spell, ctx);
+    ctx.resolved_chain_root = ResolvedChainRoot::Unproven;
+    ir
 }
 
 pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {

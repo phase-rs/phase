@@ -201,7 +201,9 @@ pub(crate) use crate::parser::oracle_ir::context::{
     HeadWindowProbe, ParseContext, PriorZoneChoicePartition, SpellAnaphorBinding, TokenPtFollowup,
     TriggerConditionScope,
 };
-use crate::parser::oracle_ir::context::{BodyScope, PendingTrackedSet, TrackedSetProducer};
+use crate::parser::oracle_ir::context::{
+    BodyScope, PendingTrackedSet, ResolvedChainRoot, TrackedSetProducer,
+};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseId,
     ClauseIr, ClauseIrBuilder, ClausePlacement, DieResultBranchIr, EffectChainIr,
@@ -45629,6 +45631,9 @@ fn parse_effect_chain_ir_body(
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
     // the one nested call that set it can read it.
     let enclosing_declared_player = ctx.enclosing_declared_player.take();
+    // CR 608.2c: whether this chain is its ability's resolved root, taken on
+    // entry so a chain nested inside it cannot inherit the proof.
+    let resolved_chain_root = std::mem::take(&mut ctx.resolved_chain_root);
     if let Some(ir) = parse_reciprocal_graveyard_choice_ir(text, kind) {
         return ir;
     }
@@ -47678,15 +47683,23 @@ fn parse_effect_chain_ir_body(
             && turn_cond.is_none()
             && target_has_cond.is_none()
         {
-            // CR 608.2c + CR 700.2: the clause is the resolved chain root only
-            // when no earlier clause of this chain has been pushed and the body
-            // is a whole ability. A mode is not: the engine appends each later
-            // chosen mode to the earlier one as a sub-ability
-            // (`build_chained_resolved`), and which mode comes first depends on
-            // the choice, so every mode is treated as a later instruction.
-            let position = match (builder.clauses().is_empty(), ctx.body_scope) {
-                (true, BodyScope::WholeAbility) => conditions::GatedInstructionPosition::ChainRoot,
-                (false, _) | (_, BodyScope::ModalMode) => {
+            // CR 608.2c + CR 700.2: the clause is the resolved root only when
+            // its entry point proved this chain is the ability's root, no
+            // earlier clause of the chain has been pushed, and the body is a
+            // whole ability. A mode is not: the engine appends each later chosen
+            // mode to the earlier one as a sub-ability (`build_chained_resolved`),
+            // and which mode comes first depends on the choice.
+            let position = match (
+                resolved_chain_root,
+                builder.clauses().is_empty(),
+                ctx.body_scope,
+            ) {
+                (ResolvedChainRoot::Proven, true, BodyScope::WholeAbility) => {
+                    conditions::GatedInstructionPosition::ChainRoot
+                }
+                (ResolvedChainRoot::Unproven, _, _)
+                | (_, false, _)
+                | (_, _, BodyScope::ModalMode) => {
                     conditions::GatedInstructionPosition::AfterInstruction
                 }
             };

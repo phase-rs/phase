@@ -5443,17 +5443,23 @@ fn parse_target_controller_control_condition_prefix(
 /// against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GatedInstructionPosition {
-    /// The first instruction of a whole ability's chain. The engine evaluates
-    /// its gate on its own resolved node before its effect, so a
-    /// target-controller read sees the targets this instruction announced.
+    /// The first instruction of a chain its entry point proved to be the
+    /// ability's resolved root (`ResolvedChainRoot::Proven`: a triggered
+    /// ability's body, an activated ability's effect, or a card's first spell
+    /// line on a card without fuse or splice). The engine evaluates its gate on its own resolved node before
+    /// its effect, so a target-controller read sees the targets this
+    /// instruction announced.
     ChainRoot,
-    /// A later instruction, lowered as a sub-ability, or any mode of a modal
-    /// body (the engine appends each later chosen mode to the earlier one as a
-    /// sub-ability, CR 700.2). The engine evaluates a sub-ability's gate in
-    /// the parent's hand-off against the PARENT's resolved node (engine
-    /// `effects/mod.rs`, the `sub.condition` check before the sub is
-    /// dispatched), so a target-controller read sees the preceding
-    /// instruction's targets, never this instruction's own.
+    /// Anything else, declined. For a later instruction (lowered as a
+    /// sub-ability), any mode of a modal body (the engine appends each later
+    /// chosen mode to the earlier one as a sub-ability, CR 700.2), a nested
+    /// remainder parse, a later spell paragraph, a fused half or a spliced card,
+    /// the engine evaluates the gate in the parent's hand-off against the
+    /// PARENT's resolved node (engine `effects/mod.rs`, the `sub.condition`
+    /// check before the sub is dispatched), so a target-controller read would
+    /// see the preceding instruction's targets. A root whose entry point wires
+    /// no proof (a reflexive or granted body parsed elsewhere) is declined
+    /// conservatively.
     AfterInstruction,
 }
 
@@ -12154,6 +12160,183 @@ mod tests {
                 parsed.parse_warnings
             );
         }
+    }
+
+    /// Every root definition `parsed` produced (spell and activated abilities,
+    /// trigger bodies) with its sub-ability chain.
+    fn all_chain_definitions(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+    ) -> Vec<AbilityDefinition> {
+        parsed
+            .abilities
+            .iter()
+            .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+            .flat_map(|root| {
+                std::iter::once(root.clone()).chain(sub_chain(root).into_iter().cloned())
+            })
+            .collect()
+    }
+
+    /// CR 608.2c (final review): a chain is proven to be its ability's resolved
+    /// root only at a trigger body, an activated ability's effect, or a card's
+    /// first spell line on a card that can neither fuse nor be spliced. Every other chain may be attached under
+    /// another node, whose gate the engine evaluates against that node:
+    /// - a remainder the pump compound splitter parses as its own chain and
+    ///   hangs under the first pump (synthetic; printed shape: Gurmag Rakshasa,
+    ///   "target creature an opponent controls gets -2/-2 until end of turn and
+    ///   target creature you control gets +2/+2 until end of turn", reordered);
+    /// - a later spell paragraph (pinned separately by
+    ///   `target_controller_suffix_on_a_later_spell_paragraph_is_an_explicit_gap`);
+    /// - a fused half (CR 702.102d) or a spliced card (CR 702.47a), both
+    ///   synthetic: Unified Will's printed text on a card with fuse or splice.
+    /// Each is an explicit condition gap, with no gate on any node.
+    #[test]
+    fn target_controller_suffix_on_an_unproven_root_is_an_explicit_gap() {
+        let unified_will =
+            "Counter target spell if you control more creatures than that spell's controller.";
+        for (text, types, keywords, gated_effect, condition) in [
+            (
+                "When this creature enters, target creature you control gets +2/+2 until end \
+                 of turn and target creature an opponent controls gets -2/-2 until end of turn \
+                 if that opponent controls no other creatures.",
+                "Creature",
+                &[][..],
+                "target creature an opponent controls gets -2/-2 until end of turn",
+                "that opponent controls no other creatures",
+            ),
+            (
+                unified_will,
+                "Instant",
+                &["Fuse".to_owned()][..],
+                "Counter target spell",
+                "you control more creatures than that spell's controller",
+            ),
+            (
+                unified_will,
+                "Instant",
+                &["Splice".to_owned()][..],
+                "Counter target spell",
+                "you control more creatures than that spell's controller",
+            ),
+        ] {
+            assert_full_strip_binds(gated_effect, condition);
+            let parsed = parse_oracle_text(text, "Synthetic", keywords, &[types.to_owned()], &[]);
+            let definitions = all_chain_definitions(&parsed);
+            assert!(
+                definitions.iter().any(|def| def
+                    .effect
+                    .target_filter()
+                    .is_some_and(|filter| !filter.is_context_ref())),
+                "reach guard: {text}: the gated instruction declares a target: {definitions:?}"
+            );
+            for def in &definitions {
+                assert_eq!(def.condition, None, "{text}: {:?}", def.effect);
+            }
+            let gaps: Vec<_> = parsed
+                .parse_warnings
+                .iter()
+                .filter_map(|w| w.gap())
+                .collect();
+            assert_eq!(
+                gaps,
+                vec![
+                    &crate::parser::oracle_ir::diagnostic::ClauseGap::Condition {
+                        guard: condition.to_string()
+                    }
+                ],
+                "{text}: the suffix must be an explicit gap: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// CR 608.2c (final review): a later spell paragraph that the parser emits
+    /// as its own spell ability is a root at parse time, but at cast the engine
+    /// appends it under the first spell ability (`combined_spell_ability_def`),
+    /// so its gate would read the first paragraph's target. Synthetic text on
+    /// Azorius Ploy's printed shape (two targeted paragraphs; its second
+    /// paragraph is the first line here). The reach guard proves the gated line
+    /// is a separate spell ability root before the gap is asserted.
+    #[test]
+    fn target_controller_suffix_on_a_later_spell_paragraph_is_an_explicit_gap() {
+        let condition = "its controller controls no creatures";
+        assert_full_strip_binds("Destroy target artifact", condition);
+        let text = format!(
+            "Prevent all combat damage that would be dealt to target creature this turn.\n\
+             Destroy target artifact if {condition}."
+        );
+        let parsed = parse_oracle_text(&text, "Synthetic", &[], &["Instant".to_owned()], &[]);
+        let [first, later] = parsed.abilities.as_slice() else {
+            panic!(
+                "reach guard: expected two spell abilities, got {:?}",
+                parsed.abilities
+            );
+        };
+        assert_eq!(first.kind, AbilityKind::Spell);
+        assert_eq!(later.kind, AbilityKind::Spell);
+        assert!(
+            matches!(
+                &*later.effect,
+                Effect::Destroy { target, .. } if !target.is_context_ref()
+            ),
+            "reach guard: the later paragraph is its own targeted root: {:?}",
+            later.effect
+        );
+        assert_eq!(first.condition, None);
+        assert_eq!(later.condition, None);
+        let gaps: Vec<_> = parsed
+            .parse_warnings
+            .iter()
+            .filter_map(|w| w.gap())
+            .collect();
+        assert_eq!(
+            gaps,
+            vec![
+                &crate::parser::oracle_ir::diagnostic::ClauseGap::Condition {
+                    guard: condition.to_string()
+                }
+            ],
+            "the suffix must be an explicit gap: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 608.2c: the mirror positive. A card's first spell line is its spell's
+    /// resolved root even when a later printed instruction follows it, so the
+    /// suffix binds on that root and the later instruction stays ungated.
+    /// Synthetic text; nearest printed card: Unified Will.
+    #[test]
+    fn target_controller_suffix_on_the_first_spell_line_binds() {
+        let text = "Destroy target artifact if its controller controls no creatures.\nDraw a card.";
+        let parsed = parse_oracle_text(text, "Synthetic", &[], &["Instant".to_owned()], &[]);
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{:?}",
+            parsed.parse_warnings
+        );
+        let [root] = parsed.abilities.as_slice() else {
+            panic!("expected one spell ability, got {:?}", parsed.abilities);
+        };
+        let (seam, _, _) = full_strip(
+            "Destroy target artifact",
+            "its controller controls no creatures",
+        );
+        assert!(seam.is_some(), "reach guard: the strip binds at a root");
+        assert!(
+            matches!(*root.effect, Effect::Destroy { .. }),
+            "{:?}",
+            root.effect
+        );
+        assert_eq!(root.condition, seam);
+        let [draw] = sub_chain(root)[..] else {
+            panic!("expected one later instruction, got {:?}", root.sub_ability);
+        };
+        assert!(
+            matches!(*draw.effect, Effect::Draw { .. }),
+            "{:?}",
+            draw.effect
+        );
+        assert_eq!(draw.condition, None);
     }
 
     /// CR 700.2 + CR 608.2c (final review): every mode of a modal body is

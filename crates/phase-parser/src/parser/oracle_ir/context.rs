@@ -398,6 +398,23 @@ pub enum BodyScope {
     ModalMode,
 }
 
+/// CR 608.2c: whether the effect chain about to be parsed is proven to resolve
+/// as its ability's root node. The engine evaluates a root's gate on the root
+/// itself, but a sub-ability's gate on its PARENT, so a gate that reads the
+/// gated instruction's own target is only representable on a proven root.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ResolvedChainRoot {
+    /// Not proven: the chain may be attached under another node at parse or
+    /// cast time (a nested remainder parse, a mode, a later spell paragraph, a
+    /// fused half, a spliced spell).
+    #[default]
+    Unproven,
+    /// Set by a top-level entry point whose chain is its ability's resolved
+    /// root (a triggered ability's body, an activated ability's effect, a
+    /// card's first spell line on a card without fuse or splice).
+    Proven,
+}
+
 /// CR 608.2k: the object a trigger condition introduces for its body's bare
 /// object pronouns, where the pinned `TargetFilter` is ambiguous on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -916,6 +933,12 @@ pub struct ParseContext {
     /// admitted inside a mode. Set to `ModalMode` on each mode's context by
     /// `parse_modal_mode_irs`; `WholeAbility` everywhere else.
     pub body_scope: BodyScope,
+    /// CR 608.2c: whether the next effect chain parsed on this context is its
+    /// ability's resolved root ([`ResolvedChainRoot`]). Set immediately before
+    /// the entry point's chain parse and taken by that parse on entry, so a
+    /// nested chain parsed inside it, or on a clone made afterwards, sees
+    /// `Unproven`. Never serialized.
+    pub resolved_chain_root: ResolvedChainRoot,
     /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
     /// "put those cards / put them onto the battlefield" anaphor (a
     /// `TargetFilter::TrackedSet`) must scan. Set by a producer clause that
