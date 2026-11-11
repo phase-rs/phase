@@ -590,6 +590,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Heist { .. }
         | Effect::HeistExile
         | Effect::HideawayConceal { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Incubate { .. }
         | Effect::Intensify { .. }
         | Effect::Learn
@@ -3543,6 +3544,7 @@ mod grant_trigger_polarity_tests {
     /// "When this dies, return it to the battlefield" — the Undying Malice grant.
     fn return_to_battlefield() -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             target: TargetFilter::SelfRef,

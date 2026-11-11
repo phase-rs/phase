@@ -1031,6 +1031,7 @@ pub(super) fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
             arranger: None,
         },
         SpellStackToGraveyardReplacement::Hand => Effect::ChangeZone {
+            library_shuffle: Default::default(),
             destination: Zone::Hand,
             origin: None,
             target: TargetFilter::ParentTarget,
@@ -3372,7 +3373,8 @@ impl ReflexiveGateParent {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
-            | Effect::Unimplemented { .. } => Self::Other,
+            | Effect::HordePlayCard { .. } => Self::Other,
+            Effect::Unimplemented { .. } => Self::Other,
         }
     }
 
@@ -10227,19 +10229,9 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
     let (after_prevent, _) = tag::<_, _, OracleError<'_>>("prevent ")
         .parse(lower.as_str())
         .ok()?;
-    // CR 615.7: prevention shields are printed as "prevent the next N damage …".
-    // Strip the optional "the next "/"next " quantifier before the count so the
-    // shared `parse_count_expr` sees a bare quantity. `opt` makes both the
-    // "the next" and the determiner-less "next" forms parse, and leaves the input
-    // untouched for "prevent N damage" (no quantifier).
-    let (after_quantifier, _) = opt(alt((
-        tag::<_, _, OracleError<'_>>("the next "),
-        tag::<_, _, OracleError<'_>>("next "),
-    )))
-    .parse(after_prevent)
-    .unwrap_or((after_prevent, None));
-    // Parse the prevention amount.
-    let (qty, rem) = parse_count_expr(after_quantifier)?;
+    // CR 615.7: strip the optional "the next "/"next " quantifier and parse the
+    // counted shield through the shared prevention-amount authority.
+    let (qty, rem) = super::imperative::parse_counted_prevention_quantity(after_prevent)?;
     // CR 615.7: Require "damage" immediately after the quantity.
     let (after_damage, _) = tag::<_, _, OracleError<'_>>("damage").parse(rem).ok()?;
 
@@ -10322,10 +10314,6 @@ pub(super) fn try_parse_bidirectional_prevent(
         PreventionScope::AllDamage
     };
 
-    // CR 615.1a: shared amount detection (issue #1094 factored this out of
-    // `parse_prevent_effect` so both paths agree).
-    let amount = super::imperative::parse_prevention_amount(rest);
-
     // CR 511.2 + CR 615: trailing duration window ("this turn" -> end of turn).
     let prevention_duration =
         nom_primitives::scan_preceded(rest, parse_duration).map(|(_, d, _)| d);
@@ -10342,11 +10330,22 @@ pub(super) fn try_parse_bidirectional_prevent(
     let (anaphor_filter, anaphor_scope) =
         super::imperative::resolve_prevent_recipient(anaphor_tp, parent_target_available)?;
 
+    // CR 615.1a + CR 615.7 + CR 107.3a: shared amount detection (issue #1094 factored
+    // this out of `parse_prevent_effect` so both paths agree). An unconsumed dynamic
+    // quantity is an explicit receipt, never a fallback shield on either half; it is
+    // read after the anaphor so an unresolved anaphor still declines the clause.
+    let Some((amount, amount_dynamic)) = super::imperative::parse_prevention_amount(rest) else {
+        return Some(parsed_clause(Effect::unimplemented(
+            super::imperative::PREVENT_UNCONSUMED_QUANTITY_GAP,
+            text,
+        )));
+    };
+
     // CR 615: the recipient ("to") shield — scoped to the chosen creature as
     // the damage RECIPIENT (target: ParentTarget, no source restriction).
     let to_effect = Effect::PreventDamage {
         amount,
-        amount_dynamic: None,
+        amount_dynamic: amount_dynamic.clone(),
         target: anaphor_filter.clone(),
         recipient_scope: anaphor_scope,
         scope,
@@ -10375,7 +10374,7 @@ pub(super) fn try_parse_bidirectional_prevent(
         AbilityKind::Spell,
         Effect::PreventDamage {
             amount,
-            amount_dynamic: None,
+            amount_dynamic,
             target: TargetFilter::Any,
             recipient_scope: EffectScope::Single,
             scope,
@@ -15633,6 +15632,84 @@ mod tests {
         assert!(
             super::try_parse_bidirectional_prevent(text, false).is_none(),
             "gate false ⇒ interceptor is a no-op"
+        );
+    }
+
+    /// CR 615.7 + CR 107.3a: the bidirectional interceptor never falls back to a
+    /// `Next(1)` shield for a dynamic quantity the count grammar left unconsumed
+    /// ("the next X plus X damage ..."); it claims the clause with the explicit
+    /// unconsumed-quantity receipt and no `by` sibling. An unresolved anaphor still
+    /// declines the clause (`None`), exactly as before the amount was validated.
+    ///
+    /// No printed card has this shape; the nearest is Maze of Ith ("Prevent all
+    /// combat damage that would be dealt to and dealt by that creature this turn").
+    /// The "the next X damage" form is the positive reach guard: both halves publish
+    /// the announced-X shield, so the negative cannot pass by the marker or the
+    /// anaphor having been rejected upstream.
+    #[test]
+    fn bidirectional_prevent_unconsumed_quantity_fails_closed() {
+        let announced_x = Some(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+
+        // Reach guard: the consumed quantity splits into two announced-X shields.
+        let consumed =
+            "prevent the next x damage that would be dealt to and dealt by that creature this turn";
+        let clause = super::try_parse_bidirectional_prevent(consumed, true)
+            .expect("a consumed announced-X quantity still splits");
+        let Effect::PreventDamage {
+            amount_dynamic: to_dynamic,
+            ..
+        } = &clause.effect
+        else {
+            panic!("expected 'to' PreventDamage, got {:?}", clause.effect);
+        };
+        assert_eq!(
+            *to_dynamic, announced_x,
+            "'to' half carries the announced X"
+        );
+        let by = clause.sub_ability.as_deref().expect("'by' sub_ability");
+        let Effect::PreventDamage {
+            amount_dynamic: by_dynamic,
+            damage_source_filter,
+            ..
+        } = &*by.effect
+        else {
+            panic!("expected 'by' PreventDamage, got {:?}", by.effect);
+        };
+        assert_eq!(
+            *by_dynamic, announced_x,
+            "'by' half carries the announced X"
+        );
+        assert_eq!(
+            damage_source_filter.as_ref(),
+            Some(&TargetFilter::ParentTarget)
+        );
+
+        // The unconsumed "plus X" operand is claimed as a receipt, with no split.
+        let unconsumed = "prevent the next x plus x damage that would be dealt to and dealt by that creature this turn";
+        let clause = super::try_parse_bidirectional_prevent(unconsumed, true)
+            .expect("the unconsumed quantity is claimed as an explicit receipt");
+        assert!(
+            matches!(
+                &clause.effect,
+                Effect::Unimplemented { name, .. }
+                    if name == super::super::imperative::PREVENT_UNCONSUMED_QUANTITY_GAP
+            ),
+            "expected the unconsumed-quantity receipt, got {:?}",
+            clause.effect
+        );
+        assert!(
+            clause.sub_ability.is_none(),
+            "no 'by' shield may follow a receipt"
+        );
+
+        // Gate off: the anaphor is unresolved, so the interceptor does not claim it.
+        assert!(
+            super::try_parse_bidirectional_prevent(unconsumed, false).is_none(),
+            "gate false => the interceptor is a no-op, receipt or not"
         );
     }
 

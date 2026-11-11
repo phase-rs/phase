@@ -505,6 +505,7 @@ fn effect_window_reach(effect: &Effect) -> WindowReach {
             destination,
             target,
             owner_library: _,
+            library_shuffle: _,
             enter_transformed: _,
             enters_under,
             enter_tapped,
@@ -912,6 +913,7 @@ fn library_arrivals_are_inert(
                     destination: Zone::Battlefield,
                     target,
                     owner_library: _,
+                    library_shuffle: _,
                     enter_transformed: _,
                     enters_under: _,
                     enter_tapped: _,
@@ -2285,6 +2287,8 @@ mod tests {
                     related_token_ids: _,
                     // Image/catalog identifiers.
                     source_printing_ids: _,
+                    // Coverage classification, not printed game rules; never on GameObject.
+                    confirmed_misparse: _,
                     // CR 202.3d + CR 709.4b: a split card's combined off-stack mana value,
                     // read by deck-construction checks. A cost, not what resolving does.
                     off_stack_mana_value_override: _,

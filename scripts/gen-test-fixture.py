@@ -70,6 +70,10 @@ def src_fixture_files() -> list[Path]:
             text = rs.read_text(encoding="utf-8", errors="ignore")
             if "shared_card_db" in text:
                 files.add(rs)
+    # The Horde challenge-deck lists are corpus rows consumed by
+    # horde_deck_card_names.rs through shared_card_db(); without them a
+    # regeneration would silently drop every Horde deck card from the fixture.
+    files.update((SRC_DIR / "game" / "decks").rglob("*.rs"))
 
     return sorted(files)
 

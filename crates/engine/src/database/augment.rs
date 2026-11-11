@@ -192,6 +192,7 @@ fn rewrite_strutting_turkey(face: &mut CardFace) {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Exile,
                     target: TypedFilter::new(TypeFilter::Creature)
@@ -228,6 +229,7 @@ fn rewrite_strutting_turkey(face: &mut CardFace) {
                 .with_else_ability(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: Some(Zone::Exile),
                         destination: Zone::Battlefield,
                         target: TargetFilter::ParentTarget,

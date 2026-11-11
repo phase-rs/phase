@@ -22,7 +22,7 @@ use crate::types::ability::{
     AbilityUseTally, ActivationRestriction, AttachSelection, AttachmentKind, AttachmentReferent,
     CardSelectionMode, CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
     CommanderOwnership, CopyRecipient, CountBinding, CounterTransferMode, DigRestOrder,
-    DigRestRemainder, DigSource, ExcessRecipient, ForEachCategoryAction, MassLibraryShuffleMode,
+    DigRestRemainder, DigSource, ExcessRecipient, ForEachCategoryAction, LibraryShuffleMode,
     ModalChoice, PerpetualModification, PileSource, PossessionAxis, RepeatContinuation,
     RuntimeHandler, SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
 };
@@ -9676,7 +9676,7 @@ fn effect_counter_unless_rejects_unrecognized_mana_symbol() {
         "shared trigger-side unless-cost parser must not reinterpret malformed mana as life"
     );
     assert!(
-        imperative::parse_counter_ast(text, &lower).is_none(),
+        imperative::parse_counter_ast(text, &lower, &mut ParseContext::default()).is_none(),
         "counter AST must decline an unparsed unless-payment rider"
     );
     let def = parse_effect_chain(text, AbilityKind::Spell);
@@ -12781,6 +12781,7 @@ fn plural_recall_rebind_marks_the_delayed_payload_as_a_tracked_set_consumer() {
         effect: Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: TargetFilter::ParentTarget,
@@ -16213,7 +16214,7 @@ fn all_player_hand_shuffle_normalizer_scopes_only_the_complete_marked_wheel() {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             random_order: false,
         }
     }
@@ -17082,7 +17083,7 @@ fn compound_shuffle_hand_and_graveyard_into_library() {
             enter_with_counters: _,
             face_down_profile: None,
             library_position: None,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             random_order: false,
         }
     ));
@@ -17103,7 +17104,7 @@ fn compound_shuffle_hand_and_graveyard_into_library() {
             enter_with_counters: _,
             face_down_profile: None,
             library_position: None,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             random_order: false,
         }
     ));
@@ -17179,7 +17180,7 @@ fn great_aurora_keeps_move_shuffle_draw_inside_each_player_iteration() {
         origin: None,
         destination: Zone::Library,
         target: TargetFilter::Or { filters },
-        library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+        library_shuffle: LibraryShuffleMode::TerminalShuffle,
         ..
     } = def.effect.as_ref()
     else {
@@ -17239,7 +17240,7 @@ fn assert_targeted_graveyard_shuffle_shape<'a>(
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
                 target: TargetFilter::ParentTarget,
-                library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
                 ..
             }
         ),
@@ -17401,6 +17402,524 @@ fn real_targeted_graveyard_shuffle_cards_bind_mass_move_and_shuffle_to_player_ta
             _ => assert!(shuffle.sub_ability.is_none()),
         }
     }
+}
+
+/// Depth-first over the parsed definition tree, collecting the class root: a
+/// player `TargetOnly` wrapper whose immediate sub-ability is the typed
+/// graveyard→library `ChangeZone` that carries the moved cards' own filter.
+fn collect_wrapped_unit_library_moves(parsed: &ParsedAbilities) -> Vec<&AbilityDefinition> {
+    let mut defs = Vec::new();
+    collect_parsed_roots(parsed, false, &mut defs);
+    defs.into_iter()
+        .filter(|def| {
+            matches!(
+                &*def.effect,
+                Effect::TargetOnly { target } if target_filter_can_target_player(target)
+            ) && def.sub_ability.as_deref().is_some_and(|sub| {
+                matches!(
+                    &*sub.effect,
+                    Effect::ChangeZone {
+                        origin: Some(Zone::Graveyard),
+                        destination: Zone::Library,
+                        target: TargetFilter::Typed(_),
+                        ..
+                    }
+                )
+            })
+        })
+        .collect()
+}
+
+/// CR 115.1 + CR 608.2b + CR 701.24a: the independently targeted graveyard
+/// cards and their shuffle actor refer to the same announced player group.
+/// That stable declaration must survive slot compaction without substituting
+/// the caster when the player becomes illegal.
+fn assert_unit_library_move_binds_shuffle_to_player(card_name: &str, root: &AbilityDefinition) {
+    let group = root
+        .declares_chosen_group
+        .unwrap_or_else(|| panic!("{card_name} must declare its player group"));
+    let move_graveyard = root
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("{card_name} must move the targeted player's cards"));
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Library,
+        target: TargetFilter::Typed(tf),
+        owner_library: false,
+        library_shuffle: LibraryShuffleMode::TerminalShuffle,
+        ..
+    } = move_graveyard.effect.as_ref()
+    else {
+        panic!(
+            "{card_name}: unexpected move shape: {:?}",
+            move_graveyard.effect
+        );
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }),
+        "{card_name} must move cards from the graveyard, got {tf:?}"
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::DeclaredPlayer { group }
+        }),
+        "{card_name} must select the chosen player's cards, got {tf:?}"
+    );
+
+    let shuffle = move_graveyard
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("{card_name} must shuffle after moving the cards"));
+    assert!(
+        matches!(
+            shuffle.effect.as_ref(),
+            Effect::Shuffle {
+                target: TargetFilter::DeclaredPlayer { group: actor_group }
+            } if *actor_group == group
+        ),
+        "{card_name} must shuffle the same chosen player's library, got {:?}",
+        shuffle.effect
+    );
+}
+
+/// CR 115.1 + CR 701.24a + CR 608.2c: the complete, verbatim Oracle texts of the
+/// nine printed cards whose instruction is "target player shuffles up to/any
+/// number of target cards from their graveyard into their library". Every one
+/// binds its terminal shuffle to the announced player rather than the caster,
+/// suppresses per-card shuffles, and keeps its moved-card filter unchanged.
+#[test]
+fn real_targeted_up_to_graveyard_shuffle_cards_bind_terminal_shuffle_to_player_target() {
+    let cases = [
+        (
+            "Dwell on the Past",
+            "Sorcery",
+            "Target player shuffles up to four target cards from their graveyard into their library.",
+        ),
+        (
+            "Gaea's Blessing",
+            "Sorcery",
+            "Target player shuffles up to three target cards from their graveyard into their library.\nDraw a card.\nWhen this card is put into your graveyard from your library, shuffle your graveyard into your library.",
+        ),
+        (
+            "Krosan Reclamation",
+            "Instant",
+            "Target player shuffles up to two target cards from their graveyard into their library.\nFlashback {1}{G} (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+        ),
+        (
+            "Loaming Shaman",
+            "Creature",
+            "When this creature enters, target player shuffles any number of target cards from their graveyard into their library.",
+        ),
+        (
+            "Memory's Journey",
+            "Instant",
+            "Target player shuffles up to three target cards from their graveyard into their library.\nFlashback {G} (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+        ),
+        (
+            "Quandrix Command",
+            "Instant",
+            "Choose two —\n• Return target creature or planeswalker to its owner's hand.\n• Counter target artifact or enchantment spell.\n• Put two +1/+1 counters on target creature.\n• Target player shuffles up to three target cards from their graveyard into their library.",
+        ),
+        (
+            "Rite of Renewal",
+            "Sorcery",
+            "Return up to two target permanent cards from your graveyard to your hand. Target player shuffles up to four target cards from their graveyard into their library. Exile Rite of Renewal.",
+        ),
+        (
+            "Stream of Consciousness",
+            "Instant",
+            "Target player shuffles up to four target cards from their graveyard into their library.",
+        ),
+        (
+            "Witness the Future",
+            "Sorcery",
+            "Target player shuffles up to four target cards from their graveyard into their library. You look at the top four cards of your library, then put one of those cards into your hand and the rest on the bottom of your library in a random order.",
+        ),
+    ];
+
+    for (card_name, card_type, oracle_text) in cases {
+        let parsed = parse_oracle_text(oracle_text, card_name, &[], &[card_type.to_string()], &[]);
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .all(|ability| !targeted_zone_move_tree_has_unimplemented(ability))
+                && parsed.triggers.iter().all(|trigger| {
+                    trigger
+                        .execute
+                        .as_deref()
+                        .is_none_or(|ability| !targeted_zone_move_tree_has_unimplemented(ability))
+                })
+                && parsed.replacements.iter().all(|replacement| {
+                    replacement
+                        .execute
+                        .as_deref()
+                        .is_none_or(|ability| !targeted_zone_move_tree_has_unimplemented(ability))
+                }),
+            "{card_name} must parse without an Unimplemented node: {parsed:#?}"
+        );
+
+        let roots = collect_wrapped_unit_library_moves(&parsed);
+        assert_eq!(
+            roots.len(),
+            1,
+            "{card_name} must declare exactly one targeted-player card shuffle, got {parsed:#?}"
+        );
+        let root = roots[0];
+        assert_unit_library_move_binds_shuffle_to_player(card_name, root);
+
+        let multi_target = root
+            .sub_ability
+            .as_deref()
+            .and_then(|movement| movement.multi_target.as_ref())
+            .unwrap_or_else(|| {
+                panic!("{card_name} must allow several card targets through multi_target")
+            });
+        assert_eq!(
+            multi_target.min,
+            QuantityExpr::Fixed { value: 0 },
+            "{card_name} allows zero cards (CR 601.2c: a variable number of targets is announced)"
+        );
+        if card_name == "Loaming Shaman" {
+            assert!(
+                multi_target.max.is_none(),
+                "Loaming Shaman says \"any number of\" target cards, got {multi_target:?}"
+            );
+        } else {
+            assert!(
+                multi_target.max.is_some(),
+                "{card_name} is bounded by \"up to N\", got {multi_target:?}"
+            );
+        }
+    }
+}
+
+/// Depth-first collection of every `Effect::Shuffle` node in a parsed card.
+fn collect_shuffle_targets(parsed: &ParsedAbilities) -> Vec<&TargetFilter> {
+    let mut defs = Vec::new();
+    collect_parsed_roots(parsed, false, &mut defs);
+    defs.into_iter()
+        .filter_map(|def| match &*def.effect {
+            Effect::Shuffle { target } => Some(target),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 701.24a + CR 608.2c: "shuffle up to N target cards from YOUR graveyard"
+/// names no player subject, so the caster performs the shuffle. The new anchor
+/// arm requires a player `TargetOnly` wrapper and must not fire here.
+#[test]
+fn controller_subject_shuffle_up_to_keeps_the_caster_shuffle() {
+    let controller_bound = [
+        (
+            "Wand of Vertebrae",
+            "Artifact",
+            "{T}: Mill a card.\n{2}, {T}, Exile this artifact: Shuffle up to five target cards from your graveyard into your library.",
+        ),
+        (
+            "Devious Cover-Up",
+            "Instant",
+            "Counter target spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard. You may shuffle up to four target cards from your graveyard into your library.",
+        ),
+        (
+            "Put Away",
+            "Instant",
+            "Counter target spell. You may shuffle up to one target card from your graveyard into your library.",
+        ),
+        (
+            "Stream of Thought",
+            "Sorcery",
+            "Target player mills four cards. You shuffle up to four cards from your graveyard into your library.\nReplicate {2}{U}{U} (When you cast this spell, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)",
+        ),
+        (
+            "Tamiyo Meets the Story Circle",
+            "Enchantment",
+            "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Until your next turn, whenever a creature attacks you or a planeswalker you control, it gets -2/-0 until end of turn.\nII — Discard any number of cards, then investigate twice for each card discarded this way.\nIII — Shuffle up to three target cards from your graveyard into your library.",
+        ),
+        (
+            "Oracle of Tragedy",
+            "Creature",
+            "When this creature enters or dies, choose one —\n• Draw a card, then discard a card.\n• Shuffle up to four target cards with mana value 3 or greater from your graveyard into your library.",
+        ),
+    ];
+
+    for (card_name, card_type, oracle_text) in controller_bound {
+        // Sagas need their subtype so the chapter rows parse at all.
+        let subtypes: Vec<String> = if card_name == "Tamiyo Meets the Story Circle" {
+            vec!["Saga".to_string()]
+        } else {
+            vec![]
+        };
+        let parsed = parse_oracle_text(
+            oracle_text,
+            card_name,
+            &[],
+            &[card_type.to_string()],
+            &subtypes,
+        );
+        let targets = collect_shuffle_targets(&parsed);
+        assert!(
+            !targets.is_empty(),
+            "{card_name} must reach a Shuffle node, otherwise the negative is vacuous: {parsed:#?}"
+        );
+        for target in targets {
+            assert!(
+                matches!(target, TargetFilter::Controller),
+                "{card_name} shuffles for its caster, got {target:?}"
+            );
+        }
+    }
+
+    // Cathartic Parting prints both shapes: an owner shuffle ("The owner of
+    // target artifact or enchantment an opponent controls shuffles it into
+    // their library.") and a controller-subject card shuffle. The anchor arm
+    // must leave both alone.
+    let parsed = parse_oracle_text(
+        "The owner of target artifact or enchantment an opponent controls shuffles it into their library. You may shuffle up to four target cards from your graveyard into your library.",
+        "Cathartic Parting",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let targets = collect_shuffle_targets(&parsed);
+    assert_eq!(
+        targets.len(),
+        2,
+        "Cathartic Parting must keep both shuffles: {parsed:#?}"
+    );
+    assert!(
+        targets
+            .iter()
+            .any(|target| matches!(target, TargetFilter::ParentTargetOwner)),
+        "Cathartic Parting keeps the owner shuffle, got {targets:?}"
+    );
+    assert!(
+        targets
+            .iter()
+            .any(|target| matches!(target, TargetFilter::Controller)),
+        "Cathartic Parting keeps the caster shuffle, got {targets:?}"
+    );
+    assert!(
+        !targets
+            .iter()
+            .any(|target| matches!(target, TargetFilter::ParentTarget)),
+        "Cathartic Parting must not gain the targeted-player anchor: {parsed:#?}"
+    );
+}
+
+/// CR 115.1 + CR 701.24a + CR 608.2c: whole-graveyard ("their graveyard") and
+/// owner ("its owner shuffles their graveyard") library moves keep their
+/// existing bindings — the sibling mass arm is untouched.
+#[test]
+fn mass_and_owner_graveyard_shuffles_keep_their_bindings() {
+    let gaea = parse_oracle_text(
+        "When this card is put into your graveyard from your library, shuffle your graveyard into your library.",
+        "Gaea's Blessing",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let trigger = gaea.triggers[0]
+        .execute
+        .as_deref()
+        .expect("Gaea's Blessing trigger body");
+    assert!(
+        matches!(
+            trigger.effect.as_ref(),
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Library,
+                target: TargetFilter::Controller,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                ..
+            }
+        ),
+        "Gaea's Blessing trigger must shuffle its controller's graveyard: {gaea:#?}"
+    );
+    assert!(
+        matches!(
+            trigger
+                .sub_ability
+                .as_deref()
+                .map(|shuffle| shuffle.effect.as_ref()),
+            Some(Effect::Shuffle {
+                target: TargetFilter::Controller
+            })
+        ),
+        "Gaea's Blessing trigger shuffle must stay on the controller: {gaea:#?}"
+    );
+
+    let nexus = parse_oracle_text(
+        "Each player shuffles their graveyard into their library.",
+        "Mnemonic Nexus",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let nexus_root = &nexus.abilities[0];
+    assert_eq!(nexus_root.player_scope, Some(PlayerFilter::All));
+    assert!(
+        matches!(
+            nexus_root.effect.as_ref(),
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Library,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                ..
+            }
+        ),
+        "Mnemonic Nexus must keep one scoped mass move: {nexus:#?}"
+    );
+    assert!(
+        matches!(
+            nexus_root
+                .sub_ability
+                .as_deref()
+                .map(|shuffle| shuffle.effect.as_ref()),
+            Some(Effect::Shuffle {
+                target: TargetFilter::Controller
+            })
+        ),
+        "Mnemonic Nexus shuffle stays scoped, not anchored: {nexus:#?}"
+    );
+
+    for (card_name, oracle_text, card_type) in [
+        (
+            "Reminisce",
+            "Target player shuffles their graveyard into their library.",
+            "Sorcery",
+        ),
+        (
+            "Emrakul, the Aeons Torn",
+            "When Emrakul is put into a graveyard from anywhere, its owner shuffles their graveyard into their library.",
+            "Creature",
+        ),
+    ] {
+        let parsed = parse_oracle_text(
+            oracle_text,
+            card_name,
+            &[],
+            &[card_type.to_string()],
+            &[],
+        );
+        let expected = if card_name == "Reminisce" {
+            TargetFilter::ParentTarget
+        } else {
+            TargetFilter::ParentTargetOwner
+        };
+        let targets = collect_shuffle_targets(&parsed);
+        assert_eq!(
+            targets.len(),
+            1,
+            "{card_name} must keep exactly one shuffle binding: {parsed:#?}"
+        );
+        assert!(
+            matches!(
+                targets[0],
+                TargetFilter::ParentTarget | TargetFilter::ParentTargetOwner
+            ),
+            "{card_name} must keep its mass anchor, got {targets:?}"
+        );
+        assert_eq!(*targets[0], expected, "{card_name} anchor changed");
+    }
+}
+
+/// CR 608.2c: the anchor carries into following clauses only where the chain
+/// keeps the same actor. Each of these cards carries the class root AND a tail
+/// that must keep its own player.
+#[test]
+fn following_clauses_keep_their_own_player() {
+    let gaea = parse_oracle_text(
+        "Target player shuffles up to three target cards from their graveyard into their library.\nDraw a card.",
+        "Gaea's Blessing",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let gaea_roots = collect_wrapped_unit_library_moves(&gaea);
+    assert_eq!(gaea_roots.len(), 1, "{gaea:#?}");
+    let gaea_shuffle = gaea_roots[0]
+        .sub_ability
+        .as_deref()
+        .and_then(|movement| movement.sub_ability.as_deref())
+        .expect("Gaea's Blessing shuffle");
+    let draw = gaea_shuffle
+        .sub_ability
+        .as_deref()
+        .expect("Gaea's Blessing draw tail");
+    assert!(
+        matches!(
+            draw.effect.as_ref(),
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                ..
+            }
+        ),
+        "a bare imperative \"Draw a card.\" stays with the caster: {gaea:#?}"
+    );
+
+    let witness = parse_oracle_text(
+        "Target player shuffles up to four target cards from their graveyard into their library. You look at the top four cards of your library, then put one of those cards into your hand and the rest on the bottom of your library in a random order.",
+        "Witness the Future",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let witness_roots = collect_wrapped_unit_library_moves(&witness);
+    assert_eq!(witness_roots.len(), 1, "{witness:#?}");
+    let witness_shuffle = witness_roots[0]
+        .sub_ability
+        .as_deref()
+        .and_then(|movement| movement.sub_ability.as_deref())
+        .expect("Witness the Future shuffle");
+    let dig = witness_shuffle
+        .sub_ability
+        .as_deref()
+        .expect("Witness the Future dig tail");
+    assert!(
+        matches!(
+            dig.effect.as_ref(),
+            Effect::Dig {
+                player: TargetFilter::Controller,
+                ..
+            }
+        ),
+        "\"You look at the top four cards\" stays with the caster: {witness:#?}"
+    );
+
+    let rite = parse_oracle_text(
+        "Return up to two target permanent cards from your graveyard to your hand. Target player shuffles up to four target cards from their graveyard into their library. Exile Rite of Renewal.",
+        "Rite of Renewal",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let rite_roots = collect_wrapped_unit_library_moves(&rite);
+    assert_eq!(rite_roots.len(), 1, "{rite:#?}");
+    let rite_shuffle = rite_roots[0]
+        .sub_ability
+        .as_deref()
+        .and_then(|movement| movement.sub_ability.as_deref())
+        .expect("Rite of Renewal shuffle");
+    let exile = rite_shuffle
+        .sub_ability
+        .as_deref()
+        .expect("Rite of Renewal exile tail");
+    assert!(
+        matches!(
+            exile.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "\"Exile Rite of Renewal\" stays on the source card: {rite:#?}"
+    );
 }
 
 /// CR 115.1a / CR 115.1c + CR 608.2c + CR 701.24a: Head Games and Jester's
@@ -25067,6 +25586,63 @@ fn delayed_trigger_without_inner_condition_lift_is_noop() {
     assert!(
         effect.condition.is_none(),
         "inner AbilityDefinition must carry no condition when none was present originally"
+    );
+}
+
+/// CR 701.20e + CR 608.2c + CR 205.3a: Kaalia, Zenith Seeker (issue #8068).
+///
+/// "You may reveal an Angel card, a Demon card, and/or a Dragon card from among
+/// them" is a card-TYPE LIST. Each leg ends with the informational "card" noun
+/// immediately before the separator, and the redundant-noun scanner only
+/// recognized that noun before a SPACE — so the leftmost leg's noun stayed in
+/// the remainder, the type-union fold never saw its comma, and the keep filter
+/// collapsed to `Angel`. Every Demon and Dragon among the revealed six was
+/// therefore unselectable.
+#[test]
+fn kaalia_zenith_seeker_reveal_list_keeps_every_listed_type() {
+    let def = parse_effect_chain(
+        "Look at the top six cards of your library. You may reveal an Angel card, a Demon card, and/or a Dragon card from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
+        AbilityKind::Spell,
+    );
+    let Effect::Dig {
+        count,
+        keep_count,
+        up_to,
+        reveal,
+        filter,
+        destination,
+        rest_destination,
+        rest_order,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected Effect::Dig, got {:?}", def.effect);
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 6 });
+    assert_eq!(*keep_count, Some(1));
+    assert!(*up_to, "\"you may reveal\" is an optional (up to one) pick");
+    assert!(*reveal, "the instruction reveals the cards publicly");
+    assert_eq!(*destination, Some(Zone::Hand));
+    assert_eq!(*rest_destination, Some(Zone::Library));
+    assert_eq!(*rest_order, DigRestOrder::Random);
+
+    let TargetFilter::Or { filters } = filter else {
+        panic!("the reveal list must fold into one union filter (issue #8068), got {filter:?}");
+    };
+    let legs: Vec<&str> = filters
+        .iter()
+        .filter_map(|leg| match leg {
+            TargetFilter::Typed(tf) => match tf.type_filters.as_slice() {
+                [TypeFilter::Subtype(subtype)] => Some(subtype.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        legs,
+        vec!["Angel", "Demon", "Dragon"],
+        "every listed type must be selectable, got {filters:?}"
     );
 }
 
@@ -48743,7 +49319,7 @@ fn perpetual_they_subject_binds_last_created_after_conjure() {
 }
 
 /// SHAPE (V1/A2 mechanism pin): a choose-then-grant SUBJECT shape binds
-/// `ParentTarget` (the tracked chosen set) via `pending_tracked_set_origin`.
+/// `ParentTarget` (the tracked chosen set) via `pending_tracked_set`.
 /// The singular head + plural anaphor is deliberately non-card-text: it pins
 /// the A2 gate mechanism (Racketeer Boss's own "choose up to two ... and/or
 /// ..." head does not parse to `ChooseFromZone`, so its production rider
@@ -49869,11 +50445,11 @@ fn conjure_of_your_choice_from_spellbook_onto_battlefield() {
         Effect::DraftFromSpellbook {
             destination,
             tapped,
-            random,
+            selection,
         } => {
             assert_eq!(destination, Zone::Battlefield);
             assert!(!tapped);
-            assert!(!random);
+            assert_eq!(selection, SpellbookSelection::Chosen);
         }
         other => panic!("expected DraftFromSpellbook, got: {other:?}"),
     }
@@ -49891,7 +50467,7 @@ fn conjure_of_your_choice_from_spellbook_apostrophe_source() {
         Effect::DraftFromSpellbook {
             destination: Zone::Battlefield,
             tapped: false,
-            random: false
+            selection: SpellbookSelection::Chosen
         }
     ));
 }
@@ -49905,7 +50481,7 @@ fn conjure_of_your_choice_from_spellbook_into_library() {
         Effect::DraftFromSpellbook {
             destination: Zone::Library,
             tapped: false,
-            random: false
+            selection: SpellbookSelection::Chosen
         }
     ));
 }
@@ -49913,14 +50489,14 @@ fn conjure_of_your_choice_from_spellbook_into_library() {
 #[test]
 fn conjure_a_random_card_from_spellbook_onto_battlefield() {
     // "conjure a random card from [X] spellbook" is the engine-picks wording of
-    // draft-from-spellbook: same Effect::DraftFromSpellbook, with random = true.
+    // draft-from-spellbook: same Effect::DraftFromSpellbook, with `SpellbookSelection::Random`.
     let e = parse_effect("conjure a random card from the Slivers Spellbook onto the battlefield");
     assert!(matches!(
         e,
         Effect::DraftFromSpellbook {
             destination: Zone::Battlefield,
             tapped: false,
-            random: true
+            selection: SpellbookSelection::Random
         }
     ));
 }
@@ -49933,7 +50509,7 @@ fn conjure_a_random_card_from_spellbook_into_hand() {
         Effect::DraftFromSpellbook {
             destination: Zone::Hand,
             tapped: false,
-            random: true
+            selection: SpellbookSelection::Random
         }
     ));
 }
@@ -50014,18 +50590,18 @@ fn conjure_named_into_top_n_each_players_library_at_random() {
 #[test]
 fn conjure_random_from_spellbook_into_top_n_library_at_random() {
     // The top-N-library destination composes with the random draft-from-spellbook wording,
-    // which parses to DraftFromSpellbook (random) rather than Conjure.
+    // which parses to DraftFromSpellbook (`SpellbookSelection::Random`) rather than Conjure.
     let e = parse_effect(
         "conjure a random card from the Slivers Spellbook into the top five cards of your library at random",
     );
     match e {
         Effect::DraftFromSpellbook {
             destination,
-            random,
+            selection,
             ..
         } => {
             assert_eq!(destination, Zone::Library);
-            assert!(random);
+            assert_eq!(selection, SpellbookSelection::Random);
         }
         other => panic!("expected DraftFromSpellbook, got: {other:?}"),
     }
@@ -50066,7 +50642,7 @@ fn conjure_random_from_spellbook_into_exile() {
         Effect::DraftFromSpellbook {
             destination: Zone::Exile,
             tapped: false,
-            random: true
+            selection: SpellbookSelection::Random
         }
     ));
 }
@@ -67605,6 +68181,7 @@ fn assert_uneven_land_search_shape(
             conditional_enter_with_counters,
             face_down_profile: None,
             enters_modified_if: None,
+            library_shuffle: _,
         } if *destination == expected_destination
             && *enter_tapped == expected_tapped
             && enter_with_counters.is_empty()
@@ -68760,6 +69337,7 @@ fn leave_battlefield_exile_replacement_matches_6538_shape() {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -70625,6 +71203,7 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Unimplemented { .. } => false,
     }
 }
@@ -85063,9 +85642,11 @@ fn possessive_shift_subject_binds_hand_reveal_to_target_controller() {
         }
     ));
     // The helper touched only the reveal: the counter keeps its base shape.
+    // CR 608.2c: the counter is a resolving spell instruction, so its bare "that
+    // spell" names the spell's earlier announced target (not a trigger event).
     assert_json_eq(
         &*reveal.sub_ability.as_deref().expect("counter").effect,
-        r#"{"type":"Counter","target":{"type":"TriggeringSource"}}"#,
+        r#"{"type":"Counter","target":{"type":"ParentTarget"}}"#,
         "Denied!'s counter",
     );
 
@@ -95164,6 +95745,7 @@ fn previous_clause_requires_bare_battlefield_move() {
     use crate::parser::oracle_ir::effect_chain::ClauseIrBuilder;
 
     let battlefield_move = || Effect::ChangeZone {
+        library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Battlefield,
         target: TargetFilter::Any,
@@ -97295,6 +97877,674 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
             "reveal-choice return keeps its pre-routing outcome, got {parsed:?} for {line:?}"
         );
     }
+}
+
+#[test]
+fn reviving_vapors_keeps_one_in_hand_and_puts_the_rest_into_the_graveyard() {
+    // Verbatim Oracle text (Scryfall). CR 608.2c: three instructions of one
+    // resolution, in written order — keep one revealed card in hand, gain life
+    // equal to THAT card's mana value, then move the other revealed cards.
+    let text = "Reveal the top three cards of your library and put one of them into your hand. You gain life equal to that card's mana value. Put all other cards revealed this way into your graveyard.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    match &*def.effect {
+        Effect::Dig {
+            count,
+            keep_count,
+            destination,
+            rest_destination,
+            reveal,
+            ..
+        } => {
+            assert_eq!(
+                *count,
+                crate::types::ability::QuantityExpr::Fixed { value: 3 },
+                "reveal three: {:#?}",
+                def.effect
+            );
+            assert_eq!(
+                *rest_destination, None,
+                "the remainder is its own instruction after the life gain, not an inline \
+                 part of the reveal (CR 608.2c written order)"
+            );
+            assert_eq!(*keep_count, Some(1), "put one of them into your hand");
+            assert!(*reveal, "the cards are revealed, not privately looked at");
+            assert_eq!(
+                *destination,
+                Some(crate::types::zones::Zone::Hand),
+                "the chosen card goes to its owner's hand"
+            );
+        }
+        other => panic!("expected the reveal Dig head, got {other:#?}"),
+    }
+    let gain = def
+        .sub_ability
+        .as_deref()
+        .expect("the life gain is the Dig's next instruction");
+    match &*gain.effect {
+        Effect::GainLife { amount, .. } => assert!(
+            matches!(
+                amount,
+                crate::types::ability::QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::ObjectManaValue {
+                        scope: crate::types::ability::ObjectScope::Demonstrative
+                    }
+                }
+            ),
+            "life equal to that card's mana value: {amount:#?}"
+        ),
+        other => panic!("expected GainLife after the Dig, got {other:#?}"),
+    }
+    // CR 404.3: moving multiple cards into the same graveyard simultaneously
+    // requires an owner-ordering choice that the engine does not provide for
+    // this mass remainder move. Rather than silently delivering in collection
+    // order, the remainder survives after the life gain as an honest gap.
+    let rest = gain
+        .sub_ability
+        .as_deref()
+        .expect("the remainder instruction follows the life gain");
+    assert!(
+        matches!(
+            &*rest.effect,
+            Effect::Unimplemented { name, .. } if name == "revealed_remainder_graveyard_order"
+        ),
+        "the CR 404.3 graveyard remainder must survive as an honest gap, got {:#?}",
+        rest.effect
+    );
+}
+
+/// CR 701.20a + CR 608.2c: "revealed this way" names a PUBLIC reveal's
+/// population, so a private "look at" cannot absorb the remainder clause. If it
+/// did, lowering would patch the look's rest destination and move those cards
+/// BEFORE the intervening "Draw a card" — the player would draw a different card
+/// than the written order gives.
+#[test]
+fn revealed_remainder_is_not_absorbed_into_a_private_look_across_a_draw() {
+    let def = parse_effect_chain(
+        "Look at the top three cards of your library. Put one of them into your hand. \
+         Draw a card. Put all other cards revealed this way into your graveyard.",
+        AbilityKind::Spell,
+    );
+    match &*def.effect {
+        Effect::Dig {
+            reveal,
+            rest_destination,
+            keep_count,
+            destination,
+            ..
+        } => {
+            assert!(!reveal, "the look is private: {:#?}", def.effect);
+            assert_eq!(*keep_count, Some(1));
+            assert_eq!(*destination, Some(crate::types::zones::Zone::Hand));
+            assert_eq!(
+                *rest_destination, None,
+                "the private look must not absorb the later remainder clause: {:#?}",
+                def.effect
+            );
+        }
+        other => panic!("expected the private look Dig head, got {other:#?}"),
+    }
+
+    // Walk the written chain: the look is followed by the draw, then by the
+    // remainder clause — unabsorbed, and an honest gap rather than a move of
+    // cards no reveal published.
+    let mut chain: Vec<&AbilityDefinition> = Vec::new();
+    let mut cursor = Some(&def);
+    while let Some(node) = cursor {
+        chain.push(node);
+        cursor = node.sub_ability.as_deref();
+    }
+    assert!(
+        matches!(
+            chain.get(1).map(|node| &*node.effect),
+            Some(Effect::Draw { .. })
+        ),
+        "the draw must follow the look in written order: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+    assert!(
+        matches!(
+            chain.last().map(|node| &*node.effect),
+            Some(Effect::Unimplemented { name, .. })
+                if name == "revealed_remainder_without_public_reveal"
+        ),
+        "the refused remainder must survive after the draw as an honest gap: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+    assert!(
+        chain
+            .iter()
+            .all(|node| !matches!(&*node.effect, Effect::ChangeZoneAll { .. })),
+        "nothing may move the remainder as a tracked-set or revealed-set move: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+}
+
+/// CR 701.20a + CR 608.2c: a "revealed this way" remainder names ONE public
+/// reveal's population, and the engine keeps exactly one such population
+/// (`last_revealed_ids`). An intervening instruction that can replace it — a
+/// `Clash` clears the ledger and refills it with BOTH clashing players' top
+/// cards — severs the remainder from the reveal, so the clause keeps its
+/// written position as an honest gap instead of moving cards the reveal never
+/// produced (an opponent's among them).
+///
+/// No printed card is known to print this exact sequence; the boundary is what
+/// is being pinned, so the text only has to be reachable by the grammar. Both
+/// guards assert reach — the public reveal parses as the head and the clash
+/// parses as the intervening clause — so the refusal cannot pass vacuously.
+#[test]
+fn revealed_remainder_is_refused_across_an_intervening_reveal_writer() {
+    let def = parse_effect_chain(
+        "Reveal the top three cards of your library and put one of them into your hand. \
+         Clash with an opponent. Put all other cards revealed this way into your graveyard.",
+        AbilityKind::Spell,
+    );
+
+    let mut chain: Vec<&AbilityDefinition> = Vec::new();
+    let mut cursor = Some(&def);
+    while let Some(node) = cursor {
+        chain.push(node);
+        cursor = node.sub_ability.as_deref();
+    }
+
+    // Reach guard 1: the head is the PUBLIC reveal the remainder would name.
+    assert!(
+        matches!(
+            chain.first().map(|node| &*node.effect),
+            Some(Effect::Dig { reveal: true, .. })
+        ),
+        "the head must be the public reveal Dig: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+    // Reach guard 2: the intervening instruction parsed as a clash, so the
+    // backward scan really had to decide whether to cross a reveal writer.
+    assert!(
+        matches!(chain.get(1).map(|node| &*node.effect), Some(Effect::Clash)),
+        "the intervening clause must parse as Clash: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+    // The refusal: the remainder survives at its written position as a gap with
+    // THIS reason (an unrelated parse miss would not be evidence).
+    assert!(
+        matches!(
+            chain.last().map(|node| &*node.effect),
+            Some(Effect::Unimplemented { name, .. })
+                if name == "revealed_remainder_after_intervening_clause"
+        ),
+        "the remainder must be refused after the clash: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+    // Nothing anywhere may move the reveal population.
+    assert!(
+        chain
+            .iter()
+            .all(|node| !matches!(&*node.effect, Effect::ChangeZoneAll { .. })),
+        "nothing may move the remainder as a revealed-set move: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+}
+
+/// CR 701.20a + CR 608.2c: a "revealed this way" remainder names ONE public
+/// reveal's population. An intervening compound instruction whose own resolution
+/// contains a reveal writer (e.g. TargetOnly -> RevealTop -> GainLife) overwrites
+/// the reveal population. Lookback must prove the ENTIRE crossed clause reveal-free
+/// (using visit_ability_def_scoped under OwnResolutionOnly), not just its deepest
+/// effect (GainLife), refusing to bind across the compound writer.
+///
+/// No printed card is known to exhibit this combined sequence. This synthetic
+/// refusal fixture composes Reviving Vapors' public-reveal selection with a
+/// multiplayer reveal nearest to Parker Luck; it tests a parser-produced
+/// preservation boundary, not support for fabricated Oracle text.
+#[test]
+fn revealed_remainder_is_refused_across_an_intervening_compound_reveal_writer() {
+    let def = parse_effect_chain(
+        "Reveal the top three cards of your library and put one of them into your hand. \
+         You and target opponent each reveal the top card of your library and gain 1 life. \
+         Put all other cards revealed this way into exile.",
+        AbilityKind::Spell,
+    );
+
+    let mut chain: Vec<&AbilityDefinition> = Vec::new();
+    let mut cursor = Some(&def);
+    while let Some(node) = cursor {
+        chain.push(node);
+        cursor = node.sub_ability.as_deref();
+    }
+
+    // Reach guard 1: head is the public Dig
+    assert!(
+        matches!(
+            chain.first().map(|node| &*node.effect),
+            Some(Effect::Dig { reveal: true, .. })
+        ),
+        "head must be the public reveal Dig: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+
+    // Reach guard 2: intervening clause parsed as TargetOnly wrapping RevealTop and GainLife
+    let intervening = chain.get(1).expect("expected intervening clause");
+    assert!(
+        matches!(&*intervening.effect, Effect::TargetOnly { .. }),
+        "intervening clause head must be TargetOnly: {:#?}",
+        intervening.effect
+    );
+    let mut has_reveal_top = false;
+    let mut has_gain_life = false;
+    let _ = crate::types::ability_visit::visit_ability_def_scoped(
+        intervening,
+        crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+        &mut |effect| {
+            if matches!(effect, Effect::RevealTop { .. }) {
+                has_reveal_top = true;
+            }
+            if matches!(effect, Effect::GainLife { .. }) {
+                has_gain_life = true;
+            }
+            std::ops::ControlFlow::Continue(())
+        },
+    );
+    assert!(has_reveal_top, "intervening clause must contain RevealTop");
+    assert!(has_gain_life, "intervening clause must contain GainLife");
+
+    // The refusal: the remainder survives at its written position as an honest gap
+    assert!(
+        matches!(
+            chain.last().map(|node| &*node.effect),
+            Some(Effect::Unimplemented { name, .. })
+                if name == "revealed_remainder_after_intervening_clause"
+        ),
+        "the remainder must be refused after the compound reveal writer: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+
+    // Nothing anywhere moves the remainder
+    assert!(
+        chain
+            .iter()
+            .all(|node| !matches!(&*node.effect, Effect::ChangeZoneAll { .. })),
+        "nothing may move the remainder as a revealed-set move: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+}
+
+/// CR 701.20a + CR 608.2c: a "revealed this way" remainder lowers to
+/// `TargetFilter::LastRevealed` scoped to `origin: Library`. But when a public
+/// Dig uses a reveal-only choice (`destination: None`, e.g. Zimone's Experiment),
+/// the selected cards remain in the library. LastRevealed still includes the
+/// entire revealed population, so a library remainder cannot be inferred from
+/// LastRevealed without including the selected cards. The continuation must be
+/// refused unless selected departure from the library is proved.
+///
+/// No printed card is known to exhibit this combined sequence. This synthetic
+/// refusal fixture changes Zimone's Experiment's initial Look to Reveal and
+/// appends a remainder solely to test the destination-None boundary; it is not
+/// Zimone's printed Oracle text.
+#[test]
+fn revealed_remainder_is_refused_when_dig_selection_does_not_depart_library() {
+    let def = parse_effect_chain(
+        "Reveal the top five cards of your library. You may reveal up to two \
+         creature and/or land cards from among them, then put the rest on the bottom of your library in a random order. \
+         Put all other cards revealed this way into exile.",
+        AbilityKind::Spell,
+    );
+
+    let mut chain: Vec<&AbilityDefinition> = Vec::new();
+    let mut cursor = Some(&def);
+    while let Some(node) = cursor {
+        chain.push(node);
+        cursor = node.sub_ability.as_deref();
+    }
+
+    // Reach guard 1: head is the public reveal Dig
+    match chain.first().map(|node| &*node.effect) {
+        Some(Effect::Dig {
+            reveal,
+            destination,
+            ..
+        }) => {
+            assert!(*reveal, "reveal must be true");
+            // Reach guard 2: destination is None (selection does not depart library)
+            assert_eq!(
+                *destination,
+                None,
+                "destination must be None for reveal-only Dig: {:#?}",
+                chain.first()
+            );
+        }
+        other => panic!("expected Effect::Dig at head, got {other:#?}"),
+    }
+
+    // Refusal assertion: the remainder survives at its written position as an honest gap
+    assert!(
+        matches!(
+            chain.get(1).map(|node| &*node.effect),
+            Some(Effect::Unimplemented { name, .. })
+                if name == "revealed_remainder_without_reveal"
+        ),
+        "remainder must be refused when selected cards do not depart library: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+
+    // Nothing anywhere moves the remainder
+    assert!(
+        chain
+            .iter()
+            .all(|node| !matches!(&*node.effect, Effect::ChangeZoneAll { .. })),
+        "nothing may move the remainder as a revealed-set move: {:#?}",
+        chain.iter().map(|n| &*n.effect).collect::<Vec<_>>()
+    );
+}
+
+/// CR 701.20a + CR 608.2c: the rest-pile clause of a reveal instruction claims
+/// only destinations it fully understands, and only an explicitly randomized
+/// library remainder (CR 401.4). An owner-ordered library remainder (CR 401.4)
+/// or graveyard remainder (CR 404.3) requires an arrangement prompt this
+/// instruction does not own, so it is refused rather than silently delivered in
+/// collection order.
+
+#[test]
+fn revealed_remainder_destinations_are_explicit_or_refused() {
+    use crate::parser::oracle_effect::sequence::parse_revealed_remainder_clause;
+    use crate::parser::oracle_ir::ast::ContinuationAst;
+    use crate::types::ability::DigRestOrder;
+    use crate::types::zones::Zone;
+
+    let accepted = [
+        (
+            "Put all other cards revealed this way into your graveyard.",
+            Zone::Graveyard,
+        ),
+        ("Put the other cards into exile.", Zone::Exile),
+        (
+            "Put all other cards revealed this way into your hand.",
+            Zone::Hand,
+        ),
+        // CR 400.3: plural-owner graveyard form (Dance, Pathetic Marionette),
+        // read through the shared partition-destination grammar.
+        (
+            "Put all other cards revealed this way into their owners' graveyards.",
+            Zone::Graveyard,
+        ),
+        ("Exile all other cards revealed this way.", Zone::Exile),
+        (
+            "Put all other cards revealed this way on the bottom of your library in a random order.",
+            Zone::Library,
+        ),
+    ];
+    for (text, zone) in accepted {
+        match parse_revealed_remainder_clause(text) {
+            Some(ContinuationAst::RevealedRemainder {
+                destination,
+                rest_order,
+            }) => {
+                assert_eq!(destination, zone, "{text}");
+                if zone == Zone::Library {
+                    assert_eq!(rest_order, DigRestOrder::Random, "{text}");
+                }
+            }
+            other => panic!("{text} must parse to an explicit remainder, got {other:?}"),
+        }
+    }
+
+    // CR 401.4: an owner-ordered library remainder needs an ordering prompt this
+    // instruction does not own, so it is refused rather than silently kept in
+    // place.
+    assert!(parse_revealed_remainder_clause(
+        "Put all other cards revealed this way on the bottom of your library."
+    )
+    .is_none());
+    // CR 608.2c: "all cards revealed this way" is the whole revealed pile, a
+    // different instruction; an unreadable destination is refused rather than
+    // defaulted to a library move.
+    for text in [
+        "Put all cards revealed this way into your graveyard.",
+        "Put all other cards revealed this way into the aether.",
+    ] {
+        assert!(parse_revealed_remainder_clause(text).is_none(), "{text}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CR 608.2c + CR 608.2k — the bare "that spell" anaphor binds by ability
+// context: the spell's earlier announced target in a resolving spell, the
+// triggering event's spell object inside a triggered ability.
+// ---------------------------------------------------------------------------
+
+/// Collect the top-level target `type` of every `Counter`/`CopySpell` node in a
+/// serialized parse (`"<none>"` when the node carries no target), so an
+/// unbound or wrongly-typed consumer is visible instead of being filtered out.
+fn spell_consumer_target_types(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if matches!(
+                map.get("type").and_then(|v| v.as_str()),
+                Some("Counter") | Some("CopySpell")
+            ) {
+                out.push(
+                    map.get("target")
+                        .and_then(|t| t.get("type"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<none>")
+                        .to_string(),
+                );
+            }
+            for inner in map.values() {
+                spell_consumer_target_types(inner, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for inner in items {
+                spell_consumer_target_types(inner, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `announced` lists the row's own announced-target node(s) ("counter target
+/// spell ..."); every other Counter/CopySpell node must bind `expected`.
+fn assert_spell_anaphor(
+    name: &str,
+    text: &str,
+    types: &[&str],
+    announced: &[&str],
+    expected: &str,
+) {
+    let parsed = parse_named_face(text, name, types);
+    // Walk the whole parse: spells/activated abilities live in `abilities`,
+    // triggered bodies in `triggers` (and their execute chains).
+    let value = serde_json::to_value(&parsed).expect("parsed abilities serialize");
+    let mut targets = Vec::new();
+    spell_consumer_target_types(&value, &mut targets);
+    let all_targets = targets.clone();
+    for announced_type in announced {
+        let position = targets
+            .iter()
+            .position(|target| target == announced_type)
+            .unwrap_or_else(|| {
+                panic!("{name}: announced target {announced_type} missing from {all_targets:?}")
+            });
+        targets.remove(position);
+    }
+    assert!(
+        !targets.is_empty(),
+        "{name}: expected a Counter/CopySpell spell anaphor beyond the announced targets, got \
+         {all_targets:?} in {value}"
+    );
+    assert!(
+        targets.iter().all(|target| target == expected),
+        "{name}: every spell anaphor must bind {expected}, got {targets:?} (all consumers: \
+         {all_targets:?})"
+    );
+}
+
+/// CR 608.2c: a resolving spell's "counter/copy that spell" names the spell's
+/// earlier announced target — not a trigger event that does not exist.
+#[test]
+fn resolving_spell_that_spell_binds_the_parent_target() {
+    assert_spell_anaphor(
+        "Denied!",
+        "Choose a card name, then target spell's controller reveals their hand. If a card with the \
+         chosen name is revealed this way, counter that spell.",
+        &["Instant"],
+        &[],
+        "ParentTarget",
+    );
+    assert_spell_anaphor(
+        "Mages' Contest",
+        "You and target spell's controller bid life. You start the bidding with a bid of 1. In turn \
+         order, each player may top the high bid. The bidding ends if the high bid stands. The high \
+         bidder loses life equal to the high bid. If you win the bidding, counter that spell.",
+        &["Instant"],
+        &[],
+        "ParentTarget",
+    );
+    assert_spell_anaphor(
+        "Bring the Ending",
+        "Counter target spell unless its controller pays {2}.\nCorrupted — Counter that spell \
+         instead if its controller has three or more poison counters.",
+        &["Instant"],
+        &["StackSpell"],
+        "ParentTarget",
+    );
+    assert_spell_anaphor(
+        "Stubborn Denial",
+        "Counter target noncreature spell unless its controller pays {1}.\nFerocious — If you \
+         control a creature with power 4 or greater, counter that spell instead.",
+        &["Instant"],
+        &["And"],
+        "ParentTarget",
+    );
+    assert_spell_anaphor(
+        "Silumgar's Scorn",
+        "As an additional cost to cast this spell, you may reveal a Dragon card from your hand.\n\
+         Counter target spell unless its controller pays {1}. If you revealed a Dragon card or \
+         controlled a Dragon as you cast this spell, counter that spell instead.",
+        &["Instant"],
+        &["StackSpell"],
+        "ParentTarget",
+    );
+    assert_spell_anaphor(
+        "Anticognition",
+        "Counter target creature or planeswalker spell unless its controller pays {2}. If an \
+         opponent has eight or more cards in their graveyard, instead counter that spell, then \
+         scry 2.",
+        &["Instant"],
+        &["Or"],
+        "ParentTarget",
+    );
+    assert_spell_anaphor(
+        "Prohibit",
+        "Kicker {2} (You may pay an additional {2} as you cast this spell.)\nCounter target spell \
+         if its mana value is 2 or less. If this spell was kicked, counter that spell if its mana \
+         value is 4 or less instead.",
+        &["Instant"],
+        &["StackSpell"],
+        "ParentTarget",
+    );
+}
+
+/// CR 608.2k: inside a triggered ability the same anaphor names the triggering
+/// event's spell object. The rows cover a printed trigger counter (Chalice of the
+/// Void), delayed bodies (Galvanic Iteration, Sea Gate Stormcaller, Tomb of
+/// Horrors Adventurer) and trigger-owned sub-parsers that carry a COPY anaphor
+/// (Mathise's die-result row, Pyromancer's Goggles' mana-spend trigger). The copy
+/// consumer keeps the event-source default by design and never consults the
+/// binding, so those two rows are printed-card output checks only (CopySpell is
+/// binding-blind). The binding hand-off for trigger-owned die rows is covered by
+/// the synthetic Counter tests (`trigger_owned_die_result_row_counter_binds_the_event_source`
+/// and the oracle.rs die-row tests), since no printed card has a counter anaphor
+/// inside those bodies today.
+#[test]
+fn triggered_ability_that_spell_binds_the_event_source() {
+    assert_spell_anaphor(
+        "Chalice of the Void",
+        "This artifact enters with X charge counters on it.\nWhenever a player casts a spell with \
+         mana value equal to the number of charge counters on this artifact, counter that spell.",
+        &["Artifact"],
+        &[],
+        "TriggeringSource",
+    );
+    assert_spell_anaphor(
+        "Galvanic Iteration",
+        "When you next cast an instant or sorcery spell this turn, copy that spell. You may choose \
+         new targets for the copy.\nFlashback {1}{U}{R}",
+        &["Instant"],
+        &[],
+        "TriggeringSource",
+    );
+    assert_spell_anaphor(
+        "Sea Gate Stormcaller",
+        "Kicker {4}{U}\nWhen this creature enters, copy the next instant or sorcery spell with mana \
+         value 2 or less you cast this turn when you cast it. If this creature was kicked, copy that \
+         spell twice instead. You may choose new targets for the copies.",
+        &["Creature"],
+        // The second CopySpell node ("copy that spell twice instead") is a
+        // pre-existing trigger-level misparse (it sits beside the ETB's delayed
+        // trigger, not inside its body); this row only pins the anaphor's type
+        // name and does not vouch for the card's full parse.
+        &[],
+        "TriggeringSource",
+    );
+    assert_spell_anaphor(
+        "Tomb of Horrors Adventurer",
+        "When this creature enters, you take the initiative.\nWhenever you cast your second spell \
+         each turn, copy it. If you've completed a dungeon, copy that spell twice instead. You may \
+         choose new targets for the copies.",
+        &["Creature"],
+        &[],
+        "TriggeringSource",
+    );
+    assert_spell_anaphor(
+        "Mathise, Surge Channeler",
+        "Whenever you cast an instant or sorcery spell with mana value 3 or greater, roll a d20.\n\
+         1-9 | Each player draws a card.\n10-19 | You draw a card.\n20 | Copy that spell. You may \
+         choose new targets for the copy.",
+        &["Creature"],
+        &[],
+        "TriggeringSource",
+    );
+    assert_spell_anaphor(
+        "Pyromancer's Goggles",
+        "{T}: Add {R}. When that mana is spent to cast a red instant or sorcery spell, copy that \
+         spell and you may choose new targets for the copy.",
+        &["Artifact"],
+        &[],
+        "TriggeringSource",
+    );
+}
+
+/// CR 706.3b + CR 608.2k: a trigger-owned die-result table is part of the
+/// triggered ability, so a bare "that spell" in one of its rows names the
+/// trigger event's spell (`TriggeringSource`), not a parent target.
+///
+/// No printed card has a Counter row in a trigger-owned results table (checked
+/// against AtomicCards), so this face is synthetic. The nearest printed analog
+/// is Mathise, Surge Channeler ("Whenever you cast an instant or sorcery spell
+/// with mana value 3 or greater, roll a d20. ... 20 | Copy that spell. You may
+/// choose new targets for the copy."), whose Copy row cannot tell the bindings
+/// apart because the CopySpell consumer keeps the event-source default. This
+/// face swaps row 20 to the Counter consumer, which does read the binding, as a
+/// regression guard for the hand-off.
+#[test]
+fn trigger_owned_die_result_row_counter_binds_the_event_source() {
+    let name = "Synthetic Die-Row Counter";
+    let text =
+        "Whenever you cast an instant or sorcery spell with mana value 3 or greater, roll a \
+                d20.\n1-9 | Each player draws a card.\n10-19 | You draw a card.\n20 | Counter \
+                that spell.";
+    assert_spell_anaphor(name, text, &["Creature"], &[], "TriggeringSource");
+
+    // Reach guard: the Counter really is the table's row 20 under the trigger's
+    // RollDie, so the assertion above is not satisfied by an unrelated node.
+    let parsed = parse_named_face(text, name, &["Creature"]);
+    let trigger = serde_json::to_value(&parsed.triggers[0]).expect("trigger serializes");
+    let roll = &trigger["execute"]["effect"];
+    assert_eq!(roll["type"], "RollDie", "{trigger}");
+    let results = roll["results"].as_array().expect("results table");
+    assert_eq!(results.len(), 3, "{trigger}");
+    let counter = &results[2]["effect"]["effect"];
+    assert_eq!(counter["type"], "Counter", "{trigger}");
+    assert_eq!(counter["target"]["type"], "TriggeringSource", "{trigger}");
 }
 
 /// CR 701.20e + CR 608.2c — issue #7754 (Through the Forest Gate):
