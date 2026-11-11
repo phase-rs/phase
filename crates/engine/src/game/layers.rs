@@ -13681,7 +13681,7 @@ mod tests {
             let pledge = scenario.add_enchantment_from_oracle(
                 P0, "Pledge of Loyalty",
                 "Enchant creature\nEnchanted creature has protection from each color among permanents you control. This effect doesn't remove this Aura.",
-            ).with_color(vec![ManaColor::White]).id();
+            ).with_color(vec![ManaColor::White]).with_subtypes(vec!["Aura"]).id();
             if with_hour {
                 scenario
                     .add_enchantment_from_oracle(P1, "Darkest Hour", "All creatures are black.")
@@ -13690,6 +13690,7 @@ mod tests {
             let thopter = scenario
                 .add_creature_from_oracle(P0, "Ornithopter", 0, 2, "Flying")
                 .as_artifact_creature()
+                .with_subtypes(vec!["Thopter"])
                 .id();
             let mut runner = scenario.build();
             let state = runner.state_mut();
@@ -13738,6 +13739,8 @@ mod tests {
                 "only Darkest Hour can color this entrant before layer 6"
             );
 
+            // Synthetic probes below: Ornithopter is printed colorless and P0's;
+            // recoloring it and handing it to P1 stand in for effects that would.
             state
                 .objects
                 .get_mut(&thopter)
@@ -15095,21 +15098,16 @@ mod tests {
     /// zero-assertion fails.
     #[test]
     fn incremental_flush_skips_protection_color_expansion_reaching_no_recipient() {
-        let mut state = setup();
-        let source = make_creature(&mut state, "Empty-Shrine Kannushi", 1, 1, P0);
-        let def = StaticDefinition::continuous()
-            .affected(TargetFilter::SelfRef)
-            .modifications(vec![ContinuousModification::AddKeyword {
-                keyword: Keyword::Protection(crate::types::keywords::ProtectionTarget::EachColor(
-                    crate::types::keywords::ProtectionColorSet::AmongPermanentsYouControl,
-                )),
-            }]);
-        {
-            let obj = state.objects.get_mut(&source).unwrap();
-            obj.static_definitions.push(def.clone());
-            obj.base_static_definitions = Arc::new(vec![def]);
-            obj.color.push(ManaColor::White);
-        }
+        // Printed Empty-Shrine Kannushi ({1}{W}): "This creature has protection
+        // from each color among permanents you control."
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_real_card(
+            P0,
+            "Empty-Shrine Kannushi",
+            Zone::Battlefield,
+            crate::test_support::shared_card_db(),
+        );
+        let mut state = scenario.state;
         evaluate_layers(&mut state);
         // REACH GUARD: the expansion is live on a full pass.
         assert!(
@@ -15122,7 +15120,7 @@ mod tests {
 
         // An opponent's entrant: the SelfRef effect does not reach it, and it
         // cannot escalate the controller-population read (CR 109.5).
-        let entrant = make_creature(&mut state, "Opponent Bears", 2, 2, P1);
+        let entrant = make_creature(&mut state, "Synthetic opponent entrant", 2, 2, P1);
         state.layers_dirty = LayersDirty::EnteredObjects([entrant].into());
         crate::game::perf_counters::reset();
         reset_granted_protection_resolution_count();
@@ -15150,7 +15148,11 @@ mod tests {
     #[test]
     fn incremental_flush_still_runs_protection_color_expansion_reaching_a_recipient() {
         let mut state = setup();
-        let lord = make_creature(&mut state, "Commander's Plate bearer", 2, 2, P0);
+        // Synthetic lord: no printed card grants "protection from each color
+        // among permanents you control" to every creature its controller
+        // controls; Empty-Shrine Kannushi (itself) and Pledge of Loyalty
+        // (enchanted creature) print the same quality for one creature.
+        let lord = make_creature(&mut state, "Synthetic each-color lord", 2, 2, P0);
         let def = StaticDefinition::continuous()
             .affected(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
@@ -15167,7 +15169,10 @@ mod tests {
             obj.color.push(ManaColor::White);
         }
         evaluate_layers(&mut state);
-        let entrant = make_creature(&mut state, "Grizzly Bears", 2, 2, P0);
+        // Synthetic colorless entrant: a colored one would change the color
+        // population and escalate to a full pass (see
+        // `kannushi_pledge_population_probe_reads_entrant_color_and_controller`).
+        let entrant = make_creature(&mut state, "Synthetic colorless entrant", 2, 2, P0);
         state.layers_dirty = LayersDirty::EnteredObjects([entrant].into());
         crate::game::perf_counters::reset();
         reset_granted_protection_resolution_count();
