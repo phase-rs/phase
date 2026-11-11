@@ -3062,15 +3062,21 @@ pub(crate) fn record_last_created_token(state: &mut GameState, object_id: Object
 /// creation order. The single authority for that re-sync; an assignment would
 /// drop the earlier batches' tokens once a paused batch resumes. The ledger is
 /// the guarded one, so no id its guard withheld is published.
+///
+/// Runs at every resume of a paused batch, with a ledger that grows each time
+/// (a token multiplier such as Parallel Lives enlarges every batch), so the
+/// membership check is a set built once per call: linear in the owner's buffer
+/// plus the batch, never a rescan of the buffer per id. An id repeated inside
+/// the batch is listed once. With no active CopyToken owner nothing changes.
 pub(crate) fn record_copy_batch_ledger_on_active_copy_token(state: &mut GameState) {
-    let batch = state.last_created_token_ids.clone();
-    if let Some(pending) = state.active_copy_token_mut() {
-        let unlisted: Vec<ObjectId> = batch
-            .into_iter()
-            .filter(|id| !pending.created_ids.contains(id))
-            .collect();
-        pending.created_ids.extend(unlisted);
-    }
+    let batch = &state.last_created_token_ids;
+    let Some(pending) = state.resolution_stack.active_copy_token_mut() else {
+        return;
+    };
+    let mut listed: HashSet<ObjectId> = pending.created_ids.iter().copied().collect();
+    pending
+        .created_ids
+        .extend(batch.iter().copied().filter(|id| listed.insert(*id)));
 }
 
 /// CR 111.1 + CR 707.2: publish a just-created token into BOTH destinations the
@@ -11377,6 +11383,59 @@ mod tests {
         );
         let (mut state, ability) = with_gear(attached_to_it);
         assert_eq!(live_entry_counters(&mut state, &ability), vec![0, 0]);
+    }
+
+    fn ids(raw: &[u64]) -> Vec<ObjectId> {
+        raw.iter().copied().map(ObjectId).collect()
+    }
+
+    /// CR 608.2c + CR 111.1: a paused copy batch resumes with a ledger that
+    /// re-lists every id it already published, so each merge must append only
+    /// the ids the owner does not hold yet — once each, in ledger order —
+    /// however many times it runs.
+    #[test]
+    fn copy_batch_ledger_merge_appends_each_unlisted_id_once_in_creation_order() {
+        let mut state = GameState::new_two_player(42);
+        state.push_copy_token(PendingCopyTokenResolution {
+            created_ids: ids(&[1, 2]),
+            remaining: Default::default(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id: ObjectId(99),
+            referent_set: None,
+        });
+        let owner_ids = |state: &GameState| {
+            state
+                .active_copy_token()
+                .expect("the CopyToken owner stays parked")
+                .created_ids
+                .clone()
+        };
+
+        state.last_created_token_ids = ids(&[1, 2, 3]);
+        record_copy_batch_ledger_on_active_copy_token(&mut state);
+        assert_eq!(owner_ids(&state), ids(&[1, 2, 3]));
+
+        // The ledger grew and repeats both an already-listed id and a new one.
+        state.last_created_token_ids = ids(&[1, 2, 3, 4, 4]);
+        record_copy_batch_ledger_on_active_copy_token(&mut state);
+        assert_eq!(owner_ids(&state), ids(&[1, 2, 3, 4]));
+
+        // Re-running on the same ledger is a no-op.
+        record_copy_batch_ledger_on_active_copy_token(&mut state);
+        assert_eq!(owner_ids(&state), ids(&[1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn copy_batch_ledger_merge_without_copy_token_owner_changes_nothing() {
+        let mut state = GameState::new_two_player(43);
+        state.last_created_token_ids = ids(&[5, 6, 6]);
+        let before = state.clone();
+
+        record_copy_batch_ledger_on_active_copy_token(&mut state);
+
+        assert!(state.active_copy_token().is_none());
+        assert_eq!(state.last_created_token_ids, before.last_created_token_ids);
+        assert_eq!(state.resolution_stack, before.resolution_stack);
     }
 }
 
