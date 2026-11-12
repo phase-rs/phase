@@ -10118,6 +10118,7 @@ mod tests {
         SharedQuality, SharedQualityRelation,
     };
     use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::keywords::KeywordKind;
 
     /// CR 608.2h: the static→ability bridge maps `QuantityQuality` 1:1 and never
     /// returns `None` for it — a dropped `None` would lower the effect to
@@ -12276,8 +12277,8 @@ mod tests {
     }
 
     /// CR 608.2c: a chain is proven to be its ability's resolved root only at a
-    /// trigger body, an activated ability's effect, or a card's first spell
-    /// line on a card whose spell is not rewritten at cast. A second targeted
+    /// trigger body, an activated ability's effect, or the only spell line of a
+    /// card whose spell is not rewritten at cast. A second targeted
     /// instruction joined to a first by " and " is a later chunk of the same
     /// chain and declines (synthetic; printed shape: Gurmag Rakshasa, "target
     /// creature an opponent controls gets -2/-2 until end of turn and target
@@ -12347,6 +12348,21 @@ mod tests {
     /// spell line without a keyword line and asserts it binds.
     #[test]
     fn target_controller_suffix_on_a_spell_rewritten_at_cast_is_an_explicit_gap() {
+        fn fuse(keyword: &Keyword) -> bool {
+            matches!(keyword, Keyword::Fuse)
+        }
+        fn splice(keyword: &Keyword) -> bool {
+            matches!(keyword, Keyword::Splice { .. })
+        }
+        fn gift(keyword: &Keyword) -> bool {
+            matches!(keyword, Keyword::Gift(_))
+        }
+        fn overload(keyword: &Keyword) -> bool {
+            matches!(keyword, Keyword::Overload(_))
+        }
+        fn awaken(keyword: &Keyword) -> bool {
+            matches!(keyword, Keyword::Awaken { .. })
+        }
         let condition = "its controller controls no creatures";
         let spell = format!("Destroy target enchantment if {condition}.");
         let (seam, _, _) = full_strip("Destroy target enchantment", condition);
@@ -12360,7 +12376,7 @@ mod tests {
 
         let split_face = vec!["__force_keyword_extract__".to_owned()];
         let no_subtypes: Vec<String> = Vec::new();
-        for (text, keywords, subtypes) in [
+        for (text, keywords, subtypes, keyword_line) in [
             (
                 format!(
                     "{spell}\nFuse (You may cast one or both halves of this card from your \
@@ -12368,6 +12384,7 @@ mod tests {
                 ),
                 split_face,
                 no_subtypes.clone(),
+                Some(fuse as fn(&Keyword) -> bool),
             ),
             (
                 format!(
@@ -12377,6 +12394,7 @@ mod tests {
                 ),
                 vec!["Splice".to_owned()],
                 no_subtypes.clone(),
+                Some(splice),
             ),
             (
                 format!(
@@ -12385,6 +12403,7 @@ mod tests {
                 ),
                 vec!["Gift".to_owned()],
                 no_subtypes.clone(),
+                Some(gift),
             ),
             (
                 format!(
@@ -12393,6 +12412,7 @@ mod tests {
                 ),
                 vec!["Overload".to_owned()],
                 no_subtypes.clone(),
+                Some(overload),
             ),
             (
                 format!(
@@ -12402,9 +12422,26 @@ mod tests {
                 ),
                 vec!["Awaken".to_owned()],
                 no_subtypes.clone(),
+                Some(awaken),
             ),
-            (spell.clone(), Vec::new(), vec!["Arcane".to_owned()]),
+            (spell.clone(), Vec::new(), vec!["Arcane".to_owned()], None),
         ] {
+            let typed: Vec<Keyword> = text
+                .lines()
+                .filter_map(|line| {
+                    let lower = crate::parser::oracle_util::strip_reminder_text(line)
+                        .trim()
+                        .to_lowercase();
+                    crate::parser::oracle_keyword::parse_router_keyword_fragment(&lower)
+                })
+                .collect();
+            match keyword_line {
+                Some(expected) => assert!(
+                    matches!(typed.as_slice(), [keyword] if expected(keyword)),
+                    "reach guard: {text}: the printed keyword line is typed: {typed:?}"
+                ),
+                None => assert!(typed.is_empty(), "reach guard: {text}: {typed:?}"),
+            }
             let parsed = parse_oracle_text(
                 &text,
                 "Synthetic",

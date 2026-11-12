@@ -5980,7 +5980,8 @@ fn parse_normalized_oracle_ir(
     // - fuse (CR 702.102d): the right half follows the left half;
     // - splice (CR 702.47a): the card's text is added to another spell;
     // - gift (CR 702.174j): the gift effect happens first, and the engine wraps
-    //   the first spell ability under a `GiftDelivery` root (`synthesize_gift`);
+    //   the card's first ability, a gift spell's spell ability, under a
+    //   `GiftDelivery` root (`synthesize_gift`);
     // - overload (CR 702.96b): the overloaded spell requires no targets;
     // - awaken (CR 702.113a): the awaken spell ability is appended below it;
     // - an Arcane spell (CR 702.47b): the spliced text is appended below it.
