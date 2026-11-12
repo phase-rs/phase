@@ -199,7 +199,6 @@ Per-line classification inside `parse_oracle_ir` (simplified; §3 has the full s
 | `context.rs` | `ParseContext` for stateful parsing (subject, actor, card_name, host_self_reference, …) |
 | `diagnostic.rs` | Re-exports the `OracleDiagnostic` data family (structured parse warnings) from `types/oracle_diagnostic.rs`; its producers stay in the parser (`swallow_check.rs`, `oracle_effect/gap_diagnosis.rs`, `ParseContext::push_diagnostic`) |
 | `effect_chain.rs` | `EffectChainIr`, `ClauseIr` + **typed clause provenance** (`ClauseId`, `ClauseDisposition`, antecedents, reference uses) and the mandatory `ClauseIrBuilder` |
-| `history_provenance.rs` | Parser-only block-history occurrence expectations, logical producer identities, lowering companions, and final instruction locators; omitted from serialized AST/gameplay data |
 | `trigger.rs` | `TriggerIr` + lowering |
 | `static_ir.rs` | `StaticIr` + lowering |
 | `replacement.rs` | `ReplacementIr` + lowering |
