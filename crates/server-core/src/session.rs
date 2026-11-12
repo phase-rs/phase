@@ -140,6 +140,7 @@ pub type RevisionedActionResult = (u64, ActionResult);
 pub struct HandledAction {
     pub result: ActionResult,
     pub takeback: Option<TakebackResolution>,
+    pub action: GameAction,
 }
 
 /// The atomic decision fields derived from one authoritative state.
@@ -648,9 +649,48 @@ pub struct GameSession {
     /// Runtime state for the online sustained-clicking contests (Eye to Eye,
     /// Mouth to Mouth). Never persisted; see `crate::contest`.
     pub contest: crate::contest::ContestRuntime,
+    /// Active expiry claim identity for spoken payments, if one is running.
+    pub active_say_expiry_claim: Option<ActiveSayPhraseExpiryClaim>,
+    /// Monotonic claim allocator for spoken-payment expiry owners.
+    pub next_say_expiry_claim_id: u64,
+}
+
+/// Active expiry claim identity for a live spoken-payment background expiry task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveSayPhraseExpiryClaim {
+    pub payment_id: u64,
+    pub claim_id: u64,
 }
 
 impl GameSession {
+    /// Try to claim the background expiry task for a spoken payment. Returns `Some(claim_id)`
+    /// if this caller claimed it (no task was running for this payment), or `None`
+    /// if a task for this payment ID is already live.
+    pub fn claim_say_phrase_expiry(&mut self, payment_id: u64) -> Option<u64> {
+        if self.active_say_expiry_claim.as_ref().map(|c| c.payment_id) == Some(payment_id) {
+            None
+        } else {
+            self.next_say_expiry_claim_id += 1;
+            let claim_id = self.next_say_expiry_claim_id;
+            self.active_say_expiry_claim = Some(ActiveSayPhraseExpiryClaim {
+                payment_id,
+                claim_id,
+            });
+            Some(claim_id)
+        }
+    }
+
+    /// Releases the active background expiry task claim if it matches `(payment_id, claim_id)`.
+    pub fn release_say_phrase_expiry(&mut self, payment_id: u64, claim_id: u64) {
+        if self.active_say_expiry_claim
+            == Some(ActiveSayPhraseExpiryClaim {
+                payment_id,
+                claim_id,
+            })
+        {
+            self.active_say_expiry_claim = None;
+        }
+    }
     pub fn ai_driver_fault(&self) -> Option<&AiDriverFault> {
         self.ai_driver_fault.as_ref()
     }
@@ -1727,6 +1767,8 @@ impl GameSession {
             takeback,
             deck_pools_cache: None,
             contest: Default::default(),
+            active_say_expiry_claim: None,
+            next_say_expiry_claim_id: 0,
         })
     }
 
@@ -1884,11 +1926,46 @@ impl GameSession {
         action: GameAction,
         card_db: Option<&CardDatabase>,
     ) -> Result<HandledAction, SessionActionError> {
+        self.handle_action_with_card_db_outcome_at(player_token, action, card_db, now_ms())
+    }
+
+    /// [`Self::handle_action_with_card_db_outcome`] with the host's ingress
+    /// instant supplied by the transport.
+    ///
+    /// Un-card (no CR entry): a spoken-payment observation is judged by the
+    /// instant the HOST received it, not by the time its queued handler finally
+    /// runs. The WebSocket ingress captures that instant before the application
+    /// queue, and passes it here so an earlier action's publication, broadcast
+    /// and AI work cannot make a timely saying look late.
+    pub fn handle_action_with_card_db_outcome_at(
+        &mut self,
+        player_token: &str,
+        action: GameAction,
+        card_db: Option<&CardDatabase>,
+        host_received_at_ms: u64,
+    ) -> Result<HandledAction, SessionActionError> {
         self.reject_if_ai_driver_faulted()?;
 
         let player = self
             .player_for_token(player_token)
             .ok_or_else(|| "Invalid player token".to_string())?;
+
+        // Un-card (no CR entry): the instant of a spoken-payment observation is
+        // evidence the engine judges, so the server never trusts the one a
+        // client claims — it stamps the observation at its own receipt, in the
+        // epoch-millisecond domain every host uses (`GameAction::stamped_by_host`).
+        // In SingleUser hosting mode (e.g. desktop sidecar acting as a local engine
+        // for a P2P host), the browser host already stamped the trusted WebRTC
+        // ingress time before forwarding over the loopback socket. Preserve that
+        // non-zero stamp rather than overwriting it with the later loopback receipt.
+        let action = if self.hosting == HostingMode::SingleUser {
+            match action {
+                GameAction::SayPhrase { at_ms, .. } if at_ms != 0 => action,
+                _ => action.stamped_by_host(host_received_at_ms),
+            }
+        } else {
+            action.stamped_by_host(host_received_at_ms)
+        };
 
         // GH #1507: while a takeback request is awaiting approval, the
         // authoritative state must not move out from under it — a new
@@ -1962,6 +2039,7 @@ impl GameSession {
                     by_object,
                 ),
                 takeback: None,
+                action,
             });
         }
         let debug_card_source = match &action {
@@ -2075,6 +2153,7 @@ impl GameSession {
                 by_object,
             ),
             takeback,
+            action,
         })
     }
 
@@ -2110,16 +2189,37 @@ impl GameSession {
         submission: InteractionSubmission,
     ) -> Result<ActionResult, String> {
         self.handle_interaction_with_rejection(player_token, submission)
+            .map(|handled| handled.result)
             .map_err(SessionActionError::into_legacy_reason)
     }
 
-    /// Rich interaction form for the authenticated Full transport.
+    /// Rich interaction form for the authenticated Full transport, stamped at
+    /// the moment this call runs. A transport that captured an earlier ingress
+    /// instant uses [`Self::handle_interaction_with_rejection_at`].
     #[allow(clippy::type_complexity)]
     pub fn handle_interaction_with_rejection(
         &mut self,
         player_token: &str,
         submission: InteractionSubmission,
-    ) -> Result<ActionResult, SessionActionError> {
+    ) -> Result<HandledAction, SessionActionError> {
+        self.handle_interaction_with_rejection_at(player_token, submission, now_ms())
+    }
+
+    /// [`Self::handle_interaction_with_rejection`] with the host's ingress
+    /// instant supplied by the transport.
+    ///
+    /// Un-card (no CR entry): a spoken saying chosen through the generic
+    /// interaction projection carries no instant of its own, so — exactly as
+    /// [`Self::handle_action_with_card_db_outcome_at`] does for a direct
+    /// `SayPhrase` — the server stamps it with the instant the socket read the
+    /// submission, never one a client claims.
+    #[allow(clippy::type_complexity)]
+    pub fn handle_interaction_with_rejection_at(
+        &mut self,
+        player_token: &str,
+        submission: InteractionSubmission,
+        host_received_at_ms: u64,
+    ) -> Result<HandledAction, SessionActionError> {
         self.reject_if_ai_driver_faulted()?;
 
         let player = self
@@ -2142,8 +2242,13 @@ impl GameSession {
         // Set player names for log resolution.
         self.state.log_player_names = self.display_names.clone();
 
-        let applied = submit_interaction_with_rejection(&mut self.state, player, submission)
-            .map_err(SessionActionError::Rejected)?;
+        let applied = submit_interaction_with_rejection(
+            &mut self.state,
+            player,
+            submission,
+            host_received_at_ms,
+        )
+        .map_err(SessionActionError::Rejected)?;
 
         info!(
             game = %self.game_code,
@@ -2173,15 +2278,19 @@ impl GameSession {
         self.game_log
             .write_game_log_entries(&self.game_code, &applied.result.log_entries);
 
-        Ok((
-            post_state,
-            applied.result.events,
-            new_legal_actions,
-            applied.result.log_entries,
-            auto_pass,
-            spell_costs,
-            by_object,
-        ))
+        Ok(HandledAction {
+            result: (
+                post_state,
+                applied.result.events,
+                new_legal_actions,
+                applied.result.log_entries,
+                auto_pass,
+                spell_costs,
+                by_object,
+            ),
+            takeback: None,
+            action: applied.action,
+        })
     }
 
     /// Applies the payload-free match-concede intent after binding its
@@ -2234,6 +2343,7 @@ impl GameSession {
                     by_object,
                 ),
                 takeback,
+                action: GameAction::Concede { player_id: player },
             },
         ))
     }
@@ -2728,6 +2838,8 @@ impl SessionManager {
             takeback,
             deck_pools_cache: None,
             contest: Default::default(),
+            active_say_expiry_claim: None,
+            next_say_expiry_claim_id: 0,
         };
         // Seat 0 is installed the way every other seat is, through the
         // per-seat setter, rather than seeded into the struct literal.
@@ -3002,6 +3114,7 @@ mod tests {
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
+    use engine::types::counter::CounterType;
     use engine::types::format::ChallengeDeck;
     use engine::types::game_state::{
         AutoPassMode, CastPaymentMode, PersistedGameState, StackEntry, StackEntryKind,
@@ -4899,6 +5012,239 @@ mod tests {
             },
         )
         .is_err());
+    }
+
+    fn toy_boat_at_upkeep_runner() -> GameRunner {
+        const TOY_BOAT_ORACLE: &str = "Cumulative upkeep\u{2014}Say \"Toy Boat\" quickly. (At the beginning of your upkeep, put an age counter on this creature, then sacrifice it unless you say \"Toy Boat\" once for each age counter on it\u{2014}without pausing between or fumbling it.)";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Untap);
+        let toy_boat = scenario
+            .add_creature_from_oracle(P0, "Toy Boat", 3, 3, TOY_BOAT_ORACLE)
+            .with_mana_cost(ManaCost::generic(3))
+            .id();
+        scenario.with_counter(toy_boat, CounterType::Age, 1);
+        let filler = ["Filler"; 4];
+        scenario.with_library_top(P0, &filler);
+        scenario.with_library_top(P1, &filler);
+        let mut runner = scenario.build();
+        runner.state_mut().un_actions.set_enabled(P0, true);
+        runner.advance_to_upkeep();
+        runner.resolve_top();
+        runner
+    }
+
+    #[test]
+    fn say_phrase_action_is_stamped_with_server_clock_rather_than_client_instant() {
+        let (mgr, code, token0, _token1) = setup_two_player_game();
+        let runner = toy_boat_at_upkeep_runner();
+        let mut session = mgr.try_session(&code).unwrap();
+        session.state = runner.state().clone();
+        drop(session);
+
+        let forged_at_ms = 999_999_999;
+        let before = now_ms();
+        let outcome = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &token0,
+                GameAction::SayPhrase {
+                    at_ms: forged_at_ms,
+                    seq: 1,
+                    payment: 1,
+                    report: Default::default(),
+                },
+                None,
+            );
+        let after = now_ms();
+        assert!(
+            outcome.is_ok(),
+            "say phrase action should be handled: {outcome:?}"
+        );
+
+        let session = mgr.try_session(&code).unwrap();
+        let payment = session.state.say_payment.as_ref().expect("payment exists");
+        let last_said_ms = payment.last_said_ms.expect("last_said_ms is recorded");
+        assert_ne!(
+            last_said_ms, forged_at_ms,
+            "session must overwrite forged client timestamp with server receipt time"
+        );
+        assert!(
+            last_said_ms >= before && last_said_ms <= after,
+            "server receipt time {last_said_ms} should be within [{before}, {after}]"
+        );
+    }
+
+    /// The transport-supplied ingress instant is the observation's time, not
+    /// the instant its queued handler finally reaches the engine.
+    #[test]
+    fn say_phrase_uses_supplied_ingress_instant() {
+        let (mgr, code, token0, _token1) = setup_two_player_game();
+        let runner = toy_boat_at_upkeep_runner();
+        let mut session = mgr.try_session(&code).unwrap();
+        session.state = runner.state().clone();
+        drop(session);
+
+        let ingress = now_ms().saturating_sub(60_000);
+        let outcome = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome_at(
+                &token0,
+                GameAction::SayPhrase {
+                    at_ms: 999_999_999,
+                    seq: 1,
+                    payment: 1,
+                    report: Default::default(),
+                },
+                None,
+                ingress,
+            );
+        assert!(
+            outcome.is_ok(),
+            "say phrase action should be handled: {outcome:?}"
+        );
+
+        let session = mgr.try_session(&code).unwrap();
+        let payment = session.state.say_payment.as_ref().expect("payment exists");
+        assert_eq!(
+            payment.last_said_ms,
+            Some(ingress),
+            "the saying must be judged at the transport's receipt instant"
+        );
+        assert_eq!(payment.clock_ms, ingress);
+    }
+
+    #[test]
+    fn approved_takeback_rekeys_say_phrase_payment() {
+        let (mgr, code, token0, _token1) = setup_two_player_game();
+        let runner = toy_boat_at_upkeep_runner();
+        let mut session = mgr.try_session(&code).unwrap();
+        session.state = runner.state().clone();
+        assert_eq!(session.state.say_payment.as_ref().unwrap().id, 1);
+        session.push_takeback_snapshot(P0);
+        drop(session);
+
+        let outcome = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &token0,
+                GameAction::SayPhrase {
+                    at_ms: now_ms(),
+                    seq: 1,
+                    payment: 1,
+                    report: Default::default(),
+                },
+                None,
+            );
+        assert!(outcome.is_ok(), "say phrase action 1: {outcome:?}");
+        assert_eq!(
+            mgr.try_session(&code)
+                .unwrap()
+                .state
+                .say_payment
+                .as_ref()
+                .unwrap()
+                .said,
+            1
+        );
+
+        let mut session = mgr.try_session(&code).unwrap();
+        assert_eq!(
+            session.request_takeback(P0, RewindTarget::LastAction),
+            Ok(TakebackOutcome::Pending)
+        );
+        assert_eq!(
+            session.respond_takeback(P1, true),
+            Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
+        );
+
+        let current_payment_id = session.state.say_payment.as_ref().unwrap().id;
+        assert_eq!(current_payment_id, 2);
+        assert_eq!(session.state.say_payment.as_ref().unwrap().said, 0);
+        drop(session);
+
+        // Frame with payment: 1 (stale) is ignored
+        let _ = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &token0,
+                GameAction::SayPhrase {
+                    at_ms: now_ms(),
+                    seq: 2,
+                    payment: 1,
+                    report: Default::default(),
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            mgr.try_session(&code)
+                .unwrap()
+                .state
+                .say_payment
+                .as_ref()
+                .unwrap()
+                .said,
+            0,
+            "stale payment id 1 must not advance said count"
+        );
+
+        // Frame with payment: 0 (not accepted as an alias) is ignored
+        let _ = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &token0,
+                GameAction::SayPhrase {
+                    at_ms: now_ms(),
+                    seq: 3,
+                    payment: 0,
+                    report: Default::default(),
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            mgr.try_session(&code)
+                .unwrap()
+                .state
+                .say_payment
+                .as_ref()
+                .unwrap()
+                .said,
+            0,
+            "payment id 0 must not be accepted as an alias"
+        );
+
+        // Frame with payment: 2 (current) is accepted
+        let _ = mgr
+            .try_session(&code)
+            .unwrap()
+            .handle_action_with_card_db_outcome(
+                &token0,
+                GameAction::SayPhrase {
+                    at_ms: now_ms(),
+                    seq: 4,
+                    payment: 2,
+                    report: Default::default(),
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            mgr.try_session(&code)
+                .unwrap()
+                .state
+                .say_payment
+                .as_ref()
+                .unwrap()
+                .said,
+            1,
+            "valid payment id 2 must advance said count"
+        );
     }
 
     /// An approved rollback must rotate the interaction namespace as well as
@@ -7981,6 +8327,8 @@ mod tests {
             takeback: TakebackLedger::new(1),
             deck_pools_cache: None,
             contest: Default::default(),
+            active_say_expiry_claim: None,
+            next_say_expiry_claim_id: 0,
         };
 
         let game_started_before = session.game_started;

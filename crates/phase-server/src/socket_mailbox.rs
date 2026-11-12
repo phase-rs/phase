@@ -6,8 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 use server_core::protocol::{ClientMessage, CommandId, ServerMessage, WithheldFrame};
-use std::sync::Arc;
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 
 pub(crate) const MAX_PENDING_QUOTA_REFUSALS: usize = 8;
 
@@ -63,6 +65,8 @@ pub(crate) struct ClientEnvelope {
     command_id: Option<CommandId>,
     #[serde(skip)]
     pub(crate) resync: Option<ResyncPermit>,
+    #[serde(skip)]
+    pub(crate) drain: Option<oneshot::Sender<()>>,
 }
 
 pub(crate) enum QuotaRecovery {
@@ -72,6 +76,15 @@ pub(crate) enum QuotaRecovery {
 }
 
 impl ClientEnvelope {
+    pub(crate) fn drain(drain: oneshot::Sender<()>) -> Self {
+        Self {
+            message: ClientMessage::Ping { timestamp: 0 },
+            command_id: None,
+            resync: None,
+            drain: Some(drain),
+        }
+    }
+
     pub(crate) fn command_id(&self) -> Option<CommandId> {
         match self.message {
             ClientMessage::Action { .. } | ClientMessage::Interaction { .. } => self.command_id,
@@ -146,7 +159,7 @@ impl Envelope {
             quota_refusal: _,
             state_encoding,
         } = self;
-        let withheld = |full_key: &mut Option<_>, state_revision: u64, frame| {
+        let withheld = |full_key: &mut Option<_>, state_revision: u64, frame, saying: bool| {
             Some(ServerMessage::StateWithheld {
                 full_key: full_key.take(),
                 state_revision,
@@ -156,6 +169,7 @@ impl Envelope {
                     WithheldFrame::StateUpdate => STATE_UPDATE_WITHHELD,
                 }
                 .to_string(),
+                saying,
             })
         };
         let replacement = match &mut message {
@@ -171,8 +185,14 @@ impl Envelope {
             ServerMessage::StateUpdate {
                 full_key,
                 state_revision,
+                saying,
                 ..
-            } => withheld(full_key, *state_revision, WithheldFrame::StateUpdate),
+            } => withheld(
+                full_key,
+                *state_revision,
+                WithheldFrame::StateUpdate,
+                *saying,
+            ),
             ServerMessage::GameStarted {
                 full_key,
                 state_revision,
@@ -184,6 +204,7 @@ impl Envelope {
                 WithheldFrame::GameStarted {
                     your_player: *your_player,
                 },
+                false,
             ),
             ServerMessage::TerminalResult {
                 delivery: Some(delivery),
@@ -196,6 +217,12 @@ impl Envelope {
             }
             ServerMessage::AuthoritativeStateExport { .. } => {
                 Some(ServerMessage::AuthoritativeStateExportFailed { message: reason })
+            }
+            ServerMessage::SayPhraseExpiry { request_id, .. } => {
+                Some(ServerMessage::SayPhraseExpiryFailed {
+                    request_id: *request_id,
+                    message: reason,
+                })
             }
             ServerMessage::ManaPaymentPreview { request_id, .. } => {
                 Some(ServerMessage::ManaPaymentPreviewFailed {
@@ -221,6 +248,7 @@ impl Envelope {
             | ServerMessage::ManaPaymentPreviewRejected { .. }
             | ServerMessage::ManaPaymentPreviewFailed { .. }
             | ServerMessage::AuthoritativeStateExportFailed { .. }
+            | ServerMessage::SayPhraseExpiryFailed { .. }
             | ServerMessage::InteractionPreviewFailed { .. }
             | ServerMessage::OpponentDisconnected { .. }
             | ServerMessage::OpponentReconnected { .. }
@@ -274,12 +302,26 @@ impl Envelope {
     }
 }
 
-#[derive(Clone, Debug)]
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+type DrainFn = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
+
+#[derive(Clone)]
 pub(crate) struct Sender(
     mpsc::UnboundedSender<Envelope>,
     Arc<Semaphore>,
     Arc<Semaphore>,
+    Arc<Mutex<Option<DrainFn>>>,
 );
+
+impl std::fmt::Debug for Sender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Sender")
+            .field(&self.0)
+            .field(&self.1)
+            .field(&self.2)
+            .finish()
+    }
+}
 
 pub(crate) fn channel() -> (Sender, Receiver) {
     let (tx, rx) = mpsc::unbounded_channel();
@@ -288,12 +330,31 @@ pub(crate) fn channel() -> (Sender, Receiver) {
             tx,
             Arc::new(Semaphore::new(MAX_PENDING_QUOTA_REFUSALS)),
             Arc::new(Semaphore::new(1)),
+            Arc::new(Mutex::new(None)),
         ),
         Receiver(rx),
     )
 }
 
 impl Sender {
+    pub(crate) fn set_ingress_drain<F, Fut>(&self, drain: F)
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let mut guard = self.3.lock().unwrap();
+        *guard = Some(Arc::new(move || Box::pin(drain())));
+    }
+
+    pub(crate) async fn drain_ingress(&self) {
+        let drainer = {
+            let guard = self.3.lock().unwrap();
+            guard.clone()
+        };
+        if let Some(drainer) = drainer {
+            drainer().await;
+        }
+    }
     pub(crate) fn try_admit_resync(&self) -> Result<ResyncPermit, RefusalError> {
         if self.is_closed() {
             return Err(RefusalError::Closed);
@@ -528,6 +589,7 @@ mod tests {
                 state: &state,
                 events: &events,
                 log_entries: &log,
+                saying: false,
                 decision: None,
             },
             &server_core::FullSessionKey {
@@ -614,6 +676,7 @@ mod tests {
             state_revision,
             withheld,
             reason,
+            saying,
         } = notice.message
         else {
             panic!("{:?}", notice.message);
@@ -622,6 +685,7 @@ mod tests {
         assert_eq!(state_revision, 6);
         assert_eq!(withheld, WithheldFrame::StateUpdate);
         assert_eq!(reason, STATE_UPDATE_WITHHELD);
+        assert!(!saying);
 
         let again = envelope(state_update(0), None).over_bound("r".to_string());
         assert!(matches!(
@@ -675,6 +739,7 @@ mod tests {
                     your_player: engine::types::player::PlayerId(1)
                 },
                 ref reason,
+                ..
             } if reason == GAME_STARTED_WITHHELD
         ));
     }
@@ -748,6 +813,7 @@ mod tests {
                 state_revision: 1,
                 withheld: WithheldFrame::StateUpdate,
                 reason: STATE_UPDATE_WITHHELD.to_string(),
+                saying: false,
             },
         ] {
             assert!(matches!(

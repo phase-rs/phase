@@ -52767,9 +52767,7 @@ fn extract_resolution_unless_pay_modifier(
             return (
                 cleaned,
                 Some(UnlessPayModifier {
-                    cost: AbilityCost::SayPhrase {
-                        phrase: phrase.trim().to_string(),
-                    },
+                    cost: AbilityCost::say_phrase(phrase.trim().to_string()),
                     payer,
                 }),
             );
@@ -53769,6 +53767,18 @@ fn try_parse_change_targets(lower: &str, ctx: &mut ParseContext) -> Option<Effec
     // parse_type_phrase_folding, producing FilterProp::TargetsOnly — no manual stripping needed.
     let spell_phrase_clean = spell_phrase.replace(" with a single target", "");
     let spell_phrase_clean = spell_phrase_clean.trim();
+
+    // CR 115.9c + CR 115.7a: If the phrase has a restriction like "that targets only [X]"
+    // on a mixed "spell or ability" phrase (such as I'm Rubber, You're Glue), keep the
+    // activation explicitly unsupported until stack-ability target restriction predicates
+    // are implemented in engine targeting and filtering.
+    if (scan_contains_phrase(spell_phrase_clean, "spell or ability")
+        || scan_contains_phrase(spell_phrase_clean, "spell and/or ability"))
+        && (scan_contains_phrase(spell_phrase_clean, "that targets only")
+            || scan_contains_phrase(spell_phrase_clean, "that targets"))
+    {
+        return Some(Effect::unimplemented("ChangeTargets", spell_phrase_clean));
+    }
 
     // Handle "spell or ability" specially since "ability" is not a card type in parse_target.
     // CR 115.7: "spell or ability" matches any spell or any activated/triggered ability on the stack.

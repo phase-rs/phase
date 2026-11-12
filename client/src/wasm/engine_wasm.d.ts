@@ -821,7 +821,7 @@ export function submit_ai_action_proposal(token: string, actor: number, action: 
  * materializes a `GameAction`; only a successful engine reducer result exposes
  * the exact action to the replay recorder.
  */
-export function submit_interaction_js(actor: number, submission: any): any;
+export function submit_interaction_js(actor: number, submission: any, at_ms?: number): any;
 
 /**
  * Drain the last captured panic message (consuming it). Returns `null` when
@@ -935,7 +935,7 @@ export interface InitOutput {
     readonly statecodechandle_with_revision: (a: number, b: bigint) => number;
     readonly submit_action: (a: number, b: any) => any;
     readonly submit_ai_action_proposal: (a: number, b: number, c: number, d: any) => any;
-    readonly submit_interaction_js: (a: number, b: any) => any;
+    readonly submit_interaction_js: (a: number, b: any, c?: number) => any;
     readonly take_last_panic_message: () => [number, number];
     readonly validateLlmProbeResponse: (a: number, b: number, c: number, d: number, e: number) => any;
     readonly statecodechandle_json_bytes: (a: number) => [number, number];

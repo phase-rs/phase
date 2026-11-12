@@ -536,8 +536,13 @@ impl TakebackLedger {
         // and advance it, so the restored snapshot and every later one carry revisions not used
         // by the discarded branch.
         let replaced_revision = state.state_revision;
+        let replaced_next_say_payment_id = state.un_actions.next_say_payment_id;
         *state = pending.target_state;
         state.state_revision = replaced_revision;
+        state.un_actions.next_say_payment_id = state
+            .un_actions
+            .next_say_payment_id
+            .max(replaced_next_say_payment_id);
         crate::game::public_state::bump_state_revision(state);
         crate::game::rekey_after_trusted_restore(state);
         // The rolled-back state is the new baseline. Snapshots *after* the

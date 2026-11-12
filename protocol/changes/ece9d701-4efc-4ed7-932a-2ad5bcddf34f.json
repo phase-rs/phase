@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameAction::SayPhrase gains a report (Saying/Expiry) and accepts fractional host instants; an older peer would count a host's expiry report as a saying and pay a timed spoken cost"
+}

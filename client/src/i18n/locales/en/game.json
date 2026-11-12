@@ -3023,6 +3023,9 @@
     "sayPhrase": {
       "title": "Say it to stop the effect",
       "say": "Say “{{phrase}}”",
+      "sayTimes": "Say “{{phrase}}” {{count}} times",
+      "progress": "{{said}} of {{required}} said",
+      "quickly": "Don't pause and don't fumble it — each click must land within a second!",
       "stayQuiet": "Stay quiet"
     },
     "fx": {

@@ -384,6 +384,7 @@ fn opaque_interaction_rejection_before_materialization_has_no_object_ids() {
                 choice_id: InteractionChoiceId("choice".to_string()),
             },
         },
+        0,
     )
     .expect_err("unknown opaque interaction rejects");
 

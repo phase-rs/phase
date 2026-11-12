@@ -65,6 +65,12 @@ pub(crate) enum HeartbeatInspection {
     Complete,
 }
 
+#[derive(Debug)]
+pub(crate) enum IngressFrame {
+    Wire(Message),
+    Drain(tokio::sync::oneshot::Sender<()>),
+}
+
 /// Server-observed ingress time travels with the payload through both queues.
 /// It is never taken from a client-controlled timestamp.
 #[derive(Debug)]
@@ -176,6 +182,7 @@ impl Drop for PendingWrite {
 #[derive(Clone)]
 pub(crate) struct NegotiatedSocket {
     messages: crate::socket_mailbox::Sender,
+    ingress: mpsc::Sender<Received<IngressFrame>>,
     control: ControlLane,
     death: Death,
     command_id: Option<server_core::protocol::CommandId>,
@@ -184,6 +191,9 @@ pub(crate) struct NegotiatedSocket {
 }
 
 impl NegotiatedSocket {
+    pub(crate) fn ingress_sender(&self) -> mpsc::Sender<Received<IngressFrame>> {
+        self.ingress.clone()
+    }
     pub(crate) fn set_command_id(&mut self, command_id: Option<server_core::protocol::CommandId>) {
         self.command_id = command_id;
     }
@@ -364,7 +374,7 @@ pub(crate) fn start(
     config: SocketConfig,
 ) -> (
     NegotiatedSocket,
-    mpsc::Receiver<Received<Message>>,
+    mpsc::Receiver<Received<IngressFrame>>,
     SocketTasks,
 ) {
     #[cfg(test)]
@@ -382,6 +392,7 @@ pub(crate) fn start(
     let (incoming, incoming_rx) = mpsc::channel(MAX_INGRESS_FRAMES);
     let facade = NegotiatedSocket {
         messages: config.replies,
+        ingress: incoming.clone(),
         control: control.clone(),
         death: death.clone(),
         command_id: None,
@@ -701,7 +712,7 @@ async fn pending_control(
 async fn read_socket<S>(
     mut stream: S,
     control: ControlLane,
-    incoming: mpsc::Sender<Received<Message>>,
+    incoming: mpsc::Sender<Received<IngressFrame>>,
     death: Death,
     liveness: Liveness,
     budget: IngressBudget,
@@ -780,7 +791,7 @@ async fn read_socket<S>(
                     }
                 };
                 match incoming.try_send(Received {
-                    message: frame,
+                    message: IngressFrame::Wire(frame),
                     received_at: Instant::now(),
                     admission,
                     heartbeat,
@@ -1083,6 +1094,7 @@ fn state_frame(message: &ServerMessage) -> StateFrame<'_> {
         },
         ServerMessage::AuthoritativeStateExport { .. } => StateFrame::Export,
         ServerMessage::ManaPaymentPreview { .. } => StateFrame::NonState,
+        ServerMessage::SayPhraseExpiry { .. } => StateFrame::NonState,
         ServerMessage::InteractionPreview { .. } => StateFrame::NonState,
         ServerMessage::ServerHello { .. }
         | ServerMessage::GameCreated { .. }
@@ -1096,6 +1108,7 @@ fn state_frame(message: &ServerMessage) -> StateFrame<'_> {
         | ServerMessage::ManaPaymentPreviewRejected { .. }
         | ServerMessage::ManaPaymentPreviewFailed { .. }
         | ServerMessage::AuthoritativeStateExportFailed { .. }
+        | ServerMessage::SayPhraseExpiryFailed { .. }
         | ServerMessage::InteractionPreviewFailed { .. }
         | ServerMessage::OpponentDisconnected { .. }
         | ServerMessage::OpponentReconnected { .. }
@@ -2070,6 +2083,7 @@ mod codec_tests {
                 state_revision: 101,
                 withheld: server_core::protocol::WithheldFrame::StateUpdate,
                 reason: crate::socket_mailbox::STATE_UPDATE_WITHHELD.into(),
+                saying: false,
             },
             None,
         );
@@ -2133,6 +2147,7 @@ mod codec_tests {
                     your_player: PlayerId(0),
                 },
                 reason: crate::socket_mailbox::GAME_STARTED_WITHHELD.into(),
+                saying: false,
             },
             None,
         );
@@ -2310,6 +2325,7 @@ mod codec_tests {
                 state_revision: 101,
                 withheld: server_core::protocol::WithheldFrame::StateUpdate,
                 reason: crate::socket_mailbox::STATE_UPDATE_WITHHELD.into(),
+                saying: false,
             },
             None,
         );
@@ -3543,7 +3559,7 @@ mod socket_tests {
 
         type Handoff = mpsc::UnboundedSender<(
             NegotiatedSocket,
-            mpsc::Receiver<Received<Message>>,
+            mpsc::Receiver<Received<IngressFrame>>,
             SocketTasks,
             Arc<ServerMetrics>,
         )>;
@@ -3655,7 +3671,7 @@ mod socket_tests {
 
         type Handoff = mpsc::UnboundedSender<(
             NegotiatedSocket,
-            mpsc::Receiver<Received<Message>>,
+            mpsc::Receiver<Received<IngressFrame>>,
             SocketTasks,
             Arc<ServerMetrics>,
         )>;
@@ -4905,7 +4921,7 @@ mod transport_fixup_tests {
             );
             assert!(matches!(
                 commands.try_recv().unwrap().message,
-                Message::Text(_) | Message::Binary(_)
+                IngressFrame::Wire(Message::Text(_) | Message::Binary(_))
             ));
         }
     }
@@ -5015,6 +5031,7 @@ mod transport_fixup_tests {
                                 choice_id: InteractionChoiceId("quota-choice".to_string()),
                             },
                         },
+                        at_ms: None,
                     },
                 ];
                 for (index, message) in commands

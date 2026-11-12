@@ -119,7 +119,7 @@ type EngineRequest =
   | { type: "respondTakeback"; id: number; actor: number; approve: boolean; aiPlayers: number[] }
   | { type: "cancelTakeback"; id: number; actor: number }
   | { type: "pendingTakeback"; id: number }
-  | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission }
+  | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission; atMs?: number }
   | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
   | { type: "previewInteraction"; id: number; actor: number; request: InteractionPreviewRequest }
   | { type: "getState"; id: number }
@@ -493,7 +493,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "submitInteraction": {
-        const outcome = submit_interaction_js(msg.actor, msg.submission);
+        const outcome = submit_interaction_js(msg.actor, msg.submission, msg.atMs);
         if (typeof outcome === "string") {
           error(msg.id, outcome);
           break;

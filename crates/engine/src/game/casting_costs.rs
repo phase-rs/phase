@@ -31226,12 +31226,7 @@ its replicate cost was paid.)\nDraw a card.";
                 },
             ),
             ("untap", AbilityCost::Untap),
-            (
-                "say phrase",
-                AbilityCost::SayPhrase {
-                    phrase: "the secret word".into(),
-                },
-            ),
+            ("say phrase", AbilityCost::say_phrase("the secret word")),
             ("loyalty", AbilityCost::Loyalty { amount: -1 }),
             (
                 "self sacrifice",

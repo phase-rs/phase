@@ -25744,6 +25744,14 @@ declare_game_state! {
     /// [`crate::types::un_actions`].
     #[serde(default, skip_serializing_if = "super::un_actions::UnActionState::is_default")]
     pub un_actions: Box<super::un_actions::UnActionState>,
+    /// Un-card (no CR entry): the engine-owned instance of a TIMED spoken
+    /// unless-payment (Toy Boat's "Say \"Toy Boat\" quickly"). It records how
+    /// many sayings were actually reported, their host-stamped instants, and the
+    /// deadline for the next one; the engine validates every observation against
+    /// it, and it persists with the rest of `GameState` across a reconnect.
+    /// `None` when no timed spoken payment is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub say_payment: Option<Box<super::un_actions::SayPhrasePayment>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replacement_auto_choices: Vec<ReplacementAutoChoiceRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -34164,6 +34172,7 @@ impl GameState {
             pending_die_roll_instruction: None,
             may_trigger_auto_choices: Vec::new(),
             un_actions: Default::default(),
+            say_payment: None,
             replacement_auto_choices: Vec::new(),
             replacement_auto_choice_tail: None,
             decision_templates: Vec::new(),
@@ -38111,6 +38120,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         repeat_process_requested: _,
         may_trigger_auto_choices: _,
         un_actions: _,
+        say_payment: _,
         replacement_auto_choices: _,
         replacement_auto_choice_tail: _,
         decision_templates: _,
@@ -38549,6 +38559,7 @@ impl PartialEq for GameState {
             && self.replacement_auto_choice_tail == other.replacement_auto_choice_tail
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.un_actions == other.un_actions
+            && self.say_payment == other.say_payment
             && self.decision_templates == other.decision_templates
             && self.priority_yields == other.priority_yields
             && self.pending_begin_game_abilities == other.pending_begin_game_abilities

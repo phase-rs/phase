@@ -354,6 +354,7 @@ pub(crate) struct StateUpdateSource<'a> {
     pub(crate) events: &'a [GameEvent],
     pub(crate) log_entries: &'a [GameLogEntry],
     pub(crate) decision: Option<DecisionInputs<'a>>,
+    pub(crate) saying: bool,
 }
 
 impl<'a> StateUpdateSource<'a> {
@@ -368,7 +369,13 @@ impl<'a> StateUpdateSource<'a> {
                 spell_costs: &result.5,
                 by_object: &result.6,
             }),
+            saying: false,
         }
+    }
+
+    pub(crate) fn saying(mut self, saying: bool) -> Self {
+        self.saying = saying;
+        self
     }
 
     pub(crate) fn from_transition(transition: &'a AiTransition) -> Self {
@@ -378,6 +385,7 @@ impl<'a> StateUpdateSource<'a> {
             events: &transition.events,
             log_entries: &transition.log_entries,
             decision: transition.decision.as_ref().map(DecisionInputs::from),
+            saying: false,
         }
     }
 
@@ -576,6 +584,7 @@ impl StateUpdatePublisher {
         mut self,
         executor: &GameExecutor,
         transitions: Vec<AiTransition>,
+        saying: bool,
     ) -> Self {
         self.flush_spectators(executor).await;
         let transition_count = transitions.len();
@@ -584,9 +593,16 @@ impl StateUpdatePublisher {
                 transition.decision.is_none() || index + 1 == transition_count,
                 "only the final AI transition may carry a decision",
             );
+            // Carry the accepted action's saying classification into continuation transitions,
+            // or mark saying if the AI itself performed a phrase saying.
+            let is_saying = saying
+                || transition
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, GameEvent::PhraseSaid { .. }));
             self = executor
                 .run(move || {
-                    let source = StateUpdateSource::from_transition(&transition);
+                    let source = StateUpdateSource::from_transition(&transition).saying(is_saying);
                     let revision = source.revision;
                     match source.guarded(&self.full_key.game_code) {
                         Ok(source) => self.publish(&source),
@@ -1136,6 +1152,7 @@ mod tests {
                         &game_db,
                         &spectators,
                         &identity,
+                        std::time::Instant::now(),
                     )
                     .await;
                     messages.recv().await.unwrap()
@@ -1316,7 +1333,7 @@ mod tests {
             )
             .await;
             publisher
-                .publish_ai(&executor, vec![small, untrimmable, oversized])
+                .publish_ai(&executor, vec![small, untrimmable, oversized], false)
                 .await
                 .finish(&executor)
                 .await;
@@ -1494,6 +1511,7 @@ mod tests {
                         &game_db,
                         &spectators,
                         &identity,
+                        std::time::Instant::now(),
                     )
                     .await;
                 }

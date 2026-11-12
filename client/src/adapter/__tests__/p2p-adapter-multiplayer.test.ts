@@ -2957,6 +2957,41 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     adapter.dispose();
   });
 
+  it("lapses a restored overdue spoken payment on its own clock while the payer is away", async () => {
+    // Toy Boat's payment was mid-window when the host page closed. The payer
+    // (seat 1) never returns; the resumed authority must still lapse it.
+    const overdue = {
+      players: [],
+      objects: {},
+      waiting_for: { type: "UnlessPayment", data: { player: 1 } },
+      say_payment: { id: 9, owed: 2, said: 1, clock_ms: 0, last_seq: 1, deadline_ms: Date.now() - 1 },
+    };
+    mocks.getState.mockResolvedValue(overdue as never);
+    // The engine lapses the payment on the authority's expiry report.
+    mocks.submitAction.mockImplementationOnce(async () => {
+      mocks.getState.mockResolvedValue({
+        players: [],
+        objects: {},
+        waiting_for: { type: "Priority", data: { player: 0 } },
+      });
+      return { events: [] };
+    });
+    const { adapter } = makeResumedHost();
+    try {
+      await adapter.initialize();
+      await vi.waitFor(() => expect(mocks.submitAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "SayPhrase",
+          data: expect.objectContaining({ payment: 9, seq: 0, report: "Expiry" }),
+        }),
+        1,
+      ));
+      expect(mocks.submitAction).toHaveBeenCalledTimes(1);
+    } finally {
+      adapter.dispose();
+    }
+  });
+
   // Issue #9527: a refreshed host labelled its guest "Opp 2" because the
   // guest's join-time display name was never persisted and the resumed host
   // never re-announced seat names to its own UI.
@@ -8599,6 +8634,44 @@ describe("P2PHostAdapter — native withheld delivery", () => {
       expect(deliveries(real.events).slice(-1)[0]).toEqual({ type: "stateDelivery", withheld: null });
       expect(hostEvents.slice(-2).map((e) => e.type === "stateDelivery" ? `stateDelivery:${e.withheld}` : e.type))
         .toEqual(["stateDelivery:null", "stateChanged"]);
+    } finally {
+      real.guest.dispose();
+      adapter.dispose();
+    }
+  });
+
+  it("carries a saying's ownership from the submitting seat's withheld reply into the fan-out", async () => {
+    const { adapter, guests: [conn], seats } = await startMockedNativeGame(2);
+    const real = await realGuest();
+    try {
+      await real.feed(await gameFrames(conn));
+      await real.guest.initializeGame();
+
+      // An unrelated ordinary submission is parked behind the guest's saying.
+      const parked = track(real.guest.submitAction({ type: "PassPriority" }, 1));
+
+      // Only the submitting seat's client matched the saying's command, so only
+      // its withheld notice is marked; the host seat's view of the same
+      // revision is an ordinary-looking publication.
+      seats[0](viewReport(2, "host view"));
+      seats[1]({ type: "stateDelivery", withheld: notice(2), saying: true });
+      await vi.waitFor(async () => expect((await gameFrames(conn)).slice(-1)[0])
+        .toMatchObject({ type: "state_withheld", revision: 2 }));
+      const sayingFrame = (await gameFrames(conn)).slice(-1)[0];
+      expect(sayingFrame).toMatchObject({ saying: true });
+      await real.feed([sayingFrame]);
+      await flushPromises();
+      expect(parked.settled).toBe(false);
+
+      // The parked submission's own (unmarked) reply still settles it.
+      for (const seat of seats) seat(withheldReport(3));
+      await vi.waitFor(async () => expect((await gameFrames(conn)).slice(-1)[0])
+        .toMatchObject({ type: "state_withheld", revision: 3 }));
+      const ownFrame = (await gameFrames(conn)).slice(-1)[0];
+      expect(ownFrame).not.toHaveProperty("saying");
+      await real.feed([ownFrame]);
+      await flushPromises();
+      expect(parked).toEqual({ settled: true, value: { events: [], log_entries: [] } });
     } finally {
       real.guest.dispose();
       adapter.dispose();

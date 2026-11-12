@@ -3022,7 +3022,10 @@
     },
     "sayPhrase": {
       "title": "Say it to stop the effect",
-      "say": "Say “{{phrase}}”",
+      "say": "「{{phrase}}」と言う",
+      "sayTimes": "「{{phrase}}」を{{count}}回言う",
+      "progress": "{{required}}回中{{said}}回",
+      "quickly": "間をあけず、つまずかずに——1秒以内にクリック！",
       "stayQuiet": "Stay quiet"
     },
     "fx": {

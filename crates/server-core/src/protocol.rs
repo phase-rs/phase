@@ -303,6 +303,18 @@ pub struct TerminalBootstrapRequest {
     pub request_id: String,
 }
 
+/// Un-card (no CR entry): the live timed spoken payment an expiry authority
+/// must time — who owes it, who is authorized to submit for it, which
+/// engine-minted payment it is, and the epoch-millisecond deadline the engine
+/// stored for the next saying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SayPhraseExpiryTarget {
+    pub payer: PlayerId,
+    pub submitter: PlayerId,
+    pub payment: u64,
+    pub deadline_ms: u64,
+}
+
 // clippy::large_enum_variant: `CreateGameWithSettings` is the outlier. This
 // enum is a short-lived per-frame deserialize target that is matched and
 // destructured at once, never stored or queued, so boxing that variant's fields
@@ -355,6 +367,22 @@ pub enum ClientMessage {
     /// server authorizes this capability from the authenticated host seat;
     /// neither a player token nor a game code travels in the payload.
     ExportAuthoritativeState,
+    /// Un-card (no CR entry): the native P2P host's bounded read of the live
+    /// timed spoken payment, optionally lapsing it first.
+    ///
+    /// Only the authenticated host seat of a single-user sidecar may send this;
+    /// a shared server lapses spoken payments on its own clock. With
+    /// `lapse: Some(payment)` the server drains the payer's ingress, then
+    /// submits the expiry observation for the engine-owned payer under the
+    /// payer's own authority (the payer's presence is never touched) when that
+    /// payment is still live and past its deadline on the server's clock. The
+    /// answer always carries the live payment afterwards, independent of any
+    /// seat's (possibly withheld or oversized) state delivery.
+    SayPhraseExpiry {
+        request_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lapse: Option<u64>,
+    },
     /// One opaque, engine-authored interaction response. The client echoes the
     /// submission the engine published in `ViewerInteraction`; it never derives
     /// a `GameAction` from the opportunity schema. Like `Action`, the
@@ -367,6 +395,8 @@ pub enum ClientMessage {
     /// See `client_message_wire_guard::wire_rejection_message`.
     Interaction {
         submission: InteractionSubmission,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_ms: Option<u64>,
     },
     /// Read-only preview of one engine-authored interaction response. The client
     /// echoes the request it minted; the authenticated session — not the payload —
@@ -894,6 +924,9 @@ pub enum ServerMessage {
         /// Empty for every deployment except a `SingleUser` sidecar.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         rewind_targets: Vec<RewindOption>,
+        /// Whether this state revision resulted from a spoken payment or lapse.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        saying: bool,
     },
     ActionRejected {
         rejection: ActionRejection,
@@ -921,6 +954,9 @@ pub enum ServerMessage {
         state_revision: u64,
         withheld: WithheldFrame,
         reason: String,
+        /// Whether this withheld revision resulted from a spoken payment or lapse.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        saying: bool,
     },
     /// Acknowledges a host-authorized permanent game cleanup.
     GameAbandoned {
@@ -949,6 +985,19 @@ pub enum ServerMessage {
     /// Requester-only operational or authorization failure for an
     /// authoritative-state export.
     AuthoritativeStateExportFailed {
+        message: String,
+    },
+    /// Requester-only answer to `ClientMessage::SayPhraseExpiry`: the live
+    /// timed spoken payment the host must time, if any.
+    SayPhraseExpiry {
+        request_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<SayPhraseExpiryTarget>,
+    },
+    /// Requester-only operational or authorization failure for
+    /// `ClientMessage::SayPhraseExpiry`.
+    SayPhraseExpiryFailed {
+        request_id: u64,
         message: String,
     },
     /// Answer to a `PreviewInteraction` request, carrying the engine's own DTO —
@@ -4120,6 +4169,7 @@ mod tests {
             derived: Default::default(),
             viewer_interaction: viewer_interaction.clone(),
             rewind_targets,
+            saying: false,
         };
 
         let populated = build(vec![RewindOption {
@@ -4190,6 +4240,7 @@ mod tests {
             state_revision: 6,
             withheld: WithheldFrame::StateUpdate,
             reason: "too large".to_string(),
+            saying: false,
         };
         let json = serde_json::to_value(&msg).unwrap();
         assert_eq!(
@@ -4209,6 +4260,24 @@ mod tests {
                 full_key: None,
                 state_revision: 6,
                 withheld: WithheldFrame::StateUpdate,
+                saying: false,
+                ..
+            }
+        ));
+        let saying_msg = ServerMessage::StateWithheld {
+            full_key: None,
+            state_revision: 7,
+            withheld: WithheldFrame::StateUpdate,
+            reason: "too large".to_string(),
+            saying: true,
+        };
+        let saying_json = serde_json::to_value(&saying_msg).unwrap();
+        assert_eq!(saying_json["data"]["saying"], true);
+        assert!(matches!(
+            serde_json::from_value::<ServerMessage>(saying_json).unwrap(),
+            ServerMessage::StateWithheld {
+                state_revision: 7,
+                saying: true,
                 ..
             }
         ));
@@ -4219,6 +4288,7 @@ mod tests {
                 your_player: PlayerId(1),
             },
             reason: String::new(),
+            saying: false,
         })
         .unwrap();
         assert_eq!(

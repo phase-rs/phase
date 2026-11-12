@@ -21,6 +21,7 @@ import {
   PROTOCOL_VERSION,
   WebSocketAdapter,
 } from "../ws-adapter";
+import { NativeP2PBridge } from "../p2p-adapter";
 import { AdapterError, AdapterErrorCode, supportsMatchConcede, supportsTakeback, supportsTurnRewind } from "../types";
 import type { FormatConfig, GameAction, GameState, SubmitResult } from "../types";
 import type {
@@ -306,6 +307,64 @@ describe("WebSocketAdapter", () => {
       }),
     );
     await initPromise;
+  });
+
+  it("hands a native bridge the sidecar's saying marker from a detached publication", async () => {
+    // Toy Boat: the sidecar lapses a spoken payment with no command of this
+    // seat's in flight, and its AI follow-up is withheld. The only evidence
+    // that these revisions were a saying is the publisher's `saying` field on
+    // the raw frames, so the bridge must learn it from this adapter's events.
+    const onRevision = vi.fn(async (_revision: number, _reports: unknown, _saying?: boolean) => {});
+    const bridge = new NativeP2PBridge(
+      { main_deck: [], sideboard: [] } as never,
+      "Host",
+      1,
+      undefined,
+      undefined,
+      { expectedServerVersion: "test" } as never,
+      onRevision,
+      async () => {},
+      async () => {},
+      async () => {},
+      () => undefined,
+    );
+    (adapter as unknown as { initializePregame: () => Promise<unknown> }).initializePregame = async () => ({
+      gameCode: "GAME01",
+      playerId: 0,
+      playerToken: "host-token",
+      fullKey: { game_code: "GAME01", generation: 1 },
+    });
+    await (bridge as unknown as { attachClient: (client: unknown) => Promise<unknown> }).attachClient(adapter);
+
+    const publish = (type: "StateUpdate" | "StateWithheld", revision: number, saying: boolean) =>
+      ws.dispatchSynthetic("message", JSON.stringify({
+        type,
+        data: type === "StateUpdate"
+          ? {
+            state_revision: revision,
+            state: { ...createMockState(), turn_number: revision },
+            events: [],
+            log_entries: [],
+            ...(saying ? { saying: true } : {}),
+          }
+          : {
+            state_revision: revision,
+            withheld: { type: "StateUpdate" },
+            reason: "over bound",
+            ...(saying ? { saying: true } : {}),
+          },
+      }));
+
+    publish("StateUpdate", 2, true);
+    publish("StateWithheld", 3, true);
+    publish("StateUpdate", 4, false);
+    await vi.waitFor(() => expect(onRevision).toHaveBeenCalledTimes(3));
+    expect(onRevision.mock.calls.map(([revision, , saying]) => [revision, saying])).toEqual([
+      [2, true],
+      [3, true],
+      [4, false],
+    ]);
+    bridge.dispose();
   });
 
   it("sends the payload-free authenticated whole-match concession intent", () => {
@@ -2923,6 +2982,107 @@ describe("WebSocketAdapter", () => {
       expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
       // The stale snapshot itself is never applied.
       expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+    });
+
+    it("settles a saying action from its own correlated stale StateUpdate without applying the stale snapshot", async () => {
+      const events = vi.fn();
+      subject.onEvent(events);
+      deliverOwnershipStateUpdate(socket, "newer-peer-update", 5);
+      const sayingAction: GameAction = {
+        type: "SayPhrase",
+        data: { payment: 7, seq: 1, at_ms: 100, report: "Saying" },
+      };
+      const outcome = trackRejection(subject.submitAction(sayingAction, 0));
+      const commandId = lastSubmissionCommandId(socket);
+      events.mockClear();
+      deliverOwnershipStateUpdate(socket, "own-stale-saying-completion", 4, commandId);
+      await expect(outcome()).resolves.toEqual({
+        resolvedWith: { events: [{ marker: "own-stale-saying-completion" }], log_entries: [] },
+      });
+      // The stale snapshot itself is never applied.
+      expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+    });
+
+    it("settles a saying action from a correlated StateWithheld notice", async () => {
+      deliverOwnershipStateUpdate(socket, "cached", 5);
+      const events = vi.fn();
+      subject.onEvent(events);
+      const sayingAction: GameAction = {
+        type: "SayPhrase",
+        data: { payment: 7, seq: 1, at_ms: 100, report: "Saying" },
+      };
+      const outcome = trackRejection(subject.submitAction(sayingAction, 0));
+      const commandId = lastSubmissionCommandId(socket);
+      deliverWithheld(6, commandId);
+      await expect(outcome()).resolves.toEqual({
+        resolvedWith: { events: [], log_entries: [] },
+      });
+      expect(latestDelivery(events)).toEqual({ revision: 6, reason: WITHHELD_REASON });
+      // The notice answered this client's own saying: a relaying native host
+      // reads the marker from here, since no other seat can learn it.
+      expect(events).toHaveBeenLastCalledWith({
+        type: "stateDelivery",
+        withheld: { revision: 6, reason: WITHHELD_REASON },
+        saying: true,
+      });
+    });
+
+    it("does not mark a withheld notice that answered an ordinary command as a saying", async () => {
+      deliverOwnershipStateUpdate(socket, "cached", 5);
+      const events = vi.fn();
+      subject.onEvent(events);
+      const outcome = trackRejection(subject.submitAction({ type: "PassPriority" }, 0));
+      deliverWithheld(6, lastSubmissionCommandId(socket));
+      await expect(outcome()).resolves.toEqual({
+        resolvedWith: { events: [], log_entries: [] },
+      });
+      expect(events).toHaveBeenLastCalledWith({
+        type: "stateDelivery",
+        withheld: { revision: 6, reason: WITHHELD_REASON },
+      });
+    });
+
+    it("presents a correlated saying's update once, through its own promise", async () => {
+      deliverOwnershipStateUpdate(socket, "cached", 5);
+      const events = vi.fn();
+      subject.onEvent(events);
+      const sayingAction: GameAction = {
+        type: "SayPhrase",
+        data: { payment: 7, seq: 1, at_ms: 100, report: "Saying" },
+      };
+      const outcome = trackRejection(subject.submitAction(sayingAction, 0));
+      deliverOwnershipStateUpdate(socket, "toy-boat-said", 6, lastSubmissionCommandId(socket));
+      await expect(outcome()).resolves.toEqual({
+        resolvedWith: { events: [{ marker: "toy-boat-said" }], log_entries: [] },
+      });
+      // The caller commits the promise's events; a second `stateChanged`
+      // carrying the same events would append them to history twice.
+      expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
+      // The snapshot itself is cached for the caller's own read.
+      expect((await subject.getSnapshot()).state.turn_number).toBe(6);
+    });
+
+    it("still hands a native bridge the correlated saying's view, marked as a saying", async () => {
+      const internals = subject as unknown as { options: Record<string, unknown> };
+      internals.options = { ...internals.options, nativePregame: {} };
+      deliverOwnershipStateUpdate(socket, "cached", 5);
+      const events = vi.fn();
+      subject.onEvent(events);
+      const sayingAction: GameAction = {
+        type: "SayPhrase",
+        data: { payment: 7, seq: 1, at_ms: 100, report: "Saying" },
+      };
+      const outcome = trackRejection(subject.submitAction(sayingAction, 0));
+      deliverOwnershipStateUpdate(socket, "toy-boat-said", 6, lastSubmissionCommandId(socket));
+      await expect(outcome()).resolves.toEqual({
+        resolvedWith: { events: [{ marker: "toy-boat-said" }], log_entries: [] },
+      });
+      const changed = events.mock.calls
+        .map(([event]) => event as { type: string })
+        .filter((event) => event.type === "stateChanged");
+      expect(changed).toEqual([
+        expect.objectContaining({ serverRevision: 6, saying: true, events: [{ marker: "toy-boat-said" }] }),
+      ]);
     });
 
     it.each(["ActionRejected", "ActionFailed"] as const)(

@@ -3022,7 +3022,10 @@
     },
     "sayPhrase": {
       "title": "Say it to stop the effect",
-      "say": "Say “{{phrase}}”",
+      "say": "Powiedz „{{phrase}}”",
+      "sayTimes": "Powiedz „{{phrase}}” {{count}} razy",
+      "progress": "{{said}} z {{required}} powiedziane",
+      "quickly": "Bez pauz i zająknięć — każde kliknięcie musi przyjść w ciągu sekundy!",
       "stayQuiet": "Stay quiet"
     },
     "fx": {

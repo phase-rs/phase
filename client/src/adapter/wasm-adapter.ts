@@ -16,6 +16,7 @@ import type {
   FormatConfig,
   GameAction,
   GameEvent,
+  GameLogEntry,
   GameState,
   LegalActionsResult,
   LlmDecisionRequestResult,
@@ -599,12 +600,28 @@ export class WasmAdapter
   async submitInteraction(
     submission: InteractionSubmission,
     actor: PlayerId,
+    atMs?: number,
   ): Promise<SubmitResult> {
     this.assertInitialized("submitInteraction");
     try {
-      const result = this.engine ? await this.engine.submitInteraction(actor, submission) : await this.fallback!.submitInteraction(submission, actor);
+      const outcome = this.engine
+        ? await this.engine.submitInteraction(actor, submission, atMs)
+        : await this.fallback!.submitInteraction(submission, actor, atMs);
       this.invalidateAiDecisionDiagnostics();
-      return result;
+      if (outcome && typeof outcome === "object" && "status" in outcome) {
+        const interactionOutcome = outcome as { status: "Applied" | "Rejected"; result?: { events?: GameEvent[]; log_entries?: GameLogEntry[] }; is_saying?: boolean; rejection?: unknown };
+        if (interactionOutcome.status === "Applied") {
+          return {
+            events: interactionOutcome.result?.events ?? [],
+            log_entries: interactionOutcome.result?.log_entries ?? [],
+            is_saying: interactionOutcome.is_saying ?? false,
+          };
+        } else {
+          throw new AdapterError("WASM_ERROR", "Interaction rejected", true);
+        }
+      }
+      // Fallback for native bridge compatibility
+      return outcome as SubmitResult;
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }
@@ -1578,7 +1595,7 @@ interface MainThreadFallback {
   cancelTakeback(actor: PlayerId): Promise<TakebackReply>;
   pendingTakeback(): Promise<TakebackVote | null>;
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
-  submitInteraction(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
+  submitInteraction(submission: InteractionSubmission, actor: PlayerId, atMs?: number): Promise<SubmitResult>;
   previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
   previewInteraction(
     request: InteractionPreviewRequest,
@@ -1739,10 +1756,10 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
     submitAction: (action: GameAction, actor: PlayerId) =>
       enqueue(() => appliedSubmitResult(unwrapAppliedOutcome(wasm.submit_action(actor, action)))),
 
-    submitInteraction: (submission: InteractionSubmission, actor: PlayerId) =>
+    submitInteraction: (submission: InteractionSubmission, actor: PlayerId, atMs?: number) =>
       enqueue(() => {
         const r = unwrapActionOutcome<{ events?: SubmitResult["events"]; log_entries?: SubmitResult["log_entries"] }>(
-          wasm.submit_interaction_js(actor, submission),
+          wasm.submit_interaction_js(actor, submission, atMs),
         );
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
       }),

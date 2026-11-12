@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "SayPhrase payment contract: repetitions and pace fields"
+}

@@ -274,6 +274,7 @@ fn candidate_draws_structurally(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::RespondToSpliceOffer { .. }
         | GameAction::DecideOptionalEffectAndRemember { .. }
         | GameAction::PayUnlessCost { .. }
+        | GameAction::SayPhrase { .. }
         | GameAction::ChooseUnlessCostBranch { .. }
         | GameAction::ChooseActivationCostBranch { .. }
         | GameAction::PayCombatTax { .. }

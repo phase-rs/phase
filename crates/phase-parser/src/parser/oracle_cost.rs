@@ -64,7 +64,7 @@ pub(crate) fn parse_oracle_cost_in(text: &str, channel: CostChannel) -> AbilityC
     let lower = text.to_lowercase();
 
     if let Some(cost) = parse_oxford_mana_alternatives_nom(&lower)
-        .or_else(|| parse_binary_cost_alternatives_nom(&lower, channel))
+        .or_else(|| parse_binary_cost_alternatives_nom(text, channel))
     {
         return cost;
     }
@@ -97,20 +97,17 @@ pub(crate) fn parse_binary_cost_conjunction_nom(text: &str) -> Option<AbilityCos
         .then_some(AbilityCost::Composite { costs })
 }
 
-/// Splits `text` into exactly two non-empty legs at the first `delimiter`; a
-/// leg ending in ',' belongs to a longer list, so the split declines.
-fn split_binary_cost_legs<'a>(
-    text: &'a str,
-    delimiter: &'static str,
-) -> Option<(&'a str, &'a str)> {
-    type E<'a> = super::oracle_nom::error::OracleError<'a>;
-    let (_, (left, right)) = all_consuming(separated_pair(
-        take_until::<_, _, E<'_>>(delimiter),
-        tag(delimiter),
-        rest,
-    ))
-    .parse(text)
-    .ok()?;
+/// Splits `text` into exactly two non-empty legs at the first `delimiter`
+/// outside double-quoted speech; a leg ending in ',' belongs to a longer list,
+/// so the split declines.
+///
+/// Un-card (no CR entry): a spoken cost's phrase is verbatim speech, so the
+/// `or` inside `Say "red or blue" quickly or pay {2}` is part of the phrase,
+/// not the cost's alternative separator. Only the outer delimiter splits.
+fn split_binary_cost_legs<'a>(text: &'a str, delimiter: &str) -> Option<(&'a str, &'a str)> {
+    let split = find_unquoted_delimiter(text, delimiter)?;
+    let left = &text[..split];
+    let right = &text[split + delimiter.len()..];
     if left.is_empty()
         || right.is_empty()
         || left.trim_end().ends_with(',')
@@ -119,6 +116,36 @@ fn split_binary_cost_legs<'a>(
         return None;
     }
     Some((left, right))
+}
+
+/// The first occurrence of `delimiter` outside a double-quoted span. Scanning
+/// cursor movement is structural, not phrase recognition: the typed cost
+/// combinators still decide what each leg means. Delimiter recognition aligns
+/// with the shared phrase parser (`parse_quoted_phrase`), which double-quotes
+/// speech, so ordinary English possessives (e.g. "owner's hand") never mask an
+/// outer cost separator.
+fn find_unquoted_delimiter(text: &str, delimiter: &str) -> Option<usize> {
+    let mut in_double_quotes = false;
+    let mut i = 0;
+    while i < text.len() {
+        let ch = text[i..].chars().next().expect("valid UTF-8");
+        match ch {
+            '"' => in_double_quotes = !in_double_quotes,
+            // The cost text keeps the original casing so a spoken phrase is
+            // preserved verbatim; the structural separator is matched without
+            // regard to case.
+            _ if !in_double_quotes
+                && text[i..]
+                    .get(..delimiter.len())
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(delimiter)) =>
+            {
+                return Some(i);
+            }
+            _ => {}
+        }
+        i += ch.len_utf8();
+    }
+    None
 }
 
 /// CR 118.12: parse the exact three-mana Oxford/non-Oxford alternative grammar
@@ -324,6 +351,7 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut brace_depth = 0u32;
+    let mut in_double_quotes = false;
     let bytes = text.as_bytes();
     let mut i = 0;
 
@@ -332,7 +360,14 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
         match ch {
             '{' => brace_depth += 1,
             '}' => brace_depth = brace_depth.saturating_sub(1),
-            ',' if brace_depth == 0 => {
+            // Un-card (no CR entry): a spoken cost's double-quoted phrase is
+            // VERBATIM speech, so a comma or " and " inside it never separates
+            // cost components (I'm Rubber, You're Glue prints a sentence).
+            // Delimiter recognition tracks double quotes only, aligned with
+            // the shared phrase parser, so an apostrophe in a possessive ("owner's")
+            // does not swallow outer cost separators.
+            '"' => in_double_quotes = !in_double_quotes,
+            ',' if brace_depth == 0 && !in_double_quotes => {
                 // CR 107.1a: The rounding comma is part of the fractional
                 // life-cost clause; a later comma still separates costs.
                 let prefix = text[start..i].trim().to_lowercase();
@@ -351,7 +386,7 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
                 }
                 start = i + 1;
             }
-            ' ' if brace_depth == 0 && bytes[i..].starts_with(b" and ") => {
+            ' ' if brace_depth == 0 && !in_double_quotes && bytes[i..].starts_with(b" and ") => {
                 let part = text[start..i].trim();
                 if !part.is_empty() {
                     parts.push(part);
@@ -853,8 +888,12 @@ fn parse_single_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
     // activation cost (Infernal Spawn of Evil). Must precede the effect-parser
     // fallback, whose `EffectCost { PayCost(SayPhrase) }` wrapper is unpayable.
     if let Some((_, rest)) = nom_on_lower(text, &lower, |i| value((), tag("say ")).parse(i)) {
-        if let Ok((_, phrase)) = parse_say_phrase_payment(rest) {
-            return AbilityCost::SayPhrase { phrase };
+        if let Ok((_, (phrase, pace))) = parse_say_phrase_payment(rest) {
+            return AbilityCost::SayPhrase {
+                phrase,
+                pace,
+                repetitions: 1,
+            };
         }
     }
 
@@ -2634,6 +2673,67 @@ mod tests {
     };
     use crate::types::counter::CounterMatch;
     use crate::types::mana::{ManaCost, ManaCostShard};
+
+    /// Toy Boat's printed cumulative upkeep cost is the spoken phrase alone:
+    /// `Say "Toy Boat" quickly.` It parses to one saying with its casing kept.
+    #[test]
+    fn printed_spoken_cost_keeps_phrase_casing() {
+        assert!(
+            matches!(
+                parse_oracle_cost("Say \"Toy Boat\" quickly"),
+                AbilityCost::SayPhrase { ref phrase, .. } if phrase == "Toy Boat"
+            ),
+            "Toy Boat's printed cost is one quick saying"
+        );
+    }
+
+    /// Synthetic, not printed: no card offers a spoken leg as an alternative.
+    /// The quoted phrase itself contains the ` or ` separator, so only quote
+    /// tracking selects the real separator outside the quotation; matching the
+    /// casing alone would split inside the phrase.
+    #[test]
+    fn alternative_splitter_skips_a_delimiter_inside_a_quotation() {
+        let text = "Say \"Red or Blue\" quickly or pay {2}";
+        let outer = "Say \"Red or Blue\" quickly".len();
+        assert_eq!(find_unquoted_delimiter(text, " or "), Some(outer));
+        assert_eq!(
+            split_binary_cost_legs(text, " or "),
+            Some(("Say \"Red or Blue\" quickly", "pay {2}"))
+        );
+
+        let AbilityCost::OneOf { costs } = parse_oracle_cost(text) else {
+            panic!("expected two alternative cost legs");
+        };
+        assert!(
+            matches!(&costs[0], AbilityCost::SayPhrase { phrase, .. } if phrase == "Red or Blue"),
+            "the spoken leg keeps its whole phrase and casing: {costs:?}"
+        );
+        assert!(
+            matches!(&costs[1], AbilityCost::Mana { .. }),
+            "the second leg is the mana alternative: {costs:?}"
+        );
+
+        // A delimiter that appears only inside a quotation is no separator.
+        assert_eq!(
+            find_unquoted_delimiter("Say \"Red or Blue\" quickly", " or "),
+            None
+        );
+    }
+
+    #[test]
+    fn cost_separator_is_preserved_around_possessive_apostrophes() {
+        let text = "Return a land you control to its owner's hand and pay {2}";
+        assert_eq!(
+            split_cost_parts(text),
+            vec!["Return a land you control to its owner's hand", "pay {2}"]
+        );
+        let AbilityCost::Composite { costs } = parse_oracle_cost(text) else {
+            panic!("expected composite cost with return and mana legs: {text}");
+        };
+        assert_eq!(costs.len(), 2);
+        assert!(matches!(&costs[0], AbilityCost::ReturnToHand { .. }));
+        assert!(matches!(&costs[1], AbilityCost::Mana { .. }));
+    }
 
     #[test]
     fn half_life_activation_cost_keeps_rounding_in_its_component() {

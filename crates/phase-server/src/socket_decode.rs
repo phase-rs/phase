@@ -26,7 +26,7 @@ use crate::{
 
 enum DecoderWake {
     Heartbeat,
-    Frame(Option<Received<Message>>),
+    Frame(Option<Received<crate::socket_io::IngressFrame>>),
 }
 
 enum RateCharge {
@@ -47,7 +47,7 @@ pub(crate) const MAX_QUOTA_DISCARDS_PER_WINDOW: u32 = 64;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
-    mut frames: mpsc::Receiver<Received<Message>>,
+    mut frames: mpsc::Receiver<Received<crate::socket_io::IngressFrame>>,
     mut socket: NegotiatedSocket,
     lobby: SharedLobby,
     host: watch::Receiver<Option<LobbyRegistration>>,
@@ -78,7 +78,7 @@ pub(crate) async fn run(
             frame = frames.recv() => DecoderWake::Frame(frame),
         };
         let Received {
-            message: frame,
+            message: ingress_frame,
             received_at,
             mut admission,
             heartbeat,
@@ -94,6 +94,23 @@ pub(crate) async fn run(
             DecoderWake::Frame(Some(frame)) => frame,
             DecoderWake::Frame(None) => break,
         };
+        let frame = match ingress_frame {
+            crate::socket_io::IngressFrame::Wire(wire) => wire,
+            crate::socket_io::IngressFrame::Drain(done_tx) => {
+                let envelope = crate::socket_mailbox::ClientEnvelope::drain(done_tx);
+                let _ = application
+                    .send(Received {
+                        message: envelope,
+                        received_at,
+                        admission,
+                        heartbeat,
+                    })
+                    .await;
+                continue;
+            }
+        };
+        #[cfg(test)]
+        socket.bootstrap_hooks().before_decode().await;
         #[cfg(test)]
         let _completed = parser_work.as_ref().map(|work| work.frame_guard());
         // Frames read before ClientHello acceptance were not reader-probed.

@@ -20,6 +20,7 @@ const wasm = vi.hoisted(() => ({
   respond_takeback_js: vi.fn(),
   cancel_takeback_js: vi.fn(),
   pending_takeback_js: vi.fn(),
+  submit_interaction_js: vi.fn(),
 }));
 vi.mock("@wasm/engine", () => ({ default: vi.fn(), ...wasm }));
 
@@ -195,6 +196,29 @@ describe("engine worker — requests", () => {
       expect(responseTo(1005)).toEqual({ type: "result", id: 1005, data: 5 });
       expect(wasm.classify_deck_js).toHaveBeenCalledWith(["Forest"]);
       expect(responseTo(1006)).toEqual({ type: "result", id: 1006, data: { archetype: "Ramp" } });
+    });
+
+    it("forwards atMs to submit_interaction_js", async () => {
+      wasm.submit_interaction_js.mockReturnValue({ status: "applied", result: { events: [], log_entries: [] } });
+
+      await send({
+        type: "submitInteraction",
+        id: 1007,
+        actor: 1,
+        submission: { interaction_id: "int-1", response: { type: "Choose", choice_id: "c-1" } },
+        atMs: 12345,
+      });
+
+      expect(wasm.submit_interaction_js).toHaveBeenCalledWith(
+        1,
+        { interaction_id: "int-1", response: { type: "Choose", choice_id: "c-1" } },
+        12345,
+      );
+      expect(responseTo(1007)).toEqual({
+        type: "result",
+        id: 1007,
+        data: { events: [], log_entries: [] },
+      });
     });
   });
 });

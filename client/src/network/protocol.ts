@@ -789,6 +789,7 @@ export type P2PMessage = P2PAuthorityWire & (
       state: GameState;
       events: GameEvent[];
       logEntries?: GameLogEntry[];
+      saying?: boolean;
     } & LegalActionsWire)
   /** Guest → host: the highest state revision the guest has APPLIED, which a
    * host ledger recording transmission cannot otherwise observe. Sent from
@@ -798,9 +799,21 @@ export type P2PMessage = P2PAuthorityWire & (
   | { type: "state_ack"; revision: number }
   /** Host → guest: the host applied this revision for the recipient but could
    * not send it; it answers a pending action as applied. */
-  | { type: "state_withheld"; revision: number }
+  | { type: "state_withheld"; revision: number; saying?: boolean }
   | { type: "action_rejected"; rejection: ActionRejection }
   | { type: "action_failed"; message: string }
+  /** Host → guest: the outcome of one spoken-payment observation, correlated by
+   *  the engine-authored payment id and the observation's own sequence. A
+   *  saying is submitted without waiting for ordinary command completion, so
+   *  its reply travels on this dedicated lane instead of settling the pending
+   *  ordinary-command slot (which may already hold a Stay Quiet answer). */
+  | {
+      type: "saying_result";
+      payment: number;
+      seq: number;
+      accepted: boolean;
+      message?: string;
+    }
   | { type: "action_noop" }
   | { type: "mana_payment_preview"; requestId: number; sourceIds: ObjectId[] }
   | { type: "mana_payment_preview_rejected"; requestId: number; rejection: ActionRejection }
@@ -899,6 +912,7 @@ const VALID_TYPES = new Set([
   "action_rejected",
   "action_failed",
   "action_noop",
+  "saying_result",
   "mana_payment_preview",
   "mana_payment_preview_rejected",
   "mana_payment_preview_failed",

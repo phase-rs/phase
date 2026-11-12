@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{
@@ -797,7 +797,7 @@ enum AiProposalSubmission {
 /// Private WASM boundary outcome for expected engine rejections. Serialization
 /// keeps recoverable action failures distinct from raw WASM/runtime errors,
 /// which continue to cross this boundary as strings or thrown `JsValue`s.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "status")]
 enum ActionOutcome<T> {
     Applied { result: T },
@@ -2622,7 +2622,7 @@ fn run_contest_drive(
 /// materializes a `GameAction`; only a successful engine reducer result exposes
 /// the exact action to the replay recorder.
 #[wasm_bindgen]
-pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
+pub fn submit_interaction_js(actor: u8, submission: JsValue, at_ms: Option<f64>) -> JsValue {
     let submission: InteractionSubmission = match serde_wasm_bindgen::from_value(submission) {
         Ok(submission) => submission,
         Err(_) => {
@@ -2631,8 +2631,12 @@ pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
             ));
         }
     };
-    match submit_interaction_inner(PlayerId(actor), submission) {
-        Ok(result) => action_outcome(result),
+    let submitted_at_ms = at_ms.and_then(|ms| if ms >= 0.0 { Some(ms as u64) } else { None });
+    match submit_interaction_inner(PlayerId(actor), submission, submitted_at_ms) {
+        Ok(inner) => match inner {
+            Ok((result, is_saying)) => to_js(&InteractionOutcome::Applied { result, is_saying }),
+            Err(rejection) => to_js(&InteractionOutcome::Rejected { rejection }),
+        },
         Err(error) => JsValue::from_str(&error),
     }
 }
@@ -2643,16 +2647,33 @@ pub fn submit_interaction_js(actor: u8, submission: JsValue) -> JsValue {
 fn submit_interaction_inner(
     actor: PlayerId,
     submission: InteractionSubmission,
-) -> Result<Result<ActionResult, ActionRejection>, String> {
+    submitted_at_ms: Option<u64>,
+) -> Result<Result<(ActionResult, bool), ActionRejection>, String> {
     with_installed_state_mut(|state| {
         let capture = hosted_capture(state, None)?;
-        let applied = submit_interaction_with_rejection(state, actor, submission)?;
+        // Un-card (no CR entry): this bridge is the authoritative ingress of a
+        // locally hosted game, so its clock stamps a projected spoken saying
+        // unless a trusted host-received ingress timestamp is provided.
+        let applied = submit_interaction_with_rejection(
+            state,
+            actor,
+            submission,
+            submitted_at_ms.unwrap_or_else(engine::util::host_clock::epoch_ms),
+        )?;
+        let is_saying = matches!(&applied.action, GameAction::SayPhrase { .. });
         // No vote is open here (refused above), so no resolution can arise.
         let (result, _) = hosted_record(state, actor, capture, &applied.action, applied.result);
         record_replay_action(false, actor, applied.action);
         invalidate_ai_proposals();
-        Ok(result)
+        Ok((result, is_saying))
     })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "status")]
+enum InteractionOutcome {
+    Applied { result: ActionResult, is_saying: bool },
+    Rejected { rejection: ActionRejection },
 }
 
 /// Preview one opaque interaction response without committing. A REFUSED declaration is a
@@ -6018,9 +6039,17 @@ fn submit_ai_action_proposal_inner(
         };
     };
 
+    // Un-card (no CR entry): this bridge hosts the AI, so its clock stamps a
+    // spoken saying at submission; the replay records the stamped action.
+    let submitted_at_ms = engine::util::host_clock::epoch_ms();
     match with_installed_state_mut(|state| {
-        let application =
-            apply_ai_action_proposal(state, &proposal.contract, actor, action.clone());
+        let application = apply_ai_action_proposal(
+            state,
+            &proposal.contract,
+            actor,
+            action.clone(),
+            submitted_at_ms,
+        );
         if let AiProposalApplication::AppliedStackPass { result }
         | AiProposalApplication::AppliedAction { result } = &application
         {
@@ -6036,7 +6065,7 @@ fn submit_ai_action_proposal_inner(
             }
         }
         Ok(AiProposalApplication::AppliedAction { result }) => {
-            record_replay_action(false, actor, action);
+            record_replay_action(false, actor, action.stamped_by_host(submitted_at_ms));
             invalidate_ai_proposals();
             AiProposalSubmission::Applied {
                 result: Box::new(result),
@@ -10126,7 +10155,9 @@ mod hosted_takeback_tests {
     use engine::types::ability::TargetRef;
     use engine::types::actions::{ResolveAllConsentDecision, ResolveAllScope};
     use engine::types::game_state::{CastPaymentMode, PlayerDeckPool};
-    use engine::types::interaction::{InteractionAvailability, PreviewRequestId};
+    use engine::types::interaction::{
+        InteractionAvailability, InteractionResponse, PreviewRequestId,
+    };
     use engine::types::mana::{ManaColor, ManaCostShard};
     use engine::types::phase::Phase;
     use engine::types::zones::Zone;
@@ -10529,7 +10560,7 @@ mod hosted_takeback_tests {
             SubmittedAction::Rejected { rejection } if rejection == not_allowed()
         ));
         assert_eq!(
-            submit_interaction_inner(P1, witness(P1)).expect("a game is installed"),
+            submit_interaction_inner(P1, witness(P1), None).expect("a game is installed"),
             Err(not_allowed())
         );
         assert!(matches!(
@@ -10552,7 +10583,7 @@ mod hosted_takeback_tests {
         ));
         assert!(token_for(P1).is_some());
         assert!(matches!(
-            submit_interaction_inner(P1, witness(P1)),
+            submit_interaction_inner(P1, witness(P1), None),
             Ok(Ok(_))
         ));
     }
@@ -10715,7 +10746,7 @@ mod hosted_takeback_tests {
     fn an_interaction_records_a_takeback_point() {
         host(bolt_3h());
         assert!(matches!(
-            submit_interaction_inner(P0, witness(P0)),
+            submit_interaction_inner(P0, witness(P0), None),
             Ok(Ok(_))
         ));
         assert_eq!(
@@ -10867,5 +10898,147 @@ mod hosted_takeback_tests {
             installed().waiting_for,
             WaitingFor::BetweenGamesSideboard { player: P0, .. }
         ));
+    }
+
+    /// Real WASM projection and submission boundary: project the timed SayPhrase
+    /// prompt twice, assert deterministic equality, submit its opaque response
+    /// through `submit_interaction_js` with a timestamp, assert progress, then
+    /// submit the concluding saying and assert settlement.
+    #[test]
+    fn projected_sayings_through_wasm_export_are_deterministic_and_settle() {
+        const TOY_BOAT_ORACLE: &str = "Cumulative upkeep\u{2014}Say \"Toy Boat\" quickly. (At the beginning of your upkeep, put an age counter on this creature, then sacrifice it unless you say \"Toy Boat\" once for each age counter on it\u{2014}without pausing between or fumbling it.)";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Untap);
+        let toy_boat = scenario
+            .add_creature_from_oracle(P0, "Toy Boat", 3, 3, TOY_BOAT_ORACLE)
+            .with_mana_cost(engine::types::mana::ManaCost::generic(3))
+            .id();
+        scenario.with_counter(toy_boat, engine::types::counter::CounterType::Age, 1);
+        let filler = ["Filler"; 4];
+        scenario.with_library_top(P0, &filler);
+        scenario.with_library_top(P1, &filler);
+        let mut runner = scenario.build();
+        runner.state_mut().un_actions.set_enabled(P0, true);
+        runner.advance_to_upkeep();
+        runner.resolve_top();
+
+        host(runner.state().clone());
+
+        let extract_saying_submission = || {
+            let state = installed();
+            let filtered = filter_state_for_viewer(&state, P0);
+            let view = engine::game::interaction::derive_viewer_interaction(&state, &filtered, P0);
+            let opportunity = view.opportunities.first().expect("one live opportunity");
+            let engine::types::interaction::InteractionOpportunityResponse::ExactChoices {
+                choices,
+            } = &opportunity.response
+            else {
+                panic!("expected exact choices, got {:?}", opportunity.response);
+            };
+            let opportunity_id = opportunity.interaction_id.clone();
+            let saying_choice = choices
+                .iter()
+                .find(|choice| {
+                    let submission = InteractionSubmission {
+                        interaction_id: opportunity_id.clone(),
+                        response: InteractionResponse::Choose {
+                            choice_id: choice.id.clone(),
+                        },
+                    };
+                    matches!(
+                        engine::game::interaction::resolve_interaction_response(
+                            &state,
+                            P0,
+                            &submission
+                        ),
+                        Ok(GameAction::SayPhrase { .. })
+                    )
+                })
+                .expect("a saying choice is projected");
+            let saying_choice_id = saying_choice.id.clone();
+            (
+                view,
+                InteractionSubmission {
+                    interaction_id: opportunity_id,
+                    response: InteractionResponse::Choose {
+                        choice_id: saying_choice_id,
+                    },
+                },
+            )
+        };
+
+        // Project the timed prompt twice and assert they are identical
+        let (view1, submission1) = extract_saying_submission();
+        let (view2, _) = extract_saying_submission();
+        assert_eq!(view1, view2, "projected timed prompt is deterministic");
+
+        // Submit the first saying via the WASM submission body with host timestamp
+        let _outcome = submit_interaction_inner(P0, submission1, Some(10_000))
+            .expect("a game is installed")
+            .expect("first saying is applied");
+
+        // Assert progress
+        let state = installed();
+        let progress = state.say_payment.as_ref().expect("say_payment is active");
+        assert_eq!(progress.said, 1);
+        assert_eq!(progress.last_said_ms, Some(10_000));
+        assert_eq!(progress.last_seq, Some(1));
+
+        // Submit the second saying (Toy Boat had 1 age counter, upkeep adds 1 = 2 counters, so 2 sayings required)
+        let (_, submission2) = extract_saying_submission();
+        let _outcome2 = submit_interaction_inner(P0, submission2, Some(10_400))
+            .expect("a game is installed")
+            .expect("second saying is applied");
+
+        // Assert settlement
+        let final_state = installed();
+        assert!(final_state.say_payment.is_none(), "payment completed");
+        assert!(
+            !matches!(final_state.waiting_for, WaitingFor::UnlessPayment { .. }),
+            "exited UnlessPayment prompt"
+        );
+        assert_eq!(
+            final_state.objects[&toy_boat].zone,
+            Zone::Battlefield,
+            "Toy Boat survives"
+        );
+    }
+
+    /// Regenerates the real-WASM integration fixture used by
+    /// `client/src/game/__tests__/toyBoatSayPrompt.integration.test.ts`.
+    ///
+    /// Run manually from the repository root:
+    /// `cargo test -p engine-wasm --lib hosted_takeback_tests::write_toy_boat_say_prompt_fixture -- --ignored --exact`
+    ///
+    /// The fixture is the engine's own trusted export of the exact prompt state
+    /// (Toy Boat on the battlefield with one age counter, its timed payment
+    /// armed). The browser-boundary test restores that snapshot instead of
+    /// re-deriving Toy Boat's upkeep in TypeScript.
+    #[test]
+    #[ignore]
+    fn write_toy_boat_say_prompt_fixture() {
+        const TOY_BOAT_ORACLE: &str = "Cumulative upkeep\u{2014}Say \"Toy Boat\" quickly. (At the beginning of your upkeep, put an age counter on this creature, then sacrifice it unless you say \"Toy Boat\" once for each age counter on it\u{2014}without pausing between or fumbling it.)";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Untap);
+        let toy_boat = scenario
+            .add_creature_from_oracle(P0, "Toy Boat", 3, 3, TOY_BOAT_ORACLE)
+            .with_mana_cost(engine::types::mana::ManaCost::generic(3))
+            .id();
+        scenario.with_counter(toy_boat, engine::types::counter::CounterType::Age, 1);
+        let filler = ["Filler"; 4];
+        scenario.with_library_top(P0, &filler);
+        scenario.with_library_top(P1, &filler);
+        let mut runner = scenario.build();
+        runner.state_mut().un_actions.set_enabled(P0, true);
+        runner.advance_to_upkeep();
+        runner.resolve_top();
+
+        host(runner.state().clone());
+        let json = export_game_state_json().expect("the prompt state exports");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../client/src/game/__tests__/fixtures/toyBoatSayPrompt.json");
+        std::fs::create_dir_all(path.parent().expect("the fixture has a parent directory"))
+            .expect("the fixture directory exists");
+        std::fs::write(&path, json).expect("the fixture writes");
     }
 }

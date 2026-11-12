@@ -129,9 +129,7 @@ fn rod_of_spanking_parses_an_unless_say_phrase_cost() {
         .expect("untap is gated by an unless cost");
     assert_eq!(
         unless.cost,
-        AbilityCost::SayPhrase {
-            phrase: "Thank you, sir. May I have another?".to_string()
-        }
+        AbilityCost::say_phrase("Thank you, sir. May I have another?")
     );
 }
 
@@ -223,7 +221,7 @@ fn say_it_payments_parse_for_optional_you_may_say_cards() {
         assert!(
             matches!(
                 &*execute.effect,
-                Effect::PayCost { cost: AbilityCost::SayPhrase { phrase: p }, .. } if p == phrase
+                Effect::PayCost { cost: AbilityCost::SayPhrase { phrase: p, .. }, .. } if p == phrase
             ),
             "{phrase}: expected a SayPhrase payment, got {:?}",
             execute.effect
@@ -1660,9 +1658,7 @@ fn a_spoken_activation_cost_parses_to_say_phrase_not_an_effect_cost() {
         panic!("expected a composite cost, got {:?}", ability.cost);
     };
     assert!(
-        costs.contains(&AbilityCost::SayPhrase {
-            phrase: "It's coming".to_string()
-        }),
+        costs.contains(&AbilityCost::say_phrase("It's coming")),
         "the spoken cost is a direct SayPhrase component: {costs:?}"
     );
     assert!(
@@ -1743,4 +1739,27 @@ fn infernal_spawn_of_evil_cannot_be_activated_without_the_un_actions_opt_in() {
     );
     assert_eq!(runner.life(P1), 20, "no damage was dealt");
     assert_settled(&runner, "Infernal Spawn opted out");
+}
+
+#[test]
+fn un_action_state_is_default_preserves_next_say_payment_id() {
+    use engine::types::game_state::GameState;
+    use engine::types::un_actions::UnActionState;
+    use engine::types::player::PlayerId;
+
+    // Create a default UnActionState and manually set a nonzero next_say_payment_id
+    let mut state = GameState::default();
+    state.un_actions.next_say_payment_id = 42;
+
+    // Serialize and deserialize
+    let json = serde_json::to_string(&state).expect("serialization failed");
+    let deserialized: GameState = serde_json::from_str(&json).expect("deserialization failed");
+
+    // The counter should be preserved (nonzero means not default)
+    assert_eq!(deserialized.un_actions.next_say_payment_id, 42);
+    assert!(!deserialized.un_actions.is_default(), "nonzero counter should make state non-default");
+
+    // Verify that a truly default state is still recognized as default
+    let default_state = GameState::default();
+    assert!(default_state.un_actions.is_default(), "default state should be default");
 }

@@ -86,7 +86,7 @@ pub fn guard_client_message_before_dispatch(
         ClientMessage::Action { action } | ClientMessage::PreviewManaPayment { action, .. } => {
             guard_game_action_payload(action)
         }
-        ClientMessage::Interaction { submission } => {
+        ClientMessage::Interaction { submission, .. } => {
             guard_interaction_submission_payload(submission)
         }
         ClientMessage::PreviewInteraction { request } => {
@@ -111,6 +111,7 @@ pub fn guard_client_message_before_dispatch(
         | ClientMessage::ConcedeMatch
         | ClientMessage::AbandonGame
         | ClientMessage::ExportAuthoritativeState
+        | ClientMessage::SayPhraseExpiry { .. }
         // One `u32` sequence number: no field to bound, so nothing to reject.
         | ClientMessage::ContestClick { .. }
         | ClientMessage::RequestTakeback(_)
@@ -376,6 +377,7 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::ExportAuthoritativeState
+        | ClientMessage::SayPhraseExpiry { .. }
         | ClientMessage::ResyncState
         | ClientMessage::SubscribeLobby
         | ClientMessage::UnsubscribeLobby
@@ -572,6 +574,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::ExportAuthoritativeState
+        | ClientMessage::SayPhraseExpiry { .. }
         | ClientMessage::ResyncState
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
@@ -903,6 +906,7 @@ mod tests {
                 interaction_id: InteractionId("interaction-1".to_string()),
                 response,
             },
+            at_ms: None,
         }
     }
 

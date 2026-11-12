@@ -31,6 +31,7 @@ use crate::types::mana::ManaType;
 use crate::types::match_config::DeckCardCount;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::un_actions::SayPhraseReport;
 use crate::types::zones::Zone;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2936,6 +2937,43 @@ pub fn candidate_actions_broad_with_probe(
                 Some(*player),
             )))
             .collect(),
+        // Un-card (no CR entry) + CR 118.12a: a TIMED spoken payment (Toy
+        // Boat's "Say \"Toy Boat\" quickly") is paid by host-stamped
+        // `GameAction::SayPhrase` observations. Offer the next saying and the
+        // explicit decline. The projected saying is a pure function of state —
+        // it never reads a clock, so the payload (and its interaction action
+        // id) is identical on every read and the projection runs on hosts with
+        // no `std` clock (browser WASM). `at_ms` is a placeholder: the
+        // authoritative submission boundary stamps the instant the action is
+        // submitted (`GameAction::stamped_by_host`). The sequence continues
+        // from the last ACCEPTED one, not from the count of sayings, so a
+        // number skipped by a lost attempt never makes the next saying stale.
+        WaitingFor::UnlessPayment { player, cost, .. }
+            if crate::game::un_actions::is_timed_saying(cost) =>
+        {
+            let payment = state.say_payment.as_ref();
+            let payment_id = payment.map_or(0, |p| p.id);
+            let next_seq = payment
+                .and_then(|p| p.last_seq)
+                .map_or(1, |seq| seq.saturating_add(1));
+            vec![
+                candidate(
+                    GameAction::SayPhrase {
+                        payment: payment_id,
+                        seq: next_seq,
+                        at_ms: 0,
+                        report: SayPhraseReport::Saying,
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ),
+                candidate(
+                    GameAction::PayUnlessCost { pay: false },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ),
+            ]
+        }
         // CR 118.12: "Counter unless pays" — opponent chooses pay or decline.
         WaitingFor::UnlessPayment { player, .. } => {
             vec![

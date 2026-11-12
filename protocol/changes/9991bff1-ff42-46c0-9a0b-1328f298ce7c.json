@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "AbilityCost::SayPhrase now carries pace and repetitions (Toy Boat's timed, per-age-counter spoken cumulative upkeep), so a peer that sends a single PayUnlessCost without them would pay the wrong number of sayings"
+}

@@ -1721,6 +1721,16 @@ fn build_prompt_input(
         // happen — a yes/no. `UnlessPaymentChooseCost` is deliberately NOT
         // folded in: it picks *among several costs*, which is a selection, not
         // a boolean, and mapping it here would misreport the question.
+        // Un-card (no CR entry): a TIMED spoken payment (Toy Boat) is not a
+        // yes/no — its "pay" answer is a stream of host-stamped sayings, which a
+        // relay client cannot author. The engine's exact candidates for it are
+        // the decline alone, so it rides the generic projection rather than
+        // advertising a "Pay" the engine would judge unpaid.
+        WaitingFor::UnlessPayment { cost, .. }
+            if engine::game::un_actions::is_timed_saying(cost) =>
+        {
+            interaction_prompt(prepared, card_lookup)
+        }
         WaitingFor::UnlessPayment {
             effect_description, ..
         } => Ok(PromptInput::ChooseBoolean(ChooseBooleanInput {
@@ -2621,7 +2631,11 @@ pub fn translate_response(
                 // CR 701.43d: pay or decline the exert cost.
                 WaitingFor::ExertChoice { .. } => Ok(GameAction::ChooseExert { exert: value }),
                 // CR 118.12: pay the unless-cost or let the effect happen.
-                WaitingFor::UnlessPayment { .. } => Ok(GameAction::PayUnlessCost { pay: value }),
+                WaitingFor::UnlessPayment { cost, .. }
+                    if !engine::game::un_actions::is_timed_saying(cost) =>
+                {
+                    Ok(GameAction::PayUnlessCost { pay: value })
+                }
                 _ => Err(AdapterError::IllegalResponseForPrompt {
                     response_kind: "chooseBoolean",
                 }),
@@ -2965,6 +2979,11 @@ pub fn convert_available_action(
         }
         // Answered through the ChooseBoolean prompt for `WaitingFor::UnlessPayment`.
         GameAction::PayUnlessCost { .. } => AvailableActionConversion::Skip,
+        // Un-card (no CR entry): a host-stamped observation of a timed spoken
+        // unless-payment (Toy Boat). It answers `WaitingFor::UnlessPayment`, is
+        // never a priority action, and carries a host instant no relay client
+        // can author — same contract as `PayUnlessCost`.
+        GameAction::SayPhrase { .. } => AvailableActionConversion::Skip,
         // Still unmapped: picking among several sub-costs is a selection, not a
         // boolean (CR 118.12a), so it does not share the UnlessPayment prompt.
         GameAction::ChooseUnlessCostBranch { .. } => {
@@ -4310,14 +4329,17 @@ fn output_family_matches_upstream(
             waiting_for,
             WaitingFor::ScryChoice { .. } | WaitingFor::SurveilChoice { .. }
         ),
-        UpstreamPromptOutput::ChooseBoolean(_) => matches!(
-            waiting_for,
+        UpstreamPromptOutput::ChooseBoolean(_) => match waiting_for {
             WaitingFor::OptionalEffectChoice { .. }
-                | WaitingFor::OpponentMayChoice { .. }
-                | WaitingFor::MiracleReveal { .. }
-                | WaitingFor::ExertChoice { .. }
-                | WaitingFor::UnlessPayment { .. }
-        ),
+            | WaitingFor::OpponentMayChoice { .. }
+            | WaitingFor::MiracleReveal { .. }
+            | WaitingFor::ExertChoice { .. } => true,
+            // A timed spoken payment is offered only as a selection.
+            WaitingFor::UnlessPayment { cost, .. } => {
+                !engine::game::un_actions::is_timed_saying(cost)
+            }
+            _ => false,
+        },
         // Reachable both bespoke (discard, CR 701.9b) and generically, so the
         // bespoke match stays primary and the open-prompt check carries the rest
         // rather than a list that would rot as the engine reclassifies states.
@@ -4944,7 +4966,8 @@ mod tests {
     use engine::game::interaction::bind_interaction_authority;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        CounterTriggerFilter, Effect, EffectKind, ResolvedAbility, TargetFilter, TriggerDefinition,
+        AbilityCost, CounterTriggerFilter, Effect, EffectKind, ResolvedAbility, TargetFilter,
+        TriggerDefinition,
     };
     use engine::types::card::LayoutKind;
     use engine::types::card_type::CoreType;
@@ -4957,6 +4980,7 @@ mod tests {
     use engine::types::identifiers::CardId;
     use engine::types::interaction::InteractionSessionId;
     use engine::types::triggers::TriggerMode;
+    use engine::types::un_actions::{PhrasePace, SayPhrasePayment, SayPhraseReport};
     use pretty_assertions::assert_eq;
 
     fn lookup(_: &GameObject) -> Option<String> {
@@ -6632,6 +6656,126 @@ mod tests {
                 && labels.iter().any(|l| l == "bottom")
                 && !labels.iter().any(|l| l == "top"),
             "got {labels:?}"
+        );
+    }
+
+    /// Un-card (no CR entry): a TIMED spoken payment (Toy Boat) is not a
+    /// yes/no. Its "pay" is a stream of host-stamped sayings no relay client
+    /// can author, so it must not ride the `ChooseBoolean` unless prompt —
+    /// whose "Pay" the engine would judge unpaid. The projection serves the
+    /// engine's exact candidates, which are the decline alone.
+    #[test]
+    fn a_timed_spoken_payment_offers_only_the_decline() {
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Toy Boat".to_string(),
+            Zone::Battlefield,
+        );
+        state.un_actions.set_enabled(PlayerId(0), true);
+        // Manually arm the say_payment so the engine has a payment ID and
+        // repetition count. The AI candidate generator reads this to author
+        // SayPhrase with the correct payment ID and sequence.
+        state.say_payment = Some(Box::new(SayPhrasePayment::new(42, 2)));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::SayPhrase {
+                phrase: "Toy Boat".to_string(),
+                pace: PhrasePace::quickly(),
+                repetitions: 2,
+            },
+            pending_effect: Box::new(ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )),
+            trigger_event: None,
+            effect_description: Some("Sacrifice Toy Boat".to_string()),
+            remaining: Vec::new(),
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("timed-say".to_string()))
+            .expect("valid interaction authority binding");
+
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup)
+            .expect("the timed spoken payment is served by the projection");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
+            panic!("a timed spoken payment is not a ChooseBoolean, got {prompt:?}");
+        };
+        // Timed spoken payments now offer both the saying (SayPhrase) and the explicit decline.
+        // The engine-authored SayPhrase candidate includes the payment ID, next sequence, and a
+        // current timestamp; the host stamps the observation when relaying.
+        // The interaction projection sorts candidates via GameAction::cmp_stable, which orders
+        // PayUnlessCost before SayPhrase (by GameActionKind discriminant), so index 0 is
+        // the explicit decline and index 1 is the saying.
+        assert_eq!(input.options.len(), 2, "say phrase and decline are offered");
+
+        // Index 0: Explicit decline (PayUnlessCost { pay: false }) — stable sort puts this first.
+        let action_decline = translate_response(
+            42,
+            PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                chosen_indices: vec![0],
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .expect("decline resolves back through the engine");
+        assert_eq!(action_decline, GameAction::PayUnlessCost { pay: false });
+
+        // Index 1: Say the phrase (AI can use this; relay clients submit SayPhrase through the
+        // generic interaction which the host then stamps with its clock).
+        let action_say = translate_response(
+            42,
+            PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                chosen_indices: vec![1],
+            }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .expect("saying resolves back through the engine");
+        match action_say {
+            GameAction::SayPhrase {
+                payment,
+                seq,
+                at_ms: _,
+                report,
+            } => {
+                assert_eq!(payment, 42); // the engine-minted payment ID
+                assert_eq!(seq, 1); // first saying
+                assert_eq!(report, SayPhraseReport::Saying);
+            }
+            other => panic!("expected SayPhrase, got {other:?}"),
+        }
+
+        // ChooseBoolean is not accepted for timed payments (the pace window requires
+        // host-stamped observations).
+        let err_true = translate_response(
+            42,
+            PromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value: true }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err_true, AdapterError::IllegalResponseForPrompt { .. }),
+            "expected IllegalResponseForPrompt, got {err_true:?}"
+        );
+
+        let err_false = translate_response(
+            42,
+            PromptOutput::ChooseBoolean(ChooseBooleanOutput::Decision { value: false }),
+            &prepared.prompt_context(),
+            &state,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err_false, AdapterError::IllegalResponseForPrompt { .. }),
+            "expected IllegalResponseForPrompt, got {err_false:?}"
         );
     }
 

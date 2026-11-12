@@ -1460,8 +1460,52 @@ export interface UnActionState {
   menu?: UnTellKind[];
 }
 
+/// Mirrors `crates/phase-ast/src/types/un_actions.rs::PhrasePace`: how a spoken
+/// payment must be delivered. `Quickly` carries the engine's window between
+/// repetitions (Toy Boat's "Say \"Toy Boat\" quickly").
+export type PhrasePace =
+  | { type: "Said" }
+  | { type: "Quickly"; max_gap_ms: number };
+
+/// Mirrors `engine::types::un_actions::SayPhrasePayment`: the engine-owned
+/// instance of a timed spoken payment (Toy Boat's "Say \"Toy Boat\" quickly").
+/// `owed` is the total the printed cost requires, `said` how many the engine has
+/// accepted, and `deadline_ms` the host instant by which the next saying must
+/// arrive. The client renders this progress and reports clicks with host stamps;
+/// it never decides whether a pause was in time.
+export interface SayPhrasePayment {
+  id: number;
+  owed: number;
+  said: number;
+  clock_ms: number;
+  last_seq?: number;
+  last_said_ms?: number;
+  deadline_ms?: number;
+}
+
+/// Mirrors `server_core::protocol::SayPhraseExpiryTarget`: the live timed
+/// spoken payment an expiry authority must time — its payer, authorized
+/// submitter, engine-minted payment id and the epoch-millisecond deadline of
+/// the next saying.
+export interface SayPhraseExpiryTarget {
+  payer: PlayerId;
+  submitter: PlayerId;
+  payment: number;
+  deadline_ms: number;
+}
+
+/// Mirrors `engine::types::un_actions::SayPhraseReport`: whether a host
+/// observation of a timed spoken payment is a saying or only the host's clock.
+export type SayPhraseReport = "Saying" | "Expiry";
+
 export type UnlessCost =
-  | { type: "SayPhrase"; phrase: string }
+  | {
+      type: "SayPhrase";
+      phrase: string;
+      pace?: PhrasePace;
+      /// CR 702.24a: one saying per age counter for a cumulative upkeep.
+      repetitions?: number;
+    }
   | { type: "Fixed"; cost: ManaCost }
   | { type: "DynamicGeneric"; quantity: unknown }
   | { type: "PayLife"; amount: number }
@@ -3737,6 +3781,15 @@ export type GameAction =
   | { type: "ChooseResolutionOptionalPaymentBranch"; data: { choice: ResolutionOptionalPaymentChoice } }
   | { type: "DecideOptionalEffectAndRemember"; data: { choice: AutoMayChoice; scope?: MayTriggerAutoChoiceScope } }
   | { type: "PayUnlessCost"; data: { pay: boolean } }
+  /// Un-card (no CR entry): one host-stamped observation of a timed spoken
+  /// unless-cost. The host stamps its own epoch-millisecond clock; the engine
+  /// validates it against the stored window. `payment: 0` means "the instance
+  /// this prompt advertises". `report: "Expiry"` says the host's clock passed
+  /// the window with no saying: it can lapse the payment but never pay it.
+  | {
+      type: "SayPhrase";
+      data: { payment: number; seq: number; at_ms: number; report?: SayPhraseReport };
+    }
   // CR 118.12a: Choose a branch of a disjunctive unless-cost. The
   // discriminant is `Decline` (effect happens) or `Pay { index }` (the
   // selected sub-cost re-enters the standard unless-payment flow).
@@ -5014,6 +5067,9 @@ export interface GameState {
   /** CR 603.5: the viewer's stored "don't ask again" auto-choices for optional ("may") triggers. */
   may_trigger_auto_choices?: MayTriggerAutoChoiceRecord[];
   un_actions?: UnActionState;
+  /** Un-card (no CR entry): the engine-owned instance of a timed spoken
+   *  unless-payment (Toy Boat). `undefined`/`null` when none is pending. */
+  say_payment?: SayPhrasePayment | null;
   replacement_auto_choices?: ReplacementAutoChoiceRecord[];
   lands_tapped_for_mana?: Record<number, number[]>;
   scheduled_turn_controls?: Array<{
@@ -5527,6 +5583,8 @@ export interface SubmitResult {
   log_entries?: GameLogEntry[];
   /** Present when the action ended a takeback vote (a browser-hosted concession). */
   takeback?: TakebackNotice;
+  /** Whether this submission was a spoken payment (SayPhrase). */
+  is_saying?: boolean;
 }
 
 /** The `SubmitResult` of an applied `submit_action` outcome. */
@@ -5860,7 +5918,7 @@ export interface EngineAdapter {
     awayPlayers?: PlayerId[],
   ): Promise<ContestDriveResult>;
   /** Submit an opaque response from the engine's current interaction projection. */
-  submitInteraction?(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
+  submitInteraction?(submission: InteractionSubmission, actor: PlayerId, atMs?: number): Promise<SubmitResult>;
   /**
    * Read-only preview of the exact automatic `CastSpell` action currently
    * offered by the engine. Unsupported transports omit this capability.

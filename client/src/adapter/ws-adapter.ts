@@ -27,6 +27,7 @@ import type {
   TakebackEvent,
   TakebackResolution,
   WithheldFrame,
+  SayPhraseExpiryTarget,
 } from "./types";
 import type {
   InteractionPreview,
@@ -1536,9 +1537,12 @@ export type WsAdapterEvent =
   | { type: "stateChanged"; snapshot: EngineSnapshot; events: GameEvent[]; logEntries?: GameLogEntry[]; serverRevision?: number;
       /** Server-published turn boundaries. Always an array on this transport —
        *  `[]` means "the server published none", never "unknown". */
-      rewindTargets?: RewindOption[] }
-  /** The server applied a state it could not send; `null` once a state arrives again. */
-  | { type: "stateDelivery"; withheld: StateWithheldNotice | null }
+      rewindTargets?: RewindOption[];
+      saying?: boolean }
+  /** The server applied a state it could not send; `null` once a state arrives again.
+   *  `saying` marks a notice that answered this client's own spoken observation,
+   *  so a relaying host can keep it off an unrelated submission's reply. */
+  | { type: "stateDelivery"; withheld: StateWithheldNotice | null; saying?: boolean }
   | { type: "sessionAttached"; attachment: NativeSessionAttachment }
   | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
   | { type: "contestProgress"; contest: number; clicks: [PlayerId, number][] }
@@ -1614,10 +1618,19 @@ export class WebSocketAdapter implements EngineAdapter {
   private _gameCode: string | null = null;
   private fullSessionKey: FullSessionKey | null = null;
   private readonly submission = new SubmissionSlot();
+  private readonly pendingSayingCommands = new Map<
+    number,
+    { resolve: (result: SubmitResult) => void; reject: (error: Error) => void }
+  >();
   private nextManaPaymentPreviewRequestId = 1;
   private pendingManaPaymentPreviews = new Map<
     number,
     { resolve: (sourceIds: ObjectId[]) => void; reject: (error: Error) => void }
+  >();
+  private nextSayPhraseExpiryRequestId = 1;
+  private readonly pendingSayPhraseExpiries = new Map<
+    number,
+    { resolve: (target: SayPhraseExpiryTarget | null) => void; reject: (error: Error) => void }
   >();
   private pendingAuthoritativeStateExport: {
     resolve: (state: string) => void;
@@ -2062,6 +2075,12 @@ export class WebSocketAdapter implements EngineAdapter {
       this.rejectPendingManaPaymentPreviews(
         new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
       );
+      this.rejectPendingSayingCommands(
+        new AdapterError("WS_CLOSED", "Connection closed during saying submission", true),
+      );
+      this.rejectPendingSayPhraseExpiries(
+        new AdapterError("WS_CLOSED", "Connection closed during spoken-payment expiry", true),
+      );
       this.rejectAuthoritativeStateExport(
         new AdapterError("WS_CLOSED", "Connection closed during authoritative-state export", true),
       );
@@ -2113,9 +2132,28 @@ export class WebSocketAdapter implements EngineAdapter {
     // from the join-token-authenticated session, never from the payload.
     // A client-supplied actor here would provide zero additional safety and
     // only creates a spoofing surface if it were ever put on the wire.
-    this.assertNoPendingSubmission();
+    if (action.type !== "SayPhrase") {
+      this.assertNoPendingSubmission();
+    }
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "WebSocket not connected", false);
+    }
+
+    if (action.type === "SayPhrase") {
+      if (!this.commandCorrelationNegotiated()) {
+        if (!this.send({ type: "Action", data: { action } })) {
+          throw new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true);
+        }
+        return { events: [], log_entries: [] };
+      }
+      const commandId = this.submission.claimCommandId();
+      return new Promise<SubmitResult>((resolve, reject) => {
+        this.pendingSayingCommands.set(commandId, { resolve, reject });
+        if (!this.send({ type: "Action", data: { action }, command_id: commandId })) {
+          this.pendingSayingCommands.delete(commandId);
+          reject(new AdapterError(AdapterErrorCode.ACTION_NOT_SENT, "Failed to send action", true));
+        }
+      });
     }
 
     return this.submitGameFrame(
@@ -2127,6 +2165,7 @@ export class WebSocketAdapter implements EngineAdapter {
   async submitInteraction(
     submission: InteractionSubmission,
     _actor: PlayerId,
+    atMs?: number,
   ): Promise<SubmitResult> {
     this.assertNoPendingSubmission();
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -2134,7 +2173,13 @@ export class WebSocketAdapter implements EngineAdapter {
     }
 
     return this.submitGameFrame(
-      { type: "Interaction", data: { submission } },
+      {
+        type: "Interaction",
+        data: {
+          submission,
+          ...(atMs !== undefined ? { at_ms: atMs } : {}),
+        },
+      },
       new AdapterError("WS_CLOSED", "Failed to send interaction", true),
     );
   }
@@ -2192,6 +2237,54 @@ export class WebSocketAdapter implements EngineAdapter {
       if (!this.send({ type: "PreviewManaPayment", data: { request_id: requestId, action } })) {
         this.pendingManaPaymentPreviews.delete(requestId);
         reject(new AdapterError("WS_CLOSED", "Failed to send mana-payment preview", true));
+      }
+    });
+  }
+
+  /**
+   * Un-card (no CR entry): the native P2P host's bounded expiry authority for a
+   * live timed spoken payment. Reads the payment the engine holds right now —
+   * independent of this seat's (possibly withheld) state delivery — after
+   * asking the server to lapse `lapse` first when it is past its deadline on
+   * the server's clock. The lapse is applied under the payer's own authority,
+   * so no seat is attached or detached by it. Requests are correlated, so
+   * overlapping reads each settle with the state their own request saw.
+   */
+  async sayPhraseExpiry(lapse?: number): Promise<SayPhraseExpiryTarget | null> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+    const requestId = this.nextSayPhraseExpiryRequestId++;
+    return new Promise<SayPhraseExpiryTarget | null>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const onTimeout = () => {
+        this.pendingSayPhraseExpiries.delete(requestId);
+        reject(
+          new AdapterError(
+            AdapterErrorCode.REQUEST_FAILED,
+            "Spoken-payment expiry request timed out",
+            true,
+          ),
+        );
+      };
+      timer = setTimeout(onTimeout, 5000);
+      const wrappedResolve = (target: SayPhraseExpiryTarget | null) => {
+        if (timer !== null) clearTimeout(timer);
+        resolve(target);
+      };
+      const wrappedReject = (error: Error) => {
+        if (timer !== null) clearTimeout(timer);
+        reject(error);
+      };
+      this.pendingSayPhraseExpiries.set(requestId, {
+        resolve: wrappedResolve,
+        reject: wrappedReject,
+      });
+      const data = lapse === undefined ? { request_id: requestId } : { request_id: requestId, lapse };
+      if (!this.send({ type: "SayPhraseExpiry", data })) {
+        if (timer !== null) clearTimeout(timer);
+        this.pendingSayPhraseExpiries.delete(requestId);
+        reject(new AdapterError("WS_CLOSED", "Failed to request spoken-payment expiry", true));
       }
     });
   }
@@ -2396,6 +2489,12 @@ export class WebSocketAdapter implements EngineAdapter {
     );
     this.rejectPendingManaPaymentPreviews(
       new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
+    );
+    this.rejectPendingSayingCommands(
+      new AdapterError("WS_CLOSED", "Adapter disposed during saying submission", true),
+    );
+    this.rejectPendingSayPhraseExpiries(
+      new AdapterError("WS_CLOSED", "Adapter disposed during spoken-payment expiry", true),
     );
     this.rejectAuthoritativeStateExport(
       new AdapterError("WS_CLOSED", "Adapter disposed during authoritative-state export", true),
@@ -2742,6 +2841,11 @@ export class WebSocketAdapter implements EngineAdapter {
     this.pendingManaPaymentPreviews.clear();
   }
 
+  private rejectPendingSayPhraseExpiries(error: Error): void {
+    for (const { reject } of this.pendingSayPhraseExpiries.values()) reject(error);
+    this.pendingSayPhraseExpiries.clear();
+  }
+
   private rejectAuthoritativeStateExport(error: Error): void {
     this.pendingAuthoritativeStateExport?.reject(error);
     this.pendingAuthoritativeStateExport = null;
@@ -2752,6 +2856,13 @@ export class WebSocketAdapter implements EngineAdapter {
       reject(error);
     }
     this.pendingInteractionPreviews.clear();
+  }
+
+  private rejectPendingSayingCommands(error: Error): void {
+    for (const { reject } of this.pendingSayingCommands.values()) {
+      reject(error);
+    }
+    this.pendingSayingCommands.clear();
   }
 
   /** Snapshot of the server's advertised identity, or null before ServerHello. */
@@ -3013,6 +3124,13 @@ export class WebSocketAdapter implements EngineAdapter {
           // own correlated completion it still answers the pending command;
           // dropping it would leave the submission slot occupied. Legacy
           // (uncorrelated) frames keep the old drop-only behaviour.
+          if (typeof msg.command_id === "number") {
+            const sayingPending = this.pendingSayingCommands.get(msg.command_id);
+            if (sayingPending) {
+              this.pendingSayingCommands.delete(msg.command_id);
+              sayingPending.resolve({ events: data.events, log_entries: data.log_entries });
+            }
+          }
           if (msg.command_id !== undefined) {
             const stalePending = this.submission.take(msg.command_id);
             if (stalePending) {
@@ -3041,8 +3159,22 @@ export class WebSocketAdapter implements EngineAdapter {
         );
         this.cachedStateRevision = data.state_revision ?? this.cachedStateRevision;
         this.settleWithheld();
-        const pending = this.submission.take(msg.command_id);
-        const resolvedAction = pending !== null;
+        let isSaying = Boolean((data as { saying?: boolean }).saying);
+        let sayingPendingResolved = false;
+        if (typeof msg.command_id === "number") {
+          const sayingPending = this.pendingSayingCommands.get(msg.command_id);
+          if (sayingPending) {
+            this.pendingSayingCommands.delete(msg.command_id);
+            sayingPending.resolve({ events: data.events, log_entries: data.log_entries });
+            isSaying = true;
+            sayingPendingResolved = true;
+          }
+        }
+        const pending = isSaying && msg.command_id === undefined ? null : this.submission.take(msg.command_id);
+        // A correlated saying's promise already carries these events to its
+        // caller, which commits them; emitting them again would present the
+        // saying twice. A native bridge still needs the view to fan it out.
+        const resolvedAction = pending !== null || sayingPendingResolved;
         if (pending) {
           pending.resolve({ events: data.events, log_entries: data.log_entries });
           this.emit({ type: "actionPendingChanged", pending: false });
@@ -3055,6 +3187,7 @@ export class WebSocketAdapter implements EngineAdapter {
             logEntries: data.log_entries,
             serverRevision: data.state_revision,
             rewindTargets: data.rewind_targets ?? [],
+            ...(isSaying ? { saying: true } : {}),
           });
         }
         break;
@@ -3065,6 +3198,13 @@ export class WebSocketAdapter implements EngineAdapter {
         const error = isActionRejection(data.rejection)
           ? actionRejectionError(data.rejection)
           : new AdapterError(AdapterErrorCode.WASM_ERROR, "Server sent an invalid action rejection.", false);
+        if (typeof msg.command_id === "number") {
+          const sayingPending = this.pendingSayingCommands.get(msg.command_id);
+          if (sayingPending) {
+            this.pendingSayingCommands.delete(msg.command_id);
+            sayingPending.reject(error);
+          }
+        }
         const pending = this.submission.take(msg.command_id);
         if (pending) {
           pending.reject(error);
@@ -3086,9 +3226,17 @@ export class WebSocketAdapter implements EngineAdapter {
 
       case "ActionFailed": {
         const data = msg.data as { message: string };
+        const error = new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true);
+        if (typeof msg.command_id === "number") {
+          const sayingPending = this.pendingSayingCommands.get(msg.command_id);
+          if (sayingPending) {
+            this.pendingSayingCommands.delete(msg.command_id);
+            sayingPending.reject(error);
+          }
+        }
         const pending = this.submission.take(msg.command_id);
         if (pending) {
-          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
+          pending.reject(error);
           this.emit({ type: "actionPendingChanged", pending: false });
         } else if (this.submission.unmatched(msg.command_id).surfaces) {
           this.emit({ type: "operationFailed", message: data.message });
@@ -3119,11 +3267,20 @@ export class WebSocketAdapter implements EngineAdapter {
           break;
         }
         if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
+        let withheldSaying = Boolean((data as { saying?: boolean }).saying);
         if (data.withheld.type === "GameStarted") {
           this.emit({ type: "bootstrapDelivered" });
           if (this.reconnectInFlight) this.completeReconnect(true);
         } else {
-          const pending = this.submission.take(msg.command_id);
+          if (typeof msg.command_id === "number") {
+            const sayingPending = this.pendingSayingCommands.get(msg.command_id);
+            if (sayingPending) {
+              this.pendingSayingCommands.delete(msg.command_id);
+              sayingPending.resolve({ events: [], log_entries: [] });
+              withheldSaying = true;
+            }
+          }
+          const pending = withheldSaying && msg.command_id === undefined ? null : this.submission.take(msg.command_id);
           if (pending) {
             pending.resolve({ events: [], log_entries: [] });
             this.emit({ type: "actionPendingChanged", pending: false });
@@ -3132,14 +3289,18 @@ export class WebSocketAdapter implements EngineAdapter {
         // A stale notice still answers its command but must not report a newer board as withheld.
         if (this.cachedStateRevision !== null && data.state_revision < this.cachedStateRevision) break;
         this.withheldState = { revision: data.state_revision, reason: data.reason };
-        this.emit({ type: "stateDelivery", withheld: this.withheldState });
+        this.emit({
+          type: "stateDelivery",
+          withheld: this.withheldState,
+          ...(withheldSaying ? { saying: true } : {}),
+        });
         break;
       }
 
       case "ActionNoOp": {
         const pending = this.submission.take(msg.command_id);
         if (pending) {
-          pending.resolve({ events: [], log_entries: [] });
+          pending.resolve({ events: [], log_entries: [], is_saying: true });
           this.emit({ type: "actionPendingChanged", pending: false });
         } else if (this.submission.unmatched(msg.command_id).releasesIndicator) {
           // Legacy servers always released the pending indicator here.
@@ -3213,6 +3374,26 @@ export class WebSocketAdapter implements EngineAdapter {
         if (pending) {
           this.pendingInteractionPreviews.delete(data.preview.requestId);
           pending.resolve(data.preview);
+        }
+        break;
+      }
+
+      case "SayPhraseExpiry": {
+        const data = msg.data as { request_id: number; target?: SayPhraseExpiryTarget | null };
+        const pending = this.pendingSayPhraseExpiries.get(data.request_id);
+        if (pending) {
+          this.pendingSayPhraseExpiries.delete(data.request_id);
+          pending.resolve(data.target ?? null);
+        }
+        break;
+      }
+
+      case "SayPhraseExpiryFailed": {
+        const data = msg.data as { request_id: number; message: string };
+        const pending = this.pendingSayPhraseExpiries.get(data.request_id);
+        if (pending) {
+          this.pendingSayPhraseExpiries.delete(data.request_id);
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
         }
         break;
       }

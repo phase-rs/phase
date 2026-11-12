@@ -152,6 +152,7 @@ pub(crate) enum ResyncPoint {
     Enqueued,
     ActionPreflight,
     Encoding,
+    Decode,
 }
 
 #[derive(Default)]
@@ -161,6 +162,7 @@ struct ResyncGates {
     enqueued: Option<Arc<BootstrapGate>>,
     action_preflight: Option<Arc<BootstrapGate>>,
     encoding: Option<Arc<BootstrapGate>>,
+    decode: Option<Arc<BootstrapGate>>,
 }
 
 impl ResyncGates {
@@ -171,6 +173,7 @@ impl ResyncGates {
             ResyncPoint::Enqueued => &mut self.enqueued,
             ResyncPoint::ActionPreflight => &mut self.action_preflight,
             ResyncPoint::Encoding => &mut self.encoding,
+            ResyncPoint::Decode => &mut self.decode,
         }
     }
 }
@@ -204,6 +207,10 @@ impl Hooks {
 
     pub(crate) async fn before_resync_dispatch(&self) {
         self.resync_boundary(ResyncPoint::Dispatch, None).await;
+    }
+
+    pub(crate) async fn before_decode(&self) {
+        self.resync_boundary(ResyncPoint::Decode, None).await;
     }
 
     pub(crate) async fn after_resync_build(

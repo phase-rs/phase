@@ -294,6 +294,10 @@ pub fn run_ai_action(
             error,
         });
     }
+    // Un-card (no CR entry): the issued candidate carries no instant (its
+    // projection never reads a clock). This in-process driver is the AI's
+    // host, so it stamps a spoken saying with the instant it submits it.
+    let action = action.stamped_by_host(engine::util::host_clock::epoch_ms());
     let applied = if is_stack_recheck_pass {
         apply_verified_ai_priority_pass(state, actor, &contract, action.clone())
     } else {
