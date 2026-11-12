@@ -391,9 +391,12 @@ fn build_board(
     let db = shared_card_db()?;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    // Targets first, so the replacement permanents below do not prompt their
-    // setup entries; a copy-on-entry target first of all, while there is no
-    // creature for its as-enters copy to choose. Returned in target order.
+    // Copy-on-entry donors go first while there is no creature to copy.
+    // Otherwise targets precede the replacement permanents, avoiding setup
+    // prompts. Return sources in target order regardless of placement order.
+    for (player, name) in board.iter().filter(|(_, name)| SETUP_FIRST.contains(name)) {
+        scenario.add_real_card(*player, name, Zone::Battlefield, db);
+    }
     let mut placement: Vec<usize> = (0..targets.len()).collect();
     placement.sort_by_key(|&index| !SETUP_FIRST.contains(&targets[index]));
     let mut placed: Vec<(usize, ObjectId)> = placement
@@ -405,7 +408,7 @@ fn build_board(
         .collect();
     placed.sort_by_key(|(index, _)| *index);
     let sources = placed.into_iter().map(|(_, id)| id).collect();
-    for (player, name) in board {
+    for (player, name) in board.iter().filter(|(_, name)| !SETUP_FIRST.contains(name)) {
         scenario.add_real_card(*player, name, Zone::Battlefield, db);
     }
     Some((scenario, sources))
@@ -509,7 +512,28 @@ fn assert_end_step_exiles_every_token(mut driven: Driven) {
         })
         .expect("declare no attackers to cross combat");
     driven.runner.advance_to_end_step();
-    driven.runner.advance_until_stack_empty();
+    let mut exile_events = Vec::new();
+    for _ in 0..MAX_PROMPTS {
+        if driven.runner.state().stack.is_empty() {
+            break;
+        }
+        exile_events.extend(
+            driven
+                .runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority to resolve the delayed exile")
+                .events,
+        );
+    }
+    for token in &tokens {
+        assert!(
+            exile_events.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, to: Zone::Exile, .. } if object_id == token
+            )),
+            "the delayed trigger must actually exile token {token:?}"
+        );
+    }
     let state = driven.runner.state();
     let remaining: Vec<(ObjectId, String)> = tokens
         .iter()
@@ -2323,5 +2347,103 @@ fn r20_esix_distinct_donor(carry: PauseCarry) {
         .find(|id| driven.runner.state().objects[id].name == MEMNITE)
         .expect("REACH-GUARD: original donor remains before the end step");
     driven.sources.push(donor);
+    assert_end_step_exiles_every_token(driven);
+}
+
+/// CR 117.2e: the final as-enters copy answer must finish the enclosing spell
+/// before returning priority, including across persisted copy prompts.
+#[test]
+fn r23_esix_gargantuan_final_copy_answer_finishes_twinflame() {
+    r23_esix_gargantuan(PauseCarry::Live);
+}
+
+#[test]
+fn r23s_esix_gargantuan_final_copy_answer_across_save_and_restore() {
+    r23_esix_gargantuan(PauseCarry::SavedAndRestored);
+}
+
+fn r23_esix_gargantuan(carry: PauseCarry) {
+    let mut copy_choices = 0;
+    let mut replacements = Vec::new();
+    let driven = cast_twinflame_with(
+        &[BEARS],
+        &[(P0, QUICKSILVER_GARGANTUAN), (P0, MEMNITE), (P0, ESIX)],
+        |waiting, driven| {
+            if !is_paused(&driven.runner) {
+                return None;
+            }
+            match carry {
+                PauseCarry::Live => {}
+                PauseCarry::SavedAndRestored => driven.runner = save_and_restore(&driven.runner),
+            }
+            match waiting {
+                WaitingFor::ReplacementChoice {
+                    player, candidates, ..
+                } => {
+                    assert_eq!(*player, P0);
+                    let source = if only_from(candidates, ESIX) {
+                        ESIX
+                    } else {
+                        QUICKSILVER_GARGANTUAN
+                    };
+                    replacements.push(source);
+                    let index = if source == ESIX {
+                        accept_index(candidates, ESIX)
+                    } else {
+                        assert_eq!(
+                            copy_choices, 1,
+                            "the substitute token offers its entry choice"
+                        );
+                        assert_eq!(candidates.len(), 2);
+                        assert!(candidates
+                            .iter()
+                            .all(|candidate| !driven.pre.contains(&candidate.source_id)));
+                        candidates
+                            .iter()
+                            .position(|candidate| candidate.description != "Decline")
+                            .expect("the entry copy offers acceptance")
+                    };
+                    Some(GameAction::ChooseReplacement { index })
+                }
+                WaitingFor::CopyTargetChoice {
+                    player,
+                    valid_targets,
+                    ..
+                } => {
+                    assert_eq!(*player, P0);
+                    let name = match copy_choices {
+                        0 => QUICKSILVER_GARGANTUAN,
+                        1 => MEMNITE,
+                        _ => panic!("unexpected third copy choice"),
+                    };
+                    copy_choices += 1;
+                    let donor = driven
+                        .pre
+                        .iter()
+                        .copied()
+                        .find(|id| driven.runner.state().objects[id].name == name)
+                        .expect("original donor exists");
+                    assert!(valid_targets.contains(&donor));
+                    Some(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(donor)),
+                    })
+                }
+                _ => None,
+            }
+        },
+    );
+    let Some(mut driven) = driven else {
+        return;
+    };
+    assert_eq!(copy_choices, 2, "both copy prompts were answered");
+    assert_eq!(replacements, vec![ESIX, QUICKSILVER_GARGANTUAN]);
+    let tokens = driven.created_tokens();
+    assert_eq!(tokens.len(), 1);
+    let token = &driven.runner.state().objects[&tokens[0]];
+    assert_eq!(token.name, MEMNITE);
+    assert_eq!((token.power, token.toughness), (Some(7), Some(7)));
+    assert_eq!(driven.runner.state().last_created_token_ids, tokens);
+    assert_eq!(assert_referent_is_every_token(&driven), tokens);
+    driven.sources = driven.pre.iter().copied().collect();
     assert_end_step_exiles_every_token(driven);
 }
