@@ -960,6 +960,9 @@ pub fn resolve(
     // was put onto the stack (activated) or triggered (triggered) but before its
     // initial one-shot zone change, the object does not move.
     if until_event_already_occurred(state, ability, events) {
+        // CR 609.3 + CR 608.2c: nothing moved, so a following "this way"
+        // count reads 0 rather than an earlier chain step's count.
+        state.last_effect_count = Some(0);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -1041,6 +1044,7 @@ pub fn resolve(
     if matches!(target_filter, TargetFilter::ParentTarget)
         && ability.parent_target_missing_reason.is_some()
     {
+        state.last_effect_count = Some(0);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -1099,9 +1103,16 @@ pub fn resolve(
         // Exception: when `target_choice_timing == Resolution` the player has not
         // yet had a chance to choose — targets are empty by design and the zone-scan
         // path must be reached so `EffectZoneChoice` can be issued.
+        //
+        // Every early return in this empty-targets block moved nothing, so each
+        // stamps `last_effect_count = Some(0)` before returning. CR 609.3: the
+        // move did only as much as possible (nothing); CR 608.2c: a following
+        // "this way" step (`QuantityRef::PreviousEffectCount`) must read that 0,
+        // not inherit a count an earlier chain step left behind.
         if ability.targeting_is_optional()
             && !matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution)
         {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1115,6 +1126,7 @@ pub fn resolve(
         // remains (for example, a Warp delayed exile after a blink), the zone-scan
         // fallback must not rediscover a same-id return by raw equality.
         if matches!(target_filter, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1131,6 +1143,7 @@ pub fn resolve(
             ability,
             target_filter,
         ) {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1152,6 +1165,7 @@ pub fn resolve(
         // (CR 603.7b) — it simply affected nothing, and the game log / event
         // observers / chain machinery must see that.
         if ability.pinned_object_targets_all_stale(state) {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1168,6 +1182,7 @@ pub fn resolve(
         // which would otherwise find nothing only through `filter.rs`'s slot
         // arm and would set `cost_payment_failed_flag` on the way out.
         if matches!(target_filter, TargetFilter::ParentTargetSlot { .. }) {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1207,6 +1222,7 @@ pub fn resolve(
         if (origin == Some(Zone::Library) || origin.is_none())
             && matches!(target_filter, TargetFilter::Any)
         {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1275,6 +1291,7 @@ pub fn resolve(
             if !up_to {
                 state.cost_payment_failed_flag = true;
             }
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -11123,6 +11140,162 @@ mod tests {
             "targeted multi-object ChangeZone must record moved-object count for \
              EventContextAmount consumers (Vengeful Regrowth 'create that many')"
         );
+    }
+
+    /// One unbound-referent move: an exile of `target` whose follower gains life
+    /// equal to `QuantityRef::PreviousEffectCount` (the "this way" count).
+    fn unbound_exile_then_gain_previous_count(
+        state: &GameState,
+        source: ObjectId,
+        target: TargetFilter,
+    ) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                library_shuffle: Default::default(),
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::PreviousEffectCount,
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        ));
+        ability.trigger_source = Some(crate::game::triggers::trigger_source_context_for_latch(
+            state,
+            &state.objects[&source],
+        ));
+        ability
+    }
+
+    /// CR 609.3 + CR 608.2c: every early return in ChangeZone's empty-targets
+    /// block moved nothing, so it stamps `last_effect_count = Some(0)`; a
+    /// following "this way" count reads 0, not a count an earlier chain step
+    /// left behind. Covers the inferred-source-unbound guard (an untargeted
+    /// "it" whose source departed), the SelfRef guard (the source left and
+    /// returned, CR 400.7), and the empty `ParentTargetSlot` guard (CR 608.2b).
+    /// Real cards: no printed card is this exact chain; the guards are shared
+    /// by every untargeted-anaphor move, and the follower stands for the "for
+    /// each card exiled this way" class.
+    #[test]
+    fn empty_target_guards_stamp_zero_moved_for_a_following_this_way_count() {
+        let creature = |state: &mut GameState| {
+            let id = create_object(
+                state,
+                CardId(1),
+                PlayerId(0),
+                "Source".into(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            id
+        };
+
+        // Inferred "it": the source died before the ability resolved.
+        let mut state = GameState::new_two_player(42);
+        let source = creature(&mut state);
+        let inferred =
+            unbound_exile_then_gain_previous_count(&state, source, TargetFilter::ParentTarget);
+        let mut events = Vec::new();
+        zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        assert!(
+            crate::game::targeting::inferred_source_referent_is_unbound(
+                &state,
+                &inferred,
+                &TargetFilter::ParentTarget
+            ),
+            "reach: the inferred-source-unbound guard is the branch under test"
+        );
+        // Sibling guards (SelfRef, ParentTargetSlot) are ordered before or after
+        // it; a SelfRef blink and an empty slot reach their own guards.
+        let mut self_ref_state = GameState::new_two_player(42);
+        let self_ref_source = creature(&mut self_ref_state);
+        let self_ref = unbound_exile_then_gain_previous_count(
+            &self_ref_state,
+            self_ref_source,
+            TargetFilter::SelfRef,
+        );
+        zones::move_to_zone(
+            &mut self_ref_state,
+            self_ref_source,
+            Zone::Exile,
+            &mut events,
+        );
+        zones::move_to_zone(
+            &mut self_ref_state,
+            self_ref_source,
+            Zone::Battlefield,
+            &mut events,
+        );
+        assert!(
+            !self_ref.self_ref_is_current(&self_ref_state),
+            "reach: the SelfRef guard is the branch under test"
+        );
+        let mut slot_state = GameState::new_two_player(42);
+        let slot_source = creature(&mut slot_state);
+        let slot = unbound_exile_then_gain_previous_count(
+            &slot_state,
+            slot_source,
+            TargetFilter::ParentTargetSlot { index: 0 },
+        );
+
+        for (label, mut state, ability, source, source_zone) in [
+            ("inferred", state, inferred, source, Zone::Graveyard),
+            (
+                "self_ref",
+                self_ref_state,
+                self_ref,
+                self_ref_source,
+                Zone::Battlefield,
+            ),
+            ("slot", slot_state, slot, slot_source, Zone::Battlefield),
+        ] {
+            // A prior chain step's nonzero count.
+            state.last_effect_count = Some(3);
+            let life_before = state.players[0].life;
+            let mut events = Vec::new();
+            crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+                .unwrap();
+            assert_eq!(
+                state.objects[&source].zone, source_zone,
+                "{label}: nothing moved"
+            );
+            assert_eq!(
+                state.last_effect_count,
+                Some(0),
+                "{label}: the guard stamps zero moved"
+            );
+            assert_eq!(
+                state.players[0].life, life_before,
+                "{label}: the following PreviousEffectCount read 0, not the stale 3"
+            );
+        }
     }
 
     /// CR 110.2a + CR 400.7: Mass graveyard-to-battlefield effects that state

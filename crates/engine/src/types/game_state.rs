@@ -315,6 +315,23 @@ fn default_remaining_one() -> u32 {
     1
 }
 
+/// Keep only the entries of an incarnation-keyed LKI table whose
+/// `(object, incarnation)` is in `sources`; objects left with no entry go.
+fn retain_named_incarnations<T: Clone>(
+    table: im::HashMap<ObjectId, im::HashMap<u64, T>>,
+    sources: &HashSet<ObjectIncarnationRef>,
+) -> im::HashMap<ObjectId, im::HashMap<u64, T>> {
+    table
+        .into_iter()
+        .filter_map(|(object_id, mut history)| {
+            history.retain(|incarnation, _| {
+                sources.contains(&ObjectIncarnationRef::of(object_id, *incarnation))
+            });
+            (!history.is_empty()).then_some((object_id, history))
+        })
+        .collect()
+}
+
 fn initial_logical_zone_change_group_id() -> u64 {
     1
 }
@@ -35818,16 +35835,22 @@ impl GameState {
         &mut self,
         sources: &HashSet<ObjectIncarnationRef>,
     ) {
-        self.lki_copiable_values_by_incarnation =
-            std::mem::take(&mut self.lki_copiable_values_by_incarnation)
-                .into_iter()
-                .filter_map(|(object_id, mut history)| {
-                    history.retain(|incarnation, _| {
-                        sources.contains(&ObjectIncarnationRef::of(object_id, *incarnation))
-                    });
-                    (!history.is_empty()).then_some((object_id, history))
-                })
-                .collect();
+        self.lki_copiable_values_by_incarnation = retain_named_incarnations(
+            std::mem::take(&mut self.lki_copiable_values_by_incarnation),
+            sources,
+        );
+    }
+
+    /// CR 608.2h + CR 707.2: the step-transition prune of the incarnation-keyed
+    /// LKI. A pending copy of its own departed source reads both that
+    /// incarnation's last-known copiable values and its departure snapshot
+    /// (`token_copy::CopySource::last_known` takes the token image from
+    /// `lki_by_incarnation`), so both tables keep exactly the incarnations in
+    /// `sources` and drop the rest as history.
+    pub(crate) fn retain_own_copy_source_lki(&mut self, sources: &HashSet<ObjectIncarnationRef>) {
+        self.retain_own_copy_source_values(sources);
+        self.lki_by_incarnation =
+            retain_named_incarnations(std::mem::take(&mut self.lki_by_incarnation), sources);
     }
 
     /// CR 104.4b + CR 608.2h: keeps only the `departed_stack_spells` records a spell-cast

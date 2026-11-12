@@ -733,6 +733,89 @@ fn esoteric_duplicator_sacrificed_to_itself_copies_at_end_step() {
     assert_eq!(copies, 1);
 }
 
+/// CR 608.2h + CR 707.2 + CR 603.7e: a token Esoteric Duplicator (itself an
+/// earlier Duplicator copy) sacrificed to its own ability in the main phase
+/// makes its delayed copy at the end step, several real step transitions later.
+/// Each step clear keeps the captured incarnation's last-known copiable values
+/// AND its departure snapshot, whose token image the copy displays; the token
+/// source ceases to exist (CR 111.7), so last known information is the only
+/// place either can come from.
+#[test]
+fn esoteric_duplicator_token_copy_keeps_its_departed_source_image_across_steps() {
+    use engine::game::game_object::DisplaySource;
+    use engine::types::card::TokenImageRef;
+
+    let mut scenario = scenario();
+    let duplicator = scenario
+        .add_artifact_from_oracle(P0, "Esoteric Duplicator", ESOTERIC_DUPLICATOR)
+        .id();
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
+    let mut runner = scenario.build();
+    let image = TokenImageRef {
+        scryfall_id: "esoteric-duplicator-token-image".to_string(),
+        scryfall_oracle_id: None,
+        face_name: None,
+        preset_id: "esoteric-duplicator".to_string(),
+    };
+    {
+        let source = runner.state_mut().objects.get_mut(&duplicator).unwrap();
+        source.is_token = true;
+        source.display_source = DisplaySource::Token;
+        source.token_image_ref = Some(image.clone());
+    }
+
+    let ability_index = runner.state().objects[&duplicator]
+        .abilities
+        .iter()
+        .position(|a| a.cost.is_some())
+        .expect("the sacrifice ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: duplicator,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("{2} and the sacrifice are payable");
+    let offered = resolve_stack(&mut runner, Optional::Accept);
+    assert_eq!(offered, 1, "reach: the {{2}} payment was offered");
+    assert!(
+        runner
+            .state()
+            .objects
+            .get(&duplicator)
+            .is_none_or(|object| object.zone != Zone::Battlefield),
+        "reach: the token source left the battlefield"
+    );
+    assert_eq!(
+        runner.state().phase,
+        Phase::PreCombatMain,
+        "reach: the copy is pending across the steps to the end step"
+    );
+
+    pass_until(&mut runner, |r| r.state().phase == Phase::End);
+    resolve_stack(&mut runner, Optional::Decline);
+    let copies: Vec<_> = runner
+        .state()
+        .battlefield
+        .iter()
+        .map(|id| &runner.state().objects[id])
+        .filter(|object| object.is_token && object.id != duplicator)
+        .collect();
+    assert_eq!(copies.len(), 1, "one delayed copy was created");
+    let copy = copies[0];
+    // CR 707.2: the captured incarnation's copiable values.
+    assert_eq!(copy.name, "Esoteric Duplicator");
+    assert!(
+        copy.abilities.iter().any(|a| a.cost.is_some()),
+        "the copy has the source's sacrifice ability"
+    );
+    // The departed token source's image survives every step clear.
+    assert_eq!(copy.token_image_ref.as_ref(), Some(&image));
+    assert_eq!(copy.display_source, DisplaySource::Token);
+}
+
 // --- Obzedat, Ghost Council: delayed own-source return (A13, A13h) ---
 
 fn obzedat_exiled_at_end_step() -> (GameScenario, ObjectId) {
