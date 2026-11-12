@@ -94,6 +94,7 @@ pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -295,6 +296,7 @@ pub(crate) fn relax_x_mana_value_constraint(filter: &TargetFilter) -> TargetFilt
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -2063,6 +2065,8 @@ fn has_enough_tap_creatures(
     let ctx = FilterContext::from_source_with_controller(source, player)
         .with_granting_object(granting_object);
     let eligible = state.battlefield.iter().copied().filter(|&id| {
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_tap_creature_cost_visit();
         if exclude_source && id == source {
             return false;
         }

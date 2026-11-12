@@ -14,6 +14,7 @@ import { Trans, useTranslation } from "react-i18next";
 import type { ParseKeys, TFunction } from "i18next";
 
 import type {
+  ChallengeDeck,
   CompanionRevealChoice,
   DeckCardCount,
   FormatConfig,
@@ -192,6 +193,7 @@ import {
   type PlayerSlot,
 } from "../stores/multiplayerStore.ts";
 import { formatMetadata, isSetupFormat } from "../data/formatRegistry.ts";
+import { withChallengeDeck } from "../data/challengeDeckRegistry.ts";
 import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore.ts";
 import { SpectatorChrome } from "../components/spectator/SpectatorChrome.tsx";
 import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
@@ -293,6 +295,8 @@ export function GamePage() {
   const difficulty = searchParams.get("difficulty") ?? "Medium";
   const joinCode = searchParams.get("code") ?? "";
   const formatParam = searchParams.get("format") as GameFormat | null;
+  // Which self-piloting Horde deck the survivors face (Horde format only).
+  const hordeDeckParam = searchParams.get("hordeDeck") as ChallengeDeck | null;
   const playersParam = searchParams.get("players");
   const matchParam = searchParams.get("match");
   const loopParam = searchParams.get("loop");
@@ -329,14 +333,21 @@ export function GamePage() {
   // treats as new). The explicit memo makes the stability guarantee
   // self-documenting.
   const formatConfig = useMemo(() => {
-    if (isDirectSoloRouteMode(rawMode)) {
-      if (savedFormatConfig && isDirectSetupFormat(savedFormatConfig.format)) {
-        return savedFormatConfig;
+    const base = (() => {
+      if (isDirectSoloRouteMode(rawMode)) {
+        if (savedFormatConfig && isDirectSetupFormat(savedFormatConfig.format)) {
+          return savedFormatConfig;
+        }
+        return setupFormatConfig ?? directSetupFormatConfig(formatParam);
       }
-      return setupFormatConfig ?? directSetupFormatConfig(formatParam);
-    }
-    return savedFormatConfig ?? (formatParam ? FORMAT_DEFAULTS[formatParam] : undefined);
-  }, [formatParam, rawMode, savedFormatConfig, setupFormatConfig]);
+      return savedFormatConfig ?? (formatParam ? FORMAT_DEFAULTS[formatParam] : undefined);
+    })();
+    // Horde: apply the challenge deck picked on the setup screen. The engine owns
+    // each deck's rules, so this swaps in that deck's whole `HordeRuleset` (wave
+    // policy, setup turns, life deltas) rather than only the deck id — see
+    // `withChallengeDeck`. No-ops for non-Horde formats and unknown decks.
+    return base && hordeDeckParam ? withChallengeDeck(base, hordeDeckParam) : base;
+  }, [formatParam, rawMode, savedFormatConfig, setupFormatConfig, hordeDeckParam]);
   // CR 103.1: 0 = play first, 1 = draw first, undefined = random
   const firstPlayer = firstParam === "play" ? 0 : firstParam === "draw" ? 1 : undefined;
   const matchConfig = useMemo<MatchConfig>(
@@ -1084,6 +1095,8 @@ function GamePageContent({
   );
   const debugPanelOpen = useUiStore((s) => s.debugPanelOpen);
   const debugClickModeButtonVisible = useUiStore((s) => s.debugClickModeButtonVisible);
+  const debugInteractionMode = useUiStore((s) => s.debugInteractionMode);
+  const toggleDebugInteractionMode = useUiStore((s) => s.toggleDebugInteractionMode);
   const logPanelOpen = useUiStore((s) => s.logPanelOpen);
   const toggleDebugClickModeButtonVisible = useUiStore(
     (s) => s.toggleDebugClickModeButtonVisible,
@@ -1264,7 +1277,8 @@ function GamePageContent({
     navigate("/");
   }, [isOnlineMode, gameId, handleConcede, navigate]);
 
-  useKeyboardShortcuts();
+  const sandboxToolsAvailable = mode === "ai" || mode === "local" || isSandboxGame;
+  useKeyboardShortcuts({ sandboxToolsAvailable });
 
   // Priority-attention cues: one controller writes the store; each cue reads it.
   usePriorityAttentionController();
@@ -1848,8 +1862,10 @@ function GamePageContent({
             : undefined
         }
         takebackAudience={hasRemoteHumans(storeGameMode) ? "table" : "solo"}
-        showSandboxTools={mode === "ai" || mode === "local" || isSandboxGame}
+        showSandboxTools={sandboxToolsAvailable}
         onSandboxToolsClick={() => useUiStore.getState().openSandboxTools()}
+        debugInteractionMode={debugInteractionMode}
+        onToggleDebugInteractionMode={sandboxToolsAvailable ? toggleDebugInteractionMode : undefined}
         debugClickModeButtonVisible={debugClickModeButtonVisible}
         onToggleDebugClickModeButtonVisible={toggleDebugClickModeButtonVisible}
         showReportCard={canReportCard}
@@ -2716,6 +2732,8 @@ function MulliganDecisionPrompt({
               >
                 <CardImage
                   cardName={obj.name}
+                  ownerPrinting={obj.printing}
+                  ownerPrintedRef={obj.printed_ref}
                   size="normal"
                   className="h-[clamp(200px,40vh,360px)] w-[clamp(143px,28.6vh,257px)]"
                 />
@@ -2939,6 +2957,8 @@ function MulliganBottomCardsPrompt({
                 >
                   <CardImage
                     cardName={obj.name}
+                    ownerPrinting={obj.printing}
+                    ownerPrintedRef={obj.printed_ref}
                     size="normal"
                     className="h-[clamp(200px,40vh,360px)] w-[clamp(143px,28.6vh,257px)]"
                   />
@@ -3465,6 +3485,7 @@ function AbilityChoiceModal() {
       footer={<CardTextReference text={localized?.oracle_text} />}
       subtitle={subtitle}
       previewCardName={obj.name}
+      previewObjectId={obj.id}
       previewCardTypes={obj.card_types}
       options={[
         ...pending.actions.map((action, i) => {

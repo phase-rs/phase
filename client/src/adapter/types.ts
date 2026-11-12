@@ -170,6 +170,7 @@ export type BuiltInGameFormat =
   | "PlanechaseCommander"
   | "Limited"
   | "Momir"
+  | "Horde"
   | "CommanderDraft"
   | "Freeform"
   | "FreeformCommander"
@@ -333,6 +334,175 @@ export interface CustomFormatDef {
 export type FormatGroup = "Constructed" | "Commander" | "Multiplayer" | "Limited";
 
 /**
+ * Which self-piloting Horde deck a `GameFormat.Horde` game uses. Mirrors the
+ * engine `ChallengeDeck` enum (`crates/engine/src/types/format.rs`).
+ */
+export type ChallengeDeck =
+  | "CybermanHorde"
+  | "DndHorde"
+  | "ZombiesHorde"
+  | "SliversHorde"
+  | "HumansGodzillaHorde"
+  | "SauronHorde"
+  | "SarumanHorde"
+  | "LotrTwoTowersHorde"
+  | "TurtleTeamUpHorde";
+
+/**
+ * Card rarity. Mirrors the engine `Rarity` enum (serde `rename_all =
+ * "lowercase"`).
+ */
+export type Rarity = "common" | "uncommon" | "rare" | "mythic" | "special" | "bonus";
+
+/**
+ * How many NON-token cards an `UntilNonToken` wave must resolve before it ends.
+ * Mirrors the engine `WaveCount` enum (serde `tag = "type", content = "data"`).
+ *
+ * `Snaking` ramps the count from `min` up to `max` and back down each Horde
+ * turn — the Zombies Horde's difficulty cycle.
+ */
+export type WaveCount =
+  | { type: "Fixed"; data: number }
+  | { type: "Snaking"; data: { min: number; max: number } };
+
+/**
+ * How a Horde turn sizes its reveal-and-resolve wave. Mirrors the engine
+ * `WaveTermination` enum (serde `tag = "type", content = "data"`).
+ */
+export type WaveTermination =
+  | { type: "FixedCount"; data: number }
+  | { type: "UntilNonToken"; data: { count: WaveCount } }
+  | { type: "UntilRarityAtLeast"; data: Rarity };
+
+/**
+ * How the Horde treats its own legendary permanent cards when they would be
+ * milled to its graveyard by damage. Mirrors the engine `HordeLegendaryDeath`
+ * enum. `EtbThenPhaseOut` is the advanced community rule (Walking Dead, Stranger
+ * Things): a milled legendary enters the battlefield (ETB triggers) then phases
+ * out, returning as a recurring boss. Basic decks use `Normal`.
+ */
+export type HordeLegendaryDeath = "Normal" | "EtbThenPhaseOut";
+
+/**
+ * Whether the engine-scripted Horde activates its permanents' activated abilities
+ * during its post-combat main phase. Mirrors the engine `HordePostCombatActivation`
+ * enum. `OncePerPermanent` is the advanced community rule (each permanent activates
+ * one non-mana ability once per turn, with the Horde's infinite mana). Basic decks
+ * use `None`.
+ */
+export type HordePostCombatActivation = "None" | "OncePerPermanent";
+
+/**
+ * The deck-construction format survivors bring to a Horde game (per-deck).
+ * `Constructed` = 60-card constructed; `Commander` = 100-card singleton EDH.
+ * Mirrors the engine `SurvivorDeckFormat` enum.
+ */
+export type SurvivorDeckFormat = "Constructed" | "Commander";
+
+/**
+ * Per-deck Horde rules carried on a `GameFormat.Horde` `FormatConfig`. Mirrors
+ * the engine `HordeRuleset` struct. The frontend only reads this; the engine is
+ * the source of truth for the rules.
+ */
+export interface HordeRuleset {
+  challenge_deck: ChallengeDeck;
+  wave: WaveTermination;
+  survivor_setup_turns: number;
+  /**
+   * The survivors' shared combined life total with a single survivor — the base
+   * the per-survivor delta adjusts from (community rules: 100). Mirrors the
+   * engine `HordeRuleset::combined_base_life`.
+   */
+  combined_base_life: number;
+  per_extra_survivor_life_delta: number;
+  horde_creatures_forced_attackers: boolean;
+  /**
+   * Whether the Horde's creatures have haste. True for the classic mill-race
+   * Hordes; false for default Turtle Team-Up (booklet p. 6 excludes newly
+   * entered creatures from that turn's combat). Mirrors the engine
+   * `HordeRuleset::horde_creatures_haste` — required here (the engine always
+   * serializes it) so deck selection can never silently drop the axis and
+   * fall back to the engine's absent-means-true default.
+   */
+  horde_creatures_haste: boolean;
+  /**
+   * How the Horde's legendary cards are treated when milled by damage. Optional
+   * here (like the engine's `#[serde(default)]`) so pre-axis serialized configs
+   * still parse; the engine's registry always emits it. Absent ⇒ `Normal`.
+   */
+  legendary_death?: HordeLegendaryDeath;
+  /**
+   * Whether the Horde activates its permanents' abilities post-combat. Optional
+   * (engine `#[serde(default)]`); the registry always emits it. Absent ⇒ `None`.
+   */
+  post_combat_activation?: HordePostCombatActivation;
+  /**
+   * The deck-construction format survivors bring (per-deck). Optional (engine
+   * `#[serde(default)]`); the registry always emits it. Absent ⇒ `Constructed`.
+   */
+  survivor_deck_format?: SurvivorDeckFormat;
+  /**
+   * Additional Horde libraries beyond `challenge_deck`, one per extra Horde seat
+   * (the LOTR two-Horde pairing). Omitted for single-Horde decks
+   * (`skip_serializing_if` empty). Absent ⇒ no co-hordes.
+   */
+  co_horde_decks?: ChallengeDeck[];
+  /**
+   * Staged boss-deck configuration (Turtle Team-Up class): the Boss team fights
+   * in stages sharing one life total per stage instead of the classic mill
+   * race. Omitted for classic decks (`skip_serializing_if` none). Absent ⇒ no
+   * Boss stages.
+   */
+  boss_stages?: BossStages;
+}
+
+/**
+ * Staged boss-deck configuration. Mirrors the engine `BossStages` struct.
+ */
+export interface BossStages {
+  /** Bosses deployed per stage in order — `[1, 2, 3]` for Turtle Team-Up. */
+  stage_sizes: number[];
+  /** Boss life at the start of each stage with fewer than four survivors. */
+  life_base: number;
+  /** Boss life at the start of each stage with four or more survivors. */
+  life_at_four_survivors: number;
+}
+
+/**
+ * One labeled line of a Horde deck's human-readable rules summary. Mirrors the
+ * engine `RuleSummaryLine` struct, rendered by `HordeRuleset::summary()`. The
+ * frontend displays these verbatim — the engine owns the wording so the display
+ * layer never derives rules prose from the structured `HordeRuleset` itself.
+ */
+export interface RuleSummaryLine {
+  /** Short category label, e.g. "Waves", "Survivor life", "Setup". */
+  label: string;
+  /** This deck's behavior for that category, human-readable. */
+  detail: string;
+}
+
+/**
+ * Display metadata for one selectable Horde challenge deck. Mirrors the engine
+ * `ChallengeDeckMetadata` struct, emitted by the `getChallengeDeckRegistry` WASM
+ * export. Adding a Horde deck is a single engine-side change — the deck picker
+ * renders this list, so the client never hardcodes which decks exist.
+ *
+ * `default_ruleset` is bundled so a picked entry can be turned into a complete
+ * `FormatConfig` without a second engine call. `rules` is the engine-authored,
+ * human-readable breakdown of that ruleset (one line per axis) for the picker to
+ * show HOW the deck plays — never re-derived on the client from `default_ruleset`.
+ */
+export interface ChallengeDeckMetadata {
+  deck: ChallengeDeck;
+  label: string;
+  short_label: string;
+  description: string;
+  default_ruleset: HordeRuleset;
+  resolved_config: FormatConfig;
+  rules: RuleSummaryLine[];
+}
+
+/**
  * CR 100.4 / CR 100.4a: format-specific sideboard policy, mirroring the
  * engine's tagged `SideboardPolicy` enum.
  */
@@ -401,8 +571,16 @@ export interface FormatConfig {
    * sent with every format configuration, mirroring `sideboard_policy`'s own
    * required-field convention above. */
   default_deck_copy_limit: DeckCopyLimit;
-  /** Configured archenemy seat for default Archenemy. Absent outside Archenemy. */
+  /**
+   * Configured archenemy seat for default Archenemy. Absent outside Archenemy.
+   * Also used by Horde: the server remaps it to the AI (Horde) seat at game start.
+   */
   archenemy_player?: PlayerId | null;
+  /**
+   * Per-deck Horde rules; present only for `GameFormat.Horde` (mirrors the
+   * engine's `#[serde(skip_serializing_if = "Option::is_none")]`).
+   */
+  horde_ruleset?: HordeRuleset | null;
   /**
    * Sandbox capability flag: when true the server permits `GameAction.Debug(_)`
    * from any player in the `debug_permitted` set. Off by default. Orthogonal
@@ -554,6 +732,26 @@ export interface MatchScore {
   draws: number;
 }
 
+/** Mirrors the engine's `DeckSection`: the deck-list field a printing annotates.
+ *  `"unknown"` is a section a newer peer sent that this build does not know. */
+export type DeckSection =
+  | "main_deck" | "sideboard" | "commander" | "companion" | "attraction_deck"
+  | "planar_deck" | "scheme_deck" | "contraption_deck" | "signature_spell" | "unknown";
+
+/** Mirrors the engine's `CardPrinting`. */
+export interface CardPrinting {
+  set_code: string;
+  collector_number: string;
+}
+
+/** Mirrors the engine's `DeckPrinting`: an owner's explicit printing for `count` copies. */
+export interface DeckPrinting {
+  section: DeckSection;
+  name: string;
+  count: number;
+  printing: CardPrinting;
+}
+
 /** Name-only per-player deck list, mirroring the engine's `PlayerDeckList`. */
 export interface ReplayPlayerDeckList {
   main_deck: string[];
@@ -565,6 +763,8 @@ export interface ReplayPlayerDeckList {
   sticker_sheets: string[];
   signature_spell: string[];
   bracket_tier: string;
+  /** The owner's explicit printing choices; display-only. Absent when empty. */
+  printings?: DeckPrinting[];
 }
 
 /** Mirrors the engine's `DeckList` — the name-only deck payload `initializeGame` accepts. */
@@ -1747,6 +1947,7 @@ export interface GameObject {
   goaded_by?: PlayerId[];
   casting_permissions?: CastingPermission[];
   is_emblem?: boolean;
+  is_conspiracy?: boolean;
   /**
    * CR 114: Display-only provenance of the source that created this emblem
    * (e.g. the planeswalker whose ultimate made it). The frontend renders the
@@ -1754,7 +1955,11 @@ export interface GameObject {
    * label. Distinct from `printed_ref` — an emblem is not represented by that
    * card (CR 114.5); this is purely presentational. Present only on emblems.
    */
-  emblem_source?: { name: string; printed_ref?: PrintedRef | null } | null;
+  emblem_source?: {
+    name: string;
+    printed_ref?: PrintedRef | null;
+    printing?: CardPrinting | null;
+  } | null;
   /**
    * CR 111.1: Whether this object is a token (not a card). Independent of
    * `display_source`: a token-copy of a real card (Twinflame, Helm of the
@@ -1812,6 +2017,9 @@ export interface GameObject {
    * generic tokens) may not carry a printed identity.
    */
   printed_ref?: PrintedRef | null;
+  /** Display-only printing of the physical card (CR 203.1/206.1); absent when the owner
+   *  chose none or the viewer may not see it. */
+  printing?: CardPrinting | null;
   back_face?: {
     name: string;
     power: number | null;
@@ -1994,6 +2202,9 @@ export interface LibrarySearchCardView {
   zone: Zone;
   identity: ObjectIncarnationRef;
   card_id: CardId;
+  /** Display-only printing of the physical card (CR 203.1/206.1); absent when the owner
+   *  chose none or the viewer may not see it. */
+  printing?: CardPrinting | null;
   current_face: LibrarySearchCardFaceView;
   front_face: LibrarySearchCardFaceView;
   back_face?: LibrarySearchCardFaceView | null;
@@ -2015,6 +2226,12 @@ export interface CardFacePartial {
 export interface CompanionInfo {
   card: { card: CardFacePartial; count: number };
   used: boolean;
+  /**
+   * CR 702.139a + CR 203.1 + CR 206.1: the owner's printing of the revealed
+   * companion, captured at the reveal from the source it was revealed from
+   * (display-only). Absent when the engine recorded none.
+   */
+  printing?: CardPrinting | null;
 }
 
 export type CompanionChoiceSource =
@@ -2045,6 +2262,16 @@ export type PlayerStatus =
 export interface Player {
   id: PlayerId;
   life: number;
+  /**
+   * Engine-derived: this seat has NO life total, so `life` is meaningless for it
+   * and must not be presented as a resource. True only for the Horde seat in a
+   * `Horde` game — damage and life loss are redirected into milling its library,
+   * and it is defeated when that library runs out.
+   *
+   * Render the seat's library count instead (see `LifeTotal`). Never infer this
+   * from format/archenemy on the client; the engine publishes it.
+   */
+  has_no_life_total?: boolean;
   poison_counters: number;
   speed?: number | null;
   mana_pool: ManaPool;
@@ -2254,6 +2481,11 @@ export type StackAbilityKindView =
 export interface StackEntryDisplay {
   source_name: string;
   token_image_ref?: TokenImageRef | null;
+  /** Display-only printing of the physical card (CR 203.1/206.1); absent when the owner
+   *  chose none or the viewer may not see it. */
+  printing?: CardPrinting | null;
+  /** Oracle and face authority from the row printing's selected source read. */
+  printed_ref?: PrintedRef | null;
   kind_label: string;
   ability_kind?: StackAbilityKindView;
   ability_description?: string;
@@ -2743,6 +2975,19 @@ export interface ContestState {
   result?: ContestResult | null;
 }
 
+/** Turtle Team-Up hero-choice Event kind. Mirrors `engine::types::game_state::HeroEventKind`. */
+export type HeroEventKind =
+  | { type: "ChromeOverload" }
+  | { type: "KrangStratagem"; data: { remaining: number } }
+  | { type: "Smackdown" }
+  | { type: "RatKingRevolution" }
+  | { type: "SavantiCurse" }
+  | { type: "Infiltration" }
+  | { type: "VillainMayhem" };
+
+/** One hero's recorded answer. Mirrors `engine::types::game_state::HeroEventAnswer`. */
+export type HeroEventAnswer = { hero: PlayerId; cards: ObjectId[] };
+
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | { type: "ResolveAllConsent"; data: { epoch: number; representative: PlayerId } }
@@ -2798,6 +3043,7 @@ export type WaitingFor =
   | { type: "RippleRevealChoice"; data: { player: PlayerId; source_id: ObjectId; count: number } }
   | { type: "RippleBottomOrder"; data: { player: PlayerId; source_id: ObjectId; cards: ObjectId[]; final_cast?: ObjectId | null } }
   | { type: "RevealUntilBottomOrder"; data: { player: PlayerId; source_id: ObjectId; cards: ObjectId[]; clear_markers?: ObjectId[]; emit_reveal_until_resolved?: ObjectId | null; reveal_until_hit_snapshot?: unknown } }
+  | { type: "DigBottomOrder"; data: { player: PlayerId; source_id: ObjectId; cards: ObjectId[] } }
   | { type: "ArrangePlanarDeckTopChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_on_top: number } }
   | { type: "RedistributeLifeTotals"; data: { player: PlayerId; options: { assignment: [PlayerId, number][] }[] } }
   | { type: "CoinFlipKeepChoice"; data: { player: PlayerId; results: boolean[]; keep_count: number } }
@@ -2914,6 +3160,7 @@ export type WaitingFor =
   | { type: "RepeatDecision"; data: { player: PlayerId; ability: unknown } }
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId; top_position?: LibraryPosition } }
   | { type: "PopulateChoice"; data: { player: PlayerId; source_id: ObjectId; valid_tokens: ObjectId[] } }
+  | { type: "SecretAgendaChoice"; data: { player: PlayerId; object_id: ObjectId; name_count: number } }
   | { type: "CompanionReveal"; data: { player: PlayerId; eligible_companions: CompanionRevealChoice[] } }
   | { type: "ChooseLegend"; data: { player: PlayerId; legend_name: string; candidates: ObjectId[] } }
   | { type: "CommanderZoneChoice"; data: { player: PlayerId; commander_id: ObjectId; current_zone: string } }
@@ -2930,7 +3177,7 @@ export type WaitingFor =
   // the active player divides that blocker's combat damage among the attackers
   // it's blocking (free division, no lethal ordering).
   | { type: "AssignBlockerDamage"; data: { player: PlayerId; blocker_id: ObjectId; total_damage: number; attackers: ObjectId[] } }
-  | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
+  | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit; scope?: DistributionScope } }
   | { type: "MoveCountersDistribution"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; destinations: ObjectId[]; pending_effect: unknown } }
   | { type: "RemoveCountersChoice"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; max_total?: number | null; pending_effect: unknown } }
   | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; up_to?: boolean; constraint?: ChooseFromZoneConstraint | null; source_id: ObjectId; reciprocal_role?: "Produce" | "Consume" | null } }
@@ -2967,6 +3214,7 @@ export type WaitingFor =
   | { type: "ChooseObjectsSelection"; data: { player: PlayerId; eligible: TargetRef[]; min: number; max?: number; trigger_event?: GameEvent } }
   | { type: "ConniveDiscard"; data: { player: PlayerId; conniver_id: ObjectId; source_id: ObjectId; cards: ObjectId[]; count: number } }
   | { type: "DiscardChoice"; data: { player: PlayerId; count: number; cards: ObjectId[]; source_id: ObjectId; effect_kind: string; up_to?: boolean; unless_filter?: TargetFilter } }
+  | { type: "HeroEventChoice"; data: { player: PlayerId; event: HeroEventKind; event_id: ObjectId; cards: ObjectId[]; count: number; up_to?: boolean; min?: number; remaining_heroes?: PlayerId[]; answers?: HeroEventAnswer[]; copies_pending: number; fired_baxters?: ObjectId[] } }
   | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[]; source_id: ObjectId } }
   | { type: "LearnChoice"; data: { player: PlayerId; hand_cards: ObjectId[] } }
   | { type: "ClashChooseOpponent"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
@@ -3155,6 +3403,16 @@ export type MulliganChoice =
 
 // ── Distribution ─────────────────────────────────────────────────────────
 
+/**
+ * CR 601.2d / CR 608.2d: when a `DistributeAmong` division is chosen. Absent on
+ * the wire for the announce-time default (`AnnouncedTargets`: every announced
+ * target receives at least one); `ResolutionCandidates` is an untargeted
+ * division chosen while the effect is applied, among any number of `targets`.
+ */
+export type DistributionScope =
+  | { type: "AnnouncedTargets" }
+  | { type: "ResolutionCandidates"; data: { pending_effect: unknown } };
+
 export type DistributionUnit =
   | { type: "Damage" }
   | { type: "EvenSplitDamage" }
@@ -3171,7 +3429,10 @@ export type RetargetScope =
 // CR 601.2c: one descent step from a stack entry's root ResolvedAbility
 // toward a node that owns declared targets. Mirrors `ChainStep`
 // (crates/engine/src/types/game_state.rs).
-export type ChainStep = "SubAbility" | "ElseAbility";
+export type ChainStep =
+  | "SubAbility"
+  | "ElseAbility"
+  | { CoinFlipBranch: { result: "Won" | "Lost" } };
 
 // CR 115.7d: the address of ONE declared-target slot inside a resolved
 // chain. Mirrors `RetargetSlotAddress`
@@ -3460,6 +3721,7 @@ export type GameAction =
   | { type: "ChooseExert"; data: { exert: boolean } }
   | { type: "ChooseEnlist"; data: { target: ObjectId | null } }
   | { type: "HarmonizeTap"; data: { creature_id: ObjectId | null } }
+  | { type: "ChooseSecretAgendaNames"; data: { names: string[] } }
   | { type: "DeclareCompanion"; data: { choice: CompanionDeclaration } }
   | { type: "CompanionToHand" }
   // CR 116.2c: special action — pay a continuous effect's printed termination
@@ -3567,7 +3829,13 @@ export type PayableResource =
   // cost (still carrying the X shard alongside any colored/generic pips,
   // e.g. `{X}{W}{U}{B}`) — the engine concretizes X into it and pays the
   // full result, so colored requirements are never dropped (#6410).
-  | { type: "ManaGeneric"; data: { base_cost: ManaCost } }
+  // CR 107.1c: `composition` says how the chosen amount becomes the cost —
+  // "ConcretizeX" (above; the default when absent) or "PerUnit" (`base_cost`
+  // repeated the chosen number of times). The "ManaGeneric" tag is legacy-frozen.
+  | {
+      type: "ManaGeneric";
+      data: { base_cost: ManaCost; composition?: "ConcretizeX" | "PerUnit" };
+    }
   | { type: "Counters" }
   | { type: "Speed" }
   // CR 732.2a: not a resource payment — the finite count an accepted
@@ -4164,6 +4432,10 @@ export type BlockerAssignmentPair = [ObjectId, ObjectId];
 export interface DebugLibraryCardView {
   object_id: ObjectId;
   name: string;
+  printed_ref?: PrintedRef | null;
+  /** Display-only printing of the physical card (CR 203.1/206.1); absent when the owner
+   *  chose none or the viewer may not see it. */
+  printing?: CardPrinting | null;
 }
 
 /** Engine-classified identity for a candidate in a legend-rule choice. */
@@ -4214,6 +4486,10 @@ export interface DerivedViews {
   unique_authorized_submitter?: PlayerId;
   /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
   scry_prompt_id?: InteractionId;
+  /** Opaque engine-issued identity of this viewer's prompt, excluding display-only data. */
+  waiting_for_identity?: string;
+  /** Authoritative transition count; compare only for equality, including decreases. */
+  state_revision?: number;
   /** Viewer-visible object ids in each player's exile pile, keyed by PlayerId. */
   visible_exile_object_ids?: Record<string, ObjectId[]>;
   /**
@@ -4451,6 +4727,27 @@ export interface DerivedViews {
    * it through `lifeReadout`. Mirrors `engine::game::derived_views::DerivedViews::life_magnitude`.
    */
   life_magnitude?: Record<string, DisplayMagnitude>;
+  /**
+   * CR 508.1a + CR 510.1a + CR 120.3a/b: per-candidate-attacker projection of unblocked damage,
+   * published only while the attack declaration prompt is open; keyed by attacker id. Display-only;
+   * before replacement and prevention effects. Mirrors
+   * `engine::game::derived_views::DerivedViews::unblocked_attack_previews`.
+   */
+  unblocked_attack_previews?: Record<string, UnblockedAttackPreview>;
+  /**
+   * CR 506.4c: each attacking creature's current attack target, keyed by attacker id. An attacker
+   * whose relation has ended is absent: it is still attacking, but not any player, planeswalker,
+   * or battle. Mirrors `engine::game::derived_views::DerivedViews::attack_targets`.
+   */
+  attack_targets?: Record<string, AttackTarget>;
+}
+
+/** Mirrors `engine::game::derived_views::UnblockedAttackPreview`. */
+export interface UnblockedAttackPreview {
+  /** CR 510.1a + CR 702.4b: combat damage across every damage step it would assign in. */
+  damage: number;
+  /** CR 120.3a / CR 120.3b: life loss that damage causes a player (0 for infect). */
+  life_loss: number;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */

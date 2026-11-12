@@ -21,7 +21,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ChooseOneOfKind, ConjureCard, ConjureSource, Effect,
-    PlayerFilter, PtValue, QuantityExpr, ResolvedAbility, SubAbilityLink, TargetFilter,
+    PlayerFilter, PtValue, QuantityExpr, ResolvedAbility, SpellbookSelection, SubAbilityLink,
+    TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -322,6 +323,15 @@ fn parsed_face(row: &ClassRow) -> CardFace {
         &owned(row.types),
         &owned(row.subtypes),
     );
+    // Merge MTGJSON keywords (from ClassRow) with parser-extracted keywords,
+    // mirroring `merge_extracted_keywords` in synthesis.
+    // Parse MTGJSON keyword strings into Keyword enums (filtering Unknown).
+    let mut keywords: Vec<engine::types::keywords::Keyword> = owned(row.keywords)
+        .iter()
+        .filter_map(|s| s.parse::<engine::types::keywords::Keyword>().ok())
+        .filter(|k| !matches!(k, engine::types::keywords::Keyword::Unknown(_)))
+        .collect();
+    engine::database::synthesis::merge_extracted_keywords(&mut keywords, parsed.extracted_keywords);
     CardFace {
         name: row.name.to_string(),
         card_type: CardType {
@@ -334,10 +344,13 @@ fn parsed_face(row: &ClassRow) -> CardFace {
             subtypes: owned(row.subtypes),
         },
         oracle_text: Some(row.oracle.to_string()),
+        keywords,
         abilities: parsed.abilities,
         triggers: parsed.triggers,
         static_abilities: parsed.statics,
         replacements: parsed.replacements,
+        additional_cost: parsed.additional_cost,
+        parse_warnings: parsed.parse_warnings,
         ..Default::default()
     }
 }
@@ -869,7 +882,9 @@ fn a_later_conjure_is_the_placement_referent() {
     assert_eq!(plus_one_counters(state, the_soldier(state)), 0);
 }
 
-fn spellbook_chain_board(random: bool) -> (GameRunner, ResolvedAbility, Vec<ObjectId>) {
+fn spellbook_chain_board(
+    selection: SpellbookSelection,
+) -> (GameRunner, ResolvedAbility, Vec<ObjectId>) {
     let (mut runner, source) = chain_board();
     runner
         .state_mut()
@@ -885,7 +900,7 @@ fn spellbook_chain_board(random: bool) -> (GameRunner, ResolvedAbility, Vec<Obje
             Effect::DraftFromSpellbook {
                 destination: Zone::Battlefield,
                 tapped: false,
-                random,
+                selection,
             },
             plus_one_on_last_created(),
         ],
@@ -905,7 +920,7 @@ fn assert_drafted_card_has_the_counter(state: &GameState, before: &[ObjectId]) {
 /// so a later `LastCreated` placement goes on it (random path, no pause).
 #[test]
 fn a_later_random_spellbook_draft_is_the_placement_referent() {
-    let (mut runner, ability, before) = spellbook_chain_board(true);
+    let (mut runner, ability, before) = spellbook_chain_board(SpellbookSelection::Random);
     resolve_chain(&mut runner, &ability);
     assert_drafted_card_has_the_counter(runner.state(), &before);
 }
@@ -915,7 +930,7 @@ fn a_later_random_spellbook_draft_is_the_placement_referent() {
 /// placement runs.
 #[test]
 fn a_later_chosen_spellbook_draft_is_the_placement_referent() {
-    let (mut runner, ability, before) = spellbook_chain_board(false);
+    let (mut runner, ability, before) = spellbook_chain_board(SpellbookSelection::Chosen);
     resolve_chain(&mut runner, &ability);
     assert!(
         matches!(

@@ -13,7 +13,8 @@
   "quantityRef": {
     "highestNumber": "il numero più alto",
     "lowestNumber": "il numero più basso",
-    "chosenNumber": "il numero scelto"
+    "chosenNumber": "il numero scelto",
+    "energyPaidOrLostThisTurn": "energia pagata o persa in questo turno"
   },
   "scryOutcome": {
     "title": "Scry completato",
@@ -86,6 +87,7 @@
     "sandboxTools": "Strumenti Sandbox",
     "sandboxToolsTitle": "Strumenti Sandbox — imposta qualsiasi stato del campo (`)",
     "openSandboxTools": "Apri strumenti Sandbox",
+    "clickMode": "Modalità clic",
     "clickModeButton": "Pulsante modalità clic",
     "shown": "Visibile",
     "hidden": "Nascosto",
@@ -254,6 +256,10 @@
       "advancedDebugPanel": {
         "title": "Pannello di debug avanzato",
         "body": "Apri il pannello di debug avanzato. La maggior parte dei giocatori dovrebbe iniziare prima con gli Strumenti di ripristino."
+      },
+      "toggleClickMode": {
+        "title": "Attiva/disattiva modalità clic",
+        "body": "Nelle partite con gli strumenti Sandbox, attiva o disattiva la modalità clic. Mentre è attiva, cliccare una carta apre il suo menu di debug (zone, F/C, segnalini, parole chiave) invece di giocarla."
       },
       "reportOrExportState": {
         "title": "Segnala o esporta stato",

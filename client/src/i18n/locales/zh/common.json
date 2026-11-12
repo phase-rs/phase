@@ -13,7 +13,8 @@
   "quantityRef": {
     "highestNumber": "最大的数",
     "lowestNumber": "最小的数",
-    "chosenNumber": "选定的数"
+    "chosenNumber": "选定的数",
+    "energyPaidOrLostThisTurn": "本回合支付或失去的能量"
   },
   "scryOutcome": {
     "title": "占卜完成",
@@ -86,6 +87,7 @@
     "sandboxTools": "沙盒工具",
     "sandboxToolsTitle": "沙盒工具 — 设置任意盘面状态（`）",
     "openSandboxTools": "打开沙盒工具",
+    "clickMode": "点击模式",
     "clickModeButton": "点击模式按钮",
     "shown": "显示",
     "hidden": "隐藏",
@@ -254,6 +256,10 @@
       "advancedDebugPanel": {
         "title": "高级调试面板",
         "body": "打开高级调试面板。大多数牌手应先用恢复工具。"
+      },
+      "toggleClickMode": {
+        "title": "切换点击模式",
+        "body": "在可使用沙盒工具的对局中开启或关闭点击模式。开启时，点击一张牌会打开其调试菜单（区域、力量/防御力、指示物、关键词），而不是使用它。"
       },
       "reportOrExportState": {
         "title": "报告或导出状态",
