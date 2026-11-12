@@ -17146,6 +17146,7 @@ mod tests {
                 counter_type,
                 count,
                 target,
+                scope: crate::types::ability::EffectScope::Single,
             } => {
                 assert_eq!(*counter_type, Some(CounterType::Plus1Plus1));
                 assert_eq!(*target, TargetFilter::SelfRef, "\"from it\" = the source");

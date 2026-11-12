@@ -26,6 +26,7 @@ fn remove_all_plus_one(obj: ObjectId, state: &mut GameState) {
             counter_type: Some(CounterType::Plus1Plus1),
             count: QuantityExpr::Fixed { value: -1 },
             target: TargetFilter::Any,
+            scope: engine::types::ability::EffectScope::Single,
         },
         vec![TargetRef::Object(obj)],
         ObjectId(998),

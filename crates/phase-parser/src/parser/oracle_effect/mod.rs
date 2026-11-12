@@ -21697,6 +21697,7 @@ fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEff
                 counter_type: Some(CounterType::Plus1Plus1),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::ParentTarget,
+                scope: EffectScope::Single,
             },
         )
     };
@@ -27195,8 +27196,14 @@ fn replace_target_with_parent(effect: &mut Effect) {
         // Terra: "Create a token that's a copy of target enchantment … put up to
         // three lore counters on it"). Mirrors the identical `LastCreated` guard on
         // the `Attach`/`UnattachAll` arms above.
+        // CR 122.1 + CR 115.10a: only a single-scope removal has an anaphoric
+        // target to rebind; a mass removal's population is not "it".
         Effect::PutCounter { target, .. }
-        | Effect::RemoveCounter { target, .. }
+        | Effect::RemoveCounter {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
         | Effect::MultiplyCounter { target, .. }
             if !matches!(target, TargetFilter::LastCreated) =>
         {
@@ -33081,7 +33088,12 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
             target,
             ..
         }
-        | Effect::RemoveCounter { target, .. }
+        // CR 122.1 + CR 115.10a: likewise only the single-scope counter removal.
+        | Effect::RemoveCounter {
+            scope: EffectScope::Single,
+            target,
+            ..
+        }
         | Effect::Sacrifice { target, .. }
         | Effect::DiscardCard { target, .. }
         | Effect::ChangeZone { target, .. }

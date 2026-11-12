@@ -5268,10 +5268,14 @@ fn rw_effect(
             p.merge(rw_quantity_expr(count));
             (p, sc)
         }
+        // CR 122.1: both scopes write the counters of the objects `target` names
+        // (one chosen object, or the population for scope:All), exactly like the
+        // PutCounter / PutCounterAll pair above.
         Effect::RemoveCounter {
             counter_type: _,
             count,
             target,
+            scope: _,
         } => {
             let (mut p, sc) = obj(StateKind::ObjectCounters, target);
             p.merge(rw_quantity_expr(count));
@@ -8507,6 +8511,7 @@ mod tests {
             counter_type: None,
             count: qfix(1),
             target,
+            scope: crate::types::ability::EffectScope::Single,
         }
     }
     fn gain_life(amount: QuantityExpr) -> Effect {

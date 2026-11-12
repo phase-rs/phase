@@ -4512,6 +4512,7 @@ mod tests {
             counter_type: Some(CounterType::Plus1Plus1),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
+            scope: engine::types::ability::EffectScope::Single,
         };
         assert_eq!(effect_polarity(&effect), EffectPolarity::Harmful);
     }
@@ -4522,6 +4523,7 @@ mod tests {
             counter_type: Some(CounterType::Minus1Minus1),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Any,
+            scope: engine::types::ability::EffectScope::Single,
         };
         assert_eq!(effect_polarity(&effect), EffectPolarity::Beneficial);
     }

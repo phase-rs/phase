@@ -369,6 +369,7 @@ fn the_face_four_five_body_parses_with_its_removal_clause() {
                 counter_type: Some(CounterType::Loyalty),
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::SelfRef,
+                scope: engine::types::ability::EffectScope::Single,
             }
         ),
         "{sub:#?}"

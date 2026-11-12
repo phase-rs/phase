@@ -6,8 +6,9 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     AbilityTag, CounterMoveSelection, CounterTransferMode, DelayedTriggerCondition,
-    DelayedTriggerKind, Duration, Effect, EffectError, EffectKind, EventCounterReproductionCount,
-    QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
+    DelayedTriggerKind, Duration, Effect, EffectError, EffectKind, EffectScope,
+    EventCounterReproductionCount, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter,
+    TargetRef,
 };
 #[cfg(test)]
 use crate::types::counter::parse_counter_type;
@@ -2407,7 +2408,7 @@ pub fn resolve_multiply(
 /// never offered, so the rider must not fire.
 ///
 /// Both the presence check and the removal-prohibition check use the resolver's
-/// own authorities (`resolve_defined_or_targets`, `counter_removal_blocked`), so
+/// own authorities (`counter_removal_targets`, `counter_removal_blocked`), so
 /// feasibility and resolution can never diverge. A `count > 1` request is still
 /// feasible whenever ≥1 permitted counter exists — the resolver removes as many
 /// as available (CR 122.1 "as much as possible"), a nonzero action. Returns
@@ -2420,7 +2421,9 @@ pub(crate) fn remove_counter_optional_is_infeasible(
     let Effect::RemoveCounter { counter_type, .. } = &ability.effect else {
         return false;
     };
-    let targets = resolve_defined_or_targets(state, ability);
+    // The resolver's own recipient binding: a mass population, a tracked set,
+    // or the chosen/anaphoric targets.
+    let targets = counter_removal_targets(state, ability);
     // Feasible iff SOME resolved target holds a matching counter that is not
     // removal-blocked. `counter_type` is `Option<CounterType>`: `Some(ct)`
     // matches that specific kind ("a charge counter"), `None` means any kind
@@ -2557,13 +2560,23 @@ pub(super) fn nontargeted_counter_population_ids(
 }
 
 /// CR 122.1: the objects a `RemoveCounter` node removes counters from. Shared
-/// by `resolve_remove` and `stack_reach`, so a pending node is read with the
-/// resolver's own binding.
+/// by `resolve_remove`, `remove_counter_optional_is_infeasible` and
+/// `stack_reach`, so a pending node is read with the resolver's own binding.
 pub(super) fn counter_removal_targets(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Vec<crate::types::identifiers::ObjectId> {
     match &ability.effect {
+        // CR 122.1 + CR 115.10a + CR 608.2h: a mass removal names no target; its
+        // population is every phased-in battlefield object the filter matches,
+        // determined once, before any counter is removed. Chain-propagated object
+        // targets never narrow it (`resolved_battlefield_population_ids` does not
+        // read `ability.targets`): Oblivion Stone's removal follows a Destroy node.
+        Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        } => super::resolved_battlefield_population_ids(state, ability, target),
         Effect::RemoveCounter {
             target:
                 target @ (TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }),
@@ -3560,7 +3573,7 @@ pub fn resolve_remove(
             // Remove all counter types. count == -1 means remove all of each type;
             // positive count means remove up to that many total (player's choice — for now, remove
             // proportionally starting from the first type).
-            let counters: Vec<(CounterType, u32)> = state
+            let mut counters: Vec<(CounterType, u32)> = state
                 .objects
                 .get(&obj_id)
                 .map(|obj| {
@@ -3571,6 +3584,11 @@ pub fn resolve_remove(
                         .collect()
                 })
                 .unwrap_or_default();
+            // `obj.counters` is a `HashMap`, whose iteration order changes from run
+            // to run, and the printed instruction fixes no order among the kinds it
+            // removes. Walk the kinds in `CounterType` order so the event order and
+            // the finite budget's pick are deterministic.
+            counters.sort_unstable_by(|a, b| a.0.cmp(&b.0));
             if raw_count < 0 {
                 counters
             } else {
@@ -5810,6 +5828,7 @@ mod tests {
                     counter_type: Some(CounterType::Plus1Plus1),
                     count: QuantityExpr::Fixed { value: 3 },
                     target: TargetFilter::Any,
+                    scope: crate::types::ability::EffectScope::Single,
                 },
                 obj_id,
             ),
@@ -7247,6 +7266,7 @@ mod tests {
                     counter_type: None,
                     count: QuantityExpr::Fixed { value: -1 },
                     target: TargetFilter::Any,
+                    scope: crate::types::ability::EffectScope::Single,
                 },
                 source_id,
             )),
@@ -7364,6 +7384,7 @@ mod tests {
                     counter_type: None,
                     count: QuantityExpr::Fixed { value: -1 },
                     target: TargetFilter::Any,
+                    scope: crate::types::ability::EffectScope::Single,
                 },
                 source_id,
             )),
@@ -7469,6 +7490,7 @@ mod tests {
                     counter_type: None,
                     count: QuantityExpr::Fixed { value: -1 },
                     target: TargetFilter::Any,
+                    scope: crate::types::ability::EffectScope::Single,
                 },
                 source_id,
             )),

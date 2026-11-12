@@ -3766,6 +3766,12 @@ fn rebind_parent_target_to_event_target_in_effect(effect: &mut Effect) {
         | Effect::BounceAll { target, .. }
         | Effect::CounterAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
+        // CR 122.1 + CR 115.10a: mass counter removal's population filter.
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::DoublePTAll { target, .. } => {
             rebind_parent_target_to_event_target_in_filter(target)
         }
@@ -3851,6 +3857,12 @@ fn rebind_parent_target_controller_in_effect(effect: &mut Effect) {
         | Effect::BounceAll { target, .. }
         | Effect::CounterAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
+        // CR 122.1 + CR 115.10a: mass counter removal's population filter.
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::DoublePTAll { target, .. } => rebind_parent_target_controller_in_filter(target),
         _ => {}
     }
@@ -4142,6 +4154,12 @@ fn effect_contains_event_target(effect: &Effect) -> bool {
         | Effect::BounceAll { target, .. }
         | Effect::CounterAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
+        // CR 122.1 + CR 115.10a: mass counter removal's population filter.
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::DoublePTAll { target, .. } => target_filter_contains_event_target(target),
         _ => false,
     }

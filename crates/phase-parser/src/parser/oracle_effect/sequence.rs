@@ -18373,6 +18373,7 @@ mod loyalty_symbol_clause_start_tests {
                     counter_type: Some(CounterType::Loyalty),
                     count: QuantityExpr::Fixed { value: 2 },
                     target: TargetFilter::SelfRef,
+                    scope: crate::types::ability::EffectScope::Single,
                 }
             ),
             "{def:#?}"

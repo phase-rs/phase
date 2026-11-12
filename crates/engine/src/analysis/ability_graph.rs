@@ -2523,6 +2523,7 @@ mod tests {
             counter_type: Some(CounterType::Plus1Plus1),
             count: fixed(3),
             target: default_target_filter_any(),
+            scope: crate::types::ability::EffectScope::Single,
         };
         let Projection::Modeled { vector, .. } = effect_projection(&remove) else {
             panic!("modeled")

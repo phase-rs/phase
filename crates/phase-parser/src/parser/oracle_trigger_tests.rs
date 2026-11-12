@@ -26712,6 +26712,7 @@ fn trigger_coalition_relic_charge_counter_drain() {
             counter_type,
             count,
             target,
+            scope: crate::types::ability::EffectScope::Single,
         } => {
             assert_eq!(
                 counter_type,
@@ -43191,6 +43192,7 @@ fn counter_threshold_continuation_binds_remove_those_counters_to_counted_kind() 
                 counter_type: Some(counter_type),
                 count: QuantityExpr::Fixed { value: -1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
             "{name}"
         );
@@ -43239,6 +43241,7 @@ fn multi_instruction_counter_gate_binds_remove_those_counters_to_counted_kind() 
                 counter_type: Some(counter_type.clone()),
                 count: QuantityExpr::Fixed { value: -1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
             "{name}"
         );

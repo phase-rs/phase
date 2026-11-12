@@ -701,7 +701,6 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         // Harmful effects
         | Effect::Destroy { target, .. }
         | Effect::DealDamage { target, .. }
-        | Effect::RemoveCounter { target, .. }
         // Removal / disruption
         | Effect::Bounce { target, .. }
         | Effect::Counter { target, .. }
@@ -745,6 +744,15 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
             ..
         }
         | Effect::Unsuspect {
+            scope: EffectScope::Single,
+            target,
+            ..
+        } => Some(target),
+        // CR 122.1 + CR 115.10a: only a single-scope counter removal exposes a
+        // selectable target. The mass (`All`) scope ("remove all counters from
+        // all permanents") is a non-targeting population effect (mirrors
+        // `SetTapState`'s `Single`/`All` split).
+        Effect::RemoveCounter {
             scope: EffectScope::Single,
             target,
             ..
@@ -5932,6 +5940,7 @@ mod counter_polarity_tests {
                 counter_type: Some(CounterType::Shield),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
+                scope: engine::types::ability::EffectScope::Single,
             }),
             EffectPolarity::Harmful
         );

@@ -44703,6 +44703,7 @@ mod tests {
             counter_type: Some(CounterType::Generic("oil".to_string())),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: crate::types::ability::EffectScope::Single,
         };
         let parent = |optional: bool, performed: bool| {
             let mut ability =
@@ -44742,6 +44743,7 @@ mod tests {
             counter_type: Some(CounterType::Generic("study".to_string())),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: crate::types::ability::EffectScope::Single,
         };
         let parent = |optional: bool, performed: bool| {
             let mut ability =
@@ -59530,6 +59532,7 @@ mod tests {
                     counter_type: Some(CounterType::Plus1Plus1),
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::ParentTarget,
+                    scope: crate::types::ability::EffectScope::Single,
                 },
             )
         };
@@ -63441,6 +63444,7 @@ mod tests {
                 counter_type: Some(CounterType::Minus1Minus1),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
             vec![],
         );
@@ -63468,6 +63472,7 @@ mod tests {
                 counter_type: Some(CounterType::Minus1Minus1),
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
             vec![],
         );
@@ -63606,6 +63611,7 @@ mod tests {
                 counter_type: Some(CounterType::Minus1Minus1),
                 count: QuantityExpr::Fixed { value: -1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
             vec![],
             source,
@@ -63715,6 +63721,7 @@ mod tests {
                     },
                 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             },
             vec![],
         );
