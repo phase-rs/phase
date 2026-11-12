@@ -164,6 +164,7 @@ mod tests {
             illegal_target_slots: Vec::new(),
             unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
+            declared_player_target_slots: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Activated,
             sub_ability: None,

@@ -9198,6 +9198,7 @@ mod tests {
             "premise: the swap keeps `distribute` and drops the announced split"
         );
         swapped.targets = targets.clone();
+        swapped.declared_player_target_slots.clear();
         swapped.target_incarnations = targets
             .iter()
             .filter_map(|t| {

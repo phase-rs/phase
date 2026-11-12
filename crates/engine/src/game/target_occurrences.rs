@@ -329,6 +329,17 @@ impl ResolvedAbility {
         self.targets = targets;
         self.finish_occurrence_write(vec![None; self.targets.len()]);
         self.chosen_target_slots.remap(|_| None);
+        self.declared_player_target_slots.clear();
+    }
+
+    /// CR 115.1: keep the declared player-role map aligned with the stored
+    /// occurrence vector whenever that vector is projected. A role whose
+    /// stored position is removed stops naming a target; every surviving role
+    /// follows its occurrence to the new index.
+    fn remap_declared_player_target_slots(&mut self, moved: impl Fn(usize) -> Option<usize>) {
+        for slot in &mut self.declared_player_target_slots {
+            slot.stored_position = slot.stored_position.and_then(&moved);
+        }
     }
 
     /// SOURCE INHERITANCE: copy `source`'s occurrences (targets and pins,
@@ -338,6 +349,7 @@ impl ResolvedAbility {
         self.targets = source.targets.clone();
         self.finish_occurrence_write(source.aligned_target_pins());
         self.chosen_target_slots.remap(|_| None);
+        self.declared_player_target_slots.clear();
     }
 
     /// SOURCE PROJECTION: replace every occurrence with the occurrences of
@@ -372,6 +384,7 @@ impl ResolvedAbility {
             .unzip();
         self.targets = targets;
         self.finish_occurrence_write(pins);
+        self.declared_player_target_slots.clear();
     }
 
     /// The node's occurrences as `(target, pin)` pairs.
@@ -433,6 +446,9 @@ impl ResolvedAbility {
         self.finish_occurrence_write(pins);
         self.chosen_target_slots
             .remap(|slot| Some(if slot < index { slot } else { slot + 1 }));
+        self.remap_declared_player_target_slots(|slot| {
+            Some(if slot < index { slot } else { slot + 1 })
+        });
     }
 
     /// Remove every occurrence.
@@ -440,6 +456,7 @@ impl ResolvedAbility {
         self.targets.clear();
         self.finish_occurrence_write(Vec::new());
         self.chosen_target_slots.remap(|_| None);
+        self.declared_player_target_slots.clear();
     }
 
     /// CR 608.2b: storage projection of resolution validation — keep the
@@ -474,6 +491,9 @@ impl ResolvedAbility {
         self.finish_occurrence_write(pins);
         self.chosen_target_slots
             .remap(|slot| kept.iter().position(|&index| index == slot));
+        self.remap_declared_player_target_slots(|slot| {
+            kept.iter().position(|&index| index == slot)
+        });
     }
 }
 

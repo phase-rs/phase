@@ -14,6 +14,8 @@ const DISRUPTOR_FLUTE: &str =
 
 const OUBLIETTE: &str = "When this enchantment enters, target creature phases out until this enchantment leaves the battlefield. Tap that creature as it phases in this way.";
 
+const SHUKO: &str = "Equipped creature gets +1/+0.\nEquip {0} ({0}: Attach to target creature you control. Equip only as a sorcery.)";
+
 #[test]
 fn disruptor_flute_raises_cost_of_named_commander() {
     let mut scenario = GameScenario::new();
@@ -94,10 +96,8 @@ fn oubliette_keeps_creature_phased_out_until_it_leaves() {
 
     let creature = scenario.add_creature(P1, "Target Bear", 2, 2).id();
     let attached_equipment = scenario
-        .add_creature(P1, "Test Blade", 0, 1)
-        .as_artifact()
+        .add_artifact_from_oracle(P1, "Shuko", SHUKO)
         .with_subtypes(vec!["Equipment"])
-        .from_oracle_text("Equipped creature gets +1/+1.\nEquip {0}")
         .id();
     for _ in 0..10 {
         scenario.add_card_to_library_top(P0, "Plains");
