@@ -5536,7 +5536,8 @@ fn parse_enters_with_keyword_rider_candidate(input: &str) -> OracleResult<'_, &s
 /// closed (`EntersWithGap::Clause`) rather than dropping printed text — the
 /// counters-only claim was the defect this function exists to fix. "Classifies
 /// to nothing" includes a nonempty grant with an unbuildable body
-/// ([`quoted_rider_grant_is_unsupported`]).
+/// ([`quoted_rider_grant_is_unsupported`]), and an unmatched trailing opener
+/// is unread text even when the complete-span count matches.
 ///
 /// Takes the ORIGINAL-case line: the inner text feeds the quoted-grant
 /// authority verbatim (mana symbols, descriptions), and both its self-reference
@@ -5602,9 +5603,12 @@ fn parse_enters_with_quoted_riders(
     }
     // CR 614.1c: every quoted span in the RIDER REGION is rider text or a
     // gap — a span the marker loop did not consume would otherwise be dropped
-    // while the line reads supported. Spans before the first rider marker are
-    // counter-clause text (Baron Von Count's "5."), owned by other readers.
-    if count_double_quoted_spans(region) != consumed_spans {
+    // while the line reads supported. An unmatched trailing opener is unread
+    // text too, and the complete-span count cannot see it (it contributes
+    // zero), so it is checked separately. Spans before the first rider marker
+    // are counter-clause text (Baron Von Count's "5."), owned by other readers.
+    let (span_count, has_unmatched_opener) = count_double_quoted_spans(region);
+    if span_count != consumed_spans || has_unmatched_opener {
         return Err(EntersWithGap::Clause);
     }
     Ok(modifications)
@@ -5612,12 +5616,16 @@ fn parse_enters_with_quoted_riders(
 
 /// True when a classified quoted-rider modification carries a granted body
 /// the classifier could not build — the fail-closed half of the rider
-/// acceptance check. `AddKeyword` and static modes carry no executable body
-/// and always pass; grants delegate to the single unimplemented authority
-/// (`oracle::has_unimplemented`). A trigger grant with NO execute chain is
-/// unsupported too: trigger lowering leaves `execute` empty exactly when the
-/// effect half did not parse, so there is no body to check and nothing honest
-/// to grant.
+/// acceptance check. Only the two executable grants are validated, against
+/// the single unimplemented authority (`oracle::has_unimplemented`); every
+/// other variant carries no executable body and passes. A trigger grant with
+/// NO execute chain is unsupported too: trigger lowering leaves `execute`
+/// empty exactly when the effect half did not parse, so there is no body to
+/// check and nothing honest to grant.
+///
+/// The accepted variants are listed exhaustively, with NO wildcard arm: a
+/// future `ContinuousModification` variant must make a deliberate choice here
+/// (and fail compilation until it does) instead of silently passing.
 fn quoted_rider_grant_is_unsupported(modification: &ContinuousModification) -> bool {
     match modification {
         ContinuousModification::GrantAbility { definition } => {
@@ -5627,16 +5635,82 @@ fn quoted_rider_grant_is_unsupported(modification: &ContinuousModification) -> b
             .execute
             .as_deref()
             .is_none_or(crate::parser::oracle::has_unimplemented),
-        _ => false,
+        // Copy, name, text, power, and toughness characteristics.
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::CopyChosen
+        | ContinuousModification::RemoveManaCost
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
+        | ContinuousModification::SubstituteTextWord { .. }
+        | ContinuousModification::SetChosenName
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::SetDynamicPower { .. }
+        | ContinuousModification::SetDynamicToughness { .. }
+        | ContinuousModification::SetPowerDynamic { .. }
+        | ContinuousModification::SetToughnessDynamic { .. }
+        | ContinuousModification::AddDynamicPower { .. }
+        | ContinuousModification::AddDynamicToughness { .. }
+        | ContinuousModification::SwitchPowerToughness => false,
+        // Keywords.
+        ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::AddDynamicKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword => false,
+        // Types and subtypes.
+        ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. } => false,
+        // Colors.
+        ContinuousModification::AddChosenColor { .. }
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. } => false,
+        // Non-executable grants, modes, and retention markers.
+        ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantReplacement { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource => false,
+        // Combat, control, lands, and counters.
+        ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. } => false,
     }
 }
 
-/// Complete `"..."` pairs in `text`, read with nom combinators so the count
-/// agrees with [`parse_enters_with_quoted_riders`] about what a span is. An
-/// unterminated trailing quote is not a span (mirroring
-/// `strip_double_quoted_spans`).
-fn count_double_quoted_spans(text: &str) -> usize {
+/// Complete `"..."` pairs in `text`, plus whether a trailing opening quote
+/// has no close — read with nom combinators so the result agrees with
+/// [`parse_enters_with_quoted_riders`] about what a span is. The unmatched
+/// flag keeps a malformed trailing opener from hiding behind the
+/// complete-span count (it contributes zero there): an opener with no close
+/// is unread rider text, not a valid end of input. `strip_double_quoted_spans`
+/// likewise does not treat it as a span — but unlike that stripper, this
+/// guard must FAIL on it rather than skip it.
+fn count_double_quoted_spans(text: &str) -> (usize, bool) {
     let mut count = 0usize;
+    let mut unmatched_opener = false;
     let mut remaining = text;
     while let Ok((after_open, _)) = preceded(
         take_until::<_, _, OracleError<'_>>("\""),
@@ -5654,10 +5728,13 @@ fn count_double_quoted_spans(text: &str) -> usize {
                 count += 1;
                 remaining = after_close;
             }
-            Err(_) => break,
+            Err(_) => {
+                unmatched_opener = true;
+                break;
+            }
         }
     }
-    count
+    (count, unmatched_opener)
 }
 
 /// The `" and with "` rider marker with its opening quote — the quoted-rider
@@ -34004,7 +34081,8 @@ mod tests {
 
     /// CR 614.1c: a quoted rider the extractor cannot read fails the clause
     /// closed — the counters-only claim must not come back through a malformed
-    /// span, an empty span, or a stray span inside the rider region.
+    /// span, an empty span, a stray span inside the rider region, or an
+    /// unmatched trailing opener after a valid grant.
     #[test]
     fn enters_with_quoted_rider_unread_fails_closed() {
         // `~`-normalized: the typed outcome takes normalized input, like every
@@ -34017,6 +34095,10 @@ mod tests {
             "If ~ was kicked, it enters with a +1/+1 counter on it and with \"\".",
             // A stray span inside the rider region the marker loop never consumes.
             "If ~ was kicked, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate ~.\" \"stray words\".",
+            // An unmatched trailing opener after a valid grant: the
+            // complete-span count still matches the consumed count, so only
+            // the unmatched-opener check fails it closed.
+            "If ~ was kicked, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate ~.\" \"stray text.",
         ] {
             assert_eq!(
                 enters_with_counters_outcome(&line.to_lowercase(), line).err(),
