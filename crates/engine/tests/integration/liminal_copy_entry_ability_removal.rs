@@ -64,6 +64,7 @@ const CLONE: &str =
 const HARDENED_SCALES: &str = "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.";
 const BRANCHING_EVOLUTION: &str = "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on that creature instead.";
 const MINION_OF_THE_WASTES: &str = "Trample\nAs this creature enters, pay any amount of life.\nMinion of the Wastes's power and toughness are each equal to the life paid as it entered.";
+const PLATINUM_EMPERION: &str = "Your life total can't change. (You can't gain or lose life. You can't pay any amount of life except 0.)";
 const SQUAD_CAPTAIN: &str = "Vigilance (Attacking doesn't cause this creature to tap.)\nThis creature enters with a +1/+1 counter on it for each other creature you control.";
 /// Grizzly Bears has no rules text.
 const GRIZZLY_BEARS: &str = "";
@@ -75,6 +76,7 @@ const THRONE_NAME: &str = "Roaming Throne";
 const GEMSTONE_NAME: &str = "Gemstone Mine";
 const GARGANTUAN_NAME: &str = "Quicksilver Gargantuan";
 const MINION_NAME: &str = "Minion of the Wastes";
+const EMPERION_NAME: &str = "Platinum Emperion";
 const SQUAD_CAPTAIN_NAME: &str = "Squad Captain";
 const BEARS_NAME: &str = "Grizzly Bears";
 
@@ -117,6 +119,12 @@ const GARGANTUAN_DONOR: Donor = Donor {
     oracle: QUICKSILVER_GARGANTUAN,
     power: 7,
     toughness: 7,
+};
+const EMPERION_DONOR: Donor = Donor {
+    name: EMPERION_NAME,
+    oracle: PLATINUM_EMPERION,
+    power: 8,
+    toughness: 8,
 };
 const SPARK_DOUBLE_DONOR: Donor = Donor {
     name: "Spark Double",
@@ -1831,6 +1839,112 @@ fn gargantuan_copy_of_minion_beside_margle(carry: PauseCarry) -> RowOutcome {
         "G5: the original's"
     );
     row_outcome(&runner, answered)
+}
+
+/// G8: CR 614.12a + CR 119.4: the copied payment happens before simultaneous
+/// entry, so a co-entering Emperion cannot prohibit it.
+#[test]
+fn clone_legion_copied_minion_pays_beside_a_co_entering_emperion() {
+    copied_minion_beside_emperion(PauseCarry::Live);
+}
+
+/// G8-SR: the same pre-entry prohibition board must survive the payment pause.
+#[test]
+fn clone_legion_copied_minion_pays_beside_a_co_entering_emperion_across_save_and_restore() {
+    assert_restored_row_matches_live(copied_minion_beside_emperion, "G8");
+}
+
+fn copied_minion_beside_emperion(carry: PauseCarry) -> RowOutcome {
+    let (runner, answered, minion) =
+        gargantuan_copy_of_minion(None, &[EMPERION_DONOR, GARGANTUAN_DONOR], carry, "G8");
+    assert_eq!(
+        prompt_kinds(&answered.prompts),
+        vec!["Replacement", "CopyTarget", "PayAmount"],
+        "G8: the copied payment follows the copy choice"
+    );
+    assert_eq!(
+        answered.prompts[2],
+        Prompt::PayAmount {
+            player: P0,
+            min: 0,
+            max: 17
+        },
+        "G8: the co-entering prohibition cannot reduce the offer"
+    );
+    assert_settled(&runner, "G8");
+    assert_eq!(
+        runner.state().players[0].life,
+        12,
+        "G8: payment lost five life"
+    );
+    assert_eq!(
+        chosen_number(&runner, the_token(&runner, MINION_NAME)),
+        Some(5)
+    );
+    assert_eq!(chosen_number(&runner, minion), Some(3));
+    assert_eq!(
+        runner.state().objects[&the_token(&runner, EMPERION_NAME)].controller,
+        P0
+    );
+    row_outcome(&runner, answered)
+}
+
+/// C8: CR 614.12a + CR 119.8 + CR 119.4b: a resident Emperion prohibits
+/// positive payment. The determined-zero surface latches zero without a prompt.
+#[test]
+fn clone_legion_copied_minion_can_only_pay_zero_beside_a_resident_emperion() {
+    let minion = std::cell::Cell::new(None);
+    let emperion = std::cell::Cell::new(None);
+    let script = Script {
+        copy_targets: vec![CopyPick::card(MINION_NAME, P0)],
+        ..Script::default()
+    };
+    let (runner, answered) = clone_legion_carried(
+        &[GARGANTUAN_DONOR],
+        |scenario| {
+            minion.set(Some(
+                scenario
+                    .add_creature_to_hand_from_oracle(P0, MINION_NAME, 0, 0, MINION_OF_THE_WASTES)
+                    .with_mana_cost(ManaCost::generic(0))
+                    .id(),
+            ));
+            emperion.set(Some(
+                scenario
+                    .add_creature_to_hand_from_oracle(P0, EMPERION_NAME, 8, 8, PLATINUM_EMPERION)
+                    .with_mana_cost(ManaCost::generic(0))
+                    .id(),
+            ));
+        },
+        |runner| {
+            cast_minion_paying_three(runner, minion.get().unwrap());
+            runner.cast(emperion.get().unwrap()).resolve();
+            assert_settled(runner, "C8: resident Emperion resolved");
+            assert_eq!(
+                runner.state().objects[&emperion.get().unwrap()].zone,
+                Zone::Battlefield
+            );
+            assert_eq!(runner.state().players[0].life, 17);
+        },
+        PauseCarry::Live,
+        &script,
+        |_, prompt| {
+            assert!(
+                !matches!(prompt, Prompt::PayAmount { .. }),
+                "C8: only zero is payable, so no payment prompt is raised"
+            )
+        },
+    );
+    assert_eq!(
+        prompt_kinds(&answered.prompts),
+        vec!["Replacement", "CopyTarget"]
+    );
+    assert_settled(&runner, "C8");
+    assert_eq!(runner.state().players[0].life, 17);
+    assert_eq!(
+        chosen_number(&runner, the_token(&runner, MINION_NAME)),
+        Some(0)
+    );
+    assert_eq!(chosen_number(&runner, minion.get().unwrap()), Some(3));
 }
 
 /// G6: Clone Legion over P1's [Grizzly Bears, Quicksilver Gargantuan]; the Gargantuan copy
