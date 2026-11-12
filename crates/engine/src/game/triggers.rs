@@ -9558,10 +9558,11 @@ pub(crate) fn park_entry_observer_triggers_if_paused(
     park_observer_triggers_if_paused_matching(state, events, slice_start, is_battlefield_entry);
 }
 
-/// CR 603.2 + CR 603.6a + CR 702.104a: the entry collector for an answer
-/// handler that returns its result directly, bypassing
+/// CR 603.2 + CR 603.6a + CR 702.104a + CR 303.4f: the entry collector for an
+/// answer handler that returns its result directly, bypassing
 /// `run_post_action_pipeline` (the Tribute answer, which is what puts the
-/// creature onto the battlefield). Only this answer's battlefield entries,
+/// creature onto the battlefield, and the Aura-host answer, which does the same
+/// for an entering Aura, token or card). Only this answer's battlefield entries,
 /// filtered as [`park_entry_observer_triggers_if_paused`] filters them; once the
 /// action has settled they are queued and the deferred queue is drained, as
 /// [`collect_and_drain_observer_triggers_if_settled`] drains it.
@@ -9803,7 +9804,8 @@ fn battlefield_entry_instruction_completed(state: &GameState, event: &GameEvent)
 /// The collectors that run as an action pauses or settles route through here:
 /// the post-action scan, and [`collect_action_end_triggers_into_deferred`] for
 /// the paused-observer helpers (the replacement and copy-choice answers among
-/// them), the resolution-choice answers and the Tribute answer. Existing owners
+/// them), the resolution-choice answers, and the Tribute and Aura-host answers
+/// ([`collect_and_drain_entry_observer_triggers_if_settled`]). Existing owners
 /// of entries keep their own timing and do not pass through: a logical
 /// zone-change group's segment collection (an entry it retains is passed through
 /// unheld here), the replay of an entry parked for its own mid-entry choice

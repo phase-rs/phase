@@ -16394,9 +16394,10 @@ fn apply_non_priority_pass_action(
                         super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
                     }
                     resume_pending_continuation_if_priority(state, &mut events)?;
-                    // CR 603.2 + CR 603.6a + CR 303.4f: this answer puts the Aura
-                    // entrant onto the battlefield (its entry tail was stashed behind
-                    // the host prompt) and returns without the post-action pipeline,
+                    // CR 603.2 + CR 603.6a + CR 303.4f: this answer (a token's or a
+                    // card's host choice) puts the Aura entrant onto the battlefield
+                    // (its entry tail was stashed behind the host prompt) and returns
+                    // without the post-action pipeline,
                     // so its battlefield entries go to the entry gate here: held
                     // while a co-entrant's host prompt is pending, matched once when
                     // the last entrant has entered.

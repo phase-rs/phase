@@ -2770,8 +2770,8 @@ mod feldon_tokens {
             assert_eq!(
                 (tributes, counter_orders),
                 (1, 2),
-                "pre-existing, as at the merge base: the second copy is not offered its own \
-                 Tribute (CR 702.104a) after the first copy's ordered counter"
+                "KNOWN-WRONG, pre-existing, as at the merge base: the second copy is not \
+                 offered its own Tribute (CR 702.104a) after the first copy's ordered counter"
             );
         } else {
             assert_eq!((tributes, counter_orders), (2, 0), "one Tribute per copy");
@@ -3020,6 +3020,79 @@ mod feldon_tokens {
             aura_token_entries(true),
             (2, 1, 2),
             "two entries, one batched trigger"
+        );
+    }
+
+    const REPLENISH: &str = "Return all enchantment cards from your graveyard to the battlefield. (Auras with nothing to enchant remain in your graveyard.)";
+
+    /// CR 603.2 + CR 303.4f: Replenish returns two Pacifism cards as one card
+    /// batch, each asking for its own host. The card path is collected by its
+    /// logical zone-change owner, and the Aura-host answer's entry collector must
+    /// not add to it: Altar of the Brood mills exactly once for each entry.
+    /// A positive witness, not a discriminator: the merge base mills the same.
+    #[test]
+    fn a_card_aura_batch_through_the_host_answer_is_checked_once_each() {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(
+            P1,
+            &[
+                "Forest", "Island", "Swamp", "Mountain", "Plains", "Forest", "Forest", "Island",
+            ],
+        );
+        scenario.with_mana_pool(
+            P0,
+            (0..4)
+                .map(|_| ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let db = crate::support::shared_card_db().expect("integration card database");
+        let host = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+        scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+        let first = scenario.add_real_card(P0, "Pacifism", Zone::Graveyard, db);
+        let second = scenario.add_real_card(P0, "Pacifism", Zone::Graveyard, db);
+        scenario.add_artifact_from_oracle(P0, "Altar of the Brood", ALTAR_OF_THE_BROOD);
+        let replenish = scenario
+            .add_spell_to_hand_from_oracle(P0, "Replenish", false, REPLENISH)
+            .id();
+        let mut runner = scenario.build();
+        let library = runner.state().players[1].library.len();
+        runner.cast(replenish).resolve();
+        let mut hosts = 0;
+        for _ in 0..16 {
+            match &runner.state().waiting_for {
+                WaitingFor::ReturnAsAuraTarget { legal_targets, .. } => {
+                    let target = legal_targets
+                        .iter()
+                        .find(|target| matches!(target, TargetRef::Object(id) if *id == host))
+                        .cloned()
+                        .expect("Hill Giant is a legal host");
+                    hosts += 1;
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(target),
+                        })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        // Reach guard: each card asked for its own host and entered.
+        assert_eq!(hosts, 2);
+        assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+        assert_eq!(
+            library - runner.state().players[1].library.len(),
+            2,
+            "one mill for each Aura that entered"
         );
     }
 

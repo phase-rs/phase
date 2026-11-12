@@ -13534,6 +13534,7 @@ pub(crate) fn reconcile_persisted_zone_change_occurrences(
     }
 
     reindex_persisted_batched_zone_change_trigger_keys(state, turn_number, &old_to_current_index)?;
+    remap_persisted_completed_instruction_bound(state, &old_to_current_index);
 
     let mut seen = HashMap::<(u32, usize), OccurrenceClaim>::new();
     visit_persisted_live_zone_changed_records(state, additional_live_event_roots, &mut |record| {
@@ -13541,6 +13542,27 @@ pub(crate) fn reconcile_persisted_zone_change_occurrences(
     })?;
 
     Ok(())
+}
+
+/// CR 608.2c + CR 603.6a: `completed_instruction_zone_changes` counts the ledger
+/// rows recorded by completed instructions. Compacting stale rows removes rows
+/// below it, so it follows the rows that survive. A value that is not an
+/// integer is left for the typed decode to reject.
+fn remap_persisted_completed_instruction_bound(
+    state: &mut serde_json::Map<String, serde_json::Value>,
+    old_to_current_index: &HashMap<usize, usize>,
+) {
+    let Some(bound) = state.get_mut("completed_instruction_zone_changes") else {
+        return;
+    };
+    let Some(old_bound) = json_usize(bound) else {
+        return;
+    };
+    let kept = old_to_current_index
+        .keys()
+        .filter(|old_index| **old_index < old_bound)
+        .count();
+    *bound = serde_json::Value::from(kept);
 }
 
 /// CR 603.2c: the replay guard's occurrence key is a current-turn ledger
@@ -44520,6 +44542,34 @@ mod tests {
             19,
             0
         )));
+    }
+
+    /// CR 608.2c + CR 603.6a: the completed-instruction bound indexes the
+    /// ledger, so pruning a stale row below it moves it down with the rows.
+    #[test]
+    fn persisted_completed_instruction_bound_follows_the_pruned_ledger() {
+        let mut state = normal_trigger_firing_fixture();
+        state.turn_number = 19;
+        let stale = persisted_zone_change_record(ObjectId(9_126), 18, 4);
+        let current = persisted_zone_change_record(ObjectId(9_127), 19, 1);
+        state.zone_changes_this_turn.push_back(stale);
+        state.zone_changes_this_turn.push_back(current.clone());
+        state.deferred_triggers[0].trigger_events = vec![persisted_zone_change_event(current)];
+        state.completed_instruction_zone_changes = 2;
+
+        let mut persisted = serde_json::to_value(PersistedGameState::Raw(Box::new(state)))
+            .expect("fixture serializes");
+        erase_persisted_event_occurrence_fields(persisted_state_payload_mut(&mut persisted));
+        let restored = serde_json::from_value::<PersistedGameState>(persisted)
+            .expect("stale ledger history is pruned")
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract");
+
+        assert_eq!(restored.zone_changes_this_turn.len(), 1);
+        assert_eq!(
+            restored.completed_instruction_zone_changes, 1,
+            "the bound counts the one surviving row"
+        );
     }
 
     #[test]
