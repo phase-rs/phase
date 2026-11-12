@@ -11927,6 +11927,7 @@ mod tests {
                 team_based: false,
                 sideboard_policy: SideboardPolicy::Unlimited,
                 default_deck_copy_limit,
+                poison_counter_threshold: 10,
             },
             legality: LegalityRules {
                 legal_sets: None,

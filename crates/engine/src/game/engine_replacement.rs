@@ -4067,7 +4067,7 @@ fn ability_definition_uses_post_replacement_event_target(ability: &AbilityDefini
 ///
 /// Engine invariant: isolate `state.waiting_for` so caller-owned prompts cannot
 /// suspend the child chain or be mistaken for new child input.
-fn resolve_post_replacement_chain(
+pub(super) fn resolve_post_replacement_chain(
     state: &mut GameState,
     resolved: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
@@ -6325,6 +6325,7 @@ mod tests {
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -8686,6 +8687,7 @@ mod tests {
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -8897,6 +8899,7 @@ mod tests {
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -9024,6 +9027,7 @@ mod tests {
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -9491,6 +9495,7 @@ mod tests {
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
