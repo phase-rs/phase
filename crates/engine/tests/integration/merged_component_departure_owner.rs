@@ -19,6 +19,12 @@
 //!   Kederekt Leviathan: "When this creature enters, return all other nonland
 //!    permanents to their owners' hands. / Unearth {6}{U} (...)"
 //!   Dryad Arbor: a 1/1 Land Creature — Forest Dryad.
+//!   Lord of Extinction: "Lord of Extinction's power and toughness are each
+//!    equal to the number of cards in all graveyards."
+//!   Platinum Angel: "Flying / You can't lose the game and your opponents can't
+//!    win the game."
+//!   Super Shredder: "Menace / Whenever another permanent leaves the
+//!    battlefield, put a +1/+1 counter on Super Shredder."
 //!   Benalish Marshal: "Other creatures you control get +1/+1."
 //!   Kor Skyfisher: "Flying / When this creature enters, return a permanent you
 //!    control to its owner's hand."
@@ -418,13 +424,19 @@ fn chaos_warp_hands_a_parked_component_back_to_the_owner_iteration() {
                     _ => None,
                 })
                 .expect("one card is revealed");
-            if revealed == pile.mender || revealed == pile.brokkos {
-                assert_eq!(
-                    runner.state().objects[&revealed].zone,
-                    Zone::Battlefield,
-                    "{label}: a revealed permanent card is put onto the battlefield"
-                );
-            }
+            // The revealed card is the shuffled library's random top card:
+            // a permanent card (either component) is put onto the battlefield,
+            // a sentinel (no card type) stays on top of the library.
+            let expected_zone = if revealed == pile.mender || revealed == pile.brokkos {
+                Zone::Battlefield
+            } else {
+                Zone::Library
+            };
+            assert_eq!(
+                runner.state().objects[&revealed].zone,
+                expected_zone,
+                "{label}: the revealed card goes where Chaos Warp sends it"
+            );
             assert_eq!(
                 mender_departure_triggers(runner.state()),
                 control,
@@ -639,6 +651,103 @@ fn concession_resume_of_a_triggered_ability_performs_state_based_actions() {
     );
 }
 
+/// CR 608.2n + CR 704.3: when the resumed resolution is an instant or sorcery,
+/// its final part comes before the state-based actions. Lord of Extinction
+/// counts the cards in all graveyards; the only one is P1's. Rebuking Ceremony
+/// targets P2's Circuit Mender and Karn, Silver Golem (P1's commander); Karn
+/// parks on P1's command-zone choice and P1 concedes, taking that card with
+/// them. The resumed ceremony finishes and goes to P0's graveyard before the
+/// state-based actions look at the Lord, so it survives as a 1/1.
+#[test]
+fn concession_resume_puts_the_spell_into_the_graveyard_before_state_based_actions() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let karn = scenario.add_real_card(P1, "Karn, Silver Golem", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Circuit Mender", Zone::Graveyard, db);
+    let mender = scenario.add_real_card(P2, "Circuit Mender", Zone::Battlefield, db);
+    let lord = scenario.add_real_card(P0, "Lord of Extinction", Zone::Battlefield, db);
+    let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
+    scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&karn)
+        .expect("Karn exists")
+        .is_commander = true;
+
+    cast_until_resolved_or_asked(&mut runner, ceremony, &[mender, karn]);
+    assert_commander_prompt(runner.state(), P1, karn);
+    assert_eq!(runner.state().objects[&lord].toughness, Some(1));
+
+    let conceded = concede(&mut runner, P1);
+    assert!(
+        matches!(conceded.waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        conceded.waiting_for
+    );
+    resolution_finished(runner.state());
+    assert_eq!(runner.state().objects[&ceremony].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[2].library.front(), Some(&mender));
+    assert_eq!(
+        runner.state().objects[&lord].zone,
+        Zone::Battlefield,
+        "CR 608.2n: the ceremony was in a graveyard when the state-based actions ran"
+    );
+    assert_eq!(runner.state().objects[&lord].toughness, Some(1));
+}
+
+/// CR 104.2a + CR 104.1 + CR 704.5a: a concession whose resumed resolution
+/// ends the game. P2 is at 0 life and controls Platinum Angel; P0 controls
+/// Super Shredder. Rebuking Ceremony targets the Angel and Karn, Silver Golem
+/// (P1's commander); Karn parks and P1 concedes. The resumed ceremony puts the
+/// Angel on top of P2's library, P2 loses to the state-based action and P0 wins.
+/// The finished game owes nothing: no frame, no carrier, nothing waiting to be
+/// put on the stack.
+#[test]
+fn concession_resume_that_ends_the_game_leaves_nothing_owed() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let karn = scenario.add_real_card(P1, "Karn, Silver Golem", Zone::Battlefield, db);
+    let angel = scenario.add_real_card(P2, "Platinum Angel", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
+    let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
+    scenario.with_life(P2, 0);
+    scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&karn)
+        .expect("Karn exists")
+        .is_commander = true;
+
+    cast_until_resolved_or_asked(&mut runner, ceremony, &[angel, karn]);
+    assert_commander_prompt(runner.state(), P1, karn);
+    assert!(
+        !runner.state().players[2].is_eliminated,
+        "Platinum Angel keeps P2 in the game at 0 life"
+    );
+
+    let conceded = concede(&mut runner, P1);
+    assert!(
+        matches!(
+            conceded.waiting_for,
+            WaitingFor::GameOver { winner: Some(P0) }
+        ),
+        "{:?}",
+        conceded.waiting_for
+    );
+    assert_eq!(runner.state().objects[&angel].zone, Zone::Exile);
+    assert!(runner.state().deferred_triggers.is_empty());
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(runner.state().pending_replacement.is_none());
+}
+
 /// CR 800.4a + CR 117.2e + CR 730.3: Chaos Warp's owner iteration parks on
 /// Brokkos's CR 903.9b prompt and the owner — the prompt's chooser — concedes.
 /// Every component leaves the game with P1, and the owner iteration and its
@@ -756,20 +865,27 @@ fn another_seat_concession_leaves_the_commander_prompt_and_its_owner_intact() {
 /// CR 730.3 + CR 603.2c + CR 903.9b: Kor Skyfisher's enters trigger returns a
 /// permanent its controller chooses at resolution; the merged permanent is
 /// chosen from several, so the move runs through the selected-card loop. The
-/// commander's prompt parks the split, and after either answer that loop — the
-/// announcing owner — records the departure once.
+/// commander's prompt parks the split — on Brokkos, or on the survivor's own
+/// incarnation — and after either answer that loop, the announcing owner,
+/// records the departure once.
 #[test]
 fn kor_skyfisher_selection_hands_a_parked_component_back_to_its_loop() {
-    for answer_index in [0, 1] {
+    for (pile_shape, answer_index) in [
+        (Pile::BrokkosUnderMender, 0),
+        (Pile::BrokkosUnderMender, 1),
+        (Pile::MenderOverBrokkos, 0),
+        (Pile::MenderOverBrokkos, 1),
+    ] {
         let db = shared_card_db().expect("integration card fixture must load");
         let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 7);
         scenario.at_phase(Phase::PreCombatMain);
         let (mender, brokkos) = add_pile(&mut scenario, P0);
+        scenario.add_real_card(P0, "Ninth Bridge Patrol", Zone::Battlefield, db);
         let skyfisher = scenario.add_real_card(P0, "Kor Skyfisher", Zone::Hand, db);
         scenario.with_mana_pool(P0, mana(ManaType::White, 2));
         let mut runner = scenario.build();
-        let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
-        let label = format!("answer {answer_index}");
+        let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, true);
+        let label = format!("{pile_shape:?}, answer {answer_index}");
 
         cast_until_resolved_or_asked(&mut runner, skyfisher, &[]);
         for _ in 0..6 {
@@ -813,8 +929,75 @@ fn kor_skyfisher_selection_hands_a_parked_component_back_to_its_loop() {
         );
         assert_eq!(runner.state().objects[&skyfisher].zone, Zone::Battlefield);
         assert_eq!(
-            mender_departure_triggers(runner.state()),
+            patrol_triggers(runner.state()),
             vec![P0],
+            "{label}: Ninth Bridge Patrol observes the one merged departure once"
+        );
+        if matches!(pile_shape, Pile::BrokkosUnderMender) {
+            assert_eq!(
+                mender_departure_triggers(runner.state()),
+                vec![P0],
+                "{label}: one merged permanent left, so its ability triggers once"
+            );
+        }
+    }
+}
+
+/// CR 800.4a + CR 730.3: another seat concedes while Chaos Warp's owner
+/// iteration is parked on Brokkos's prompt. The prompt, the component child and
+/// the owner iteration beneath it are untouched; either answer finishes the
+/// owner's shuffle and reveal with the merged departure observed once.
+#[test]
+fn another_seat_concession_leaves_a_parked_owner_iteration_intact() {
+    for answer_index in [0, 1] {
+        let db = shared_card_db().expect("integration card fixture must load");
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let (mender, brokkos) = add_pile(&mut scenario, P1);
+        scenario.add_real_card(P1, "Ninth Bridge Patrol", Zone::Battlefield, db);
+        let bystander = scenario.add_real_card(P2, "Circuit Mender", Zone::Battlefield, db);
+        let warp = scenario.add_real_card(P0, "Chaos Warp", Zone::Hand, db);
+        scenario.with_library_top(P1, &["Library Card A", "Library Card B"]);
+        scenario.with_mana_pool(P0, mana(ManaType::Red, 3));
+        let mut runner = scenario.build();
+        let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
+        let label = format!("answer {answer_index}");
+
+        cast_until_resolved_or_asked(&mut runner, warp, &[pile.survivor]);
+        assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        let conceded = concede(&mut runner, P2);
+        assert!(
+            matches!(
+                conceded.waiting_for,
+                WaitingFor::ReplacementChoice { player: P1, .. }
+            ),
+            "{label}: {:?}",
+            conceded.waiting_for
+        );
+        assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        assert_eq!(runner.state().objects[&bystander].zone, Zone::Exile);
+
+        let events = answer(&mut runner, answer_index);
+        resolution_finished(runner.state());
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id: P1,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )),
+            "{label}: the owner still shuffles"
+        );
+        assert_eq!(
+            patrol_triggers(runner.state()),
+            vec![P1],
+            "{label}: Ninth Bridge Patrol observes the one merged departure once"
+        );
+        assert_eq!(
+            mender_departure_triggers(runner.state()),
+            vec![P1],
             "{label}: one merged permanent left, so its ability triggers once"
         );
     }

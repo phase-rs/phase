@@ -198,7 +198,8 @@ fn run_state_based_actions(
             for &loser in &losers {
                 events.push(GameEvent::PlayerLost { player_id: loser });
             }
-            super::elimination::eliminate_players(state, &losers, departures, events);
+            // Only a concession reports an owed resume; SBA losses never do.
+            let _ = super::elimination::eliminate_players(state, &losers, departures, events);
 
             // If the game ended (a sole winner or a CR 104.4a draw), stop now.
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {

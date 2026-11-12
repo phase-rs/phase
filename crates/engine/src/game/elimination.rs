@@ -157,7 +157,8 @@ pub fn eliminate_players_simultaneously(
     players_to_eliminate: &[PlayerId],
     events: &mut Vec<GameEvent>,
 ) {
-    eliminate_players(
+    // Only a concession reports an owed resume; this caller's pipeline scans.
+    let _ = eliminate_players(
         state,
         players_to_eliminate,
         DepartureTriggers::ScannedByCaller,
@@ -172,13 +173,31 @@ pub fn eliminate_players_simultaneously(
 /// produces. The departure collects the abilities they trigger itself (CR 603.2):
 /// a leaves-the-battlefield observer sees the conceding player's permanents leave
 /// the game (CR 603.6c).
-pub fn concede(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
+pub fn concede(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> DepartureResume {
     eliminate_players(
         state,
         &[player],
         DepartureTriggers::CollectedByDeparture,
         events,
-    );
+    )
+}
+
+/// CR 117.2e + CR 608.2c: what a departure leaves owed to the action that
+/// caused it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum DepartureResume {
+    /// Nothing of a resolution is left for the caller to finish.
+    Settled,
+    /// The departure canceled the current replacement-choice pause of a parked
+    /// zone-change owner. Its surviving tail is still owed: the caller resumes
+    /// it and settles the action before any player receives priority, and the
+    /// departure left its queued triggers for that settlement to place.
+    ParkedZoneChangeTail,
 }
 
 /// CR 603.2 + CR 603.6c: who collects the triggered abilities a departure's own
@@ -201,7 +220,8 @@ pub(crate) fn eliminate_players(
     players_to_eliminate: &[PlayerId],
     departure_triggers: DepartureTriggers,
     events: &mut Vec<GameEvent>,
-) {
+) -> DepartureResume {
+    let mut resume = DepartureResume::Settled;
     let first_event = events.len();
     let first_record = state.zone_changes_this_turn.len();
     let mut eliminated_any = false;
@@ -352,7 +372,7 @@ pub(crate) fn eliminate_players(
     }
 
     if !eliminated_any {
-        return;
+        return resume;
     }
     mark_left_game_departures_simultaneous(state, events, first_event, first_record);
     let departure_end = events.len();
@@ -463,7 +483,6 @@ pub(crate) fn eliminate_players(
             events,
             first_event,
             looked_back_observers.map(|observers| (observers, departure_end)),
-            &[],
         );
     }
 
@@ -564,46 +583,21 @@ pub(crate) fn eliminate_players(
             };
 
         // CR 800.4a + CR 117.2e + CR 608.2c: a departure that canceled the
-        // current pause of a parked zone-change owner (a batch delivery or a
-        // ChangeZone iteration, or a merged permanent's component child and the
-        // owner that announced it) leaves that owner's surviving tail owed. No
-        // player has priority while it resolves, and no post-action pipeline
-        // follows a concession, so the concession resumes it here through the
-        // common priority boundary and queues what the resumed moves trigger
-        // (CR 603.2) before the deferred-trigger drain below places them.
+        // current replacement-choice pause of a parked zone-change owner (a
+        // batch delivery or a ChangeZone iteration, or a merged permanent's
+        // component child and the owner that announced it) leaves that owner's
+        // surviving tail owed. No player has priority while it resolves, so a
+        // concession — which no post-action pipeline follows — reports it to the
+        // action, which finishes the resolution and then settles it like any
+        // action that completed one: final part, state-based actions, then the
+        // queue below (CR 608.2n, CR 117.5).
         if departure_triggers == DepartureTriggers::CollectedByDeparture
             && zone_change_pause_was_live
             && state.pending_replacement.is_none()
             && matches!(state.waiting_for, WaitingFor::Priority { .. })
             && state.resolution_stack.active_zone_change_owner_is_parked()
         {
-            // The resume runs in its own buffer: a drain takes the buffer it is
-            // handed into its parked carrier when it stops on another prompt,
-            // and emits that carrier's stored events in front of the new ones
-            // when it completes. Its own buffer is exactly what it emitted.
-            let mut resumed = Vec::new();
-            if let Err(error) =
-                super::engine::resume_pending_continuation_if_priority(state, &mut resumed)
-            {
-                tracing::error!(%error, "a canceled zone-change pause did not resume its tail");
-                debug_assert!(
-                    false,
-                    "a canceled zone-change pause did not resume its tail: {error}"
-                );
-            }
-            // CR 117.5 + CR 704.3: a player is about to receive priority after
-            // the resumed resolution, so state-based actions are performed
-            // first; what they and the resumed moves trigger is queued below.
-            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                super::sba::check_state_based_actions(state, &mut resumed);
-            }
-            // CR 603.2c: an owner the resume parks again holds its collected
-            // occurrences for its own settlement; they are not collected here.
-            let retained = super::engine_priority::retained_logical_zone_events(state);
-            super::triggers::collect_unclaimed_triggers_into_deferred(
-                state, &resumed, 0, None, &retained,
-            );
-            events.append(&mut resumed);
+            resume = DepartureResume::ParkedZoneChangeTail;
         }
 
         if let Some(frame) = staged_optional_sacrifice_decline {
@@ -615,7 +609,9 @@ pub(crate) fn eliminate_players(
         // CR 603.3b: If prune collapsed an ordering pass into
         // `deferred_triggers` while `waiting_for` is Priority, dispatch now so
         // combat auto-advance does not skip them (issue #1350).
-        drain_or_clear_deferred_triggers_after_elimination(state, departure_triggers, events);
+        if resume == DepartureResume::Settled {
+            drain_or_clear_deferred_triggers_after_elimination(state, departure_triggers, events);
+        }
 
         // CR 800.4a: If the active `WaitingFor` was waiting on any
         // newly-eliminated player, advance to `Priority` for the next living
@@ -811,6 +807,7 @@ pub(crate) fn eliminate_players(
     state
         .resolution_stack
         .retire_orphaned_component_delivery_parent();
+    resume
 }
 
 /// CR 103.5 + CR 800.4a: Prune eliminated players from the in-flight
@@ -1286,8 +1283,11 @@ fn abandon_pending_zone_change_member_for_player_left(
             continue;
         }
         // The canceled pause was the sole current resolution operation. Its
-        // surviving carrier tail will resume through the ordinary Priority
-        // drain; no unrelated continuation is cleared here.
+        // surviving carrier tail is resumed by the action that caused the
+        // departure (a concession reports it as `DepartureResume`, the
+        // engine's concede settlement finishes it before priority; a caller
+        // with a pipeline reaches it at its priority boundary). No unrelated
+        // continuation is cleared here.
         state.waiting_for = WaitingFor::Priority {
             player: players::next_player(state, leaving_player),
         };

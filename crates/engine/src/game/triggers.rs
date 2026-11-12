@@ -9296,21 +9296,15 @@ fn departure_event_looks_back(event: &GameEvent) -> bool {
 /// becoming unattached, CR 603.10a + CR 603.10c) are matched against them,
 /// every other event against the live game.
 /// Delayed abilities carry their controller from creation and are matched live.
-///
-/// `retained` names zone-change occurrences a parked logical owner already
-/// collected and holds for its own settlement (CR 603.2c); like the post-action
-/// scan, this collector does not rediscover them.
 pub(crate) fn collect_unclaimed_triggers_into_deferred(
     state: &mut GameState,
     events: &[GameEvent],
     event_start: usize,
     looked_back: Option<(ImmediatelyBeforeObservers, usize)>,
-    retained: &[GameEvent],
 ) {
     let consumed = state.consumed_before_priority_trigger_events.clone();
     let mut ordinary =
         filter_already_collected_trigger_events_from(state, events, event_start, &consumed);
-    ordinary.retain(|event| !retained.contains(event));
     if let Some((observers, split)) = looked_back {
         // CR 603.10: only the departure's look-back events are matched against
         // the observers as they were before it (`departure_event_looks_back`);
@@ -9330,13 +9324,12 @@ pub(crate) fn collect_unclaimed_triggers_into_deferred(
         observers.collect_into_deferred(state, &looked_back_events);
     }
     collect_triggers_into_deferred(state, &ordinary);
-    let mut delayed = unclaimed_trigger_events_from(
+    let delayed = unclaimed_trigger_events_from(
         events,
         event_start,
         TriggerCollectionRequester::Delayed,
         &consumed,
     );
-    delayed.retain(|event| !retained.contains(event));
     collect_unclaimed_delayed_triggers_into_deferred(state, events, &delayed);
 }
 

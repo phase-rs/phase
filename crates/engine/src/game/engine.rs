@@ -12631,7 +12631,34 @@ fn apply_action(
     // (CR 603.6c), since no pipeline scans this action's events.
     if let GameAction::Concede { player_id } = action {
         let mut events = Vec::new();
-        super::elimination::concede(state, player_id, &mut events);
+        match super::elimination::concede(state, player_id, &mut events) {
+            super::elimination::DepartureResume::Settled => {}
+            // CR 117.2e + CR 608.2c + CR 117.5: the concession canceled the
+            // current pause of a parked zone-change owner while its resolution
+            // still owes a surviving tail. Finish that resolution, then settle
+            // the action as any action that completed one: the owed final part
+            // (CR 608.2n), state-based actions (CR 704.3), then the triggered
+            // abilities the departure queued together with the resumed ones.
+            super::elimination::DepartureResume::ParkedZoneChangeTail => {
+                // The resume runs in its own buffer: a drain that stops on
+                // another prompt takes the buffer it is handed into its parked
+                // carrier, which must not be the departure's own events.
+                let resume_start = events.len();
+                let mut resumed = Vec::new();
+                resume_pending_continuation_if_priority(state, &mut resumed)?;
+                events.append(&mut resumed);
+                let provisional = state.waiting_for.clone();
+                let settled = super::engine_priority::run_post_action_pipeline_from(
+                    state,
+                    &mut events,
+                    resume_start,
+                    &provisional,
+                    false,
+                    false,
+                )?;
+                sync_waiting_for(state, &settled);
+            }
+        }
         return Ok(ActionResult::applied(events, state.waiting_for.clone()));
     }
 

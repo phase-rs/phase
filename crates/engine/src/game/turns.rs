@@ -3182,7 +3182,6 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
             events,
             reversion_start,
             None,
-            &[],
         );
         // CR 603.7 + CR 514.3a: a delayed ability waiting to be put on the
         // stack "at the beginning of the next cleanup step" triggers on THIS
