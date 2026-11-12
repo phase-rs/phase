@@ -2274,7 +2274,23 @@ fn boundary_continues_sentence(prev_boundary: Option<ClauseBoundary>) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
+    assemble_effect_chain_with_provenance(ir).value
+}
+
+pub(crate) fn assemble_effect_chain_with_provenance(
+    ir: &EffectChainIr,
+) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
+    let mut history_transport =
+        crate::parser::oracle_ir::history_provenance::HistoryTransport::default();
+    // Declare every committed occurrence, including a clause a later fold removes.
+    // An untransported producer stays explicitly dangling instead of losing its record.
+    for clause in &ir.clauses {
+        for pending in &clause.parsed.history {
+            history_transport.capture(pending.committed(clause.id), None);
+        }
+    }
     let _chain = tracing::debug_span!(target: "engine::parser::binding", "chain", kind = ?ir.kind, clauses = ir.clauses.len()).entered();
     let kind = ir.kind;
     let continuation_kind = ir.continuation_kind.unwrap_or(AbilityKind::Spell);
@@ -3761,6 +3777,26 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         for current in &mut current_defs {
             apply_where_x_ability_expression(current, clause_ir.where_x_binding());
         }
+        // Bind the declared producer before delayed wrapping and spine linking move it.
+        // A compound follower may have become a separate current_defs entry.
+        for pending in &clause_ir.parsed.history {
+            let mut path = pending.locator.clone().unwrap_or_default();
+            let index = if clause_sub.is_some()
+                && path.0.first()
+                    == Some(
+                        &crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+                    ) {
+                path.0.remove(0);
+                1
+            } else {
+                0
+            };
+            let producer = pending
+                .locator
+                .as_ref()
+                .and_then(|_| current_defs.get(index).and_then(|def| path.resolve(def)));
+            history_transport.capture(pending.committed(clause_ir.id), producer);
+        }
 
         // CR 615.5 + CR 609.7: In a "damage is prevented this way" rider, the
         // surface phrase "that source's controller" lowers to
@@ -4827,7 +4863,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // `refuse_unenforced_aggregate_resolution_selection`.
     super::lower::refuse_unenforced_aggregate_resolution_selection(&mut result);
 
-    result
+    history_transport.finish(result)
 }
 
 /// CR 608.2c: validate the structural "repeat this process" directives of an

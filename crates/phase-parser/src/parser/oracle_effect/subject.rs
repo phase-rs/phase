@@ -872,6 +872,7 @@ fn build_conditional_protection_grant_clause(
         })
         .collect();
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -938,6 +939,7 @@ fn build_additive_type_continuous_clause(
     let affected = static_affected_for_application(application);
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -1024,6 +1026,7 @@ fn try_parse_compound_all_subjects_become_clause(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -1771,6 +1774,7 @@ fn try_parse_combat_tax_effect_clause(text: &str) -> Option<ParsedEffectClause> 
         return None;
     }
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -1962,6 +1966,7 @@ fn try_parse_target_and_same_name_pump_clause(
         ],
     };
     let mass_clause = ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -2109,6 +2114,7 @@ fn try_parse_subject_restriction_clause(
             parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
         let affected = static_affected_for_application(&application);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -2166,6 +2172,7 @@ fn try_parse_subject_restriction_clause(
                 .map(|def| def.affected(affected.clone()))
                 .collect();
             return Some(ParsedEffectClause {
+                history: Vec::new(),
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
@@ -2202,6 +2209,7 @@ fn try_parse_subject_restriction_clause(
                 parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
             let affected = static_affected_for_application(&application);
             return Some(ParsedEffectClause {
+                history: Vec::new(),
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
@@ -2268,6 +2276,7 @@ fn try_parse_subject_restriction_clause(
                     });
             if let Some(application) = broadcast {
                 return Some(ParsedEffectClause {
+                    history: Vec::new(),
                     head_text: None,
                     optional_targeting: false,
                     unlowered_guard: None,
@@ -2313,6 +2322,7 @@ fn try_parse_subject_restriction_clause(
                     TargetFilter::ParentTarget
                 ) {
                     return Some(ParsedEffectClause {
+                        history: Vec::new(),
                         head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
@@ -2348,6 +2358,7 @@ fn try_parse_subject_restriction_clause(
                 parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
             let affected = static_affected_for_application(&application);
             return Some(ParsedEffectClause {
+                history: Vec::new(),
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
@@ -2417,6 +2428,7 @@ fn try_parse_subject_restriction_clause(
             kind: None,
         };
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -2466,6 +2478,7 @@ fn try_parse_subject_restriction_clause(
         let affected = static_affected_for_application(&application);
         let mode = StaticMode::CantBeRegenerated;
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -2503,6 +2516,7 @@ fn try_parse_subject_restriction_clause(
         };
         let affected = static_affected_for_application(&application);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -2610,6 +2624,7 @@ fn try_parse_can_attack_with_defender(
         def = def.condition(condition);
     }
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -2660,6 +2675,7 @@ fn try_parse_targeting_bypass_clause(text: &str) -> Option<ParsedEffectClause> {
         return None;
     }
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -2720,6 +2736,7 @@ fn try_parse_can_block_additional(
     let mode = StaticMode::ExtraBlockers { count };
     let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -5305,6 +5322,7 @@ fn try_split_pump_compound(
         )))
     };
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -5509,6 +5527,7 @@ fn build_keyword_choice_clause(
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -5714,6 +5733,7 @@ fn build_pt_choice_clause(
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -5762,6 +5782,7 @@ fn build_continuous_clause(
     {
         let effect = build_pump_effect(&application, power, toughness);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -5820,6 +5841,7 @@ fn build_continuous_clause(
         build_defender_attack_continuous_compound(&application, predicate_text)
     {
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -5937,6 +5959,7 @@ fn build_continuous_clause(
     if let Some((power, toughness)) = extract_pump_modifiers(&modifications) {
         let effect = build_pump_effect(&application, power, toughness);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -5977,6 +6000,7 @@ fn build_continuous_clause(
         };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -6326,6 +6350,7 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -6359,6 +6384,7 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -6418,6 +6444,7 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -6556,6 +6583,7 @@ fn build_become_clause(
                 .unwrap_or_default();
         let recipient = copy_recipient_for_application(&application, &target);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -6598,6 +6626,7 @@ fn build_become_clause(
                 .unwrap_or_default();
         let recipient = copy_recipient_for_application(&application, &target);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -6643,6 +6672,7 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -6705,6 +6735,7 @@ fn build_become_clause(
 
     let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -6845,6 +6876,7 @@ fn try_parse_become_and_attack_if_able(
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -6955,6 +6987,7 @@ fn try_parse_set_life_total(
         .clone()
         .unwrap_or_else(|| application.affected.clone());
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -7218,6 +7251,7 @@ fn try_parse_become_choice(
     )));
 
     let clause = ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -7298,6 +7332,7 @@ fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
             .modifications(vec![ContinuousModification::AddStaticMode { mode }])
     };
     ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -7369,6 +7404,7 @@ fn build_restriction_clause(
             .modifications(vec![ContinuousModification::AddKeyword { keyword }])
             .description(predicate.to_string());
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -7579,6 +7615,7 @@ fn build_restriction_clause(
                 }])
                 .description(predicate.to_string());
             return Some(ParsedEffectClause {
+                history: Vec::new(),
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
@@ -7698,6 +7735,7 @@ fn build_restriction_clause(
         .collect();
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -8266,6 +8304,7 @@ fn try_parse_copula_goaded_clause(
     };
     let target = resolve_it_pronoun(ctx);
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -8425,6 +8464,7 @@ pub(super) fn try_parse_each_deals_damage_equal_to_power(text: &str) -> Option<P
     // returns None for this effect → no-op) and the resolver reads only the flat
     // `ability.targets` vector, never `extra_source`.
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         multi_target: Some(multi_target),
         ..super::parsed_clause(Effect::EachDealsDamageEqualToPower {

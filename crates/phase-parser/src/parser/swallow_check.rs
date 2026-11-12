@@ -27,14 +27,14 @@ use super::oracle_effect::player_lookback_relative_clause_owns_suffix;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use super::oracle_ir::doc::OracleItemIr;
 use super::oracle_ir::feature::{
-    audit_units, scope_to_unit, AuditUnit, ItemIdTracks, OracleSemanticFeature,
+    audit_units, history_for_unit, scope_to_unit, AuditUnit, ItemIdTracks, OracleSemanticFeature,
 };
 use super::oracle_nom::error::OracleError;
 use super::oracle_nom::primitives::{scan_contains, scan_preceded, split_sentence_units};
 use super::oracle_nom::quantity::parse_using_mana_produced_by_head;
 use super::oracle_target::{
     parse_block_history_clause, parse_block_pairing_clause, restricting_block_pairings,
-    BlockHistoryKey, BlockPairingForm, CombatRelationSubjectWord, HistoryPartner,
+    BlockPairingForm, CombatRelationSubjectWord,
 };
 use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::swallow_evidence::UnitEvidence;
@@ -168,8 +168,10 @@ fn stamp_provenance(unit_diagnostics: &mut [OracleDiagnostic], unit: &AuditUnit<
 pub(crate) fn check_swallowed_clauses(
     items: &[OracleItemIr],
     source_text: &str,
+    card_name: &str,
     result: &ParsedAbilities,
     tracks: &ItemIdTracks<'_>,
+    history: &[super::oracle_ir::history_provenance::DocumentHistory],
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
     for unit in audit_units(items, source_text) {
@@ -229,7 +231,11 @@ pub(crate) fn check_swallowed_clauses(
         detect_condition_unless(&cleaned, fragment, &evidence, &mut found);
         detect_condition_as_long_as(&cleaned, fragment, &evidence, &scoped, &mut found);
         detect_duration_this_turn(&cleaned, fragment, &evidence, &mut found);
-        detect_combat_history_relation(&cleaned, fragment, &evidence, &mut found);
+        let history = history_for_unit(history, &unit, result, tracks);
+        let history_cleaned = strip_parens(
+            &super::oracle_util::normalize_card_name_refs(fragment, card_name).to_ascii_lowercase(),
+        );
+        detect_combat_history_relation(&history_cleaned, fragment, &history, &mut found);
         detect_combat_pairing_relation(&cleaned, fragment, &evidence, &mut found);
         detect_cast_mana_source_qualifier(&cleaned, fragment, &evidence, &mut found);
         detect_duration_next_turn(&cleaned, fragment, &evidence, &mut found);
@@ -6448,49 +6454,48 @@ fn detect_damage_subject_conjunction(
 /// the clause already fails closed (`instruction_drops_block_partner`) and is
 /// skipped before this runs; the detector is the backstop for every other path.
 ///
-/// Ownership limit: this works on a unit's text and its serialized definitions, which
-/// record no link from a clause to the instruction that wrote it. So it matches each
-/// clause to its own distinct relation anywhere in the unit (one whole filter per relation,
-/// on a subject the partner word can bind), not to that relation's instruction. Binding a
-/// clause to its own instruction is the guard's job, done where each instruction's text is
-/// known (`instruction_drops_block_partner`, and the compound split's per-conjunct check).
-fn detect_combat_history_relation(
+/// Every recognized occurrence needs a provenance record from its own lowering.
+/// The record's expected subject was bound there, never reconstructed from words
+/// or inferred from the final tree. Only its producer's own operands can vouch.
+pub(crate) fn detect_combat_history_relation(
     cleaned: &str,
     original: &str,
-    evidence: &UnitEvidence,
+    provenance: &[super::oracle_ir::history_provenance::HistoryAudit<'_>],
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
-    // CR 608.2i: each whole filter's own restricting relations, one per distinct
-    // relation (`restricting_block_pairings`), so leaves repeated under one `And`
-    // vouch once. The walk reads a filter whole and stops there; a filter a
-    // property names (a reference, not the affected set) is never reached.
-    let mut available = evidence.collect_outside::<TargetFilter, BlockHistoryKey>(
-        |node| {
-            <FilterProp as serde::Deserialize>::deserialize(node).is_ok()
-                || <TargetFilter as serde::Deserialize>::deserialize(node).is_ok()
-        },
-        restricting_block_pairings,
-    );
-    // Each clause needs its own relation, of its direction and window and on a
-    // subject its partner can bind, so a represented clause can't vouch for a
-    // second one.
+    let mut available = provenance.iter().collect::<Vec<_>>();
     let mut swallowed = false;
     let mut remaining = cleaned;
     while let Some((_, clause, rest)) = scan_preceded(remaining, parse_block_history_clause) {
-        let word = match clause.partner {
-            HistoryPartner::Subject(word) => Some(word),
-            HistoryPartner::Filter | HistoryPartner::Unbound => None,
-        };
         match available
             .iter()
-            .position(|key| key.represents(clause.direction, clause.scope, word))
+            .position(|record| record.record.occurrence.clause == clause)
         {
             Some(index) => {
-                available.swap_remove(index);
+                available.remove(index);
             }
             None => swallowed = true,
         }
         remaining = rest;
+    }
+    for (index, evidence) in provenance.iter().enumerate() {
+        if provenance[..index].iter().any(|previous| {
+            previous.record.producer == evidence.record.producer
+                && previous.record.occurrence == evidence.record.occurrence
+        }) {
+            swallowed = true;
+        }
+        let represented = evidence.record.expected.is_some_and(|expected| {
+            evidence.instruction.is_some_and(|instruction| {
+                super::oracle_effect::own_instruction_populations(&instruction.effect)
+                    .into_iter()
+                    .flat_map(restricting_block_pairings)
+                    .any(|actual| actual == expected)
+            })
+        });
+        if !represented {
+            swallowed = true;
+        }
     }
     if swallowed {
         diagnostics.push(OracleDiagnostic::swallowed_clause(
@@ -6769,7 +6774,60 @@ fn effect_name(effect: &Effect) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use crate::parser::oracle_ir::history_provenance::{
+        audit_history, capture_own_history, HistoryProvenance, InstructionIdentity, InstructionPath,
+    };
     use crate::parser::swallow_evidence::UnitEvidence;
+
+    fn history_filter_diagnostics(text: &str, filters: Vec<TargetFilter>) -> Vec<OracleDiagnostic> {
+        let mut clause = crate::parser::oracle_ir::ast::parsed_clause(Effect::DestroyAll {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        });
+        let ctx = crate::parser::oracle_ir::context::ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..Default::default()
+        };
+        capture_own_history(&mut clause, text, &ctx);
+        let definitions = filters
+            .into_iter()
+            .map(|target| {
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::DestroyAll {
+                        target,
+                        cant_regenerate: false,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let records = clause
+            .history
+            .into_iter()
+            .enumerate()
+            .take(definitions.len())
+            .map(|(index, pending)| HistoryProvenance {
+                occurrence: pending.occurrence,
+                expected: pending.expected,
+                producer: InstructionIdentity {
+                    clause: crate::parser::oracle_ir::effect_chain::ClauseId(index as u32),
+                    lineage: Vec::new(),
+                    instruction: InstructionPath::default(),
+                },
+                locator: Some(InstructionPath::default()),
+            })
+            .collect::<Vec<_>>();
+        let evidence = records
+            .iter()
+            .zip(&definitions)
+            .flat_map(|(record, definition)| {
+                audit_history(std::slice::from_ref(record), definition)
+            })
+            .collect::<Vec<_>>();
+        let mut diagnostics = Vec::new();
+        detect_combat_history_relation(text, text, &evidence, &mut diagnostics);
+        diagnostics
+    }
 
     use super::{
         any_ability_has_unimplemented, def_tree_has_cast_graveyard_redirect_rider,
@@ -15862,7 +15920,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             super::detect_combat_history_relation(
                 &cleaned,
                 text,
-                &UnitEvidence::from_json_for_test("[]"),
+                &[],
                 &mut diagnostics,
             );
             assert!(
@@ -15998,14 +16056,8 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let restricting = with(vec![relation.clone()]);
         let text =
             "destroy all creatures it blocked this turn. tap all creatures it blocked this turn.";
-        let flagged = |filters: Vec<TargetFilter>| {
-            let evidence = UnitEvidence::from_json_for_test(
-                &serde_json::to_string(&filters).expect("filters serialize"),
-            );
-            let mut diagnostics = Vec::new();
-            detect_combat_history_relation(text, text, &evidence, &mut diagnostics);
-            !diagnostics.is_empty()
-        };
+        let flagged =
+            |filters: Vec<TargetFilter>| !history_filter_diagnostics(text, filters).is_empty();
         assert!(
             !flagged(vec![restricting.clone(), restricting.clone()]),
             "one filter per clause"
@@ -16041,20 +16093,10 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             ]),
             "an unrestricted Or branch doesn't restrict"
         );
-        // Only a filter's own negation or disjunction is a barrier: another enum's
-        // union of restricting populations (`CardTypeSetSource::AnyOf`) still
-        // carries both relations.
-        let union = serde_json::json!([{
-            "type": "AnyOf",
-            "sources": [restricting.clone(), restricting.clone()],
-        }]);
-        let evidence = UnitEvidence::from_json_for_test(&union.to_string());
+        // Unrelated serialized unions no longer supply instruction ownership.
         let mut diagnostics = Vec::new();
-        detect_combat_history_relation(text, text, &evidence, &mut diagnostics);
-        assert!(
-            diagnostics.is_empty(),
-            "a union of populations restricts each"
-        );
+        detect_combat_history_relation(text, text, &[], &mut diagnostics);
+        assert!(!diagnostics.is_empty(), "missing provenance is reported");
         assert!(
             flagged(vec![
                 with(vec![relation.clone(), relation.clone()]),
@@ -16089,17 +16131,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         }]);
         let source_clause = "destroy all creatures ~ blocked this turn.";
         let flags_source_clause = |filters: Vec<TargetFilter>| {
-            let evidence = UnitEvidence::from_json_for_test(
-                &serde_json::to_string(&filters).expect("filters serialize"),
-            );
-            let mut diagnostics = Vec::new();
-            detect_combat_history_relation(
-                source_clause,
-                source_clause,
-                &evidence,
-                &mut diagnostics,
-            );
-            !diagnostics.is_empty()
+            !history_filter_diagnostics(source_clause, filters).is_empty()
         };
         assert!(
             flags_source_clause(vec![on_earlier_target]),
@@ -16487,14 +16519,16 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
 
         let history = "destroy all creatures it blocked this turn.";
         let history_reported = |direction, scope| {
-            let mut diagnostics = Vec::new();
-            super::detect_combat_history_relation(
+            !history_filter_diagnostics(
                 history,
-                history,
-                &evidence(direction, scope),
-                &mut diagnostics,
-            );
-            !diagnostics.is_empty()
+                vec![TargetFilter::Typed(TypedFilter::creature().properties(
+                    vec![FilterProp::CombatRelation {
+                        relation: CombatRelation::BlockPairing { direction, scope },
+                        subject: CombatRelationSubject::Source,
+                    }],
+                ))],
+            )
+            .is_empty()
         };
         assert!(
             !history_reported(BlockPairDirection::SubjectIsBlocker, this_turn),
@@ -16527,14 +16561,16 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         // A two-way clause is represented only by a two-way filter in its own window.
         let two_way = "destroy all creatures that blocked or were blocked by it this turn.";
         let two_way_reported = |direction, scope| {
-            let mut diagnostics = Vec::new();
-            super::detect_combat_history_relation(
+            !history_filter_diagnostics(
                 two_way,
-                two_way,
-                &evidence(direction, scope),
-                &mut diagnostics,
-            );
-            !diagnostics.is_empty()
+                vec![TargetFilter::Typed(TypedFilter::creature().properties(
+                    vec![FilterProp::CombatRelation {
+                        relation: CombatRelation::BlockPairing { direction, scope },
+                        subject: CombatRelationSubject::Source,
+                    }],
+                ))],
+            )
+            .is_empty()
         };
         assert!(
             !two_way_reported(BlockPairDirection::Either, this_turn),

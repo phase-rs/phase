@@ -1765,6 +1765,12 @@ impl ClauseDraft<'_> {
             .allocator()
             .allocate_with_span(span, Some(&self.source_text))
             .expect("chain-relative clause span is contained by its chain item");
+        // Seal the history occurrence's clause envelope with the same source unit
+        // that owns its parsed instruction. Reminting an absorbed clause transports
+        // this envelope too; nested logical lineage remains on the pending record.
+        for record in &mut self.parsed.history {
+            record.occurrence.source = Some(source.clone());
+        }
         self.builder.next_clause_id += 1;
         self.builder.clauses.push(ClauseIr {
             id,

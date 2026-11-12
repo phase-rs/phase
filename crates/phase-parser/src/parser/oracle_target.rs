@@ -7242,40 +7242,6 @@ pub(crate) struct BlockHistoryKey {
     pub(crate) subject: CombatRelationSubject,
 }
 
-impl BlockHistoryKey {
-    /// Whether this relation represents a clause of `direction` and `scope`
-    /// naming `word`, which it does when its subject is one the word can bind
-    /// (`CombatRelationSubjectWord::history_subjects`). `None` is a partner no
-    /// subject word covers, whose subject the clause doesn't say.
-    pub(crate) fn represents(
-        self,
-        direction: BlockPairDirection,
-        scope: CombatHistoryScope,
-        word: Option<CombatRelationSubjectWord>,
-    ) -> bool {
-        self.direction == direction
-            && self.scope == scope
-            && word.is_none_or(|word| word.history_subjects().contains(&self.subject))
-    }
-}
-
-impl CombatRelationSubjectWord {
-    /// CR 608.2c: the subjects a history clause naming this word can bind, as
-    /// `resolve_relation_subject` binds them: "~" its source, "that creature" an
-    /// earlier instruction's target, and "it" either, by its antecedent.
-    pub(crate) fn history_subjects(self) -> &'static [CombatRelationSubject] {
-        match self {
-            Self::SelfName => &[CombatRelationSubject::Source],
-            Self::Pronoun => &[
-                CombatRelationSubject::AnaphoricTarget,
-                CombatRelationSubject::Source,
-            ],
-            Self::Demonstrative => &[CombatRelationSubject::AnaphoricTarget],
-            Self::TargetCreature => &[CombatRelationSubject::ParentTarget],
-        }
-    }
-}
-
 /// CR 608.2i: the distinct `BlockPairing` history relations that restrict `filter`'s
 /// objects. A relation restricts only as a conjunct: under negation (`Not`) it excludes
 /// objects, and in a disjunction (`AnyOf`, `Or`) another branch can admit an object the

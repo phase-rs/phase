@@ -562,41 +562,6 @@ impl UnitEvidence {
         found
     }
 
-    /// The values `read` gives for each node that deserializes as `T`, skipping
-    /// every node below one `barrier` holds for: a node in a subtree whose
-    /// meaning the barrier changes (a negation) is not evidence of the fact
-    /// `read` names.
-    pub(super) fn collect_outside<T: DeserializeOwned, U>(
-        &self,
-        barrier: impl Fn(&Value) -> bool,
-        read: impl Fn(&T) -> Vec<U>,
-    ) -> Vec<U> {
-        fn walk<T: DeserializeOwned, U>(
-            node: &Value,
-            barrier: &impl Fn(&Value) -> bool,
-            read: &impl Fn(&T) -> Vec<U>,
-            out: &mut Vec<U>,
-        ) {
-            if let Ok(value) = T::deserialize(node) {
-                out.extend(read(&value));
-            }
-            if barrier(node) {
-                return;
-            }
-            match node {
-                Value::Object(map) => map
-                    .iter()
-                    .filter(|(k, _)| k.as_str() != DESCRIPTION_KEY)
-                    .for_each(|(_, v)| walk(v, barrier, read, out)),
-                Value::Array(items) => items.iter().for_each(|v| walk(v, barrier, read, out)),
-                _ => {}
-            }
-        }
-        let mut out = Vec::new();
-        walk(&self.root, &barrier, &read, &mut out);
-        out
-    }
-
     /// Does any node stored at one of `keys` deserialize as `T` and satisfy `pred`?
     ///
     /// Key anchoring is **mandatory** for externally tagged enums, whose unit variants are

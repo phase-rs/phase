@@ -4531,11 +4531,21 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         .items
         .iter()
         .any(|item| matches!(item.node, OracleNodeIr::Modal(_)));
+    let mut history_provenance = Vec::new();
     let mut host_reference_candidates = HostReferenceCandidates::default();
     for item in &ir.items {
         match &item.node {
             OracleNodeIr::Spell(ability_ir) => {
-                let mut def = lower_ability_ir(ability_ir);
+                let lowered =
+                    crate::parser::oracle_effect::lower_ability_ir_with_provenance(ability_ir);
+                let mut def = lowered.value;
+                history_provenance.extend(lowered.history.into_iter().map(|record| {
+                    crate::parser::oracle_ir::history_provenance::DocumentHistory {
+                        item: item.id,
+                        root: crate::parser::oracle_ir::history_provenance::HistoryRoot::Ability,
+                        record,
+                    }
+                }));
                 if !owns_modal_modes {
                     host_reference_candidates.abilities.push((
                         item.id,
@@ -4582,7 +4592,25 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
                 printed_ability_slot += 1;
             }
             OracleNodeIr::Trigger(trigger_node) => {
-                let mut def = lower_trigger_node_ir(trigger_node);
+                let lowered = match trigger_node {
+                    TriggerNodeIr::Parsed(trigger) => {
+                        crate::parser::oracle_trigger::lower_trigger_ir_with_provenance(trigger)
+                    }
+                    TriggerNodeIr::Assembled { .. } => {
+                        crate::parser::oracle_ir::history_provenance::Lowered {
+                            value: lower_trigger_node_ir(trigger_node),
+                            history: Vec::new(),
+                        }
+                    }
+                };
+                let mut def = lowered.value;
+                history_provenance.extend(lowered.history.into_iter().map(|record| {
+                    crate::parser::oracle_ir::history_provenance::DocumentHistory {
+                        item: item.id,
+                        root: crate::parser::oracle_ir::history_provenance::HistoryRoot::TriggerExecute,
+                        record,
+                    }
+                }));
                 // The card's own parsed effect-chain trigger is a candidate.
                 // Recorded here, not in `lower_trigger_ir`, which also lowers
                 // triggers quoted inside a grant ("… has 'When …'"); those keep
@@ -4667,6 +4695,16 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // → etb-exile → punisher). Order is behavior-load-bearing: the swallow audit
     // reads `result` between the player-persist and the etb-exile/punisher
     // applications.
+    let history_transports = crate::parser::oracle_ir::feature::capture_document_history(
+        &history_provenance,
+        &result,
+        &ItemIdTracks {
+            abilities: &ability_ids,
+            triggers: &trigger_ids,
+            statics: &static_ids,
+            replacements: &replacement_ids,
+        },
+    );
     apply_self_replacement_override(&mut result, &ir.relations, &mut ability_ids);
     apply_linked_choice_etb_counter(&mut result, &ir.relations, &mut replacement_ids);
     apply_linked_choice_constrained_card_type_static(
@@ -4741,12 +4779,20 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         statics: &static_ids,
         replacements: &replacement_ids,
     };
+    crate::parser::oracle_ir::feature::finish_document_history(
+        &mut history_provenance,
+        history_transports,
+        &result,
+        &tracks,
+    );
     let mut swallow_diagnostics = Vec::new();
     super::swallow_check::check_swallowed_clauses(
         &audit_items,
         &ir.source_text,
+        &ir.card_name,
         &result,
         &tracks,
+        &history_provenance,
         &mut swallow_diagnostics,
     );
     ir.diagnostics.append(&mut swallow_diagnostics);

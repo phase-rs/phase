@@ -26,6 +26,9 @@ use crate::types::zones::Zone;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ParsedEffectClause {
+    /// Lowering-only clause ownership; never part of the AST trace or gameplay data.
+    #[serde(skip)]
+    pub(crate) history: Vec<super::history_provenance::PendingHistory>,
     pub(crate) effect: Effect,
     pub(crate) duration: Option<Duration>,
     /// Compound "and" remainder parsed into a sub_ability chain.
@@ -2379,6 +2382,7 @@ pub(crate) fn assert_no_compound_remainder(rem: &str, context: &str) {
 
 pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
     ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         effect,

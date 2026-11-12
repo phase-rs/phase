@@ -2627,6 +2627,7 @@ fn try_parse_whenever_this_turn_from(
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -2766,6 +2767,7 @@ fn build_reflexive_coin_flip_trigger(is_win: bool, inner: AbilityDefinition) -> 
     trigger_def.valid_target = Some(TargetFilter::Controller);
 
     ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -2814,6 +2816,7 @@ fn build_when_next_delayed_trigger(
         Box::new(alt)
     });
     ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -3111,6 +3114,7 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     trigger_def.valid_target = Some(TargetFilter::Controller);
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -3220,6 +3224,7 @@ fn try_parse_when_next_generic_event(tp: TextPair) -> Option<ParsedEffectClause>
     let inner = parse_effect_chain_with_context(after.original, AbilityKind::Spell, &mut inner_ctx);
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -3313,6 +3318,7 @@ fn try_parse_reflexive_this_way_trigger(tp: TextPair) -> Option<ParsedEffectClau
     let inner = parse_effect_chain_with_context(after.original, AbilityKind::Spell, &mut inner_ctx);
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -3473,6 +3479,7 @@ fn try_parse_at_next_phase_delayed_trigger(
     ctx.spell_anaphor_binding = SpellAnaphorBinding::EventSource;
     let inner = parse_effect_chain_with_context(effect_text, kind, &mut ctx);
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -4338,6 +4345,7 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
         };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -5317,6 +5325,7 @@ fn try_parse_inline_delayed_trigger(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -5658,6 +5667,7 @@ fn try_parse_damage_prevention_disabled(tp: TextPair) -> Option<ParsedEffectClau
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -5730,6 +5740,7 @@ fn try_parse_cant_enter_battlefield_from_restriction(
     });
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -5797,6 +5808,7 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -5863,6 +5875,7 @@ fn try_parse_temporary_spell_cost_modification(tp: TextPair<'_>) -> Option<Parse
     // inner static carries its own controller-scoped `affected` (cards you
     // control) so it functions exactly as if printed on the source.
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -5914,6 +5927,7 @@ fn try_parse_temporary_attack_only_neighbor(tp: TextPair<'_>) -> Option<ParsedEf
         player: PlayerScope::Controller,
     };
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -5984,6 +5998,7 @@ fn try_parse_temporary_cant_become_tapped(tp: TextPair<'_>) -> Option<ParsedEffe
         player: PlayerScope::Controller,
     };
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -6201,6 +6216,7 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
     };
 
     let clause = ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -6303,6 +6319,7 @@ fn try_parse_passive_cant_be_played_land_effect(tp: TextPair<'_>) -> Option<Pars
     let land_filter = parse_passive_cant_be_played_land_filter(before_played)?;
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -6392,6 +6409,7 @@ fn try_parse_passive_cant_be_cast_effect(tp: TextPair<'_>) -> Option<ParsedEffec
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -6516,6 +6534,7 @@ fn try_parse_cant_play_from_zone(tp: TextPair<'_>) -> Option<ParsedEffectClause>
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -6595,6 +6614,7 @@ fn try_parse_cant_activate_non_mana_abilities_effect(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -6641,6 +6661,7 @@ fn try_parse_during_that_turn_powerup_prohibition(tp: TextPair<'_>) -> Option<Pa
     .filter(|((), rest)| rest.trim_matches(['.', ' ']).is_empty())?;
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -6715,6 +6736,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
         }
 
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -6797,6 +6819,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -6939,6 +6962,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     );
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -7064,6 +7088,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     .sub_ability(delayed_return);
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -8759,6 +8784,8 @@ fn ability_definition_from_clause(
         unlowered_guard: _,
         // Parser bookkeeping the block-history guard has already read; nothing to lower.
         head_text: _,
+        // Parser provenance for the audit; a branch definition built here carries none.
+        history: _,
         entry_onset,
     } = clause;
     let mut def = AbilityDefinition::new(kind, effect);
@@ -9155,6 +9182,7 @@ fn try_parse_for_each_counter_kind_choice(tp: TextPair<'_>) -> Option<ParsedEffe
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -9201,6 +9229,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
 
     let categories = all_core_type_categories();
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -9311,6 +9340,7 @@ fn try_parse_for_each_category_exile(tp: TextPair<'_>) -> Option<ParsedEffectCla
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -9399,6 +9429,7 @@ fn try_parse_for_each_category_put_counter(tp: TextPair<'_>) -> Option<ParsedEff
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -9571,6 +9602,16 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
 }
 
 fn parse_effect_clause_with_damage_context(
+    text: &str,
+    ctx: &mut ParseContext,
+    damage_context: DamageTargetContext,
+) -> ParsedEffectClause {
+    let mut clause = parse_effect_clause_with_damage_context_inner(text, ctx, damage_context);
+    crate::parser::oracle_ir::history_provenance::capture_own_history(&mut clause, text, ctx);
+    clause
+}
+
+fn parse_effect_clause_with_damage_context_inner(
     text: &str,
     ctx: &mut ParseContext,
     damage_context: DamageTargetContext,
@@ -11456,6 +11497,7 @@ fn try_parse_player_draws_and_gains_control(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -12782,6 +12824,7 @@ fn parse_effect_clause_inner_with_damage_context(
     // power and toughness N/N" — the ApplyPerpetual keyword action (base P/T).
     if let Some((effect, onset)) = try_parse_perpetual_base_pt(tp) {
         return ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             entry_onset: onset,
             ..parsed_clause(effect)
@@ -15226,6 +15269,7 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -15330,6 +15374,7 @@ impl ParsedRetainedTypeClause {
     fn lower(self, duration_binding: RetainedTypeDurationBinding) -> ParsedEffectClause {
         let duration = duration_binding.duration();
         ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -20080,6 +20125,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
 
     if let Some(effect) = parse_energy_gain_base(&numeric_base_lower, quantity.clone()) {
         return Some(ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -20131,6 +20177,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 imperative::lower_targeted_action_ast(ast.with_for_each_quantity(quantity.clone()));
             let effect = thread_for_each_subject(effect, base_no_duration, ctx);
             return Some(ParsedEffectClause {
+                history: Vec::new(),
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
@@ -20413,6 +20460,7 @@ fn parsed_for_each_quantity_effect(
             let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, effect);
             sub_ability.duration = duration;
             return ParsedEffectClause {
+                history: Vec::new(),
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
@@ -20430,6 +20478,7 @@ fn parsed_for_each_quantity_effect(
     }
 
     ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -20578,6 +20627,7 @@ fn try_parse_random_card_perpetual_gain_quoted_ability(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -21762,6 +21812,7 @@ fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEff
     });
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -23170,6 +23221,7 @@ fn try_parse_reanimate_self_and_target(
     sub_ability.optional = sub_clause.optional;
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         sub_ability: Some(Box::new(sub_ability)),
         ..parsed_clause(primary)
@@ -23395,6 +23447,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
                 parse_target_with_ctx(target_text.trim_start(), &mut continuation_ctx);
             if sub_rem.trim().is_empty() && !matches!(sub_target, TargetFilter::Any) {
                 sub_clause = ParsedEffectClause {
+                    history: Vec::new(),
                     head_text: None,
                     optional_targeting: false,
                     unlowered_guard: None,
@@ -23602,6 +23655,15 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         sub_clause.multi_target.is_some(),
         continuation_ctx.target_selection_mode,
     );
+    crate::parser::oracle_ir::history_provenance::capture_own_history(
+        &mut sub_clause,
+        &sub_lower,
+        &continuation_ctx,
+    );
+    let mut continuation_history = std::mem::take(&mut sub_clause.history);
+    for record in &mut continuation_history {
+        record.prepend(crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility);
+    }
     let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
     sub_ability.target_choice_timing = continuation_timing;
     sub_ability.sub_ability = sub_clause.sub_ability;
@@ -23667,6 +23729,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     Some(ParsedEffectClause {
         // CR 608.2c: the head owns only the text before " and "; the block-history
         // guard reads its clauses there (`instruction_drops_block_partner`).
+        history: continuation_history,
         head_text: Some(text[..text.len() - remainder.len()].to_lowercase()),
         optional_targeting: false,
         unlowered_guard: None,
@@ -23708,6 +23771,7 @@ fn try_parse_tap_goad_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     let sub_ability = AbilityDefinition::new(AbilityKind::Spell, Effect::Goad { target });
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -24078,6 +24142,7 @@ fn try_parse_compound_player_object_damage(
     // effects (rules 614 and 615), so that single event is what those shields
     // observe — see `resolve_all` in game/effects/deal_damage.rs.
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -24212,6 +24277,7 @@ fn try_parse_compound_object_player_damage(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -24352,6 +24418,7 @@ fn try_parse_radiance_color_fanout_damage_inner(
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -24741,6 +24808,7 @@ fn try_parse_multi_target_damage_chain_inner(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -24873,6 +24941,7 @@ fn try_parse_multi_target_counter_chain(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -25339,6 +25408,7 @@ fn try_split_copy_cast_compound(text: &str, ctx: &mut ParseContext) -> Option<Pa
 
     let sub_ability = AbilityDefinition::new(AbilityKind::Spell, cast_effect);
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -25517,6 +25587,7 @@ fn try_split_damage_compound_with_damage_context(
     sub_ability.entry_onset = sub_clause.entry_onset;
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -25706,6 +25777,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -26064,6 +26136,7 @@ fn try_parse_shared_equal_to_quantity_compound(
         })
     });
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         sub_ability: sub_ability.map(Box::new),
         ..parsed_clause(head.lower_conjunct(qty, subject.as_ref(), tp.original))
@@ -26150,6 +26223,7 @@ fn try_parse_physical_contest(text: &str, ctx: &mut ParseContext) -> Option<Pars
         return Some(contest);
     };
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         sub_ability: Some(Box::new(ability_definition_from_clause(
             AbilityKind::Spell,
@@ -26310,6 +26384,7 @@ fn try_parse_compound_subject_each(
     tail.sub_ability = Some(Box::new(half_b));
 
     let distributed = ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -26335,6 +26410,7 @@ fn try_parse_compound_subject_each(
         return Some(distributed);
     };
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -26406,6 +26482,7 @@ fn bind_coordinated_player_set(
     }
     match head {
         Some(target) => ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             sub_ability: Some(Box::new(body)),
             ..parsed_clause(Effect::TargetOnly { target })
@@ -26413,6 +26490,7 @@ fn bind_coordinated_player_set(
         None => {
             ctx.pending_player_scope = Some(set);
             ParsedEffectClause {
+                history: Vec::new(),
                 head_text: None,
                 duration: body.duration,
                 sub_ability: body.sub_ability,
@@ -27158,6 +27236,46 @@ fn anaphor_rewrite_would_drop_this_way_binding(text_lower: &str, effect: &Effect
             .is_some_and(TargetFilter::references_tracked_set)
 }
 
+/// The affected populations owned by this instruction. Nested payloads and
+/// continuation instructions have their own operands and are deliberately excluded.
+/// Both the lowering guard and the final provenance audit must use this boundary.
+pub(crate) fn own_instruction_populations(effect: &Effect) -> Vec<&TargetFilter> {
+    // `mass_population_target` adds `ChangeZoneAll`, which the parser-side
+    // list does not carry. CR 701.27a + CR 115.10a: a scope-`All` Transform
+    // ("transform all Humans") keeps a population neither shared list names,
+    // and its `target_filter()` is `None`. It is read here only, so the
+    // chain-prior population the shared lists feed is unchanged.
+    let population = mass_population_filter(effect)
+        .or_else(|| mass_population_target(effect))
+        .or(match effect {
+            Effect::Transform {
+                scope: EffectScope::All,
+                target,
+            } => Some(target),
+            _ => None,
+        });
+    // CR 611.2c: an untargeted continuous grant over a broadcast population
+    // ("creatures that were blocked by that creature this combat gain
+    // trample", Ride Down) keeps that population in its statics' `affected`,
+    // which neither shared list nor `target_filter()` names. Read here only.
+    let grant_populations = match effect {
+        Effect::GenericEffect {
+            static_abilities,
+            target: None,
+            ..
+        } => static_abilities.as_slice(),
+        _ => &[],
+    }
+    .iter()
+    .filter_map(|static_def| static_def.affected.as_ref())
+    .filter(|filter| is_broadcast_population_filter(filter));
+    population
+        .into_iter()
+        .chain(grant_populations)
+        .chain(effect.target_filter())
+        .collect()
+}
+
 /// CR 608.2c + CR 608.2i + CR 115.1a: an instruction whose affected objects — a mass
 /// population or a target — are defined by a block-history clause their filter does not
 /// carry: a partner that is an indefinite filter phrase (Time to Reflect: "target creature
@@ -27178,43 +27296,7 @@ fn instruction_drops_block_partner(
     lower: &str,
     ctx: &ParseContext,
 ) -> bool {
-    let effect = &clause.effect;
-    let populations: Vec<&TargetFilter> = {
-        // `mass_population_target` adds `ChangeZoneAll`, which the parser-side
-        // list does not carry. CR 701.27a + CR 115.10a: a scope-`All` Transform
-        // ("transform all Humans") keeps a population neither shared list names,
-        // and its `target_filter()` is `None`. It is read here only, so the
-        // chain-prior population the shared lists feed is unchanged.
-        let population = mass_population_filter(effect)
-            .or_else(|| mass_population_target(effect))
-            .or(match effect {
-                Effect::Transform {
-                    scope: EffectScope::All,
-                    target,
-                } => Some(target),
-                _ => None,
-            });
-        // CR 611.2c: an untargeted continuous grant over a broadcast population
-        // ("creatures that were blocked by that creature this combat gain
-        // trample", Ride Down) keeps that population in its statics' `affected`,
-        // which neither shared list nor `target_filter()` names. Read here only.
-        let grant_populations = match effect {
-            Effect::GenericEffect {
-                static_abilities,
-                target: None,
-                ..
-            } => static_abilities.as_slice(),
-            _ => &[],
-        }
-        .iter()
-        .filter_map(|static_def| static_def.affected.as_ref())
-        .filter(|filter| is_broadcast_population_filter(filter));
-        population
-            .into_iter()
-            .chain(grant_populations)
-            .chain(effect.target_filter())
-            .collect()
-    };
+    let populations = own_instruction_populations(&clause.effect);
     let own_text = clause.head_text.as_deref().unwrap_or(lower);
     !populations.is_empty()
         && population_drops_block_history_clause(own_text, &[populations], |word| {
@@ -30709,6 +30791,7 @@ fn lower_subject_predicate_ast_body(
             sub_ability,
             onset,
         } => ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -30729,6 +30812,7 @@ fn lower_subject_predicate_ast_body(
             sub_ability,
             onset,
         } => ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -30748,6 +30832,7 @@ fn lower_subject_predicate_ast_body(
             duration,
             sub_ability,
         } => ParsedEffectClause {
+            history: Vec::new(),
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
@@ -31080,6 +31165,7 @@ fn lower_subject_predicate_ast_body(
                     inner.sub_ability = clause.sub_ability;
                     inner.multi_target = clause.multi_target;
                     return ParsedEffectClause {
+                        history: Vec::new(),
                         head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
@@ -31312,6 +31398,7 @@ fn lower_subject_predicate_ast_body(
                             crate::types::ability::TargetChoiceTiming::Resolution;
                     }
                     return ParsedEffectClause {
+                        history: Vec::new(),
                         head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
@@ -31340,6 +31427,7 @@ fn lower_subject_predicate_ast_body(
                     let mut explore = AbilityDefinition::new(AbilityKind::Spell, Effect::Explore);
                     explore.sub_ability = clause.sub_ability;
                     return ParsedEffectClause {
+                        history: Vec::new(),
                         head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
@@ -31362,6 +31450,7 @@ fn lower_subject_predicate_ast_body(
 
                 if !matches!(affected, TargetFilter::SelfRef) {
                     return ParsedEffectClause {
+                        history: Vec::new(),
                         head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
@@ -32888,6 +32977,7 @@ fn wrap_target_subject_damage(
     damage_ability.distribute = clause.distribute;
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -44157,7 +44247,18 @@ pub(crate) enum ChainLoweringMode {
 /// The step is a no-op on an empty `die_results`, which is what keeps every
 /// non-die producer byte-identical.
 pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
-    let mut def = lower_effect_chain_ir(&ir.body);
+    lower_ability_ir_with_provenance(ir).value
+}
+
+pub(crate) fn lower_ability_ir_with_provenance(
+    ir: &AbilityIr,
+) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
+    let lowered = lower::lower_effect_chain_ir_with_provenance(&ir.body);
+    let mut def = lowered.value;
+    let transport = crate::parser::oracle_ir::history_provenance::HistoryTransport::from_lowered(
+        &def,
+        lowered.history,
+    );
     attach_die_result_branches_before_finalization(&mut def, &ir.die_results);
     finalize_effect_chain(&mut def);
     // CR 608.2c + CR 121.1: finalization can assemble the Great Aurora class's
@@ -44185,20 +44286,35 @@ pub(crate) fn lower_ability_ir(ir: &AbilityIr) -> AbilityDefinition {
         }
     }
     apply_ability_root_transforms(&mut def, &ir.root_transforms);
+    let mut mode_history = Vec::new();
     if let Some(modal) = &ir.modal {
         def = def.with_modal(
             modal.choice.clone(),
             modal
                 .modes
                 .iter()
-                .map(|mode| lower_ability_ir(&mode.ability))
+                .enumerate()
+                .map(|(index, mode)| {
+                    let mut lowered = lower_ability_ir_with_provenance(&mode.ability);
+                    for record in &mut lowered.history {
+                        record.prepend(
+                            crate::parser::oracle_ir::history_provenance::InstructionStep::Mode(
+                                index,
+                            ),
+                        );
+                    }
+                    mode_history.extend(lowered.history);
+                    lowered.value
+                })
                 .collect(),
         );
     }
     // CR 605.1a + CR 605.3b: classify after the activation envelope and
     // stages, so a library-moving cost keeps the supported stack-using path.
     refuse_linked_paid_cast_in_activated_mana_ability(&mut def, &ir.source_text);
-    def
+    let mut lowered = transport.finish(def);
+    lowered.history.extend(mode_history);
+    lowered
 }
 
 /// CR 602.1a + CR 605.1a: require the completed activation envelope before
@@ -46490,6 +46606,7 @@ fn parse_effect_chain_ir_body(
                     .clause(
                         normalized_text,
                         ParsedEffectClause {
+                            history: Vec::new(),
                             head_text: None,
                             // CR 611.2e: "It's an Aura enchantment …" is an "is"
                             // statement, so it applies simultaneously with the entry.
@@ -49479,7 +49596,9 @@ fn parse_effect_chain_ir_body(
                 0,
                 Some(damage_context),
             );
-            let mut inner_def = lower_effect_chain_ir(&inner_ir);
+            let inner_lowered = lower::lower_effect_chain_ir_with_provenance(&inner_ir);
+            let mut inner_def = inner_lowered.value;
+            let inner_history = inner_lowered.history;
             if let Some(spec) = inner_multi_target {
                 inner_def = inner_def.multi_target(spec);
             }
@@ -49534,10 +49653,16 @@ fn parse_effect_chain_ir_body(
                     ctx.push_diagnostic(d);
                 }
             }
+            let mut delayed_clause = parsed_clause(delayed_effect);
+            delayed_clause.history = inner_history.into_iter().map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record, crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+                )
+            }).collect();
             builder
                 .clause(
                     normalized_text,
-                    parsed_clause(delayed_effect),
+                    delayed_clause,
                     chunk.boundary_after,
                     ClauseDisposition::Emit {
                         followup: None,
@@ -49623,6 +49748,7 @@ fn parse_effect_chain_ir_body(
                 .clause(
                     normalized_text,
                     ParsedEffectClause {
+                        history: Vec::new(),
                         head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
@@ -50381,6 +50507,11 @@ fn parse_effect_chain_ir_body(
                 replace_target_with_parent(&mut clause.effect);
             }
         }
+        crate::parser::oracle_ir::history_provenance::capture_own_history(
+            &mut clause,
+            &text_lower,
+            ctx,
+        );
         if instruction_drops_block_partner(&clause, &text_lower, ctx) {
             clause.effect = Effect::unimplemented("block_history_partner", text.as_str());
             clause.sub_ability = None;

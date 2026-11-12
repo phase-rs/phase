@@ -2352,12 +2352,18 @@ fn mode_exposes_subject_batch(mode: &TriggerMode) -> bool {
 /// inline modal) use this same path before attaching that metadata, so the
 /// trigger's optionality and target semantics cannot diverge from a plain
 /// `EffectChain` body.
-fn lower_trigger_effect_chain(
+fn lower_trigger_effect_chain_with_provenance(
     chain_ir: &EffectChainIr,
     modifiers: &TriggerModifiers,
     die_results: &[DieResultBranchIr],
-) -> AbilityDefinition {
-    let mut ability = lower_effect_chain_ir(chain_ir);
+) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
+    let lowered =
+        crate::parser::oracle_effect::lower::lower_effect_chain_ir_with_provenance(chain_ir);
+    let mut ability = lowered.value;
+    let transport = crate::parser::oracle_ir::history_provenance::HistoryTransport::from_lowered(
+        &ability,
+        lowered.history,
+    );
     attach_terminal_die_result_branches_before_finalization(&mut ability, die_results);
     crate::parser::oracle_effect::finalize_effect_chain(&mut ability);
     if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
@@ -2405,7 +2411,7 @@ fn lower_trigger_effect_chain(
     {
         ability.optional = true;
     }
-    ability
+    transport.finish(ability)
 }
 
 /// Lower a document trigger node.
@@ -2481,16 +2487,24 @@ pub(crate) fn reflexive_event_trigger(
 }
 
 pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
+    lower_trigger_ir_with_provenance(ir).value
+}
+
+pub(crate) fn lower_trigger_ir_with_provenance(
+    ir: &TriggerIr,
+) -> crate::parser::oracle_ir::history_provenance::Lowered<TriggerDefinition> {
+    let mut history = Vec::new();
     let mut def = ir.partial_def.clone();
     let modifiers = &ir.modifiers;
 
     // Lower the body
     let execute = match &ir.body {
-        Some(TriggerBody::EffectChain(chain_ir)) => Some(Box::new(lower_trigger_effect_chain(
-            chain_ir,
-            modifiers,
-            &ir.die_results,
-        ))),
+        Some(TriggerBody::EffectChain(chain_ir)) => {
+            let lowered =
+                lower_trigger_effect_chain_with_provenance(chain_ir, modifiers, &ir.die_results);
+            history = lowered.history;
+            Some(Box::new(lowered.value))
+        }
         Some(TriggerBody::Reflexive(reflexive)) => {
             let reflexive_owns_die_results =
                 effect_chain_has_terminal_roll_die(&reflexive.effect_chain);
@@ -2502,11 +2516,13 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             } else {
                 (&[], ir.die_results.as_slice())
             };
-            let mut reflexive_ability = lower_trigger_effect_chain(
+            let reflexive_lowered = lower_trigger_effect_chain_with_provenance(
                 &reflexive.effect_chain,
                 modifiers,
                 reflexive_die_results,
             );
+            let mut reflexive_ability = reflexive_lowered.value;
+            let mut reflexive_history = reflexive_lowered.history;
             if let ReflexiveConnector::Condition(connector) = &reflexive.connector {
                 reflexive_ability.condition = Some(connector.clone());
             }
@@ -2517,7 +2533,15 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                     modal
                         .modes
                         .iter()
-                        .map(|mode| crate::parser::oracle_effect::lower_ability_ir(&mode.ability))
+                        .enumerate()
+                        .map(|(index, mode)| {
+                            let mut lowered = crate::parser::oracle_effect::lower_ability_ir_with_provenance(&mode.ability);
+                            for record in &mut lowered.history {
+                                record.prepend(crate::parser::oracle_ir::history_provenance::InstructionStep::Mode(index));
+                            }
+                            reflexive_history.extend(lowered.history);
+                            lowered.value
+                        })
                         .collect(),
                 );
             }
@@ -2526,6 +2550,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             // controller may decline or a mandatory instruction. Both build the
             // same parent → dependent-subability shape; the typed connector
             // preserves whether the printed rider is reflexive or outcome-gated.
+            let mut parent_history = Vec::new();
             let mut parent_ability = match &reflexive.parent {
                 ReflexiveParent::MayPay {
                     cost,
@@ -2533,7 +2558,13 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 } => {
                     let mut pay_ability = match payment_chain {
                         Some(chain) => {
-                            lower_trigger_effect_chain(chain, modifiers, parent_die_results)
+                            let lowered = lower_trigger_effect_chain_with_provenance(
+                                chain,
+                                modifiers,
+                                parent_die_results,
+                            );
+                            parent_history = lowered.history;
+                            lowered.value
                         }
                         None => AbilityDefinition::new(
                             AbilityKind::Spell,
@@ -2551,38 +2582,79 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 // printed instruction, not an offer — it carries no `optional`
                 // flag and no decline prompt.
                 ReflexiveParent::Mandatory { instruction } => {
-                    lower_trigger_effect_chain(instruction, modifiers, parent_die_results)
+                    let lowered = lower_trigger_effect_chain_with_provenance(
+                        instruction,
+                        modifiers,
+                        parent_die_results,
+                    );
+                    parent_history = lowered.history;
+                    lowered.value
                 }
             };
             let reflexive_ability = match &reflexive.connector {
                 ReflexiveConnector::Condition(_) => reflexive_ability,
                 ReflexiveConnector::Event(event) => {
+                    for record in &mut reflexive_history {
+                        record.prepend(crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload);
+                    }
                     reflexive_event_trigger(event, reflexive_ability)
                 }
             };
+            for record in &mut reflexive_history {
+                record.prepend(
+                    crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+                );
+            }
+            history = parent_history;
+            history.extend(reflexive_history);
             parent_ability.sub_ability = Some(Box::new(reflexive_ability));
             Some(Box::new(parent_ability))
         }
-        Some(TriggerBody::Modal(modal)) => Some(Box::new(
-            lower_trigger_effect_chain(&modal.marker, modifiers, &[]).with_modal(
-                modal.choice.clone(),
-                modal
-                    .modes
-                    .iter()
-                    .map(|mode| crate::parser::oracle_effect::lower_ability_ir(&mode.ability))
-                    .collect(),
-            ),
-        )),
-        Some(TriggerBody::Vote(vote)) => Some(Box::new(lower_trigger_effect_chain(
-            &vote.effect_chain(AbilityKind::Spell),
-            modifiers,
-            &[],
-        ))),
-        Some(TriggerBody::Pile(pile)) => Some(Box::new(lower_trigger_effect_chain(
-            &pile.effect_chain(AbilityKind::Spell),
-            modifiers,
-            &[],
-        ))),
+        Some(TriggerBody::Modal(modal)) => {
+            let lowered = lower_trigger_effect_chain_with_provenance(&modal.marker, modifiers, &[]);
+            history = lowered.history;
+            let modes = modal
+                .modes
+                .iter()
+                .enumerate()
+                .map(|(index, mode)| {
+                    let mut lowered =
+                        crate::parser::oracle_effect::lower_ability_ir_with_provenance(
+                            &mode.ability,
+                        );
+                    for record in &mut lowered.history {
+                        record.prepend(
+                            crate::parser::oracle_ir::history_provenance::InstructionStep::Mode(
+                                index,
+                            ),
+                        );
+                    }
+                    history.extend(lowered.history);
+                    lowered.value
+                })
+                .collect();
+            Some(Box::new(
+                lowered.value.with_modal(modal.choice.clone(), modes),
+            ))
+        }
+        Some(TriggerBody::Vote(vote)) => {
+            let lowered = lower_trigger_effect_chain_with_provenance(
+                &vote.effect_chain(AbilityKind::Spell),
+                modifiers,
+                &[],
+            );
+            history = lowered.history;
+            Some(Box::new(lowered.value))
+        }
+        Some(TriggerBody::Pile(pile)) => {
+            let lowered = lower_trigger_effect_chain_with_provenance(
+                &pile.effect_chain(AbilityKind::Spell),
+                modifiers,
+                &[],
+            );
+            history = lowered.history;
+            Some(Box::new(lowered.value))
+        }
         None => None,
     };
 
@@ -2591,6 +2663,11 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // their life"), rebind the body's `PlayerScope::Target` possessive
     // quantities to `PlayerScope::ScopedPlayer` so they resolve against the
     // damaged/attacked player rather than an absent chosen target.
+    let transport = execute.as_deref().map(|execute| {
+        crate::parser::oracle_ir::history_provenance::HistoryTransport::from_lowered(
+            execute, history,
+        )
+    });
     let mut execute = execute;
     // CR 608.2c + CR 608.2d — PRECEDENCE between the two `optional_player`
     // producers. This detector reads the TRIGGER BODY's head (`tag("they may ")`,
@@ -2988,7 +3065,10 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         .as_deref()
         .is_some_and(has_single_indicated_action_instruction)
     {
-        return unknown_trigger_definition(&ir.source_text).1;
+        return crate::parser::oracle_ir::history_provenance::Lowered {
+            value: unknown_trigger_definition(&ir.source_text).1,
+            history: Vec::new(),
+        };
     }
     constrain_triggering_spell_with_nth_filter(&mut def);
 
@@ -3287,7 +3367,21 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         }
     }
 
-    def
+    let history = match (transport, def.execute.take()) {
+        (Some(transport), Some(execute)) => {
+            let lowered = transport.finish(*execute);
+            def.execute = Some(Box::new(lowered.value));
+            lowered.history
+        }
+        (_, execute) => {
+            def.execute = execute;
+            Vec::new()
+        }
+    };
+    crate::parser::oracle_ir::history_provenance::Lowered {
+        value: def,
+        history,
+    }
 }
 
 /// CR 608.2c: the targeter rebind's stop rule BEFORE a link: a delayed trigger

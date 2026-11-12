@@ -1570,9 +1570,15 @@ pub(super) fn fold_search_choose_type_conditional_destination(def: &mut AbilityD
 /// is returned only if every difference from the unseeded one is confined to the
 /// positions the bindings may occupy (`accepting_bindings_confined`).
 pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
+    lower_effect_chain_ir_with_provenance(ir).value
+}
+
+pub(crate) fn lower_effect_chain_ir_with_provenance(
+    ir: &EffectChainIr,
+) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
     let unseeded = {
         let _pass = tracing::debug_span!(target: "engine::parser::binding", "assembly_attempt", pass = "unseeded").entered();
-        super::assembly::assemble_effect_chain(ir)
+        super::assembly::assemble_effect_chain_with_provenance(ir)
     };
     if ir
         .clauses
@@ -1589,9 +1595,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         .for_each(transplant_accepting_player_bindings);
     let seeded = {
         let _pass = tracing::debug_span!(target: "engine::parser::binding", "assembly_attempt", pass = "seeded").entered();
-        super::assembly::assemble_effect_chain(&seeded_ir)
+        super::assembly::assemble_effect_chain_with_provenance(&seeded_ir)
     };
-    let confined = accepting_bindings_confined(&unseeded, &seeded);
+    let confined = accepting_bindings_confined(&unseeded.value, &seeded.value);
     tracing::debug!(target: "engine::parser::binding", confined, selected_pass = if confined { "seeded" } else { "unseeded" }, "assembly selected");
     if confined {
         seeded
@@ -10119,6 +10125,7 @@ pub(super) fn try_parse_distribute_damage(
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -10208,6 +10215,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
 
     let counter_name = counter_type.as_str().into_owned();
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -10271,6 +10279,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
@@ -10399,6 +10408,7 @@ pub(super) fn try_parse_bidirectional_prevent(
     by_ability.sub_link = SubAbilityLink::SequentialSibling;
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
