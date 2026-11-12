@@ -1987,3 +1987,74 @@ fn ascent_of_the_worthy_first_chapter_offers_the_controllers_creatures_at_resolu
     );
     assert_resolution_settled(&runner, "Ascent of the Worthy");
 }
+
+/// CR 601.2c + CR 701.14a: "Choose a creature you control. It fights target
+/// creature you don't control." The fight resolves its fighters from the chain's
+/// announced slots, so the chosen creature must stay announced at cast (not moved
+/// to resolution) or the fight silently does nothing. Synthetic Oracle: no printed
+/// card pairs a bare choice with a fight; the nearest printed shapes are Crush
+/// Underfoot (a bare choice feeding a printed target) and the Fight cards that
+/// choose both fighters.
+#[test]
+fn bare_choice_feeding_a_fight_is_announced_and_the_fight_happens() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let fighter = scenario.add_creature(P0, "Own fighter", 4, 8).id();
+    scenario.add_creature(P0, "Other own creature", 1, 1);
+    let victim = scenario.add_creature(P1, "Opposing creature", 2, 8).id();
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic fight",
+            true,
+            "Choose a creature you control. It fights target creature you don't control.",
+        )
+        .with_mana_cost(parse_mtgjson_mana_cost("{G}"))
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    // Both picks are announced as the spell is cast: the chosen creature and the
+    // opposing creature it fights.
+    let mut announced = Vec::new();
+    for _ in 0..4 {
+        let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+            break;
+        };
+        let pick = [fighter, victim]
+            .into_iter()
+            .map(TargetRef::Object)
+            .find(|target| selection.current_legal_targets.contains(target))
+            .expect("a legal announcement");
+        announced.push(pick.clone());
+        runner
+            .act(GameAction::ChooseTarget { target: Some(pick) })
+            .unwrap();
+    }
+    assert_eq!(
+        announced,
+        vec![TargetRef::Object(fighter), TargetRef::Object(victim)],
+        "the chosen creature and the fought creature are both announced while casting"
+    );
+    assert_eq!(runner.state().stack.len(), 1);
+    runner.advance_until_stack_empty();
+    assert_resolution_settled(&runner, "the fight spell");
+    assert_eq!(
+        runner.state().objects[&victim].damage_marked,
+        4,
+        "the chosen creature dealt damage equal to its power in the fight"
+    );
+    assert_eq!(
+        runner.state().objects[&fighter].damage_marked,
+        2,
+        "the fought creature dealt damage back"
+    );
+}

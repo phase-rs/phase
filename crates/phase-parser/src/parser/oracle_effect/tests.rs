@@ -80560,6 +80560,54 @@ fn bare_choose_feeding_a_printed_target_through_the_chosen_object_keeps_stack_ti
         "{text}: {def:#?}"
     );
 
+    // A later instruction that prints "target" and reads the chosen object through
+    // a fight's subject, or an exchange's first side, needs the choice announced
+    // too: the engine recovers both fighters from the announced root slots.
+    // Synthetic Oracle; the nearest printed Fight shape with a chosen object is
+    // Crush Underfoot's damage, and the nearest printed exchange is Daring Thief.
+    for (text, reads) in [
+        (
+            "Choose a creature you control. It fights target creature you don't control.",
+            "Fight",
+        ),
+        (
+            "Choose a creature you control, then it fights target creature.",
+            "Fight",
+        ),
+        (
+            "Choose a creature you control. Exchange control of it and target creature an opponent controls.",
+            "ExchangeControl",
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let consumer = def.sub_ability.as_deref().expect("the consumer clause");
+        assert!(
+            match (reads, consumer.effect.as_ref()) {
+                (
+                    "Fight",
+                    Effect::Fight {
+                        subject: TargetFilter::ParentTarget,
+                        ..
+                    },
+                ) => true,
+                (
+                    "ExchangeControl",
+                    Effect::ExchangeControl {
+                        target_a: TargetFilter::ParentTarget,
+                        ..
+                    },
+                ) => true,
+                _ => false,
+            },
+            "{text}: reach guard for the consumer reading the choice: {def:#?}"
+        );
+        assert_eq!(
+            def.target_choice_timing,
+            TargetChoiceTiming::Stack,
+            "{text}: the choice stays announced"
+        );
+    }
+
     // An intervening announced target is the rebound printed target's antecedent,
     // not the earlier choice, which keeps `Resolution`. Synthetic.
     let text = "Choose a creature you control. Destroy target artifact. It deals damage equal to its power to target creature.";
@@ -80684,6 +80732,32 @@ fn compound_choice_object_and_player_keeps_resolution_before_printed_target_foll
             "{text}: the object-and-player producer's declaration stands"
         );
     }
+}
+
+/// SHAPE: the resolution chooser enumerates battlefield permanents only, so a bare
+/// choice of a card in another zone ("a creature card you control in exile") keeps
+/// the announced pick it had before the producer existed (CR 608.2d: the choice
+/// must be one the engine can offer). Synthetic Oracle: the printed analogues say
+/// "you own" and stay unimplemented. The control is the battlefield choice.
+#[test]
+fn bare_choose_in_another_zone_keeps_base_timing() {
+    for text in [
+        "Choose a creature card you control in exile. Put it onto the battlefield.",
+        "Choose an artifact card you control in a graveyard. Return it to the battlefield.",
+        "Choose a card you control in exile.",
+    ] {
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        assert!(
+            matches!(ir.clauses[0].parsed.effect, Effect::TargetOnly { .. }),
+            "{text}: reach guard for the bare choice: {ir:#?}"
+        );
+        assert_eq!(
+            ir.clauses[0].declared_target_choice_timing, None,
+            "{text}: a non-battlefield choice declares nothing"
+        );
+    }
+    let control = parse_effect_chain("Choose a creature you control.", AbilityKind::Spell);
+    assert_eq!(control.target_choice_timing, TargetChoiceTiming::Resolution);
 }
 
 /// SHAPE: a bare choice repeated once per opponent keeps the timing it had before

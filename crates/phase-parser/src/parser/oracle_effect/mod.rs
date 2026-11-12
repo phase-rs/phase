@@ -29393,8 +29393,7 @@ fn announced_target_antecedent(
 fn withhold_resolution_timing_from_choices_feeding_printed_targets(clauses: &mut [ClauseIr]) {
     for consumer in 0..clauses.len() {
         let later = &clauses[consumer];
-        let printed_target_lost_its_slot = (later.parsed.effect.target_filter()
-            == Some(&TargetFilter::ParentTarget)
+        let printed_target_lost_its_slot = (effect_reads_chosen_object(&later.parsed.effect)
             || matches!(later.parsed.effect, Effect::Unimplemented { .. }))
             && lower::PrintedTargetWord::from_clauses(std::slice::from_ref(later))
                 == lower::PrintedTargetWord::Present;
@@ -29511,6 +29510,26 @@ fn withhold_resolution_timing_from_repeated_choices(clauses: &mut [ClauseIr]) {
 
 fn cast_time_bare_choice(effect: &Effect, timing: TargetChoiceTiming) -> bool {
     timing != TargetChoiceTiming::Resolution && matches!(effect, Effect::TargetOnly { .. })
+}
+
+/// CR 608.2c: whether a later instruction's effect reads the chosen object through
+/// a slot the engine resolves from the chain's announced root slots: its target
+/// (rebound to `ParentTarget` by the anaphora rewrite), a fight's subject ("It
+/// fights target creature": `resolve_fight_fighters` recovers both fighters from
+/// the root slot pair), or an exchange's first side. Reading it through another
+/// slot is not claimed; over-withholding only returns a choice to its base timing.
+fn effect_reads_chosen_object(effect: &Effect) -> bool {
+    effect.target_filter() == Some(&TargetFilter::ParentTarget)
+        || matches!(
+            effect,
+            Effect::Fight {
+                subject: TargetFilter::ParentTarget,
+                ..
+            } | Effect::ExchangeControl {
+                target_a: TargetFilter::ParentTarget,
+                ..
+            }
+        )
 }
 
 /// The nearest object-naming node of one clause, read from its own sub chain
