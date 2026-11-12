@@ -2247,15 +2247,14 @@ fn hold_parked_decision(
         }
         return false;
     }
+    // A live child's event is another object's; the member's own pause
+    // boundary, if any, belonged to its now-prevented or approved event.
+    let own_boundary = owner.paused_current.take();
     let decision = HeldReplacementDecision {
         pending,
         chooser,
         prompt,
-        boundary: if live_child {
-            None
-        } else {
-            owner.paused_current.take()
-        },
+        boundary: if live_child { None } else { own_boundary },
         drain,
     };
     withdraw_dependent_holds(state, owner, index, &decision);
@@ -4733,6 +4732,122 @@ pub(crate) fn reconcile_staged_batch_after_departure(
     Ok(crate::game::engine_resolution_choices::DepartureSettlement::NotSettled)
 }
 
+/// CR 800.4a + CR 800.4h + CR 616.1: after a departure, a held decision that
+/// no longer stands is asked again from its member's consultation. A held
+/// decision applied nothing to the game: its replacements only rewrote its own
+/// pending event and its drain has not run (a live child's prevention only
+/// removed damage, which a new consultation removes again). So a decision
+/// whose event no longer survives, whose chooser left, or whose candidates or
+/// chooser changed (`pending_replacement_needs_reconsult`) is dropped and its
+/// member consulted again by the sweep through the same consult functions;
+/// the others keep their decision. The published decision was already settled
+/// by the departure's own replacement authority.
+fn settle_held_decisions_after_departure(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+) {
+    let Some(staged) = owner.staged.as_ref() else {
+        return;
+    };
+    if staged.stage != BatchDeliveryStage::Approving {
+        return;
+    }
+    let held: Vec<usize> = staged
+        .members
+        .iter()
+        .enumerate()
+        .filter(|(_, member)| member.held_decision.is_some())
+        .map(|(index, _)| index)
+        .collect();
+    if held.is_empty() {
+        return;
+    }
+    let published = state.pending_replacement.take();
+    for index in held {
+        let staged = owner.staged.as_ref().expect("staged");
+        let member = staged.members[index].clone();
+        let decision = member.held_decision.as_ref().expect("held");
+        let own_event_live = decision.boundary.is_none() || staged_member_is_live(state, &member);
+        state.pending_replacement = Some(decision.pending.clone());
+        let stands = own_event_live
+            && crate::game::players::is_alive(state, decision.chooser)
+            && replacement::replacement_event_survives(state, &decision.pending.proposed)
+            && !replacement::pending_replacement_needs_reconsult(state, Some(decision.chooser));
+        state.pending_replacement = None;
+        if stands {
+            continue;
+        }
+        let member = &mut owner.staged.as_mut().expect("staged").members[index];
+        member.held_decision = None;
+        if member.state == StagedBatchMemberState::Abandoned {
+            continue;
+        }
+        member.state = StagedBatchMemberState::Unconsulted;
+        member.pending_outcome = None;
+        member.approved_post_replacement = None;
+        member.blocked = false;
+        if let StagedMemberOperation::Destroy(operation) = member.operation {
+            member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
+                outer: StagedDestroyOuterApproval::Unapproved,
+                ..operation
+            });
+        }
+    }
+    state.pending_replacement = published;
+}
+
+/// CR 101.4 + CR 800.4a: when a departure leaves a held decision with a chooser
+/// earlier in APNAP order than the published one's, the published decision is
+/// held again and the scheduler asks in order. Only a decision whose drain is
+/// not on the stack can be held here.
+fn demote_published_after_departure(state: &mut GameState, owner: &mut PendingBatchDeliveries) {
+    let Some(index) = staged_asking_index(owner) else {
+        return;
+    };
+    let Some(published_chooser) = (match &state.waiting_for {
+        WaitingFor::ReplacementChoice { player, .. }
+        | WaitingFor::EntryControllerChoice { player, .. } => Some(*player),
+        _ => None,
+    }) else {
+        return;
+    };
+    if matches!(
+        state.resolution_stack.iter().last(),
+        Some(crate::types::resolution::ResolutionFrame::PostReplacement(
+            _
+        ))
+    ) {
+        return;
+    }
+    let apnap = crate::game::players::apnap_order(state);
+    let rank = |player: PlayerId| {
+        apnap
+            .iter()
+            .position(|seat| *seat == player)
+            .unwrap_or(usize::MAX)
+    };
+    let earlier_held = owner.staged.as_ref().is_some_and(|staged| {
+        staged.members.iter().any(|member| {
+            member
+                .held_decision
+                .as_ref()
+                .is_some_and(|decision| rank(decision.chooser) < rank(published_chooser))
+        })
+    });
+    if !earlier_held {
+        return;
+    }
+    let kind = if owner.paused_current.is_some() {
+        ParkedDecisionKind::Own
+    } else {
+        ParkedDecisionKind::LiveChild
+    };
+    let point = state.resolution_stack.consult_drain_point();
+    if hold_parked_decision(state, owner, index, point, kind) {
+        release_staged_asking(owner, index);
+    }
+}
+
 /// Shared reconcile of one staged owner (top or buried). Returns whether the
 /// batch has nothing left and must settle.
 fn reconcile_staged_owner(
@@ -4741,6 +4856,9 @@ fn reconcile_staged_owner(
     group_id: LogicalZoneChangeGroupId,
     events: &mut Vec<GameEvent>,
 ) -> bool {
+    settle_held_decisions_after_departure(state, owner);
+    demote_published_after_departure(state, owner);
+    sync_staged_requests(owner);
     let prompt_group = match &state.waiting_for {
         WaitingFor::DigRestSplitChoice {
             completion: Some(LibraryPlacementContinuation::ApprovedBatch { logical_group_id }),
@@ -4770,8 +4888,9 @@ fn reconcile_staged_owner(
             player: state.active_player,
         };
     }
-    // CR 101.4c: this batch's selection prompt stays while its chooser and
-    // every offered decision remain; otherwise the scheduler asks again.
+    // CR 101.4c: this batch's selection prompt (only an approving batch with
+    // no asking member raises one) stays while its chooser and every offered
+    // decision remain; otherwise the scheduler asks again.
     if let WaitingFor::ReplacementDecisionOrder { player, objects } = &state.waiting_for {
         let held_subjects: Vec<ObjectId> = owner
             .staged
@@ -4789,7 +4908,9 @@ fn reconcile_staged_owner(
                     .collect()
             })
             .unwrap_or_default();
-        let ours = objects.iter().any(|object| held_subjects.contains(object));
+        let ours = owner.staged.as_ref().is_some_and(|staged| {
+            staged.stage == BatchDeliveryStage::Approving && staged.asking.is_none()
+        });
         if ours {
             if crate::game::players::is_alive(state, *player)
                 && objects.iter().all(|object| held_subjects.contains(object))

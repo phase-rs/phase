@@ -7412,7 +7412,7 @@ impl PendingBatchDeliveries {
     ///
     /// | Member state | Approving: before / at-or-after cursor | Arranging or Delivering: before / at-or-after cursor |
     /// | --- | --- | --- |
-    /// | Unconsulted | only while `blocked` / yes | no / no |
+    /// | Unconsulted | yes (waiting, or consulted again) / yes | no / no |
     /// | OuterConsulting, InnerConsulting, PreventedWithChild | held XOR asking / no | no / no |
     /// | Approved, Terminal | yes / no | Terminal only / yes |
     /// | Abandoned | yes / yes | yes / yes |
@@ -7456,9 +7456,9 @@ impl PendingBatchDeliveries {
                 return Err("a consulted staged member is still marked blocked".to_string());
             }
             let allowed = match member.state {
-                StagedBatchMemberState::Unconsulted => {
-                    approving && (index >= staged.cursor || member.blocked)
-                }
+                // Before the cursor, an unconsulted member waits on another
+                // member's decision or is consulted again after a departure.
+                StagedBatchMemberState::Unconsulted => approving,
                 StagedBatchMemberState::OuterConsulting
                 | StagedBatchMemberState::InnerConsulting
                 | StagedBatchMemberState::PreventedWithChild => {

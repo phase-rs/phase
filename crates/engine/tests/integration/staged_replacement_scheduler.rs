@@ -408,3 +408,187 @@ fn day_of_judgment_asks_exchanged_progenitus_commanders_in_apnap_order() {
         assert_eq!(zone(&runner, library), Zone::Library, "{case}");
     }
 }
+
+const CONTROL_MAGIC: &str = "Enchant creature\nYou control enchanted creature.";
+
+/// P0 (active) controls Grizzly Bears C wearing P0's Hyena Umbra and Spider
+/// Umbra. Returns (c, c_hyena).
+fn active_two_umbra_creature(scenario: &mut GameScenario) -> (ObjectId, ObjectId, ObjectId) {
+    let c = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let hyena = umbra(scenario, P0, "Hyena Umbra", HYENA_UMBRA);
+    let spider = umbra(scenario, P0, "Spider Umbra", SPIDER_UMBRA);
+    (c, hyena, spider)
+}
+
+/// CR 104.3a + CR 800.4a + CR 616.1: Wrath of God in a three-player game. P2
+/// controls P0's Runeclaw Bear through Control Magic ("You control enchanted
+/// creature"); P1 controls Dauthi Voidwalker and Rest in Peace is on the
+/// battlefield, so the Bear's move to P0's graveyard is P2's choice, held while
+/// P0 is asked about their own creature's Umbra armor. P2 concedes: Control
+/// Magic leaves the game with P2, the Bear's control returns to P0, and its
+/// decision is asked of P0. Nothing is lost and the batch finishes.
+#[test]
+fn a_held_decisions_chooser_concedes_and_its_owner_decides() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P1, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER);
+    scenario.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE);
+    let (c, c_hyena, c_spider) = active_two_umbra_creature(&mut scenario);
+    let bear = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+    let magic = umbra(&mut scenario, p2, "Control Magic", CONTROL_MAGIC);
+    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+    let mut runner = scenario.build();
+    attach(&mut runner, c_hyena, c);
+    attach(&mut runner, c_spider, c);
+    attach(&mut runner, magic, bear);
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&bear].controller, p2);
+
+    cast_until_decision(&mut runner, wrath);
+    assert_eq!(
+        asked_choice(&runner),
+        (P0, c),
+        "P0 is asked first (CR 101.4)"
+    );
+    runner
+        .act(GameAction::Concede { player_id: p2 })
+        .expect("P2 concedes while P0's choice is open");
+    assert!(runner.state().players[2].is_eliminated);
+    assert_eq!(runner.state().objects[&bear].controller, P0);
+    assert_eq!(asked_choice(&runner), (P0, c));
+    round_trip(&mut runner);
+    choose_source(&mut runner, c_hyena);
+    // The destroyed Hyena Umbra is P0's card and P1 controls Dauthi
+    // Voidwalker, so its move is P0's choice too: P0 holds two decisions.
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P0,
+            objects: vec![c_hyena, bear],
+        },
+        "the Bear's decision is now P0's, beside the Aura's"
+    );
+    select_decision(&mut runner, bear);
+    assert_eq!(asked_choice(&runner), (P0, bear));
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P0 answers for the Bear");
+    assert_eq!(asked_choice(&runner), (P0, c_hyena));
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P0 answers for the Aura");
+    finish(&mut runner);
+    assert_eq!(zone(&runner, bear), Zone::Exile);
+    assert_eq!(zone(&runner, c), Zone::Battlefield);
+    assert_eq!(zone(&runner, c_hyena), Zone::Exile);
+    assert_eq!(attached_to(&runner, c_spider), Some(c));
+}
+
+/// CR 101.4c + CR 104.3a + CR 800.4a: Wrath of God in a three-player game.
+/// P1 holds two Umbra armor choices and is choosing which to make first when
+/// P1 concedes; both creatures leave the game with P1. P2's creature with no
+/// choice is destroyed, and the batch finishes.
+#[test]
+fn the_selecting_player_concedes_and_the_batch_finishes() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let first_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let first_spider = umbra(&mut scenario, P1, "Spider Umbra", SPIDER_UMBRA);
+    let second = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let second_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let second_spider = umbra(&mut scenario, P1, "Spider Umbra", SPIDER_UMBRA);
+    let bystander = scenario.add_creature(p2, "Elvish Mystic", 1, 1).id();
+    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+    let mut runner = scenario.build();
+    attach(&mut runner, first_hyena, first);
+    attach(&mut runner, first_spider, first);
+    attach(&mut runner, second_hyena, second);
+    attach(&mut runner, second_spider, second);
+    engine::game::layers::flush_layers(runner.state_mut());
+
+    cast_until_decision(&mut runner, wrath);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P1,
+            objects: vec![first, second],
+        }
+    );
+    round_trip(&mut runner);
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes at the selection");
+    assert!(runner.state().players[1].is_eliminated);
+    finish(&mut runner);
+    assert_eq!(zone(&runner, bystander), Zone::Graveyard);
+    assert_eq!(zone(&runner, wrath), Zone::Graveyard);
+}
+
+/// CR 104.3a + CR 800.4a + CR 702.89a: Wrath of God in a three-player game.
+/// P1's Runeclaw Bear wears P0's Hyena Umbra, so the armor destroys that Aura
+/// instead, and the Aura's move to P0's graveyard asks P0 to choose between
+/// P2's Dauthi Voidwalker and Rest in Peace: a live child held on the Bear. P0
+/// also holds an armor choice for their own creature and selects it first. P1
+/// concedes while that is asked; the Bear leaves the game, but the Aura is
+/// P0's and its decision is still asked, after which the batch finishes.
+#[test]
+fn a_live_child_survives_its_hosts_owner_conceding() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(p2, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER);
+    scenario.add_enchantment_from_oracle(p2, "Rest in Peace", REST_IN_PEACE);
+    let (c, c_hyena, c_spider) = active_two_umbra_creature(&mut scenario);
+    let host = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let p0_hyena = umbra(&mut scenario, P0, "Hyena Umbra", HYENA_UMBRA);
+    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+    let mut runner = scenario.build();
+    attach(&mut runner, c_hyena, c);
+    attach(&mut runner, c_spider, c);
+    attach(&mut runner, p0_hyena, host);
+    engine::game::layers::flush_layers(runner.state_mut());
+
+    cast_until_decision(&mut runner, wrath);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P0,
+            objects: vec![c, p0_hyena],
+        },
+        "P0 holds C's armor choice and the Aura's Dauthi/Rest in Peace choice"
+    );
+    select_decision(&mut runner, c);
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes while P0's choice is open");
+    assert!(runner.state().players[1].is_eliminated);
+    round_trip(&mut runner);
+    choose_source(&mut runner, c_spider);
+    // The destroyed Spider Umbra is P0's card and P2 controls Dauthi
+    // Voidwalker, so its move is P0's choice as well.
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P0,
+            objects: vec![c_spider, p0_hyena],
+        },
+        "the departed host's Aura decision survives beside the new one"
+    );
+    select_decision(&mut runner, p0_hyena);
+    assert_eq!(asked_choice(&runner), (P0, p0_hyena));
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P0 answers for the departed host's Aura");
+    assert_eq!(asked_choice(&runner), (P0, c_spider));
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P0 answers for the Spider Umbra");
+    finish(&mut runner);
+    assert_eq!(zone(&runner, p0_hyena), Zone::Exile);
+    assert_eq!(zone(&runner, c_spider), Zone::Exile);
+    assert_eq!(zone(&runner, c), Zone::Battlefield);
+    assert_eq!(attached_to(&runner, c_hyena), Some(c));
+}
