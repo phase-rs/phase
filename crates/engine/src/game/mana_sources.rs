@@ -2617,6 +2617,62 @@ fn reveal_then_mana_gross(
     shape: &RevealThenManaShape<'_>,
     casting_spell: Option<ObjectId>,
 ) -> u32 {
+    with_full_reveal_population(
+        state,
+        object_id,
+        controller,
+        ability,
+        shape,
+        casting_spell,
+        planned_gross_mana,
+    )
+    .unwrap_or(0)
+}
+
+/// CR 605.3a + CR 107.1c: the shard-coverage profiles of a reveal-then-mana
+/// activation — one per distinct production it could make with every eligible
+/// card revealed (Metalworker's {C}{C} per card is a run of colourless mana).
+/// The reveal itself stays the payer's choice; this only sizes what it could add.
+fn reveal_then_mana_profile_kinds(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    ability: &AbilityDefinition,
+    shape: &RevealThenManaShape<'_>,
+    casting_spell: Option<ObjectId>,
+) -> Vec<ActivatableManaProfileKind> {
+    let mut kinds: Vec<ActivatableManaProfileKind> = Vec::new();
+    with_full_reveal_population(
+        state,
+        object_id,
+        controller,
+        ability,
+        shape,
+        casting_spell,
+        |produced, scratch, node| {
+            if let Some(kind) =
+                profile_kind_from_production(scratch, object_id, controller, produced, node)
+            {
+                kinds.push(kind);
+            }
+        },
+    );
+    kinds
+}
+
+/// Run `read` against a scratch state in which every card eligible for the
+/// activation's reveal (announced spell excluded, CR 601.2a) has been revealed,
+/// with the activation's `Effect::Mana` node and production. `None` when nothing
+/// is eligible or the chain has no production.
+fn with_full_reveal_population<R>(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    ability: &AbilityDefinition,
+    shape: &RevealThenManaShape<'_>,
+    casting_spell: Option<ObjectId>,
+    read: impl FnOnce(&ManaProduction, &GameState, &ResolvedAbility) -> R,
+) -> Option<R> {
     let eligible = reveal_eligible_hand_cards(
         state,
         object_id,
@@ -2625,7 +2681,7 @@ fn reveal_then_mana_gross(
         casting_spell,
     );
     if eligible.is_empty() {
-        return 0;
+        return None;
     }
     // The activation resolves its "revealed this way" population as the
     // tracked set its reveal publishes; size the production against a scratch
@@ -2634,16 +2690,12 @@ fn reveal_then_mana_gross(
     scratch.chain_tracked_set_id = None;
     super::effects::publish_tracked_set(&mut scratch, eligible);
     let resolved = super::ability_utils::build_resolved_from_def(ability, object_id, controller);
-    let Some(mana_node) =
-        std::iter::successors(Some(&resolved), |node| node.sub_ability.as_deref())
-            .find(|node| matches!(node.effect, Effect::Mana { .. }))
-    else {
-        return 0;
-    };
+    let mana_node = std::iter::successors(Some(&resolved), |node| node.sub_ability.as_deref())
+        .find(|node| matches!(node.effect, Effect::Mana { .. }))?;
     let Effect::Mana { produced, .. } = &mana_node.effect else {
-        return 0;
+        return None;
     };
-    planned_gross_mana(produced, &scratch, mana_node)
+    Some(read(produced, &scratch, mana_node))
 }
 
 /// CR 605.3b: Net mana one usable activation contributes to planned capacity.
@@ -3009,6 +3061,35 @@ fn activatable_mana_profiles_for_object(
             continue;
         }
         let Effect::Mana { produced, .. } = &*ability.effect else {
+            // CR 605.3a + CR 107.1c: a reveal-then-mana ability's production
+            // follows its reveal, so it joins the shard profiles through the
+            // same sizing as its capacity — else a colourless shard ({C}) is
+            // rejected while the scalar capacity would have paid it.
+            if let Some(shape) = reveal_then_mana_shape(ability) {
+                let revealed = reveal_then_mana_profile_kinds(
+                    state,
+                    object_id,
+                    controller,
+                    ability,
+                    &shape,
+                    casting_spell,
+                );
+                if let Some(net) = usable_mana_ability_net(
+                    state,
+                    object_id,
+                    controller,
+                    ability,
+                    CapacityUse::Castability,
+                    casting_spell,
+                ) {
+                    capacity = capacity.max(net);
+                }
+                kinds.extend(
+                    revealed
+                        .into_iter()
+                        .filter_map(|kind| profile_kind_allowed_for_context(kind, payment_context)),
+                );
+            }
             continue;
         };
         if let Some(net) = usable_mana_ability_net(

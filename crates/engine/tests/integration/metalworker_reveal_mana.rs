@@ -1072,3 +1072,175 @@ fn auto_cast_with_metalworker_as_only_source_reaches_the_payer_reveal() {
         runner.state().waiting_for
     );
 }
+
+const WINDING_CONSTRICTOR_ORACLE: &str = "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.\nIf you would get one or more counters, you get that many plus one of each of those kinds of counters instead.";
+const DOUBLING_SEASON_ORACLE: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
+
+/// CR 616.1 + CR 608.2c + CR 605.3b: Winding Constrictor ("plus one") and
+/// Doubling Season (twice) both replace the charge counter Empowered
+/// Autogenerator puts on itself. The controller orders them BEFORE the colour
+/// prompt: adding first gives (1+1)x2 = 4 counters, doubling first gives
+/// 1x2+1 = 3. The mana equals the resulting counter count, and the interrupted
+/// cast's payment resumes exactly once and finalizes. Returns that count.
+fn autogenerator_counter_order(order_index: usize) -> u32 {
+    let charge = CounterType::Generic("charge".to_string());
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let autogenerator = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Empowered Autogenerator",
+            EMPOWERED_AUTOGENERATOR_ORACLE,
+        )
+        .id();
+    scenario.add_creature_from_oracle(P0, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR_ORACLE);
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+    let spell = scenario
+        .add_spell_to_hand(P0, "Juggernaut", true)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("manual cast reaches the mana payment prompt");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: autogenerator,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activation is legal during payment");
+
+    // The replacement-order prompt comes first; nothing is on the stack but the
+    // spell and no counter has landed yet.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "expected the CR 616.1 ordering prompt first, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.iter().all(|entry| matches!(
+        entry.kind,
+        engine::types::game_state::StackEntryKind::Spell { .. }
+    )));
+    runner
+        .act(GameAction::ChooseReplacement { index: order_index })
+        .expect("ordering choice is legal");
+
+    // Then the colour prompt, with the counters already placed.
+    let counters = runner.state().objects[&autogenerator]
+        .counters
+        .get(&charge)
+        .copied()
+        .unwrap_or(0);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ),
+        "expected the colour prompt after the ordering, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .expect("choosing the color is legal");
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Blue) as u32,
+        counters,
+        "X is the number of charge counters the ordered replacements left"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "the interrupted payment resumes, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the pooled mana pays the spell");
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert_eq!(runner.state().stack.len(), 1, "the spell was cast once");
+    assert!(runner.state().pending_cast.is_none(), "payment finalized");
+    counters
+}
+
+#[test]
+fn autogenerator_counter_replacement_order_decides_the_mana() {
+    let mut results = vec![
+        autogenerator_counter_order(0),
+        autogenerator_counter_order(1),
+    ];
+    results.sort_unstable();
+    assert_eq!(results, vec![3, 4], "add-then-double 4, double-then-add 3");
+}
+
+/// CR 601.2g + CR 605.3a + CR 107.1c: Matter Reshaper ({2}{C}) needs a colourless
+/// shard. Metalworker produces {C}, so with two other artifact cards in hand and
+/// an empty pool the cast is not rejected on the colourless-shard check: Auto
+/// hands payment to the payer, who reveals both and completes it.
+#[test]
+fn auto_cast_matter_reshaper_counts_metalworker_for_the_colorless_shard() {
+    use engine::types::mana::ManaCostShard;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let metalworker = scenario
+        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
+        .as_artifact()
+        .id();
+    let art1 = scenario
+        .add_creature_to_hand(P0, "Ornithopter", 0, 2)
+        .as_artifact()
+        .id();
+    let art2 = scenario
+        .add_creature_to_hand(P0, "Memnite", 1, 1)
+        .as_artifact()
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Matter Reshaper", true)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Colorless],
+            generic: 2,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the colorless shard must not reject a cast Metalworker can pay");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "Auto hands the payment to the payer, got {:?}",
+        runner.state().waiting_for
+    );
+
+    activate(&mut runner, metalworker);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![art1, art2],
+        })
+        .expect("reveal selection is legal");
+    assert_eq!(colorless(&runner), 4);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the pooled mana pays the spell");
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert!(runner.state().pending_cast.is_none(), "payment finalized");
+}

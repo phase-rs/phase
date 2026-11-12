@@ -600,6 +600,19 @@ pub(super) fn resolve_mana_ability_excluding(
 }
 
 /// Find the `Effect::Mana` node within an ability's root or sub_ability chain.
+/// CR 608.2c: `ability` with the instructions before its production already
+/// performed — rooted at that `Effect::Mana` link, keeping the activation's cost
+/// and restrictions.
+fn ability_from_mana_production(ability: &AbilityDefinition) -> AbilityDefinition {
+    let Some(production) = crate::types::ability::inline_mana_preamble(ability) else {
+        return ability.clone();
+    };
+    let mut remaining = ability.clone();
+    remaining.effect = production.effect.clone();
+    remaining.sub_ability = production.sub_ability.clone();
+    remaining
+}
+
 /// CR 608.2c: the instructions of a mana ability that precede its production,
 /// in written order — the chain cut just before its first `Effect::Mana` link.
 /// `None` when the production is the root (nothing precedes it).
@@ -3831,6 +3844,41 @@ fn finish_mana_ability_cost_payment(
     // this activation's final removed-counter count. It rides `pending` across
     // the colour prompt to production.
     pending.cost_removed_counters = cursor.cost_removed_counters;
+    // CR 605.3b + CR 608.2c: a mana ability whose production follows other
+    // instructions (Empowered Autogenerator's counter) performs them now, in
+    // written order, once its costs are paid — before the colour prompt and
+    // production read the state they change.
+    if crate::types::ability::inline_mana_preamble(&ability_def).is_some() {
+        with_bound_mana_activation(
+            state,
+            pending.source_id,
+            pending.player,
+            &ability_def,
+            pending.chosen_x,
+            pending.cost_paid_object.clone(),
+            pending.announced_source_incarnation,
+            pending.cost_removed_counters,
+            |state, resolved| {
+                if let Some(preamble) = resolved_before_mana(resolved) {
+                    run_inline_mana_subresolution(state, |state| {
+                        let _ = super::effects::resolve_ability_chain(state, &preamble, events, 0);
+                    });
+                }
+            },
+        );
+        // CR 616.1 + CR 608.2c: an instruction of the chain paused on a
+        // replacement choice (competing counter replacements). Park the
+        // activation exactly like a paused cost payment — its snapshot narrowed
+        // to the part still owed, the mana production — so, once the choice
+        // settles, the same typed resume continues it exactly once through the
+        // colour prompt, production and the payment it interrupted.
+        if state.pending_replacement.is_some() {
+            pending.ability_snapshot = Some(ability_from_mana_production(&ability_def));
+            cursor.parent = parent;
+            pause_mana_ability_cost_payment(state, None, pending, cursor, events, cost_event_start);
+            return Ok(state.waiting_for.clone());
+        }
+    }
     // CR 602.2b + CR 601.2i + CR 605.3: every cost is paid, so the mana ability
     // has become activated. Publish it here — before the colour prompt and
     // before production — for every resolution mode (manual, auto-tap, nested
@@ -3858,30 +3906,6 @@ fn finish_mana_ability_cost_payment(
     );
     super::triggers::collect_activation_event_at_boundary(state, events, activation_event)
         .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
-    // CR 605.3b + CR 608.2c: a mana ability whose production follows other
-    // instructions (Empowered Autogenerator's counter) performs them now, in
-    // written order, once its costs are paid — before the colour prompt and
-    // production read the state they change, and exactly once (the prompt's
-    // resume produces from the already-changed state).
-    if crate::types::ability::inline_mana_preamble(&ability_def).is_some() {
-        with_bound_mana_activation(
-            state,
-            pending.source_id,
-            pending.player,
-            &ability_def,
-            pending.chosen_x,
-            pending.cost_paid_object.clone(),
-            pending.announced_source_incarnation,
-            pending.cost_removed_counters,
-            |state, resolved| {
-                if let Some(preamble) = resolved_before_mana(resolved) {
-                    run_inline_mana_subresolution(state, |state| {
-                        let _ = super::effects::resolve_ability_chain(state, &preamble, events, 0);
-                    });
-                }
-            },
-        );
-    }
     if !resolves_automatically && pending.color_override.is_none() {
         // CR 605.3b + CR 608.2d: the colour choice this ability offers is sized
         // and gated by this activation's own paid count, under the same binding
