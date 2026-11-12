@@ -27,6 +27,13 @@
 //!    battlefield, put a +1/+1 counter on Super Shredder."
 //!   Benalish Marshal: "Other creatures you control get +1/+1."
 //!   Unsummon: "Return target creature to its owner's hand."
+//!   Collision of Realms: "Each player shuffles all creatures they own into
+//!    their library. Each player who shuffled a nontoken creature into their
+//!    library this way reveals cards from the top of their library until they
+//!    reveal a creature card, then puts that card onto the battlefield and the
+//!    rest on the bottom of their library in a random order." (The parser does not
+//!    support the reveal and bottom clauses, so only the shuffle half is
+//!    asserted, and the spell's own final zone is not.)
 //!   Kor Skyfisher: "Flying / When this creature enters, return a permanent you
 //!    control to its owner's hand."
 //!   Ninth Bridge Patrol: "Whenever another creature you control leaves the
@@ -1282,6 +1289,56 @@ fn concession_resume_reaching_a_merged_member_parks_on_its_component() {
             vec![P2],
             "{label}: Ninth Bridge Patrol observes the one merged departure once"
         );
+    }
+}
+
+/// CR 800.4a + CR 608.2m + CR 730.3: Collision of Realms' per-player pass for
+/// the owner of a merged commander pile parks on Brokkos's prompt, and that
+/// owner concedes. The pass the iteration was running leaves with its player, and
+/// the resolution goes on with the pass of the player still in the game: P2's
+/// Circuit Mender is shuffled into P2's library before priority. (The same
+/// concession over a plain, unmerged permanent abandons the whole carrier,
+/// including P2's pass, exactly as at the merge base; that behaviour is not
+/// touched by this change and is measured identical at base and head.)
+#[test]
+fn concession_during_a_merged_permanents_owner_pass_goes_on_with_the_next_pass() {
+    for pile_shape in [Pile::BrokkosUnderMender, Pile::MenderOverBrokkos] {
+        let db = shared_card_db().expect("integration card fixture must load");
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let (mender, brokkos) = add_pile(&mut scenario, P1);
+        let bystander = scenario.add_real_card(P2, "Circuit Mender", Zone::Battlefield, db);
+        let collision = scenario.add_real_card(P0, "Collision of Realms", Zone::Hand, db);
+        scenario.with_mana_pool(P0, mana(ManaType::Red, 7));
+        let mut runner = scenario.build();
+        let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, true);
+        let label = format!("{pile_shape:?}");
+
+        cast_until_resolved_or_asked(&mut runner, collision, &[]);
+        assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        let conceded = concede(&mut runner, P1);
+
+        assert!(
+            matches!(
+                conceded.waiting_for,
+                WaitingFor::Priority { .. } | WaitingFor::OrderTriggers { .. }
+            ),
+            "{label}: {:?}",
+            conceded.waiting_for
+        );
+        resolution_finished(runner.state());
+        assert_eq!(
+            runner.state().objects[&bystander].zone,
+            Zone::Library,
+            "{label}: P2's pass still shuffles P2's creature"
+        );
+        for component in [pile.mender, pile.brokkos] {
+            assert_eq!(
+                runner.state().objects[&component].zone,
+                Zone::Exile,
+                "{label}: CR 800.4a: {component:?} leaves the game with its owner"
+            );
+        }
     }
 }
 
