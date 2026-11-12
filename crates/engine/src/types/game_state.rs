@@ -9702,6 +9702,24 @@ pub enum PendingCostMoveCompletion {
     },
 }
 
+impl PendingCostMoveCompletion {
+    /// CR 601.2h + CR 702.66a: whether reaching this completion means the cast's mana has
+    /// ALREADY been paid, so the cast it holds is a prepaid continuation whose copy the
+    /// restore boundary must validate. Exhaustive by construction: a new completion variant
+    /// must state which side it is on, rather than inheriting a silent "not paid".
+    pub(crate) fn settles_cast_mana(&self) -> bool {
+        match self {
+            // CR 702.190a + CR 702.188a: the Sneak / Web-slinging move pays before it parks.
+            Self::FinalizeCast { .. }
+            // CR 601.2h + CR 702.66a: the delve exiles settle after the mana is spent.
+            | Self::FinalizeDelvedCast { .. } => true,
+            Self::FinishPending
+            | Self::CompleteSelectedReturnToHand { .. }
+            | Self::PublishExileTrackedSet => false,
+        }
+    }
+}
+
 /// CR 601.2h: What a spell's payment commit decided before its mana was spent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrepaidSpellFinalization {
@@ -9897,6 +9915,19 @@ pub enum PendingSacrificeCostCompletion {
         frame: Box<OptionalEffectFrame>,
         selected: Vec<ObjectIncarnationRef>,
     },
+}
+
+impl PendingSacrificeCostCompletion {
+    /// CR 601.2h + CR 601.2f: whether this sacrifice completion resumes a cast whose mana was
+    /// already paid. Exhaustive by construction, for the same reason as
+    /// [`PendingCostMoveCompletion::settles_cast_mana`].
+    pub(crate) fn settles_cast_mana(&self) -> bool {
+        match self {
+            // CR 601.2f-h: declaration and mana payment are complete.
+            Self::FinalizeSpell { .. } => true,
+            Self::SelectedNonSelf | Self::SelfRef | Self::ResolutionOptionalPayment { .. } => false,
+        }
+    }
 }
 
 /// CR 702.21a + CR 701.21 + CR 616.1: The unpaid work after one ward sacrifice
@@ -12715,8 +12746,9 @@ impl std::fmt::Display for AnnouncedTargetFactConflict {
             } => write!(
                 f,
                 "its announced-target latch states the zone {stated:?} for {target:?}, but that \
-                 target's announcement pin is still current in {pinned:?}, so the object never \
-                 changed zones and was announced there (CR 601.2c + CR 400.7)"
+                 target's announcement pin is absent or still current, and the object is in \
+                 {pinned:?} now, so it never changed zones and was announced there \
+                 (CR 601.2c + CR 400.7)"
             ),
         }
     }
@@ -19189,36 +19221,60 @@ impl GameState {
         // Every OTHER completion parks a cost move that has not paid the cast's mana, so
         // it has no payment to validate; the wildcard states that negative rather than
         // defaulting a paid shape open.
-        let carried: Option<(&PendingCast, Option<u32>)> = match self.pending_cost_move_resume.as_ref() {
-                // CR 702.190a + CR 702.188a: the Sneak / Web-slinging returned-creature
-                // move rebuilt the cast at the park, so the amount rides on the completion
-                // and may be absent — in which case the copy supplies it.
+        // The completion decides whether this park has already paid the cast's mana, so the
+        // match is exhaustive over BOTH enums: a wildcard here would be the same
+        // default-open shape this whole change exists to remove, and a future completion
+        // variant would inherit it silently.
+        let carried: Option<(&PendingCast, Option<u32>)> =
+            match self.pending_cost_move_resume.as_ref() {
                 Some(PendingCostMoveResume::Cast {
-                    pending: Some(pending),
-                    completion:
+                    pending,
+                    completion,
+                    ..
+                }) => pending.as_deref().and_then(|pending| {
+                    if !completion.settles_cast_mana() {
+                        return None;
+                    }
+                    // CR 702.190a + CR 702.188a: the Sneak / Web-slinging park REBUILT the
+                    // cast, so the amount rides on the completion rather than on the cast.
+                    let stated = match completion {
                         PendingCostMoveCompletion::FinalizeCast {
                             prepaid_actual_mana_spent,
                             ..
-                        },
+                        } => *prepaid_actual_mana_spent,
+                        PendingCostMoveCompletion::FinalizeDelvedCast { .. }
+                        | PendingCostMoveCompletion::FinishPending
+                        | PendingCostMoveCompletion::CompleteSelectedReturnToHand { .. }
+                        | PendingCostMoveCompletion::PublishExileTrackedSet => {
+                            pending.prepaid_actual_mana_spent
+                        }
+                    };
+                    Some((pending, stated))
+                }),
+                Some(PendingCostMoveResume::SacrificeForCost {
+                    pending,
+                    completion,
                     ..
-                }) => Some((pending, *prepaid_actual_mana_spent)),
-                Some(PendingCostMoveResume::Cast {
-                    pending: Some(pending),
-                    completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
-                    ..
-                })
-                // CR 601.2h + CR 601.2f: the sacrifice-for-cost commit re-pays a deferred
-                // hand discard and then resumes the cast under the same
-                // `PrepaidSpellFinalization`, reading the payment off the same cast.
-                | Some(PendingCostMoveResume::SacrificeForCost {
-                    pending: Some(pending),
-                    completion: PendingSacrificeCostCompletion::FinalizeSpell { .. },
-                    ..
-                }) => Some((pending, pending.prepaid_actual_mana_spent)),
-                // CR 601.2h + CR 702.66a: the Delve exiles settle first and this completion
-                // re-enters the inner finalizer with what the first pass decided; the
-                // payment travels on the cast the root holds.
-                _ => None,
+                }) => pending.as_deref().and_then(|pending| {
+                    completion
+                        .settles_cast_mana()
+                        .then_some((pending, pending.prepaid_actual_mana_spent))
+                }),
+                Some(
+                    PendingCostMoveResume::WardSacrificePayment { .. }
+                    | PendingCostMoveResume::ReplacementMayCost { .. }
+                    | PendingCostMoveResume::Foretell { .. }
+                    | PendingCostMoveResume::UnlessBouncePayment { .. }
+                    | PendingCostMoveResume::ManaAbilityPayment { .. }
+                    | PendingCostMoveResume::LoyaltyActivation { .. }
+                    | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                    | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::TurnFaceUpCostMove { .. }
+                    | PendingCostMoveResume::CounterCostRemovalPayment { .. }
+                    | PendingCostMoveResume::CollectEvidencePayment { .. }
+                    | PendingCostMoveResume::ActivationMillPayment { .. },
+                )
+                | None => None,
             };
         if let Some((pending, stated_amount)) = carried {
             if pending.activation_ability_index.is_none() {
@@ -19327,6 +19383,28 @@ impl GameState {
         carrier: &PrepaidSpellCopyCarrier<'_>,
     ) -> Result<(), PersistedRestoreError> {
         let pending = carrier.pending;
+        if pending.activation_ability_index.is_some() {
+            return Ok(());
+        }
+        self.prove_prepaid_spell_copy(pending, carrier.stated_amount, carrier.credited_player)
+            .map(|_| ())
+    }
+
+    /// CR 601.2h + CR 700.14 + CR 118.3a + CR 207.2c: the ONE authority on "is this save's
+    /// prepaid spell copy the payment the journal records?".
+    ///
+    /// It compares every fact the copy carries against the settled spend together — the
+    /// stated amount, `mana_spent_to_cast_amount`, `colors_spent_to_cast`,
+    /// `mana_spent_source_snapshots`, and the per-player split the resume credits — because a
+    /// save that leaves one honest and forges another is exactly the shape that reaches the
+    /// CR 601.2i history. Both callers wrap the conflict in their own envelope: the restore
+    /// boundary refuses the load, the consumption site refuses the finalize.
+    pub(crate) fn prove_prepaid_spell_copy(
+        &self,
+        pending: &PendingCast,
+        stated_amount: Option<u32>,
+        credited_player: PlayerId,
+    ) -> Result<usize, PersistedRestoreError> {
         let source_id = pending.object_id;
         // CR 601.2h: only a cast whose payment has already run can carry a copy of THIS
         // cast. Before that the field still holds whatever the object carried in — stale
@@ -19337,13 +19415,13 @@ impl GameState {
         // discriminator is restated HERE, beside the read it protects, so a carrier added
         // to that enumeration later cannot start validating a payment that never ran.
         if pending.activation_ability_index.is_some() {
-            return Ok(());
+            return Ok(0);
         }
         // A cast object this save does not carry is a different guard's question (the
         // finalizers refuse to publish a spell whose object is gone); there is no copy to
         // compare, and this rule does not invent one.
         let Some(spell) = self.objects.get(&source_id) else {
-            return Ok(());
+            return Ok(0);
         };
         // CR 118.3a: the recipient the spend was recorded against is the spell's own
         // incarnation — the value `GameState::mana_payment_recipient` builds from the live
@@ -19362,7 +19440,7 @@ impl GameState {
         // recorded. Presence is not the fact: the resume consumes this number as the
         // cast's spent mana (CR 601.2h paid facts, CR 700.14 Expend) instead of
         // re-deriving it, so a save stating another amount has not recorded this payment.
-        if let Some(stated_amount) = carrier.stated_amount {
+        if let Some(stated_amount) = stated_amount {
             if stated_amount as usize != settled.len() {
                 return Err(PersistedRestoreError::ContradictoryPrepaidSpellCopy {
                     source_id,
@@ -19463,7 +19541,7 @@ impl GameState {
         // claim larger than the payment itself fails the `helper_settled == helper_credit`
         // conjunct below rather than underflowing this subtraction — no save can reach the
         // remainder with a claim the payment cannot cover.
-        let caster = carrier.credited_player;
+        let caster = credited_player;
         let caster_credit = settled.len().saturating_sub(helper_credit);
         let caster_settled = self.payer_settled_units(caster, &recipient);
         if helper_settled.unwrap_or_default() != helper_credit || caster_settled != caster_credit {
@@ -19481,7 +19559,7 @@ impl GameState {
                 },
             });
         }
-        Ok(())
+        Ok(settled.len())
     }
 
     /// CR 118.3a + CR 700.14: how many units the resolved-rules journal records as spent by
