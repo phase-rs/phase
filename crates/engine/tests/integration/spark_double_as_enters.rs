@@ -2690,6 +2690,139 @@ mod feldon_tokens {
         assert_eq!(runner.life(P0) - life, 2, "Soul Warden sees both tokens");
     }
 
+    const FANATIC_OF_XENAGOS: &str = "Trample\nTribute 1 (As this creature enters, an opponent of your choice may put a +1/+1 counter on it.)\nWhen this creature enters, if tribute wasn't paid, it gets +1/+1 and gains haste until end of turn.";
+    const CACKLING_COUNTERPART: &str = "Create a token that's a copy of target creature you control.\nFlashback {5}{U}{U} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+
+    /// Cackling Counterpart under Doubling Season copies Fanatic of Xenagos
+    /// twice. Each copy's Tribute is answered by `tribute_payer`, the opponent
+    /// chosen for it, in a game of `players`, who pays it when `pay` is set;
+    /// Hardened Scales is then on the battlefield, so each paid counter stops on
+    /// its CR 616.1 order with Doubling Season. Returns each Fanatic token's
+    /// power and haste, and Soul Warden's life gain.
+    fn fanatic_copies_and_warden_life(
+        players: u8,
+        tribute_payer: PlayerId,
+        pay: bool,
+    ) -> (Vec<(Option<i32>, bool)>, i32) {
+        let mut scenario = GameScenario::new_n_player(players, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let fanatic = scenario
+            .add_creature_from_oracle(P0, "Fanatic of Xenagos", 3, 3, FANATIC_OF_XENAGOS)
+            .with_subtypes(vec!["Centaur", "Warrior"])
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", SEASON);
+        scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+        let scales = pay.then(|| {
+            scenario
+                .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+                .id()
+        });
+        let counterpart = scenario
+            .add_spell_to_hand_from_oracle(P0, "Cackling Counterpart", true, CACKLING_COUNTERPART)
+            .id();
+        let mut runner = scenario.build();
+        let life = runner.life(P0);
+        runner.cast(counterpart).target_object(fanatic).resolve();
+        let mut tributes = 0;
+        let mut counter_orders = 0;
+        for _ in 0..40 {
+            match &runner.state().waiting_for {
+                WaitingFor::NamedChoice { options, .. } => {
+                    let choice = options
+                        .iter()
+                        .find(|option| option.as_str() == tribute_payer.0.to_string())
+                        .cloned()
+                        .expect("the tribute payer is an opponent to choose");
+                    runner.act(GameAction::ChooseOption { choice }).unwrap();
+                }
+                WaitingFor::TributeChoice { player, .. } => {
+                    assert_eq!(*player, tribute_payer, "the chosen opponent decides");
+                    tributes += 1;
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: pay })
+                        .unwrap();
+                }
+                WaitingFor::ReplacementChoice { candidates, .. } => {
+                    let index = candidates
+                        .iter()
+                        .position(|candidate| Some(candidate.source_id) == scales)
+                        .expect("only a paid tribute counter is ordered");
+                    counter_orders += 1;
+                    runner.act(GameAction::ChooseReplacement { index }).unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        // Reach guard: each copy stopped on its own Tribute, answered by the
+        // chosen opponent; the first answer went on to the second copy's choice.
+        if pay {
+            // Reach guard: the paid counter stopped on its order for each copy.
+            // The second copy is not offered its own Tribute after the first
+            // copy's ordered counter; the merge base behaves the same.
+            assert_eq!((tributes, counter_orders), (1, 2));
+        } else {
+            assert_eq!((tributes, counter_orders), (2, 0), "one Tribute per copy");
+        }
+        let copies = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.is_token
+                    && object.zone == Zone::Battlefield
+                    && object.name == "Fanatic of Xenagos"
+            })
+            .map(|object| (object.power, object.has_keyword(&Keyword::Haste)))
+            .collect();
+        (copies, runner.life(P0) - life)
+    }
+
+    /// CR 702.104a + CR 603.6a + CR 603.2: Tribute is decided as the creature
+    /// enters, so the opponent's answer is what puts each copy onto the
+    /// battlefield. Both copies are one entry event: Soul Warden ("Whenever
+    /// another creature enters, you gain 1 life.") sees both, and each copy's own
+    /// "When this creature enters, if tribute wasn't paid, it gets +1/+1 and
+    /// gains haste until end of turn." triggers and resolves.
+    #[test]
+    fn a_tribute_answer_puts_its_entrant_into_the_entry_event() {
+        for (players, payer) in [(2, P1), (3, PlayerId(2))] {
+            let (copies, gained) = fanatic_copies_and_warden_life(players, payer, false);
+            assert_eq!(
+                copies.len(),
+                2,
+                "Doubling Season makes two copies ({players} players)"
+            );
+            assert_eq!(
+                gained, 2,
+                "Soul Warden sees both copies ({players} players)"
+            );
+            assert_eq!(
+                copies,
+                vec![(Some(4), true); 2],
+                "each copy's own tribute-unpaid trigger resolved ({players} players)"
+            );
+        }
+    }
+
+    /// The same event when the opponent pays the Tribute and its counter stops
+    /// on its Hardened Scales / Doubling Season order: the order's answer puts
+    /// the copy onto the battlefield and hands its entry to the event, so Soul
+    /// Warden sees both copies.
+    #[test]
+    fn a_paid_tribute_whose_counter_is_ordered_keeps_its_entrant_in_the_event() {
+        let (copies, gained) = fanatic_copies_and_warden_life(2, P1, true);
+        assert_eq!(copies.len(), 2, "Doubling Season makes two copies");
+        assert_eq!(gained, 2, "Soul Warden sees both copies");
+    }
+
     #[test]
     fn t5a_decline_enters_and_dies_once_without_a_copy() {
         let (mut scenario, feldon) = setup();
