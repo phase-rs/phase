@@ -5586,8 +5586,11 @@ impl BattlefieldEntrantProjection {
     /// Known gaps: an effect-carried entry gate does not install a with-entry
     /// effect (no printed return carries both a gate and a `WithEntry` rider); a
     /// liminal (transformed or melded) entrant with a rider keeps its liminal read
-    /// (none printed); and earlier members of a mass move are already on the
-    /// scratch board.
+    /// (none printed); earlier members of a mass move are already on the
+    /// scratch board; and a face-down entrant is placed without delivery's
+    /// face-down preflight, so a face-down instant or sorcery card is refused on
+    /// the scratch (CR 400.4a) and keeps today's read (no printed face-down return
+    /// carries a rider).
     pub(crate) fn new(
         state: &GameState,
         entrant: ObjectId,
@@ -5618,7 +5621,9 @@ impl BattlefieldEntrantProjection {
     /// simultaneous "is/has" effect, as it would exist on the battlefield. It is placed on a scratch
     /// battlefield as the new object (CR 400.7) under the controller it enters under (CR 110.2a), with
     /// the characteristics the event already gives it installed by delivery's own authority (face
-    /// down, as-enters choices, enter as a copy; replacements already applied, CR 616.1), turned back
+    /// down, as-enters choices, enter as a copy, CR 616.1; counters and the tapped status the event
+    /// carries are not staged, a known gap: no printed external entry replacement reads P/T or tapped
+    /// status), turned back
     /// face up when it enters transformed (CR 712.14a), the carried effect installed on it, and the
     /// full layer pass run (CR 613.1, 613.3, 613.6, 613.7), which a detached applier cannot reproduce.
     /// `None` when the event carries no such effect, is not a battlefield entry, or its entrant can't
