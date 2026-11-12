@@ -1826,33 +1826,33 @@ fn cast_legal_targets(runner: &mut GameRunner, player: PlayerId, spell: ObjectId
         }
         Err(other) => panic!("unexpected cast failure: {other:?}"),
     }
-    if let WaitingFor::TargetSelection { target_slots, .. } = runner.state().waiting_for.clone() {
-        return target_slots[0]
-            .legal_targets
+    let objects = |targets: &[TargetRef]| -> Vec<ObjectId> {
+        targets
             .iter()
             .filter_map(|t| match t {
                 TargetRef::Object(id) => Some(*id),
                 TargetRef::Player(_) => None,
             })
-            .collect();
+            .collect()
+    };
+    // Completion boundary: target selection was reached (its candidates), or a
+    // sole legal target was auto-selected and the spell is on the stack. Any
+    // other wait state is a test failure, never an empty answer.
+    if let WaitingFor::TargetSelection { target_slots, .. } = runner.state().waiting_for.clone() {
+        return objects(&target_slots[0].legal_targets);
     }
-    runner
+    let entry = runner
         .state()
         .stack
         .iter()
         .find(|entry| entry.id == spell)
-        .and_then(|entry| entry.ability())
-        .map(|ability| {
-            ability
-                .targets
-                .iter()
-                .filter_map(|t| match t {
-                    TargetRef::Object(id) => Some(*id),
-                    TargetRef::Player(_) => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+        .unwrap_or_else(|| {
+            panic!(
+                "cast neither reached target selection nor put the spell on the stack: {:?}",
+                runner.state().waiting_for
+            )
+        });
+    objects(&entry.ability().expect("spell ability").targets)
 }
 
 /// P1 announces a graveyard-targeting spell with P0's creature card in P0's

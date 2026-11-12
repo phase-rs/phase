@@ -4192,10 +4192,10 @@ fn functioning_static_cant_be_targeted_prohibits(
         let Some(ref filter) = def.affected else {
             return false;
         };
-        // CR 109.2 + CR 109.2a: off the battlefield, only a branch that explicitly
-        // names `obj`'s zone can denote it, and that branch must itself match
-        // (a bare sibling branch means battlefield permanents). A static with no
-        // off-battlefield zone costs one cheap branch walk.
+        // CR 109.2 + CR 109.2a: off the battlefield, `obj` can match only a
+        // conjunctive clause of the filter that positively names its zone; a bare
+        // clause means battlefield permanents, whatever its siblings say. A static
+        // with no off-battlefield clause costs one cheap expansion.
         let applies_to_obj = |filter: &TargetFilter| {
             crate::game::filter::matches_target_filter(
                 state,
@@ -4208,8 +4208,8 @@ fn functioning_static_cant_be_targeted_prohibits(
             applies_to_obj(filter)
         } else {
             filter
-                .branches_naming_zone(obj.zone)
-                .into_iter()
+                .clauses_naming_zone(obj.zone)
+                .iter()
                 .any(applies_to_obj)
         };
         filter_applies
@@ -5821,29 +5821,34 @@ mod tests {
         assert!(!targets_p1.contains(&TargetRef::Object(c1)));
     }
 
-    /// CR 109.2 + CR 113.6: an `Or` affected filter "creature cards in graveyards
-    /// or creatures" protects a graveyard card only through its explicit-zone
-    /// branch and a battlefield creature through its bare branch; the bare branch
-    /// alone never protects a graveyard card.
+    /// CR 109.2 + CR 109.2a + CR 113.6: an off-battlefield candidate is protected
+    /// only through a conjunctive clause that positively names its zone, however
+    /// the filter nests. Graveyard LAND vs graveyard nonland CREATURE card tells
+    /// the explicit arm from the bare "creature" arm.
     #[test]
-    fn cross_object_cant_be_targeted_or_filter_is_branch_aware() {
-        use crate::types::ability::{FilterProp, StaticDefinition, TypedFilter};
+    fn cross_object_cant_be_targeted_zone_stays_on_the_positive_clause() {
+        use crate::types::ability::{ControllerRef, FilterProp, StaticDefinition, TypedFilter};
         use crate::types::statics::{ProhibitionScope, StaticMode};
         let (mut state, _c0, c1) = setup_with_creatures();
-        let grave_id = create_object(
-            &mut state,
-            CardId(900),
-            PlayerId(1),
-            "Dead Bear".to_string(),
-            Zone::Graveyard,
-        );
-        state
-            .objects
-            .get_mut(&grave_id)
-            .unwrap()
-            .card_types
-            .core_types
-            .push(CoreType::Creature);
+        let mut graveyard_card = |id: u64, name: &str, core: CoreType| {
+            let oid = create_object(
+                &mut state,
+                CardId(id),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Graveyard,
+            );
+            state
+                .objects
+                .get_mut(&oid)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(core);
+            oid
+        };
+        let grave_land = graveyard_card(900, "Dead Land", CoreType::Land);
+        let grave_creature = graveyard_card(902, "Dead Bear", CoreType::Creature);
         let source = create_object(
             &mut state,
             CardId(901),
@@ -5851,11 +5856,11 @@ mod tests {
             "Warding Stone".to_string(),
             Zone::Battlefield,
         );
-        let grave_branch =
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+        let gy_land =
+            TargetFilter::Typed(TypedFilter::land().properties(vec![FilterProp::InZone {
                 zone: Zone::Graveyard,
             }]));
-        let bare_branch = TargetFilter::Typed(TypedFilter::creature());
+        let bare_creature = TargetFilter::Typed(TypedFilter::creature());
         let install = |state: &mut GameState, affected: TargetFilter| {
             let obj = state.objects.get_mut(&source).unwrap();
             obj.static_definitions = vec![StaticDefinition::new(StaticMode::CantBeTargeted {
@@ -5868,25 +5873,63 @@ mod tests {
             functioning_static_cant_be_targeted_prohibits(&state.objects[&id], PlayerId(0), state)
         };
 
-        // Bare branch listed first: the zone-naming sibling must not leak onto it.
+        // "land cards in graveyards or creatures" (bare arm listed first).
         install(
             &mut state,
             TargetFilter::Or {
-                filters: vec![bare_branch.clone(), grave_branch.clone()],
+                filters: vec![bare_creature.clone(), gy_land.clone()],
             },
         );
-        assert!(prohibits(&state, grave_id), "explicit graveyard branch");
+        assert!(prohibits(&state, grave_land), "explicit graveyard land arm");
         assert!(
             prohibits(&state, c1),
-            "bare branch protects battlefield creature"
+            "bare arm protects battlefield creature"
+        );
+        assert!(
+            !prohibits(&state, grave_creature),
+            "the bare creature arm denotes permanents, not a graveyard creature card"
         );
 
-        install(&mut state, bare_branch);
-        assert!(
-            !prohibits(&state, grave_id),
-            "a bare branch alone denotes permanents, not graveyard cards"
+        // Nested: And(Or(bare creature, graveyard land), controller You).
+        install(
+            &mut state,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Or {
+                        filters: vec![bare_creature.clone(), gy_land.clone()],
+                    },
+                    TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+                ],
+            },
         );
-        assert!(prohibits(&state, c1));
+        assert!(prohibits(&state, grave_land), "nested explicit arm");
+        assert!(prohibits(&state, c1), "nested bare arm on the battlefield");
+        assert!(
+            !prohibits(&state, grave_creature),
+            "nesting must not let the bare arm admit a graveyard creature card"
+        );
+
+        // A negated zone predicate supplies no zone: "creatures that aren't land
+        // cards in graveyards" describes battlefield permanents.
+        install(
+            &mut state,
+            TargetFilter::And {
+                filters: vec![
+                    bare_creature,
+                    TargetFilter::Not {
+                        filter: Box::new(gy_land),
+                    },
+                ],
+            },
+        );
+        assert!(
+            prohibits(&state, c1),
+            "battlefield creature is not a gy land"
+        );
+        assert!(
+            !prohibits(&state, grave_creature),
+            "Not(InZone graveyard) must not make a graveyard creature card match"
+        );
     }
 
     /// CR 702.18a: A `StaticMode::CantBeTargeted` static (the descriptive Shroud
