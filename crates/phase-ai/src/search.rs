@@ -2388,7 +2388,7 @@ pub fn fallback_action(
             .first()
             .map(|slot| GameAction::ChoosePermanentTypeSlot { slot: *slot }),
 
-        // Choose play/draw and sideboard: between-games defaults.
+        // CR 103.1: the chooser elects to take the first turn (game one and between games); sideboard: submit the deck unchanged.
         WaitingFor::BetweenGamesChoosePlayDraw { .. } | WaitingFor::ChooseStartingPlayer { .. } => {
             first_turn_election(&state.waiting_for)
         }

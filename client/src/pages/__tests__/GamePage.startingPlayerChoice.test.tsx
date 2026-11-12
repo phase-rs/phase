@@ -90,6 +90,7 @@ vi.mock("../../adapter/draft-adapter.ts", async (importOriginal) => ({
 }));
 
 const TITLE = "Choose Who Plays First";
+const PLAY_DRAW_TITLE = "Game 2: Choose Play or Draw";
 
 function startingPlayerPrompt(chooser: PlayerId, candidates: PlayerId[]): WaitingFor {
   return { type: "ChooseStartingPlayer", data: { player: chooser, candidates } };
@@ -206,6 +207,43 @@ describe("GamePage starting-player choice", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(TITLE)).toBeNull();
     expect(screen.queryByRole("button", { name: /plays first|Play First/ })).toBeNull();
+  });
+
+  it("spectator sees the chooser's name, not the chooser's prompt", async () => {
+    act(() => {
+      useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: true });
+    });
+    showPrompt(startingPlayerPrompt(0, [0, 1]), [0, 1]);
+    renderGamePage();
+
+    expect(
+      await screen.findByText("Alice is choosing who plays first…"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(TITLE)).toBeNull();
+    expect(screen.queryByRole("button", { name: /plays first|Play First/ })).toBeNull();
+  });
+
+  it("spectator is not shown the between-games play/draw prompt", async () => {
+    act(() => {
+      useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: true });
+    });
+    showPrompt(
+      {
+        type: "BetweenGamesChoosePlayDraw",
+        data: { player: 0, game_number: 2, score: { p0_wins: 1, p1_wins: 0, draws: 0 } },
+      },
+      [0, 1],
+    );
+    renderGamePage();
+
+    expect(screen.queryByText(PLAY_DRAW_TITLE)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Play First|Draw First/ })).toBeNull();
+
+    // Reach guard: the same seat, seated rather than spectating, is shown the prompt.
+    act(() => {
+      useMultiplayerStore.setState({ isSpectator: false });
+    });
+    expect(await screen.findByText(PLAY_DRAW_TITLE)).toBeInTheDocument();
   });
 
   it("prompt waits for the starting contest", async () => {
