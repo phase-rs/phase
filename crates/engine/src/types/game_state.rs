@@ -37547,9 +37547,9 @@ fn _gamestate_partition_is_total(s: &GameState) {
         // `entering_aura_authority` (CR 303.4f entering-Aura host authority):
         // EXCLUDED from `impl PartialEq for GameState`, and that is the SAFE
         // direction here rather than the dangerous one. It is `Some` only while
-        // `waiting_for == ReturnAsAuraTarget` — a state the loop sampler never
-        // records (samples are taken at the Priority window) — and it is taken
-        // by the resume arm, so it is `None` at every sample beat. It is a
+        // `waiting_for == ReturnAsAuraTarget` — a state no loop frame is taken at
+        // (frames are Priority windows) — and it is taken by the resume arm, so
+        // it is `None` at every frame. It is a
         // read-only snapshot of an object `objects` already carries, never an
         // accumulator: no value can grow across iterations in it.
         entering_aura_authority: _,

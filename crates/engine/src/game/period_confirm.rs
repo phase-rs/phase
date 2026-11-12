@@ -15,7 +15,7 @@ use crate::analysis::decision_template::{
     ChoicePoint, DecisionSlot, DecisionTemplate, MayChoiceOption, PinnedDecision,
     ShortcutDecisionSchema, TargetPin,
 };
-use crate::analysis::loop_check::{classify_win_kind, LoopCertificate, WinKind};
+use crate::analysis::loop_check::{LoopCertificate, WinKind};
 use crate::analysis::resource::{
     certify_instructed_library_departure, driving_resources_non_decreasing_carried, frame_without,
     survived_repetitions, CertifiedInstructedDeparture, CleanupPair, CounterClass, CoveredGrowth,
@@ -3583,13 +3583,33 @@ fn counted_ending(
     ended: &CycleEnd,
 ) -> Option<WinKind> {
     matches!(ended, CycleEnd::HolderWon(_)).then(|| {
-        match classify_win_kind(holder, &ResourceVector::period(start, end), Some(end)) {
-            kind @ (WinKind::LethalDamage
-            | WinKind::PoisonLoss
-            | WinKind::Decking
-            | WinKind::ImmediateWin) => kind,
-            // CR 104.2b / CR 104.3e: no opponent's life, poison or library moved, so an effect won it.
-            WinKind::ExtraTurns | WinKind::Advantage => WinKind::ImmediateWin,
+        // CR 704.5a + CR 704.5b + CR 704.5c: the game has ended at `end`, so the thresholds the
+        // opponents seated at `start` have crossed there name the win.
+        let seated = seats(start);
+        let opponents = || {
+            end.players
+                .iter()
+                .filter(|p| p.id != holder && seated.contains(&p.id))
+        };
+        let crossed: Vec<WinKind> = [
+            (opponents().any(|p| p.life <= 0), WinKind::LethalDamage),
+            (
+                opponents().any(|p| p.drew_from_empty_library),
+                WinKind::Decking,
+            ),
+            (
+                opponents().any(|p| p.poison_counters >= 10),
+                WinKind::PoisonLoss,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(crossed, kind)| crossed.then_some(kind))
+        .collect();
+        match crossed[..] {
+            [kind] => kind,
+            // CR 104.2b / CR 104.3e: with no threshold crossed an effect won it; two or more name
+            // no single axis.
+            _ => WinKind::ImmediateWin,
         }
     })
 }

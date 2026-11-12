@@ -4068,7 +4068,11 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             projected: false,
             history: HistoryReads::NONE,
         }
-        .or(x.extract_in_zone().map_or(Axes::NONE, Axes::zone_count)),
+        .or(x
+            .extract_zones()
+            .into_iter()
+            .map(Axes::zone_count)
+            .fold(Axes::NONE, Axes::or)),
         FilterReadContext::SnapshotOrEvent => Axes::NONE,
     };
     base.or(match x {
@@ -8944,6 +8948,13 @@ mod tests {
                  creature cards in your graveyard.\nScavenge {4}{B} ({4}{B}, Exile this card \
                  from your graveyard: Put a number of +1/+1 counters equal to this card's power \
                  on target creature. Scavenge only as a sorcery.)",
+            ),
+            (
+                "Sailors' Bane",
+                "This spell costs {1} less to cast for each card you own in exile and in your \
+                 graveyard that's an instant card, a sorcery card, or a card that has an \
+                 Adventure.\nWard {4} (Whenever this creature becomes the target of a spell or \
+                 ability an opponent controls, counter it unless that player pays {4}.)",
             ),
         ] {
             assert!(

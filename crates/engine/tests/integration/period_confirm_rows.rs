@@ -8351,6 +8351,60 @@ fn a_counted_offer_states_no_outcome_its_take_does_not_produce() {
     }
 }
 
+/// CR 104.2a + CR 704.5a + CR 704.5c + CR 732.2a: Kilo, Apogee Mind ("Whenever Kilo becomes
+/// tapped, proliferate.") tapped by Relic of Legends and untapped by Freed from the Real, with
+/// Scheming Aspirant ("Whenever you proliferate, each opponent loses 2 life and you gain 2
+/// life."): the counted offer names the threshold P1 has crossed when the game ends. Offered at
+/// 2 life and 8 poison, life reaches 0 at 9 poison; offered at 3 and 8, poison reaches 10 at 1.
+#[test]
+fn a_counted_offer_names_the_threshold_its_ending_crosses() {
+    use crate::kilo_live_offer_from_real_dump::{FREED_UNTAP, RELIC_TAP_MANA};
+    let Some(db) = shared_card_db() else { return };
+    for (offered_at, repetitions, expected) in [
+        ((2, 8), 1, WinKind::LethalDamage),
+        ((3, 8), 2, WinKind::PoisonLoss),
+    ] {
+        // One live cycle precedes the offer.
+        let start = (offered_at.0 + 2, offered_at.1 - 1);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P1, start.0);
+        let kilo = scenario.add_real_card(P0, "Kilo, Apogee Mind", Zone::Battlefield, db);
+        let relic = scenario.add_real_card(P0, "Relic of Legends", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Scheming Aspirant", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+        runner.state_mut().players[1].poison_counters = start.1;
+        let freed = place(runner.state_mut(), P0, "Freed from the Real", db);
+        attach_to(runner.state_mut(), freed, kilo);
+        let score = |action: &GameAction| {
+            names(&[kilo])(action)
+                + chooses_color(ManaType::Blue)(action)
+                + i32::from(matches!(action, GameAction::SelectTargets { targets }
+                    if targets == &[TargetRef::Player(P1)]))
+        };
+        activate(&mut runner, relic, RELIC_TAP_MANA);
+        settle(&mut runner, &score);
+        activate(&mut runner, freed, FREED_UNTAP);
+        settle(&mut runner, &score);
+        let p1 = &runner.state().players[1];
+        assert_eq!((p1.life, p1.poison_counters), offered_at, "reach");
+        let (count, _, certificate) = offered_parts(&runner);
+        assert_eq!(count, IterationCount::Fixed(repetitions), "{offered_at:?}");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::LoopShortcut {
+                    predicted_winner: Some(P0),
+                    ..
+                }
+            ),
+            "{offered_at:?}"
+        );
+        assert_eq!(certificate.win_kind, Some(expected), "{offered_at:?}");
+    }
+}
+
 /// Cycles the Altar + Gravecrawler period like [`drive_altar_offers`], noting P0's library at each
 /// offer.
 fn drive_altar_offers_noting_p0(

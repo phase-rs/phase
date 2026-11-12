@@ -190,7 +190,7 @@ impl TacticalPolicy for LoopShortcutPolicy {
             //
             // NOTE (tripwire, still live for the unbounded branch): a `Fixed(n)` large enough
             // to cross lethal WOULD commit a `GameOver` — and against an offer whose name is
-            // RIGHT it still does. the drive crowns only the seat `proposal.predicted_winner` names
+            // RIGHT it still does. The drive crowns only the seat `proposal.predicted_winner` names
             // (or any seat when it names nobody). Such a declare by a faller
             // proposer is a committed self-loss, and this arm is still neutral on it. On a BOUNDED offer that hazard is
             // discharged by the `loop_shortcut_declare_eliminates_proposer` arm BELOW, which asks
