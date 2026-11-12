@@ -7427,8 +7427,11 @@ pub enum BatchCompletion {
         /// determines the printed placement order and remains the
         /// selected-object tracked set / effect count.
         chosen: Vec<ObjectId>,
-        /// Selection members that were already in a library at delivery time.
-        /// They are repositions, not replaceable zone-change requests.
+        /// Selection members that were already in a library when the owner's
+        /// arrangement was answered. Retained for wire compatibility with a
+        /// completion parked by an older build; every selected member — this set
+        /// included — is delivered through the replacement-consulting batch
+        /// (CR 614.1 + CR 701.20d), so the tail no longer replays them.
         library_origin: Vec<ObjectId>,
         /// Normalized placement requested by the original instruction.
         library_position: LibraryPosition,

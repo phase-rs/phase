@@ -13776,9 +13776,9 @@ pub(crate) fn filter_consumed_trigger_events(
 ///     `engine_resolution_choices.rs`, plus bottom selection in `mulligan.rs`,
 ///     the last of which answers the SAME
 ///     `GameAction::SelectCards` variant. A duplicate id therefore reaches
-///     `move_library_origin_cards_in_selection_order`
+///     the owner-ordered `PutAtLibraryPosition` delivery batch
 ///     (`engine_resolution_choices.rs`) and repositions one object twice
-///     inside one loop. That is a boundary-validation gap, not a filter defect.
+///     inside one batch. That is a boundary-validation gap, not a filter defect.
 ///
 /// CARVE-OUT: `game/stack.rs` builds a production `ZoneChanged` carrying
 /// index `0`, but it is a local probe passed only to

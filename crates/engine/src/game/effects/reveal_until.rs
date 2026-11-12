@@ -771,24 +771,19 @@ pub(crate) fn move_rest_then(
                 }
             };
             // CR 701.20d: the pile is delivered one card at a time; once it has
-            // been placed, the whole pile is one reorder of the library. A paused
-            // delivery leaves undelivered members bound to their occurrences.
+            // been placed, the whole pile is one reorder of the library. The
+            // delivery authority owns that reorder, so it settles before the
+            // completion's reveal cleanup — synchronously or after a CR 616.1
+            // pause — and a completion that parks a child operation cannot strand
+            // it in a batch record this caller no longer owns.
             let library_reorder = crate::game::zones::LibraryReorderOperation::begin(state, cards);
-            let result =
-                zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events);
-            if matches!(result, zone_pipeline::BatchMoveResult::NeedsChoice) {
-                // CR 701.20d + CR 616.1: a pile that pauses on a replacement
-                // ordering choice resumes through the batch drain, so the
-                // reorder rides that record and settles exactly once when the
-                // complete instruction finishes.
-                state
-                    .active_batch_delivery_mut()
-                    .expect("a paused pile owns the active batch record")
-                    .library_reorder = Some(library_reorder);
-            } else {
-                library_reorder.finish(state);
-            }
-            result
+            zone_pipeline::move_objects_simultaneously_settling_then(
+                state,
+                reqs,
+                Some(library_reorder),
+                completion,
+                events,
+            )
         }
         dest => {
             // CR 400.7: the rest cards move themselves to `dest`; each anchors

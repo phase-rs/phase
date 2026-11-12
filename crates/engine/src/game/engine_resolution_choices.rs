@@ -7783,59 +7783,50 @@ pub(super) fn handle_resolution_choice(
                                 .is_some_and(|object| object.zone == Zone::Library)
                         })
                         .collect();
-                    let non_library_order = effect_zone_non_library_delivery_order(
-                        state,
-                        &chosen,
-                        &library_origin,
-                        &library_position,
-                    );
-
-                    if non_library_order.is_empty() {
-                        move_library_origin_cards_in_selection_order(
-                            state,
-                            &chosen,
-                            &library_position,
-                            events,
-                        );
-                    } else {
-                        // The selected EffectZoneChoice is now consumed. Clear it
-                        // before the pipeline may park a CR 616.1 prompt; otherwise
-                        // `park_waiting_for` intentionally preserves the stale
-                        // choice for Devour's nested-choice path.
-                        state.waiting_for = WaitingFor::Priority { player };
-                        let requests = non_library_order
-                            .into_iter()
-                            .map(|card_id| {
-                                crate::game::zone_pipeline::ZoneMoveRequest::effect(
-                                    card_id,
-                                    Zone::Library,
-                                    source_id,
-                                )
-                                .at_library_position(library_position.clone())
-                            })
-                            .collect();
-                        let completion =
-                            crate::types::game_state::BatchCompletion::EffectZonePutAtLibraryPositionComplete {
-                                player,
+                    // The selected EffectZoneChoice is now consumed. Clear it
+                    // before the pipeline may park a CR 616.1 prompt; otherwise
+                    // `park_waiting_for` intentionally preserves the stale
+                    // choice for Devour's nested-choice path.
+                    state.waiting_for = WaitingFor::Priority { player };
+                    // CR 401.4 + CR 614.1 + CR 616.1: the owner's arrangement is
+                    // ONE batch through the replacement-consulting pipeline. A
+                    // selected card that already sits in a library is still a
+                    // proposed library placement, so its move consults `Moved`
+                    // replacements through the same arm every other library
+                    // placement uses — never a raw in-library reposition.
+                    let requests = effect_zone_library_placement_order(&chosen, &library_position)
+                        .into_iter()
+                        .map(|card_id| {
+                            crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                                card_id,
+                                Zone::Library,
                                 source_id,
-                                chosen: chosen.clone(),
-                                library_origin,
-                                library_position,
-                            };
-                        match crate::game::zone_pipeline::move_objects_simultaneously_then(
-                            state,
-                            requests,
-                            Some(completion),
-                            events,
-                        ) {
-                            crate::game::zone_pipeline::BatchMoveResult::Done
-                            | crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
-                                return Ok(ResolutionChoiceOutcome::WaitingFor(
-                                    state.waiting_for.clone(),
-                                ));
-                            }
-                        }
-                    }
+                            )
+                            .at_library_position(library_position.clone())
+                        })
+                        .collect();
+                    // CR 701.20d: the arrangement is one reorder of each affected
+                    // library; the delivery authority settles it before the tail's
+                    // reveal cleanup and carries it across a CR 616.1 pause.
+                    let library_reorder = zones::LibraryReorderOperation::begin(state, &chosen);
+                    let completion =
+                        crate::types::game_state::BatchCompletion::EffectZonePutAtLibraryPositionComplete {
+                            player,
+                            source_id,
+                            chosen: chosen.clone(),
+                            library_origin,
+                            library_position,
+                        };
+                    crate::game::zone_pipeline::move_objects_simultaneously_settling_then(
+                        state,
+                        requests,
+                        Some(library_reorder),
+                        Some(completion),
+                        events,
+                    );
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
                 }
                 // CR 608.2d + CR 301.5b: Resolution-time Equipment pick for
                 // deferred optional attach (Nahiri, the Lithomancer +2).
@@ -9763,194 +9754,19 @@ fn effect_zone_library_placement_order(
     }
 }
 
-/// The distinct library holders of `cards`, in first-seen order. CR 400.3: a
-/// card goes to its owner's library, which a shared-library format stores in
-/// one container, so a mixed-owner batch is replayed once per container.
-fn library_holders_of(
-    state: &GameState,
-    cards: &[ObjectId],
-) -> Vec<crate::types::player::PlayerId> {
-    let mut holders = Vec::new();
-    for &card_id in cards {
-        let holder = state.zone_storage_seat(Zone::Library, state.objects[&card_id].owner);
-        if !holders.contains(&holder) {
-            holders.push(holder);
-        }
-    }
-    holders
-}
-
-/// CR 401.4 + CR 400.3: Deliver Hand-origin cards in the order whose resulting
-/// relative order matches the raw mixed-source placement. The later
-/// Library-only replay can change their interleaving with library cards, but
-/// never their own order.
-fn effect_zone_non_library_delivery_order(
-    state: &GameState,
-    chosen: &[ObjectId],
-    library_origin: &[ObjectId],
-    library_position: &LibraryPosition,
-) -> Vec<ObjectId> {
-    let mut delivery_order = Vec::new();
-    for holder in library_holders_of(state, chosen) {
-        let library = state.library_of(holder).iter().copied().collect();
-        let desired = replay_effect_zone_library_placement(
-            state,
-            holder,
-            library,
-            chosen,
-            chosen,
-            library_position,
-        );
-        let non_library: Vec<_> = desired
-            .into_iter()
-            .filter(|card_id| chosen.contains(card_id) && !library_origin.contains(card_id))
-            .collect();
-        match library_position {
-            LibraryPosition::Top | LibraryPosition::NthFromTop { .. } => {
-                delivery_order.extend(non_library.into_iter().rev());
-            }
-            LibraryPosition::Bottom => delivery_order.extend(non_library),
-            LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
-                unreachable!("EffectZoneChoice normalizes unsupported library positions to Top")
-            }
-        }
-    }
-    delivery_order
-}
-
-fn replay_effect_zone_library_placement(
-    state: &GameState,
-    holder: crate::types::player::PlayerId,
-    mut library: Vec<ObjectId>,
-    chosen: &[ObjectId],
-    placed: &[ObjectId],
-    library_position: &LibraryPosition,
-) -> Vec<ObjectId> {
-    for card_id in effect_zone_library_placement_order(chosen, library_position) {
-        let card_holder = state.zone_storage_seat(Zone::Library, state.objects[&card_id].owner);
-        if card_holder != holder || !placed.contains(&card_id) {
-            continue;
-        }
-        library.retain(|id| *id != card_id);
-        match library_position {
-            LibraryPosition::Top => library.insert(0, card_id),
-            LibraryPosition::Bottom => library.push(card_id),
-            LibraryPosition::NthFromTop { n } => {
-                let index = (n.saturating_sub(1) as usize).min(library.len());
-                library.insert(index, card_id);
-            }
-            LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
-                unreachable!("EffectZoneChoice normalizes unsupported library positions to Top")
-            }
-        }
-    }
-    library
-}
-
-fn move_library_origin_cards_in_selection_order(
-    state: &mut GameState,
-    chosen: &[ObjectId],
-    library_position: &LibraryPosition,
-    events: &mut Vec<GameEvent>,
-) {
-    // CR 701.20d: the owner's arrangement is one reorder of the library even
-    // though each card is repositioned separately; settle reveal retirement for
-    // the whole arrangement once every card is in place.
-    let library_reorder = zones::LibraryReorderOperation::begin(state, chosen);
-    match library_position {
-        LibraryPosition::Bottom => {
-            for &card_id in chosen {
-                // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
-                zones::move_to_library_position(state, card_id, false, events);
-            }
-        }
-        LibraryPosition::Top | LibraryPosition::NthFromTop { .. } => {
-            let index = match library_position {
-                LibraryPosition::Top => Some(0),
-                LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
-                _ => unreachable!("matched library position"),
-            };
-            let placement_order = effect_zone_library_placement_order(chosen, library_position);
-            for card_id in placement_order {
-                // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
-                zones::move_to_library_at_index(state, card_id, index, events);
-            }
-        }
-        LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
-            unreachable!("EffectZoneChoice normalizes unsupported library positions to Top")
-        }
-    }
-    library_reorder.finish(state);
-}
-
-/// CR 401.4 + CR 400.3 + CR 608.2c: Preserve the raw arm's selected-card interleaving
-/// after the Hand-origin delivery batch has settled. Reconstruct each affected
-/// library without the newly delivered cards, replay the original placement
-/// order using only cards that actually landed in a library, then reposition
-/// just the cards that began there into the resulting slots.
-fn reposition_library_origins_after_batch_delivery(
-    state: &mut GameState,
-    chosen: &[ObjectId],
-    library_origin: &[ObjectId],
-    library_position: &LibraryPosition,
-    events: &mut Vec<GameEvent>,
-) {
-    let library_placed: Vec<_> = chosen
-        .iter()
-        .copied()
-        .filter(|card_id| {
-            state
-                .objects
-                .get(card_id)
-                .is_some_and(|object| object.zone == Zone::Library)
-        })
-        .collect();
-    // CR 701.20d: repositioning the library-origin cards is one reorder of each
-    // affected library; settle reveal retirement once all of them are placed.
-    let library_reorder = zones::LibraryReorderOperation::begin(state, library_origin);
-    for holder in library_holders_of(state, library_origin) {
-        let library = state
-            .library_of(holder)
-            .iter()
-            .copied()
-            .filter(|id| library_origin.contains(id) || !chosen.contains(id))
-            .collect();
-        let desired = replay_effect_zone_library_placement(
-            state,
-            holder,
-            library,
-            chosen,
-            &library_placed,
-            library_position,
-        );
-        for (index, &card_id) in desired.iter().enumerate().rev() {
-            if library_origin.contains(&card_id) {
-                // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
-                zones::move_to_library_at_index(state, card_id, Some(index), events);
-            }
-        }
-    }
-    library_reorder.finish(state);
-}
-
 /// CR 401.4 + CR 101.4: the one completion of a (possibly multi-owner)
 /// arrangement: tracked set, count and EffectResolved cover the whole moved set.
+/// Every selected member — one that began in a library included — was delivered
+/// by the replacement-consulting batch that carries this completion, and that
+/// batch settled the arrangement's CR 701.20d reorder before this tail runs.
 fn finish_effect_zone_put_at_library_position(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
     source_id: ObjectId,
     chosen: Vec<ObjectId>,
-    library_origin: Vec<ObjectId>,
     library_position: LibraryPosition,
     events: &mut Vec<GameEvent>,
 ) {
-    reposition_library_origins_after_batch_delivery(
-        state,
-        &chosen,
-        &library_origin,
-        &library_position,
-        events,
-    );
     if state.active_ability_continuation().is_some() {
         let tracked = if matches!(library_position, LibraryPosition::Bottom) {
             state
@@ -10863,7 +10679,11 @@ pub(crate) fn run_batch_completion(
             player,
             source_id,
             chosen,
-            library_origin,
+            // CR 401.4: the recorded library-origin set stays on the wire for a
+            // completion parked by an older build. Every selected member is now
+            // delivered by the same replacement-consulting batch, so the tail no
+            // longer replays that subset separately.
+            library_origin: _,
             library_position,
         } => {
             finish_effect_zone_put_at_library_position(
@@ -10871,7 +10691,6 @@ pub(crate) fn run_batch_completion(
                 player,
                 source_id,
                 chosen,
-                library_origin,
                 library_position,
                 events,
             );
@@ -15807,95 +15626,71 @@ mod tests {
         (state, pile)
     }
 
-    fn hand_card(state: &mut GameState, owner: PlayerId, n: u32) -> ObjectId {
-        create_object(
-            state,
-            CardId(200 + u64::from(n)),
-            owner,
-            format!("Hand {n}"),
-            Zone::Hand,
-        )
+    /// CR 401.4: the placement sequence is one pass over the pile. Only Top
+    /// placement is delivered in reverse so the first chosen card ends on top;
+    /// Bottom and NthFromTop place each card at the requested slot in the chosen
+    /// order.
+    #[test]
+    fn library_placement_sequence_reverses_only_top_placement() {
+        let chosen = [ObjectId(11), ObjectId(12), ObjectId(13)];
+        assert_eq!(
+            effect_zone_library_placement_order(&chosen, &LibraryPosition::Top),
+            vec![ObjectId(13), ObjectId(12), ObjectId(11)]
+        );
+        assert_eq!(
+            effect_zone_library_placement_order(&chosen, &LibraryPosition::Bottom),
+            chosen.to_vec()
+        );
+        assert_eq!(
+            effect_zone_library_placement_order(&chosen, &LibraryPosition::NthFromTop { n: 3 }),
+            chosen.to_vec()
+        );
     }
 
+    /// CR 401.4 + CR 400.3 + CR 701.20d: an owner-ordered arrangement is one
+    /// replacement-consulting delivery batch. A P1-owned card placed third from
+    /// the top of a shared pile lands in the single container, the same card in
+    /// separate libraries lands in its owner's, and the within-library
+    /// reposition creates no zone-change record.
     #[test]
-    fn nth_from_top_pair_reads_the_shared_pile_not_the_empty_seat() {
-        let nth = LibraryPosition::NthFromTop { n: 3 };
-        for (mut state, expected_shared) in
-            [(dandan_pile().0, true), (standard_libraries().0, false)]
-        {
-            let c1 = hand_card(&mut state, PlayerId(1), 1);
-            let c2 = hand_card(&mut state, PlayerId(1), 2);
-            let order = effect_zone_non_library_delivery_order(&state, &[c1, c2], &[], &nth);
-            assert_eq!(order, vec![c1, c2], "shared={expected_shared}");
+    fn owner_ordered_batch_places_shared_and_separate_libraries() {
+        for shared in [true, false] {
+            let (mut state, pile) = if shared {
+                dandan_pile()
+            } else {
+                standard_libraries()
+            };
+            let p1c = pile[7];
+            // CR 400.3: the destination library is the owner's — one shared
+            // container in a shared-library format, the owner's own otherwise.
+            let holder = if shared { 0 } else { 1 };
+            let before: Vec<ObjectId> = state.players[holder].library.iter().copied().collect();
+            let mut expected: Vec<ObjectId> =
+                before.iter().copied().filter(|id| *id != p1c).collect();
+            expected.insert(2, p1c);
+            let request =
+                crate::game::zone_pipeline::ZoneMoveRequest::effect(p1c, Zone::Library, p1c)
+                    .at_library_position(LibraryPosition::NthFromTop { n: 3 });
+            let reorder = crate::game::zones::LibraryReorderOperation::begin(&state, &[p1c]);
+            let mut events = Vec::new();
+            let result = crate::game::zone_pipeline::move_objects_simultaneously_settling_then(
+                &mut state,
+                vec![request],
+                Some(reorder),
+                None,
+                &mut events,
+            );
+            assert!(matches!(
+                result,
+                crate::game::zone_pipeline::BatchMoveResult::Done
+            ));
+            let placed: Vec<ObjectId> = state.players[holder].library.iter().copied().collect();
+            assert_eq!(placed, expected, "shared={shared}");
+            assert!(
+                state.zone_changes_this_turn.is_empty(),
+                "shared={shared}: a within-library reposition is not a zone change"
+            );
         }
-    }
-
-    #[test]
-    fn mixed_owner_top_batch_is_one_pass_over_the_shared_pile() {
-        let top = LibraryPosition::Top;
-        let (mut shared, _) = dandan_pile();
-        shared.seat_order.rotate_left(1);
-        let a = hand_card(&mut shared, PlayerId(0), 1);
-        let b = hand_card(&mut shared, PlayerId(1), 2);
-        assert_eq!(
-            effect_zone_non_library_delivery_order(&shared, &[a, b], &[], &top),
-            vec![b, a],
-            "the first chosen card ends on top of the one pile"
-        );
-
-        let (mut standard, _) = standard_libraries();
-        let a = hand_card(&mut standard, PlayerId(0), 1);
-        let b = hand_card(&mut standard, PlayerId(1), 2);
-        assert_eq!(
-            effect_zone_non_library_delivery_order(&standard, &[a, b], &[], &top),
-            vec![a, b],
-            "separate libraries are delivered grouped by owner"
-        );
-    }
-
-    #[test]
-    fn library_origin_reposition_sees_one_pile_across_owners() {
-        let nth = LibraryPosition::NthFromTop { n: 3 };
-        let (mut shared, pile) = dandan_pile();
-        let p1c = pile[7];
-        reposition_library_origins_after_batch_delivery(
-            &mut shared,
-            &[p1c],
-            &[p1c],
-            &nth,
-            &mut Vec::new(),
-        );
-        let mut expected: Vec<ObjectId> = pile.iter().copied().filter(|id| *id != p1c).collect();
-        expected.insert(2, p1c);
-        assert_eq!(
-            shared.players[0]
-                .library
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-            expected,
-            "a P1-owned card is placed third from the top of the one pile"
-        );
-        assert!(shared.players[1].library.is_empty());
-
-        let (mut standard, pile) = standard_libraries();
-        let p1c = pile[7];
-        reposition_library_origins_after_batch_delivery(
-            &mut standard,
-            &[p1c],
-            &[p1c],
-            &nth,
-            &mut Vec::new(),
-        );
-        assert_eq!(
-            standard.players[1]
-                .library
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-            vec![pile[1], pile[3], p1c, pile[5], pile[9]],
-            "separate libraries place the card third from the top of its owner's"
-        );
     }
 
     /// CR 115.10a: only a parked UNTARGETED (Resolution-timed)

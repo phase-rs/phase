@@ -1078,3 +1078,431 @@ fn settled_owner_order_is_not_identifiable_from_any_projection() {
         );
     }
 }
+
+/// CR 614.6 + CR 616.1: A synthetic `Moved` library redirect. The removed
+/// replacement is the witness; the replacement is installed on a textless
+/// enchantment creature so the board, not a printed card, carries it.
+fn library_redirect(
+    description: &str,
+    destination: Zone,
+) -> engine::types::ability::ReplacementDefinition {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter,
+    };
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::zones::EtbTapState;
+
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Library)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                destination,
+                origin: None,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                library_shuffle: Default::default(),
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        ))
+        .description(description.to_string())
+}
+
+/// CR 614.6 + CR 616.1 + CR 401.4: "Put all cards revealed this way on the
+/// bottom of your library in any order." The owner's answer is a proposed
+/// library placement for every selected card, so it consults `Moved`
+/// replacements exactly like the ordinary delivery path: two competing
+/// library redirects surface `WaitingFor::ReplacementChoice` after the answer,
+/// and the answered replacement decides where the revealed cards end up.
+#[test]
+fn erratic_mutation_owner_order_consults_competing_replacements() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let victim = scenario.add_creature(P1, "Victim", 2, 5).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Erratic Mutation", true, ERRATIC_MUTATION_ORACLE)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    scenario
+        .add_creature(P0, "Redirect A", 1, 1)
+        .as_enchantment()
+        .with_replacement_definition(library_redirect("Redirect A", Zone::Exile));
+    scenario
+        .add_creature(P0, "Redirect B", 1, 1)
+        .as_enchantment()
+        .with_replacement_definition(library_redirect("Redirect B", Zone::Exile));
+
+    let other = scenario.add_card_to_library_top(P0, "Deep Card");
+    let nonland = scenario
+        .add_spell_to_library_top(P0, "Divination", false)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let land2 = scenario
+        .add_spell_to_library_top(P0, "Island", false)
+        .as_land()
+        .id();
+    let land1 = scenario
+        .add_spell_to_library_top(P0, "Forest", false)
+        .as_land()
+        .id();
+
+    let mut runner = scenario.build();
+    let mut committed = runner.cast(spell).target_object(victim).commit();
+    committed.act(GameAction::PassPriority).unwrap();
+    committed.act(GameAction::PassPriority).unwrap();
+
+    // Reach guard: the pump already resolved and the owner is arranging the
+    // revealed pile while it is still on top of the library (CR 701.20b).
+    evaluate_layers(committed.state_mut());
+    assert_eq!(committed.state().objects[&victim].power, Some(5));
+    match &committed.state().waiting_for {
+        WaitingFor::EffectZoneChoice { player, cards, .. } => {
+            assert_eq!(*player, P0);
+            assert_eq!(
+                cards
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                [land1, land2, nonland].into_iter().collect(),
+            );
+        }
+        other_wait => panic!("expected EffectZoneChoice, got {other_wait:?}"),
+    }
+
+    // Submit the encounter order down the bottom.
+    committed
+        .act(GameAction::SelectCards {
+            cards: vec![land1, land2, nonland],
+        })
+        .unwrap();
+
+    // CR 614.6: the owner-ordered delivery is a replaceable placement, so each
+    // selected card's move surfaces the two-way CR 616.1 ordering choice.
+    let mut answered = 0;
+    while matches!(
+        committed.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ) {
+        assert!(
+            answered < 6,
+            "each selected card surfaces at most one ordering choice, then the batch settles"
+        );
+        committed
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("answer the competing library redirect");
+        answered += 1;
+    }
+    assert!(
+        answered > 0,
+        "the owner-ordered pile must consult the competing library redirects"
+    );
+
+    let state = committed.state();
+    for (id, label) in [(land1, "land1"), (land2, "land2"), (nonland, "nonland")] {
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Exile,
+            "{label} must take the answered redirect instead of the library bottom"
+        );
+    }
+    assert_eq!(
+        state.objects[&other].zone,
+        Zone::Library,
+        "the unrevealed card is untouched"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the batch settled back to priority, got {:?}",
+        state.waiting_for
+    );
+    assert!(state.active_batch_delivery().is_none());
+    assert!(state.stack.is_empty());
+    evaluate_layers(committed.state_mut());
+    assert_eq!(committed.state().objects[&victim].power, Some(5));
+    assert_eq!(committed.state().objects[&victim].toughness, Some(2));
+}
+
+/// Printed Proteus Staff Oracle text (MTGJSON).
+const PROTEUS_STAFF: &str = "{2}{U}, {T}: Put target creature on the bottom of its owner's library. That creature's controller reveals cards from the top of their library until they reveal a creature card. The player puts that card onto the battlefield and the rest on the bottom of their library in any order. Activate only as a sorcery.";
+
+/// Drive the activation through priority and replacement pauses until a prompt
+/// the resolution driver does not answer (the owner's bottom-order choice). The
+/// shared `AbilityActivation::resolve` driver auto-answers
+/// `RevealUntilBottomOrder` with the encounter order, which would hide the
+/// answer path under test.
+fn drive_to_owner_order(runner: &mut engine::game::scenario::GameRunner, limit: usize) {
+    for _ in 0..limit {
+        match &runner.state().waiting_for {
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("answer the library modifier");
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority to resolve the activation");
+            }
+            _ => return,
+        }
+    }
+    panic!("the activation did not reach the owner-order prompt within {limit} steps");
+}
+
+/// Give a staged library card the creature type the reveal is looking for.
+fn configure_kept_creature(state: &mut engine::types::game_state::GameState, id: ObjectId) {
+    use engine::types::card_type::CoreType;
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types = vec![CoreType::Creature];
+    obj.base_card_types = obj.card_types.clone();
+    obj.power = Some(2);
+    obj.toughness = Some(2);
+    obj.base_power = Some(2);
+    obj.base_toughness = Some(2);
+}
+
+/// CR 701.20d + CR 701.20a + CR 608.2c: Proteus Staff's "the rest on the bottom
+/// of their library in any order" pauses the resolving instruction on
+/// `RevealUntilBottomOrder`. Answering it delivers the rest pile through the
+/// replacement-consulting batch, and the batch settles the arrangement's single
+/// reorder BEFORE the instruction's reveal cleanup runs: the answered cards
+/// become new objects (CR 701.20d) instead of keeping their old occurrences
+/// while the cleanup already dropped their reveal markers.
+#[test]
+fn proteus_staff_owner_order_settles_reorder_before_cleanup() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let staff = scenario
+        .add_artifact_from_oracle(P0, "Proteus Staff", PROTEUS_STAFF)
+        .id();
+    let victim = scenario.add_vanilla(P0, 2, 2);
+    // Top-first library: [Miss A, Miss B, Kept Creature, Deep Card].
+    let deep = scenario.add_card_to_library_top(P0, "Deep Card");
+    let kept = scenario.add_card_to_library_top(P0, "Kept Creature");
+    let miss_b = scenario.add_card_to_library_top(P0, "Miss B");
+    let miss_a = scenario.add_card_to_library_top(P0, "Miss A");
+    let mut runner = scenario.build();
+    configure_kept_creature(runner.state_mut(), kept);
+    let incarnations_before = [
+        runner.state().objects[&miss_a].incarnation,
+        runner.state().objects[&miss_b].incarnation,
+    ];
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: staff,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("activate Proteus Staff");
+    drive_to_owner_order(&mut runner, 12);
+
+    // Reach guard: the production owner-order prompt names the two misses in
+    // reveal order.
+    let WaitingFor::RevealUntilBottomOrder { player, cards, .. } =
+        runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected RevealUntilBottomOrder, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    assert_eq!(cards, vec![miss_a, miss_b]);
+
+    // CR 401.4: the owner answers with the bottom order.
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![miss_b, miss_a],
+        })
+        .expect("answer the owner's bottom order");
+
+    let state = runner.state();
+    assert_eq!(
+        state.players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![deep, victim, miss_b, miss_a],
+        "the answered order is the settled bottom of the library"
+    );
+    assert_eq!(
+        state.objects[&kept].zone,
+        Zone::Battlefield,
+        "the revealed creature card is the kept card"
+    );
+    // CR 701.20d: every reordered revealed card stops being revealed and
+    // becomes a new object. A cleanup running ahead of the reorder settlement
+    // would leave these occurrences unchanged.
+    for (id, label, incarnation_before) in [
+        (miss_a, "Miss A", incarnations_before[0]),
+        (miss_b, "Miss B", incarnations_before[1]),
+    ] {
+        assert!(
+            state.objects[&id].incarnation > incarnation_before,
+            "{label} must become a new object when the arrangement settles"
+        );
+        assert!(
+            !state.revealed_cards.contains(&id) && !state.public_revealed_cards.contains(&id),
+            "{label} must stop being revealed"
+        );
+    }
+    let opponent_view = engine::game::visibility::filter_state_for_viewer(state, P1);
+    for (id, label) in [(miss_a, "Miss A"), (miss_b, "Miss B")] {
+        assert_eq!(
+            opponent_view.objects[&id].name,
+            engine::game::visibility::HIDDEN_CARD_NAME,
+            "{label} must be hidden from the opponent after settlement"
+        );
+    }
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the instruction settled back to priority, got {:?}",
+        state.waiting_for
+    );
+    assert!(state.active_batch_delivery().is_none());
+    assert!(state.stack.is_empty());
+}
+
+/// CR 701.20d + CR 616.1: The same owner answer, but the rest pile's library
+/// deliveries hit two competing `Moved` replacements. The delivery parks on
+/// `WaitingFor::ReplacementChoice` after the answer, resumes through the batch
+/// drain, and settles the arrangement's reorder before the reveal cleanup runs
+/// — once, with no stranded batch.
+#[test]
+fn proteus_staff_paused_owner_order_still_settles_reorder() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let staff = scenario
+        .add_artifact_from_oracle(P0, "Proteus Staff", PROTEUS_STAFF)
+        .id();
+    scenario
+        .add_creature(P0, "Redirect A", 1, 1)
+        .as_enchantment()
+        .with_replacement_definition(library_redirect("Redirect A", Zone::Exile));
+    scenario
+        .add_creature(P0, "Redirect B", 1, 1)
+        .as_enchantment()
+        .with_replacement_definition(library_redirect("Redirect B", Zone::Exile));
+    let victim = scenario.add_vanilla(P0, 2, 2);
+    let deep = scenario.add_card_to_library_top(P0, "Deep Card");
+    let kept = scenario.add_card_to_library_top(P0, "Kept Creature");
+    let miss_b = scenario.add_card_to_library_top(P0, "Miss B");
+    let miss_a = scenario.add_card_to_library_top(P0, "Miss A");
+    let mut runner = scenario.build();
+    configure_kept_creature(runner.state_mut(), kept);
+    let incarnations_before = [
+        runner.state().objects[&miss_a].incarnation,
+        runner.state().objects[&miss_b].incarnation,
+    ];
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: staff,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("activate Proteus Staff");
+    // The victim's own library placement is answered inside this drive.
+    drive_to_owner_order(&mut runner, 12);
+
+    let WaitingFor::RevealUntilBottomOrder { cards, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected RevealUntilBottomOrder after the victim's placement, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(cards, vec![miss_a, miss_b]);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![miss_b, miss_a],
+        })
+        .expect("answer the owner's bottom order");
+
+    // CR 616.1: each rest-pile delivery pauses on the two competing replacements
+    // and resumes through the batch drain.
+    let mut paused = 0;
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ) {
+        assert!(paused < 8, "the replacement choices are bounded");
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("answer the library modifier");
+        paused += 1;
+    }
+    assert!(
+        paused > 0,
+        "the owner-ordered rest pile must pause on the competing replacements"
+    );
+
+    let state = runner.state();
+    for (id, label) in [
+        (victim, "the bounced creature"),
+        (miss_a, "Miss A"),
+        (miss_b, "Miss B"),
+    ] {
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Exile,
+            "{label} must take the answered redirect instead of the library bottom"
+        );
+    }
+    assert_eq!(
+        state.players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![deep],
+        "only the unrevealed card is left in the library"
+    );
+    assert_eq!(state.objects[&kept].zone, Zone::Battlefield);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the paused instruction settled back to priority, got {:?}",
+        state.waiting_for
+    );
+    assert!(state.active_batch_delivery().is_none());
+    assert!(state.stack.is_empty());
+    assert!(
+        incarnations_before[0] < runner.state().objects[&miss_a].incarnation
+            || !state.revealed_cards.contains(&miss_a),
+        "the paused delivery still retires the revealed miss instead of leaving it public"
+    );
+}

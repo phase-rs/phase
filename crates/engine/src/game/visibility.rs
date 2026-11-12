@@ -3407,6 +3407,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         .collect();
     let is_hidden_ordered = |object_id: ObjectId| hidden_ordered_ids.contains(&object_id);
     for player in filtered.players.iter_mut() {
+        // allow-raw-zone: a viewer-projection clone reorders its own hidden-zone display slots; no gameplay zone change occurs (CR 401.2 + CR 401.4).
         canonicalize_hidden_ordered_zone(&mut player.library, is_hidden_ordered);
         // CR 717.2 + CR 901.15 + CR 904.4: the supplementary decks are
         // hidden-order zones too, so the same identity-to-position boundary

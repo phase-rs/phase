@@ -1292,9 +1292,36 @@ pub(crate) fn move_objects_simultaneously(
 /// delivery, including an inline completion tail: `Done` means that tail also
 /// settled; `NeedsChoice` means a CR 616.1 replacement choice parked it. Callers
 /// may therefore restore priority or run their own tail only after `Done`.
+///
+/// A batch that also reorders a library as one instruction passes that reorder
+/// to [`move_objects_simultaneously_settling_then`]; it must never finish the
+/// reorder after this call returns (see that function for why).
 pub(crate) fn move_objects_simultaneously_then(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
+    completion: Option<BatchCompletion>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    move_objects_simultaneously_settling_then(state, reqs, None, completion, events)
+}
+
+/// CR 701.20d + CR 603.10a + CR 616.1: As [`move_objects_simultaneously_then`],
+/// additionally owning the whole-library reorder this instruction performs.
+///
+/// `library_reorder` settles BEFORE `completion` runs on BOTH completion paths:
+/// here on the synchronous path, and in `drain_pending_batch_deliveries` after a
+/// replacement-paused delivery. A reveal-until rest pile's completion is its
+/// reveal-marker cleanup, so settling afterwards would find the markers already
+/// cleared and leave every reordered card revealed at its new position while it
+/// keeps its old occurrence (CR 701.20d requires the opposite: a reordered
+/// revealed card stops being revealed and becomes a new object). A caller that
+/// finished the reorder after this function returned would also lose it when the
+/// completion parks a child operation of its own, because that pause owns a new
+/// batch record rather than this instruction's reorder.
+pub(crate) fn move_objects_simultaneously_settling_then(
+    state: &mut GameState,
+    reqs: Vec<ZoneMoveRequest>,
+    library_reorder: Option<crate::types::game_state::LibraryReorderOperation>,
     completion: Option<BatchCompletion>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
@@ -1323,6 +1350,12 @@ pub(crate) fn move_objects_simultaneously_then(
                 &logical_zone_change_group,
                 &events[event_start..],
             );
+            // CR 701.20d + CR 616.1: every member of this library placement is
+            // now in place, so the whole-library reorder it performed settles
+            // before the completion's reveal cleanup / reveal-marker retirement.
+            if let Some(library_reorder) = library_reorder {
+                library_reorder.finish(state);
+            }
             // Synchronous completion (the common single-redirect path): run the
             // cleanup now, and surface a pause it raises to the enclosing caller.
             completion.map_or(BatchMoveResult::Done, |mut completion| {
@@ -1341,6 +1374,9 @@ pub(crate) fn move_objects_simultaneously_then(
             // once, after logical settlement.
             let pending = ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard));
             pending.completion = completion;
+            // CR 701.20d + CR 616.1: the reorder rides the same parked owner; its
+            // drain settles the reorder before running this completion.
+            pending.library_reorder = library_reorder;
             pending.attempted = ids;
             pending.zone_change_record_start = zone_change_record_start;
             pending.deferred_events.extend(events.drain(event_start..));
