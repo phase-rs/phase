@@ -2559,10 +2559,11 @@ fn settle_finished_game(state: &mut GameState, result: &mut ActionResult) {
 /// player's departure canceled (`elimination::DepartureResume`), then settle it
 /// as any action that completed one: the owed final part (CR 608.2n),
 /// state-based actions (CR 704.3), then the queued triggered abilities. The
-/// pipeline scans `events[scan_from..]`: from the departure's own events when
-/// no one collected them yet (the player-loss safety net), else from the
-/// resumed events (a concession collected its departure itself). The resume
-/// runs in its own buffer, because a drain that stops on another prompt takes
+/// pipeline scans `events[scan_from..]` and skips every occurrence the departure
+/// already claimed (the departure collects its own triggers once, against the
+/// observers as they were before it: CR 603.10a, CR 603.2c), so the player-loss
+/// safety net starts at the departure's events and a concession at the resumed
+/// ones. The resume runs in its own buffer, because a drain that stops on another prompt takes
 /// the buffer it is handed into its parked carrier. A departure is never
 /// undone, so a failure is reported rather than returned.
 fn settle_resolution_resumed_after_departure(
@@ -2624,8 +2625,9 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
         // that is still under way (its chooser left). This net applies the
         // loss at the prompt (#962) rather than at the next priority
         // (CR 104.3b); the resolution is then finished before any player
-        // receives priority, and the departure's own events, which nothing on
-        // this route has collected, are scanned with the resumed ones.
+        // receives priority. The departure collected its own triggers and claimed
+        // its events (CR 603.10a, CR 603.2c), so the settlement's scan from
+        // `departure_start` takes only what happened after it.
         let departure_start = result.events.len();
         if sba::check_state_based_actions_reporting_departure(state, &mut result.events)
             == super::elimination::DepartureResume::ParkedZoneChangeTail

@@ -813,16 +813,17 @@ const GRAFTED_WARGEAR_ORACLE: &str = "Equipped creature gets +3/+2.\n\
      Equip {0}";
 
 /// CR 603.10c + CR 603.3a + CR 800.4a + CR 800.4d: on P2's turn, P2 steals P0's
-/// Grafted Wargear with Word of Seizing, equips it to P2's bear, and concedes.
-/// The bear leaves the game and the Wargear becomes unattached in the same
-/// event that ends P2's control effects. "Becomes unattached" looks back in
-/// time, so the ability is P2's, the Wargear's controller immediately before,
-/// and it isn't put on the stack; the Wargear then reverts to P0.
+/// Grafted Wargear with Word of Seizing, equips it to P2's bear, and leaves the
+/// game by `loss`. The bear leaves the game and the Wargear becomes unattached
+/// in the same event that ends P2's control effects. "Becomes unattached" looks
+/// back in time, so the ability is P2's, the Wargear's controller immediately
+/// before, and it isn't put on the stack; the Wargear then reverts to P0. The
+/// `Unattached` event is not a zone change, so only the occurrence claim keeps
+/// the caller's later scan from collecting it again under P0.
 ///
 /// REVERT-FAILING: reading the departure's `Unattached` event against the
 /// post-revert board gives the Wargear's trigger to P0.
-#[test]
-fn concession_after_stealing_equipment_retires_its_unattach_trigger() {
+fn assert_stolen_equipment_unattach_retired(loss: Loss) {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     for player in [P0, P1, P2] {
@@ -869,9 +870,7 @@ fn concession_after_stealing_equipment_retires_its_unattach_trigger() {
     );
     assert!(runner.state().stack.is_empty());
 
-    runner
-        .act(GameAction::Concede { player_id: P2 })
-        .expect("P2 concedes");
+    lose_the_game(&mut runner, &[P2], loss);
     assert_eq!(zone(&runner, bear), Zone::Exile);
     assert_eq!(
         runner.state().objects[&wargear].attached_to,
@@ -891,6 +890,16 @@ fn concession_after_stealing_equipment_retires_its_unattach_trigger() {
         "CR 603.10c + CR 800.4d: the unattach trigger was P2's, and P2 left"
     );
     assert!(runner.state().deferred_triggers.is_empty());
+}
+
+#[test]
+fn concession_after_stealing_equipment_retires_its_unattach_trigger() {
+    assert_stolen_equipment_unattach_retired(Loss::Concede);
+}
+
+#[test]
+fn zero_life_after_stealing_equipment_retires_its_unattach_trigger() {
+    assert_stolen_equipment_unattach_retired(Loss::ZeroLife);
 }
 
 /// How the losing players leave the game in a stolen-observer test.
