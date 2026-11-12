@@ -796,15 +796,19 @@ pub fn move_object_for_test(
 /// "enters with" / "as enters" replacement — including the CR 306.5b /
 /// CR 310.4b intrinsic counters — to modify. CR 603.2g + CR 603.6a: and no
 /// enters-the-battlefield trigger event occurs.
-/// Callers: `move_object_with_terminal` (THE zone-change entry point) and
+/// Callers: `move_object_with_terminal` (THE zone-change entry point),
+/// `execute_zone_move_with_applied_terminal` (the effect-driven funnel every
+/// `execute_zone_move*` wrapper reaches) and
 /// `engine_debug::enter_battlefield_with_etb` (the sandbox consulting entry).
 pub(crate) fn zone_move_is_primitive_noop(
     state: &GameState,
     object: &GameObject,
     to: Zone,
 ) -> bool {
-    // CR 111.8: a token outside the battlefield (and not stack-resident) stays put.
-    zones::token_is_outside_battlefield_and_stack(state, object)
+    // CR 111.8: a token outside the battlefield (and not stack-resident) stays
+    // put — except a Horde-deck token, which moves by design in boss-deck
+    // games (see `zones::token_cannot_change_zones`).
+    zones::token_cannot_change_zones(state, object)
         // CR 400.6 + CR 603.6d: Battlefield -> Battlefield is no entry event.
         || (object.zone == Zone::Battlefield && to == Zone::Battlefield)
 }
@@ -1638,6 +1642,14 @@ fn anticipated_zone_change_delivery(
 /// `mill_double_redirect_choice_continuation` (two sequential parks, no
 /// completion) and `surveil_rest_pile_redirect_continuation` (two sequential
 /// parks WITH a completion that must fire once after the second park drains).
+///
+/// CLASSIFICATION CONTRACT (issue #10431): the resumed segment's
+/// `terminal_completion` is recorded by the resume seam
+/// (`engine_replacement::handle_replacement_choice_inner`) before either
+/// terminal, so a delivery that parks again in its own tail (ETB counter
+/// ordering, entering-attacker choice) is still classified `Moved` here. `None`
+/// at this point means the delivery never reached a terminal decision and is a
+/// contract violation, not a state this function may paper over.
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let Some(pending) = state.active_batch_delivery().cloned() {
         let PendingBatchDeliveries {
@@ -1690,9 +1702,24 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 &paused_current.delivery_events,
             )
             .expect("resumed batch retains its exact paused delivery");
-            let terminal_completion = paused_current
-                .terminal_completion
-                .expect("resumed batch delivery records its exact terminal completion");
+            // CR 616.1 + CR 603.10a: a resumed batch member must be classified
+            // before its owner can be drained. The resume seam records it whether
+            // the delivery returns `Done` or parks again
+            // (`engine_replacement::handle_replacement_choice_inner`), so `None`
+            // here means a delivery that never reached a terminal decision — a
+            // contract violation, never a fallback (settlement would leave the
+            // member `Pending`).
+            let terminal_completion =
+                paused_current
+                    .terminal_completion
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "resumed batch member {} (incarnation {}) has no terminal completion ({} retained delivery events)",
+                            paused_current.member.object_id.0,
+                            paused_current.member.incarnation,
+                            paused_current.delivery_events.len()
+                        )
+                    });
             logical_zone_change_group
                 .record_delivery_completion(paused_current.member.object_id, terminal_completion)
                 .expect("resumed batch member records its exact terminal outcome");
@@ -3191,6 +3218,7 @@ mod entering_aura_attachment_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::SelfRef,
@@ -3262,6 +3290,7 @@ mod entering_aura_attachment_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::SelfRef,
@@ -4706,13 +4735,25 @@ fn execute_zone_move_with_applied_terminal(
     replacement_applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
-    let Some(member) = state
-        .objects
-        .get(&obj_id)
-        .map(ObjectIncarnationRef::from_object)
-    else {
+    let Some(object) = state.objects.get(&obj_id) else {
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     };
+    let member = ObjectIncarnationRef::from_object(object);
+    // CR 111.8 + CR 400.6 + CR 603.6d + CR 614.12: the shared object-level
+    // no-op guard (`zone_move_is_primitive_noop`). `move_object_with_terminal`
+    // runs it before ITS replacement consult; this funnel — the one every
+    // `execute_zone_move*` wrapper, and therefore every effect-driven
+    // `ChangeZone` / `ChangeZoneAll` member, reaches — must run it too. Without
+    // it the funnel seeds entry counters and calls `replace_event` for a move
+    // `zones::move_to_zone` then refuses: a replacement is consulted, and can
+    // be consumed (CR 616.1, `last_effect_count`) or reported applied
+    // (`GameEvent::ReplacementApplied`), for a move that never happens; and a
+    // Battlefield -> Battlefield proposal re-applies every enters-with
+    // replacement for an object that never left. Remaining in place with no
+    // event is exactly what CR 111.8 and CR 400.6/CR 603.6d say.
+    if zone_move_is_primitive_noop(&*state, object, dest_zone) {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    }
     // CR 712.14a: A single-faced object instructed to enter transformed
     // cannot enter the battlefield. A single-faced copy of a transforming
     // Saga therefore remains in exile after its final chapter resolves.
@@ -4730,6 +4771,23 @@ fn execute_zone_move_with_applied_terminal(
     if from_zone == Zone::Library && dest_zone == Zone::Library && library_placement.is_none() {
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     }
+    // Boss-stage Horde (Turtle Team-Up booklet, printed p. 7): Boss-owned
+    // cards bound for hand go to their graveyard "instead". Normalize the
+    // PROPOSED destination — before `replace_event` consults — so
+    // graveyard-scoped replacements (Rest in Peace) observe the real
+    // destination and survive CR 616.1 ordering pauses on the parked event.
+    // CR 400.6 applies replacements before the move happens; CR 616.1f
+    // repeats the process for effects that would now be applicable. The
+    // classic top-of-library redirect stays a mover-level mapping in
+    // `zones::move_to_zone` (unchanged); that mover also keeps this mapping
+    // as a backstop for consult-bypassing paths. The object exists (the
+    // missing-object arm returned above), so the owner read is total.
+    let dest_zone = {
+        let owner = state.objects.get(&obj_id).map(|obj| obj.owner);
+        owner.map_or(dest_zone, |owner| {
+            zones::boss_hand_redirect_destination(state, owner, dest_zone)
+        })
+    };
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
     if let ProposedEvent::ZoneChange {
         applied,
@@ -5177,6 +5235,7 @@ mod w3_library_placement_tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Exile,
                         target: TargetFilter::Any,
@@ -5203,6 +5262,7 @@ mod w3_library_placement_tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: to,
                     target: TargetFilter::Any,
@@ -5224,6 +5284,7 @@ mod w3_library_placement_tests {
     fn face_down_self_search(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
         let mut exile_step = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -5794,6 +5855,7 @@ mod w3_library_placement_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -5908,6 +5970,7 @@ mod w3_library_placement_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -6050,6 +6113,7 @@ mod w3_library_placement_tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Exile,
                         target: TargetFilter::Any,
@@ -6856,6 +6920,7 @@ mod layers_incremental_flush_tests {
         assert!(
             crate::game::layers::static_layer_dependency_for_zone_transition(
                 &state,
+                reanimated,
                 Zone::Graveyard,
                 Zone::Battlefield
             ),
@@ -6962,6 +7027,7 @@ mod layers_incremental_flush_tests {
         assert!(
             !crate::game::layers::static_layer_dependency_for_zone_transition(
                 &state,
+                entering_watcher,
                 Zone::Graveyard,
                 Zone::Battlefield
             ),
@@ -6998,6 +7064,13 @@ mod layers_incremental_flush_tests {
     /// test pins that handoff end-to-end — cheap mark at the seam, escalation
     /// plus full evaluation at the flush — so neither half of the contract can
     /// silently regress.
+    ///
+    /// #10400 note: the per-object zone-of-function term in
+    /// `static_layer_dependency_for_zone_transition` reads `state.objects`
+    /// directly, so it too bypasses the stale-by-design index for the MOVED
+    /// SOURCE's own statics. This test's assertions are unchanged because its
+    /// fixture's definitions carry empty `active_zones`, which the term
+    /// deliberately does not match.
     #[test]
     fn populated_index_entry_defers_zone_reading_static_to_flush_escalation() {
         let mut state = GameState::new_two_player(42);
@@ -7068,6 +7141,7 @@ mod layers_incremental_flush_tests {
         assert!(
             !crate::game::layers::static_layer_dependency_for_zone_transition(
                 &state,
+                entering_watcher,
                 Zone::Graveyard,
                 Zone::Battlefield
             ),
@@ -7110,9 +7184,15 @@ mod layers_incremental_flush_tests {
 #[cfg(test)]
 mod effect_driven_transformed_entry_tests {
     use super::*;
+    use crate::game::layers::{evaluate_layers, flush_layers, mark_layers_full};
     use crate::game::zones::create_object;
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, FilterProp, StaticCondition, TypeFilter, TypedFilter,
+    };
     use crate::types::card_type::{CardType, CoreType};
+    use crate::types::game_state::LayersDirty;
     use crate::types::identifiers::CardId;
+    use crate::types::keywords::Keyword;
 
     /// CR 712.14a (2nd sentence) regression guard: a SINGLE-FACED object
     /// instructed to enter transformed cannot enter the battlefield — it remains
@@ -7266,6 +7346,132 @@ mod effect_driven_transformed_entry_tests {
             "CR 712.14a: the DFC must be transformed (back face) after this entry"
         );
     }
+
+    /// CR 113.6b + CR 400.7 + CR 611.3a: reanimating a source whose static
+    /// functions from the graveyard stops that static, so recipients' cached
+    /// characteristics must be re-derived through the production pipeline.
+    ///
+    /// Reach guard, not a revert probe: with the printed Anger parse the
+    /// `IsPresent(Mountain you control)` filter carries
+    /// `FilterProp::InZone { zone: Zone::Battlefield }`, which
+    /// `static_condition_reads_zone_membership` reads, so for a move whose
+    /// destination is the battlefield the pre-existing board-wide term already
+    /// proposes `Full` at base. What this row guards is the reach end: the
+    /// recipient's applied Haste must lapse after the flush. The revert probes
+    /// for the new per-object term are the mill (V2/V7/V8), exile (V5/V10) and
+    /// library-placement (V11/V11b/V12) rows, whose source zones the condition
+    /// does not read.
+    #[test]
+    fn reanimated_incarnation_marks_full_and_drops_graveyard_grant() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(80071),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let mountain = create_object(
+            &mut state,
+            CardId(80072),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mountain).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Mountain".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let bear = create_object(
+            &mut state,
+            CardId(80073),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+        }
+        let anger = create_object(
+            &mut state,
+            CardId(80074),
+            PlayerId(0),
+            "Anger".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&anger).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ))
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])
+                    .condition(StaticCondition::And {
+                        conditions: vec![
+                            StaticCondition::SourceInZone {
+                                zone: Zone::Graveyard,
+                            },
+                            StaticCondition::IsPresent {
+                                filter: Some(TargetFilter::Typed(TypedFilter {
+                                    type_filters: vec![TypeFilter::Subtype("Mountain".to_string())],
+                                    controller: Some(ControllerRef::You),
+                                    properties: vec![FilterProp::InZone {
+                                        zone: Zone::Battlefield,
+                                    }],
+                                })),
+                            },
+                        ],
+                    })
+                    .active_zones(vec![Zone::Graveyard]),
+            );
+            assert_eq!(
+                obj.static_definitions.iter_all().count(),
+                1,
+                "fixture premise: the milled source carries exactly the Anger static"
+            );
+        }
+
+        mark_layers_full(&mut state);
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&bear].has_keyword(&Keyword::Haste),
+            "precondition: Anger in the graveyard with a Mountain grants Haste"
+        );
+        assert!(!state.layers_dirty.is_dirty());
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(anger, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&anger].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "reanimating a graveyard-functioning static's source must force a full \
+             re-evaluation via the per-object zone-of-function term, got {:?}",
+            state.layers_dirty
+        );
+        flush_layers(&mut state);
+        assert!(
+            !state.objects[&bear].has_keyword(&Keyword::Haste),
+            "once Anger leaves the graveyard its grant must lapse for pre-existing recipients"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -7375,6 +7581,7 @@ mod exiling_player_record_tests {
         let card = card_p1_exiled(&mut state);
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -7585,6 +7792,7 @@ mod hand_entry_receiver_tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -7650,5 +7858,207 @@ mod hand_entry_receiver_tests {
         assert!(state.players[1].hand.contains(&first));
         assert!(state.players[1].hand.contains(&second));
         assert_eq!(rebound_owners(&state), vec![Some(P0), Some(P0)]);
+    }
+}
+
+/// CR 111.8 + CR 400.6: the effect-driven funnel
+/// (`execute_zone_move_with_applied_terminal`) must refuse the same
+/// object-level no-ops the pipeline entry (`move_object_with_terminal`) and the
+/// zone primitive already refuse, before it seeds entry counters or consults a
+/// replacement. These are the seam tests; the production entry (Ephemerate on a
+/// Spike Feeder token) is pinned in
+/// `tests/integration/ephemerate_token_no_entry.rs`.
+#[cfg(test)]
+mod effect_driven_entry_noop_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::identifiers::CardId;
+
+    const SPIKE_FEEDER_ENTER: &str = "Spike Feeder enters with two +1/+1 counters on it.";
+
+    /// A Spike Feeder-shaped object: `zone` is where the move starts, and its
+    /// parsed "enters with two +1/+1 counters" definition is installed so the
+    /// funnel would seed those counters on an unguarded Battlefield proposal.
+    fn spike_feeder(state: &mut GameState, zone: Zone, is_token: bool) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            "Spike Feeder".to_string(),
+            zone,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.is_token = is_token;
+        object.replacement_definitions.push(
+            crate::parser::oracle_replacement::parse_replacement_line(
+                SPIKE_FEEDER_ENTER,
+                "Spike Feeder",
+            )
+            .expect("the enters-with line parses to a replacement"),
+        );
+        id
+    }
+
+    fn move_to(
+        state: &mut GameState,
+        id: ObjectId,
+        from: Zone,
+        to: Zone,
+    ) -> (ZoneMoveResult, Vec<GameEvent>) {
+        let mut events = Vec::new();
+        let result = execute_zone_move(
+            state,
+            id,
+            from,
+            to,
+            ObjectId(100),
+            None,
+            false,
+            EtbTapState::Unspecified,
+            false,
+            None,
+            &[],
+            None,
+            false,
+            None,
+            None,
+            &mut events,
+        );
+        (result, events)
+    }
+
+    fn counters(state: &GameState, id: ObjectId) -> u32 {
+        state.objects[&id]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Red at base: the funnel consulted the exiled token's own `Moved`
+    /// definition and emitted `ReplacementApplied` for a return CR 111.8
+    /// refuses.
+    #[test]
+    fn r4_exiled_token_return_consults_nothing() {
+        let mut state = GameState::new_two_player(42);
+        let id = spike_feeder(&mut state, Zone::Exile, true);
+
+        let (result, events) = move_to(&mut state, id, Zone::Exile, Zone::Battlefield);
+
+        assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Exile,
+            "CR 111.8: the token stays in exile"
+        );
+        assert!(events.is_empty(), "no replacement is consulted: {events:?}");
+        assert_eq!(counters(&state, id), 0);
+    }
+
+    /// Positive reach-guard for R4: the same fixture and call with a card does
+    /// reach the replacement and the entry.
+    #[test]
+    fn r4_positive_card_enters_with_counters_from_exile() {
+        let mut state = GameState::new_two_player(42);
+        let id = spike_feeder(&mut state, Zone::Exile, false);
+
+        let (result, events) = move_to(&mut state, id, Zone::Exile, Zone::Battlefield);
+
+        assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert_eq!(counters(&state, id), 2, "CR 614.1c: enters with two");
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CounterAdded { .. })));
+    }
+
+    /// Red at base: Battlefield -> Battlefield is not a zone change (CR 400.6),
+    /// yet the funnel re-applied the enters-with counters.
+    #[test]
+    fn r5_battlefield_to_battlefield_token_adds_no_counters() {
+        let mut state = GameState::new_two_player(42);
+        let id = spike_feeder(&mut state, Zone::Battlefield, true);
+        // Seed what the def placed on entry, so "stays 2" is distinguishable
+        // from the base's 4.
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+        let incarnation = state.objects[&id].incarnation;
+
+        let (result, events) = move_to(&mut state, id, Zone::Battlefield, Zone::Battlefield);
+
+        assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
+        assert_eq!(counters(&state, id), 2, "CR 400.6: no second entry");
+        assert!(events.is_empty(), "no entry happens: {events:?}");
+        assert_eq!(
+            state.objects[&id].incarnation, incarnation,
+            "the object never became a new object (CR 400.7)"
+        );
+    }
+
+    /// Positive reach-guard for R5: the same object and definition still apply
+    /// on a real entry from hand.
+    #[test]
+    fn r5_positive_same_fixture_hand_to_battlefield() {
+        let mut state = GameState::new_two_player(42);
+        // A card, not a token: CR 111.8 keeps a token outside the battlefield
+        // from entering, which is R4's half, not this reach guard's.
+        let id = spike_feeder(&mut state, Zone::Hand, false);
+
+        let (result, events) = move_to(&mut state, id, Zone::Hand, Zone::Battlefield);
+
+        assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert_eq!(counters(&state, id), 2);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CounterAdded { .. })));
+    }
+
+    /// Preservation row (green at base): the CR 111.7 stack carve-out still
+    /// lets a stack-resident token move.
+    #[test]
+    fn r6_token_with_stack_residency_still_moves() {
+        let mut state = GameState::new_two_player(42);
+        let id = spike_feeder(&mut state, Zone::Stack, true);
+
+        let (result, events) = move_to(&mut state, id, Zone::Stack, Zone::Exile);
+
+        assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
+        assert_eq!(state.objects[&id].zone, Zone::Exile);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged { .. })));
+    }
+
+    /// Preservation row (green at base): a copy of a card off the battlefield is
+    /// not a token, so the guard leaves it alone (CR 707.10a is an SBA).
+    #[test]
+    fn r7_copy_of_card_off_battlefield_still_moves() {
+        let mut state = GameState::new_two_player(42);
+        let id = spike_feeder(&mut state, Zone::Graveyard, false);
+        state.objects.get_mut(&id).unwrap().is_copy = true;
+
+        let (result, events) = move_to(&mut state, id, Zone::Graveyard, Zone::Battlefield);
+
+        assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged { .. })));
+    }
+
+    /// The absent-object early return is unchanged.
+    #[test]
+    fn r8_absent_object_stays_remained() {
+        let mut state = GameState::new_two_player(42);
+
+        let (result, events) = move_to(&mut state, ObjectId(999), Zone::Exile, Zone::Battlefield);
+
+        assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
+        assert!(events.is_empty());
     }
 }

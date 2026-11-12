@@ -19,6 +19,9 @@ use std::num::NonZeroUsize;
 
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::{declared_targets_in_chain, flatten_targets_in_chain};
+use crate::game::combat::{active_attack_target, AttackTarget};
+use crate::game::combat_damage::combat_damage_to_defender;
+use crate::game::effects::deal_damage::DamageContext;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{AttachTarget, DisplaySource, GameObject};
 use crate::game::stack::{
@@ -624,6 +627,19 @@ pub struct SharedPilesView {
     pub graveyard: Option<PlayerId>,
 }
 
+/// CR 510.1a + CR 702.4b + CR 120.3a/b: display-only projection, at the current
+/// state, of what a creature that may attack would do to a player if it attacks
+/// and is not blocked. Computed before replacement and prevention effects
+/// (CR 614.1 / CR 615.1), which apply only as the damage event happens.
+/// Not a game action; recomputed on every snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnblockedAttackPreview {
+    /// CR 510.1a + CR 702.4b: combat damage across every damage step it would assign in.
+    pub damage: u32,
+    /// CR 120.3a / CR 120.3b: life loss that damage causes a player (0 for infect).
+    pub life_loss: u32,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
@@ -1013,6 +1029,18 @@ pub struct DerivedViews {
     /// `Life` axis for that seat is rising; only non-`Finite` entries are emitted.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub life_magnitude: BTreeMap<PlayerId, DisplayMagnitude>,
+
+    /// CR 508.1a + CR 510.1a + CR 120.3a/b: per-candidate-attacker projection of unblocked
+    /// damage, published only while the attack declaration prompt is open; keyed by attacker
+    /// id. Display-only; before replacement and prevention effects (CR 614.1 / CR 615.1).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub unblocked_attack_previews: HashMap<ObjectId, UnblockedAttackPreview>,
+
+    /// CR 506.4c: each attacking creature's current attack target, keyed by attacker id. An
+    /// attacker whose relation has ended is absent: it is still an attacking creature, but it
+    /// is not attacking any player, planeswalker, or battle.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub attack_targets: HashMap<ObjectId, AttackTarget>,
 }
 
 /// Serialize-only wrapper. The wire shape is
@@ -1053,7 +1081,8 @@ impl Serialize for ClientGameStateRef<'_> {
 /// trigger-firing redaction below. Future private removals reaching `waiting_for` must
 /// remain shared with [`delivered_prompt_identity`].
 fn client_state_wire_value(state: &GameState) -> serde_json::Result<serde_json::Value> {
-    let projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
+    let mut projected_state = crate::game::visibility::project_paid_cast_cleanup_authority(state);
+    crate::game::visibility::redact_waiting_for_iteration_members(&mut projected_state.waiting_for);
     let mut value = serde_json::to_value(&projected_state)?;
     let Some(root) = value.as_object_mut() else {
         return Ok(value);
@@ -1544,6 +1573,8 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         current_target_kind: current_target_kind(state),
         dungeon_rooms: dungeon_rooms(state),
         storm_count: storm_count(state),
+        unblocked_attack_previews: unblocked_attack_previews(state),
+        attack_targets: attack_targets(state),
         ..DerivedViews::default()
     };
 
@@ -2211,6 +2242,50 @@ fn storm_count(state: &GameState) -> u32 {
             | StackEntryKind::CombatDamage { .. } => None,
         })
         .unwrap_or_else(|| spells_cast_this_turn(state))
+}
+
+/// CR 508.1a: one unblocked-attack projection per creature the open attack
+/// declaration prompt lets attack; empty in every other state (just-in-time).
+fn unblocked_attack_previews(state: &GameState) -> HashMap<ObjectId, UnblockedAttackPreview> {
+    let WaitingFor::DeclareAttackers {
+        valid_attacker_ids, ..
+    } = &state.waiting_for
+    else {
+        return HashMap::new();
+    };
+    valid_attacker_ids
+        .iter()
+        .filter_map(|&id| {
+            // CR 510.1b + CR 702.4b: unblocked attacker's damage over both damage steps — the
+            // shared authority.
+            let damage = combat_damage_to_defender(state, id, &[]).max(0) as u32;
+            let has_infect = DamageContext::from_source(state, id)?.has_infect;
+            let life_loss = if has_infect {
+                // CR 120.3b: infect damage to a player is poison counters, not life loss.
+                0
+            } else {
+                // CR 120.3a: damage to a player without infect is that much life loss.
+                damage
+            };
+            Some((id, UnblockedAttackPreview { damage, life_loss }))
+        })
+        .collect()
+}
+
+/// CR 400.7 + CR 506.4c: each attacker's relation read through the combat authority, which
+/// drops a planeswalker or battle removed from combat (CR 506.4) and a player who has left
+/// the game; empty outside combat.
+fn attack_targets(state: &GameState) -> HashMap<ObjectId, AttackTarget> {
+    let Some(combat) = &state.combat else {
+        return HashMap::new();
+    };
+    combat
+        .attackers
+        .iter()
+        .filter_map(|info| {
+            active_attack_target(state, info).map(|(target, _)| (info.object_id, target))
+        })
+        .collect()
 }
 
 /// The table-wide count of spells actually cast this turn. This is intentionally
@@ -3220,9 +3295,9 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        CommanderDamageEntry, DelayedTrigger, PendingCast, StackEntry, StackEntryKind,
-        StackPaidSnapshot, TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
-        TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
+        CommanderDamageEntry, DelayedTrigger, DistributionScope, DistributionUnit, PendingCast,
+        StackEntry, StackEntryKind, StackPaidSnapshot, TargetEffectDetail, TargetSelectionProgress,
+        TargetSelectionSlot, TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, TriggerFiring,
@@ -8995,6 +9070,52 @@ mod tests {
             }),
             "the rows are exactly what a client rebuilds from the filtered object's counters, its \
              loyalty, the battlefield set and the `∞` store — zero new information"
+        );
+    }
+
+    /// CR 608.2d: `client_state_wire_value` redacts a paused resolution-time
+    /// division's look-result provenance by itself. The fixture is the raw
+    /// authoritative state — no viewer filter runs first — so this fails if the
+    /// serializer's own `redact_waiting_for_iteration_members` call is removed.
+    #[test]
+    fn client_wire_redacts_resolution_division_provenance_without_viewer_filter() {
+        let mut state = GameState::new_two_player(42);
+        let mut pending = ResolvedAbility::new(
+            Effect::unimplemented("private loop probe", "private loop probe"),
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        pending.context.parent_target_iteration_members = Some(vec![ObjectId(1), ObjectId(2)]);
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total: 3,
+            targets: vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Object(ObjectId(2)),
+            ],
+            unit: DistributionUnit::Damage,
+            scope: DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            },
+        };
+
+        let wire = client_state_wire_value(&state).expect("client projection serializes");
+        let pending_effect = &wire["waiting_for"]["data"]["scope"]["data"]["pending_effect"];
+        assert!(pending_effect.is_object(), "reach guard: {wire}");
+        assert!(
+            pending_effect["context"]
+                .get("parent_target_iteration_members")
+                .is_none(),
+            "wire payload leaked iteration members: {pending_effect}"
+        );
+        // Reach guard: the trusted serialization of the same state carries the
+        // provenance, so its absence above is the projection's own redaction.
+        let trusted = serde_json::to_value(&state).expect("trusted state serializes");
+        assert!(
+            trusted["waiting_for"]["data"]["scope"]["data"]["pending_effect"]["context"]
+                .get("parent_target_iteration_members")
+                .is_some()
         );
     }
 

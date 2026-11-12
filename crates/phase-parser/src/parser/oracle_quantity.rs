@@ -5336,6 +5336,44 @@ mod tests {
         }
     }
 
+    /// CR 205.3m + CR 107.1a: the category-restricted distinct-subtype count
+    /// ("creature types among <population>") is a for-each clause, so it both
+    /// multiplies ungrouped and divides grouped (Sarek: "for every five creature
+    /// types among non-Borg creatures you control").
+    #[test]
+    fn for_each_creature_types_among_population_counts_and_groups() {
+        use crate::types::ability::SubtypeExclusion;
+        use crate::types::card_type::SubtypeSet;
+        let distinct = parse_for_each_clause("creature type among non-borg creatures you control")
+            .expect("ungrouped distinct creature-type count parses");
+        let QuantityRef::DistinctSubtypes {
+            source: CardTypeSetSource::Objects { filter },
+            exclude: SubtypeExclusion::None,
+            restrict: Some(SubtypeSet::Creature),
+        } = &distinct
+        else {
+            panic!("expected restricted DistinctSubtypes, got {distinct:?}");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed population, got {filter:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                "Borg".to_string()
+            )))));
+        assert_eq!(
+            parse_for_each_clause_expr("five creature types among non-borg creatures you control"),
+            Some(QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref { qty: distinct }),
+                divisor: 5,
+                rounding: RoundingMode::Down,
+            })
+        );
+    }
+
     /// CR 107.1 + CR 608.2c: a leading group size N ≥ 2 divides the counted
     /// clause at the expression level and is declined at the reference level,
     /// which cannot express the grouping.
@@ -5831,10 +5869,162 @@ mod tests {
         }
     }
 
+    /// CR 205.4a + CR 604.3: the supertype qualifier stays in the CDA's
+    /// per-card filter, while the unqualified count keeps its existing shape.
+    #[test]
+    fn parse_cda_quantity_opponents_graveyards_nonbasic_land_qualifier() {
+        assert_eq!(
+            parse_cda_quantity("the number of nonbasic land cards in your opponents' graveyards"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![],
+                    scope: CountScope::Opponents,
+                    filter: Some(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Land],
+                        controller: None,
+                        properties: vec![FilterProp::NotSupertype {
+                            value: crate::types::card_type::Supertype::Basic,
+                        }],
+                    })),
+                },
+            })
+        );
+        assert_eq!(
+            parse_cda_quantity("the number of cards in your opponents' graveyards"),
+            Some(opponents_graveyard_zone_count())
+        );
+    }
+
+    /// SHAPE: singular and plural qualified counts preserve their zone and scope.
+    #[test]
+    fn parse_supertype_qualified_zone_card_counts() {
+        let zone_count = |zone, scope, type_filter, property| {
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone,
+                    card_types: vec![],
+                    scope,
+                    filter: Some(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![type_filter],
+                        controller: None,
+                        properties: vec![property],
+                    })),
+                },
+            })
+        };
+        let legendary = FilterProp::HasSupertype {
+            value: crate::types::card_type::Supertype::Legendary,
+        };
+        let nonbasic = FilterProp::NotSupertype {
+            value: crate::types::card_type::Supertype::Basic,
+        };
+
+        for (phrase, parse, expected) in [
+            (
+                "the number of legendary creature cards in your graveyard",
+                parse_cda_quantity as fn(&str) -> Option<QuantityExpr>,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::Controller,
+                    TypeFilter::Creature,
+                    legendary.clone(),
+                ),
+            ),
+            (
+                "the number of nonbasic land cards in all graveyards",
+                parse_cda_quantity,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::All,
+                    TypeFilter::Land,
+                    nonbasic.clone(),
+                ),
+            ),
+            (
+                "the number of legendary creature cards in exile",
+                parse_cda_quantity,
+                zone_count(
+                    ZoneRef::Exile,
+                    CountScope::All,
+                    TypeFilter::Creature,
+                    legendary.clone(),
+                ),
+            ),
+            (
+                "legendary creature cards in your graveyard",
+                parse_for_each_clause_expr,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::Controller,
+                    TypeFilter::Creature,
+                    legendary.clone(),
+                ),
+            ),
+            (
+                "the number of nonbasic tapped land cards in your opponents' graveyards",
+                parse_cda_quantity,
+                None,
+            ),
+            (
+                "the number of nonbasic land cards in your opponents' graveyards",
+                parse_cda_quantity,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::Opponents,
+                    TypeFilter::Land,
+                    nonbasic.clone(),
+                ),
+            ),
+            (
+                "the number of legendary creature card in your graveyard",
+                parse_cda_quantity,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::Controller,
+                    TypeFilter::Creature,
+                    legendary.clone(),
+                ),
+            ),
+            (
+                "legendary creature card in your graveyard",
+                parse_for_each_clause_expr,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::Controller,
+                    TypeFilter::Creature,
+                    legendary,
+                ),
+            ),
+            (
+                "the number of nonbasic land card in your opponents' graveyards",
+                parse_cda_quantity,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::Opponents,
+                    TypeFilter::Land,
+                    nonbasic,
+                ),
+            ),
+            (
+                "the number of nonbasic tapped land card in your opponents' graveyards",
+                parse_cda_quantity,
+                None,
+            ),
+            (
+                "the number of legendary creature cardboard in your graveyard",
+                parse_cda_quantity,
+                None,
+            ),
+        ] {
+            assert_eq!(parse(phrase), expected, "{phrase}");
+        }
+    }
+
     /// CR 614.1c + CR 122.6: an enters-with amount the parser cannot read must
     /// fail closed. The shared nom grammar requires full consumption, so an
-    /// extremum head, a supertype qualifier, or a trailing relative clause must
-    /// decline the whole phrase rather than leave a truncated zone count.
+    /// extremum head or a trailing relative clause must decline the whole
+    /// phrase rather than leave a truncated zone count.
     #[test]
     fn parse_cda_quantity_opponents_graveyards_extended_text_fails_closed() {
         // Positive reach guard: the unextended phrase is still read.
@@ -5845,7 +6035,6 @@ mod tests {
         for phrase in [
             "the greatest number of cards an opponent has drawn this turn among cards in your opponents' graveyards",
             "the greatest number of cards an opponent has drawn this turn among cards in opponents' graveyards",
-            "the number of nonbasic land cards in your opponents' graveyards",
             "the number of cards in your opponents' graveyards that were put there from the battlefield this turn",
         ] {
             assert_eq!(parse_cda_quantity(phrase), None, "{phrase}");
@@ -10451,5 +10640,149 @@ mod tests {
         )
         .is_none());
         assert!(parse_for_each_target_controlled_type("creature you control").is_none());
+    }
+
+    /// The population of a `Ref` over an object-property aggregate.
+    fn aggregate_population(expr: &QuantityExpr) -> &TargetFilter {
+        let QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(aggregate),
+        } = expr
+        else {
+            panic!("expected a property aggregate, got {expr:?}");
+        };
+        let CardTypeSetSource::Objects { filter } = aggregate.source() else {
+            panic!(
+                "expected an object population, got {:?}",
+                aggregate.source()
+            );
+        };
+        filter
+    }
+
+    /// CR 903.3e: what "your commanders" reads in an aggregate.
+    fn your_commanders_in_every_zone() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::Owned {
+                controller: ControllerRef::You,
+            },
+            FilterProp::IsCommander,
+            FilterProp::InAnyZone {
+                zones: Zone::ALL.to_vec(),
+            },
+        ]))
+    }
+
+    /// CR 903.3e: the printed phrase of Tangleweave Armor and Cactus Preserve
+    /// reaches the widened population through the CDA entry point, so the
+    /// combinator route wins before the legacy aggregate block. No printed card
+    /// exhibits the "twice ..." composite; the nearest printed card is Tangleweave
+    /// Armor.
+    #[test]
+    fn cda_quantity_your_commanders_read_every_zone() {
+        let printed = parse_cda_quantity("the greatest mana value among your commanders")
+            .expect("the printed phrase parses");
+        assert_eq!(
+            *aggregate_population(&printed),
+            your_commanders_in_every_zone()
+        );
+
+        let Some(QuantityExpr::Multiply { factor: 2, inner }) =
+            parse_event_context_quantity("twice the greatest mana value among your commanders")
+        else {
+            panic!("the composite parses as Multiply by 2");
+        };
+        assert_eq!(
+            *aggregate_population(&inner),
+            your_commanders_in_every_zone()
+        );
+    }
+
+    /// CR 903.3e + CR 903.3d: the verbatim Oracle text of the two printed cards
+    /// that read the greatest mana value among "your commanders" reads every zone,
+    /// and Command Chair's "commanders you control" keeps its controller scope.
+    #[test]
+    fn printed_commander_aggregate_text_reads_every_zone() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::{ContinuousModification, Effect, ManaProduction};
+
+        let armor = parse_oracle_text(
+            "Living weapon (When this Equipment enters, create a 0/0 black Phyrexian Germ creature token, then attach this to it.)\nEquipped creature gets +X/+X, where X is the greatest mana value among your commanders.\nEquip {4}",
+            "Tangleweave Armor",
+            &[],
+            &["Artifact".to_string()],
+            &["Equipment".to_string()],
+        );
+        let ContinuousModification::AddDynamicPower { value } = &armor.statics[0].modifications[0]
+        else {
+            panic!("{:?}", armor.statics[0].modifications[0]);
+        };
+        assert_eq!(
+            *aggregate_population(value),
+            your_commanders_in_every_zone()
+        );
+        let ContinuousModification::AddDynamicToughness { value } =
+            &armor.statics[0].modifications[1]
+        else {
+            panic!("{:?}", armor.statics[0].modifications[1]);
+        };
+        assert_eq!(
+            *aggregate_population(value),
+            your_commanders_in_every_zone()
+        );
+
+        let land = parse_oracle_text(
+            "This land enters tapped.\n{T}: Add one mana of any type that a land you control could produce.\n{3}: Until end of turn, this land becomes an X/X green Plant creature with reach, where X is the greatest mana value among your commanders. It's still a land.",
+            "Cactus Preserve",
+            &[],
+            &["Land".to_string()],
+            &["Desert".to_string()],
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*land.abilities[1].effect
+        else {
+            panic!("{:?}", land.abilities[1].effect);
+        };
+        let ContinuousModification::SetPowerDynamic { value } =
+            &static_abilities[0].modifications[0]
+        else {
+            panic!("{:?}", static_abilities[0].modifications[0]);
+        };
+        assert_eq!(
+            *aggregate_population(value),
+            your_commanders_in_every_zone()
+        );
+        let ContinuousModification::SetToughnessDynamic { value } =
+            &static_abilities[0].modifications[1]
+        else {
+            panic!("{:?}", static_abilities[0].modifications[1]);
+        };
+        assert_eq!(
+            *aggregate_population(value),
+            your_commanders_in_every_zone()
+        );
+
+        let chair = parse_oracle_text(
+            "This artifact enters tapped.\n{T}: Add three mana of any one color.\n{T}: Add X mana of any one color, where X is the greatest mana value among commanders you control.",
+            "Command Chair",
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+        let Effect::Mana {
+            produced: ManaProduction::AnyOneColor { count, .. },
+            ..
+        } = &*chair.abilities[1].effect
+        else {
+            panic!("{:?}", chair.abilities[1].effect);
+        };
+        assert_eq!(
+            *aggregate_population(count),
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::IsCommander])
+            )
+        );
     }
 }
