@@ -465,3 +465,53 @@ fn this_is_how_it_ends_shuffle_branch_with_one_eligible_creature_moves_it_withou
     assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     assert!(state.stack.is_empty());
 }
+
+/// CR 701.24a + CR 730.3 + CR 730.2b: with only a merged creature to choose,
+/// the exclusion of its absorbed component leaves one candidate, so the branch
+/// moves the merged permanent without a prompt, both of its cards arrive, and
+/// the owner's library is shuffled exactly once.
+#[test]
+fn this_is_how_it_ends_shuffle_branch_with_only_a_merged_creature_moves_every_card_once() {
+    let (mut runner, _target, others, component, shuffle_index) =
+        this_is_how_it_ends_at_the_choice(&["Host Creature"], true);
+    let merged = others[0];
+    let component = component.expect("merged component");
+
+    let chosen = runner
+        .act(GameAction::ChooseBranch {
+            index: shuffle_index,
+        })
+        .expect("the shuffle branch is chosen");
+
+    assert_eq!(shuffled_players(&chosen.events), vec![P1]);
+    let state = runner.state();
+    assert_eq!(state.objects[&merged].zone, Zone::Library);
+    assert_eq!(state.objects[&component].zone, Zone::Library);
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+}
+
+/// Zero-eligible control: the target's owner has no other creature, so the
+/// shuffle branch moves nothing, completes without a prompt, and still
+/// shuffles (CR 701.24c).
+#[test]
+fn this_is_how_it_ends_shuffle_branch_with_no_other_creature_completes_without_a_prompt() {
+    let (mut runner, target, _others, _component, shuffle_index) =
+        this_is_how_it_ends_at_the_choice(&[], false);
+
+    let chosen = runner
+        .act(GameAction::ChooseBranch {
+            index: shuffle_index,
+        })
+        .expect("the shuffle branch is chosen");
+
+    assert_eq!(
+        shuffled_players(&chosen.events),
+        vec![P1],
+        "CR 701.24c: the branch's library is shuffled even with nothing to move"
+    );
+    let state = runner.state();
+    assert_eq!(state.objects[&target].zone, Zone::Library);
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+}
