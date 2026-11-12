@@ -373,7 +373,10 @@ fn concession_board() -> (GameRunner, engine::types::identifiers::ObjectId) {
 }
 
 /// The concession board with two cards in P0's hand, so the discard leg of a
-/// `Composite` cost has a real choice after the draw leg.
+/// `Composite` cost has a real choice after the draw leg. Synthetic: no
+/// printed card has a resolution-time composite cost with a draw or a discard
+/// leg (the five printed ones are all `[Mana, PayLife]`); the nearest printed
+/// draw cost is Psychic Vortex's "Cumulative upkeep—Draw a card."
 fn concession_board_with_hand() -> (GameRunner, engine::types::identifiers::ObjectId) {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);

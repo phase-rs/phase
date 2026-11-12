@@ -3188,8 +3188,8 @@ pub fn stuck_decision_diagnostic(state: &GameState) -> Option<StuckDecisionDiagn
 
 fn mana_action_player(state: &GameState) -> Option<PlayerId> {
     match &state.waiting_for {
-        // CR 605.3a + CR 702.24a: the continuation of a repeated draw payment
-        // asks for no mana payment, so it admits no mana action.
+        // CR 702.24a: the continuation of a repeated draw payment has one
+        // answer; `refuse_mana_at_payment_continuation` refuses mana there.
         WaitingFor::UnlessPayment { .. }
             if crate::game::engine_payment_choices::awaits_payment_continuation(state) =>
         {

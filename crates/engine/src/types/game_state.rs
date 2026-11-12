@@ -19304,15 +19304,25 @@ pub enum WaitingFor {
     /// CR 118.12: Opponent must decide whether to pay a cost to prevent an effect.
     /// Used by "counter unless pays {X}" (Mana Leak), tax triggers (Esper Sentinel),
     /// and ward costs (CR 702.21a).
+    ///
+    /// CR 702.24a: the same prompt is the continuation of a repeated draw
+    /// payment whose work slice ended with instructions still owed. It is then
+    /// derived from the payment's parked owner
+    /// (`engine_payment_choices::payment_continuation_prompt`) and equal to it;
+    /// paying continues the payment and declining is not an answer.
     UnlessPayment {
         player: PlayerId,
+        /// CR 702.24a: for a compact cumulative-upkeep draw, how many times
+        /// `cost` (one printed instruction) is paid: the age-counter count at
+        /// the choice to pay, or the instructions still owed at a
+        /// continuation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repeat: Option<u32>,
         /// CR 118.12: The cost to pay. Stored as the unified `AbilityCost`
         /// taxonomy. Forward-compatible deserialization accepts the legacy
         /// `UnlessCost` JSON shape (see `deserialize_ability_cost_compat` in
         /// `types/ability.rs`). For a compact cumulative-upkeep draw this is
-        /// the printed instruction and `repeat` carries the age-counter count.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        repeat: Option<u32>,
+        /// the printed instruction and `repeat` carries its count.
         #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat")]
         cost: AbilityCost,
         /// The effect to execute if the player declines to pay.
