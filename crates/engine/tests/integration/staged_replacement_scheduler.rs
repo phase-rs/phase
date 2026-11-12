@@ -985,6 +985,69 @@ fn one_player_orders_their_held_color_choices() {
     }
 }
 
+const PENDANT_OF_PROSPERITY: &str = "This artifact enters under the control of an opponent of your choice.\n{2}, {T}: Draw a card, then you may put a land card from your hand onto the battlefield. This artifact's owner draws a card, then that player may put a land card from their hand onto the battlefield.";
+
+/// CR 614.12a + CR 101.4 + CR 616.1: in a three-player game Open the Vaults
+/// returns a Pendant of Prosperity ("This artifact enters under the control of
+/// an opponent of your choice") to P0 and to P1. Each owner chooses the
+/// opponent before the artifacts enter: P0, the active player, first, whichever
+/// Pendant is earlier in the graveyards. The game is saved and reopened at each
+/// choice.
+#[test]
+fn open_the_vaults_asks_entry_controller_choices_in_apnap_order() {
+    const P2: PlayerId = PlayerId(2);
+    for p1_card_first in [true, false] {
+        let case = format!("p1_card_first={p1_card_first}");
+        let mut scenario = GameScenario::new_n_player(3, 0x10637);
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut pendant = |owner: PlayerId| {
+            scenario
+                .add_artifact_to_graveyard(owner, "Pendant of Prosperity")
+                .from_oracle_text(PENDANT_OF_PROSPERITY)
+                .id()
+        };
+        let (p0_pendant, p1_pendant) = if p1_card_first {
+            let p1 = pendant(P1);
+            (pendant(P0), p1)
+        } else {
+            let p0 = pendant(P0);
+            (p0, pendant(P1))
+        };
+        let vaults = zero_cost_spell(&mut scenario, "Open the Vaults", OPEN_THE_VAULTS);
+        let mut runner = scenario.build();
+
+        cast_until_decision(&mut runner, vaults);
+        for (owner, pendant, opponent) in [(P0, p0_pendant, P2), (P1, p1_pendant, P0)] {
+            let WaitingFor::EntryControllerChoice { player, candidates } =
+                runner.state().waiting_for.clone()
+            else {
+                panic!(
+                    "{case}: expected an entry controller choice, got {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!(player, owner, "{case}");
+            assert!(candidates.contains(&opponent), "{case}: {candidates:?}");
+            let subject = runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .and_then(|pending| pending.proposed.affected_object_id());
+            assert_eq!(subject, Some(pendant), "{case}");
+            round_trip(&mut runner);
+            runner
+                .act(GameAction::ChooseEntryController { opponent })
+                .expect("the owner chooses an opponent");
+        }
+        finish(&mut runner);
+        for (pendant, controller) in [(p0_pendant, P2), (p1_pendant, P0)] {
+            let object = &runner.state().objects[&pendant];
+            assert_eq!(object.zone, Zone::Battlefield, "{case}");
+            assert_eq!(object.controller, controller, "{case}");
+        }
+    }
+}
+
 /// Wrath of God over `n` of P1's creatures with Rest in Peace on the
 /// battlefield; with `umbras`, each creature also wears Hyena Umbra and Spider
 /// Umbra, so every member holds an armor choice. Returns the replacement work
