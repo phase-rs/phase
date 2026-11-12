@@ -20560,3 +20560,242 @@ fn commit_with_one_parking_fuel_among_three_triggers_for_every_fuel() {
         assert_eq!(counters, 3);
     }
 }
+
+// ---------------------------------------------------------------------------
+// CR 109.2a + CR 115.9 + CR 601.2c: the UNTOUCHED-Reanimate control for the
+// recorded-announcement guard.
+//
+// Reanimate's "target creature card from a graveyard" is the clause the guard's
+// announcement projection exists for. The filter names a ZONE (CR 109.2a), so a guard that
+// judges the recorded fact through a projection stating no zone reads the graveyard card
+// as a battlefield permanent and refuses a save that recorded both correctly.
+//
+// The board parks at `WaitingFor::ManaPayment` with NO interactive target prompt: the
+// graveyard holds exactly one creature card, so the engine auto-selects the only legal
+// target (CR 601.2c) on its way to payment, and the announcement latch is taken at
+// `check_additional_cost_or_pay_with_kept_cost` before any cost is paid (CR 601.2h). That
+// is why this witness must not issue a `SelectTargets` — the engine is already at payment.
+// ---------------------------------------------------------------------------
+
+const REANIMATE_ORACLE: &str =
+    "Put target creature card from a graveyard onto the battlefield under your control.";
+
+struct ParkedReanimate {
+    runner: GameRunner,
+    spell: ObjectId,
+    corpse: ObjectId,
+    swamp: ObjectId,
+}
+
+/// Cast the board's Reanimate as `CastSpell { targets: vec![], payment_mode: Manual }` and
+/// stop at the payment prompt, exactly as the CR 733 board does.
+fn park_reanimate_at_manual_payment() -> ParkedReanimate {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Owned by the OPPONENT: CR 110.2a's control override must be distinguishable from
+    // ownership when the spell resolves, so the witness cannot pass on a no-op.
+    let corpse = scenario
+        .add_creature_to_graveyard(P1, "Stolen Bear", 2, 2)
+        .id();
+    let swamp = scenario.add_basic_land(P0, ManaColor::Black);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Reanimate", false, REANIMATE_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    let cast = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the manual Reanimate cast is announced");
+    assert!(
+        matches!(cast.waiting_for, WaitingFor::ManaPayment { player: P0, .. }),
+        "reach-guard: the cast parks at manual payment with no target prompt, got {:?}",
+        cast.waiting_for
+    );
+    ParkedReanimate {
+        runner,
+        spell,
+        corpse,
+        swamp,
+    }
+}
+
+/// The one object fact the parked cast's announcement latch carries: the announced
+/// object, the zone it was announced in, and the token bit it then held.
+fn parked_latch_fact(
+    runner: &GameRunner,
+) -> (
+    ObjectId,
+    engine::types::game_state::AnnouncedTargetZone,
+    engine::types::game_state::CapturedTokenBit,
+) {
+    let pending = runner
+        .state()
+        .pending_cast
+        .as_deref()
+        .expect("reach-guard: the manual payment park keeps its pending cast");
+    let facts = pending
+        .committed_target_facts
+        .as_deref()
+        .expect("reach-guard: the announcement latch is populated at the payment park");
+    assert_eq!(
+        facts.len(),
+        1,
+        "reach-guard: Reanimate declares exactly one target"
+    );
+    match &facts[0] {
+        engine::types::game_state::ActivationTargetFact::Object {
+            id, zone, token, ..
+        } => (*id, *zone, *token),
+        other => panic!("reach-guard: Reanimate's declared target is an object, got {other:?}"),
+    }
+}
+
+/// CR 109.2a + CR 115.9 + CR 601.2c: an UNTOUCHED save of a Reanimate cast is admitted by
+/// the checked restore and resumes into the reanimation it announced.
+#[test]
+fn untouched_reanimate_save_restores_and_resumes() {
+    let ParkedReanimate {
+        runner,
+        spell,
+        corpse,
+        swamp,
+    } = park_reanimate_at_manual_payment();
+
+    // THE DECISIVE REACH GUARD, and the answer this witness exists to record: at the
+    // `ManaPayment` park the cast's own announcement latch IS populated, and it states
+    // both announcement-time facts the restore guard reads.
+    let (latched, zone, token) = parked_latch_fact(&runner);
+    assert_eq!(latched, corpse, "the latch names the announced card");
+    assert_eq!(
+        zone,
+        engine::types::game_state::AnnouncedTargetZone::Known(Zone::Graveyard),
+        "CR 109.2a: the card was announced in the graveyard the filter names"
+    );
+    assert_eq!(
+        token,
+        engine::types::game_state::CapturedTokenBit::Known(false),
+        "CR 111.1 + CR 115.9: the card was not a token when it was announced"
+    );
+
+    // The save, through the authoritative capture and the checked restore.
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the parked Reanimate cast serializes");
+    let restored: PersistedGameState =
+        serde_json::from_str(&saved).expect("the parked Reanimate cast deserializes");
+    let restored = restored
+        .into_game_state()
+        .expect("CR 109.2a: an untouched Reanimate save is admitted, not refused");
+    let mut runner = GameRunner::from_state(restored);
+
+    // Resume: the restored cast is still at its payment prompt and pays its {B} from the
+    // Swamp, exactly as an uninterrupted cast would.
+    let (_, _, grouped) = legal_actions_full(runner.state());
+    let selection = grouped
+        .get(&swamp)
+        .into_iter()
+        .flatten()
+        .find_map(|action| match action {
+            GameAction::TapLandForMana { selection } => Some(selection.clone()),
+            _ => None,
+        })
+        .expect("the restored payment prompt offers the Swamp's own {T}: Add {B}");
+    runner
+        .act(GameAction::TapLandForMana { selection })
+        .expect("the restored cast takes the mana it announced it would");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the restored manual payment finalizes");
+    assert_eq!(
+        runner.state().objects[&spell].zone,
+        Zone::Stack,
+        "reach-guard: the resumed cast reached the stack"
+    );
+
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty(), "the spell resolved");
+
+    let object = &runner.state().objects[&corpse];
+    assert_eq!(
+        object.zone,
+        Zone::Battlefield,
+        "the resumed Reanimate put the announced card onto the battlefield"
+    );
+    assert_eq!(
+        object.controller, P0,
+        "CR 110.2a: the card enters under the caster's control"
+    );
+    assert_eq!(
+        object.owner, P1,
+        "CR 110.2: the entry changes control, never ownership"
+    );
+}
+
+/// CR 601.2c + CR 109.2a: the discriminating twin. The SAME save with the announcement's
+/// recorded zone restated as the battlefield is REFUSED — the declaring slot's filter is
+/// "creature card from a graveyard", and the guard judges it against the zone the record
+/// itself states. This direction can only fire because the honest control above passes,
+/// and it is the reason the zone must travel into the evaluator at all: a projection that
+/// states no zone cannot tell the two saves apart.
+#[test]
+fn restore_refuses_a_reanimate_announcement_with_a_restated_zone() {
+    let ParkedReanimate {
+        runner,
+        spell,
+        corpse,
+        ..
+    } = park_reanimate_at_manual_payment();
+
+    let mut state = runner.state().clone();
+    let pending = state
+        .pending_cast
+        .as_mut()
+        .expect("reach-guard: the manual payment park keeps its pending cast");
+    let facts = pending
+        .committed_target_facts
+        .as_deref_mut()
+        .expect("reach-guard: the announcement latch is populated");
+    match &mut facts[0] {
+        engine::types::game_state::ActivationTargetFact::Object { id, zone, .. } => {
+            assert_eq!(*id, corpse, "reach-guard: the fact is the announced card");
+            *zone = engine::types::game_state::AnnouncedTargetZone::Known(Zone::Battlefield);
+        }
+        other => panic!("reach-guard: the fact is an object fact, got {other:?}"),
+    }
+
+    let error = PersistedGameState::capture(state)
+        .into_game_state()
+        .expect_err("a restated announcement zone cannot be admitted");
+    match error {
+        engine::types::game_state::PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+            spell_object_id,
+            reason,
+        } => {
+            assert_eq!(
+                spell_object_id, spell,
+                "the refusal names the cast it is about"
+            );
+            match reason {
+                engine::types::game_state::AnnouncedTargetFactConflict::SnapshotContradictsDeclaredFilter {
+                    target,
+                } => assert_eq!(
+                    target,
+                    TargetRef::Object(corpse),
+                    "and the target whose recorded announcement now fails its own slot filter"
+                ),
+                other => panic!(
+                    "expected the declared-filter refusal that reads the recorded zone, got {other:?}"
+                ),
+            }
+        }
+        other => panic!("expected a recorded-announcement refusal, got {other:?}"),
+    }
+}
