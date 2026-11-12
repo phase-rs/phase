@@ -5180,7 +5180,7 @@ fn stack_announced_roles(effect_text: &str, ctx: &ParseContext) -> Option<Announ
 }
 
 /// CR 115.1: the one announced object target of an instruction (a
-/// spell's or a triggered ability's), owned by the
+/// spell's, a triggered ability's or an activated ability's), owned by the
 /// head the condition is attached to, or `None` when the declaration is not
 /// exactly one controller-capable object role. A companion player, a payer, a
 /// child role, or any other second role makes the suffix decline, and so does a
@@ -5506,7 +5506,10 @@ pub(super) enum GatedInstructionPosition {
     /// `effects/mod.rs`, the `sub.condition` check before the sub is
     /// dispatched), and only then on the sub itself; both must hold, so the
     /// parent's targets would decide it. An overloaded spell announces no
-    /// targets (CR 702.96b), so its gate would read none. A root whose entry
+    /// targets (CR 702.96b), so its gate would read none; an awaken spell or an
+    /// Arcane splice host gets an instruction appended below it at cast, which
+    /// a false gate would skip; a spell with a second paragraph may get one
+    /// with a condition of its own. A root whose entry
     /// point wires no proof (a reflexive body, a granted activated body) is
     /// declined conservatively.
     AfterInstruction,
@@ -10118,7 +10121,6 @@ mod tests {
         SharedQuality, SharedQualityRelation,
     };
     use crate::types::counter::{CounterMatch, CounterType};
-    use crate::types::keywords::KeywordKind;
 
     /// CR 608.2h: the static→ability bridge maps `QuantityQuality` 1:1 and never
     /// returns `None` for it — a dropped `None` would lower the effect to
@@ -12288,7 +12290,7 @@ mod tests {
     /// `target_controller_suffix_on_a_later_spell_paragraph_is_an_explicit_gap`
     /// and `target_controller_suffix_on_a_spell_rewritten_at_cast_is_an_explicit_gap`.
     #[test]
-    fn target_controller_suffix_on_an_unproven_root_is_an_explicit_gap() {
+    fn target_controller_suffix_on_a_later_chunk_is_an_explicit_gap() {
         let text = "When this creature enters, target creature you control gets +2/+2 until end \
                     of turn and target creature an opponent controls gets -2/-2 until end of \
                     turn if that opponent controls no other creatures.";
