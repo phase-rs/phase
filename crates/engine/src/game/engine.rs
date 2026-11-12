@@ -12841,6 +12841,10 @@ fn apply_action(
                 .suspended_mana_abilities()
                 .next()
                 .is_some() => {}
+        // CR 605.3b: confirming a mana ability's own payment resolves a mana
+        // ability; it commits no play.
+        GameAction::PassPriority
+            if matches!(state.waiting_for, WaitingFor::ManaAbilityManaPayment { .. }) => {}
         GameAction::PassPriority
         | GameAction::PlayLand { .. }
         | GameAction::CastSpell { .. }

@@ -4934,6 +4934,125 @@ fn a_manual_signet_inside_a_manual_spell_payment_opens_its_own_window() {
     assert_eq!(runner.state().players[1].life, 17);
 }
 
+/// CR 605.3b: a mana ability resolves at once and commits no play, so
+/// confirming a manual Rakdos Signet leaves the earlier land taps undoable, as
+/// the Auto activation does. The Mountain's unspent {R} can still be taken
+/// back; the Swamp's {B}, pinned to pay the `{1}`, is spent and cannot.
+#[test]
+fn confirming_a_manual_signet_keeps_the_unspent_land_taps_undoable() {
+    let mut scenario = scenario_at_main();
+    let signet = add(&mut scenario, P0, "Rakdos Signet", Zone::Battlefield);
+    let swamp = add(&mut scenario, P0, "Swamp", Zone::Battlefield);
+    let mountain = add(&mut scenario, P0, "Mountain", Zone::Battlefield);
+    let mut runner = build(scenario);
+    tap_land_for_mana(&mut runner, swamp);
+    tap_land_for_mana(&mut runner, mountain);
+    let index = mana_ability_index(&runner, signet);
+
+    let waiting_for = activate_index(&mut runner, signet, index, CastPaymentMode::Manual);
+    assert!(is_mana_ability_payment(&waiting_for), "{waiting_for:?}");
+    let black = pips_of(&runner, ManaType::Black)[0];
+    pin(&mut runner, black);
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(tapped(&runner, signet), "reach guard: the Signet resolved");
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 1), (ManaType::Red, 2)]),
+        "reach guard: the pinned {{B}} paid the {{1}}"
+    );
+
+    assert!(
+        runner
+            .act(GameAction::UntapLandForMana { object_id: swamp })
+            .is_err(),
+        "the Swamp's {{B}} was spent on the Signet"
+    );
+    let waiting_for = act(
+        &mut runner,
+        GameAction::UntapLandForMana {
+            object_id: mountain,
+        },
+    );
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    assert!(!tapped(&runner, mountain), "the Mountain's tap is undone");
+    assert!(tapped(&runner, swamp));
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 1), (ManaType::Red, 1)]),
+        "only the Mountain's {{R}} left the pool; the Signet's {{B}}{{R}} stays"
+    );
+}
+
+/// The same inside Lightning Bolt's manual `ManaPayment`: confirming the nested
+/// manual Rakdos Signet returns to the spell's payment with the Mountain's
+/// unspent tap still undoable, and Bolt is then paid with the Signet's {R}.
+#[test]
+fn confirming_a_nested_manual_signet_keeps_the_spell_payment_land_taps_undoable() {
+    let mut scenario = scenario_at_main();
+    let bolt = add(&mut scenario, P0, "Lightning Bolt", Zone::Hand);
+    let signet = add(&mut scenario, P0, "Rakdos Signet", Zone::Battlefield);
+    let swamp = add(&mut scenario, P0, "Swamp", Zone::Battlefield);
+    let mountain = add(&mut scenario, P0, "Mountain", Zone::Battlefield);
+    let mut runner = build(scenario);
+    let card_id = runner.state().objects[&bolt].card_id;
+    let mut waiting_for = act(
+        &mut runner,
+        GameAction::CastSpell {
+            object_id: bolt,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        },
+    );
+    if matches!(waiting_for, WaitingFor::TargetSelection { .. }) {
+        waiting_for = act(
+            &mut runner,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            },
+        );
+    }
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    tap_land_for_mana(&mut runner, swamp);
+    tap_land_for_mana(&mut runner, mountain);
+    assert!(
+        is_mana_payment(&runner.state().waiting_for),
+        "reach guard: the manual spell payment waits for confirmation"
+    );
+
+    let index = mana_ability_index(&runner, signet);
+    let waiting_for = activate_index(&mut runner, signet, index, CastPaymentMode::Manual);
+    assert!(is_mana_ability_payment(&waiting_for), "{waiting_for:?}");
+    let black = pips_of(&runner, ManaType::Black)[0];
+    pin(&mut runner, black);
+    let waiting_for = pass(&mut runner);
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 1), (ManaType::Red, 2)]),
+        "reach guard: the pinned {{B}} paid the {{1}}"
+    );
+
+    let waiting_for = act(
+        &mut runner,
+        GameAction::UntapLandForMana {
+            object_id: mountain,
+        },
+    );
+    assert!(is_mana_payment(&waiting_for), "{waiting_for:?}");
+    assert!(!tapped(&runner, mountain), "the Mountain's tap is undone");
+    assert_eq!(
+        pool(&runner, P0),
+        mana(&[(ManaType::Black, 1), (ManaType::Red, 1)])
+    );
+
+    let waiting_for = pass(&mut runner);
+    assert!(is_priority(&waiting_for), "{waiting_for:?}");
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().players[1].life, 17);
+}
+
 /// The interaction schema of the manual window offers confirming and pinning,
 /// and at priority a mana ability with mana in its cost (Rakdos Signet,
 /// Doubling Cube) has a manual sibling while Sol Ring still has none.
