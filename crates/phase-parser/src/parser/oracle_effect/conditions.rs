@@ -5497,10 +5497,10 @@ fn parse_target_controller_control_condition_prefix(
 pub(super) enum GatedInstructionPosition {
     /// The first instruction of a chain its entry point proved to be the
     /// ability's resolved root (`ResolvedChainRoot::Proven`: a triggered
-    /// ability's body, an activated ability's effect, or the spell line of a
-    /// card whose only non-keyword line it is and whose spell is not rewritten
-    /// at cast). The engine
-    /// evaluates its gate on its own resolved node before its effect, so a
+    /// ability's body, an activated ability's effect on a card without a gift
+    /// keyword, or the spell line of a card whose only non-keyword line it is
+    /// and whose spell is not rewritten at cast). The engine evaluates its gate
+    /// on its own resolved node before its effect, so a
     /// target-controller read sees the targets this instruction announced.
     ChainRoot,
     /// Anything else, declined. For a later instruction (lowered as a
@@ -12289,9 +12289,9 @@ mod tests {
     }
 
     /// CR 608.2c: a chain is proven to be its ability's resolved root only at a
-    /// trigger body, an activated ability's effect, or the spell line of a card
-    /// whose only non-keyword line it is and whose spell is not rewritten at
-    /// cast. A second targeted
+    /// trigger body, an activated ability's effect on a card without a gift
+    /// keyword, or the spell line of a card whose only non-keyword line it is
+    /// and whose spell is not rewritten at cast. A second targeted
     /// instruction joined to a first by " and " is a later chunk of the same
     /// chain and declines (synthetic; printed shape: Gurmag Rakshasa, "target
     /// creature an opponent controls gets -2/-2 until end of turn and target
@@ -12350,7 +12350,8 @@ mod tests {
     ///   card's half reaches the parser (with the export's
     ///   `__force_keyword_extract__` sentinel instead of MTGJSON names);
     /// - splice (CR 702.47a): Glacial Ray's printed splice line;
-    /// - gift (CR 702.174j): Long River's Pull's printed gift line;
+    /// - gift (CR 702.174j): Long River's Pull's printed gift line, read from
+    ///   the printed line or the MTGJSON gift keyword;
     /// - overload (CR 702.96b): Cyclonic Rift's printed overload line;
     /// - awaken (CR 702.113a): Scatter to the Winds' printed awaken line;
     /// - a splice host (CR 702.47b): the same spell line on an Arcane instant.
@@ -12764,14 +12765,19 @@ mod tests {
         }
     }
 
-    /// CR 702.174j + CR 608.2c: the engine wraps a gift card's first ability,
-    /// of any kind, under a `GiftDelivery` root (`synthesize_gift`; Starforged
-    /// Sword's synthesized Equip sits under it), so an activated ability's
-    /// effect on a gift card is no resolved root and its suffix is an explicit
-    /// gap. Synthetic text: Long River's Pull's printed gift line with
-    /// `target_controller_suffix_on_an_activated_ability_binds`'s activated
-    /// ability. The reach guard parses the same activated line without the gift
-    /// line and asserts it binds, and that the router types the gift line.
+    /// CR 608.2c: the engine wraps a gift card's first ability, of any kind,
+    /// under a `GiftDelivery` root (`synthesize_gift`, an engine behaviour; for
+    /// a spell the gift effect happens first, CR 702.174j; Starforged Sword's
+    /// synthesized Equip sits under it), so an activated ability's effect on a
+    /// gift card is no resolved root and its suffix is an explicit gap. The
+    /// engine keys on the MTGJSON gift keyword, and the keyword router cannot
+    /// type every printed gift line, so each row passes the MTGJSON keyword and
+    /// one printed line: Long River's Pull's (typed), Archival Whorl's "Gift a
+    /// Rhystic Study" and Octomancer's "Gift an Octopus" (both untyped). Synthetic
+    /// text: those lines with `target_controller_suffix_on_an_activated_ability_binds`'s
+    /// activated ability. The reach guards parse the same activated line without
+    /// a gift line and assert it binds, and assert whether the router types
+    /// each gift line.
     #[test]
     fn target_controller_suffix_on_a_gift_cards_activated_ability_is_an_explicit_gap() {
         let condition = "its controller controls no creatures";
@@ -12783,41 +12789,54 @@ mod tests {
             "reach guard: it binds without gift"
         );
 
-        let gift = "Gift a card (You may promise an opponent a gift as you cast this spell. If \
-                    you do, they draw a card before its other effects.)";
-        let lower = crate::parser::oracle_util::strip_reminder_text(gift)
-            .trim()
-            .to_lowercase();
-        assert!(
-            matches!(
-                crate::parser::oracle_keyword::parse_router_keyword_fragment(&lower),
-                Some(Keyword::Gift(_))
+        for (gift, router_types_it) in [
+            (
+                "Gift a card (You may promise an opponent a gift as you cast this spell. If \
+                 you do, they draw a card before its other effects.)",
+                true,
             ),
-            "reach guard: the router types the gift line"
-        );
-        let text = format!("{gift}\n{activated}");
-        let parsed = parse_oracle_text(
-            &text,
-            "Synthetic",
-            &["Gift".to_owned()],
-            &["Creature".to_owned()],
-            &[],
-        );
-        let definitions = all_chain_definitions(&parsed);
-        assert!(
-            definitions
-                .iter()
-                .any(|def| def.kind == AbilityKind::Activated
-                    && matches!(
-                        &*def.effect,
-                        Effect::Destroy { target, .. } if !target.is_context_ref()
-                    )),
-            "reach guard: the activated ability parsed: {definitions:?}"
-        );
-        for def in &definitions {
-            assert_eq!(def.condition, None, "{:?}", def.effect);
+            ("Gift a Rhystic Study", false),
+            (
+                "Gift an Octopus (You may promise an opponent a gift as you cast this spell. If \
+                 you do, when it enters, they create an 8/8 blue Octopus creature token.)",
+                false,
+            ),
+        ] {
+            let lower = crate::parser::oracle_util::strip_reminder_text(gift)
+                .trim()
+                .to_lowercase();
+            assert_eq!(
+                matches!(
+                    crate::parser::oracle_keyword::parse_router_keyword_fragment(&lower),
+                    Some(Keyword::Gift(_))
+                ),
+                router_types_it,
+                "reach guard: {gift}: whether the router types the gift line"
+            );
+            let text = format!("{gift}\n{activated}");
+            let parsed = parse_oracle_text(
+                &text,
+                "Synthetic",
+                &["Gift".to_owned()],
+                &["Creature".to_owned()],
+                &[],
+            );
+            let definitions = all_chain_definitions(&parsed);
+            assert!(
+                definitions
+                    .iter()
+                    .any(|def| def.kind == AbilityKind::Activated
+                        && matches!(
+                            &*def.effect,
+                            Effect::Destroy { target, .. } if !target.is_context_ref()
+                        )),
+                "reach guard: {gift}: the activated ability parsed: {definitions:?}"
+            );
+            for def in &definitions {
+                assert_eq!(def.condition, None, "{gift}: {:?}", def.effect);
+            }
+            assert_only_condition_gap(&parsed, condition);
         }
-        assert_only_condition_gap(&parsed, condition);
     }
 
     /// CR 608.2c: the assembled-chain check is total. If the first clause no
