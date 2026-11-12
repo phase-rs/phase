@@ -1140,12 +1140,12 @@ pub(crate) fn apply_damage_after_replacement(
 /// original source's keywords at resume time; `amount` is captured as `Fixed` so
 /// it does not re-resolve against mutated state.
 fn build_remaining_damage_node(
+    ability: &ResolvedAbility,
     damage_source_id: ObjectId,
-    controller: PlayerId,
     target: TargetRef,
     amount: u32,
 ) -> ResolvedAbility {
-    ResolvedAbility::new(
+    let mut node = ResolvedAbility::new(
         Effect::DealDamage {
             amount: QuantityExpr::Fixed {
                 value: amount as i32,
@@ -1161,14 +1161,26 @@ fn build_remaining_damage_node(
         },
         vec![target],
         damage_source_id,
-        controller,
-    )
+        ability.controller,
+    );
+    carry_instruction_context(&mut node, ability);
+    node
+}
+
+/// CR 608.2c: a remaining-recipient node continues the paused instruction, so
+/// it carries that instruction's casting-time context (cast origin, paid
+/// costs, …). The tail stashed after it is handed this context when the last
+/// node resolves; a fresh context there would make "if this spell was cast
+/// from exile" (Ultimate Magic: Meteor) read false.
+fn carry_instruction_context(node: &mut ResolvedAbility, ability: &ResolvedAbility) {
+    node.context = ability.context.clone();
 }
 
 /// CR 120.4b: Build a one-shot continuation that applies an already-replaced
 /// damage event. Unlike `build_remaining_damage_node`, this does not route back
 /// through the replacement pipeline.
 fn build_post_replacement_damage_node(
+    ability: &ResolvedAbility,
     ctx: &DamageContext,
     event: &ProposedEvent,
 ) -> Option<ResolvedAbility> {
@@ -1182,7 +1194,7 @@ fn build_post_replacement_damage_node(
         return None;
     };
 
-    Some(ResolvedAbility::new(
+    let mut node = ResolvedAbility::new(
         Effect::ApplyPostReplacementDamage {
             context: DamageContextSnapshot::from(ctx),
             target: target.clone(),
@@ -1192,7 +1204,9 @@ fn build_post_replacement_damage_node(
         Vec::new(),
         ctx.source_id,
         ctx.controller,
-    ))
+    );
+    carry_instruction_context(&mut node, ability);
+    Some(node)
 }
 
 /// CR 120.4b + CR 616.1e: Stash remaining already-replaced damage survivors so
@@ -1205,13 +1219,11 @@ fn stash_remaining_post_replacement_damage(
 ) {
     let mut iter = remaining
         .iter()
-        .filter_map(|(ctx, event)| build_post_replacement_damage_node(ctx, event));
+        .filter_map(|(ctx, event)| build_post_replacement_damage_node(ability, ctx, event));
     let Some(mut head) = iter.next() else {
         if let Some(sub) = ability.sub_ability.as_ref() {
-            append_to_pending_continuation(
-                state,
-                Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-            );
+            let tail = stashed_tail(state, sub, ability);
+            append_to_pending_continuation(state, Some(Box::new(tail)));
         }
         return;
     };
@@ -1220,7 +1232,7 @@ fn stash_remaining_post_replacement_damage(
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
+        append_to_sub_chain(&mut head, stashed_tail(state, sub, ability));
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
@@ -1253,41 +1265,37 @@ pub(crate) enum DamageTail {
 
 /// CR 608.2c: the damage instructions that deal damage to, or from, several
 /// objects or players one event at a time and can therefore pause between two
-/// of their events. Resolved through [`resolve_instruction`] so the chain
-/// driver learns whether the tail was stashed. When one of them returns
-/// [`DamageTail::Caller`] with child work pending (its last recipient's
-/// substitute raised a prompt), `resolve_ability_chain` places the tail
-/// outside the whole child stack.
+/// of their events — exactly the effects [`resolve_instruction`] dispatches.
+/// When one of them returns [`DamageTail::Caller`] with child work pending
+/// (its last recipient's substitute raised a prompt), `resolve_ability_chain`
+/// places the tail outside the whole child stack.
 pub(crate) fn is_multi_event_damage_instruction(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::DealDamage { .. }
-            | Effect::DamageAll { .. }
-            | Effect::DamageEachPlayer { .. }
-            | Effect::EachDealsDamageEqualToPower { .. }
-            | Effect::EachSourceDealsDamage { .. }
-    )
+    multi_event_damage_resolver(effect).is_some()
 }
 
-/// CR 608.2c: resolve one [`is_multi_event_damage_instruction`] effect,
-/// reporting who owns the parent's tail.
+type DamageInstructionResolver =
+    fn(&mut GameState, &ResolvedAbility, &mut Vec<GameEvent>) -> Result<DamageTail, EffectError>;
+
+/// The single list of multi-event damage instructions and their resolvers.
+fn multi_event_damage_resolver(effect: &Effect) -> Option<DamageInstructionResolver> {
+    match effect {
+        Effect::DealDamage { .. } => Some(resolve_damage),
+        Effect::DamageAll { .. } => Some(resolve_all_damage),
+        Effect::DamageEachPlayer { .. } => Some(resolve_each_player_damage),
+        Effect::EachDealsDamageEqualToPower { .. } => Some(resolve_each_deals_power_damage),
+        Effect::EachSourceDealsDamage { .. } => Some(resolve_each_source_damage),
+        _ => None,
+    }
+}
+
+/// CR 608.2c: resolve one multi-event damage instruction, reporting who owns
+/// the parent's tail; `None` when `ability` is not one.
 pub(crate) fn resolve_instruction(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
-) -> Result<DamageTail, EffectError> {
-    match &ability.effect {
-        Effect::DealDamage { .. } => resolve_damage(state, ability, events),
-        Effect::DamageAll { .. } => resolve_all_damage(state, ability, events),
-        Effect::DamageEachPlayer { .. } => resolve_each_player_damage(state, ability, events),
-        Effect::EachDealsDamageEqualToPower { .. } => {
-            resolve_each_deals_power_damage(state, ability, events)
-        }
-        Effect::EachSourceDealsDamage { .. } => resolve_each_source_damage(state, ability, events),
-        _ => Err(EffectError::MissingParam(
-            "multi-event damage instruction".to_string(),
-        )),
-    }
+) -> Option<Result<DamageTail, EffectError>> {
+    multi_event_damage_resolver(&ability.effect).map(|resolve| resolve(state, ability, events))
 }
 
 /// CR 120.3 + CR 616.1e: Build a linked sub_ability chain from a sequence of
@@ -1305,15 +1313,13 @@ fn stash_remaining_damage_chain(
         // No remaining batch work — still forward the parent's sub_ability so the
         // downstream chain resumes after the pending replacement choice resolves.
         if let Some(sub) = ability.sub_ability.as_ref() {
-            append_to_pending_continuation(
-                state,
-                Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-            );
+            let tail = stashed_tail(state, sub, ability);
+            append_to_pending_continuation(state, Some(Box::new(tail)));
         }
         return;
     };
     if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
+        append_to_sub_chain(&mut head, stashed_tail(state, sub, ability));
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
@@ -1327,8 +1333,7 @@ fn remaining_damage_chain(
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
 ) -> Option<ResolvedAbility> {
     let node = |target, amount| {
-        let mut node =
-            build_remaining_damage_node(damage_source_id, ability.controller, target, amount);
+        let mut node = build_remaining_damage_node(ability, damage_source_id, target, amount);
         node.trigger_source = ability.trigger_source.clone();
         node
     };
@@ -1353,7 +1358,8 @@ fn remaining_damage_chain(
 /// false and no object target leaks; for Lady Loki's `CastFromZone
 /// { target: ParentTarget }` tail (empty targets, non-`Resolution` timing) it
 /// returns true and the hit is preserved so the free cast still addresses it.
-fn cast_tail_with_parent_targets(
+fn stashed_tail(
+    state: &mut GameState,
     sub: &ResolvedAbility,
     ability: &ResolvedAbility,
 ) -> ResolvedAbility {
@@ -1361,6 +1367,10 @@ fn cast_tail_with_parent_targets(
     if crate::game::effects::should_propagate_parent_targets(ability, &tail) {
         tail.mirror_targets_from(ability);
     }
+    // CR 608.2c: the tail is handed its context by the REAL parent — the paused
+    // instruction — exactly as the chain driver would hand it on completion
+    // (ability index, chosen players, casting-time facts).
+    crate::game::effects::apply_parent_chain_context(&mut tail, ability, None, state);
     tail
 }
 
@@ -1377,15 +1387,13 @@ fn stash_each_source_combined_continuation(
     already_replaced: &[(DamageContext, ProposedEvent)],
     raw_remaining: impl IntoIterator<Item = (ObjectId, TargetRef, u32)>,
 ) {
-    let controller = ability.controller;
-
     // Build the head node: prioritise already-replaced (ApplyPostReplacementDamage)
     // over raw (DealDamage) so Phase-C application fires before Phase-B for any
     // remaining-raw sources.
     let mut head_opt: Option<ResolvedAbility> = None;
 
     for (ctx, event) in already_replaced {
-        if let Some(node) = build_post_replacement_damage_node(ctx, event) {
+        if let Some(node) = build_post_replacement_damage_node(ability, ctx, event) {
             match head_opt.as_mut() {
                 None => head_opt = Some(node),
                 Some(h) => append_to_sub_chain(h, node),
@@ -1394,7 +1402,7 @@ fn stash_each_source_combined_continuation(
     }
 
     for (source_id, target, amount) in raw_remaining {
-        let node = build_remaining_damage_node(source_id, controller, target, amount);
+        let node = build_remaining_damage_node(ability, source_id, target, amount);
         match head_opt.as_mut() {
             None => head_opt = Some(node),
             Some(h) => append_to_sub_chain(h, node),
@@ -1405,13 +1413,11 @@ fn stash_each_source_combined_continuation(
         match head_opt.as_mut() {
             None => {
                 // Nothing to stash — forward sub_ability so downstream fires.
-                append_to_pending_continuation(
-                    state,
-                    Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-                );
+                let tail = stashed_tail(state, sub, ability);
+                append_to_pending_continuation(state, Some(Box::new(tail)));
                 return;
             }
-            Some(h) => append_to_sub_chain(h, cast_tail_with_parent_targets(sub, ability)),
+            Some(h) => append_to_sub_chain(h, stashed_tail(state, sub, ability)),
         }
     }
 
@@ -1433,28 +1439,24 @@ fn stash_remaining_each_source_damage(
     ability: &ResolvedAbility,
     remaining: impl IntoIterator<Item = (ObjectId, TargetRef, u32)>,
 ) {
-    let controller = ability.controller;
     let mut iter = remaining.into_iter();
     let Some((first_source, first_target, first_amount)) = iter.next() else {
         // No remaining batch work — forward the parent's sub_ability so the
         // downstream chain resumes after the pending replacement choice resolves.
         if let Some(sub) = ability.sub_ability.as_ref() {
-            append_to_pending_continuation(
-                state,
-                Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-            );
+            let tail = stashed_tail(state, sub, ability);
+            append_to_pending_continuation(state, Some(Box::new(tail)));
         }
         return;
     };
 
-    let mut head =
-        build_remaining_damage_node(first_source, controller, first_target, first_amount);
+    let mut head = build_remaining_damage_node(ability, first_source, first_target, first_amount);
     for (source_id, target, amount) in iter {
-        let node = build_remaining_damage_node(source_id, controller, target, amount);
+        let node = build_remaining_damage_node(ability, source_id, target, amount);
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
+        append_to_sub_chain(&mut head, stashed_tail(state, sub, ability));
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
@@ -3436,8 +3438,8 @@ fn stash_remaining_each_deals_chain(
             continue;
         }
         let node = build_remaining_damage_node(
+            ability,
             source_id,
-            ability.controller,
             TargetRef::Object(recipient_id),
             power as u32,
         );
@@ -3449,16 +3451,14 @@ fn stash_remaining_each_deals_chain(
     match head {
         Some(mut h) => {
             if let Some(sub) = ability.sub_ability.as_ref() {
-                append_to_sub_chain(&mut h, cast_tail_with_parent_targets(sub, ability));
+                append_to_sub_chain(&mut h, stashed_tail(state, sub, ability));
             }
             append_to_pending_continuation(state, Some(Box::new(h)));
         }
         None => {
             if let Some(sub) = ability.sub_ability.as_ref() {
-                append_to_pending_continuation(
-                    state,
-                    Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-                );
+                let tail = stashed_tail(state, sub, ability);
+                append_to_pending_continuation(state, Some(Box::new(tail)));
             }
         }
     }
@@ -4175,7 +4175,7 @@ mod tests {
     }
 
     /// CR 608.2c + CR 616.1e: the FALSE-branch pair for the propagation test above.
-    /// `cast_tail_with_parent_targets` gates on `should_propagate_parent_targets`,
+    /// `stashed_tail` gates on `should_propagate_parent_targets`,
     /// which returns false for a `Resolution`-timed sub. When it does, the stashed
     /// tail must NOT inherit the parent's object targets — otherwise a plain
     /// multi-target `DealDamage` tail would silently gain the parent's referents on

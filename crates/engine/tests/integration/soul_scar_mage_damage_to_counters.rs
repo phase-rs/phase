@@ -660,12 +660,59 @@ fn sweep_tail_runs_once_after_the_counter_prompts() {
     );
 }
 
-/// CR 608.2c + CR 616.1g: the targeted form (`Effect::DealDamage` with two
-/// targets) keeps the same order. No printed card follows "deals 2 damage to
-/// each of two target creatures" (Swelter) with another instruction, so the
-/// test card adds a draw to Swelter's clause.
+const SPARKMAGES_GAMBIT: &str = "Sparkmage's Gambit deals 1 damage to each of up to two target \
+creatures. Those creatures can't block this turn.";
+
+/// CR 608.2c + CR 616.1g: Sparkmage's Gambit (`Effect::DealDamage` with two
+/// targets) under Soul-Scar Mage. Each target orders its counter
+/// replacements. "Those creatures can't block this turn" follows the whole
+/// damage instruction, and when it runs it still names BOTH chosen targets,
+/// although the instruction paused between them.
 #[test]
 fn targeted_damage_tail_waits_for_every_counter_prompt() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mage = scenario
+        .add_creature_from_oracle(P0, "Soul-Scar Mage", 1, 2, SOUL_SCAR_ORACLE)
+        .id();
+    let first = scenario.add_creature(P1, "First Wall", 0, 10).id();
+    let second = scenario.add_creature(P1, "Second Wall", 0, 10).id();
+    let season = scenario
+        .add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON)
+        .id();
+    scenario.add_creature_from_oracle(P1, "Vizier of Remedies", 2, 1, VIZIER);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Sparkmage's Gambit", false, SPARKMAGES_GAMBIT)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    give_priority(&mut runner, P0);
+    runner.cast(spell).target_objects(&[first, second]).commit();
+    let cant_block = |r: &engine::game::scenario::GameRunner, id: ObjectId| {
+        !engine::game::combat::can_block_pair(r.state(), id, mage)
+    };
+    let answered = answer_season_first_while_the_tail_waits(&mut runner, season, |r| {
+        cant_block(r, first) || cant_block(r, second)
+    });
+
+    assert_eq!(answered, 2, "one ordering prompt per target");
+    // Doubling Season first: 1 × 2 − 1 = 1 counter each.
+    assert_eq!(minus_counters(&runner, first), 1);
+    assert_eq!(minus_counters(&runner, second), 1);
+    assert!(cant_block(&runner, first), "the first target can't block");
+    assert!(cant_block(&runner, second), "the second target can't block");
+}
+
+const ELECTROLYZE: &str = "Electrolyze deals 2 damage divided as you choose among one or two \
+targets.\nDraw a card.";
+
+/// CR 601.2d + CR 608.2c + CR 616.1g: Electrolyze's damage divided 1/1 between
+/// two of P1's creatures (the `distribution` branch). Each portion's counters
+/// are ordered; "Draw a card." waits for the second portion's order and runs
+/// once.
+#[test]
+fn divided_damage_tail_waits_for_every_counter_prompt() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_creature_from_oracle(P0, "Soul-Scar Mage", 1, 2, SOUL_SCAR_ORACLE);
@@ -677,11 +724,108 @@ fn targeted_damage_tail_waits_for_every_counter_prompt() {
     scenario.add_creature_from_oracle(P1, "Vizier of Remedies", 2, 1, VIZIER);
     scenario.with_library_top(P0, &["L1", "L2", "L3"]);
     let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Electrolyze", true, ELECTROLYZE)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    give_priority(&mut runner, P0);
+    let hand_unfinished = runner.state().players[0].hand.len() - 1;
+    runner
+        .cast(spell)
+        .target_objects(&[first, second])
+        .distribute_among(&[
+            (engine::types::ability::TargetRef::Object(first), 1),
+            (engine::types::ability::TargetRef::Object(second), 1),
+        ])
+        .commit();
+    let answered = answer_season_first_while_the_tail_waits(&mut runner, season, |r| {
+        r.state().players[0].hand.len() > hand_unfinished
+    });
+
+    assert_eq!(answered, 2, "one ordering prompt per portion");
+    assert_eq!(minus_counters(&runner, first), 1);
+    assert_eq!(minus_counters(&runner, second), 1);
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand_unfinished + 1,
+        "the trailing draw ran once"
+    );
+}
+
+/// CR 608.2c + CR 616.1g: a single recipient whose substitute raises the only
+/// prompt leaves nothing to stash — the chain places the tail outside the
+/// paused substitute instead. Lightning Helix at one of P1's creatures under
+/// Doubling Season and Vizier of Remedies: "you gain 3 life" has not happened
+/// while the counter order is open and happens once after it.
+#[test]
+fn single_recipient_counter_prompt_runs_the_tail_after_it() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Soul-Scar Mage", 1, 2, SOUL_SCAR_ORACLE);
+    let wall = scenario.add_creature(P1, "Wall", 0, 10).id();
+    let season = scenario
+        .add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON)
+        .id();
+    scenario.add_creature_from_oracle(P1, "Vizier of Remedies", 2, 1, VIZIER);
+    let helix = scenario
+        .add_spell_to_hand_from_oracle(P0, "Lightning Helix", true, LIGHTNING_HELIX)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    give_priority(&mut runner, P0);
+    let life_before = runner.life(P0);
+    runner.cast(helix).target_object(wall).commit();
+    let answered = answer_season_first_while_the_tail_waits(&mut runner, season, |r| {
+        r.life(P0) != life_before
+    });
+
+    assert_eq!(answered, 1, "the single counter event is ordered once");
+    assert_eq!(minus_counters(&runner, wall), 5, "3 × 2 − 1");
+    assert_eq!(
+        runner.life(P0),
+        life_before + 3,
+        "you gain 3 life exactly once"
+    );
+}
+
+const BOON_REFLECTION: &str = "If you would gain life, you gain twice that much life instead.";
+const ANGEL_OF_VITALITY: &str = "Flying\nIf you would gain life, you gain that much life plus 1 \
+instead.\nThis creature gets +2/+2 as long as you have 25 or more life.";
+
+/// CR 608.2c + CR 616.1 + CR 702.15b: Allies at Last's clause with two
+/// lifelink sources, under Boon Reflection and Angel of Vitality. Applying the
+/// first source's damage gains life, and the two life-gain replacements must be
+/// ordered (Phase C of the multi-source batch pauses with the second source's
+/// already-replaced damage still to apply). The draw written after the damage
+/// waits for every life-gain order and runs once. No printed card follows this
+/// clause with another instruction, so the test card adds a draw.
+#[test]
+fn multi_source_life_gain_order_runs_the_tail_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let big = {
+        let mut builder = scenario.add_creature(P0, "Big Lifelinker", 3, 3);
+        builder.with_keyword(engine::types::keywords::Keyword::Lifelink);
+        builder.id()
+    };
+    let small = {
+        let mut builder = scenario.add_creature(P0, "Small Lifelinker", 2, 2);
+        builder.with_keyword(engine::types::keywords::Keyword::Lifelink);
+        builder.id()
+    };
+    scenario.add_enchantment_from_oracle(P0, "Boon Reflection", BOON_REFLECTION);
+    scenario.add_creature_from_oracle(P0, "Angel of Vitality", 2, 2, ANGEL_OF_VITALITY);
+    let wall = scenario.add_creature(P1, "Great Wall", 0, 20).id();
+    scenario.with_library_top(P0, &["L1", "L2", "L3"]);
+    let spell = scenario
         .add_spell_to_hand_from_oracle(
             P0,
-            "Swelter and Draw",
+            "Allies and Draw",
             false,
-            "Swelter and Draw deals 2 damage to each of two target creatures. Draw a card.",
+            "Up to two target creatures you control each deal damage equal to their power to \
+             target creature an opponent controls. Draw a card.",
         )
         .with_mana_cost(engine::types::mana::ManaCost::zero())
         .id();
@@ -689,14 +833,40 @@ fn targeted_damage_tail_waits_for_every_counter_prompt() {
     let mut runner = scenario.build();
     give_priority(&mut runner, P0);
     let hand_unfinished = runner.state().players[0].hand.len() - 1;
-    runner.cast(spell).target_objects(&[first, second]).commit();
-    let answered = answer_season_first_while_the_tail_waits(&mut runner, season, |r| {
-        r.state().players[0].hand.len() > hand_unfinished
-    });
+    runner
+        .cast(spell)
+        .target_objects(&[big, small, wall])
+        .commit();
 
-    assert_eq!(answered, 2, "one ordering prompt per target");
-    assert_eq!(minus_counters(&runner, first), 3);
-    assert_eq!(minus_counters(&runner, second), 3);
+    let mut answered = 0usize;
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { player, .. } => {
+                assert_eq!(
+                    player, P0,
+                    "the player gaining life orders the replacements"
+                );
+                assert_eq!(
+                    runner.state().players[0].hand.len(),
+                    hand_unfinished,
+                    "the trailing draw ran while life-gain order {} was open",
+                    answered + 1
+                );
+                answered += 1;
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("order the life-gain replacements");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+
+    assert!(answered >= 1, "a life-gain ordering choice paused Phase C");
+    assert_eq!(runner.state().objects[&wall].damage_marked, 5);
     assert_eq!(
         runner.state().players[0].hand.len(),
         hand_unfinished + 1,
