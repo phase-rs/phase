@@ -70,7 +70,7 @@ use super::oracle_target::{
 use super::oracle_util::{
     canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
     normalize_card_name_refs, parse_number, parse_ordinal, parse_subtype, strip_after,
-    strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER, SELF_REF_PARSE_ONLY_PHRASES,
+    strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER,
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::ManaProduction;
@@ -2459,6 +2459,74 @@ fn filter_uses_departure_attachment_prop(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 611.2c: whether a counter-removal trigger's body installs a static mode
+/// over a population named by its characteristics (see the gate in
+/// `lower_trigger_ir`).
+fn trigger_broadcasts_static_mode_population(
+    def: &TriggerDefinition,
+    execute: Option<&AbilityDefinition>,
+) -> bool {
+    matches!(def.mode, TriggerMode::CounterRemoved)
+        && execute.is_some_and(chain_broadcasts_static_mode_population)
+}
+
+fn chain_broadcasts_static_mode_population(ability: &AbilityDefinition) -> bool {
+    effect_broadcasts_static_mode_population(&ability.effect)
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(chain_broadcasts_static_mode_population)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_broadcasts_static_mode_population)
+        || ability
+            .mode_abilities
+            .iter()
+            .any(chain_broadcasts_static_mode_population)
+}
+
+/// A non-targeted `GenericEffect` with a static that adds a static mode
+/// (`ContinuousModification::AddStaticMode`) to the objects its application
+/// filter (`generic_effect_application_filter`) names by characteristics.
+fn effect_broadcasts_static_mode_population(effect: &Effect) -> bool {
+    let Effect::GenericEffect {
+        static_abilities,
+        target: None,
+        ..
+    } = effect
+    else {
+        return false;
+    };
+    static_abilities.iter().any(|static_def| {
+        static_def.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                crate::types::ability::ContinuousModification::AddStaticMode { .. }
+            )
+        }) && crate::types::ability::generic_effect_application_filter(
+            None,
+            static_def.affected.as_ref(),
+        )
+        .is_some_and(filter_is_characteristic_population)
+    })
+}
+
+/// CR 611.2c: a "set of objects" named by type ("creatures"): a `Typed` filter
+/// with type words, or a combination with one. Context references, inherited
+/// targets, the source, a tracked set ("those creatures", a fixed referent),
+/// the last created objects and a bare player filter are not populations.
+fn filter_is_characteristic_population(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => !typed.type_filters.is_empty(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_is_characteristic_population)
+        }
+        TargetFilter::Not { filter } => filter_is_characteristic_population(filter),
+        _ => false,
+    }
+}
+
 /// CR 603.12: a reflexive triggered ability keyed on an event — created as the
 /// parent's next instruction, it triggers only on that event having occurred
 /// earlier during the same resolution.
@@ -2728,14 +2796,24 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
 
     // CR 603.2c: `try_parse_counter_trigger` marks the kind-agnostic "one or
     // more counters" phrasing as batched-by-phrasing (`def.batched = true`) but
-    // cannot see the lowered effect. Re-gate here now that `execute` is known:
-    // still-`Unimplemented` forms are forced non-batched (a not-yet-typed effect
-    // that must not consume a multi-event batch).
+    // cannot see the lowered effect. Re-gate `CounterAdded` here now that
+    // `execute` is known: still-`Unimplemented` forms are forced non-batched,
+    // because an `Unimplemented` per-kind reproduction must not reach the
+    // scalar magnitude arm (a not-yet-typed effect that must not consume a
+    // multi-event batch).
+    //
+    // `CounterRemoved` is deliberately NOT re-gated: a removal trigger has no
+    // such consumer, and for `CounterRemoved` `batched` states the phrasing's
+    // CR 603.2c granularity ("one or more" vs a singular counter), read by the
+    // per-recipient fold and by `counter_removal_fires_per_counter` in
+    // game/triggers.rs. Forcing it off would split an `Unimplemented` "one or
+    // more" removal trigger per counter.
     //
     // Any non-`Unimplemented` effect keeps `def.batched = true`. At runtime, a
-    // batched `CounterAdded` trigger fires once per recipient object
-    // (`counter_added_fires_per_recipient` → `matching_counter_added_events_by_
-    // recipient` in game/triggers.rs) — a class-level CR 603.2c property of the
+    // batched `CounterAdded` / `CounterRemoved` trigger fires once per recipient
+    // object (`counter_event_fires_per_recipient` → `matching_counter_added_events_by_
+    // recipient` in game/triggers.rs; removals are summed per recipient so
+    // "that much" reads the whole removal) — a class-level CR 603.2c property of the
     // "one or more counters on a <singular recipient>" phrasing, NOT of the
     // effect leaf. That granularity binds a per-recipient intervening-if ("if
     // it's not a Kree") to a single recipient and resolves the effect once per
@@ -2770,6 +2848,21 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 "departure_attachment_relation",
                 def.description.clone().unwrap_or_default(),
             ),
+        )));
+    }
+    // CR 611.2c: a rules-modifying continuous effect from a resolved ability
+    // "can affect objects that weren't affected when that continuous effect
+    // began". The broadcast install binds a characteristic-defined population
+    // once, at resolution, and no authority yet decides per part which
+    // `AddStaticMode` broadcasts need a live set. On the counter-removal grammar
+    // this parser admits, keep such a body an honest gap instead of a supported
+    // frozen set (Veiling Oddity: "creatures can't be blocked this turn").
+    if trigger_broadcasts_static_mode_population(&def, execute.as_deref()) {
+        execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            // The trigger's whole printed line (`def.description` is set
+            // from it only further below).
+            Effect::unimplemented("broadcast_static_mode_live_set", ir.source_text.clone()),
         )));
     }
     def.execute = execute;
@@ -22981,8 +23074,13 @@ fn parse_counter_type_prefix(prefix: &str) -> Option<CounterTriggerFilter> {
     })
 }
 
-/// CR 122.1: Parse "a [type] counter is removed from [subject]" patterns.
-/// Also handles zone constraints like "while it's exiled" (e.g. suspend cards).
+/// CR 122.1: Parse counter-removal triggers: active "you remove a [type]
+/// counter [from <subject>]" / "you remove one or more [type] counters [from
+/// <subject>]", passive "a [type] counter is removed from
+/// <subject>", batched "one or more [type] counters are removed from
+/// <subject>", and threshold "the last [type] counter is removed from
+/// <subject>". Also handles zone constraints like "while it's exiled" (e.g.
+/// suspend cards).
 fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     // Pattern: "a [type] counter is removed from [subject] [while ...]"
     let (after_prefix, _) = opt(alt((
@@ -22992,19 +23090,41 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     .parse(lower)
     .ok()?;
     // CR 122.1 + CR 603.12: active voice — "you remove a [type] counter [from
-    // <subject>]" ("When you remove a counter this way", Immard, the
-    // Stormcleaver). With no "from" subject any object's removal matches.
-    if let Ok((rest, counter_type)) = (
+    // <subject>]" / "you remove one or more [type] counters [from <subject>]"
+    // ("When you remove a counter this way", Immard, the Stormcleaver). With
+    // no "from" subject any object's removal matches. As in the passive arm
+    // below, each quantifier is paired with its own noun inside one `alt`
+    // (number agreement), and the counter type uses the STRICT parser so the
+    // noun "counter"/"counters" is never read as a custom counter kind.
+    if let Ok((rest, (quantity, counter_type))) = preceded(
         tag::<_, _, OracleError<'_>>("you remove "),
-        alt((tag("a "), tag("an "), tag("one or more "))),
-        opt(terminated(
-            nom_primitives::parse_counter_type_typed,
-            tag::<_, _, OracleError<'_>>(" "),
+        alt((
+            (
+                value(
+                    CounterRemovalQuantity::Singular,
+                    alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))),
+                ),
+                opt(terminated(
+                    nom_primitives::parse_strict_counter_type,
+                    tag::<_, _, OracleError<'_>>(" "),
+                )),
+                tag("counter"),
+            ),
+            (
+                value(
+                    CounterRemovalQuantity::OneOrMore,
+                    tag::<_, _, OracleError<'_>>("one or more "),
+                ),
+                opt(terminated(
+                    nom_primitives::parse_strict_counter_type,
+                    tag::<_, _, OracleError<'_>>(" "),
+                )),
+                tag("counters"),
+            ),
         )),
-        alt((tag("counters"), tag("counter"))),
     )
-        .map(|(_, _, counter_type, _)| counter_type)
-        .parse(after_prefix)
+    .map(|(quantity, counter_type, _)| (quantity, counter_type))
+    .parse(after_prefix)
     {
         let mut def = make_base();
         def.mode = TriggerMode::CounterRemoved;
@@ -23027,50 +23147,124 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
                 threshold: None,
             });
         }
+        // CR 603.2c: "you remove one or more ... counters" is one occurrence
+        // per recipient per simultaneous batch; "you remove a ... counter" is
+        // one occurrence per counter removed.
+        def.batched = matches!(quantity, CounterRemovalQuantity::OneOrMore);
         return Some((TriggerMode::CounterRemoved, def));
     }
-    let (after_a, ()) = value((), tag::<_, _, OracleError<'_>>("a "))
-        .parse(after_prefix)
-        .ok()?;
 
-    let (_, (counter_type, subject_rest)) =
-        nom_primitives::split_once_on(after_a, " counter is removed from ").ok()?;
-    let counter_type = counter_type.trim();
-    let subject_rest = subject_rest.trim();
+    // CR 122.1 + CR 603.2c: passive voice — "a [type] counter is removed from
+    // <subject>" / "one or more [type] counters are removed from <subject>".
+    // Number agreement is enforced by pairing each quantifier with its own
+    // noun phrase inside one `alt`. The counter type uses the STRICT parser so
+    // an untyped "one or more counters" never reads "counters" as a custom
+    // counter kind; no type word means the trigger matches any counter kind.
+    let (subject_text, (quantity, counter_type)) = alt((
+        (
+            value(
+                CounterRemovalQuantity::OneOrMore,
+                tag::<_, _, OracleError<'_>>("one or more "),
+            ),
+            opt(terminated(
+                nom_primitives::parse_strict_counter_type,
+                tag::<_, _, OracleError<'_>>(" "),
+            )),
+            tag("counters are removed from "),
+        ),
+        (
+            value(
+                CounterRemovalQuantity::Singular,
+                alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))),
+            ),
+            opt(terminated(
+                nom_primitives::parse_strict_counter_type,
+                tag::<_, _, OracleError<'_>>(" "),
+            )),
+            tag("counter is removed from "),
+        ),
+        // CR 122.1: "the last [type] counter is removed from <subject>" fires
+        // only on the removal that leaves none of that kind (Orcish Mine,
+        // Riftmarked Knight). The type is required: an untyped "the last
+        // counter" would mean the last counter of any kind, which this
+        // per-kind threshold does not express, so it declines.
+        (
+            value(
+                CounterRemovalQuantity::Last,
+                tag::<_, _, OracleError<'_>>("the last "),
+            ),
+            map(
+                terminated(
+                    nom_primitives::parse_strict_counter_type,
+                    tag::<_, _, OracleError<'_>>(" "),
+                ),
+                Some,
+            ),
+            tag("counter is removed from "),
+        ),
+    ))
+    .map(|(quantity, counter_type, _)| (quantity, counter_type))
+    .parse(after_prefix)
+    .ok()?;
+
+    let (filter, remainder) =
+        parse_single_subject(subject_text.trim(), &mut ParseContext::default());
+    // CR 122.1: optional zone rider for cards whose trigger functions from exile
+    // (suspend: "while it's exiled"). Any other unparsed tail declines rather
+    // than being silently dropped.
+    let (_, zone_constraint) = all_consuming(opt(preceded(
+        multispace0,
+        value(
+            Zone::Exile,
+            alt((
+                tag::<_, _, OracleError<'_>>("while it's exiled"),
+                tag("while ~ is exiled"),
+            )),
+        ),
+    )))
+    .parse(remainder.trim())
+    .ok()?;
 
     let mut def = make_base();
     def.mode = TriggerMode::CounterRemoved;
-
-    // Parse optional "while it's exiled" / "while ~ is exiled" zone constraint
-    let (subject_text, zone_constraint) =
-        if let Some(before) = subject_rest.strip_suffix("while it's exiled") {
-            (before.trim(), Some(Zone::Exile))
-        } else if let Some(before) = subject_rest.strip_suffix("while ~ is exiled") {
-            (before.trim(), Some(Zone::Exile))
-        } else {
-            (subject_rest, None)
+    def.valid_card = Some(filter);
+    // CR 122.1: a named counter kind restricts the trigger to that kind; the
+    // untyped form leaves the filter unset and matches every kind. "The last"
+    // adds a threshold of 0: the trigger matcher fires only when the removal
+    // leaves no counters of that kind on the object.
+    if let Some(counter_type) = counter_type {
+        let threshold = match quantity {
+            CounterRemovalQuantity::Last => Some(0),
+            CounterRemovalQuantity::Singular | CounterRemovalQuantity::OneOrMore => None,
         };
-
-    // Parse subject
-    if subject_text == "~" || SELF_REF_PARSE_ONLY_PHRASES.contains(&subject_text) {
-        def.valid_card = Some(TargetFilter::SelfRef);
-    } else {
-        let (filter, _) = parse_single_subject(subject_text, &mut ParseContext::default());
-        def.valid_card = Some(filter);
+        def.counter_filter = Some(CounterTriggerFilter {
+            counter_type,
+            threshold,
+        });
     }
-
-    // Set counter type as description metadata (the counter_filter field could be extended
-    // but for now the type info is captured in the description)
-    if !counter_type.is_empty() {
-        def.description = Some(format!("{counter_type} counter"));
-    }
-
-    // CR 122.1: Zone constraint for cards that trigger from exile (e.g. suspend)
+    // CR 603.2c: "one or more ... counters are removed" is one occurrence per
+    // simultaneous removal event, so it fires once per batch (per recipient at
+    // runtime). The flag is the phrasing's granularity and is never re-gated.
+    def.batched = matches!(quantity, CounterRemovalQuantity::OneOrMore);
     if let Some(zone) = zone_constraint {
         def.trigger_zones = vec![zone];
     }
 
     Some((TriggerMode::CounterRemoved, def))
+}
+
+/// Grammatical quantifier of a counter-removal trigger, shared by both voices:
+/// "a [type] counter is removed" / "you remove a [type] counter" (one
+/// occurrence per counter removed), "one or more [type] counters are removed" /
+/// "you remove one or more [type] counters" (one occurrence per recipient per
+/// simultaneous batch), and the passive-only "the last [type] counter is
+/// removed" (one occurrence, only on the removal that leaves none of that
+/// kind).
+#[derive(Clone, Copy)]
+enum CounterRemovalQuantity {
+    Singular,
+    OneOrMore,
+    Last,
 }
 
 /// CR 603.6c: Parse the source-zone tail of a "put into a graveyard" clause.

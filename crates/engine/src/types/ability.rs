@@ -1058,6 +1058,26 @@ impl CostPaidObjectSnapshot {
         }
     }
 
+    /// CR 608.2h + CR 400.7: Bind the object a zone-change record describes as
+    /// it last existed in the zone it left: its characteristics are the record's
+    /// last known information, and it is pinned to the incarnation that left
+    /// (the record's source identity), so it never names the new object the
+    /// move created, nor a later one at the same storage id.
+    ///
+    /// Returns a snapshot pinned to [`LEGACY_INCARNATION`] when the record
+    /// carries no source identity, which no live object can match.
+    pub fn from_departure_record(record: &crate::types::game_state::ZoneChangeRecord) -> Self {
+        Self {
+            object_id: record.object_id,
+            lki: crate::game::effects::lki_snapshot_from_zone_change_record(record),
+            incarnation: record
+                .trigger_source_context()
+                .map_or(crate::types::identifiers::LEGACY_INCARNATION, |context| {
+                    context.identity.reference.incarnation
+                }),
+        }
+    }
+
     /// CR 400.7: True when this snapshot still names the live object it was
     /// bound to. False when the referent left and returned (a new object at the
     /// same storage id), when it is gone entirely, or when the record is a

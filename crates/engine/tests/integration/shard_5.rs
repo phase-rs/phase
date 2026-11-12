@@ -430,6 +430,7 @@ mod you_have_been_caught_stealing_any_damage;
 mod yuna_grand_summoner;
 mod yunas_whistle;
 mod zero_life_mid_cast_payment;
+mod zero_moved_this_way_count;
 mod zhulodok_double_cascade;
 mod zimone_all_questioning;
 mod zone_change_reflexive_this_way;

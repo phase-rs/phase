@@ -315,6 +315,23 @@ fn default_remaining_one() -> u32 {
     1
 }
 
+/// Keep only the entries of an incarnation-keyed LKI table whose
+/// `(object, incarnation)` is in `sources`; objects left with no entry go.
+fn retain_named_incarnations<T: Clone>(
+    table: im::HashMap<ObjectId, im::HashMap<u64, T>>,
+    sources: &HashSet<ObjectIncarnationRef>,
+) -> im::HashMap<ObjectId, im::HashMap<u64, T>> {
+    table
+        .into_iter()
+        .filter_map(|(object_id, mut history)| {
+            history.retain(|incarnation, _| {
+                sources.contains(&ObjectIncarnationRef::of(object_id, *incarnation))
+            });
+            (!history.is_empty()).then_some((object_id, history))
+        })
+        .collect()
+}
+
 fn initial_logical_zone_change_group_id() -> u64 {
     1
 }
@@ -35560,53 +35577,7 @@ impl GameState {
         // the carrier loops below erase each ability's captured source identity
         // (`clear_trigger_identity_recursive`), the only key to those entries,
         // over every carrier that erase touches.
-        let mut retained_copy_sources: HashSet<ObjectIncarnationRef> = HashSet::new();
-        {
-            let mut collect = |ability: &ResolvedAbility| {
-                crate::game::effects::token_copy::collect_own_copy_sources(
-                    ability,
-                    &mut retained_copy_sources,
-                );
-            };
-            for entry in clone.stack.iter().chain(clone.resolving_stack_entry.iter()) {
-                if let Some(ability) = entry.ability() {
-                    collect(ability);
-                }
-            }
-            for pending in clone
-                .pending_trigger
-                .as_deref()
-                .into_iter()
-                .chain(clone.deferred_triggers.iter().map(|ctx| &ctx.pending))
-                .chain(
-                    clone
-                        .pending_trigger_order
-                        .iter()
-                        .flat_map(|order| order.groups.iter())
-                        .flat_map(|group| group.triggers.iter())
-                        .map(|ctx| &ctx.pending),
-                )
-            {
-                collect(&pending.ability);
-            }
-            for trigger in &clone.delayed_triggers {
-                collect(&trigger.ability);
-            }
-            if let Some(resume) = clone.pending_triggered_mana_resume.as_ref() {
-                collect(&resume.current.pending.ability);
-                for ctx in resume.accepted_tail.iter().chain(
-                    resume
-                        .collected_batches
-                        .iter()
-                        .flat_map(|batch| batch.contexts.iter()),
-                ) {
-                    collect(&ctx.pending.ability);
-                }
-            }
-            for epic in &clone.epic_effects {
-                collect(&epic.spell);
-            }
-        }
+        let retained_copy_sources = clone.readable_own_copy_sources();
 
         // CR 104.4b + CR 400.7: the all-zone incarnation bump advances a source's
         // epoch on every zone change, so a mandatory loop that cycles its source's
@@ -35719,17 +35690,7 @@ impl GameState {
         // CR 104.4b + CR 608.2h: last-known copiable values no ability can still
         // read as its own copy source are history, not position — pruned against
         // the set captured above, before the identities were erased.
-        clone.lki_copiable_values_by_incarnation =
-            std::mem::take(&mut clone.lki_copiable_values_by_incarnation)
-                .into_iter()
-                .filter_map(|(object_id, mut history)| {
-                    history.retain(|incarnation, _| {
-                        retained_copy_sources
-                            .contains(&ObjectIncarnationRef::of(object_id, *incarnation))
-                    });
-                    (!history.is_empty()).then_some((object_id, history))
-                })
-                .collect();
+        clone.retain_own_copy_source_values(&retained_copy_sources);
         clone.canonicalize_loop_identities();
         clone
     }
@@ -35823,6 +35784,87 @@ impl GameState {
                 (!history.is_empty()).then_some((object_id, history))
             })
             .collect();
+    }
+
+    /// CR 104.4b + CR 608.2h: the source incarnations whose last-known copiable
+    /// values some carrier can still read as its own copy source
+    /// (token_copy::collect_own_copy_sources over every ability carrier). The
+    /// single authority for both loop normalisation and the step-transition clear.
+    pub(crate) fn readable_own_copy_sources(&self) -> HashSet<ObjectIncarnationRef> {
+        let mut retained_copy_sources: HashSet<ObjectIncarnationRef> = HashSet::new();
+        {
+            let mut collect = |ability: &ResolvedAbility| {
+                crate::game::effects::token_copy::collect_own_copy_sources(
+                    ability,
+                    &mut retained_copy_sources,
+                );
+            };
+            for entry in self.stack.iter().chain(self.resolving_stack_entry.iter()) {
+                if let Some(ability) = entry.ability() {
+                    collect(ability);
+                }
+            }
+            for pending in self
+                .pending_trigger
+                .as_deref()
+                .into_iter()
+                .chain(self.deferred_triggers.iter().map(|ctx| &ctx.pending))
+                .chain(
+                    self.pending_trigger_order
+                        .iter()
+                        .flat_map(|order| order.groups.iter())
+                        .flat_map(|group| group.triggers.iter())
+                        .map(|ctx| &ctx.pending),
+                )
+            {
+                collect(&pending.ability);
+            }
+            for trigger in &self.delayed_triggers {
+                collect(&trigger.ability);
+            }
+            if let Some(resume) = self.pending_triggered_mana_resume.as_ref() {
+                collect(&resume.current.pending.ability);
+                for ctx in resume.accepted_tail.iter().chain(
+                    resume
+                        .collected_batches
+                        .iter()
+                        .flat_map(|batch| batch.contexts.iter()),
+                ) {
+                    collect(&ctx.pending.ability);
+                }
+            }
+            for epic in &self.epic_effects {
+                collect(&epic.spell);
+            }
+        }
+        retained_copy_sources
+    }
+
+    /// CR 608.2h + CR 707.2: keep only the copiable-values LKI named in sources;
+    /// the rest is history.
+    pub(crate) fn retain_own_copy_source_values(
+        &mut self,
+        sources: &HashSet<ObjectIncarnationRef>,
+    ) {
+        self.lki_copiable_values_by_incarnation = retain_named_incarnations(
+            std::mem::take(&mut self.lki_copiable_values_by_incarnation),
+            sources,
+        );
+    }
+
+    /// CR 608.2h + CR 707.2: the step-transition prune of the incarnation-keyed
+    /// LKI. A pending copy of its own departed source reads both that
+    /// incarnation's last-known copiable values and its departure snapshot
+    /// (`token_copy::CopySource::last_known` takes the token image from
+    /// `lki_by_incarnation`), so both tables keep exactly the incarnations in
+    /// `sources` and drop the rest as history. This symmetry holds for the
+    /// step clear only: the loop-normalisation clone prunes `lki_by_incarnation`
+    /// by `retain_carrier_referenced_lki` instead (comparison only, so the
+    /// dropped display data has no behavioural effect).
+    pub(crate) fn retain_own_copy_source_lki(&mut self, sources: &HashSet<ObjectIncarnationRef>) {
+        self.retain_own_copy_source_values(sources);
+        self.lki_by_incarnation =
+            retain_named_incarnations(std::mem::take(&mut self.lki_by_incarnation), sources);
     }
 
     /// CR 104.4b + CR 608.2h: keeps only the `departed_stack_spells` records a spell-cast
@@ -49608,6 +49650,125 @@ mod tests {
                 .lki_copiable_values_by_incarnation
                 .is_empty(),
             "an ability that does not copy its own source retains nothing"
+        );
+    }
+
+    /// R1 (plan r4, U9). CR 400.7 + CR 608.2h + CR 707.2: the step-transition
+    /// prune keeps exactly the last-known copiable values a pending delayed copy
+    /// of its own source can still read (the captured incarnation), and drops a
+    /// later incarnation of the same object (a new object) and values no carrier
+    /// reads. A delayed ability that does not copy its source keeps nothing.
+    #[test]
+    fn step_clear_keeps_only_the_copiable_values_a_pending_copy_reads() {
+        let source = ObjectId(5);
+        let unread = ObjectId(6);
+        let captured = 7;
+        let copy_effect = |target: TargetFilter| Effect::CopyTokenOf {
+            target,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+        };
+        let fixture = |effect: Effect| {
+            let mut state = GameState::new_two_player(7);
+            let values_object = crate::game::zones::create_object(
+                &mut state,
+                CardId(90),
+                PlayerId(0),
+                "Copy Source".to_string(),
+                Zone::Exile,
+            );
+            let values = |name: &str| {
+                let mut values = crate::game::printed_cards::intrinsic_copiable_values(
+                    &state.objects[&values_object],
+                );
+                values.name = name.to_string();
+                values
+            };
+            let (departed, later, unread_values) =
+                (values("Departed"), values("Later"), values("Unread"));
+            let mut ability = ResolvedAbility::new(effect, vec![], source, PlayerId(0));
+            ability.source_incarnation = Some(captured);
+            state.delayed_triggers.push(DelayedTrigger::new(
+                DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                Box::new(ability),
+                PlayerId(0),
+                source,
+                true,
+            ));
+            for (id, incarnation, values) in [
+                (source, captured, departed),
+                (source, 8, later),
+                (unread, 1, unread_values),
+            ] {
+                state
+                    .lki_copiable_values_by_incarnation
+                    .entry(id)
+                    .or_default()
+                    .insert(incarnation, values);
+            }
+            state
+        };
+        let prune = |mut state: GameState| {
+            let readable = state.readable_own_copy_sources();
+            state.retain_own_copy_source_values(&readable);
+            state
+        };
+        let names = |state: &GameState| {
+            let mut names: Vec<(ObjectId, u64, String)> = state
+                .lki_copiable_values_by_incarnation
+                .iter()
+                .flat_map(|(id, history)| {
+                    history
+                        .iter()
+                        .map(move |(incarnation, values)| (*id, *incarnation, values.name.clone()))
+                })
+                .collect();
+            names.sort();
+            names
+        };
+
+        let inferred = fixture(copy_effect(TargetFilter::ParentTarget));
+        assert!(
+            inferred.lki_copiable_values_by_incarnation[&source].contains_key(&captured),
+            "reach: the captured incarnation is recorded before the prune"
+        );
+        assert_eq!(
+            names(&prune(inferred)),
+            vec![(source, captured, "Departed".to_string())],
+            "only the incarnation the pending copy captured survives"
+        );
+
+        assert_eq!(
+            names(&prune(fixture(copy_effect(TargetFilter::SelfRef)))),
+            vec![(source, captured, "Departed".to_string())],
+            "a SelfRef delayed copy keeps the same entry"
+        );
+
+        let not_a_copy = prune(fixture(Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            origin: None,
+            target: TargetFilter::ParentTarget,
+            owner_library: false,
+            library_shuffle: Default::default(),
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        }));
+        assert!(
+            not_a_copy.lki_copiable_values_by_incarnation.is_empty(),
+            "a delayed ability that does not copy its source keeps nothing"
         );
     }
 
