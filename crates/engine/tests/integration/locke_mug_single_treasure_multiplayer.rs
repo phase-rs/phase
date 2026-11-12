@@ -63,6 +63,7 @@ fn locke_attacks_in_four_player_game(land_milled_by: &[PlayerId]) -> (GameRunner
             } else {
                 scenario
                     .add_spell_to_library_top(player, "Milled Spell", false)
+                    .with_mana_cost(engine::types::mana::ManaCost::zero())
                     .id()
             }
         })
@@ -199,6 +200,17 @@ fn locke_mill_into_exile(
     leyline: bool,
     land_milled_by: &[PlayerId],
 ) -> (GameRunner, usize, Vec<ObjectId>) {
+    locke_mill_into_exile_with(P1, leyline, land_milled_by)
+}
+
+/// [`locke_mill_into_exile`] with the replacement permanents controlled by
+/// `defender_seat`: P1 pauses Locke's controller's (first) seat, P0 pauses the
+/// LAST seat (P1's own card meets both of P0's replacements and P1 chooses).
+fn locke_mill_into_exile_with(
+    replacement_controller: PlayerId,
+    leyline: bool,
+    land_milled_by: &[PlayerId],
+) -> (GameRunner, usize, Vec<ObjectId>) {
     use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::actions::GameAction;
     use engine::types::game_state::WaitingFor;
@@ -207,9 +219,19 @@ fn locke_mill_into_exile(
     let mut scenario = GameScenario::new_n_player(2, 9225);
     scenario.at_phase(Phase::PreCombatMain);
     let locke = scenario.add_real_card(P0, "Locke, Treasure Hunter", Zone::Battlefield, db);
-    scenario.add_real_card(P1, "Rest in Peace", Zone::Battlefield, db);
+    scenario.add_real_card(
+        replacement_controller,
+        "Rest in Peace",
+        Zone::Battlefield,
+        db,
+    );
     if leyline {
-        scenario.add_real_card(P1, "Leyline of the Void", Zone::Battlefield, db);
+        scenario.add_real_card(
+            replacement_controller,
+            "Leyline of the Void",
+            Zone::Battlefield,
+            db,
+        );
     }
     let staged: Vec<ObjectId> = [P0, P1]
         .into_iter()
@@ -219,6 +241,7 @@ fn locke_mill_into_exile(
             } else {
                 scenario
                     .add_spell_to_library_top(player, "Milled Spell", false)
+                    .with_mana_cost(engine::types::mana::ManaCost::zero())
                     .id()
             }
         })
@@ -310,4 +333,97 @@ fn without_a_replacement_choice_exiled_mills_give_the_same_results() {
     let (runner, prompts, staged) = locke_mill_into_exile(false, &[]);
     assert_eq!(prompts, 0);
     assert_exiled_mill_results(&runner, &staged, 0);
+}
+
+/// Walks combat to the postcombat main phase, answering the declare-blockers
+/// step with no blocks (CR 509.1).
+fn advance_past_combat(runner: &mut GameRunner) {
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+    for _ in 0..40 {
+        if runner.state().phase == Phase::PostCombatMain {
+            return;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareBlockers { .. } => {
+                runner.declare_blockers(&[]).expect("no blocks");
+            }
+            _ => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority is legal");
+            }
+        }
+        runner.advance_until_stack_empty();
+    }
+    panic!("combat did not reach the postcombat main phase");
+}
+
+fn can_cast(runner: &GameRunner, id: ObjectId) -> bool {
+    use engine::types::actions::GameAction;
+    engine::ai_support::legal_actions(runner.state())
+        .iter()
+        .any(|action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == id))
+}
+
+/// CR 701.17c + CR 601.2a: after the paused flow, Locke's controller casts the
+/// exiled spell through the public cast action at sorcery timing, it reaches the
+/// stack, and the single-use grant leaves the OTHER eligible spell uncastable.
+fn assert_one_shared_cast(mut runner: GameRunner, staged: &[ObjectId], first_cast: usize) {
+    advance_past_combat(&mut runner);
+    let (cast, other) = (staged[first_cast], staged[1 - first_cast]);
+    assert!(
+        can_cast(&runner, cast),
+        "reach guard: the exiled spell is offered"
+    );
+    assert!(
+        can_cast(&runner, other),
+        "reach guard: its sibling is offered too"
+    );
+    runner.cast(cast).commit();
+    assert_eq!(
+        runner.state().objects[&cast].zone,
+        Zone::Stack,
+        "the exiled spell reached the stack through the public cast action"
+    );
+    runner.advance_until_stack_empty();
+    assert!(
+        !can_cast(&runner, other) && !holds_mug_cast_grant(&runner, other),
+        "the grant allows ONE cast; the other eligible spell is closed out"
+    );
+}
+
+/// Pause on the FIRST seat: the defender's later, automatically exiled spell is
+/// cast, then the paused seat's spell is not.
+#[test]
+fn the_later_seats_exiled_spell_is_actually_cast_once_after_the_pause() {
+    let (runner, prompts, staged) = locke_mill_into_exile(true, &[]);
+    assert_eq!(prompts, 1, "reach guard: the first seat paused");
+    assert_one_shared_cast(runner, &staged, 1);
+}
+
+/// Pause on the first seat, cast the paused seat's own exiled spell instead.
+#[test]
+fn the_paused_seats_exiled_spell_is_actually_cast_once_after_the_pause() {
+    let (runner, prompts, staged) = locke_mill_into_exile(true, &[]);
+    assert_eq!(prompts, 1);
+    assert_one_shared_cast(runner, &staged, 0);
+}
+
+/// Pause on the LAST seat (P0 controls both replacements, P1 chooses): another
+/// resume point, with nothing left to drain after the answer.
+#[test]
+fn a_pause_on_the_last_seat_keeps_both_exiled_spells_and_one_cast() {
+    let (runner, prompts, staged) = locke_mill_into_exile_with(P0, true, &[]);
+    assert_eq!(prompts, 1, "reach guard: the last seat paused");
+    assert_exiled_mill_results(&runner, &staged, 0);
+    assert_one_shared_cast(runner, &staged, 0);
+}
+
+/// The last-seat pause with a land: the exiled land still creates the Treasure.
+#[test]
+fn a_last_seat_pause_still_counts_its_exiled_land_for_the_treasure() {
+    let (runner, prompts, staged) = locke_mill_into_exile_with(P0, true, &[P1]);
+    assert_eq!(prompts, 1);
+    assert_exiled_mill_results(&runner, &staged, 1);
 }

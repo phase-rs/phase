@@ -200,6 +200,7 @@ pub(crate) fn complete_mill_delivery(
     cards: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
+    let settled_from = events.len();
     for object_id in cards {
         let Some(zone) = state.objects.get(&object_id).map(|object| object.zone) else {
             continue;
@@ -213,7 +214,31 @@ pub(crate) fn complete_mill_delivery(
             to: zone,
         });
     }
+    // CR 701.17c + CR 608.2c: the settling batch publishes its own results — the
+    // `Milled` it just emitted, never the rest of the action's buffer — into the
+    // tracked set a `player_scope` clause's detached tail reads. This is the one
+    // seam a seat's mill reaches on the paused (CR 616.1) and unpaused path alike.
+    super::publish_settled_mill_to_scope_tail(
+        state,
+        public_milled_results(&events[settled_from..]),
+    );
     BatchMoveResult::Done
+}
+
+/// CR 701.17c: the cards an effect that refers to milled cards can find — each
+/// `Milled` in `events` whose destination is a public zone ("as long as that
+/// zone is a public zone"). The caller passes the span its own batch emitted, so
+/// the selector never has to attribute events to a batch. The single authority
+/// for both the synchronous tracked-set harvest and the settling batch's own
+/// publication.
+pub(crate) fn public_milled_results(events: &[GameEvent]) -> Vec<ObjectId> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::Milled { object_id, to, .. } if to.is_public() => Some(*object_id),
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -247,6 +272,28 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// CR 701.17c: only a milled card whose destination zone is public can be
+    /// found by an effect that refers to it. Synthetic events: no printed card
+    /// routes a milled card to a private zone.
+    #[test]
+    fn public_milled_results_keep_only_public_destinations() {
+        let milled = |id: u64, to: Zone| GameEvent::Milled {
+            player_id: PlayerId(0),
+            object_id: ObjectId(id),
+            to,
+        };
+        let events = [
+            milled(1, Zone::Graveyard),
+            milled(2, Zone::Exile),
+            milled(3, Zone::Hand),
+            milled(4, Zone::Library),
+        ];
+        assert_eq!(
+            public_milled_results(&events),
+            vec![ObjectId(1), ObjectId(2)]
+        );
     }
 
     /// Every `GameEvent::Milled` in `events`, as `(player, object, destination)`.

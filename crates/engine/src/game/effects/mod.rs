@@ -1549,38 +1549,15 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 )
             });
         if let Some((source_id, links, collects)) = scoped_channels {
-            // CR 701.17c + CR 608.2c: the answered seat's mill completed in this
-            // action (`Milled` rides the batch completion), so its cards join the
-            // clause's tracked set like the legs' do, wherever a replacement sent
-            // them. Only a tail that reads the set needs it.
-            let tail_reads_set = state
-                .active_ability_continuation()
-                .and_then(|pending| pending.player_scope_tail.as_ref())
-                .is_some_and(|scope| chain_references_tracked_set(&scope.after_scope));
-            if tail_reads_set {
-                let milled: Vec<_> = events
-                    .iter()
-                    .filter_map(|event| match event {
-                        GameEvent::Milled { object_id, .. } => {
-                            Some((*object_id, Some(ThisWayCause::Milled)))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                if !milled.is_empty() {
-                    publish_tracked_set_with_causes(state, milled);
-                }
-            }
             // CR 608.2c + CR 608.2f: the answered seat's moves join the clause's
             // "this way" ledger under the same action-local bound as the
             // created-token read above.
-            let moved = clause_zone_changed_ids(events);
             if let Some(ledger) = state
                 .active_ability_continuation_frame_mut()
                 .and_then(|frame| frame.pending.player_scope_tail.as_mut())
                 .and_then(|scope| scope.zone_changed_this_way.as_mut())
             {
-                extend_clause_ledger(ledger, moved);
+                extend_clause_ledger(ledger, clause_zone_changed_ids(events));
             }
             let linked_additions = if links {
                 linked_exile_batch_from_events(state, source_id, events)
@@ -13719,6 +13696,36 @@ fn park_resolution_object_choice(
     ResolutionProgress::Waiting
 }
 
+/// CR 701.17c + CR 608.2c: a settled mill batch publishes its public results
+/// into the tracked set of the `player_scope` clause whose detached tail reads
+/// it. The live clause is the resolving sidecar (a leg draining under it) or the
+/// active continuation's (the paused seat's batch settling before its drain);
+/// with neither, or a tail that does not read the set, the ordinary postlude
+/// publication owns the result.
+pub(super) fn publish_settled_mill_to_scope_tail(state: &mut GameState, settled: Vec<ObjectId>) {
+    if settled.is_empty() {
+        return;
+    }
+    let tail_reads_set = state
+        .resolving_player_scope_tail
+        .as_ref()
+        .or_else(|| {
+            state
+                .active_ability_continuation()
+                .and_then(|pending| pending.player_scope_tail.as_ref())
+        })
+        .is_some_and(|scope| chain_references_tracked_set(&scope.after_scope));
+    if tail_reads_set {
+        publish_tracked_set_with_causes(
+            state,
+            settled
+                .into_iter()
+                .map(|id| (id, Some(ThisWayCause::Milled)))
+                .collect(),
+        );
+    }
+}
+
 /// CR 608.2c + CR 608.2d: once its resolution-time object choice is answered,
 /// does the parked `head` publish its own result into the chain's tracked set?
 ///
@@ -15123,13 +15130,7 @@ fn affected_objects_from_events(
         Effect::Mill {
             destination: crate::types::zones::Zone::Graveyard,
             ..
-        } => events
-            .iter()
-            .filter_map(|event| match event {
-                GameEvent::Milled { object_id, .. } => Some(*object_id),
-                _ => None,
-            })
-            .collect(),
+        } => mill::public_milled_results(events),
         _ => {
             let dest_zone = match effect {
                 Effect::ChangeZone { destination, .. }
