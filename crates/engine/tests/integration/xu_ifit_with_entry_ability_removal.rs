@@ -15,7 +15,8 @@
 //! a later instruction of the same resolution may still apply such an effect (R4, R4d, R8, R8b,
 //! R9), including a `ChangeZone` resumed after a CR 616.1 replacement-ordering pause that
 //! precedes the entry (R4p); a pause after an entry has been delivered keeps the entry with its
-//! owner (known gap).
+//! owner, and a rider that pauses before it applies (a ReturnAsAura host choice among two or
+//! more candidates) lets the post-action collector check the entry first (known gaps).
 //!
 //! Consequence (b) — CR 113.6h + CR 614.12 + CR 611.2e: an ability of the entrant that modifies
 //! how it enters functions as it enters, checked as the permanent would exist on the battlefield,

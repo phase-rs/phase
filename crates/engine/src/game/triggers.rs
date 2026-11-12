@@ -4828,7 +4828,9 @@ pub(crate) enum EntryOccurrenceCollector {
     /// checks the entry at the instruction's completion.
     Owner,
     /// A later instruction may still apply an "is/has" effect simultaneously with the entry
-    /// (CR 611.2e): the post-action collector checks the entry once that effect exists.
+    /// (CR 611.2e): the post-action collector of this action checks the entry, after that effect
+    /// exists unless the instruction applying it pauses first (known gap: a multi-host
+    /// ReturnAsAura host choice, CR 303.4f).
     AfterSimultaneousEntryEffects,
 }
 
@@ -4902,8 +4904,9 @@ pub(crate) fn complete_logical_zone_trigger_collection(
 /// `EntryOccurrenceCollector::AfterSimultaneousEntryEffects` the owner checks no ordinary
 /// trigger for its battlefield-entry occurrences (segment, settlement, or latched batched pass).
 /// A handed-off entry therefore carries no witness in `deferred_triggers`, so the post-action
-/// collector is its sole collector and checks it once, after the resolution's simultaneous
-/// "is/has" effects exist (CR 603.2c).
+/// collector of this action is its sole collector and checks it once (CR 603.2c), after the
+/// resolution's simultaneous "is/has" effects exist when no instruction pauses before applying
+/// one (a multi-host ReturnAsAura host choice is a known gap).
 pub(crate) fn complete_logical_zone_trigger_collection_for(
     state: &mut GameState,
     group: &mut LogicalZoneChangeGroup,
