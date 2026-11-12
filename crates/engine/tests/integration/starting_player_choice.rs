@@ -592,7 +592,7 @@ fn free_for_all_chooser_may_name_any_seat() {
     assert_eq!(state.current_starting_player, named);
 }
 
-/// CR 103.1a + CR 805.3b: under shared team turns the candidates and the
+/// CR 103.1a + CR 805.3: under shared team turns the candidates and the
 /// chooser are side representatives, so the choice names a starting team.
 #[test]
 fn two_headed_giant_choice_is_between_team_representatives() {
