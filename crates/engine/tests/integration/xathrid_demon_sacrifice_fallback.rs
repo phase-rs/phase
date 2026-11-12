@@ -174,3 +174,132 @@ fn each_player_clause_including_the_controller_seat_keeps_the_sacrifice_result()
         "no 7 life fallback after a performed sacrifice"
     );
 }
+
+// ---------------------------------------------------------------------------
+// SYNTHETIC scoped-Seek witnesses (no printed card pairs a per-player Seek with
+// a "this way" gate). CR 608.2c: a clause's "this way" result is what the clause
+// actually did — a scoped Seek that moves cards publishes them, and a Seek that
+// finds nothing has a real empty result that must not leak an earlier clause's
+// moves.
+// ---------------------------------------------------------------------------
+
+use engine::game::ability_utils::build_resolved_from_def;
+use engine::game::effects::resolve_ability_chain;
+use engine::parser::oracle_effect::parse_effect_chain;
+use engine::types::ability::{
+    AbilityCondition, AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
+    TypedFilter,
+};
+use engine::types::zones::EtbTapState;
+
+const GATE_LIFE: i32 = 3;
+
+/// `Seek a land card from your library into your hand` scoped to every player.
+fn scoped_land_seek() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Seek {
+            filter: TargetFilter::Typed(TypedFilter::land()),
+            count: QuantityExpr::Fixed { value: 1 },
+            from_top: None,
+            destination: Zone::Hand,
+            enter_tapped: EtbTapState::Unspecified,
+        },
+    )
+    .player_scope(PlayerFilter::All)
+}
+
+/// "If a card changed zones this way, you gain 3 life."
+fn this_way_life_gate() -> AbilityDefinition {
+    let mut gate = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: GATE_LIFE },
+            player: TargetFilter::Controller,
+        },
+    );
+    gate.condition = Some(AbilityCondition::ZoneChangedThisWay {
+        filter: TargetFilter::Any,
+        destination: None,
+    });
+    gate
+}
+
+fn two_player_runner(libraries_have_lands: bool) -> (GameRunner, ObjectId, Vec<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature(P0, "Seek Source", 1, 1).id();
+    let mut library_cards = Vec::new();
+    for seat in [P0, P1] {
+        let id = if libraries_have_lands {
+            scenario.add_land_to_library_top(seat, "Library Land").id()
+        } else {
+            scenario
+                .add_spell_to_library_top(seat, "Library Spell", false)
+                .id()
+        };
+        library_cards.push(id);
+    }
+    (scenario.build(), source, library_cards)
+}
+
+/// (a) A scoped Seek that moves a card for each player publishes exactly those
+/// moves: the gate sees them. Under the effect-name table (Seek unlisted) the
+/// pre-clause ledger was restored, the gate read an empty ledger, and no life
+/// was gained.
+#[test]
+fn synthetic_scoped_seek_that_moves_cards_publishes_them_to_the_gate() {
+    let (mut runner, source, library_cards) = two_player_runner(true);
+    let def = scoped_land_seek().sub_ability(this_way_life_gate());
+    let ability = build_resolved_from_def(&def, source, P0);
+    let life_before = runner.life(P0);
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("scoped seek resolves");
+
+    for card in &library_cards {
+        assert_eq!(
+            runner.state().objects[card].zone,
+            Zone::Hand,
+            "each player's seek moved their land to hand"
+        );
+    }
+    assert_eq!(
+        runner.life(P0),
+        life_before + GATE_LIFE,
+        "CR 608.2c: the gate reads the Seek's own moves"
+    );
+}
+
+/// (b) A prior clause moved a creature; the scoped Seek then finds nothing. Its
+/// empty result is a real result: the gate must see an empty ledger, not the
+/// sacrificed creature. Under the old name table the Seek counted as nonmoving
+/// and the sacrifice's ledger leaked through, so the gate fired.
+#[test]
+fn synthetic_scoped_seek_finding_nothing_clears_the_prior_clause_ledger() {
+    let (mut runner, source, _) = two_player_runner(false);
+    let mut head = parse_effect_chain("sacrifice a creature", AbilityKind::Spell);
+    head.sub_ability = Some(Box::new(
+        scoped_land_seek().sub_ability(this_way_life_gate()),
+    ));
+    let ability = build_resolved_from_def(&head, source, P0);
+    let life_before = runner.life(P0);
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("sacrifice then scoped seek resolve");
+
+    assert_eq!(
+        runner.state().objects[&source].zone,
+        Zone::Graveyard,
+        "reach guard: the prior clause moved something"
+    );
+    assert!(
+        runner.state().last_zone_changed_ids.is_empty(),
+        "the empty Seek result replaces the sacrifice's ledger"
+    );
+    assert_eq!(
+        runner.life(P0),
+        life_before,
+        "CR 608.2c: the gate must not read the prior clause's moves"
+    );
+}

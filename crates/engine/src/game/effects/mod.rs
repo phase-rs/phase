@@ -19025,6 +19025,7 @@ fn publish_player_scope_clause_results(
     zero_fill_domain: &[PlayerId],
     after_scope_needs_linked_exile: bool,
     scoped_events: &[GameEvent],
+    ledger_before_clause: Vec<ObjectId>,
 ) -> PlayerScopeClauseBatches {
     let counts_by_player = previous_effect_counts_by_player_from_events(
         EffectKind::from(&scoped_template.effect),
@@ -19078,15 +19079,13 @@ fn publish_player_scope_clause_results(
     // a permanent this way" / ZoneChangedThisWay gates see every player's
     // sacrifice — not only the last iteration's overwrite of
     // `last_zone_changed_ids`.
-    // CR 608.2c: "this way" names the instruction that performed the moves. A
-    // clause whose effect cannot move objects (Xathrid Demon's "each opponent
-    // loses life equal to the sacrificed creature's power") produced no
-    // zone-change result of its own, so it must leave the earlier
-    // instruction's ledger for the fallback ("If you can't sacrifice a
-    // creature, ...") to read rather than overwrite it with an empty span.
-    if effect_moves_objects(&scoped_template.effect) {
-        state.last_zone_changed_ids = clause_zone_changed_ids(scoped_events);
-    }
+    // CR 608.2c: see `clause_ledger_outcome` — observed moves publish, an empty
+    // moving clause clears, a nonmoving clause preserves the earlier ledger.
+    state.last_zone_changed_ids =
+        match clause_ledger_outcome(&scoped_template.effect, scoped_events) {
+            ClauseLedgerOutcome::Publish(ids) => ids,
+            ClauseLedgerOutcome::Preserve => ledger_before_clause,
+        };
     if next_sub_needs_tracked_set(outer) {
         publish_tracked_set_for_resolution(
             state,
@@ -19228,17 +19227,55 @@ fn resolve_after_scope_with_created_seats(
     outcome
 }
 
-/// CR 608.2c + CR 400.1: can this effect move objects between zones, so that
-/// its own result is what a later "this way" gate reads? Reuses the producer
-/// action table ([`this_way_cause_for_effect`] +
-/// [`ThisWayCause::is_zone_transition`]) and adds the destination-agnostic
-/// movers whose cause is not named (a library-bound `ChangeZone`).
+/// CR 608.2c + CR 400.1: is this effect a clause whose own instruction moves
+/// objects between zones, so that an empty result is a real "nothing moved"
+/// result rather than the absence of a result? Reuses the producer action
+/// table ([`this_way_cause_for_effect`] + [`ThisWayCause::is_zone_transition`])
+/// and adds the movers whose cause is not named (a library-bound `ChangeZone`,
+/// Seek's hand-bound find, and the other pipeline movers below). Interactive
+/// finders (`Dig`, `SearchLibrary`) are excluded: their own span only prompts,
+/// and the follow-up move they park publishes its own result.
 fn effect_moves_objects(effect: &Effect) -> bool {
     this_way_cause_for_effect(effect).is_some_and(ThisWayCause::is_zone_transition)
         || matches!(
             EffectKind::from(effect),
-            EffectKind::ChangeZone | EffectKind::ChangeZoneAll | EffectKind::BounceAll
+            EffectKind::ChangeZone
+                | EffectKind::ChangeZoneAll
+                | EffectKind::BounceAll
+                | EffectKind::Bounce
+                | EffectKind::Seek
+                | EffectKind::Cloak
+                | EffectKind::RevealUntil
+                | EffectKind::PutOnTopOrBottom
         )
+}
+
+/// What a completed `player_scope` clause does to the "this way" ledger
+/// (`GameState::last_zone_changed_ids`).
+enum ClauseLedgerOutcome {
+    /// The clause's result replaces the ledger (possibly with an empty result).
+    Publish(Vec<ObjectId>),
+    /// The clause produced no zone-change result of its own; the earlier
+    /// instruction's ledger stays.
+    Preserve,
+}
+
+/// CR 608.2c: "this way" names the instruction that performed the moves, and
+/// instructions are followed in the order written. One decision, driven by what
+/// the clause actually did:
+/// 1. Observed zone changes always win, whatever the effect's name.
+/// 2. A moving clause that moved nothing has a real, empty result — it clears
+///    the ledger instead of leaking the earlier clause's moves.
+/// 3. A nonmoving clause (Xathrid Demon's "each opponent loses life equal to
+///    the sacrificed creature's power") leaves the earlier ledger for the
+///    fallback ("If you can't sacrifice a creature, ...") to read.
+fn clause_ledger_outcome(effect: &Effect, scoped_events: &[GameEvent]) -> ClauseLedgerOutcome {
+    let observed = clause_zone_changed_ids(scoped_events);
+    if !observed.is_empty() || effect_moves_objects(effect) {
+        ClauseLedgerOutcome::Publish(observed)
+    } else {
+        ClauseLedgerOutcome::Preserve
+    }
 }
 
 /// CR 608.2c + CR 608.2f: the "this way" ledger of a `player_scope` clause's
@@ -21145,6 +21182,7 @@ pub(crate) fn drain_pending_discard_batch(
             &fan_out.matching_players,
             fan_out.after_scope_needs_linked_exile,
             &window,
+            state.last_zone_changed_ids.clone(),
         );
         // CR 608.2h: the clause has completed, so clear its frozen values before
         // the parked tail runs — a following `player_scope` clause captures its
@@ -22748,6 +22786,7 @@ fn resolve_chain_body(
                             &matching_players,
                             false,
                             &events[scoped_events_before..],
+                            state.last_zone_changed_ids.clone(),
                         );
                         // The generic publication clears a table its effect kind does
                         // not produce from events.
@@ -22839,13 +22878,13 @@ fn resolve_chain_body(
         let collects_seat_results = scoped_template.effect.is_token_creator();
         let mut seat_results: Vec<SeatCreatedTokens> = Vec::new();
         // CR 608.2c: "this way" names the earlier instruction that moved the
-        // cards. A clause whose effect cannot move objects (Xathrid Demon's
-        // "each opponent loses life ...") produced no zone-change result of its
-        // own, so each generated seat leg's empty span must not replace the
-        // moving instruction's ledger for the fallback that follows. Only this
-        // driver generates the legs, so the ledger is restored here, after the
-        // fan-out; every other non-moving node keeps the ordinary reset (Court
-        // of Locthwain's linked-exile permission, CR 406.6).
+        // cards. The pre-fan-out ledger is handed to the clause publication,
+        // which applies `clause_ledger_outcome` once: observed moves publish,
+        // an empty moving clause clears, and a nonmoving clause (Xathrid
+        // Demon's "each opponent loses life ...") restores this ledger for the
+        // fallback that follows. Every other non-moving node keeps the
+        // ordinary reset (Court of Locthwain's linked-exile permission,
+        // CR 406.6).
         let ledger_before_fan_out = state.last_zone_changed_ids.clone();
         for (i, pid) in matching_players.iter().enumerate() {
             // CR 608.2c + CR 101.3: Each scoped iteration is a fresh
@@ -23009,9 +23048,6 @@ fn resolve_chain_body(
                 break;
             }
         }
-        if !effect_moves_objects(&scoped_template.effect) {
-            state.last_zone_changed_ids = ledger_before_fan_out;
-        }
         let batches = publish_player_scope_clause_results(
             state,
             ability,
@@ -23019,6 +23055,7 @@ fn resolve_chain_body(
             &matching_players[..applied_domain_end],
             after_scope_needs_linked_exile,
             &events[scoped_events_before..],
+            ledger_before_fan_out,
         );
         if !paused {
             // CR 608.2e: this `player_scope` clause has completed. Clear its
