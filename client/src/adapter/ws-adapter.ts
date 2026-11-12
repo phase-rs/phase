@@ -2470,9 +2470,13 @@ export class WebSocketAdapter implements EngineAdapter {
           // parked when B is retired, and never touch an already-adopted C.
           previousPending = this.rejectSocketRequests(false) || previousPending;
         }
-        if (!this.disposed && this.stateCodecPreparation === preparation
-          && bootstrap.failure !== null) {
-          if (this.ws === null) {
+        // A never-adopted candidate's failure always moves the sticky policy
+        // (its close usually did already); an adopted, since superseded one
+        // never poisons its replacement. Only an attachment that still owns the
+        // episode, with no current socket, records it as the latest binding.
+        const ownsEpisode = this.stateCodecPreparation === preparation;
+        if (!this.disposed && bootstrap.failure !== null && (ownsEpisode || bootstrap.socket === null)) {
+          if (this.ws === null && ownsEpisode) {
             // No incumbent: record the notice as this adapter's latest
             // attachment, exactly as before.
             this.stateCodec.adopt(bootstrap, socket.ws);
@@ -2914,9 +2918,13 @@ export class WebSocketAdapter implements EngineAdapter {
     // The reconnect interval is open: a game command (Action, Interaction) on
     // the incumbent would meet the server's seat-authority refusal once the
     // candidate owns the seat, so it is not sent: the same typed, localized
-    // refusal as during codec recovery. Other requests keep their base
-    // behaviour; with no incumbent (every product reconnect episode starts
-    // after the current socket closed) they fail locally as before.
+    // refusal as during codec recovery. Other requests (concede, emote,
+    // takeback, previews, export, seat mutation, abandon) are not gated: on the
+    // merge base they went to the candidate, adopted at the handshake. Now, with
+    // no incumbent (every product reconnect episode starts after the current
+    // socket closed), they fail locally until the bootstrap adopts the
+    // candidate; with a live incumbent (public API only) they go to it, where
+    // a refusal answers only that request.
     if (this.confirmingPreparation !== null) {
       throw new AdapterError(
         AdapterErrorCode.ACTION_NOT_SENT,

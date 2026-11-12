@@ -4130,14 +4130,11 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
     it("keeps a terminal codec failure after the written ReconnectDraft for the next reattach, which is snapshot-only", async () => {
       vi.useFakeTimers();
       const session = draftCodecSession(decodeEnvelope);
-      // The candidate's decoder rejects the bootstrap Full: a terminal
-      // bootstrapRejection before adoption.
-      const rejecting = draftCodecSession(() => ({ kind: "resyncRequired" }));
       const { adapter, ws, provider } = await startCodecDraft(session.session);
       const events: unknown[] = [];
       adapter.onEvent((event) => events.push(event));
       await enterCodecMatch(ws, events);
-      provider.mockResolvedValueOnce(rejecting.session);
+      provider.mockResolvedValueOnce(draftCodecSession(decodeEnvelope).session);
       const reconnecting = watch(adapter.reconnectDraft());
       await drainArt();
       const candidate = MockWebSocket.last!;
@@ -4146,18 +4143,17 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
         await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
           expect.stringContaining('"type":"ReconnectDraft"'),
         ));
-        candidate.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
-        // Reach guard: the codec was negotiated and the setup is on the wire.
+        // Reach guard: the codec was offered and the setup is on the wire.
         expect(offeredCodec(candidate)).toBe(true);
         expect(policyOf(adapter)).toEqual({ kind: "negotiate" });
-        candidate.dispatchSynthetic("message", draftFrame("Full", {
-          type: "GameStarted",
-          data: { state: matchState("reattach-start"), your_player: 0, full_key: FULL_KEY },
+        // The server's codec confirmation, arriving after the write, contradicts
+        // the offer: a terminal confirmationFailure before adoption.
+        candidate.dispatchSynthetic("message", JSON.stringify({
+          type: "ServerHello", data: { server_version: "0.0.0-test", selected_state_codec: null },
         }));
-        await vi.waitFor(() => expect(rejecting.decode).toHaveBeenCalledOnce());
         await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({ code: "WS_CLOSED" }));
         // The failure belongs to this adapter's draft episode.
-        expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "bootstrapRejection" });
+        expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "confirmationFailure" });
 
         // The next reattach through the public API is snapshot-only.
         const next = watch(adapter.reconnectDraft());
@@ -4182,13 +4178,12 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       async (trigger) => {
         vi.useFakeTimers();
         const session = draftCodecSession(decodeEnvelope);
-        const rejecting = draftCodecSession(() => ({ kind: "resyncRequired" }));
         const { adapter, ws, provider } = await startCodecDraft(session.session);
         const events: unknown[] = [];
         adapter.onEvent((event) => events.push(event));
         await enterCodecMatch(ws, events);
         const command = watch(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
-        provider.mockResolvedValueOnce(rejecting.session);
+        provider.mockResolvedValueOnce(draftCodecSession(decodeEnvelope).session);
         const reconnecting = watch(adapter.reconnectDraft());
         await drainArt();
         const candidate = MockWebSocket.last!;
@@ -4202,16 +4197,15 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
           await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
             expect.stringContaining('"type":"ReconnectDraft"'),
           ));
-          candidate.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
           expect(offeredCodec(candidate)).toBe(true);
-          candidate.dispatchSynthetic("message", draftFrame("Full", {
-            type: "GameStarted",
-            data: { state: matchState("reattach-start"), your_player: 0, full_key: FULL_KEY },
+          // A codec confirmation that contradicts the offer, after the write.
+          candidate.dispatchSynthetic("message", JSON.stringify({
+            type: "ServerHello", data: { server_version: "0.0.0-test", selected_state_codec: null },
           }));
           await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({ code: "WS_CLOSED" }));
           await vi.waitFor(() => expect(command.value()).toMatchObject({ code: "WS_CLOSED" }));
           if (trigger !== "none") expect(successor).not.toBeNull();
-          expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "bootstrapRejection" });
+          expect(policyOf(adapter)).toEqual({ kind: "snapshotOnly", reason: "confirmationFailure" });
           // Whoever starts it, the next reattach does not offer the codec: a
           // successor started inside the settlement selects its lease after
           // `abandonCandidate` has moved the policy (`selectLease`).
@@ -4233,8 +4227,12 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
     it("lets the decoder's own verdict on the reattach outlive the bound; the next reattach is snapshot-only", async () => {
       vi.useFakeTimers();
       const session = draftCodecSession(decodeEnvelope);
-      // The candidate's decode RPC hangs and fails at its own deadline,
-      // counted from its call, as the worker and fallback decoders do.
+      // Synthetic order: on a reattach this server sends DraftMatchStart, a
+      // plain frame that settles the interval, before any Full (phase-server
+      // main.rs:2812-2818), so a Full decoded inside the interval does not
+      // happen with it. This exercises the shared owner's deferral through the
+      // draft adapter. The candidate's decode RPC hangs and fails at its own
+      // deadline, counted from its call, as the worker and fallback decoders do.
       const hanging = draftCodecSession(decodeEnvelope);
       hanging.decode.mockImplementationOnce(() => new Promise((_, reject) => {
         setTimeout(() => reject(new Error("decode RPC timed out")), STATE_CODEC_DECODE_TIMEOUT_MS);
@@ -4299,8 +4297,11 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
         // After the server answers, the adopted candidate takes requests again.
         receive(candidate, "DraftStateUpdate", { view: createMockDraftView() });
         await vi.waitFor(() => expect(reconnecting.value()).toEqual({ resolvedWith: undefined }));
-        expect(() => (adapter as unknown as { assertNoReattachInterval(r: string): void })
-          .assertNoReattachInterval("probe")).not.toThrow();
+        const afterAdoption = adapter.submitPick("picked-after-adoption").catch((error: unknown) => error);
+        await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+          expect.stringContaining('"type":"DraftAction"'),
+        ));
+        void afterAdoption;
       } finally {
         adapter.dispose();
         vi.useRealTimers();
@@ -4373,6 +4374,47 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
         expect(adapter.currentMatchId).toBe("r2-t0");
         expect(events).not.toContainEqual(expect.objectContaining({ type: "draftActionRejected" }));
         expect(candidate.close).not.toHaveBeenCalled();
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it("sends a match transition the incumbent deferred when the reattach's setup is not written", async () => {
+      vi.useFakeTimers();
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+      provider.mockResolvedValueOnce(draftCodecSession(decodeEnvelope).session);
+      const reconnecting = watch(adapter.reconnectDraft());
+      await drainArt();
+      const candidate = MockWebSocket.last!;
+      let failWrite!: (error: Error) => void;
+      candidate.sendReceipt = vi.fn(() => new Promise<void>((_, reject) => { failWrite = reject; }));
+      try {
+        candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+        // The next round's pairing reaches the incumbent while the setup's
+        // receipt is still pending: the transition is left to the reattach.
+        const incumbentSends = ws.send.mock.calls.length;
+        receive(ws, "DraftMatchStart", {
+          match_id: "r2-t0", round: 2, game_code: "GAME02", full_key: { game_code: "GAME02", generation: 1 },
+          player_token: "match-draft-token", your_player: 0, opponent_name: "Bob",
+        });
+        await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "matchStarting", matchId: "r2-t0" })));
+        expect(ws.send.mock.calls.slice(incumbentSends)).toEqual([]);
+        // The setup is not written after all: the kept incumbent still owns
+        // the seat and attaches the new match itself.
+        failWrite(new Error("async write failed"));
+        await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({
+          code: "WS_CLOSED", message: "Failed to send setup frame",
+        }));
+        expect(ws.close).not.toHaveBeenCalled();
+        expect(ws.send.mock.calls.slice(incumbentSends).map(([frame]) => JSON.parse(String(frame)).type))
+          .toEqual(["ReconnectDraft"]);
+        expect(adapter.currentMatchId).toBe("r2-t0");
       } finally {
         adapter.dispose();
         vi.useRealTimers();

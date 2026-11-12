@@ -291,6 +291,12 @@ export class ServerDraftAdapter implements EngineAdapter {
    * and the server may already route the draft seat to the candidate.
    */
   private confirmingAttachment: DraftAttachment | null = null;
+  /**
+   * A match transition the incumbent saw while `confirmingAttachment` was open
+   * and left to that reattach. If the reattach's setup turns out not to have
+   * been written, the kept incumbent still owns the seat and sends it itself.
+   */
+  private deferredMatchReattach: DraftAttachment | null = null;
   private listeners: ServerDraftAdapterEventListener[] = [];
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
@@ -1348,6 +1354,8 @@ export class ServerDraftAdapter implements EngineAdapter {
       let written: boolean;
       // Why the interval after the write did not end in a positive bootstrap.
       let unconfirmed: SetupConfirmationOutcome | null = null;
+      // Whether the incumbent left a match transition to this reattach.
+      let deferredMatch = false;
       // The incumbent this setup replaces: only it is retired if the
       // candidate is not adopted (a successor may be current by then).
       const incumbent = this.ws;
@@ -1386,8 +1394,18 @@ export class ServerDraftAdapter implements EngineAdapter {
       } finally {
         confirmation?.dispose();
         if (this.confirmingAttachment === attachment) this.confirmingAttachment = null;
+        deferredMatch = this.deferredMatchReattach === attachment;
+        if (deferredMatch) this.deferredMatchReattach = null;
       }
       if (!written) {
+        // The setup never reached the wire, so the kept incumbent still owns the
+        // seat: a match transition it left to this reattach is its own to attach.
+        if (deferredMatch && this.draftCode && this.draftToken) {
+          this.send({
+            type: "ReconnectDraft",
+            data: { draft_code: this.draftCode, player_token: this.draftToken },
+          });
+        }
         throw new AdapterError("WS_CLOSED", "Failed to send setup frame", true);
       }
       if (unconfirmed !== null) {
@@ -1469,6 +1487,8 @@ export class ServerDraftAdapter implements EngineAdapter {
       }
       if (!this.sockets.has(sourceSocket)) return;
       sourceSocket.onmessage = handleMessage;
+      // Drained: release the admitted frames (and their parsed envelopes).
+      setupMessages.length = 0;
     } catch (error) {
       const failure = error instanceof HandshakeError
         ? new AdapterError("WS_ERROR", error.message, error.kind !== "protocol_mismatch" && error.kind !== "invalid_url")
@@ -1622,12 +1642,14 @@ export class ServerDraftAdapter implements EngineAdapter {
           try {
             if (this.confirmingAttachment !== null) {
               // A reattach interval is open, so this frame came from the
-              // incumbent (the candidate's frames are buffered). The
-              // candidate's ReconnectDraft is already written, and the server
-              // attaches the current match on it (`attach_current_draft_match`,
-              // phase-server main.rs:2795-2815); the same request on the
-              // incumbent would meet the seat-authority refusal once the
-              // candidate owns the seat (:13042-13053).
+              // incumbent (the candidate's frames are buffered). Once the
+              // candidate's ReconnectDraft is on the wire the server attaches
+              // the current match on it (`attach_current_draft_match`,
+              // phase-server main.rs:2795-2815), and the same request on the
+              // incumbent would meet the seat-authority refusal (:13042-13053).
+              // The reattach sends it on the incumbent instead if its setup
+              // turns out not to have been written.
+              this.deferredMatchReattach = this.confirmingAttachment;
             } else if (this.draftCode && this.draftToken) {
               this.send({
                 type: "ReconnectDraft",
