@@ -441,8 +441,9 @@ fn parse_replacement_line_inner(
     }
 
     // --- "Prevent all/the next N damage" patterns (CR 615) ---
-    if let Some(def) = parse_damage_to_player_instead_followup(&norm_lower, &text) {
-        return Some(def);
+    if let Some(lowered) = parse_damage_to_player_instead_followup(&norm_lower, &text) {
+        *history = lowered.history;
+        return Some(lowered.value);
     }
     if let Some(lowered) =
         parse_damage_to_self_instead_followup_with_provenance(&norm_lower, &normalized, &text)
@@ -14078,7 +14079,7 @@ fn parse_damage_to_self_instead_followup(
 fn parse_damage_to_player_instead_followup(
     norm_lower: &str,
     original_text: &str,
-) -> Option<ReplacementDefinition> {
+) -> Option<Lowered<ReplacementDefinition>> {
     let total_len = norm_lower.len();
     let ((effect_start, effect_len), rest) = nom_on_lower(original_text, norm_lower, |i| {
         let (i, _) = tag("if damage would be dealt to a player, ").parse(i)?;
@@ -14095,16 +14096,18 @@ fn parse_damage_to_player_instead_followup(
     }
 
     let effect_text = original_text.get(effect_start..effect_start + effect_len)?;
-    let mut followup = parse_effect_chain(effect_text, AbilityKind::Spell);
-    rewrite_replacement_event_recipient_to_post_replacement_target(&mut followup);
+    let mut followup =
+        super::oracle_effect::parse_effect_chain_with_provenance(effect_text, AbilityKind::Spell);
+    rewrite_replacement_event_recipient_to_post_replacement_target(&mut followup.value);
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::DamageDone)
+    Some(Lowered {
+        value: ReplacementDefinition::new(ReplacementEvent::DamageDone)
             .prevention_shield(PreventionAmount::All)
             .damage_target_filter(damage_target_any_player())
-            .execute(followup)
+            .execute(followup.value)
             .description(original_text.to_string()),
-    )
+        history: followup.history,
+    })
 }
 
 /// CR 604.2: Strip a leading "as long as <condition>, " gate — a printed static

@@ -5320,6 +5320,7 @@ fn try_split_pump_compound(
     // pump as a `ChooseOneOf` sub_ability keyed to the pumped creature
     // (`ParentTarget`). Non-modal remainders ("you gain 1 life") fall back to
     // the general effect-chain parse.
+    let mut history = Vec::new();
     let sub_ability = if remainder.is_empty() {
         None
     } else if let Some((choice, choice_duration)) =
@@ -5328,14 +5329,18 @@ fn try_split_pump_compound(
         duration = duration.or(choice_duration);
         Some(Box::new(choice))
     } else {
-        Some(Box::new(super::parse_effect_chain(
-            remainder,
-            AbilityKind::Spell,
-        )))
+        let lowered = super::parse_effect_chain_with_provenance(remainder, AbilityKind::Spell);
+        history.extend(lowered.history.into_iter().map(|record| {
+            crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                record,
+                crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+            )
+        }));
+        Some(Box::new(lowered.value))
     };
     Some(ParsedEffectClause {
-        history: Vec::new(),
-        head_text: None,
+        history,
+        head_text: Some(pump_part.to_string()),
         optional_targeting: false,
         unlowered_guard: None,
         effect,

@@ -14,7 +14,7 @@ use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
-use super::oracle_effect::parse_effect_chain;
+use super::oracle_effect::parse_effect_chain_with_provenance;
 use super::oracle_ir::history_provenance::Lowered;
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_nom::primitives as nom_primitives;
@@ -180,7 +180,7 @@ pub(crate) fn parse_saga_chapters(lines: &[&str], _card_name: &str) -> SagaChapt
             // parsing would mis-split the opener and leave the outcome clauses
             // Unimplemented. Try it first, mirroring the spell-line dispatch in
             // `oracle.rs`.
-            let mut history = Vec::new();
+            let history;
             let mut execute = match crate::parser::oracle_vote::parse_vote_block_with_provenance(
                 effect_text,
                 AbilityKind::Spell,
@@ -207,14 +207,18 @@ pub(crate) fn parse_saga_chapters(lines: &[&str], _card_name: &str) -> SagaChapt
                 // modal path's modes do. The chapter head establishes no
                 // self-reference host or event-object antecedent, so every
                 // other context field stays at its default.
-                None => crate::parser::oracle_modal::try_parse_inline_modal_ability(
+                None => {
+                    let lowered = crate::parser::oracle_modal::try_parse_inline_modal_ability_with_provenance(
                     effect_text,
                     &crate::parser::oracle_ir::context::ParseContext {
                         in_trigger: true,
                         ..Default::default()
                     },
                 )
-                .unwrap_or_else(|| parse_effect_chain(effect_text, AbilityKind::Spell)),
+                    .unwrap_or_else(|| parse_effect_chain_with_provenance(effect_text, AbilityKind::Spell));
+                    history = lowered.history;
+                    lowered.value
+                }
             };
             // CR 611.2a + CR 714.2b: A chapter ability that grants an ability with no
             // explicit duration in its Oracle text creates a continuous effect that

@@ -582,11 +582,11 @@ mod tests {
             &InstructionPath(vec![InstructionStep::ChoiceBranch(0)]),
             &mut lowered.value,
         );
-        sibling.effect = Box::new(Effect::SetTapState {
+        *sibling.effect = Effect::SetTapState {
             target: original,
             scope: crate::types::ability::EffectScope::All,
             state: crate::types::ability::TapStateChange::Tap,
-        });
+        };
         assert!(
             flagged(text, &lowered),
             "the sibling cannot vouch for branch 1"
@@ -894,7 +894,7 @@ mod tests {
         else {
             unreachable!()
         };
-        per_choice_effect[0] = Box::new(misplaced);
+        *per_choice_effect[0] = misplaced;
         assert!(flagged(text, &lowered));
     }
 
@@ -925,7 +925,7 @@ mod tests {
         else {
             unreachable!()
         };
-        per_choice_effect[0] = Box::new(misplaced);
+        *per_choice_effect[0] = misplaced;
         assert!(flagged(text, &lowered));
     }
 
@@ -996,8 +996,76 @@ mod tests {
     }
 
     #[test]
+    fn casting_prohibition_tail_keeps_its_history_producer() {
+        let text = "Your opponents can't cast spells, tap all creatures ~ blocked this turn.";
+        let mut lowered = lower(text, source_context());
+        assert!(matches!(
+            lowered.value.effect.as_ref(),
+            Effect::AddRestriction { .. }
+        ));
+        let path = InstructionPath(vec![InstructionStep::SubAbility]);
+        assert!(matches!(
+            path.resolve(&lowered.value).unwrap().effect.as_ref(),
+            Effect::SetTapState { .. }
+        ));
+        assert_eq!(lowered.history.len(), 1);
+        assert_eq!(lowered.history[0].locator.as_ref(), Some(&path));
+        assert!(!flagged(text, &lowered));
+        let misplaced = path.resolve(&lowered.value).unwrap().clone();
+        replace_population(resolve_mut(&path, &mut lowered.value), bare());
+        lowered.value.else_ability = Some(Box::new(misplaced));
+        assert!(flagged(text, &lowered));
+    }
+
+    #[test]
     fn replacement_document_seam_keeps_execute_history() {
         let text = "If damage would be dealt to ~, tap all creatures ~ blocked this turn instead.";
+        let mut doc = crate::parser::oracle::parse_oracle_ir(
+            text,
+            "History witness",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let replacement = doc
+            .items
+            .iter_mut()
+            .find_map(|item| match &mut item.node {
+                super::super::doc::OracleNodeIr::Replacement(replacement) => Some(replacement),
+                _ => None,
+            })
+            .expect("replacement document route");
+        assert_eq!(replacement.history.len(), 1);
+        assert!(matches!(
+            replacement
+                .definition
+                .execute
+                .as_ref()
+                .unwrap()
+                .effect
+                .as_ref(),
+            Effect::SetTapState { .. }
+        ));
+        assert!(!document_flagged(&mut doc));
+        let replacement = doc
+            .items
+            .iter_mut()
+            .find_map(|item| match &mut item.node {
+                super::super::doc::OracleNodeIr::Replacement(replacement) => Some(replacement),
+                _ => None,
+            })
+            .unwrap();
+        let execute = replacement.definition.execute.as_mut().unwrap();
+        replace_population(execute, bare());
+        execute.sub_ability = Some(Box::new(
+            lower("Tap all creatures ~ blocked this turn.", source_context()).value,
+        ));
+        assert!(document_flagged(&mut doc));
+    }
+
+    #[test]
+    fn player_damage_replacement_document_seam_keeps_execute_history() {
+        let text = "If damage would be dealt to a player, that player taps all creatures ~ blocked this turn instead.";
         let mut doc = crate::parser::oracle::parse_oracle_ir(
             text,
             "History witness",
@@ -1069,6 +1137,111 @@ mod tests {
         assert!(matches!(
             definition.execute.as_ref().unwrap().effect.as_ref(),
             Effect::Vote { .. }
+        ));
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].locator.as_ref(), Some(&path));
+        assert!(!document_flagged(&mut doc));
+        let definition = doc
+            .items
+            .iter_mut()
+            .find_map(|item| match &mut item.node {
+                super::super::doc::OracleNodeIr::Trigger(
+                    super::super::trigger::TriggerNodeIr::Assembled { definition, .. },
+                ) => Some(definition),
+                _ => None,
+            })
+            .unwrap();
+        let execute = definition.execute.as_mut().unwrap();
+        replace_population(resolve_mut(&path, execute), bare());
+        execute.sub_ability = Some(Box::new(
+            lower("Tap all creatures ~ blocked this turn.", source_context()).value,
+        ));
+        assert!(document_flagged(&mut doc));
+    }
+
+    #[test]
+    fn ordinary_saga_document_seam_keeps_execute_history() {
+        let text = "I — Tap all creatures ~ blocked this turn.";
+        let mut doc = crate::parser::oracle::parse_oracle_ir(
+            text,
+            "History witness",
+            &[],
+            &["Enchantment".to_string()],
+            &["Saga".to_string()],
+        );
+        let (definition, history) = doc
+            .items
+            .iter_mut()
+            .find_map(|item| match &mut item.node {
+                super::super::doc::OracleNodeIr::Trigger(
+                    super::super::trigger::TriggerNodeIr::Assembled {
+                        definition,
+                        history,
+                        ..
+                    },
+                ) => Some((definition, history)),
+                _ => None,
+            })
+            .expect("assembled chapter document route");
+        let path = InstructionPath::default();
+        assert!(matches!(
+            definition.execute.as_ref().unwrap().effect.as_ref(),
+            Effect::SetTapState { .. }
+        ));
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].locator.as_ref(), Some(&path));
+        assert!(!document_flagged(&mut doc));
+        let definition = doc
+            .items
+            .iter_mut()
+            .find_map(|item| match &mut item.node {
+                super::super::doc::OracleNodeIr::Trigger(
+                    super::super::trigger::TriggerNodeIr::Assembled { definition, .. },
+                ) => Some(definition),
+                _ => None,
+            })
+            .unwrap();
+        let execute = definition.execute.as_mut().unwrap();
+        replace_population(resolve_mut(&path, execute), bare());
+        execute.sub_ability = Some(Box::new(
+            lower("Tap all creatures ~ blocked this turn.", source_context()).value,
+        ));
+        assert!(document_flagged(&mut doc));
+    }
+
+    #[test]
+    fn modal_saga_document_seam_keeps_mode_history() {
+        let text = "I — Choose one — • Draw a card. • Tap all creatures ~ blocked this turn.";
+        let mut doc = crate::parser::oracle::parse_oracle_ir(
+            text,
+            "History witness",
+            &[],
+            &["Enchantment".to_string()],
+            &["Saga".to_string()],
+        );
+        let (definition, history) = doc
+            .items
+            .iter_mut()
+            .find_map(|item| match &mut item.node {
+                super::super::doc::OracleNodeIr::Trigger(
+                    super::super::trigger::TriggerNodeIr::Assembled {
+                        definition,
+                        history,
+                        ..
+                    },
+                ) => Some((definition, history)),
+                _ => None,
+            })
+            .expect("assembled chapter document route");
+        let path = InstructionPath(vec![InstructionStep::Mode(1)]);
+        assert!(definition.execute.as_ref().unwrap().modal.is_some());
+        assert_eq!(definition.execute.as_ref().unwrap().mode_abilities.len(), 2);
+        assert!(matches!(
+            path.resolve(definition.execute.as_ref().unwrap())
+                .unwrap()
+                .effect
+                .as_ref(),
+            Effect::SetTapState { .. }
         ));
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].locator.as_ref(), Some(&path));
@@ -1189,9 +1362,9 @@ mod tests {
         assert!(!flagged(text, &lowered));
         replace_population(resolve_mut(&path, &mut lowered.value), bare());
         // Evidence on the target-declaration wrapper cannot satisfy its child.
-        lowered.value.effect = Box::new(Effect::TargetOnly {
+        *lowered.value.effect = Effect::TargetOnly {
             target: population(CombatRelationSubject::Source),
-        });
+        };
         assert!(flagged(text, &lowered));
     }
 

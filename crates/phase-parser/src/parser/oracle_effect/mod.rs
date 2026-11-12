@@ -6283,15 +6283,24 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         .trim_start()
         .trim_start_matches([',', ' '])
         .trim_start();
+    let mut history = Vec::new();
     let sub_ability = if tail.is_empty() {
         None
     } else {
-        Some(Box::new(parse_effect_chain(tail, AbilityKind::Spell)))
+        let lowered = parse_effect_chain_with_provenance(tail, AbilityKind::Spell);
+        history.extend(lowered.history.into_iter().map(|record| {
+            crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                record,
+                crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+            )
+        }));
+        Some(Box::new(lowered.value))
     };
 
     let clause = ParsedEffectClause {
-        history: Vec::new(),
-        head_text: None,
+        history,
+        // The continuation owns its text and history, independently of this restriction.
+        head_text: Some(tp.original[..tp.original.len() - tail.len()].to_string()),
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::AddRestriction {
@@ -44941,6 +44950,13 @@ pub(super) fn parse_child_ability_with_parent_target(
 
 /// The algebraic identity T8 rests on, written literally:
 /// `parse_effect_chain(t, k)` **is** `lower_ability_ir(&parse_ability_ir_standalone(t, k))`.
+pub(crate) fn parse_effect_chain_with_provenance(
+    text: &str,
+    kind: AbilityKind,
+) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
+    lower_ability_ir_with_provenance(&parse_ability_ir_standalone(text, kind))
+}
+
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     lower_ability_ir(&parse_ability_ir_standalone(text, kind))
 }
