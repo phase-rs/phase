@@ -176,7 +176,7 @@ fn laboratory_maniac_draw_from_empty_library_wins() {
         .events;
     runner.advance_until_stack_empty();
 
-    // CR 104.2b: the winner's opponent loses the game.
+    // CR 104.2b: Laboratory Maniac's controller wins the game; the opponent's PlayerLost records OpponentWon.
     let losses: Vec<_> = events
         .iter()
         .filter_map(|event| match event {

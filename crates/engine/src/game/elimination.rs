@@ -243,9 +243,9 @@ pub(crate) fn eliminate_players(
         }
     }
     let leaving_set: HashSet<PlayerId> = leaving.iter().map(|&(player, _)| player).collect();
-    // CR 104.3: every leaving player loses the game. Emitted before any sweep so
-    // a concession's own trigger collection over `events[first_event..]` sees it
-    // (CR 603.10f).
+    // CR 104.3: every leaving player loses the game. Emitted inside
+    // `events[first_event..]`, which a concession's own trigger collection
+    // scans (CR 603.2).
     events.extend(
         leaving
             .iter()
