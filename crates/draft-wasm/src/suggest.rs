@@ -778,7 +778,7 @@ mod tests {
 
     fn tied_color_pool() -> Vec<DraftCardInstance> {
         vec![
-            instance("Alabaster Unicorn", &["W"], 3, "Creature — Unicorn"),
+            instance("Pearled Unicorn", &["W"], 3, "Creature — Unicorn"),
             instance("Wind Drake", &["U"], 3, "Creature — Drake"),
             instance("Scathe Zombies", &["B"], 3, "Creature — Zombie"),
             instance("Gray Ogre", &["R"], 3, "Creature — Ogre"),
@@ -849,7 +849,7 @@ mod tests {
                 .iter()
                 .map(String::as_str)
                 .collect::<HashSet<_>>(),
-            HashSet::from(["Alabaster Unicorn", "Wind Drake"]),
+            HashSet::from(["Pearled Unicorn", "Wind Drake"]),
         );
         assert_eq!(deck.main_deck.len(), 2);
         assert_eq!(
