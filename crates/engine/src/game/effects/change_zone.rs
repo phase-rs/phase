@@ -4118,7 +4118,7 @@ mod tests {
     use crate::types::counter::CounterType;
     use crate::types::game_state::{
         BatchCompletion, ChangeZoneBatchTail, ChangeZoneCountPolicy, ChangeZoneSettled,
-        PendingContinuation,
+        PendingContinuation, StagedBatchMemberState,
     };
     use crate::types::game_state::{ExileLinkKind, StackEntry, StackEntryKind, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
@@ -7155,7 +7155,6 @@ mod tests {
     /// is therefore every undelivered member after the asking one, whatever
     /// its staged state, carrying its own request exactly as before.
     fn downgrade_staged_change_zone_to_legacy(state: &mut GameState) {
-        use crate::types::game_state::StagedBatchMemberState;
         let owner = state
             .resolution_stack
             .take_active_batch_delivery()
@@ -13837,7 +13836,7 @@ mod tests {
             "expected first ReplacementChoice, got {:?}",
             state.waiting_for
         );
-        // R4c: the staged batch's cursor member request is the delivery
+        // R4c: the staged batch's asking member request is the delivery
         // authority and carries the same face-down profile the legacy carrier
         // held; the behavior assertions below are unchanged.
         let pending = staged_current_member_request(&state)

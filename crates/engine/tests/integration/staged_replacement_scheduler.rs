@@ -345,35 +345,34 @@ fn day_of_judgment_asks_exchanged_progenitus_commanders_in_apnap_order() {
         let mut scenario =
             GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
         scenario.at_phase(Phase::PreCombatMain);
-        let progenitus = |scenario: &mut GameScenario, owner: PlayerId| {
+        // CR 613.1b: each commander is under the other player's control, set
+        // as its Layer 2 base controller. Nearest printed source: Aminatou,
+        // the Fateshifter's "Each player gains control of all nonland
+        // permanents other than Aminatou controlled by the next player in the
+        // chosen direction", which does not target.
+        let progenitus = |scenario: &mut GameScenario, owner: PlayerId, controller: PlayerId| {
             scenario
                 .add_creature_from_oracle(owner, "Progenitus", 10, 10, PROGENITUS)
                 .as_legendary()
                 .with_subtypes(vec!["Hydra", "Avatar"])
                 .commander()
+                .controlled_by(controller)
                 .id()
         };
-        let p1_commander = progenitus(&mut scenario, P1);
-        let p0_commander = progenitus(&mut scenario, P0);
+        let p1_commander = progenitus(&mut scenario, P1, P0);
+        let p0_commander = progenitus(&mut scenario, P0, P1);
         let judgment = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
         let mut runner = scenario.build();
-        // Infrastructure exception: the exchanged control (an Insurrection-style
-        // effect) is set on the objects directly.
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&p1_commander)
-            .unwrap()
-            .controller = P0;
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&p0_commander)
-            .unwrap()
-            .controller = P1;
-        engine::game::layers::flush_layers(runner.state_mut());
 
         cast_until_decision(&mut runner, judgment);
+        for (commander, owner, controller) in [(p1_commander, P1, P0), (p0_commander, P0, P1)] {
+            let object = &runner.state().objects[&commander];
+            assert_eq!(
+                (object.owner, object.controller, object.zone),
+                (owner, controller, Zone::Battlefield),
+                "{case}: control is still exchanged at the first choice"
+            );
+        }
         round_trip(&mut runner);
         let mut asked = Vec::new();
         for _ in 0..4 {
@@ -383,7 +382,7 @@ fn day_of_judgment_asks_exchanged_progenitus_commanders_in_apnap_order() {
             else {
                 break;
             };
-            asked.push(player);
+            asked.push(asked_choice(&runner));
             let take_command = if player == P0 {
                 p0_takes_command
             } else {
@@ -399,7 +398,11 @@ fn day_of_judgment_asks_exchanged_progenitus_commanders_in_apnap_order() {
                 .act(GameAction::ChooseReplacement { index })
                 .expect("the owner answers");
         }
-        assert_eq!(asked, vec![P0, P1], "{case}: owners choose APNAP");
+        assert_eq!(
+            asked,
+            vec![(P0, p0_commander), (P1, p1_commander)],
+            "{case}: each owner chooses for their own commander, APNAP"
+        );
         finish(&mut runner);
         let (command, library) = if p0_takes_command {
             (p0_commander, p1_commander)
@@ -847,16 +850,19 @@ const HERALDIC_BANNER: &str = "As this artifact enters, choose a color.\nCreatur
 /// an as-enters color choice to each player while Root Maze ("Artifacts and
 /// lands enter tapped") also applies to each entry. Coldsteel Heart adds its
 /// own "This artifact enters tapped". Whichever of an entry's replacements the
-/// pipeline reaches first, each held color choice is asked exactly once, P0's
-/// first, and both artifacts enter tapped with the chosen color.
+/// pipeline reaches first and whichever card is earlier in the graveyards,
+/// each held color choice is asked exactly once, P0's first, and both
+/// artifacts enter tapped with the chosen color.
 #[test]
 fn open_the_vaults_asks_each_held_color_choice_once() {
     for (name, oracle) in [
         ("Coldsteel Heart", COLDSTEEL_HEART),
         ("Heraldic Banner", HERALDIC_BANNER),
     ] {
-        for maze_owner in [P0, P1] {
-            let case = format!("{name}, Root Maze controlled by {maze_owner:?}");
+        for (maze_owner, p1_card_first) in [(P0, true), (P0, false), (P1, true), (P1, false)] {
+            let case = format!(
+                "{name}, Root Maze controlled by {maze_owner:?}, p1_card_first={p1_card_first}"
+            );
             let mut scenario = GameScenario::new();
             scenario.at_phase(Phase::PreCombatMain);
             scenario.add_enchantment_from_oracle(maze_owner, "Root Maze", ROOT_MAZE);
@@ -866,8 +872,13 @@ fn open_the_vaults_asks_each_held_color_choice_once() {
                     .from_oracle_text(oracle)
                     .id()
             };
-            let p1_artifact = artifact(P1);
-            let p0_artifact = artifact(P0);
+            let (p0_artifact, p1_artifact) = if p1_card_first {
+                let p1 = artifact(P1);
+                (artifact(P0), p1)
+            } else {
+                let p0 = artifact(P0);
+                (p0, artifact(P1))
+            };
             let vaults = zero_cost_spell(&mut scenario, "Open the Vaults", OPEN_THE_VAULTS);
             let mut runner = scenario.build();
 
@@ -880,7 +891,13 @@ fn open_the_vaults_asks_each_held_color_choice_once() {
                         runner.state().waiting_for
                     );
                 };
-                asked.push(player);
+                let subject = runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .and_then(|pending| pending.proposed.affected_object_id())
+                    .expect("the color choice is about an entering artifact");
+                asked.push((player, subject));
                 round_trip(&mut runner);
                 runner
                     .act(GameAction::ChooseOption {
@@ -888,7 +905,7 @@ fn open_the_vaults_asks_each_held_color_choice_once() {
                     })
                     .expect("the entrant's controller chooses a color");
             }
-            assert_eq!(asked, vec![P0, P1], "{case}");
+            assert_eq!(asked, vec![(P0, p0_artifact), (P1, p1_artifact)], "{case}");
             finish(&mut runner);
             for (artifact, color) in [(p0_artifact, "Red"), (p1_artifact, "Green")] {
                 let object = &runner.state().objects[&artifact];
@@ -1100,14 +1117,17 @@ fn wrath_work(n: usize, umbras: bool) -> ReplacementWork {
 /// the replacement pipeline, and the work per member is a constant, measured at
 /// three population sizes so the fixed cost of casting cancels out:
 /// - no choice: exactly two pipeline entries (the outer destruction and its
-///   move, CR 701.8a) and two index rebuilds per member; the removed forecast
-///   ran the pipeline twice more per member before the live consult;
-/// - an Umbra armor choice per member (CR 702.89a): at most four entries and
+///   move, CR 701.8a) and two index rebuilds per member, and no dependency
+///   refresh per member (one for the whole sweep); the removed forecast ran
+///   the pipeline twice more per member before the live consult;
+/// - an Umbra armor choice per member (CR 702.89a): exactly two entries and
 ///   four rebuilds per member, covering its consult, the answer's
-///   continuation and the chosen Aura's own destruction.
+///   continuation and the chosen Aura's own destruction, and two dependency
+///   refreshes per choice (one when it is held, one when it is answered), each
+///   a single pass over the members that never enters the pipeline.
 #[test]
 fn staged_scheduler_consults_each_member_once() {
-    for umbras in [false, true] {
+    for (umbras, expected) in [(false, [2, 2, 0]), (true, [2, 4, 2])] {
         let [w1, w2, w3] = [8, 16, 24].map(|n| wrath_work(n, umbras));
         let per_member = |pick: fn(&ReplacementWork) -> u64| {
             let first = (pick(&w2) - pick(&w1)) / 8;
@@ -1118,15 +1138,16 @@ fn staged_scheduler_consults_each_member_once() {
             );
             first
         };
-        let entries = per_member(|work| work.pipeline_entries);
-        let rebuilds = per_member(|work| work.index_rebuilds);
-        if umbras {
-            assert!(entries <= 4, "{entries} pipeline entries per member");
-            assert!(rebuilds <= 4, "{rebuilds} index rebuilds per member");
-        } else {
-            assert_eq!(entries, 2, "no choice: each member is consulted once");
-            assert_eq!(rebuilds, 2, "one index rebuild per consult");
-        }
+        assert_eq!(
+            [
+                per_member(|work| work.pipeline_entries),
+                per_member(|work| work.index_rebuilds),
+                per_member(|work| work.blocking_refreshes),
+            ],
+            expected,
+            "umbras={umbras}: pipeline entries, index rebuilds and dependency \
+             refreshes per member: {w1:?} {w2:?} {w3:?}"
+        );
     }
 }
 
@@ -1238,6 +1259,127 @@ fn a_pre_scheduler_save_without_its_pause_is_refused() {
         error.contains("a consulted staged member follows the approval cursor"),
         "{error}"
     );
+}
+
+/// Apply `edit` to every JSON object under `value`.
+fn edit_objects(
+    value: &mut serde_json::Value,
+    edit: &mut dyn FnMut(&mut serde_json::Map<String, serde_json::Value>),
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            edit(map);
+            for child in map.values_mut() {
+                edit_objects(child, edit);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                edit_objects(item, edit);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// CR 616.1 + CR 101.4c: checked restore refuses a save at the selection
+/// prompt (Wrath of God over P1's two creatures, each wearing Hyena Umbra and
+/// Felidar Umbra) whose held decisions do not agree with the game: a selection
+/// that omits one of its chooser's decisions, a held decision whose chooser is
+/// no seat, two held decisions about one object, and an asking member that
+/// still holds its decision. The untouched save restores.
+#[test]
+fn a_selection_save_with_inconsistent_held_decisions_is_refused() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut attachments = Vec::new();
+    for name in ["Grizzly Bears", "Runeclaw Bear"] {
+        let creature = scenario.add_creature(P1, name, 2, 2).id();
+        attachments.push((
+            umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA),
+            creature,
+        ));
+        attachments.push((
+            umbra(&mut scenario, P1, "Felidar Umbra", FELIDAR_UMBRA),
+            creature,
+        ));
+    }
+    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+    let mut runner = scenario.build();
+    for (aura, host) in attachments {
+        attach(&mut runner, aura, host);
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    cast_until_decision(&mut runner, wrath);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder { .. }
+    ));
+    let saved = serde_json::to_value(PersistedGameState::capture(runner.state().clone()))
+        .expect("the selection prompt serializes");
+    restore_fixture(&saved.to_string()).expect("the untouched save restores");
+
+    type Edit = fn(&mut serde_json::Map<String, serde_json::Value>, &mut Vec<serde_json::Value>);
+    let cases: [(&str, Edit, &str); 4] = [
+        (
+            "the selection omits a decision",
+            |map, _| {
+                if map.get("type").and_then(|kind| kind.as_str())
+                    == Some("ReplacementDecisionOrder")
+                {
+                    map["data"]["objects"]
+                        .as_array_mut()
+                        .expect("the offered decisions")
+                        .pop();
+                }
+            },
+            "a replacement decision order does not offer its first chooser's decisions",
+        ),
+        (
+            "a held chooser is no seat",
+            |map, _| {
+                if let Some(decision) = map.get_mut("held_decision").filter(|held| held.is_object())
+                {
+                    decision["chooser"] = serde_json::json!(7);
+                }
+            },
+            "a held staged decision's chooser is not in the game",
+        ),
+        (
+            "two held decisions are about one object",
+            |map, seen| {
+                if let Some(decision) = map.get_mut("held_decision").filter(|held| held.is_object())
+                {
+                    match seen.first() {
+                        Some(first) => decision["pending"] = first.clone(),
+                        None => seen.push(decision["pending"].clone()),
+                    }
+                }
+            },
+            "two held staged decisions are about the same object",
+        ),
+        (
+            "the asking member still holds its decision",
+            |map, _| {
+                if map.contains_key("cursor") && map.contains_key("members") {
+                    let first = map["members"][0]["identity"].clone();
+                    map.insert("asking".to_string(), first);
+                }
+            },
+            "the asking staged member also holds its decision",
+        ),
+    ];
+    for (case, edit, expected) in cases {
+        let mut tampered = saved.clone();
+        let mut seen = Vec::new();
+        edit_objects(&mut tampered, &mut |map| edit(map, &mut seen));
+        assert_ne!(tampered, saved, "{case}: the edit applies");
+        let error = match restore_fixture(&tampered.to_string()) {
+            Ok(_) => panic!("{case}: the save must not restore"),
+            Err(error) => error,
+        };
+        assert!(error.contains(expected), "{case}: {error}");
+    }
 }
 
 /// CR 101.4c: at the replacement decision order prompt, the AI's legal actions
@@ -1438,4 +1580,80 @@ fn a_departure_that_hands_a_choice_to_an_earlier_seat_restarts_apnap() {
     finish(&mut runner);
     assert_eq!(zone(&runner, bear), Zone::Exile);
     assert_eq!(zone(&runner, c), Zone::Battlefield);
+}
+
+/// CR 101.4c + CR 101.4d + CR 800.4a: the same three-player Wrath of God, with
+/// P1 controlling two creatures that each wear Hyena Umbra and Spider Umbra, so
+/// P1 is choosing which of their two choices to make first while P2 holds the
+/// choice for P0's Runeclaw Bear (Control Magic, with P1's Dauthi Voidwalker
+/// and Rest in Peace both applying to its move). P2 concedes while P1's
+/// selection is open: the Bear returns to P0, its choice becomes P0's, and P0
+/// is asked before P1 selects. P1's selection is then offered again.
+#[test]
+fn a_departure_during_a_selection_asks_the_earlier_seat_first() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P1, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER);
+    scenario.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE);
+    let c1 = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let c1_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let c1_spider = umbra(&mut scenario, P1, "Spider Umbra", SPIDER_UMBRA);
+    let c2 = scenario.add_creature(P1, "Balduvian Bears", 2, 2).id();
+    let c2_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let c2_spider = umbra(&mut scenario, P1, "Spider Umbra", SPIDER_UMBRA);
+    let bear = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+    let magic = umbra(&mut scenario, p2, "Control Magic", CONTROL_MAGIC);
+    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+    let mut runner = scenario.build();
+    attach(&mut runner, c1_hyena, c1);
+    attach(&mut runner, c1_spider, c1);
+    attach(&mut runner, c2_hyena, c2);
+    attach(&mut runner, c2_spider, c2);
+    attach(&mut runner, magic, bear);
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&bear].controller, p2);
+
+    cast_until_decision(&mut runner, wrath);
+    let selection = WaitingFor::ReplacementDecisionOrder {
+        player: P1,
+        objects: vec![c1, c2],
+    };
+    assert_eq!(
+        runner.state().waiting_for,
+        selection,
+        "P1 selects first: P0 has no choice yet"
+    );
+    runner
+        .act(GameAction::Concede { player_id: p2 })
+        .expect("P2 concedes while P1's selection is open");
+    assert_eq!(runner.state().objects[&bear].controller, P0);
+    assert_eq!(
+        asked_choice(&runner),
+        (P0, bear),
+        "P0's choice now comes before P1's selection"
+    );
+    round_trip(&mut runner);
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P0 answers");
+    assert_eq!(
+        runner.state().waiting_for,
+        selection,
+        "P1's selection is offered again"
+    );
+    select_decision(&mut runner, c2);
+    assert_eq!(asked_choice(&runner), (P1, c2));
+    choose_source(&mut runner, c2_spider);
+    assert_eq!(asked_choice(&runner), (P1, c1));
+    choose_source(&mut runner, c1_hyena);
+    finish(&mut runner);
+    assert_eq!(zone(&runner, bear), Zone::Exile);
+    assert_eq!(zone(&runner, c1), Zone::Battlefield);
+    assert_eq!(zone(&runner, c2), Zone::Battlefield);
+    // Rest in Peace exiles each destroyed Aura.
+    assert_eq!(zone(&runner, c1_hyena), Zone::Exile);
+    assert_eq!(attached_to(&runner, c1_spider), Some(c1));
+    assert_eq!(zone(&runner, c2_spider), Zone::Exile);
+    assert_eq!(attached_to(&runner, c2_hyena), Some(c2));
 }

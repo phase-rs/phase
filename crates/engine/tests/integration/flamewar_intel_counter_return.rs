@@ -37,6 +37,7 @@ fn flamewar_returns_only_own_exiled_cards_with_intel_counters() {
     let flamewar = scenario
         .add_creature_from_oracle(P0, "Flamewar, Brash Veteran", 3, 2, FLAMEWAR)
         .as_legendary()
+        .as_artifact_creature()
         .with_subtypes(vec!["Robot"])
         .id();
     scenario.add_basic_land(P0, ManaColor::Red);

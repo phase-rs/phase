@@ -9718,12 +9718,15 @@ pub(crate) fn event_is_accounted(event: &ProposedEvent) -> bool {
 
 /// Replacement-pipeline work counted by [`measure_replacement_work`]: one
 /// `pipeline_entries` per entry into the replacement loop (a fresh event or an
-/// answered decision continuing it) and one `index_rebuilds` per full rebuild
-/// of the active replacement index, which scans every object.
+/// answered decision continuing it), one `index_rebuilds` per full rebuild
+/// of the active replacement index, which scans every object, and one
+/// `blocking_refreshes` per pass of a staged population over its members to
+/// recompute which of them wait on an outstanding decision.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReplacementWork {
     pub pipeline_entries: u64,
     pub index_rebuilds: u64,
+    pub blocking_refreshes: u64,
 }
 
 thread_local! {
@@ -9745,7 +9748,7 @@ pub fn measure_replacement_work<R>(f: impl FnOnce() -> R) -> (R, ReplacementWork
     (result, work)
 }
 
-fn count_replacement_work(bump: impl FnOnce(&mut ReplacementWork)) {
+pub(crate) fn count_replacement_work(bump: impl FnOnce(&mut ReplacementWork)) {
     REPLACEMENT_WORK.with(|cell| {
         if let Some(mut work) = cell.get() {
             bump(&mut work);

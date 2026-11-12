@@ -28,7 +28,7 @@ use crate::types::game_state::{
     StagedLibraryArrangement, StagedMemberOperation, StagedMemberOutcome, WaitingFor,
     ZoneDeliveryExileTracking, ZoneMoveCompletion,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::types::format::EntryOwnership;
 use crate::types::identifiers::{LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef};
@@ -2012,16 +2012,14 @@ fn run_staged_batch(
     events: &mut Vec<GameEvent>,
     run_start: usize,
 ) -> StagedStop {
-    // The members this run consulted again because their held decision no
-    // longer stood; see `schedule_staged_decisions`.
-    let mut reconsulted = Vec::new();
+    let mut run = StagedApprovalRun::default();
     loop {
         let Some(stage) = owner.staged.as_ref().map(|staged| staged.stage) else {
             return StagedStop::Delivered;
         };
         match stage {
             BatchDeliveryStage::Approving => {
-                match drive_staged_approval(state, owner, events, &mut reconsulted) {
+                match drive_staged_approval(state, owner, events, &mut run) {
                     StagedConsult::Continue => continue,
                     StagedConsult::Paused => {
                         // A paused batch is a savable state: project the
@@ -2057,6 +2055,20 @@ fn run_staged_batch(
             }
         }
     }
+}
+
+/// What one `run_staged_batch` call remembers across its approval steps.
+#[derive(Default)]
+struct StagedApprovalRun {
+    /// The members this run consulted again because their held decision no
+    /// longer stood; see `schedule_staged_decisions`.
+    reconsulted: Vec<ObjectIncarnationRef>,
+    /// Whether every member's `blocked` flag matches the outstanding decisions
+    /// and no member behind the cursor is waiting to be consulted. Both depend
+    /// only on the outstanding decisions, so they are recomputed when a
+    /// decision is held, published or dropped, and not for every member of the
+    /// sweep.
+    blocking_settled: bool,
 }
 
 /// The index of the staged member a frozen identity names.
@@ -2106,7 +2118,7 @@ fn drive_staged_approval(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
     events: &mut Vec<GameEvent>,
-    reconsulted: &mut Vec<ObjectIncarnationRef>,
+    run: &mut StagedApprovalRun,
 ) -> StagedConsult {
     // The asking member continues only its own consultation: an answered
     // outer Destroy runs its inner move next.
@@ -2114,6 +2126,7 @@ fn drive_staged_approval(
         if staged_decision_is_published(state) {
             return StagedConsult::Paused;
         }
+        run.blocking_settled = false;
         let member = owner.staged.as_ref().expect("asking is staged").members[index].clone();
         if let (
             StagedMemberOperation::Destroy(operation),
@@ -2128,17 +2141,24 @@ fn drive_staged_approval(
         release_staged_asking(owner, index);
         return StagedConsult::Continue;
     }
-    refresh_staged_blocking(state, owner);
-    let staged = owner.staged.as_ref().expect("approving owner is staged");
-    // A member blocked by a decision that has since resolved is consulted now.
-    let deferred = staged.members[..staged.cursor.min(staged.members.len())]
-        .iter()
-        .position(|member| member.state == StagedBatchMemberState::Unconsulted && !member.blocked);
-    if let Some(index) = deferred {
-        let point = state.resolution_stack.consult_drain_point();
-        let result = consult_staged_member(state, owner, events, index);
-        return settle_staged_consult(state, owner, index, result, point);
+    if !run.blocking_settled {
+        refresh_staged_blocking(state, owner);
+        let staged = owner.staged.as_ref().expect("approving owner is staged");
+        // A member blocked by a decision that has since resolved is consulted
+        // now.
+        let deferred = staged.members[..staged.cursor.min(staged.members.len())]
+            .iter()
+            .position(|member| {
+                member.state == StagedBatchMemberState::Unconsulted && !member.blocked
+            });
+        if let Some(index) = deferred {
+            let point = state.resolution_stack.consult_drain_point();
+            let result = consult_staged_member(state, owner, events, index);
+            return settle_staged_consult(state, owner, index, result, point);
+        }
+        run.blocking_settled = true;
     }
+    let staged = owner.staged.as_ref().expect("approving owner is staged");
     let cursor = staged.cursor;
     if let Some(member) = staged.members.get(cursor) {
         if member.state == StagedBatchMemberState::Unconsulted && member.blocked {
@@ -2147,9 +2167,16 @@ fn drive_staged_approval(
         }
         let point = state.resolution_stack.consult_drain_point();
         let result = consult_staged_member(state, owner, events, cursor);
+        if result == StagedConsult::Paused {
+            run.blocking_settled = false;
+        }
         return settle_staged_consult(state, owner, cursor, result, point);
     }
-    schedule_staged_decisions(state, owner, reconsulted)
+    let scheduled = schedule_staged_decisions(state, owner, &mut run.reconsulted);
+    if scheduled == StagedConsult::Continue {
+        run.blocking_settled = false;
+    }
+    scheduled
 }
 
 /// After one member's consultation: a parked decision is held when it can be
@@ -2195,7 +2222,8 @@ fn settle_staged_consult(
 /// whose prompt is a replacement-family prompt, no paused cost or discard
 /// carrier, nothing left above the consultation's drain point once its ready
 /// drain is taken, and no drain under a prevention's live child. Any other park
-/// is left published (returns `false`).
+/// is left published (returns `false`): it is asked at once, at its member's
+/// place in the sweep, ahead of the decisions already held.
 fn hold_parked_decision(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
@@ -2289,11 +2317,22 @@ fn decision_subject(pending: &PendingReplacement) -> Option<ObjectId> {
 /// decision is about it, or offers a replacement whose application moves it
 /// (CR 702.89a: Umbra armor destroys its own Aura).
 fn decision_depends_on(state: &GameState, pending: &PendingReplacement, object: ObjectId) -> bool {
-    decision_subject(pending) == Some(object)
-        || pending.candidates.iter().any(|candidate| {
-            candidate.source == object
-                && replacement::replacement_moves_its_source(state, *candidate)
-        })
+    decision_dependents(state, pending).any(|dependent| dependent == object)
+}
+
+/// CR 616.1: the objects whose own move a decision decides; see
+/// [`decision_depends_on`].
+fn decision_dependents<'a>(
+    state: &'a GameState,
+    pending: &'a PendingReplacement,
+) -> impl Iterator<Item = ObjectId> + 'a {
+    decision_subject(pending).into_iter().chain(
+        pending
+            .candidates
+            .iter()
+            .filter(|candidate| replacement::replacement_moves_its_source(state, **candidate))
+            .map(|candidate| candidate.source),
+    )
 }
 
 /// A newly held decision of member `index` decides every other member it
@@ -2329,13 +2368,17 @@ fn withdraw_dependent_holds(
 }
 
 /// CR 616.1: recompute which unconsulted members wait on an outstanding
-/// decision (held, or the published one).
+/// decision (held, or the published one). One pass over the outstanding
+/// decisions and one over the members.
 fn refresh_staged_blocking(state: &GameState, owner: &mut PendingBatchDeliveries) {
+    replacement::count_replacement_work(|work| work.blocking_refreshes += 1);
     let asking = staged_asking_index(owner);
     let Some(staged) = owner.staged.as_mut() else {
         return;
     };
-    let outstanding: Vec<(usize, &PendingReplacement)> = staged
+    // Each object an outstanding decision decides, with the deciding members.
+    let mut deciders: HashMap<ObjectId, Vec<usize>> = HashMap::new();
+    let outstanding = staged
         .members
         .iter()
         .enumerate()
@@ -2345,22 +2388,17 @@ fn refresh_staged_blocking(state: &GameState, owner: &mut PendingBatchDeliveries
                 .as_ref()
                 .map(|decision| (index, &decision.pending))
         })
-        .chain(asking.zip(state.pending_replacement.as_ref()).into_iter())
-        .collect();
-    let blocked: Vec<bool> = staged
-        .members
-        .iter()
-        .enumerate()
-        .map(|(index, member)| {
-            member.state == StagedBatchMemberState::Unconsulted
-                && outstanding.iter().any(|(owner_index, pending)| {
-                    *owner_index != index
-                        && decision_depends_on(state, pending, member.identity.object_id)
-                })
-        })
-        .collect();
-    for (member, blocked) in staged.members.iter_mut().zip(blocked) {
-        member.blocked = blocked;
+        .chain(asking.zip(state.pending_replacement.as_ref()));
+    for (index, pending) in outstanding {
+        for dependent in decision_dependents(state, pending) {
+            deciders.entry(dependent).or_default().push(index);
+        }
+    }
+    for (index, member) in staged.members.iter_mut().enumerate() {
+        member.blocked = member.state == StagedBatchMemberState::Unconsulted
+            && deciders
+                .get(&member.identity.object_id)
+                .is_some_and(|indices| indices.iter().any(|decider| *decider != index));
     }
 }
 
@@ -2376,7 +2414,10 @@ fn schedule_staged_decisions(
     owner: &mut PendingBatchDeliveries,
     reconsulted: &mut Vec<ObjectIncarnationRef>,
 ) -> StagedConsult {
-    retire_moved_held_members(state, owner);
+    if retire_moved_held_members(state, owner) {
+        // The retired decisions no longer block anything.
+        return StagedConsult::Continue;
+    }
     let staged = owner.staged.as_ref().expect("approving owner is staged");
     let held: Vec<(usize, PlayerId, ObjectId)> = staged
         .members
@@ -2433,10 +2474,10 @@ fn schedule_staged_decisions(
 /// CR 400.7: a held member whose own object moved or changed incarnation while
 /// another decision was asked cannot undergo its move; its decision is dropped.
 /// A live child's host keeps its decision: the child's event is another
-/// object's.
-fn retire_moved_held_members(state: &GameState, owner: &mut PendingBatchDeliveries) {
+/// object's. Returns whether any decision was dropped.
+fn retire_moved_held_members(state: &GameState, owner: &mut PendingBatchDeliveries) -> bool {
     let Some(staged) = owner.staged.as_ref() else {
-        return;
+        return false;
     };
     let moved: Vec<usize> = staged
         .members
@@ -2451,6 +2492,7 @@ fn retire_moved_held_members(state: &GameState, owner: &mut PendingBatchDeliveri
         })
         .map(|(index, _)| index)
         .collect();
+    let retired = !moved.is_empty();
     for index in moved {
         if let Some(member) = owner
             .staged
@@ -2461,6 +2503,7 @@ fn retire_moved_held_members(state: &GameState, owner: &mut PendingBatchDeliveri
         }
         mark_staged_member_preempted(owner, index);
     }
+    retired
 }
 
 /// CR 400.7: the member's frozen incarnation is still the live object.
@@ -2627,10 +2670,10 @@ pub(crate) fn hold_answer_repark(
 
 /// Checked restore of the replacement-choice scheduler (CR 616.1 + CR 101.4):
 /// every held decision has a living chooser in seat range and a present
-/// subject, an as-enters prompt is still live for its pending replacement,
-/// the asking member has a published decision, every blocked member waits on
-/// an outstanding decision, and a selection prompt offers exactly its
-/// APNAP-first chooser's held decisions.
+/// subject that no other held decision is about, an as-enters prompt is still
+/// live for its pending replacement, the asking member has a published
+/// decision, every blocked member waits on an outstanding decision, and a
+/// selection prompt offers exactly its APNAP-first chooser's held decisions.
 pub(crate) fn validate_restored_staged_scheduler(state: &GameState) -> Result<(), String> {
     let published = staged_decision_is_published(state);
     for owner in state.resolution_stack.staged_batch_owners() {
@@ -2640,10 +2683,17 @@ pub(crate) fn validate_restored_staged_scheduler(state: &GameState) -> Result<()
         if staged.asking.is_some() && !published {
             return Err("the asking staged member has no published decision".to_string());
         }
+        // A selection names a decision by its subject, so subjects are unique.
+        let mut subjects = HashSet::new();
         for member in &staged.members {
             let Some(decision) = &member.held_decision else {
                 continue;
             };
+            if !subjects
+                .insert(decision_subject(&decision.pending).unwrap_or(member.identity.object_id))
+            {
+                return Err("two held staged decisions are about the same object".to_string());
+            }
             if decision.chooser.0 as usize >= state.players.len()
                 || !crate::game::players::is_alive(state, decision.chooser)
             {
@@ -4314,7 +4364,7 @@ fn continue_staged_batch_after_answer(
 }
 
 /// The only child-settlement entry for Approving. Moves the retained outcome
-/// into the cursor member once no child or replacement is live.
+/// into the asking member once no child or replacement is live.
 fn finalize_staged_pending_outcome_on(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
@@ -4346,7 +4396,7 @@ fn finalize_staged_pending_outcome_on(
     // CR 800.4b + CR 616.1: an exact paused entry can finish as Remained
     // without an Execute/Prevented consultation handback when its intended
     // controller leaves. Consume that retained terminal through the same
-    // member/cursor authority; it is neither approval nor replacement prevention.
+    // asking-member authority; it is neither approval nor replacement prevention.
     if member.state == StagedBatchMemberState::InnerConsulting
         && member.pending_outcome.is_none()
         && owner.paused_current.as_ref().is_some_and(|paused| {
@@ -4366,8 +4416,8 @@ fn finalize_staged_pending_outcome_on(
             StagedBatchMemberState::OuterConsulting,
             StagedMemberOutcome::Approved(ProposedEvent::Destroy { .. }),
         ) => {
-            // CR 701.8a: outer approval, not delivery. Keep the cursor here and
-            // let the driver run the second, inner consult.
+            // CR 701.8a: outer approval, not delivery. The member stays the
+            // asking one and the driver runs its second, inner consult.
             member.state = StagedBatchMemberState::InnerConsulting;
             member.pending_outcome = None;
             approve_staged_destroy_outer(owner, cursor);
@@ -4887,9 +4937,11 @@ fn reconcile_staged_owner(
             player: state.active_player,
         };
     }
-    // CR 101.4c: this batch's selection prompt (only an approving batch with
-    // no asking member raises one) stays while its chooser and every offered
-    // decision remain; otherwise the scheduler asks again.
+    // CR 101.4c + CR 101.4d: this batch's selection prompt (only an approving
+    // batch with no asking member raises one) stays while its chooser and
+    // every offered decision remain and no held decision is consulted again;
+    // otherwise the scheduler asks again, since a new consultation's chooser
+    // may be earlier in APNAP order than the prompt's.
     if let WaitingFor::ReplacementDecisionOrder { player, objects } = &state.waiting_for {
         let held_subjects: Vec<ObjectId> = owner
             .staged
@@ -4911,7 +4963,8 @@ fn reconcile_staged_owner(
             staged.stage == BatchDeliveryStage::Approving && staged.asking.is_none()
         });
         if ours {
-            if crate::game::players::is_alive(state, *player)
+            if settlement == HeldDepartureSettlement::Unchanged
+                && crate::game::players::is_alive(state, *player)
                 && objects.iter().all(|object| held_subjects.contains(object))
             {
                 return false;
@@ -14002,7 +14055,12 @@ mod staged_batch_tests {
         let mut events = Vec::new();
         let mut owner = take_owner(&mut state, group_id);
         assert_eq!(
-            drive_staged_approval(&mut state, &mut owner, &mut events, &mut Vec::new()),
+            drive_staged_approval(
+                &mut state,
+                &mut owner,
+                &mut events,
+                &mut StagedApprovalRun::default()
+            ),
             StagedConsult::Continue
         );
         put_owner(&mut state, owner);
@@ -14022,7 +14080,12 @@ mod staged_batch_tests {
 
         let mut owner = take_owner(&mut state, group_id);
         assert_eq!(
-            drive_staged_approval(&mut state, &mut owner, &mut events, &mut Vec::new()),
+            drive_staged_approval(
+                &mut state,
+                &mut owner,
+                &mut events,
+                &mut StagedApprovalRun::default()
+            ),
             StagedConsult::Continue
         );
         put_owner(&mut state, owner);

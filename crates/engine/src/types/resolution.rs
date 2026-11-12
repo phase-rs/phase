@@ -23,9 +23,9 @@ use crate::types::ability::{
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    AbilityOnsetRecord, ChangeZoneMemberEntry, CostResume, DrainStatus, DrawSequenceStack,
-    GameState, GameStateDecode, GameStateDecodeMode, ParentTargetOccurrences, PayCostKind,
-    PendingBatchDeliveries, PendingChangeZoneIteration, PendingChooseOneOf,
+    AbilityOnsetRecord, BatchDeliveryStage, ChangeZoneMemberEntry, CostResume, DrainStatus,
+    DrawSequenceStack, GameState, GameStateDecode, GameStateDecodeMode, ParentTargetOccurrences,
+    PayCostKind, PendingBatchDeliveries, PendingChangeZoneIteration, PendingChooseOneOf,
     PendingComponentDeliveryParent, PendingConniveReentry, PendingContinuation,
     PendingCopyTokenResolution, PendingCounterAdditionQueue, PendingCounterMoveQueue,
     PendingCounterRemoval, PendingCounterRemovalInFlight, PendingCounterRemovalQueue,
@@ -34,7 +34,7 @@ use crate::types::game_state::{
     PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
     PostReplacementDrain, PostReplacementDrainDispatch, PostReplacementDrainStack,
     PostReplacementFrameId, RepeatIterationChoice, ResidentDrainPolicy, ResolvingTriggerContext,
-    WaitingFor, ABILITY_ONSET_RECORD_FIELD,
+    StagedBatchMemberState, WaitingFor, ABILITY_ONSET_RECORD_FIELD,
 };
 use crate::types::identifiers::{
     DiscardFrameId, LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef,
@@ -2213,7 +2213,6 @@ impl ResolutionStack {
     /// a decision is published (`published`). Any other shape is left for the
     /// stage validator to refuse.
     pub(crate) fn upgrade_pre_scheduler_staged_owners(&mut self, published: bool) {
-        use crate::types::game_state::{BatchDeliveryStage, StagedBatchMemberState};
         for owner in self.staged_batch_owners_mut() {
             let paused_member = owner.paused_current.as_ref().map(|paused| paused.member);
             let Some(staged) = owner.staged.as_mut() else {
