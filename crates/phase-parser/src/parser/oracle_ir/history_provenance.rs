@@ -446,6 +446,49 @@ mod tests {
         }
     }
 
+    /// The binary "A or B" choice carries each arm's record at its branch, and the
+    /// wrapper owns no printed text. Constructed from Highway Robbery's binary
+    /// imperative and Joven's Ferrets' population. The history arm comes second: put
+    /// first ("Tap all creatures ~ blocked this turn, or draw a card."), a mid-text
+    /// "this turn" is read as the clause's duration before the choice parser runs, and
+    /// the guard fails the instruction closed.
+    #[test]
+    fn binary_choice_parser_preserves_branch_history_ownership() {
+        let text = "Draw a card or tap all creatures ~ blocked this turn.";
+        let mut lowered = lower(text, source_context());
+        let Effect::ChooseOneOf { branches, kind, .. } = lowered.value.effect.as_ref() else {
+            panic!("expected binary choice, got {lowered:?}");
+        };
+        assert_eq!(branches.len(), 2, "{lowered:?}");
+        assert_eq!(*kind, crate::types::ability::ChooseOneOfKind::Ordinary);
+        assert!(matches!(*branches[1].effect, Effect::SetTapState { .. }));
+        assert_eq!(lowered.history.len(), 1, "{lowered:?}");
+        let path = InstructionPath(vec![InstructionStep::ChoiceBranch(1)]);
+        assert_eq!(lowered.history[0].locator.as_ref(), Some(&path));
+        assert!(!flagged(text, &lowered), "{lowered:?}");
+
+        let original = crate::parser::oracle_effect::own_instruction_populations(
+            &resolve_mut(&path, &mut lowered.value).effect,
+        )[0]
+        .clone();
+        replace_population(resolve_mut(&path, &mut lowered.value), bare());
+        // Draw has no object population; give the sibling a Tap population while
+        // retaining exactly the provenance produced by the binary parser.
+        let sibling = resolve_mut(
+            &InstructionPath(vec![InstructionStep::ChoiceBranch(0)]),
+            &mut lowered.value,
+        );
+        sibling.effect = Box::new(Effect::SetTapState {
+            target: original,
+            scope: crate::types::ability::EffectScope::All,
+            state: crate::types::ability::TapStateChange::Tap,
+        });
+        assert!(
+            flagged(text, &lowered),
+            "the sibling cannot vouch for branch 1"
+        );
+    }
+
     /// A choice branch owns its own history clause: the audit resolves the record's
     /// `ChoiceBranch` locator and reads only that branch's operands. Constructed: no
     /// printed card reaches the three-branch "unless that player" choice with a history

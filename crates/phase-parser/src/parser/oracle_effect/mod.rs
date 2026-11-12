@@ -2591,7 +2591,13 @@ fn try_parse_whenever_this_turn_from(
     inner_ctx.object_pronoun_ref = anaphors.object_pronoun_ref;
     inner_ctx.condition_object_antecedent = anaphors.condition_object_antecedent;
     inner_ctx.demonstrative_object_ref = anaphors.demonstrative_object_ref;
-    let inner = parse_effect_chain_with_context(effect_text, AbilityKind::Spell, &mut inner_ctx);
+    let inner_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
+        effect_text,
+        AbilityKind::Spell,
+        &mut inner_ctx,
+        DamageTargetContext::InheritedTargets,
+    );
+    let inner = inner_lowered.value;
     // CR 603.4: a delayed body that opens with an intervening "if" clause must
     // carry that condition on its root ability. When the shared conditional
     // splitter finds a leading "if …," but the parsed root carries no
@@ -2627,8 +2633,17 @@ fn try_parse_whenever_this_turn_from(
     };
 
     Some(ParsedEffectClause {
-        history: Vec::new(),
-        head_text: None,
+        history: inner_lowered
+            .history
+            .into_iter()
+            .map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record,
+                    crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+                )
+            })
+            .collect(),
+        head_text: Some(String::new()),
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::CreateDelayedTrigger {
@@ -3221,11 +3236,26 @@ fn try_parse_when_next_generic_event(tp: TextPair) -> Option<ParsedEffectClause>
     }
     trigger_def.execute = None;
 
-    let inner = parse_effect_chain_with_context(after.original, AbilityKind::Spell, &mut inner_ctx);
+    let inner_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
+        after.original,
+        AbilityKind::Spell,
+        &mut inner_ctx,
+        DamageTargetContext::InheritedTargets,
+    );
+    let inner = inner_lowered.value;
 
     Some(ParsedEffectClause {
-        history: Vec::new(),
-        head_text: None,
+        history: inner_lowered
+            .history
+            .into_iter()
+            .map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record,
+                    crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+                )
+            })
+            .collect(),
+        head_text: Some(String::new()),
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::CreateDelayedTrigger {
@@ -3315,11 +3345,26 @@ fn try_parse_reflexive_this_way_trigger(tp: TextPair) -> Option<ParsedEffectClau
         def
     };
 
-    let inner = parse_effect_chain_with_context(after.original, AbilityKind::Spell, &mut inner_ctx);
+    let inner_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
+        after.original,
+        AbilityKind::Spell,
+        &mut inner_ctx,
+        DamageTargetContext::InheritedTargets,
+    );
+    let inner = inner_lowered.value;
 
     Some(ParsedEffectClause {
-        history: Vec::new(),
-        head_text: None,
+        history: inner_lowered
+            .history
+            .into_iter()
+            .map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record,
+                    crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+                )
+            })
+            .collect(),
+        head_text: Some(String::new()),
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::CreateDelayedTrigger {
@@ -3477,10 +3522,25 @@ fn try_parse_at_next_phase_delayed_trigger(
     let mut ctx = antecedents.clone_player_antecedents();
     // CR 603.7 + CR 608.2k: delayed body, no announced parent target.
     ctx.spell_anaphor_binding = SpellAnaphorBinding::EventSource;
-    let inner = parse_effect_chain_with_context(effect_text, kind, &mut ctx);
+    let inner_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
+        effect_text,
+        kind,
+        &mut ctx,
+        DamageTargetContext::InheritedTargets,
+    );
+    let inner = inner_lowered.value;
     Some(ParsedEffectClause {
-        history: Vec::new(),
-        head_text: None,
+        history: inner_lowered
+            .history
+            .into_iter()
+            .map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record,
+                    crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+                )
+            })
+            .collect(),
+        head_text: Some(String::new()),
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::CreateDelayedTrigger {
@@ -5318,15 +5378,29 @@ fn try_parse_inline_delayed_trigger(
     if self_disjunction {
         inner_ctx.subject = Some(TargetFilter::SelfRef);
     }
-    let mut inner =
-        parse_effect_chain_with_context(effect_text, AbilityKind::Spell, &mut inner_ctx);
+    let inner_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
+        effect_text,
+        AbilityKind::Spell,
+        &mut inner_ctx,
+        DamageTargetContext::InheritedTargets,
+    );
+    let mut inner = inner_lowered.value;
     if self_disjunction {
         rebind_triggering_source_to_parent_target(&mut inner);
     }
 
     Some(ParsedEffectClause {
-        history: Vec::new(),
-        head_text: None,
+        history: inner_lowered
+            .history
+            .into_iter()
+            .map(|record| {
+                crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                    record,
+                    crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload,
+                )
+            })
+            .collect(),
+        head_text: Some(String::new()),
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::CreateDelayedTrigger {
@@ -8608,20 +8682,20 @@ fn try_parse_choose_one_of_inline(
     // single-clause `parse_effect_clause`. `build_resolved_from_def` consumes the
     // chained `AbilityDefinition` via `resolve_ability_chain` at resolution.
     let diagnostics_snapshot = ctx.diagnostics.len();
-    let mut left_def;
-    let mut right_def;
+    let left_lowered;
+    let right_lowered;
     if scoped_choice_player {
         // Throwaway (`ChosenColorQualifierScope` rule 1) — only `diagnostics`
         // is copied back, never `*ctx = branch_ctx`.
         let mut branch_ctx = ctx.clone_throwaway();
         branch_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
-        left_def = parse_nested_effect_chain_with_damage_context(
+        left_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
             left_orig,
             AbilityKind::Spell,
             &mut branch_ctx,
             damage_context,
         );
-        right_def = parse_nested_effect_chain_with_damage_context(
+        right_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
             right_orig,
             AbilityKind::Spell,
             &mut branch_ctx,
@@ -8629,19 +8703,22 @@ fn try_parse_choose_one_of_inline(
         );
         ctx.diagnostics = branch_ctx.diagnostics;
     } else {
-        left_def = parse_nested_effect_chain_with_damage_context(
+        left_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
             left_orig,
             AbilityKind::Spell,
             ctx,
             damage_context,
         );
-        right_def = parse_nested_effect_chain_with_damage_context(
+        right_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
             right_orig,
             AbilityKind::Spell,
             ctx,
             damage_context,
         );
     }
+
+    let mut left_def = left_lowered.value;
+    let mut right_def = right_lowered.value;
 
     // Reject unless BOTH branches produce a non-Unimplemented HEAD effect. This
     // prevents false positives on noun-phrase disjunctions and "and/or"
@@ -8682,7 +8759,7 @@ fn try_parse_choose_one_of_inline(
     // CR 701.55a vs CR 608.2d: the "faces a villainous choice —" prefix is
     // the only printed villainous-choice instruction; every other inline
     // "A or B" parses ordinary, so Valeyard doubling never touches it.
-    Some(parsed_clause(Effect::ChooseOneOf {
+    let mut clause = parsed_clause(Effect::ChooseOneOf {
         chooser,
         branches: vec![left_def, right_def],
         kind: if scoped_choice_player {
@@ -8690,7 +8767,20 @@ fn try_parse_choose_one_of_inline(
         } else {
             ChooseOneOfKind::Ordinary
         },
-    }))
+    });
+    clause.head_text = Some(String::new());
+    for (index, history) in [left_lowered.history, right_lowered.history]
+        .into_iter()
+        .enumerate()
+    {
+        clause.history.extend(history.into_iter().map(|record| {
+            crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                record,
+                crate::parser::oracle_ir::history_provenance::InstructionStep::ChoiceBranch(index),
+            )
+        }));
+    }
+    Some(clause)
 }
 
 fn parse_villainous_choice_chooser_prefix(input: &str) -> OracleResult<'_, PlayerFilter> {
@@ -44868,7 +44958,17 @@ fn parse_nested_effect_chain_with_damage_context(
     ctx: &mut ParseContext,
     damage_context: DamageTargetContext,
 ) -> AbilityDefinition {
-    lower_ability_ir(&parse_ability_ir_with_damage_context(
+    parse_nested_effect_chain_with_damage_context_and_provenance(text, kind, ctx, damage_context)
+        .value
+}
+
+fn parse_nested_effect_chain_with_damage_context_and_provenance(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+    damage_context: DamageTargetContext,
+) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
+    lower_ability_ir_with_provenance(&parse_ability_ir_with_damage_context(
         text,
         kind,
         ChainLoweringMode::WithContext,
