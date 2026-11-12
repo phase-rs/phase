@@ -4824,11 +4824,14 @@ pub(crate) fn append_and_collect_logical_zone_trigger_segment_for(
 /// logical zone-change owner's battlefield-entry occurrences.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EntryOccurrenceCollector {
-    /// No later instruction of this resolution can apply an effect with the entry, or one that
-    /// starts after the entry may act on a moved object (CR 608.2c: "Put a flying counter on
-    /// it.", "It gains haste until end of turn."): the owner checks the entry at the
-    /// instruction's completion. In the second case the "is/has" effect does not exist yet
-    /// (known gap: an observer keyed on that effect alone misses the entry).
+    /// The owner checks the entry at the instruction's completion: when no later instruction of
+    /// this resolution can apply an effect with the entry; when one that starts after the entry
+    /// may act on a moved object (CR 608.2c: "Put a flying counter on it.", "It gains haste
+    /// until end of turn."); or when the completion site narrows the group back to its owner
+    /// (CR 603.2c: an occurrence that ends outside the battlefield, an entry delivered by an
+    /// earlier action, or a resume with members still to deliver). In every case but the first
+    /// the "is/has" effect does not exist yet (known gap: an observer keyed on that effect alone
+    /// misses the entry).
     Owner,
     /// A later instruction may still apply an "is/has" effect simultaneously with the entry
     /// (CR 611.2e) and no instruction that starts after the entry may act on a moved object
