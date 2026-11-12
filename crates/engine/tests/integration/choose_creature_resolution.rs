@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use engine::game::game_object::AttachTarget;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -1615,4 +1616,210 @@ fn crush_underfoot_announces_its_giant_at_cast() {
         "the Giant choice must not move to resolution while it is the spell's only announcement"
     );
     assert_eq!(head.targets, vec![TargetRef::Object(second_giant)]);
+}
+
+// ---------------------------------------------------------------------------
+// Armed and Armored ({1}{W} Instant): "Vehicles you control become artifact
+// creatures until end of turn. Choose a Dwarf you control. Attach any number of
+// Equipment you control to it." The Dwarf is chosen as the spell resolves
+// (CR 608.2d), not announced (CR 115.10a), so a Dwarf with shroud can be chosen.
+// The card is loaded from the committed card-data fixture; the permanents
+// around it are test bodies.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn armed_and_armored_chooses_its_dwarf_at_resolution_and_attaches_to_it() {
+    let db = load_db().expect("the committed card-data fixture carries Armed and Armored");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let shroud_dwarf = scenario
+        .add_creature(P0, "Shroud Dwarf", 2, 2)
+        .with_subtypes(vec!["Dwarf"])
+        .with_keyword(Keyword::Shroud)
+        .id();
+    let other_dwarf = scenario
+        .add_creature(P0, "Other Dwarf", 1, 1)
+        .with_subtypes(vec!["Dwarf"])
+        .id();
+    let non_dwarf = scenario.add_creature(P0, "Non-Dwarf", 3, 3).id();
+    let opposing_dwarf = scenario
+        .add_creature(P1, "Opposing Dwarf", 2, 2)
+        .with_subtypes(vec!["Dwarf"])
+        .id();
+    let equipment: Vec<ObjectId> = ["First Equipment", "Second Equipment"]
+        .iter()
+        .map(|name| {
+            scenario
+                .add_artifact_from_oracle(P0, name, "Equip {1}")
+                .with_subtypes(vec!["Equipment"])
+                .id()
+        })
+        .collect();
+    scenario.add_basic_land(P0, ManaColor::White);
+    scenario.add_basic_land(P0, ManaColor::White);
+    let spell = scenario.add_real_card(P0, "Armed and Armored", Zone::Hand, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    // CR 115.10a: nothing is announced while casting.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    pass_priority_to_prompt(&mut runner, "Armed and Armored's Dwarf choice");
+    let WaitingFor::ChooseFromZoneChoice {
+        player,
+        cards,
+        count,
+        source_id,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected the resolution Dwarf choice: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*source_id, spell);
+    assert_eq!(*count, 1);
+    assert_eq!(
+        id_set(cards),
+        id_set(&[shroud_dwarf, other_dwarf]),
+        "only P0's Dwarves are offered; the shroud Dwarf is among them"
+    );
+    assert!(!cards.contains(&non_dwarf) && !cards.contains(&opposing_dwarf));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![shroud_dwarf],
+        })
+        .unwrap();
+    // CR 608.2c: then "attach any number of Equipment you control to it".
+    let WaitingFor::EffectZoneChoice {
+        player,
+        cards,
+        up_to,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected the Equipment choice: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert!(*up_to, "any number of Equipment");
+    assert_eq!(id_set(cards), id_set(&equipment));
+    runner
+        .act(GameAction::SelectCards {
+            cards: equipment.clone(),
+        })
+        .unwrap();
+    for item in &equipment {
+        assert_eq!(
+            runner.state().objects[item].attached_to,
+            Some(AttachTarget::Object(shroud_dwarf)),
+            "each Equipment is attached to the chosen shroud Dwarf"
+        );
+    }
+    assert_resolution_settled(&runner, "Armed and Armored");
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+}
+
+// ---------------------------------------------------------------------------
+// Sakashima's Will ({3}{U} Sorcery), mode 2: "Choose a creature you control.
+// Each other creature you control becomes a copy of that creature until end of
+// turn." The creature is chosen as the spell resolves (CR 608.2d), so a creature
+// with shroud can be chosen, and the others become copies of it (CR 707.2). The
+// card is loaded from the committed card-data fixture; the creatures are test
+// bodies.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sakashimas_will_second_mode_chooses_the_original_at_resolution() {
+    let db = load_db().expect("the committed card-data fixture carries Sakashima's Will");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let original = scenario
+        .add_creature(P0, "Shroud original", 5, 6)
+        .with_keyword(Keyword::Shroud)
+        .id();
+    let other = scenario.add_creature(P0, "Other creature", 1, 1).id();
+    let opposing = scenario.add_creature(P1, "Opposing creature", 2, 2).id();
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
+    let spell = scenario.add_real_card(P0, "Sakashima's Will", Zone::Hand, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ModeChoice { player: P0, .. }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectModes { indices: vec![1] })
+        .unwrap();
+    // CR 115.10a: the chosen mode announces nothing.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    pass_priority_to_prompt(&mut runner, "Sakashima's Will's creature choice");
+    let WaitingFor::ChooseFromZoneChoice {
+        player,
+        cards,
+        count,
+        source_id,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected the resolution creature choice: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*source_id, spell);
+    assert_eq!(*count, 1);
+    assert_eq!(id_set(cards), id_set(&[original, other]));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![original],
+        })
+        .unwrap();
+    assert_resolution_settled(&runner, "Sakashima's Will");
+    assert_eq!(
+        name_and_pt(&mut runner, other),
+        ("Shroud original".to_string(), Some(5), Some(6)),
+        "the other creature P0 controls becomes a copy of the chosen one"
+    );
+    assert_eq!(
+        name_and_pt(&mut runner, opposing),
+        ("Opposing creature".to_string(), Some(2), Some(2)),
+        "an opponent's creature is untouched"
+    );
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
 }
