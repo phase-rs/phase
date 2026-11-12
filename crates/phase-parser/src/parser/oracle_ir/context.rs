@@ -13,6 +13,38 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
 
+/// CR 608.2d + CR 115.10a: who makes the bare choices of the clause being
+/// lowered, when that is not proven to be the ability's controller. `TargetOnly`'s
+/// resolution-time chooser prompts only the controller, so a bare choice owned by
+/// any of these keeps the timing it had before the bare-choice producer existed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClauseChooser {
+    /// A subject other than the controller or the source: printed on the
+    /// predicate ("an opponent chooses ..."), carried by a conjugated
+    /// continuation, or named by an earlier chunk of the same sentence (CR 608.2c).
+    Subject(TargetFilter),
+    /// A player scope peeled from an earlier chunk of the same sentence that this
+    /// subjectless chunk continues ("each opponent may draw a card, then choose
+    /// ...").
+    Scope(PlayerFilter),
+    /// An accepting-player scope peeled from an earlier chunk of the same sentence
+    /// ("any opponent may ..., then choose ...").
+    AcceptingPlayers(OpponentMayScope),
+    /// An earlier chunk of the same sentence names a subject the parser does not
+    /// recognize ("your opponents each draw a card, then choose ..."; "an opponent
+    /// does the same, then chooses ..."). It is not proven to be the controller, so
+    /// the choice fails closed.
+    UnrecognizedSubject,
+    /// A chunk that opens with a conjugated verb and no subject of its own, whose
+    /// subject neither the chain nor the earlier chunks of its sentence name ("each
+    /// opponent who does chooses ...", "an opponent who controls an artifact
+    /// chooses ...", whose relative-clause subject is lifted into a condition
+    /// before the clause is parsed). "You"
+    /// refers to the controller (CR 109.5) and never takes the conjugated verb, so
+    /// the chooser is some other player.
+    ElidedThirdPerson,
+}
+
 /// CR 611.2a + CR 608.2c: the window a chunk's clause printed at its head, read by
 /// the clause parser itself rather than re-derived from the chunk's source text.
 ///
@@ -29,30 +61,6 @@ use crate::types::zones::Zone;
 /// `Unarmed` (the default, and every standalone parse) records nothing. An
 /// `Armed` probe the parse never settled — a recognizer that returned before
 /// reading its head — means "no head window": it states nothing to distribute.
-/// CR 608.2d + CR 115.10a: who makes the bare choices of the clause being
-/// lowered, when that is not proven to be the ability's controller. `TargetOnly`'s
-/// resolution-time chooser prompts only the controller, so a bare choice owned by
-/// any of these keeps the timing it had before the bare-choice producer existed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClauseChooser {
-    /// A subject other than the controller or the source: printed on the
-    /// predicate ("an opponent chooses ..."), carried by a conjugated
-    /// continuation, or named by an earlier chunk of the same sentence (CR 608.2c).
-    Subject(TargetFilter),
-    /// A player scope peeled from an earlier chunk of the same sentence that this
-    /// subjectless chunk continues ("your opponents may draw a card, then choose
-    /// ...").
-    Scope(PlayerFilter),
-    /// An accepting-player scope peeled from an earlier chunk of the same sentence
-    /// ("any opponent may ..., then choose ...").
-    AcceptingPlayers(OpponentMayScope),
-    /// A conjugated continuation ("..., then chooses ...") whose third-person
-    /// subject the chain resolves to no reference ("an opponent does the same,
-    /// then chooses ..."). "You" refers to the controller (CR 109.5) and never
-    /// takes the conjugated verb, so the chooser is some other player.
-    ElidedThirdPerson,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum HeadWindowProbe {
     #[default]
@@ -640,8 +648,9 @@ pub struct ParseContext {
     /// subject of its own: from the carried player subject that a conjugated
     /// continuation inherits; else from the latest subject or peeled scope, other
     /// than the controller or the source, that an earlier chunk of the same
-    /// sentence names; else, for a conjugated continuation, as an unresolved third
-    /// person (CR 608.2c). Inherited by the compound continuations that predicate
+    /// sentence names, failing closed when that chunk's subject is not recognized;
+    /// else, for a chunk opening with a conjugated verb, as an elided third person
+    /// (CR 608.2c). Inherited by the compound continuations that predicate
     /// splits into; a continuation with a controller subject of its own clears it
     /// for that conjunct. `None` outside such a predicate. Set and consumed within
     /// a single chunk parse; never serialized.

@@ -29373,38 +29373,126 @@ fn announced_target_antecedent(
 /// CR 601.2c + CR 115.10a + CR 608.2d: a bare object choice moves to resolution
 /// only when no later instruction of the ability still needs its announcement.
 /// A later clause that prints "target" but whose effect the anaphora rewrite has
-/// bound to the chosen object (`ParentTarget`) lost its own announcement slot, so
-/// moving the choice to resolution would let the spell be cast with no legal
-/// recipient (Crush Underfoot: "Choose a Giant creature you control. It deals
-/// damage equal to its power to target creature."; upstream issue #10688). Such
-/// a choice keeps the timing it had before the producer existed. A later clause
-/// that prints "target" but lowers to `Unimplemented` has no announcement slot to
-/// keep either, and reads the chosen object the same way (Guard Dogs: "Prevent all
-/// combat damage target creature would deal this turn if it shares a color with
-/// that permanent."), so it is treated alike: whether such a clause reads the
-/// choice cannot be read from its lowering, and keeping the earlier timing is the
-/// conservative reading.
+/// bound to its antecedent (`ParentTarget`) lost its own announcement slot. If
+/// that antecedent is a bare choice, moving the choice to resolution would let the
+/// spell be cast with no legal recipient (Crush Underfoot: "Choose a Giant creature
+/// you control. It deals damage equal to its power to target creature."; upstream
+/// issue #10688), so that choice keeps the timing it had before the producer
+/// existed. A later clause that prints "target" but lowers to `Unimplemented` has
+/// no announcement slot to keep either, and is treated alike (Guard Dogs: "Prevent
+/// all combat damage target creature would deal this turn if it shares a color
+/// with that permanent."): whether it reads its antecedent cannot be read from its
+/// lowering, and keeping the earlier timing is the conservative reading.
 ///
-/// Only the bare object choice is withheld. The object-and-player choice ("choose
-/// a creature you control and an opponent") chains its player choice as the
-/// clause's own sub-ability and keeps the `Resolution` its producer has always
-/// declared.
+/// The antecedent is found per later clause by `withhold_antecedent_choice`: the
+/// nearest earlier node that names an object, so only the choice that clause can
+/// read is withheld ("Choose a creature you control. It gains indestructible until
+/// end of turn. Choose a Giant creature you control. It deals damage ... to target
+/// creature." withholds only the second choice). A compound continuation's choice
+/// ("Exile all graveyards and choose a creature you control.") is such a node too.
 fn withhold_resolution_timing_from_choices_feeding_printed_targets(clauses: &mut [ClauseIr]) {
-    for choice in 0..clauses.len() {
-        if clauses[choice].declared_target_choice_timing != Some(TargetChoiceTiming::Resolution)
-            || !matches!(clauses[choice].parsed.effect, Effect::TargetOnly { .. })
-            || clauses[choice].parsed.sub_ability.is_some()
-        {
-            continue;
+    for consumer in 0..clauses.len() {
+        let later = &clauses[consumer];
+        let printed_target_lost_its_slot = (later.parsed.effect.target_filter()
+            == Some(&TargetFilter::ParentTarget)
+            || matches!(later.parsed.effect, Effect::Unimplemented { .. }))
+            && lower::PrintedTargetWord::from_clauses(std::slice::from_ref(later))
+                == lower::PrintedTargetWord::Present;
+        if printed_target_lost_its_slot {
+            withhold_antecedent_choice(&mut clauses[..consumer]);
         }
-        let feeds_printed_target = clauses[choice + 1..].iter().any(|later| {
-            (later.parsed.effect.target_filter() == Some(&TargetFilter::ParentTarget)
-                || matches!(later.parsed.effect, Effect::Unimplemented { .. }))
-                && lower::PrintedTargetWord::from_clauses(std::slice::from_ref(later))
-                    == lower::PrintedTargetWord::Present
-        });
-        if feeds_printed_target {
-            clauses[choice].declared_target_choice_timing = None;
+    }
+}
+
+/// The nearest object-naming node of one clause, read from its own sub chain
+/// (deepest first, the order it resolves back from) and then from its head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObjectAntecedent {
+    /// The clause head is a bare object choice declared `Resolution`.
+    BareChoiceHead,
+    /// The node at this depth of the clause's sub chain is a bare object choice
+    /// timed `Resolution` (a compound continuation's choice).
+    BareChoiceSub(usize),
+    /// Another object-naming node: an announced target, or a choice that is not a
+    /// bare object choice (the object-and-player choice chains its player choice
+    /// and keeps the `Resolution` its producer has always declared).
+    Other,
+}
+
+/// CR 608.2c: the object a node names, if any. A `TargetOnly` choice names one;
+/// so does an effect whose target filter is not a context reference. A context
+/// reference (`ParentTarget`, the controller, ...) names no new object, so the
+/// walk passes over it.
+fn node_object_antecedent(
+    effect: &Effect,
+    bare_resolution_choice: bool,
+    site: ObjectAntecedent,
+) -> Option<ObjectAntecedent> {
+    match effect {
+        Effect::TargetOnly { .. } if bare_resolution_choice => Some(site),
+        Effect::TargetOnly { .. } => Some(ObjectAntecedent::Other),
+        _ if effect
+            .target_filter()
+            .is_some_and(|filter| !filter.is_context_ref()) =>
+        {
+            Some(ObjectAntecedent::Other)
+        }
+        _ => None,
+    }
+}
+
+fn clause_object_antecedent(clause: &ClauseIr) -> Option<ObjectAntecedent> {
+    let subs: Vec<&AbilityDefinition> =
+        std::iter::successors(clause.parsed.sub_ability.as_deref(), |node| {
+            node.sub_ability.as_deref()
+        })
+        .collect();
+    subs.iter()
+        .enumerate()
+        .rev()
+        .find_map(|(depth, node)| {
+            node_object_antecedent(
+                &node.effect,
+                node.target_choice_timing == TargetChoiceTiming::Resolution
+                    && node.sub_ability.is_none(),
+                ObjectAntecedent::BareChoiceSub(depth),
+            )
+        })
+        .or_else(|| {
+            node_object_antecedent(
+                &clause.parsed.effect,
+                clause.declared_target_choice_timing == Some(TargetChoiceTiming::Resolution)
+                    && clause.parsed.sub_ability.is_none(),
+                ObjectAntecedent::BareChoiceHead,
+            )
+        })
+}
+
+/// CR 601.2c: withhold `Resolution` from the bare choice that is the nearest
+/// object-naming node before a later clause, restoring the timing it lowered to
+/// before the bare-choice producer existed: no declaration on a clause head, and
+/// `Stack` on a compound continuation's choice (the continuation's classifier
+/// gives an undeclared bare `TargetOnly` `Stack`). Nothing is withheld when the
+/// nearest object-naming node is anything else.
+fn withhold_antecedent_choice(earlier: &mut [ClauseIr]) {
+    for clause in earlier.iter_mut().rev() {
+        match clause_object_antecedent(clause) {
+            None => continue,
+            Some(ObjectAntecedent::Other) => return,
+            Some(ObjectAntecedent::BareChoiceHead) => {
+                clause.declared_target_choice_timing = None;
+                return;
+            }
+            Some(ObjectAntecedent::BareChoiceSub(depth)) => {
+                let mut node = clause.parsed.sub_ability.as_deref_mut();
+                for _ in 0..depth {
+                    node = node.and_then(|def| def.sub_ability.as_deref_mut());
+                }
+                if let Some(choice) = node {
+                    choice.target_choice_timing = TargetChoiceTiming::Stack;
+                }
+                return;
+            }
         }
     }
 }
@@ -32416,14 +32504,16 @@ fn non_controller_subject_chooser(subject: &TargetFilter) -> Option<ClauseChoose
 /// continues, when that chooser is not proven to be the controller. Reads the
 /// latest chunk of the current sentence among `earlier` (the chunks before it)
 /// that names a subject or peels a player scope ("an opponent draws a card, then
-/// chooses ..."; "your opponents may draw a card, then choose ..."; "an opponent
-/// does the same, then chooses ..."), including a subject `carried_player` keeps
-/// no reference for. It is a pure function of the
-/// chunks' own text, so a chunk that an earlier special-case branch of the chain
-/// loop consumed still counts. `None` when that chunk names the controller ("you
-/// ...", "you may ...") or the source, or when no earlier chunk of the sentence
-/// names one; an object subject is returned too, which keeps the bare choice at
-/// the timing it had before the bare-choice producer existed. Probes a throwaway
+/// chooses ..."; "any opponent may draw a card, then choose ..."), including a
+/// subject `carried_player` keeps no reference for. An imperative chunk (its
+/// predicate opens the chunk) names no subject and is read past. Any other chunk
+/// whose subject the parser does not recognize ("your opponents each draw a card",
+/// "an opponent does the same") fails closed as `UnrecognizedSubject`. It is a pure function of the chunks' own text, so a
+/// chunk that an earlier special-case branch of the chain loop consumed still
+/// counts. `None` when the latest named subject is the controller ("you ...",
+/// "you may ...") or the source, or when no earlier chunk of the sentence names
+/// one; an object subject is returned too, which keeps the bare choice at the
+/// timing it had before the bare-choice producer existed. Probes a throwaway
 /// context because subject parsing may record target state on it.
 fn sentence_chooser_before(earlier: &[ClauseChunk], ctx: &ParseContext) -> Option<ClauseChooser> {
     earlier
@@ -32443,11 +32533,15 @@ fn sentence_chooser_before(earlier: &[ClauseChunk], ctx: &ParseContext) -> Optio
                 // A bare "you may" names the controller.
                 return Some(None);
             }
-            subject::parse_leading_subject_application(&rest, &mut ctx.clone_throwaway())
-                .or_else(|| {
-                    subject::parse_subject_before_auxiliary(&rest, &mut ctx.clone_throwaway())
-                })
-                .map(|application| non_controller_subject_chooser(&application.affected))
+            match subject::parse_leading_subject_application(&rest, &mut ctx.clone_throwaway()) {
+                Some(application) => Some(non_controller_subject_chooser(&application.affected)),
+                // An imperative opens with its predicate and names no subject of
+                // its own; keep reading back.
+                None if subject::find_predicate_start(&rest) == Some(0) => None,
+                // Fail closed: a subject the parser does not recognize is not
+                // proven to be the controller.
+                None => Some(Some(ClauseChooser::UnrecognizedSubject)),
+            }
         })
         .flatten()
 }
@@ -49030,9 +49124,9 @@ fn parse_effect_chain_ir_body(
         // subject is the carried player, who announces this chunk's choices while
         // the effect is applied. A chunk naming no subject of its own otherwise
         // continues the sentence's latest non-controller subject or peeled scope,
-        // carried or not; a conjugated continuation with neither still has a
-        // third-person subject, never the controller (CR 109.5).
-        // Record that chooser as the clause's subject chooser so the
+        // carried or not, and fails closed on a subject the parser does not
+        // recognize (`sentence_chooser_before`). Record that chooser as the
+        // clause's subject chooser so the
         // controller-only bare-choice producer does not declare Resolution for it,
         // exactly as for a printed non-controller subject. `chunk_ctx` is rebuilt
         // per chunk, so the seed ends with this chunk; a nested printed subject

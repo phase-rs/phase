@@ -80368,18 +80368,22 @@ fn last_choice_timings(text: &str) -> (Option<TargetChoiceTiming>, Vec<TargetCho
 /// (CR 608.2d), even when the chain carries no player reference for that subject:
 /// a chosen opponent ("An opponent draws a card, then chooses ..."), a plural
 /// subject whose verb does not conjugate ("Your opponents draw a card, then choose
-/// ..."), an earlier chunk's peeled accepting-player or player scope ("Any
-/// opponent may draw a card, then choose ..."; "Each opponent may ..."), a
-/// subject before a modal "may" or a "do(es) the same" back-reference
-/// (both chunks a special-case branch of the chain loop can consume before the
-/// subject is read), and a conjugated continuation whose subject resolves to no
-/// reference at all ("The monarch draws a card, then chooses ..."; "you" never
-/// takes the conjugated verb, CR 109.5). No Resolution is declared, so each keeps
-/// the `Stack` timing it lowered to before the producer existed. That value is
-/// pinned as the unchanged baseline, not as a rules claim: the other player should
-/// choose, which `TargetOnly` cannot express (the existing third-party chooser
-/// limitation). The matched controls name the controller ("you", "you may") or
-/// start a new sentence, and keep `Resolution`.
+/// ..."), or an earlier chunk's peeled accepting-player or player scope ("Any
+/// opponent may draw a card, then choose ..."; "Each opponent may ..."). A subject
+/// the parser does not recognize earlier in its sentence fails closed ("Your
+/// opponents each draw a card", "An opponent does the same", "Your opponents may
+/// draw a card", "The monarch draws a card", "Its controller and you each draw a
+/// card"); "does the same" and "may"
+/// chunks are also ones a special-case branch of the chain loop can consume before
+/// the subject is read. No Resolution is declared, so each keeps the `Stack` timing
+/// it lowered to before the producer existed. That value is pinned as the unchanged
+/// baseline, not as a rules claim: the other player should choose, which
+/// `TargetOnly` cannot express (the existing third-party chooser limitation). The
+/// matched controls name the controller ("you", "you may") or start a new
+/// sentence, and keep `Resolution`. A chunk opening with a conjugated verb and no
+/// subject anywhere in its sentence ("Each opponent who does chooses ...", "An
+/// opponent who controls an artifact chooses ...", whose relative-clause subject
+/// the chain lifts into a condition) is a third person too (CR 109.5).
 /// Synthetic Oracle: no printed card continues a third-party subject with
 /// "choose(s) a <object> you control"; the nearest printed card for the
 /// third-party chooser is Wormfang Crab ("an opponent chooses a permanent you
@@ -80397,6 +80401,11 @@ fn bare_choose_continuing_an_uncarried_sentence_subject_keeps_stack_timing() {
         "Any opponent may draw a card, then choose a creature you control.",
         "Each opponent may draw a card, then choose a creature you control.",
         "The monarch draws a card, then chooses a creature you control.",
+        "Your opponents each draw a card, then choose a creature you control.",
+        "Exile target creature. Its controller and you each draw a card, then choose a creature you control.",
+        "Each opponent may draw a card. Each opponent who does chooses a creature you control.",
+        "Each opponent who controls a creature chooses a creature you control.",
+        "An opponent who controls an artifact chooses a creature you control.",
     ] {
         let observed = last_choice_timings(text);
         if observed != (None, vec![TargetChoiceTiming::Stack]) {
@@ -80556,6 +80565,81 @@ fn bare_choose_feeding_a_printed_target_through_the_chosen_object_keeps_stack_ti
         "reach guard: the printed-target prevention clause stays unimplemented: {head:#?}"
     );
     assert_eq!(head.target_choice_timing, TargetChoiceTiming::Stack);
+
+    // The withheld choice is the printed target's antecedent, not every earlier
+    // choice: the first choice only feeds the indestructible grant and keeps
+    // `Resolution`; the second feeds the rebound "target creature" and keeps
+    // `Stack`. Synthetic chain of Final Showdown's mode and Crush Underfoot.
+    let text = "Choose a creature you control. It gains indestructible until end of turn. Choose a Giant creature you control. It deals damage equal to its power to target creature.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![TargetChoiceTiming::Resolution, TargetChoiceTiming::Stack],
+        "{text}: {def:#?}"
+    );
+
+    // An intervening announced target is the rebound printed target's antecedent,
+    // not the earlier choice, which keeps `Resolution`. Synthetic.
+    let text = "Choose a creature you control. Destroy target artifact. It deals damage equal to its power to target creature.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let damage = std::iter::successors(Some(&def), |node| node.sub_ability.as_deref())
+        .find(|node| matches!(node.effect.as_ref(), Effect::DealDamage { .. }))
+        .expect("the damage instruction");
+    assert!(
+        matches!(
+            damage.effect.as_ref(),
+            Effect::DealDamage {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "{text}: reach guard for the rebound printed target: {def:#?}"
+    );
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![TargetChoiceTiming::Resolution],
+        "{text}"
+    );
+
+    // A compound continuation's choice is an antecedent too ("... and choose a
+    // creature you control."), and keeps the `Stack` it lowered to before the
+    // producer existed when the next sentence's printed target is rebound to it.
+    // Synthetic: Crush Underfoot's follow-up after a compound choice.
+    let text = "Exile all graveyards and choose a creature you control. It deals damage equal to its power to target creature.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let choice = def
+        .sub_ability
+        .as_deref()
+        .expect("the compound continuation");
+    assert!(
+        matches!(choice.effect.as_ref(), Effect::TargetOnly { .. }),
+        "{text}: reach guard for the compound choice: {def:#?}"
+    );
+    assert!(
+        matches!(
+            choice
+                .sub_ability
+                .as_deref()
+                .map(|damage| damage.effect.as_ref()),
+            Some(Effect::DealDamage {
+                target: TargetFilter::ParentTarget,
+                ..
+            })
+        ),
+        "{text}: reach guard for the rebound printed target: {def:#?}"
+    );
+    assert_eq!(
+        choice.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "{text}"
+    );
+    let control = "Exile all graveyards and choose a creature you control. It gains indestructible until end of turn.";
+    let def = parse_effect_chain(control, AbilityKind::Spell);
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![TargetChoiceTiming::Resolution],
+        "{control}: with no printed target after it the compound choice resolves"
+    );
 
     for text in [
         "Choose a creature you control. It deals damage equal to its power to target creature you don't control.",
