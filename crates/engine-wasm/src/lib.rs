@@ -400,6 +400,7 @@ mod external_format_config_tests {
                     team_based: false,
                     sideboard_policy: SideboardPolicy::Unlimited,
                     default_deck_copy_limit: DeckCopyLimit::UpTo(4),
+                    poison_counter_threshold: 10,
                 },
                 legality: LegalityRules {
                     legal_sets: None,
