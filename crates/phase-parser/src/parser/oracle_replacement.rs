@@ -5378,7 +5378,9 @@ fn parse_enters_with_keyword_riders(text: &str) -> Vec<crate::types::keywords::K
     let mut riders = Vec::new();
     // CR 614.1c: the rider is part of the SAME sentence as the enters-with
     // clause, so the scan is bounded to that sentence UP FRONT rather than
-    // per-candidate. Bounding only after a marker was found would still let the
+    // per-candidate, on the quote-aware boundary shared with the quoted scan:
+    // a quoted sibling rider's own period must not end the entering sentence.
+    // Bounding only after a marker was found would still let the
     // very first `take_until` reach into a later sentence when the entering
     // sentence carried no rider at all, granting an unrelated later
     // `" and with "` to this replacement. The production caller,
@@ -5415,17 +5417,42 @@ fn parse_enters_with_keyword_riders(text: &str) -> Vec<crate::types::keywords::K
 /// therefore the only one whose `" and with "` riders belong to this replacement
 /// (CR 614.1c).
 ///
+/// The SHARED sentence boundary for both rider scans (bare-keyword and
+/// quoted-ability). Quoted spans are masked on the length-preserving quote
+/// mask, so a granted ability's own period ("…Regenerate this creature.\"")
+/// does not end the entering sentence: without the mask the bare scan clips at
+/// the quoted period and a bare rider printed AFTER a quoted one ("…and with
+/// \"…creature.\" and with haste.") is silently dropped.
+///
 /// Clipping here is what makes the scan sentence-safe as a whole. Doing it only
 /// inside the per-rider candidate bound is not enough: that bound is applied
 /// after a marker has already been selected, so it cannot undo an initial search
 /// that already crossed a period.
+///
+/// Quoteless input keeps the naive clip: it is zero-alloc and preserves the
+/// exact historical boundary for the entire quoteless corpus. Only text that
+/// actually contains a quote pays for the mask.
 fn enters_with_rider_sentence(text: &str) -> &str {
-    terminated(
+    // Zero-alloc fast path: no double quote means the naive clip is already
+    // exact. A char scan, not string-literal dispatch, mirroring
+    // `strip_double_quoted_spans` and the mask's own fast path.
+    if text.find('"').is_none() {
+        return terminated(
+            take_until::<_, _, OracleError<'_>>("."),
+            tag::<_, _, OracleError<'_>>("."),
+        )
+        .parse(text)
+        .map_or(text, |(_, sentence)| sentence);
+    }
+    let masked = nom_primitives::mask_double_quoted_spans_preserving_len(text);
+    let masked: &str = &masked;
+    let clip_len = terminated(
         take_until::<_, _, OracleError<'_>>("."),
         tag::<_, _, OracleError<'_>>("."),
     )
-    .parse(text)
-    .map_or(text, |(_, sentence)| sentence)
+    .parse(masked)
+    .map_or(text.len(), |(rest, _)| masked.len() - rest.len());
+    text.get(..clip_len).unwrap_or(text)
 }
 
 /// The `" and with "` rider marker — both the scan anchor and one of the two
@@ -5501,13 +5528,15 @@ fn parse_enters_with_keyword_rider_candidate(input: &str) -> OracleResult<'_, &s
 /// modifications onto the same execute chain as the counters, so they inherit
 /// the definition's gate (Invasion/Apocalypse kicker cycle).
 ///
-/// Quote-aware throughout: the sentence clip runs on the length-preserving
-/// quote mask, so a granted ability's own period ("…Regenerate this
-/// creature.\"") does not end the entering sentence. A marker with no closing
-/// quote, a span that classifies to nothing, or an unconsumed span inside the
-/// rider region fails closed (`EntersWithGap::Clause`) rather than dropping
-/// printed text — the counters-only claim was the defect this function exists
-/// to fix.
+/// Quote-aware throughout: the sentence clip is the quote-aware boundary
+/// shared with the bare-keyword scan ([`enters_with_rider_sentence`]), so a
+/// granted ability's own period ("…Regenerate this creature.\"") does not end
+/// the entering sentence. A marker with no closing quote, a span that
+/// classifies to nothing, or an unconsumed span inside the rider region fails
+/// closed (`EntersWithGap::Clause`) rather than dropping printed text — the
+/// counters-only claim was the defect this function exists to fix. "Classifies
+/// to nothing" includes a nonempty grant with an unbuildable body
+/// ([`quoted_rider_grant_is_unsupported`]).
 ///
 /// Takes the ORIGINAL-case line: the inner text feeds the quoted-grant
 /// authority verbatim (mana symbols, descriptions), and both its self-reference
@@ -5528,7 +5557,7 @@ fn parse_enters_with_quoted_riders(
     if text.find('"').is_none() {
         return Ok(Vec::new());
     }
-    let sentence = enters_with_quoted_rider_sentence(text);
+    let sentence = enters_with_rider_sentence(text);
     let region = match take_until::<_, _, OracleError<'_>>(ENTERS_WITH_KEYWORD_RIDER_MARKER)
         .parse(sentence)
     {
@@ -5554,7 +5583,17 @@ fn parse_enters_with_quoted_riders(
         .parse(after_marker)
         .map_err(|_| EntersWithGap::Clause)?;
         let classified = crate::parser::oracle_static::classify_quoted_inner(inner.trim());
-        if classified.is_empty() {
+        // CR 614.1c: "unreadable" includes a NONEMPTY classification whose
+        // granted body the classifier could not build. The GrantAbility
+        // fallback wraps whatever `parse_quoted_ability` produced — including
+        // an `Unimplemented` body — and a GrantTrigger may carry an
+        // unimplemented (or missing) execute chain. Coverage detects the
+        // nested gap, but the rider check must not accept the span first:
+        // accepting it publishes the line as supported while the grant is
+        // silently lost.
+        let unsupported =
+            classified.is_empty() || classified.iter().any(quoted_rider_grant_is_unsupported);
+        if unsupported {
             return Err(EntersWithGap::Clause);
         }
         modifications.extend(classified);
@@ -5571,22 +5610,25 @@ fn parse_enters_with_quoted_riders(
     Ok(modifications)
 }
 
-/// The FIRST sentence of `text`, with quoted spans masked so a granted
-/// ability's own period does not end it (CR 614.1c: the rider is part of the
-/// SAME sentence as the enters-with clause). The mask preserves byte length,
-/// so the boundary found in the masked text clips the original directly. The
-/// production caller declines multi-sentence lines before extraction, so this
-/// clip is defensive helper behavior, mirroring [`enters_with_rider_sentence`].
-fn enters_with_quoted_rider_sentence(text: &str) -> &str {
-    let masked = nom_primitives::mask_double_quoted_spans_preserving_len(text);
-    let masked: &str = &masked;
-    let clip_len = terminated(
-        take_until::<_, _, OracleError<'_>>("."),
-        tag::<_, _, OracleError<'_>>("."),
-    )
-    .parse(masked)
-    .map_or(text.len(), |(rest, _)| masked.len() - rest.len());
-    text.get(..clip_len).unwrap_or(text)
+/// True when a classified quoted-rider modification carries a granted body
+/// the classifier could not build — the fail-closed half of the rider
+/// acceptance check. `AddKeyword` and static modes carry no executable body
+/// and always pass; grants delegate to the single unimplemented authority
+/// (`oracle::has_unimplemented`). A trigger grant with NO execute chain is
+/// unsupported too: trigger lowering leaves `execute` empty exactly when the
+/// effect half did not parse, so there is no body to check and nothing honest
+/// to grant.
+fn quoted_rider_grant_is_unsupported(modification: &ContinuousModification) -> bool {
+    match modification {
+        ContinuousModification::GrantAbility { definition } => {
+            crate::parser::oracle::has_unimplemented(definition)
+        }
+        ContinuousModification::GrantTrigger { trigger } => trigger
+            .execute
+            .as_deref()
+            .is_none_or(crate::parser::oracle::has_unimplemented),
+        _ => false,
+    }
 }
 
 /// Complete `"..."` pairs in `text`, read with nom combinators so the count
@@ -24905,6 +24947,48 @@ mod tests {
         );
     }
 
+    /// CR 614.1c: a bare-keyword rider printed AFTER a quoted sibling rider in
+    /// the same sentence must still lift. The quoted ability's own period
+    /// ("…Regenerate this creature.\"") is not the sentence end; a naive
+    /// first-period clip ends the scan inside the quote and `haste` is never
+    /// reached. No printed card chains a quoted rider with a bare one, so the
+    /// frame is synthetic — but both halves are verbatim printed rider shapes
+    /// (Anavolver's regeneration grant, the kicker cycle's bare keywords).
+    #[test]
+    fn enters_with_keyword_rider_after_a_quoted_rider_is_kept() {
+        // Scanner level: the quote's period must not end the entering sentence.
+        assert_eq!(
+            parse_enters_with_keyword_riders(
+                "it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\" and with haste."
+            ),
+            vec![Keyword::Haste],
+            "a bare rider after a quoted sibling must survive the sentence clip"
+        );
+
+        // Composed level: both riders land on the one kicker-gated replacement.
+        let def = parse_replacement_line(
+            "If this creature was kicked, it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\" and with haste.",
+            "Synthetic Quoted Then Bare Rider",
+        )
+        .expect("the composed line is claimed");
+        let execute = def.execute.as_deref().expect("execute ability");
+        assert_eq!(
+            collect_granted_keywords(execute),
+            vec![Keyword::Haste],
+            "the bare half grants Haste"
+        );
+        assert!(
+            quoted_entry_grants(&def)
+                .iter()
+                .any(|grant| matches!(grant, ContinuousModification::GrantAbility { .. })),
+            "the quoted half still grants the regeneration ability"
+        );
+        assert!(
+            find_put_counter(execute).is_some(),
+            "the counters must still be placed"
+        );
+    }
+
     /// Every `AddKeyword` granted anywhere in `ability`'s sub-ability chain.
     fn collect_granted_keywords(ability: &AbilityDefinition) -> Vec<Keyword> {
         let mut found = Vec::new();
@@ -33956,6 +34040,73 @@ mod tests {
             "Test Creature"
         )
         .is_some());
+    }
+
+    /// CR 614.1c: a quoted rider that classifies NONEMPTY but whose granted
+    /// body is unimplemented fails the clause closed — the acceptance check
+    /// must not publish the line as supported while the grant is silently
+    /// lost. Pins both grant arms (activated fallback, triggered) at the
+    /// classifier level, then at the scan level, with supported-body
+    /// reach-guards proving the frames themselves still lift.
+    #[test]
+    fn enters_with_quoted_rider_unsupported_body_fails_closed() {
+        // Classifier level: both bodies classify nonempty, and both granted
+        // bodies are unbuildable — the exact shape the scan must reject.
+        let activated =
+            crate::parser::oracle_static::classify_quoted_inner("Blah blah xyzzy nonsense.");
+        assert_eq!(activated.len(), 1, "got {activated:?}");
+        let ContinuousModification::GrantAbility { definition } = &activated[0] else {
+            panic!("expected the GrantAbility fallback, got {:?}", activated[0]);
+        };
+        assert!(
+            crate::parser::oracle::has_unimplemented(definition),
+            "the control body must be unimplemented"
+        );
+
+        let triggered = crate::parser::oracle_static::classify_quoted_inner(
+            "Whenever this creature deals damage, xyzzy nonsense.",
+        );
+        assert_eq!(triggered.len(), 1, "got {triggered:?}");
+        let ContinuousModification::GrantTrigger { trigger } = &triggered[0] else {
+            panic!("expected GrantTrigger, got {:?}", triggered[0]);
+        };
+        assert!(
+            trigger
+                .execute
+                .as_deref()
+                .is_none_or(crate::parser::oracle::has_unimplemented),
+            "the control trigger must be unimplemented or missing its execute"
+        );
+
+        // Scan level: both frames fail closed.
+        for line in [
+            "it enters with a +1/+1 counter on it and with \"Blah blah xyzzy nonsense.\".",
+            "it enters with a +1/+1 counter on it and with \"Whenever this creature deals damage, xyzzy nonsense.\".",
+        ] {
+            assert_eq!(
+                parse_enters_with_quoted_riders(line).err(),
+                Some(EntersWithGap::Clause),
+                "{line:?}"
+            );
+        }
+
+        // Reach-guards: the same frames with supported bodies still lift.
+        assert_eq!(
+            parse_enters_with_quoted_riders(
+                "it enters with a +1/+1 counter on it and with \"Pay 3 life: Regenerate this creature.\"."
+            )
+            .expect("supported activated body lifts")
+            .len(),
+            1
+        );
+        assert_eq!(
+            parse_enters_with_quoted_riders(
+                "it enters with a +1/+1 counter on it and with \"Whenever this creature deals damage, you gain that much life.\"."
+            )
+            .expect("supported trigger body lifts")
+            .len(),
+            1
+        );
     }
 
     /// CR 614.1c: a quoted span inside the counter clause is not a rider.
