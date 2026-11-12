@@ -4363,7 +4363,64 @@ pub(super) fn pay_delve_after_distribution(
             &declared_targets_in_chain(&pending.ability),
         ));
     }
-    let spent = recorded_mana_spent_to_cast(state, pending.object_id);
+    // CR 601.2h + CR 700.14 + CR 118.3a: validate the amount AT CONSUMPTION. The restore
+    // boundary cannot decide which parks to validate from anything the save cannot drop (see
+    // the three predicate branches), so the check that matters runs here instead, while the
+    // cast is still parked and the journal is live: the number about to be stamped into
+    // `prepaid_actual_mana_spent` — and from there into CR 700.14's Expend ledger — must be
+    // the payment the journal records.
+    //
+    // A park that STATES its amount outranks the copy: the stated value is the one the
+    // boundary validated, and a save cannot make it disagree with the journal without being
+    // refused there. Only the fallback reads the copy, so only the fallback needs proving
+    // here — and a save cannot erase its way past a check that runs after it is loaded.
+    // CR 601.2h + CR 700.14 + CR 118.3a: validate the amount AT CONSUMPTION. The restore
+    // boundary cannot decide which parks to validate from anything the save cannot drop (see
+    // `prepaid_spell_copy_carriers` and the three predicate branches in the PR record), so the
+    // check that matters runs here instead, while the cast is still parked and the journal is
+    // live: the number about to be stamped into `prepaid_actual_mana_spent` — and from there
+    // into CR 700.14's Expend ledger — must be the payment the journal records.
+    //
+    // A park that STATES its amount outranks the copy: that value is the one the boundary
+    // validated, and a save cannot make it disagree with the journal without being refused
+    // there. Only the fallback reads the copy, so only the fallback needs proving here — and
+    // a save cannot erase its way past a check that runs after it is loaded.
+    let spent = match pending.prepaid_actual_mana_spent {
+        Some(stated) => stated,
+        None => {
+            let copy = recorded_mana_spent_to_cast(state, pending.object_id);
+            // CR 118.3a: the same projection `proven_prepaid_spell_copy` uses — every
+            // settled unit recorded for this cast's recipient, convoke excluded.
+            let settled = state
+                .objects
+                .get(&pending.object_id)
+                .map(crate::game::game_object::ObjectIncarnationRefExt::from_object)
+                .map(crate::types::resolved_commands::ManaPaymentRecipient::Object)
+                .map_or(0, |recipient| {
+                    state
+                        .resolved_rules_journal
+                        .spent_mana()
+                        .iter()
+                        .filter(|spent| spent.recipient == recipient)
+                        .filter(|spent| !spent.unit.is_convoke_payment())
+                        .count()
+                });
+            if copy as usize != settled {
+                return Err(EngineError::InvalidAction(
+                    crate::types::game_state::PersistedRestoreError::ContradictoryPrepaidSpellCopy {
+                        source_id: pending.object_id,
+                        reason: crate::types::game_state::PrepaidSpellCopyConflict::AmountDisagreesWithSettledSpend {
+                            copy_amount: copy,
+                            copy_marks_spent: false,
+                            settled,
+                        },
+                    }
+                    .to_string(),
+                ));
+            }
+            copy
+        }
+    };
     let completion = PendingCostMoveCompletion::FinalizeDelvedCast {
         phyrexian_choices: None,
         pre_payment_checks: None,

@@ -15120,6 +15120,42 @@ fn restore_validates_the_x_distribution_park_against_the_journal() {
         );
     }
 
+    // (b) The ERASE + FORGE attack: the amount deleted and the copy forged. Restore cannot
+    // see this (the erasure makes the park look unpaid to any save-derived test — see the
+    // three predicate branches), so the check runs where the copy is CONSUMED: completing
+    // the distribution must refuse rather than stamp the forged amount into
+    // `prepaid_actual_mana_spent` and CR 700.14's Expend ledger.
+    {
+        let mut state = runner.state().clone();
+        state
+            .pending_cast
+            .as_deref_mut()
+            .expect("reach-guard: the distribution prompt owns the cast")
+            .prepaid_actual_mana_spent = None;
+        state
+            .objects
+            .get_mut(&spell)
+            .expect("the spell object is in the save")
+            .mana_spent_to_cast_amount = settled + 1;
+        let restored = PersistedGameState::capture(state)
+            .into_game_state()
+            .expect("reach-guard: the erasure is invisible to restore — that is the whole point");
+        let mut resumed = GameRunner::from_state(restored);
+        let refusal = resumed
+            .act(GameAction::DistributeAmong {
+                distribution: vec![],
+            })
+            .expect_err(
+                "CR 700.14: consuming a forged copy must refuse, or the Expend ledger is written \
+                 from a number no payment proves",
+            );
+        let rendered = refusal.to_string();
+        assert!(
+            rendered.contains("resolved-rules journal records"),
+            "the refusal is the copy-vs-journal check, got: {rendered}"
+        );
+    }
+
     // (b) The forged copy: REFUSED. Nothing else in the save states an amount the resume
     // could corroborate, so the copy is the only witness and it must agree with the journal.
     let mut state = runner.state().clone();

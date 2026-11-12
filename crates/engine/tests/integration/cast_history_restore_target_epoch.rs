@@ -1094,6 +1094,14 @@ fn a_latch_stating_a_zone_the_announcement_pin_forbids_is_refused() {
 /// The honest pinless pack is admitted (its stated zone IS the live zone, because nothing
 /// moved the object); the same pack with the zone restated is refused even though the pins
 /// that would have caught it earlier are gone.
+///
+/// The pinless honest pack is a state the ENGINE never writes — every latch it captures today
+/// carries its pins, and a target that legitimately moved keeps a stale pin and is skipped. It
+/// is exercised here because a save can reach that shape, and the guard must not treat the
+/// missing evidence as permission. If a future writer ever emits a Known announcement zone
+/// with no pin for an object that HAS moved, this comparison would refuse it as a
+/// contradiction; that writer must also record the pin, which is what makes the zone
+/// checkable at all.
 #[test]
 fn a_pinless_latch_still_cannot_state_a_zone_the_object_never_left() {
     let MidPaymentBoard {
