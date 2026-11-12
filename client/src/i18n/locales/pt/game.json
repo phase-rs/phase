@@ -1502,7 +1502,9 @@
       "titleReveal": "Revelar da Mão",
       "titleOpponentHand": "Mão do Oponente",
       "subtitleReveal": "Escolha uma carta para revelar ou recuse",
-      "subtitleChoose": "Escolha uma carta"
+      "subtitleChoose": "Escolha uma carta",
+      "subtitleRevealAnyNumber": "Escolha qualquer número de cartas para revelar",
+      "subtitleChooseCount": "Escolha {{count}} cartas"
     },
     "search": {
       "title": "Procurar no Grimório",

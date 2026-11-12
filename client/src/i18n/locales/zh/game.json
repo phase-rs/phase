@@ -827,7 +827,9 @@
     },
     "reveal": {
       "subtitleChoose": "选择一张牌",
+      "subtitleChooseCount": "选择{{count}}张牌",
       "subtitleReveal": "选择一张牌展示，或拒绝",
+      "subtitleRevealAnyNumber": "选择任意数量的牌展示",
       "titleOpponentHand": "对手的手牌",
       "titleReveal": "从手牌展示"
     },

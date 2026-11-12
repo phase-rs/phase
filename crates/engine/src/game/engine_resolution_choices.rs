@@ -5126,7 +5126,7 @@ pub(super) fn handle_resolution_choice(
             WaitingFor::RevealChoice {
                 player,
                 cards,
-                filter,
+                filter: _,
                 optional,
                 decline_runs_continuation,
                 cardinality,
@@ -5141,7 +5141,6 @@ pub(super) fn handle_resolution_choice(
                     state,
                     *pending,
                     &cards,
-                    &filter,
                     cardinality,
                     chosen,
                     events,
@@ -5153,13 +5152,7 @@ pub(super) fn handle_resolution_choice(
             // the chosen cards are revealed and become the tracked set the
             // continuation counts ("for each card revealed this way").
             if cardinality == crate::types::ability::ObjectSelectionCardinality::AnyNumber {
-                effects::reveal_hand::validate_reveal_selection(
-                    state,
-                    &cards,
-                    &filter,
-                    cardinality,
-                    &chosen,
-                )?;
+                effects::reveal_hand::validate_reveal_selection(&cards, cardinality, &chosen)?;
                 effects::reveal_hand::reveal_selected_hand_cards(state, player, &chosen, events);
                 effects::publish_tracked_set(state, chosen);
                 set_priority(state, player);
@@ -5200,13 +5193,7 @@ pub(super) fn handle_resolution_choice(
             }
             // CR 608.2d: a post-reveal choice takes exactly the published
             // number of distinct eligible cards (one, historically).
-            effects::reveal_hand::validate_reveal_selection(
-                state,
-                &cards,
-                &filter,
-                cardinality,
-                &chosen,
-            )?;
+            effects::reveal_hand::validate_reveal_selection(&cards, cardinality, &chosen)?;
 
             state
                 .resolve_and_apply_information(

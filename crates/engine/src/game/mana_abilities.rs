@@ -1516,24 +1516,17 @@ pub(crate) fn handle_reveal_choice_for_mana_ability(
     state: &mut GameState,
     pending: PendingManaAbility,
     eligible_cards: &[ObjectId],
-    filter: &TargetFilter,
     cardinality: ObjectSelectionCardinality,
     chosen: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    super::effects::reveal_hand::validate_reveal_selection(
-        state,
-        eligible_cards,
-        filter,
-        cardinality,
-        &chosen,
-    )?;
+    super::effects::reveal_hand::validate_reveal_selection(eligible_cards, cardinality, &chosen)?;
     super::effects::reveal_hand::reveal_selected_hand_cards(state, pending.player, &chosen, events);
 
-    // Each independent activation of a mana ability owns a fresh tracked set.
-    // Reset `chain_tracked_set_id` before publishing so this activation does not union
-    // into the population of any prior activation or resolution chain.
-    state.chain_tracked_set_id = None;
+    // Each independent activation of a mana ability owns a fresh tracked set:
+    // publish it outside any enclosing resolution chain so it never unions into
+    // that chain's population, and hand the enclosing chain back afterwards.
+    let enclosing_chain = state.chain_tracked_set_id.take();
     super::effects::publish_tracked_set(state, chosen);
 
     let ability_def = mana_ability_definition(state, &pending)?;
@@ -1564,7 +1557,7 @@ pub(crate) fn handle_reveal_choice_for_mana_ability(
         );
     });
 
-    state.chain_tracked_set_id = None;
+    state.chain_tracked_set_id = enclosing_chain;
 
     if let Some(pause) = collect_completed_mana_frame_events(
         state,
@@ -3781,61 +3774,69 @@ fn finish_mana_ability_cost_payment(
             }
             return Ok(resume);
         }
+    }
 
-        // CR 605.3b + CR 107.1c + CR 701.20a: a mana ability that reveals "any
-        // number of [filter] cards in your hand" (Metalworker) asks for that
-        // selection while it resolves; production resumes from the choice.
-        if let Effect::RevealHand {
-            card_filter,
-            cardinality: cardinality @ ObjectSelectionCardinality::AnyNumber,
-            ..
-        } = &*ability_def.effect
-        {
-            // The filter is evaluated from the activated ability's source, as
-            // the resolver evaluates it from the resolving ability.
-            let ctx = FilterContext::from_source_with_controller(pending.source_id, pending.player);
-            let eligible: Vec<ObjectId> = state.players[pending.player.0 as usize]
-                .hand
-                .iter()
-                .copied()
-                .filter(|&id| matches_target_filter(state, id, card_filter, &ctx))
-                .collect();
-            if !eligible.is_empty() {
-                let resume = WaitingFor::RevealChoice {
-                    player: pending.player,
-                    cards: eligible,
-                    filter: card_filter.clone(),
-                    optional: false,
-                    decline_runs_continuation: false,
-                    cardinality: *cardinality,
-                    pending_mana_ability: Some(Box::new(pending.clone())),
-                };
-                if settles_completed_frame {
-                    debug_assert!(cursor.parent.is_none());
-                    if let Some(pause) = collect_completed_mana_frame_events(
-                        state,
-                        cursor.deferred_cost_events,
-                        events,
-                        cost_event_start,
-                        ManaTriggerFixedPointResume::Root {
-                            player: pending.player,
-                            resume: Box::new(pending.resume.clone()),
-                        },
-                    ) {
-                        return Ok(pause);
-                    }
-                    if let Some(order_wf) =
-                        super::triggers::preserve_order_triggers_resume(state, resume.clone())
-                    {
-                        return Ok(order_wf);
-                    }
+    let mut enclosing_reveal_chain = None;
+    // CR 605.3b + CR 107.1c + CR 701.20a: a mana ability that reveals "any
+    // number of [filter] cards in your hand" (Metalworker) asks for that
+    // selection while it resolves; production resumes from the choice.
+    if let Effect::RevealHand {
+        card_filter,
+        cardinality: cardinality @ ObjectSelectionCardinality::AnyNumber,
+        ..
+    } = &*ability_def.effect
+    {
+        // The filter is evaluated from the activated ability's source, as
+        // the resolver evaluates it from the resolving ability.
+        let ctx = FilterContext::from_source_with_controller(pending.source_id, pending.player);
+        let eligible: Vec<ObjectId> = state.players[pending.player.0 as usize]
+            .hand
+            .iter()
+            .copied()
+            .filter(|&id| matches_target_filter(state, id, card_filter, &ctx))
+            .collect();
+        // The synchronous auto-resolver (`AutoResolved`) has no prompt to
+        // surface — its caller restores its own `waiting_for` — so it takes
+        // the always-legal CR 107.1c choice of zero cards rather than
+        // parking a selection nobody would answer.
+        if !eligible.is_empty() && !resolves_automatically {
+            let resume = WaitingFor::RevealChoice {
+                player: pending.player,
+                cards: eligible,
+                filter: card_filter.clone(),
+                optional: false,
+                decline_runs_continuation: false,
+                cardinality: *cardinality,
+                pending_mana_ability: Some(Box::new(pending.clone())),
+            };
+            if settles_completed_frame {
+                debug_assert!(cursor.parent.is_none());
+                if let Some(pause) = collect_completed_mana_frame_events(
+                    state,
+                    cursor.deferred_cost_events,
+                    events,
+                    cost_event_start,
+                    ManaTriggerFixedPointResume::Root {
+                        player: pending.player,
+                        resume: Box::new(pending.resume.clone()),
+                    },
+                ) {
+                    return Ok(pause);
                 }
-                return Ok(resume);
-            } else {
-                state.chain_tracked_set_id = None;
-                super::effects::publish_tracked_set(state, Vec::new());
-                state.chain_tracked_set_id = None;
+                if let Some(order_wf) =
+                    super::triggers::preserve_order_triggers_resume(state, resume.clone())
+                {
+                    return Ok(order_wf);
+                }
             }
+            return Ok(resume);
+        } else {
+            // CR 107.1c: zero cards revealed. Publish this activation's own
+            // empty set outside any enclosing chain so production counts
+            // it — not an earlier activation's set — and restore the
+            // enclosing chain once production has read it.
+            enclosing_reveal_chain = Some(state.chain_tracked_set_id.take());
+            super::effects::publish_tracked_set(state, Vec::new());
         }
     }
 
@@ -3852,6 +3853,9 @@ fn finish_mana_ability_cost_payment(
         pending.announced_source_incarnation,
         pending.cost_removed_counters,
     );
+    if let Some(enclosing_chain) = enclosing_reveal_chain {
+        state.chain_tracked_set_id = enclosing_chain;
+    }
     if !resolves_automatically {
         complete_mana_ability_activation(
             state,

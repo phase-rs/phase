@@ -4373,6 +4373,15 @@ pub(super) fn parse_hand_reveal_ast(
         {
             return parse_counted_hand_reveal(after_reveal, ctx);
         }
+        // CR 107.1c + CR 701.20a: an any-number reveal without a readable card
+        // filter is an honest gap, not a reveal that can never select a card.
+        if cardinality == ObjectSelectionCardinality::AnyNumber
+            && matches!(card_filter, TargetFilter::None)
+        {
+            return Some(HandRevealImperativeAst::UnreadableAnyNumberFilter {
+                fragment: text.to_string(),
+            });
+        }
         return Some(HandRevealImperativeAst::RevealAll {
             target,
             card_filter,
@@ -4623,6 +4632,9 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
         },
         // CR 701.20: Reveal a targeted object (Hauntwoods Shrieker).
         HandRevealImperativeAst::RevealObject { target } => Effect::Reveal { target },
+        HandRevealImperativeAst::UnreadableAnyNumberFilter { fragment } => {
+            Effect::unimplemented("reveal_any_number_card_filter", fragment)
+        }
     }
 }
 

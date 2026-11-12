@@ -20698,6 +20698,12 @@ impl WaitingFor {
             WaitingFor::PayAmountChoice {
                 pending_mana_ability,
                 ..
+            }
+            // CR 605.3b + CR 701.20a: a reveal selection inside a mana
+            // ability's immediate resolution (Metalworker).
+            | WaitingFor::RevealChoice {
+                pending_mana_ability,
+                ..
             } => pending_mana_ability.as_deref(),
             WaitingFor::PayManaAbilityMana {
                 pending_mana_ability,
@@ -20752,7 +20758,6 @@ impl WaitingFor {
             | WaitingFor::DigChoice { .. }
             | WaitingFor::DigRestSplitChoice { .. }
             | WaitingFor::SurveilChoice { .. }
-            | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
             | WaitingFor::SearchPartitionChoice { .. }
             | WaitingFor::OutsideGameChoice { .. }
@@ -20980,7 +20985,8 @@ impl WaitingFor {
             // CR 608.2d: a reveal choice the chooser cannot decline is no stop.
             || matches!(
                 self,
-                WaitingFor::RevealChoice { optional: false, cards, .. } if cards.len() >= 2
+                WaitingFor::RevealChoice { optional: false, cards, cardinality, .. }
+                    if cardinality.has_multiple_selections(cards.len())
             )
             || matches!(
                 self,
@@ -21034,8 +21040,11 @@ impl WaitingFor {
             WaitingFor::RevealChoice {
                 optional: false,
                 cards,
+                cardinality,
                 ..
-            } if cards.len() >= 2 => Some(ChoicePoint::ResolutionSet),
+            } if cardinality.has_multiple_selections(cards.len()) => {
+                Some(ChoicePoint::ResolutionSet)
+            }
             _ => None,
         }
     }
@@ -21046,10 +21055,13 @@ impl WaitingFor {
             WaitingFor::RevealChoice {
                 cards,
                 optional: false,
+                cardinality,
                 ..
-            } if cards.len() == 1 => Some(crate::types::actions::GameAction::SelectCards {
-                cards: cards.clone(),
-            }),
+            } if cardinality.forces_all_eligible(cards.len()) => {
+                Some(crate::types::actions::GameAction::SelectCards {
+                    cards: cards.clone(),
+                })
+            }
             _ => None,
         }
     }

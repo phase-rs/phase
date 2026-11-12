@@ -284,6 +284,32 @@ impl ObjectSelectionCardinality {
             Self::AnyNumber => true,
         }
     }
+
+    /// CR 608.2d + CR 107.1c: whether `eligible` objects admit at least two
+    /// distinct legal selections. An exact count `k` has `C(eligible, k)`
+    /// selections (two or more exactly when `0 < k < eligible`); "any number"
+    /// always has the empty selection plus one per non-empty subset, so a
+    /// single eligible object already offers two answers (none, or it).
+    pub fn has_multiple_selections(&self, eligible: usize) -> bool {
+        match self {
+            Self::Exactly { count } => {
+                usize::try_from(*count).is_ok_and(|count| 0 < count && count < eligible)
+            }
+            Self::AnyNumber => eligible >= 1,
+        }
+    }
+
+    /// CR 608.2d: the selection that is the only legal answer — every eligible
+    /// object when an exact count equals the number eligible. "Any number" is
+    /// never forced: the empty selection is always legal (CR 107.1c).
+    pub fn forces_all_eligible(&self, eligible: usize) -> bool {
+        match self {
+            Self::Exactly { count } => {
+                eligible > 0 && usize::try_from(*count).is_ok_and(|count| count == eligible)
+            }
+            Self::AnyNumber => false,
+        }
+    }
 }
 
 /// CR 608.2d + CR 101.2: Additional eligibility required before an object may
@@ -35615,7 +35641,7 @@ pub(crate) fn cost_moves_card_to_or_from_library(ability_def: &AbilityDefinition
     .is_break()
 }
 
-/// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), its own resolution adds
+/// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the ability adds
 /// mana, and it's not a loyalty ability (CR 606.2). Deliberately EXCLUDES the
 /// fourth criterion ("its cost and effect don't move any card to or from a
 /// library"), which is why this is NOT the mana-ability test and must never be
@@ -35645,39 +35671,42 @@ pub fn produces_mana_on_activation(ability_def: &AbilityDefinition) -> bool {
     // makes this not-a-mana-ability under today's behavior, and this change
     // must not widen mana-ability status for any shipping card.
     //
-    // CR 605.1a: "it could add mana to a player's mana pool when it resolves" —
-    // the `Effect::Mana` may sit anywhere in the ability's OWN resolution, not
-    // only at the root: Metalworker's "Reveal any number of artifact cards in
-    // your hand. Add {C}{C} for each card revealed this way." roots on
-    // `RevealHand`. Any other targeting clause in that same resolution also
-    // makes the ability targeted.
-    let mut adds_mana = false;
-    let mut targets = false;
-    let _ = visit_ability_def_scoped(
-        ability_def,
-        ResolutionScope::OwnResolutionOnly,
-        &mut |effect| {
-            if let Effect::Mana { target, .. } = effect {
-                adds_mana = true;
-                if target
-                    .as_ref()
-                    .is_some_and(|role| role.declared_filters().next().is_some())
-                {
-                    targets = true;
-                }
+    // CR 605.1a: "it could add mana to a player's mana pool when it resolves".
+    // The production is the root `Effect::Mana`, or — CR 107.1c + CR 701.20a —
+    // the `Effect::Mana` immediately after a root "reveal any number of
+    // [filter] cards in your hand" (Metalworker, Sacellum Godspeaker), whose
+    // resolution-time selection the immediate resolver pauses for and resumes
+    // into production. An ability whose production follows any other non-Mana
+    // clause (Empowered Autogenerator: "Put a charge counter on this artifact.
+    // Add X mana ...") also meets CR 605.1a, but the immediate resolver
+    // produces mana before running such a clause, which breaks CR 608.2c's
+    // written order; those abilities keep resolving on the stack, in order,
+    // until immediate resolution runs the whole chain in written order.
+    let production_target = match &*ability_def.effect {
+        Effect::Mana { target, .. } => Some(target),
+        Effect::RevealHand {
+            cardinality: ObjectSelectionCardinality::AnyNumber,
+            ..
+        } if extract_target_filter_from_effect(&ability_def.effect).is_none() => {
+            match ability_def.sub_ability.as_deref().map(|sub| &*sub.effect) {
+                Some(Effect::Mana { target, .. }) => Some(target),
+                _ => None,
             }
-            if extract_target_filter_from_effect(effect).is_some() {
-                targets = true;
-            }
-            ControlFlow::Continue(())
-        },
-    );
+        }
+        _ => None,
+    };
+    let Some(production_target) = production_target else {
+        return false;
+    };
+    let target_attached = production_target
+        .as_ref()
+        .and_then(|r| r.declared_filters().next());
     // CR 605.1a: A targeted mana-producing ability is not a mana ability.
     // Reject both the explicit `multi_target` mechanism and the embedded
     // `Effect::Mana::target` field (Jeska's Will mode 1: "Add {R} for each
     // card in target opponent's hand" — the spell targets, so it must use the
     // stack and is not a mana ability under CR 605).
-    if !adds_mana || targets || ability_def.multi_target.is_some() {
+    if ability_def.multi_target.is_some() || target_attached.is_some() {
         return false;
     }
     // CR 605.1a: "...and it's not a loyalty ability." A loyalty ability (CR 606)
@@ -48211,6 +48240,7 @@ mod tests {
             selection: CardSelectionMode::Chosen,
             choice_optional: false,
             reveal: false,
+            cardinality: ObjectSelectionCardinality::SINGLE,
         };
         let json = serde_json::to_string(&effect).unwrap();
         assert!(

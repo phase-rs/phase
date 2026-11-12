@@ -2517,6 +2517,24 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         }
     }
 
+    // CR 701.20a + CR 400.2: a `RevealChoice` offered before anything is
+    // revealed ("reveal any number of artifact cards in your hand", "you may
+    // reveal a land card") lists exactly the matching cards of the chooser's
+    // HIDDEN hand. Its membership and count are private to the chooser; only a
+    // viewer who already knows every listed card (a post-reveal choice over an
+    // already-revealed hand) keeps the list.
+    if let WaitingFor::RevealChoice { player, cards, .. } = &mut filtered.waiting_for {
+        let candidates_hidden = viewer.is_none_or(|v| {
+            !viewer_has_private_access_to_player(state, v, *player)
+                && cards
+                    .iter()
+                    .any(|&id| !is_visible_revealed_card(state, v, id))
+        });
+        if candidates_hidden {
+            cards.clear();
+        }
+    }
+
     // CR 701.38 secret ballot (Truth or Consequences): withhold the running
     // tallies and ballots from EVERY viewer until the simultaneous reveal, so
     // neither later voters nor opponents can infer earlier secret votes. The
@@ -4316,7 +4334,13 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
             pending_mana_ability,
             ..
         } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
+        // CR 605.3b: a reveal selection inside a mana ability's immediate
+        // resolution (Metalworker) carries the paused activation.
         WaitingFor::PayAmountChoice {
+            pending_mana_ability,
+            ..
+        }
+        | WaitingFor::RevealChoice {
             pending_mana_ability,
             ..
         } => {
@@ -7155,6 +7179,21 @@ mod tests {
                     max: 1,
                     accumulated: 0,
                     source_id: paid,
+                    pending_mana_ability: Some(mana_ability()),
+                }),
+            ),
+            (
+                // CR 605.3b: the Metalworker reveal selection carries the paused activation.
+                "RevealChoice pending mana ability",
+                "/waiting_for/".to_string(),
+                5,
+                prompt(WaitingFor::RevealChoice {
+                    player: owner,
+                    cards: Vec::new(),
+                    filter: crate::types::ability::TargetFilter::Any,
+                    optional: false,
+                    decline_runs_continuation: false,
+                    cardinality: crate::types::ability::ObjectSelectionCardinality::AnyNumber,
                     pending_mana_ability: Some(mana_ability()),
                 }),
             ),
@@ -15661,6 +15700,71 @@ mod tests {
         assert_eq!(
             opponent.replacement_continuations, state.replacement_continuations,
             "an unreferenced rider naming only public objects is projected unchanged"
+        );
+    }
+
+    /// CR 701.20a + CR 400.2: a reveal selection offered before anything is revealed
+    /// ("reveal any number of artifact cards in your hand") lists the matching cards of the
+    /// chooser's HIDDEN hand. The chooser keeps every candidate; an opponent or an unseated
+    /// spectator learns neither which cards match nor how many.
+    #[test]
+    fn reveal_choice_candidates_are_private_to_the_chooser() {
+        use crate::types::ability::{ObjectSelectionCardinality, TargetFilter};
+        let reveal_candidates = |waiting_for: &WaitingFor| match waiting_for {
+            WaitingFor::RevealChoice { cards, .. } => cards.clone(),
+            other => panic!("expected a RevealChoice, got {other:?}"),
+        };
+        let mut state = GameState::new_two_player(42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Artifact A".to_string(),
+            Zone::Hand,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Artifact B".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards: vec![a, b],
+            filter: TargetFilter::Any,
+            optional: false,
+            decline_runs_continuation: false,
+            cardinality: ObjectSelectionCardinality::AnyNumber,
+            pending_mana_ability: None,
+        };
+
+        // Zero revealed so far: the chooser sees every option, nobody else sees any.
+        assert_eq!(
+            reveal_candidates(&filter_state_for_viewer(&state, PlayerId(0)).waiting_for),
+            vec![a, b]
+        );
+        assert!(
+            reveal_candidates(&filter_state_for_viewer(&state, PlayerId(1)).waiting_for).is_empty()
+        );
+        assert!(
+            reveal_candidates(&filter_state_for_unseated_viewer(&state).waiting_for).is_empty()
+        );
+
+        // Partial: one candidate already public does not unlock the membership of the other.
+        state.revealed_cards.insert(a);
+        assert!(
+            reveal_candidates(&filter_state_for_viewer(&state, PlayerId(1)).waiting_for).is_empty()
+        );
+        assert!(
+            reveal_candidates(&filter_state_for_unseated_viewer(&state).waiting_for).is_empty()
+        );
+
+        // Fully revealed (a post-reveal choice over a revealed hand): the list is public.
+        state.revealed_cards.insert(b);
+        assert_eq!(
+            reveal_candidates(&filter_state_for_viewer(&state, PlayerId(1)).waiting_for),
+            vec![a, b]
         );
     }
 }

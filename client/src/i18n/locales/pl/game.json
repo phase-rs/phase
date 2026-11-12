@@ -1502,7 +1502,9 @@
       "titleReveal": "Ujawnij z ręki",
       "titleOpponentHand": "Ręka przeciwnika",
       "subtitleReveal": "Wybierz kartę do ujawnienia lub odmów",
-      "subtitleChoose": "Wybierz kartę"
+      "subtitleChoose": "Wybierz kartę",
+      "subtitleRevealAnyNumber": "Wybierz dowolną liczbę kart do ujawnienia",
+      "subtitleChooseCount": "Wybierz {{count}} kart"
     },
     "search": {
       "title": "Przeszukaj bibliotekę",

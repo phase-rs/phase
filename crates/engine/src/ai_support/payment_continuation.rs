@@ -185,6 +185,10 @@ pub fn classify_payment_continuation(state: &GameState) -> PaymentContinuationSt
         | WaitingFor::PayAmountChoice {
             pending_mana_ability: Some(mana_ability),
             ..
+        }
+        | WaitingFor::RevealChoice {
+            pending_mana_ability: Some(mana_ability),
+            ..
         } => classify_pending_mana_ability(state, mana_ability),
         WaitingFor::ChooseManaColor {
             context: ManaChoiceContext::ManaAbility(mana_ability),
@@ -1255,6 +1259,10 @@ fn waiting_for_contains_root(waiting_for: &WaitingFor, root: &PaymentContinuatio
             ..
         }
         | WaitingFor::PayAmountChoice {
+            pending_mana_ability: Some(mana_ability),
+            ..
+        }
+        | WaitingFor::RevealChoice {
             pending_mana_ability: Some(mana_ability),
             ..
         } => pending_mana_contains_root(mana_ability, root),

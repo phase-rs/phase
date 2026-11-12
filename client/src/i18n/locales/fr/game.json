@@ -1502,7 +1502,9 @@
       "titleReveal": "Révéler depuis la main",
       "titleOpponentHand": "Main de l'adversaire",
       "subtitleReveal": "Choisissez une carte à révéler, ou refusez",
-      "subtitleChoose": "Choisissez une carte"
+      "subtitleChoose": "Choisissez une carte",
+      "subtitleRevealAnyNumber": "Choisissez un nombre quelconque de cartes à révéler",
+      "subtitleChooseCount": "Choisissez {{count}} cartes"
     },
     "search": {
       "title": "Chercher dans la bibliothèque",

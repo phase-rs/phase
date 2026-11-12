@@ -6556,7 +6556,7 @@ mod tests {
                 "Metalworker",
                 1,
                 2,
-                "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each                  card revealed this way.",
+                "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.",
             )
             .as_artifact()
             .id();

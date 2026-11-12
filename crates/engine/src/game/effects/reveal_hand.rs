@@ -323,14 +323,14 @@ pub fn resolve(
 }
 
 /// CR 608.2d + CR 701.20a: validate a submitted `WaitingFor::RevealChoice`
-/// selection against the prompt it answers — the published cardinality, the
-/// published eligible `cards` and the card `filter`. The player can't choose an
-/// option that's illegal or impossible, and each card can be selected at most
-/// once, so a repeated id is rejected before anything is revealed.
+/// selection against the prompt it answers — the published cardinality and the
+/// published eligible `cards`. Every producer builds `cards` by evaluating the
+/// card filter from the resolving ability's viewpoint, so that list is the
+/// single authority for eligibility. The player can't choose an option that's
+/// illegal or impossible, and each card can be selected at most once, so a
+/// repeated id is rejected before anything is revealed.
 pub(crate) fn validate_reveal_selection(
-    state: &GameState,
     cards: &[ObjectId],
-    filter: &TargetFilter,
     cardinality: ObjectSelectionCardinality,
     chosen: &[ObjectId],
 ) -> Result<(), EngineError> {
@@ -349,19 +349,7 @@ pub(crate) fn validate_reveal_selection(
         }
         if !cards.contains(&chosen_id) {
             return Err(EngineError::InvalidAction(
-                "Selected card not in revealed hand".to_string(),
-            ));
-        }
-        if !matches!(filter, TargetFilter::Any)
-            && !matches_target_filter(
-                state,
-                chosen_id,
-                filter,
-                &FilterContext::from_source(state, chosen_id),
-            )
-        {
-            return Err(EngineError::InvalidAction(
-                "Selected card does not match the required filter".to_string(),
+                "Selected card is not an eligible card of this reveal".to_string(),
             ));
         }
     }

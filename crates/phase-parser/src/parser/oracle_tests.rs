@@ -34931,6 +34931,48 @@ fn metalworker_reveal_any_number_and_add_mana() {
     );
 }
 
+/// CR 107.1c + CR 701.20a: an any-number hand reveal whose card type phrase the
+/// parser cannot read must surface as an unimplemented gap, never as an
+/// any-number `RevealHand` with an empty filter (a reveal that can select
+/// nothing, reported as supported). Sacellum Godspeaker and Rosheen, Roaring
+/// Prophet — verified Oracle text (Scryfall).
+#[test]
+fn unreadable_any_number_reveal_filter_is_an_unimplemented_gap() {
+    for (name, oracle, types) in [
+        (
+            "Sacellum Godspeaker",
+            "{T}: Reveal any number of creature cards with power 5 or greater from your hand. Add {G} for each card revealed this way.",
+            vec!["Creature".to_string()],
+        ),
+        (
+            "Rosheen, Roaring Prophet",
+            "{T}: Reveal any number of cards with {X} in their mana cost in your hand. Add {C}{C} for each card revealed this way. Spend this mana only on costs that contain {X}.",
+            vec!["Legendary".to_string(), "Creature".to_string()],
+        ),
+    ] {
+        let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(crate::parser::oracle::has_unimplemented),
+            "{name}: the unreadable reveal filter must be an unimplemented gap, got {:?}",
+            parsed.abilities
+        );
+        assert!(
+            !parsed.abilities.iter().any(|ability| matches!(
+                ability.effect.as_ref(),
+                Effect::RevealHand {
+                    card_filter: TargetFilter::None,
+                    ..
+                }
+            )),
+            "{name}: no filterless RevealHand may survive, got {:?}",
+            parsed.abilities
+        );
+    }
+}
+
 /// CR 201.5a: the two-layer IR facade lowers a refused quoted granter name to the same
 /// unsupported residual as the production pipeline.
 #[test]

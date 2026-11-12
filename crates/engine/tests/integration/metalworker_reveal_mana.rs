@@ -14,8 +14,9 @@ use engine::ai_support::legal_actions;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::{ObjectSelectionCardinality, TargetFilter};
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, ManaChoice, ManaChoicePrompt, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaType};
 use engine::types::phase::Phase;
@@ -25,6 +26,7 @@ const METALWORKER_ORACLE: &str =
     "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.";
 const KINNAN_ORACLE: &str =
     "Whenever you tap a nonland permanent for mana, add one mana of any type that permanent produced.";
+const EMPOWERED_AUTOGENERATOR_ORACLE: &str = "{T}: Put a charge counter on this artifact. Add X mana of any one color, where X is the number of charge counters on this artifact.";
 const SCENT_OF_JASMINE_ORACLE: &str =
     "Reveal any number of white cards in your hand. You gain 2 life for each card revealed this way.";
 
@@ -118,6 +120,16 @@ fn metalworker_prompts_any_number_and_two_revealed_artifacts_add_four_colorless(
         }
         other => panic!("expected an any-number RevealChoice, got {other:?}"),
     }
+    // CR 605.3b: the selection is part of the mana ability's immediate
+    // resolution, so the prompt continues that activation.
+    assert!(
+        runner.state().waiting_for.is_mana_ability_continuation(),
+        "the reveal prompt continues the mana ability's activation"
+    );
+    assert!(
+        runner.state().waiting_for.withholds_priority(),
+        "no player receives priority while the activation's reveal is pending"
+    );
 
     let outcome = runner
         .act(GameAction::SelectCards {
@@ -128,6 +140,11 @@ fn metalworker_prompts_any_number_and_two_revealed_artifacts_add_four_colorless(
     assert_eq!(colorless(&runner), 4, "{{C}}{{C}} for each of two cards");
     assert_eq!(revealed_ids(&outcome.events), vec![artifacts]);
     assert_activation_completed(&runner, metalworker);
+    assert!(
+        !runner.state().waiting_for.is_mana_ability_continuation(),
+        "the continuation is cleared once the activation completes"
+    );
+    assert!(!runner.state().waiting_for.withholds_priority());
 }
 
 #[test]
@@ -454,5 +471,134 @@ fn scent_of_jasmine_reveals_any_number_of_white_cards_from_the_stack() {
     assert!(
         runner.state().stack.is_empty(),
         "the spell finished resolving"
+    );
+}
+
+/// A later activation with no eligible card must count its own (empty) reveal,
+/// never the set an earlier activation revealed. CR 107.1c: with nothing
+/// eligible, zero cards are revealed and no mana is added.
+#[test]
+fn metalworker_with_nothing_eligible_ignores_an_earlier_activations_reveal() {
+    let (mut runner, metalworker, artifacts, _) = metalworker_board(1);
+    activate(&mut runner, metalworker);
+    runner
+        .act(GameAction::SelectCards {
+            cards: artifacts.clone(),
+        })
+        .expect("first reveal is legal");
+    assert_eq!(colorless(&runner), 2);
+
+    // The revealed artifact leaves the hand (cast for {0}), so the next
+    // activation has nothing eligible.
+    runner.cast(artifacts[0]).resolve();
+    assert_eq!(
+        runner.state().objects[&artifacts[0]].zone,
+        Zone::Battlefield
+    );
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&metalworker)
+        .unwrap()
+        .tapped = false;
+
+    let outcome = runner
+        .act(GameAction::ActivateAbility {
+            source_id: metalworker,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activation is legal with nothing eligible");
+    assert!(revealed_ids(&outcome.events).is_empty());
+    assert_eq!(
+        colorless(&runner),
+        2,
+        "zero cards revealed this way adds no mana"
+    );
+    assert_activation_completed(&runner, metalworker);
+}
+
+/// CR 608.2c: Empowered Autogenerator (verified Oracle text, Scryfall) puts its
+/// charge counter on BEFORE its mana is counted, and its "any one color" is the
+/// controller's choice. Its production follows a non-Mana clause, so it
+/// resolves in written order on the stack rather than through the immediate
+/// mana-ability resolver (which would produce first and read zero counters).
+#[test]
+fn empowered_autogenerator_counts_the_counter_it_just_placed() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let autogenerator = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Empowered Autogenerator",
+            EMPOWERED_AUTOGENERATOR_ORACLE,
+        )
+        .id();
+    let mut runner = scenario.build();
+    let charge = CounterType::Generic("charge".to_string());
+
+    let tap_for = |runner: &mut GameRunner, color: ManaType| {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&autogenerator)
+            .unwrap()
+            .tapped = false;
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: autogenerator,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("activation is legal");
+        while matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && !runner.state().stack.is_empty()
+        {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority resolves the ability");
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::ChooseManaColor {
+                choice: ManaChoicePrompt::SingleColor { options },
+                ..
+            } => assert!(
+                options.contains(&color),
+                "any one color offers {color:?}, got {options:?}"
+            ),
+            other => panic!("expected the any-one-color prompt, got {other:?}"),
+        }
+        runner
+            .act(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(color),
+                count: 1,
+            })
+            .expect("choosing the color is legal");
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+            "the ability finishes resolving, got {:?}",
+            runner.state().waiting_for
+        );
+        assert!(runner.state().stack.is_empty());
+    };
+
+    tap_for(&mut runner, ManaType::Blue);
+    assert_eq!(runner.state().objects[&autogenerator].counters[&charge], 1);
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Blue),
+        1,
+        "first tap: one counter, so one mana of the chosen color"
+    );
+
+    tap_for(&mut runner, ManaType::Red);
+    assert_eq!(runner.state().objects[&autogenerator].counters[&charge], 2);
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Red),
+        2,
+        "second tap: two counters, so two mana of the chosen color"
     );
 }

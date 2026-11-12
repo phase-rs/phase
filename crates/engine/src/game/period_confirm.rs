@@ -33,7 +33,7 @@ use crate::game::play_trace::{
     self, AnswerOptionality, CostChoices, CostMove, EntryKind, NamedSpan, PeriodReach, PlayLocus,
     PromptClass, TraceEntry,
 };
-use crate::types::ability::TargetRef;
+use crate::types::ability::{ObjectSelectionCardinality, TargetRef};
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -697,20 +697,58 @@ enum PromptKey {
 type KeyedPath = Vec<(PromptKey, PointAnswer)>;
 
 /// CR 601.2c + CR 608.2d: each option of the target or card choice at `replay`, as its answer.
-fn choice_options(replay: &GameState) -> Vec<GameAction> {
+///
+/// CR 608.2d + CR 107.1c: a card choice's answers are the legal SELECTIONS its cardinality
+/// admits (one card for an exact-one pick; every subset, the empty one included, for "any
+/// number"). `None` when the domain holds more than `limit` selections, so the proof declines
+/// rather than enumerating past its bound.
+fn choice_options(replay: &GameState, limit: usize) -> Option<Vec<GameAction>> {
     match &replay.waiting_for {
-        WaitingFor::TriggerTargetSelection { selection, .. } => selection
-            .current_legal_targets
-            .iter()
-            .map(|target| GameAction::ChooseTarget {
-                target: Some(target.clone()),
-            })
-            .collect(),
-        WaitingFor::RevealChoice { cards, .. } => cards
-            .iter()
-            .map(|&card| GameAction::SelectCards { cards: vec![card] })
-            .collect(),
-        _ => Vec::new(),
+        WaitingFor::TriggerTargetSelection { selection, .. } => Some(
+            selection
+                .current_legal_targets
+                .iter()
+                .map(|target| GameAction::ChooseTarget {
+                    target: Some(target.clone()),
+                })
+                .collect(),
+        ),
+        WaitingFor::RevealChoice {
+            cards, cardinality, ..
+        } => {
+            // Exact-one is the historical shape: one selection per card, no subset walk.
+            if *cardinality == ObjectSelectionCardinality::SINGLE {
+                return (cards.len() <= limit).then(|| {
+                    cards
+                        .iter()
+                        .map(|&card| GameAction::SelectCards { cards: vec![card] })
+                        .collect()
+                });
+            }
+            // Any other cardinality walks the subsets: 2^n of them, so past `MAX_SUBSET_WALK`
+            // eligible cards the proof declines instead of enumerating.
+            if cards.len() > MAX_SUBSET_WALK {
+                return None;
+            }
+            let mut selections = Vec::new();
+            for mask in 0u32..(1u32 << cards.len()) {
+                let chosen: Vec<_> = cards
+                    .iter()
+                    .enumerate()
+                    .filter(|&(bit, _)| mask & (1 << bit) != 0)
+                    .map(|(_, &card)| card)
+                    .collect();
+                if !cardinality.admits(chosen.len()) {
+                    continue;
+                }
+                if selections.len() == limit {
+                    return None;
+                }
+                selections.push(GameAction::SelectCards { cards: chosen });
+            }
+            Some(selections)
+        }
+        _ => Some(Vec::new()),
     }
 }
 
@@ -754,7 +792,7 @@ fn decision_prompt(replay: &GameState, limit: usize) -> Option<(PromptKey, Vec<P
             Some((PromptKey::Order(point_key(&labels)), answers))
         }
         ChoicePoint::AnnouncedTarget | ChoicePoint::ResolutionSet => {
-            let options = choice_options(replay);
+            let options = choice_options(replay, limit)?;
             if options.len() > limit {
                 return None;
             }
@@ -782,7 +820,7 @@ fn answer_action(replay: &GameState, answer: &PointAnswer) -> Option<GameAction>
         PointAnswer::Order(order) => Some(GameAction::OrderTriggers {
             order: order_indices(&point_labels(replay)?, order)?,
         }),
-        PointAnswer::Option(chosen) => choice_options(replay)
+        PointAnswer::Option(chosen) => choice_options(replay, ORDER_EDGES)?
             .contains(chosen)
             .then(|| chosen.clone()),
     }
@@ -1668,6 +1706,9 @@ fn halt(replay: &GameState, refusal: &OfferRefusal) -> Halt {
 /// with at most `1 + 2 * ONWARD_POINTS` replays per edge, the replays are linear in the budget.
 const ORDER_EDGES: usize = 25;
 
+/// The most eligible cards whose subsets a choice's decision domain is walked over.
+const MAX_SUBSET_WALK: usize = 16;
+
 /// The most ordering points a cover check replays, per onward frame, to come back to a node's
 /// point; an edge costs at most `1 + 2 * ONWARD_POINTS` replays.
 const ONWARD_POINTS: usize = 8;
@@ -2505,5 +2546,76 @@ mod tests {
                 player: PlayerId(0)
             }
         );
+    }
+
+    fn reveal_prompt(
+        cards: Vec<ObjectId>,
+        cardinality: crate::types::ability::ObjectSelectionCardinality,
+    ) -> GameState {
+        let mut state = GameState::new_two_player(7);
+        state.waiting_for = WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards,
+            filter: crate::types::ability::TargetFilter::Any,
+            optional: false,
+            decline_runs_continuation: false,
+            cardinality,
+            pending_mana_ability: None,
+        };
+        state
+    }
+
+    /// CR 107.1c + CR 608.2d: one eligible card under "any number" has TWO legal answers — the
+    /// empty selection and the singleton — so it is a decision point whose domain is {∅, {a}},
+    /// never a forced single option. Exact-one keeps its one-answer-per-card domain.
+    #[test]
+    fn an_any_number_reveal_offers_every_subset_as_its_options() {
+        use crate::types::ability::ObjectSelectionCardinality as Card;
+        let select = |cards: Vec<ObjectId>| GameAction::SelectCards { cards };
+        let (a, b) = (ObjectId(11), ObjectId(12));
+
+        let one = reveal_prompt(vec![a], Card::AnyNumber);
+        assert!(!one.waiting_for.is_forced_one_option_choice());
+        assert_eq!(
+            one.waiting_for.option_point(),
+            Some(ChoicePoint::ResolutionSet)
+        );
+        assert_eq!(
+            choice_options(&one, ORDER_EDGES),
+            Some(vec![select(vec![]), select(vec![a])])
+        );
+
+        let two = reveal_prompt(vec![a, b], Card::AnyNumber);
+        assert_eq!(
+            choice_options(&two, ORDER_EDGES),
+            Some(vec![
+                select(vec![]),
+                select(vec![a]),
+                select(vec![b]),
+                select(vec![a, b]),
+            ])
+        );
+
+        // Exact-one behavior is unchanged: a lone card is forced, several are one answer each.
+        let forced = reveal_prompt(vec![a], Card::SINGLE);
+        assert!(forced.waiting_for.is_forced_one_option_choice());
+        assert_eq!(forced.waiting_for.option_point(), None);
+        let pick = reveal_prompt(vec![a, b], Card::SINGLE);
+        assert_eq!(
+            choice_options(&pick, ORDER_EDGES),
+            Some(vec![select(vec![a]), select(vec![b])])
+        );
+    }
+
+    /// CR 104.4b: a subset domain past the proof's bound is declined, never enumerated.
+    #[test]
+    fn an_any_number_reveal_past_the_bound_declines_the_proof() {
+        use crate::types::ability::ObjectSelectionCardinality as Card;
+        let cards: Vec<ObjectId> = (1..=5).map(ObjectId).collect();
+        let prompt = reveal_prompt(cards.clone(), Card::AnyNumber);
+        // 2^5 = 32 selections exceed the 25-edge bound.
+        assert_eq!(choice_options(&prompt, ORDER_EDGES), None);
+        let wide = reveal_prompt((1..=40).map(ObjectId).collect(), Card::AnyNumber);
+        assert_eq!(choice_options(&wide, usize::MAX), None);
     }
 }
