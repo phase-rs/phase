@@ -4439,6 +4439,38 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
+    it("leaves a join that supersedes the reattach to its own attachment when the incumbent is retired", async () => {
+      vi.useFakeTimers();
+      const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();
+      try {
+        // The reattach is written and unconfirmed when a join supersedes it.
+        const join = watch(adapter.joinDraft("ABCD12", "Joiner"));
+        await drainArt();
+        await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({ code: "WS_CLOSED" }));
+        // The superseded reattach retired the incumbent and its own work...
+        await vi.waitFor(() => expect(ws.close).toHaveBeenCalled());
+        await vi.waitFor(() => expect(command.value()).toMatchObject({ code: "WS_CLOSED" }));
+        expect(candidate.close).toHaveBeenCalled();
+        // ...but not the join's claim: it is still pending, and its own
+        // attachment dials and sends JoinDraftWithPassword.
+        expect(join.value()).toBe("never settled");
+        const joinSocket = MockWebSocket.last!;
+        expect(joinSocket).not.toBe(candidate);
+        joinSocket.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.waitFor(() => expect(joinSocket.send).toHaveBeenCalledWith(
+          expect.stringContaining('"type":"JoinDraftWithPassword"'),
+        ));
+        expect(join.value()).toBe("never settled");
+        receive(joinSocket, "DraftJoined", {
+          draft_code: "ABCD12", player_token: "join-token", seat_index: 1, view: createMockDraftView(),
+        });
+        await vi.waitFor(() => expect(join.value()).toMatchObject({ resolvedWith: expect.anything() }));
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
     it("parses a large reattach bootstrap once, through adoption", async () => {
       vi.useFakeTimers();
       const { adapter, candidate, reconnecting } = await sentCandidate();

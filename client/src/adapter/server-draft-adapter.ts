@@ -1066,7 +1066,7 @@ export class ServerDraftAdapter implements EngineAdapter {
   }
 
   /** A close settles only the command, previews and draft action sent on that source. */
-  private settleSocketClose(source: PhaseSocketTransport): void {
+  private settleSocketClose(source: PhaseSocketTransport, settleAction = true): void {
     // Previews sent on the retired socket can no longer be answered; previews
     // sent on the current socket are not its to reject.
     this.rejectPendingManaPaymentPreviews(
@@ -1077,10 +1077,12 @@ export class ServerDraftAdapter implements EngineAdapter {
       new AdapterError("WS_CLOSED", "Connection closed during interaction preview", true),
       source,
     );
-    this.settleDraftAction(
-      new AdapterError("WS_CLOSED", "Connection closed during draft operation", true),
-      source,
-    );
+    if (settleAction) {
+      this.settleDraftAction(
+        new AdapterError("WS_CLOSED", "Connection closed during draft operation", true),
+        source,
+      );
+    }
     if (this.submissionSocket !== source) return;
     const dropped = this.submission.drop();
     this.submissionSocket = null;
@@ -1150,9 +1152,14 @@ export class ServerDraftAdapter implements EngineAdapter {
       this.pingInterval = null;
     }
     this.stateCodec.clearRecovery();
-    // Its seat sender is gone: nothing it was owed can arrive, so settle it.
+    // Its seat sender is gone: nothing it was owed can arrive, so settle it,
+    // except the action slot of a join that superseded this reattach: that
+    // claim is bound to the incumbent only until the join's own socket
+    // handshakes, and its attachment is still dialing.
+    const superseding = this.unfinishedAttachment?.owner;
+    const joinOwnsAction = superseding?.type === "join" && this.draftResolve === superseding.resolve;
     try {
-      this.settleSocketClose(incumbent);
+      this.settleSocketClose(incumbent, !joinOwnsAction);
     } finally {
       this.releaseSocket(incumbent);
     }
