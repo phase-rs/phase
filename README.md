@@ -433,7 +433,12 @@ Game transport adoption rejects predecessor-owned commands, previews, exports,
 seat mutations and abandon requests with `WS_CLOSED` before releasing the old
 wrapper and decoder lease; the server need not close the old peer. All request
 owners are cleared before listeners can claim replacement work. Join/game-start
-waiters instead follow the attachment handoff. Each acquired candidate keeps an
+waiters instead follow the attachment handoff: while a reconnect candidate's
+interval is open, the incumbent's own transport error or close settles its
+requests and resources but not the initialization the candidate's episode owns.
+Each acquired candidate, including an initial join's or a Create's, is retired
+with its decoder lease as soon as its attachment is cancelled, not when a held
+setup write answers. Each acquired candidate keeps an
 idempotent cleanup owner through throwing, disposal and superseding callbacks,
 including requests claimed before that candidate is abandoned.
 
@@ -468,7 +473,10 @@ reattach. Two game attachments keep the write-time cutover: native sidecar
 sockets (`nativeAi` / `nativePregame`), whose transport this change leaves as it
 was, and the attempts of an active initial-join fallback, which start only
 after the previous socket closed and have their own deadline. The interval
-reads each frame's tag from the canonical type-first envelope; a frame whose
+reads each frame's tag from the canonical type-first envelope (the frames a
+candidate buffers before its setup settles are bounded at the adapter: 64
+frames and 16 MiB of expanded text, not counting the settling bootstrap, and a
+candidate that exceeds it is cut off and handled like a close); a frame whose
 tag can settle it is parsed once there, must parse as that envelope, and is
 the envelope dispatched after adoption, so the bootstrap is parsed once.
 Frames already admitted for that candidate stay buffered through those

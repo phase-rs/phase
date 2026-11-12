@@ -46,8 +46,10 @@ import {
 } from "../services/openPhaseSocket";
 import {
   SETUP_CONFIRMATION_TIMEOUT_MS,
+  SetupBufferBudget,
   SetupConfirmation,
   reportUncaughtError,
+  whenAborted,
   type SetupConfirmationOutcome,
   type SetupFrameMessage,
 } from "../services/setupConfirmation";
@@ -2577,17 +2579,41 @@ export class WebSocketAdapter implements EngineAdapter {
       };
       // Keep admission buffered through public handoff callbacks and the
       // entire drain: their synchronous replies follow already-admitted frames.
+      const bufferBudget = new SetupBufferBudget();
       socket.ws.onmessage = (event) => {
         (setupMessages ??= []).push(event);
         // Only the positive bootstrap adopts; a refusal ends the interval.
         const parsed = confirmation?.observe("game", event.data);
-        if (parsed !== undefined) parsedSetupFrames.set(event, parsed);
+        if (parsed !== undefined) {
+          parsedSetupFrames.set(event, parsed);
+          return;
+        }
+        // The buffer's own bound: the codec releases its receive charge once
+        // this handler has the frame, and the text stays retained here until
+        // the drain, so a peer that never settles the setup is cut off by size.
+        if (confirmation !== null && confirmation.current !== null) return;
+        if (bufferBudget.admit(event.data)) return;
+        if (confirmation !== null) {
+          confirmation.overflow();
+        } else if (this.initialFallbackActive()) {
+          this.failInitialFallback(initialFallbackFailure());
+        } else {
+          this.rejectInitialization(new AdapterError(
+            "WS_CLOSED", "The server sent too much before the setup was confirmed", true,
+          ));
+          preparation.abort();
+        }
       };
 
       socket.ws.onerror = () => {
         // A retired socket's late error (e.g. a delayed envelope write) must not fail its replacement.
         if (this.disposed || this.ws !== socket.ws) return;
         if (this.sessionIdentityRejected) return;
+        // While a reconnect interval is open this socket is the incumbent, and
+        // the initialization it may still hold belongs to the candidate's
+        // episode (see `frameDecidesEpisode`): its transport error settles
+        // nothing here, and its close follows.
+        if (!this.frameDecidesEpisode()) return;
         // The initialization is the single failure surface of an initial fallback.
         if (this.initialFallbackActive()) {
           this.failInitialFallback(initialFallbackFailure());
@@ -2624,6 +2650,11 @@ export class WebSocketAdapter implements EngineAdapter {
           if (this.sessionIdentityRejected) return;
           // A replayed GameStarted must not announce an already-lost opponent.
           this.hostWaitingForOpponent = false;
+          // The incumbent's close settles its own requests (above) and its
+          // transport resources; the initialization and game-start waiters it
+          // may still hold transfer to the candidate's episode, whose result
+          // decides them.
+          if (!this.frameDecidesEpisode()) return;
           // Initial fallback, unlike an ordinary reconnect, owns its join
           // promise across retryable losses until its episode ends.
           if (this.admitInitialFallback(bootstrap, socket.ws)) {
@@ -2702,7 +2733,20 @@ export class WebSocketAdapter implements EngineAdapter {
           socket.ws, setupFrame, preparation.signal, (frame, target) => this.send(frame, target),
         );
         if (confirmation === null) {
-          written = await write;
+          // Every private candidate has an abort owner independent of the write:
+          // a cancellation that lands while the receipt is pending retires the
+          // candidate and its lease at once, not when the encoder answers. The
+          // receipt's fate still decides the post-write paths.
+          const onAbort = () => {
+            if (this.setupWritePreparation === preparation) this.setupWritePreparation = null;
+            retireSocket();
+          };
+          preparation.signal.addEventListener("abort", onAbort, { once: true });
+          try {
+            written = await write;
+          } finally {
+            preparation.signal.removeEventListener("abort", onAbort);
+          }
         } else {
           // A receipt that never settles is bounded by the same owner: a close
           // or timeout first leaves the frame's fate unknown. An abort that
@@ -2711,12 +2755,7 @@ export class WebSocketAdapter implements EngineAdapter {
           // now; the incumbent still waits for the receipt's fate (the same
           // bound applies), as an abort before it settles says nothing about
           // whether the frame went out.
-          const abortedDuringReceipt = new Promise<"abort">((resolve) => {
-            if (!preparation.signal.aborted) {
-              preparation.signal.addEventListener("abort", () => resolve("abort"), { once: true });
-            }
-          });
-          const first = await Promise.race([write, confirmation.settled, abortedDuringReceipt]);
+          const first = await Promise.race([write, confirmation.settled, whenAborted(preparation.signal)]);
           if (first === "abort") {
             if (this.confirmingPreparation === preparation) this.confirmingPreparation = null;
             retireSocket();
@@ -2815,7 +2854,9 @@ export class WebSocketAdapter implements EngineAdapter {
           "WS_CLOSED",
           unconfirmed === "timeout"
             ? "Reconnect was not confirmed in time"
-            : "Connection closed before the reconnect was confirmed",
+            : unconfirmed === "overflow"
+              ? "The server sent too much before the reconnect was confirmed"
+              : "Connection closed before the reconnect was confirmed",
           true,
         ));
         if (this.reconnectInFlight) this.attemptReconnect();

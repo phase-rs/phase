@@ -4528,6 +4528,63 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       },
     );
 
+    it("retires a superseded create's candidate and its lease at once while its setup receipt is held", async () => {
+      vi.useFakeTimers();
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, provider } = await startCodecDraft(session.session);
+      const settings: Parameters<typeof adapter.createDraft>[0] = {
+        displayName: "Contender", setCodes: ["TST"], kind: "Premier", public: false,
+        tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+      };
+      const first = draftCodecSession(decodeEnvelope);
+      provider.mockResolvedValueOnce(first.session);
+      void adapter.createDraft(settings).catch(() => undefined);
+      await drainArt();
+      const candidate = MockWebSocket.last!;
+      // The encoder holds the receipt: the frame's fate is unknown.
+      candidate.sendReceipt = vi.fn(() => new Promise<void>(() => undefined));
+      try {
+        candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+        provider.mockResolvedValueOnce(draftCodecSession(decodeEnvelope).session);
+        void adapter.createDraft(settings).catch(() => undefined);
+        await drainArt();
+        // Before the encoder answers: the superseded candidate is closed and its
+        // lease is released exactly once.
+        expect(candidate.close).toHaveBeenCalled();
+        expect(first.close).toHaveBeenCalledOnce();
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      ["frame count", 65, 1024],
+      ["expanded text", 17, 1024 * 1024],
+    ] as const)(
+      "cuts off a reattach candidate whose unsettled frames exceed the buffer's %s",
+      async (_budget, frames, size) => {
+        vi.useFakeTimers();
+        const { adapter, ws, candidate, reconnecting } = await sentCandidate();
+        try {
+          const padding = "x".repeat(size);
+          for (let index = 0; index < frames; index++) {
+            candidate.dispatchSynthetic("message", JSON.stringify({
+              type: "Pong", data: { timestamp: index, padding },
+            }));
+            await vi.advanceTimersByTimeAsync(0);
+          }
+          await vi.waitFor(() => expect(reconnecting.value()).toMatchObject({ code: "WS_CLOSED" }));
+          expect(ws.close).toHaveBeenCalledOnce();
+          expect(candidate.close).toHaveBeenCalled();
+        } finally {
+          adapter.dispose();
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it("leaves a join that supersedes the reattach to its own attachment when the incumbent is retired", async () => {
       vi.useFakeTimers();
       const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();

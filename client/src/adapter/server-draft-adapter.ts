@@ -30,8 +30,10 @@ import {
 } from "../services/openPhaseSocket";
 import {
   SETUP_CONFIRMATION_TIMEOUT_MS,
+  SetupBufferBudget,
   SetupConfirmation,
   reportUncaughtError,
+  whenAborted,
   type SetupConfirmationOutcome,
   type SetupFrameMessage,
 } from "../services/setupConfirmation";
@@ -1263,13 +1265,29 @@ export class ServerDraftAdapter implements EngineAdapter {
       // Envelopes the confirmation interval already parsed, by frame: the
       // drain dispatches them without materializing the frame a second time.
       const parsedSetupFrames = new WeakMap<object, SetupFrameMessage>();
+      const bufferBudget = new SetupBufferBudget();
       sourceSocket.onmessage = (event) => {
         setupMessages.push(event);
         // The positive bootstrap or the server's `DraftActionRejected` answer
         // adopts (the seat may already be this candidate's); an `Error` ends
         // the interval.
         const parsed = confirmation?.observe("draft", event.data);
-        if (parsed !== undefined) parsedSetupFrames.set(event, parsed);
+        if (parsed !== undefined) {
+          parsedSetupFrames.set(event, parsed);
+          return;
+        }
+        // The buffer's own bound: the codec releases its receive charge once
+        // this handler has the frame, and the text stays retained here until
+        // the drain, so a peer that never settles the setup is cut off by size.
+        if (confirmation !== null && confirmation.current !== null) return;
+        if (bufferBudget.admit(event.data)) return;
+        if (confirmation !== null) {
+          confirmation.overflow();
+        } else if (this.unfinishedAttachment === attachment) {
+          this.cancelAttachment(new AdapterError(
+            "WS_CLOSED", "The server sent too much before the setup was confirmed", true,
+          ));
+        }
       };
       const handleMessage: NonNullable<PhaseSocketTransport["onmessage"]> = (event) => {
         if (!this.sockets.has(sourceSocket)) return;
@@ -1378,7 +1396,18 @@ export class ServerDraftAdapter implements EngineAdapter {
           sourceSocket, setupFrame, attachment.controller.signal, (frame, target) => this.send(frame, target),
         );
         if (confirmation === null) {
-          written = await write;
+          // Every private candidate has an abort owner independent of the
+          // write: a cancellation that lands while the receipt is pending
+          // retires the candidate and its lease at once, not when the encoder
+          // answers. The receipt's fate still decides the post-write paths.
+          const candidate = socket!;
+          const onAbort = () => this.abandonCandidate(candidate, bootstrap);
+          attachment.controller.signal.addEventListener("abort", onAbort, { once: true });
+          try {
+            written = await write;
+          } finally {
+            attachment.controller.signal.removeEventListener("abort", onAbort);
+          }
         } else {
           // A receipt that never settles is bounded by the same owner. An abort
           // that lands while the receipt is pending releases the interval's
@@ -1386,12 +1415,7 @@ export class ServerDraftAdapter implements EngineAdapter {
           // the attachment now; the incumbent still waits for the receipt's
           // fate (the same bound applies), as an abort before it settles says
           // nothing about whether the frame went out.
-          const abortedDuringReceipt = new Promise<"abort">((resolve) => {
-            if (!attachment.controller.signal.aborted) {
-              attachment.controller.signal.addEventListener("abort", () => resolve("abort"), { once: true });
-            }
-          });
-          const first = await Promise.race([write, confirmation.settled, abortedDuringReceipt]);
+          const first = await Promise.race([write, confirmation.settled, whenAborted(attachment.controller.signal)]);
           if (first === "abort") {
             if (this.confirmingAttachment === attachment) this.confirmingAttachment = null;
             this.abandonCandidate(socket, bootstrap);
@@ -1447,6 +1471,10 @@ export class ServerDraftAdapter implements EngineAdapter {
         if (unconfirmed === "timeout") {
           this.rejectAttachment(attachment.owner, new AdapterError(
             "WS_CLOSED", "Reconnect was not confirmed in time", true,
+          ));
+        } else if (unconfirmed === "overflow") {
+          this.rejectAttachment(attachment.owner, new AdapterError(
+            "WS_CLOSED", "The server sent too much before the reattach was confirmed", true,
           ));
         } else if (refusal !== null) {
           this.rejectAttachment(attachment.owner, new AdapterError("WS_ERROR", refusal.message, true));

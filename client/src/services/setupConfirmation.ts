@@ -18,7 +18,49 @@ import { frameType } from "./stateCodecSocket";
  */
 export const SETUP_CONFIRMATION_TIMEOUT_MS = STATE_CODEC_DECODE_TIMEOUT_MS;
 
-export type SetupConfirmationOutcome = "confirmed" | "refused" | "closed" | "timeout" | "aborted";
+export type SetupConfirmationOutcome =
+  | "confirmed"
+  | "refused"
+  | "closed"
+  | "timeout"
+  | "aborted"
+  | "overflow";
+
+/**
+ * Resolves when `signal` aborts; stays pending if it never does. A signal that
+ * already aborted never resolves it, because the write's own signal check covers
+ * that case. Adapters race it against a pending setup write so a cancelled
+ * private candidate is retired at once instead of when the encoder answers.
+ */
+export function whenAborted(signal: AbortSignal): Promise<"abort"> {
+  return new Promise<"abort">((resolve) => {
+    if (!signal.aborted) signal.addEventListener("abort", () => resolve("abort"), { once: true });
+  });
+}
+
+/** Frames a private candidate may buffer before its setup settles. */
+export const SETUP_BUFFER_MAX_FRAMES = 64;
+/** Expanded text (UTF-16, two bytes a unit) a private candidate may buffer. */
+export const SETUP_BUFFER_MAX_TEXT_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Admission budget for the frames a private candidate buffers while its setup
+ * is unsettled. The codec transport releases its own receive charge once the
+ * adapter's handler has the frame, so the adapter, which retains the expanded
+ * text until the drain, owns this bound. It counts only frames that do not
+ * settle the setup: the one bootstrap may be as large as the transport allows.
+ */
+export class SetupBufferBudget {
+  private frames = 0;
+  private bytes = 0;
+
+  /** Charges one unsettling frame; false once the buffer's budget is exhausted. */
+  admit(data: unknown): boolean {
+    this.frames++;
+    if (typeof data === "string") this.bytes += data.length * 2;
+    return this.frames <= SETUP_BUFFER_MAX_FRAMES && this.bytes <= SETUP_BUFFER_MAX_TEXT_BYTES;
+  }
+}
 
 /** The server's refusal of a setup frame, as the adapters surface it. */
 export interface SetupRefusal {
@@ -233,6 +275,11 @@ export class SetupConfirmation {
   /** The refusal that settled this confirmation, when it was refused. */
   get refusal(): SetupRefusal | null {
     return this.refusalValue;
+  }
+
+  /** The candidate's unsettled frame buffer overflowed its budget. */
+  overflow(): void {
+    this.finish("overflow");
   }
 
   /** The candidate closed. */
