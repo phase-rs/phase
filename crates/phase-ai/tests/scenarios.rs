@@ -1,3 +1,7 @@
+// The auto-trait proof for the im-backed game states an `AiSession` caches and
+// shares across threads exceeds the default limit of 128.
+#![recursion_limit = "256"]
+
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::Read;
