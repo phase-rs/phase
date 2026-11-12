@@ -1174,17 +1174,45 @@ fn reaches_opposing_creature(effect: &Effect) -> bool {
         | Effect::Fight { target, .. }
         | Effect::DestroyAll { target, .. }
         | Effect::DamageAll { target, .. } => may_be_opposing_creature(target),
-        // An exile or graveyard move from the battlefield (CR 701.19a,
-        // CR 701.20e) removes an opposing creature. A move from another zone
-        // (library, graveyard, hand) — e.g., Gifts Ungiven's "put the chosen
-        // cards into your graveyard" — takes nothing off the battlefield and
-        // is not removal. Only `origin == Some(Zone::Battlefield)` qualifies;
-        // `origin == None` is ambiguous and must not be assumed to be the
-        // battlefield.
-        Effect::ChangeZone { origin, target, .. } => {
-            matches!(origin, Some(Zone::Battlefield)) && may_be_opposing_creature(target)
+        // An exile from the battlefield (CR 701.13a) or a graveyard move
+        // from the battlefield (CR 704.5f: creature with 0 toughness) removes
+        // an opposing creature. A move from another zone (library, graveyard,
+        // hand) — e.g., Gifts Ungiven's "put the chosen cards into your
+        // graveyard" — takes nothing off the battlefield and is not removal.
+        // Only `origin == Some(Zone::Battlefield)` qualifies; `origin == None`
+        // is ambiguous: if the target filter can only match battlefield
+        // permanents (e.g., typed creature filter), we infer battlefield
+        // origin; otherwise we conservatively return false.
+        Effect::ChangeZone { origin, target, .. }
+        | Effect::ChangeZoneAll { origin, target, .. } => {
+            let origin_is_battlefield = match origin {
+                Some(Zone::Battlefield) => true,
+                None => target_filter_implies_battlefield(target),
+                Some(_) => false,
+            };
+            origin_is_battlefield && may_be_opposing_creature(target)
         }
         _ => true,
+    }
+}
+
+/// Whether `target` is a filter that can only match battlefield permanents.
+/// Used to infer battlefield origin when `ChangeZone.origin` is `None`.
+/// Returns true for typed creature/permanent filters; false for player,
+/// zone-specific, or unbound filters.
+fn target_filter_implies_battlefield(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            // A typed filter with a creature/permanent type filter and no
+            // zone restriction implies battlefield (CR 109.2: objects on
+            // the battlefield are permanents).
+            typed.type_filters.iter().any(type_admits_creature)
+        }
+        TargetFilter::Or { filters } => filters.iter().all(target_filter_implies_battlefield),
+        TargetFilter::And { filters } => filters.iter().any(target_filter_implies_battlefield),
+        // All other filters (Player, None, ParentTarget, etc.) don't imply
+        // battlefield — they could match objects in other zones.
+        _ => false,
     }
 }
 
@@ -1215,6 +1243,11 @@ fn type_admits_creature(filter: &TypeFilter) -> bool {
 /// references the AI cannot resolve statically (a parent target, an event
 /// object, the enchanted creature) can be opposing, so they answer yes;
 /// players, the source and objects the controller made or paid answer no.
+///
+/// Used for non-Sacrifice effects (Destroy, Exile, Bounce, etc.) where
+/// `controller: null` on a creature target means "any creature" including
+/// opponents'. For Sacrifice effects, use
+/// `may_be_opposing_creature_for_sacrifice` instead.
 fn may_be_opposing_creature(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Any => true,
@@ -1288,6 +1321,45 @@ fn may_be_opposing_creature(filter: &TargetFilter) -> bool {
     }
 }
 
+/// Whether a Sacrifice effect's target can name an opponent's creature.
+///
+/// Per CR 701.21a and the engine's `resolve_sacrifice_scope`, a Sacrifice
+/// effect with `controller: null` defaults to the ability's controller (the
+/// player who controls the ability). Only explicit opponent/player scopes
+/// (TargetPlayer, Opponent, DeclaredPlayer, etc.) can reach an opposing
+/// creature.
+///
+/// Exception: a broad `Permanent` type filter with null controller is
+/// treated as potentially opponent-reaching, because "sacrifice a permanent"
+/// commonly appears on "each player" or "target player" effects (e.g.,
+/// Crack the Earth), whereas "sacrifice a creature" with null controller
+/// typically indicates a self-only sacrifice (e.g., Oni Possession).
+fn may_be_opposing_creature_for_sacrifice(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            let admits_creature = typed.type_filters.iter().all(type_admits_creature);
+            let is_broad_permanent = typed
+                .type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Permanent));
+            matches!(
+                typed.controller,
+                Some(ControllerRef::Opponent)
+                    | Some(ControllerRef::TargetPlayer)
+                    | Some(ControllerRef::TargetOpponent)
+                    | Some(ControllerRef::DeclaredPlayer { .. })
+                    | Some(ControllerRef::EventTargetController)
+                    | Some(ControllerRef::ParentTargetController)
+                    | Some(ControllerRef::SourceChosenPlayer)
+            ) && admits_creature
+                || (typed.controller.is_none() && is_broad_permanent && admits_creature)
+        }
+        TargetFilter::Or { filters } => filters.iter().any(may_be_opposing_creature_for_sacrifice),
+        TargetFilter::And { filters } => filters.iter().all(may_be_opposing_creature_for_sacrifice),
+        _ => false,
+    }
+}
+
 /// Whether a continuous modification lowers the recipient's toughness.
 /// CR 704.5f: a creature with toughness 0 or less is put into its owner's
 /// graveyard. A dynamic reduction carries its sign in the quantity (see
@@ -1331,7 +1403,7 @@ fn has_removal_static(face: &CardFace) -> bool {
 /// [`has_removal_static`]), and sacrifice effects that can target an
 /// opposing creature (e.g., Exile into Darkness: "Target player sacrifices
 /// a creature", CR 701.21a). Self-sacrifice costs (e.g., Sakura-Tribe Elder)
-/// target `SelfRef` and are excluded by `may_be_opposing_creature`.
+/// target `SelfRef` and are excluded by `may_be_opposing_creature_for_sacrifice`.
 fn is_removal(face: &CardFace, reading: RoleReading) -> bool {
     let effects = collect_face_effects(face);
     match reading {
@@ -1342,9 +1414,12 @@ fn is_removal(face: &CardFace, reading: RoleReading) -> bool {
                     || is_shrink_removal(effect)
                     // Sacrifice that can reach an opposing creature (edicts).
                     // Self-sacrifice (SelfRef) is excluded by the target check.
+                    // Use the sacrifice-specific checker which respects that
+                    // `controller: null` defaults to the ability's controller.
                     || matches!(
                         effect,
-                        Effect::Sacrifice { target, .. } if may_be_opposing_creature(target)
+                        Effect::Sacrifice { target, .. }
+                            if may_be_opposing_creature_for_sacrifice(target)
                     )
             }) || has_removal_static(face)
         }
@@ -3509,55 +3584,56 @@ mod tests {
         let scored = first_pick(p, &card("Gifts Ungiven", "CHK", &blue, &gifts));
         assert_eq!(scored.class_bonus, 0.0, "Gifts Ungiven is not removal");
 
-        // Positive control: Doom Blade ("Destroy target nonblack creature") IS removal.
-        let doom_blade = oracle_face(serde_json::json!({
-            "name": "Doom Blade",
-            "manaCost": "{1}{B}",
-            "manaValue": 2.0,
+        // Positive control: Rend Flesh (CHK) — "Destroy target non-Spirit creature."
+        // is removal under the full reading.
+        let rend_flesh = oracle_face(serde_json::json!({
+            "name": "Rend Flesh",
+            "manaCost": "{2}{B}",
+            "manaValue": 3.0,
             "colors": ["B"],
-            "type": "Instant",
+            "type": "Instant — Arcane",
             "types": ["Instant"],
-            "text": "Destroy target nonblack creature.",
+            "subtypes": ["Arcane"],
+            "text": "Destroy target non-Spirit creature.",
         }));
-        assert!(classify(&doom_blade).contains(&CardClass::Removal));
-        assert!(roles(&doom_blade).contains(&DeckRole::Removal));
-        let db_score = first_pick(
+        assert!(classify(&rend_flesh).contains(&CardClass::Removal));
+        assert!(roles(&rend_flesh).contains(&DeckRole::Removal));
+        let rf_score = first_pick(
             p,
-            &card("Doom Blade", "CHK", &vec!["B".to_string()], &doom_blade),
+            &card("Rend Flesh", "CHK", &vec!["B".to_string()], &rend_flesh),
         );
-        assert_eq!(db_score.class_bonus, 0.9, "Doom Blade is removal");
-        assert_eq!(db_score.deck_need, 2.0, "removal need is empty");
+        assert_eq!(rf_score.class_bonus, 0.9, "Rend Flesh is removal");
+        assert_eq!(rf_score.deck_need, 2.0, "removal need is empty");
     }
 
     #[test]
-    fn exile_into_darkness_opposing_sacrifice_is_removal() {
+    fn horobis_whisper_opposing_sacrifice_is_removal() {
         let p = DraftProfile::kamigawa_block();
         let black = vec!["B".to_string()];
-        // Exile into Darkness: "Target player sacrifices a creature of their
-        // choice with mana value 3 or less." This is an edict — it can reach
-        // an opposing creature and is removal.
-        let exile = oracle_face(serde_json::json!({
-            "name": "Exile into Darkness",
+        // Horobi's Whisper (CHK): "Target player sacrifices a creature." This is
+        // an edict — it can reach an opposing creature and is removal.
+        let whisper = oracle_face(serde_json::json!({
+            "name": "Horobi's Whisper",
             "manaCost": "{2}{B}",
             "manaValue": 3.0,
             "colors": ["B"],
             "type": "Instant",
             "types": ["Instant"],
-            "text": "Target player sacrifices a creature of their choice with mana value 3 or less.",
+            "text": "Target player sacrifices a creature.",
         }));
         // Positive guard: exports a Sacrifice effect with a target that can be opposing.
-        let has_sacrifice = collect_face_effects(&exile).iter().any(
-            |e| matches!(e, Effect::Sacrifice { target, .. } if may_be_opposing_creature(target)),
+        let has_sacrifice = collect_face_effects(&whisper).iter().any(
+            |e| matches!(e, Effect::Sacrifice { target, .. } if may_be_opposing_creature_for_sacrifice(target)),
         );
         assert!(
             has_sacrifice,
-            "positive guard: Exile into Darkness exports opposing sacrifice"
+            "positive guard: Horobi's Whisper exports opposing sacrifice"
         );
         // Full reading: counts as removal because it can target an opposing creature.
-        assert!(classify(&exile).contains(&CardClass::Removal));
-        assert!(roles(&exile).contains(&DeckRole::Removal));
-        let scored = first_pick(p, &card("Exile into Darkness", "SOK", &black, &exile));
-        assert_eq!(scored.class_bonus, 0.85, "SOK removal bonus");
+        assert!(classify(&whisper).contains(&CardClass::Removal));
+        assert!(roles(&whisper).contains(&DeckRole::Removal));
+        let scored = first_pick(p, &card("Horobi's Whisper", "CHK", &black, &whisper));
+        assert_eq!(scored.class_bonus, 0.9, "CHK removal bonus");
         assert_eq!(scored.deck_need, 2.0, "removal need is empty");
 
         // Negative control: Sakura-Tribe Elder's "Sacrifice this creature" is a
@@ -3580,11 +3656,262 @@ mod tests {
         assert!(!roles(&elder).contains(&DeckRole::Removal));
         let elder_score = first_pick(
             p,
-            &card("Sakura-Tribe Elder", "CHK", &vec!["G".to_string()], &elder),
+            &card("Sakura-Tribe Elder", "CHK", &["G".to_string()], &elder),
         );
         assert_eq!(
             elder_score.class_bonus, 0.25,
             "Elder gets fixing bonus, not removal"
         );
+    }
+
+    #[test]
+    fn reciprocate_battlefield_exile_with_typed_target_is_removal() {
+        let p = DraftProfile::kamigawa_block();
+        let white = vec!["W".to_string()];
+        // Reciprocate (CHK): "Exile target creature that dealt damage to you this
+        // turn." The parser emits ChangeZone with origin None and a typed
+        // creature target. Since the target filter implies battlefield, this is
+        // removal.
+        let reciprocate = oracle_face(serde_json::json!({
+            "name": "Reciprocate",
+            "manaCost": "{2}{W}",
+            "manaValue": 3.0,
+            "colors": ["W"],
+            "type": "Instant",
+            "types": ["Instant"],
+            "text": "Exile target creature that dealt damage to you this turn.",
+        }));
+        // Positive guard: exports ChangeZone to Exile with typed creature target.
+        let has_exile = collect_face_effects(&reciprocate).iter().any(|e| {
+            matches!(
+                e,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            )
+        });
+        assert!(has_exile, "Reciprocate exports battlefield exile");
+        assert!(classify(&reciprocate).contains(&CardClass::Removal));
+        assert!(roles(&reciprocate).contains(&DeckRole::Removal));
+        let scored = first_pick(p, &card("Reciprocate", "CHK", &white, &reciprocate));
+        assert_eq!(scored.class_bonus, 0.9, "Reciprocate is removal");
+    }
+
+    #[test]
+    fn final_judgment_mass_exile_is_removal() {
+        let p = DraftProfile::kamigawa_block();
+        let white = vec!["W".to_string()];
+        // Final Judgment (BOK): "Exile all creatures." Uses ChangeZoneAll with
+        // destination Exile. Must be classified as removal.
+        let final_judgment = oracle_face(serde_json::json!({
+            "name": "Final Judgment",
+            "manaCost": "{4}{W}{W}",
+            "manaValue": 6.0,
+            "colors": ["W"],
+            "type": "Sorcery",
+            "types": ["Sorcery"],
+            "text": "Exile all creatures.",
+        }));
+        // Positive guard: exports ChangeZoneAll to Exile.
+        let has_mass_exile = collect_face_effects(&final_judgment).iter().any(|e| {
+            matches!(
+                e,
+                Effect::ChangeZoneAll {
+                    destination: Zone::Exile,
+                    ..
+                }
+            )
+        });
+        assert!(has_mass_exile, "Final Judgment exports mass exile");
+        assert!(classify(&final_judgment).contains(&CardClass::Removal));
+        assert!(roles(&final_judgment).contains(&DeckRole::Removal));
+        let scored = first_pick(p, &card("Final Judgment", "BOK", &white, &final_judgment));
+        assert_eq!(scored.class_bonus, 0.9, "Final Judgment is removal");
+    }
+
+    #[test]
+    fn eradicate_battlefield_exile_is_removal_off_board_is_not() {
+        let p = DraftProfile::kamigawa_block();
+        let black = vec!["B".to_string()];
+        // Eradicate (BOK): "Exile target nonblack creature. Search its
+        // controller's graveyard, hand, and library for all cards with the same
+        // name as that creature and exile them. Then that player shuffles."
+        // The first exile (battlefield) is removal; the subsequent exiles from
+        // other zones are not. The classifier only sees the first effect for
+        // the removal class.
+        let eradicate = oracle_face(serde_json::json!({
+            "name": "Eradicate",
+            "manaCost": "{3}{B}",
+            "manaValue": 4.0,
+            "colors": ["B"],
+            "type": "Instant",
+            "types": ["Instant"],
+            "text": "Exile target nonblack creature. Search its controller's graveyard, hand, and library for all cards with the same name as that creature and exile them. Then that player shuffles.",
+        }));
+        // Positive guard: exports at least one ChangeZone to Exile with typed target.
+        let has_battlefield_exile = collect_face_effects(&eradicate).iter().any(|e| {
+            matches!(
+                e,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            )
+        });
+        assert!(has_battlefield_exile, "Eradicate exports battlefield exile");
+        // Classified as removal because the first effect reaches an opposing creature.
+        assert!(classify(&eradicate).contains(&CardClass::Removal));
+        assert!(roles(&eradicate).contains(&DeckRole::Removal));
+        let scored = first_pick(p, &card("Eradicate", "BOK", &black, &eradicate));
+        assert_eq!(scored.class_bonus, 0.9, "Eradicate is removal");
+    }
+
+    #[test]
+    fn oni_possession_self_sacrifice_is_not_removal() {
+        let p = DraftProfile::kamigawa_block();
+        let black = vec!["B".to_string()];
+        // Oni Possession (CHK): "Enchant creature. Enchanted creature gets
+        // +3/+1. At the beginning of your upkeep, sacrifice a creature."
+        // The sacrifice trigger forces the controller to sacrifice their own
+        // creature. The Sacrifice effect has a typed creature target with no
+        // controller restriction (defaults to ability's controller = you). This
+        // must NOT be classified as opponent-targeting removal.
+        let oni_possession = oracle_face(serde_json::json!({
+            "name": "Oni Possession",
+            "manaCost": "{3}{B}",
+            "manaValue": 4.0,
+            "colors": ["B"],
+            "type": "Enchantment — Aura",
+            "types": ["Enchantment"],
+            "subtypes": ["Aura"],
+            "text": "Enchant creature\nEnchanted creature gets +3/+1.\nAt the beginning of your upkeep, sacrifice a creature.",
+        }));
+        // Positive guard: exports a Sacrifice effect with typed creature target.
+        let has_sacrifice = collect_face_effects(&oni_possession).iter().any(|e| {
+            matches!(
+                e,
+                Effect::Sacrifice {
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            )
+        });
+        assert!(has_sacrifice, "Oni Possession exports sacrifice effect");
+        // But the target has no explicit opponent scope, so it's not removal.
+        assert!(!classify(&oni_possession).contains(&CardClass::Removal));
+        assert!(!roles(&oni_possession).contains(&DeckRole::Removal));
+        let scored = first_pick(p, &card("Oni Possession", "CHK", &black, &oni_possession));
+        // Oni Possession is a Spirit (no, it's an Aura) — it gets no class bonus.
+        assert_eq!(scored.class_bonus, 0.0, "Oni Possession is not removal");
+    }
+
+    #[test]
+    fn painwracker_oni_conditional_self_sacrifice_is_not_removal() {
+        let p = DraftProfile::kamigawa_block();
+        let black = vec!["B".to_string()];
+        // Painwracker Oni (CHK): "At the beginning of your upkeep, if you
+        // control an Ogre, sacrifice a creature." Same as Oni Possession — the
+        // sacrifice targets the controller's own creatures.
+        let painwracker = oracle_face(serde_json::json!({
+            "name": "Painwracker Oni",
+            "manaCost": "{4}{B}",
+            "manaValue": 5.0,
+            "colors": ["B"],
+            "type": "Creature — Demon Spirit",
+            "types": ["Creature"],
+            "subtypes": ["Demon", "Spirit"],
+            "power": "5",
+            "toughness": "5",
+            "text": "At the beginning of your upkeep, if you control an Ogre, sacrifice a creature.",
+        }));
+        let has_sacrifice = collect_face_effects(&painwracker).iter().any(|e| {
+            matches!(
+                e,
+                Effect::Sacrifice {
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            )
+        });
+        assert!(has_sacrifice, "Painwracker Oni exports sacrifice effect");
+        assert!(!classify(&painwracker).contains(&CardClass::Removal));
+        assert!(!roles(&painwracker).contains(&DeckRole::Removal));
+        let scored = first_pick(p, &card("Painwracker Oni", "CHK", &black, &painwracker));
+        // It's a Spirit, so it gets the Spirit class bonus (0.55).
+        assert_eq!(
+            scored.class_bonus, 0.55,
+            "Painwracker Oni gets Spirit bonus"
+        );
+    }
+
+    #[test]
+    fn crack_the_earth_each_player_sacrifices_is_removal() {
+        let p = DraftProfile::kamigawa_block();
+        let red = vec!["R".to_string()];
+        // Crack the Earth (BOK): "Each player sacrifices a permanent of their
+        // choice." This can reach an opponent's creature and is removal.
+        // The effect targets each player, and each player sacrifices their
+        // choice. The Sacrifice effect's target filter has an explicit player
+        // scope (TargetPlayer/EachPlayer) that resolves to opponents.
+        let crack = oracle_face(serde_json::json!({
+            "name": "Crack the Earth",
+            "manaCost": "{1}{R}",
+            "manaValue": 2.0,
+            "colors": ["R"],
+            "type": "Sorcery",
+            "types": ["Sorcery"],
+            "text": "Each player sacrifices a permanent of their choice.",
+        }));
+        // Positive guard: exports a Sacrifice effect with a target that can be opposing.
+        let has_sacrifice = collect_face_effects(&crack).iter().any(
+            |e| matches!(e, Effect::Sacrifice { target, .. } if may_be_opposing_creature_for_sacrifice(target)),
+        );
+        eprintln!("Crack effects: {:?}", collect_face_effects(&crack));
+        eprintln!("Crack has_sacrifice: {}", has_sacrifice);
+        assert!(has_sacrifice, "Crack the Earth exports opposing sacrifice");
+        assert!(classify(&crack).contains(&CardClass::Removal));
+        assert!(roles(&crack).contains(&DeckRole::Removal));
+        let scored = first_pick(p, &card("Crack the Earth", "BOK", &red, &crack));
+        assert_eq!(scored.class_bonus, 0.9, "Crack the Earth is removal");
+    }
+
+    #[test]
+    fn exile_into_darkness_upkeep_sacrifice_plus_exile_is_removal() {
+        let p = DraftProfile::kamigawa_block();
+        let black = vec!["B".to_string()];
+        // Exile into Darkness (SOK): "At the beginning of your upkeep,
+        // sacrifice a creature. If you do, exile target creature."
+        // This is an enchantment with an upkeep trigger. The trigger has two
+        // parts: a self-sacrifice (cost-like) and an exile of a target
+        // creature. The exile effect targets an opposing creature and is
+        // removal.
+        let exile = oracle_face(serde_json::json!({
+            "name": "Exile into Darkness",
+            "manaCost": "{3}{B}{B}",
+            "manaValue": 5.0,
+            "colors": ["B"],
+            "type": "Enchantment",
+            "types": ["Enchantment"],
+            "text": "At the beginning of your upkeep, sacrifice a creature. If you do, exile target creature.",
+        }));
+        // Positive guard: exports a ChangeZone to Exile with typed creature target.
+        let has_exile = collect_face_effects(&exile).iter().any(|e| {
+            matches!(
+                e,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            )
+        });
+        assert!(has_exile, "Exile into Darkness exports battlefield exile");
+        assert!(classify(&exile).contains(&CardClass::Removal));
+        assert!(roles(&exile).contains(&DeckRole::Removal));
+        let scored = first_pick(p, &card("Exile into Darkness", "SOK", &black, &exile));
+        assert_eq!(scored.class_bonus, 0.85, "Exile into Darkness is removal");
     }
 }

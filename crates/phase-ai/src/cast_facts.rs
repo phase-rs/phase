@@ -617,6 +617,10 @@ pub(crate) fn is_direct_removal(effect: &Effect) -> bool {
             | Effect::DestroyAll { .. }
             | Effect::DamageAll { .. }
             | Effect::DiscardCard { .. }
+            | Effect::ChangeZoneAll {
+                destination: Zone::Exile | Zone::Graveyard,
+                ..
+            }
     ) || matches!(
         effect,
         Effect::ChangeZone {
