@@ -80541,6 +80541,18 @@ fn bare_choose_feeding_a_printed_target_through_the_chosen_object_keeps_stack_ti
     // `Resolution`; the second feeds the rebound "target creature" and keeps
     // `Stack`. Synthetic chain of Final Showdown's mode and Crush Underfoot.
     let text = "Choose a creature you control. It gains indestructible until end of turn. Choose a Giant creature you control. It deals damage equal to its power to target creature.";
+    let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+    let declared: Vec<_> = ir
+        .clauses
+        .iter()
+        .filter(|clause| matches!(clause.parsed.effect, Effect::TargetOnly { .. }))
+        .map(|clause| clause.declared_target_choice_timing)
+        .collect();
+    assert_eq!(
+        declared,
+        vec![Some(TargetChoiceTiming::Resolution), None],
+        "{text}: choice A keeps its declaration, choice B (the printed target's antecedent) loses it"
+    );
     let def = parse_effect_chain(text, AbilityKind::Spell);
     assert_eq!(
         target_only_chain_timings(&def),
