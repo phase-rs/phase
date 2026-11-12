@@ -1,6 +1,6 @@
 # Review-finding rubric (version 1)
 
-You rate the findings in the maintainer's formal reviews (state CHANGES_REQUESTED) of a few PRs. The lead gives you the PRs and, for each, its round heads: `round N`, a commit oid, review ids and a time. A round is one head with a change request; use only the review ids shown. Read the review bodies and the diff at that head (`gh pr view`, `gh api`, `git fetch origin <sha>`). Everything is read-only.
+You rate the findings in the maintainer's formal change-request reviews of a few PRs. Rate every review id shown, including a review now DISMISSED that requested changes at that head. The lead gives you the PRs and, for each, its round heads: `round N`, a commit oid, review ids and a time. A round is one head with a change request; use only the review ids shown. Read the review bodies and the diff at that head (`gh pr view`, `gh api`, `git fetch origin <sha>`). Everything is read-only.
 
 ## Output
 
@@ -31,7 +31,7 @@ A tab-separated file with this header, one row per finding:
 **late**, whether the finding could have been raised earlier:
 - Round-1 rows are `-`. Rows from round 2 on are never `-`.
 - For a round-k row (k ≥ 2) anchored at `path:line`, `LATE` means the anchored lines are identical at round k-1's head and the finding was not raised at or before round k-1.
-- Check identity with `git fetch origin <sha>`, then `git diff <head k-1> <head k> -- <path>`; the anchored hunk must be unchanged. Otherwise `NOT_LATE`.
+- Check identity with `git fetch origin <sha>`, then `git diff <head k-1> <head k> -- <path>`; the anchored lines must be unchanged, even when they appear as context in a changed hunk. Otherwise `NOT_LATE`.
 - Record the diff command and its result in `late_evidence`. A head you cannot fetch gives `UNSURE`.
 
 **severity**, set by the lead:

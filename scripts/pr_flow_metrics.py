@@ -72,7 +72,7 @@ REGISTRY: dict[str, tuple[int, str, str]] = {
     "per_author_top10": (1, "GH", "Top 10 authors by PR count with median skill_rounds and live open PR count."),
     "right_censored": (1, "GH", "Open PRs in the window and their mean skill_rounds so far (lower bound)."),
     "truncation_repaired_prs": (1, "GH", "PRs whose reviews or comments needed follow-up pages."),
-    "pipeline_level": (2, "GH", "none / template_only / full from pr_review.artifact_profile on the PR body."),
+    "pipeline_level": (2, "GH", "none / template_only / full from pr_review.artifact_profile on the PR body; full means both SHA lines are filled, for any head."),
     "rounds_v2.per_pr": (1, "GH", "Distinct commit oids over maintainer reviews whose effective state is CHANGES_REQUESTED."),
     "rounds_v2.share_ge4": (1, "GH", "v2 rounds >= 4 / external PRs."),
     "rounds_v2.share_zero_or_one_round_merged": (1, "GH", "Merged PRs with v2 rounds <= 1 / merged PRs."),
@@ -648,6 +648,8 @@ def event_state(event: dict[str, Any]) -> str | None:
     if pr_review.is_block_event(event):
         return "blocked"
     outcome = pr_review.canonical_outcome(event)
+    if outcome.reason == "negative_review":  # e.g. `request_changes`, which is_block_event does not list
+        return "blocked"
     if outcome.state in {"merged", "closed"} or outcome.reason == "pruned":
         return "terminal"
     if outcome.reason == "requested_changes_warning":
@@ -784,9 +786,12 @@ def log_fields(snapshot: dict[str, Any], external: list[dict[str, Any]], fetched
         for t, event in timed:
             if event.get("head_sha"):
                 first_seen.setdefault(event["head_sha"], t)
-        known = sorted((h for h in first_seen if h in arrivals), key=lambda h: arrivals[h])
+        known = [h for h in first_seen if h in arrivals]
         without_arrival += len(first_seen) - len(known)
-        for head in known[1:]:
+        opened = parse_time(pr["createdAt"])
+        for head in known:
+            if arrivals[head] <= opened:  # the head the PR opened with was never picked up after a push
+                continue
             pickup_heads += 1
             latency = hours_between(arrivals[head], first_seen[head])
             if latency < 0:

@@ -2629,7 +2629,12 @@ def latest_requested_changes_warning_timestamp(packet: dict[str, Any]) -> str | 
         if not marker_present:
             continue
         author_login = comment_login(comment)
-        if acting_login and author_login and author_login != acting_login:
+        if (
+            comment.get("authorAssociation") not in MEMBER_AUTHOR_ASSOCIATIONS
+            and acting_login
+            and author_login
+            and author_login != acting_login
+        ):
             continue
         timestamps.append(comment.get("createdAt"))
     return max((timestamp for timestamp in timestamps if timestamp), default=None)

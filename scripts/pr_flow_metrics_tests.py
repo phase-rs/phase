@@ -775,12 +775,27 @@ class LogFieldTests(Harness):
     def test_head_pickup_latency(self) -> None:
         timeline = [commit(H[1], "2026-10-27T00:00:00Z"), force_push(H[2], "2026-10-28T00:00:00Z"), force_push(H[3], "2026-10-29T00:00:00Z")]
         pickup = self.log_block(
-            [pr_node(1, timelineItems=connection(timeline))],
+            [pr_node(1, created="2026-10-27T00:30:00Z", timelineItems=connection(timeline))],
             event(1, "observation", "2026-10-27T01:00:00Z", H[1]), event(1, "observation", "2026-10-28T02:00:00Z", H[2]),
             event(1, "observation", "2026-10-28T23:00:00Z", H[3]), event(1, "observation", "2026-10-30T00:00:00Z", H[4]),
         )["head_pickup"]
         self.assertEqual((pickup["heads"], pickup["latency_hours"]["n"], pickup["latency_hours"]["total"]), (2, 1, 2.0))
         self.assertEqual((pickup["negative_dropped"], pickup["without_arrival"], pickup["over_24h"]), (1, 1, 0))
+
+    def test_head_pickup_counts_the_first_logged_head_when_the_opening_head_is_unlogged(self) -> None:
+        timeline = [commit(H[1], "2026-10-27T00:00:00Z"), force_push(H[2], "2026-10-28T00:00:00Z")]
+        pickup = self.log_block(
+            [pr_node(1, created="2026-10-27T00:30:00Z", timelineItems=connection(timeline))],
+            event(1, "observation", "2026-10-28T02:00:00Z", H[2]),
+        )["head_pickup"]
+        self.assertEqual((pickup["heads"], pickup["latency_hours"]["total"]), (1, 2.0))
+
+    def test_request_changes_ends_a_hold_as_blocked(self) -> None:
+        held = self.log_block(
+            [pr_node(1)], event(1, "held", "2026-10-27T00:00:00Z", outcome="held"),
+            event(1, "request_changes", "2026-10-27T03:00:00Z"),
+        )["held"]
+        self.assertEqual((held["spells"], held["censored"], held["hours"]["total"]), (1, 0, 3.0))
 
     def test_spells_end_at_closure_and_later_transitions_are_ignored(self) -> None:
         prs = [pr_node(1, state="CLOSED", closedAt="2026-10-27T01:00:00Z"),
