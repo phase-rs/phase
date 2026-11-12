@@ -2946,12 +2946,6 @@ fn handle_copy_token_source_choice(
         player: state.active_player,
     };
     state.finish_active_paused_post_replacement_dispatch();
-    // CR 117.2e + CR 608.2c: the substitute's copies are made, but the effect
-    // whose creation they replaced (a parked copy owner, the producing
-    // instruction's tail) is still resolving. Finish it at the common boundary
-    // in this action, as every sibling choice handler does; no player has
-    // priority before that.
-    super::engine::resume_pending_continuation_if_priority(state, events)?;
 
     // No `replay_deferred_entry_events` here, and that omission is deliberate
     // rather than forgotten. The replaced event is `CreateToken`, whose source
@@ -2965,6 +2959,21 @@ fn handle_copy_token_source_choice(
 }
 
 pub(super) fn handle_copy_target_choice(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    target: Option<TargetRef>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let waiting_for = apply_copy_target_choice(state, waiting_for, target, events)?;
+    state.waiting_for = waiting_for;
+    // CR 117.2e + CR 608.2c: every successful copy answer shares this boundary.
+    // A settled liminal batch can expose an enclosing copy owner or replacement
+    // drain; finish that resolution before priority, preserving any new prompt.
+    super::engine::resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
+}
+
+fn apply_copy_target_choice(
     state: &mut GameState,
     waiting_for: WaitingFor,
     target: Option<TargetRef>,
@@ -3429,7 +3438,6 @@ pub(super) fn handle_copy_target_choice(
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
-    super::engine::resume_pending_continuation_if_priority(state, events)?;
     Ok(state.waiting_for.clone())
 }
 
