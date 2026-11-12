@@ -39,7 +39,7 @@ use super::effects::mill::apply_mill_after_replacement;
 use super::effects::scry::apply_scry_after_replacement;
 use super::effects::token::apply_create_token_after_replacement;
 use super::engine::EngineError;
-use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
+use super::life_costs::PayLifeCostResult;
 use super::sacrifice::{apply_sacrifice_after_replacement, SacrificeApply};
 
 /// CR 101.4 + CR 616.1: In a Prevented replacement-resume arm, resume a parked
@@ -2463,6 +2463,19 @@ pub(super) fn handle_entry_payment(
         } => (*player, *accumulated),
         _ => unreachable!("a live pre-entry payment owns a PayAmountChoice prompt"),
     };
+    // CR 614.12a: the copied payment precedes simultaneous entry. Judge its
+    // prohibition on the same board as its offer, before taking the parked
+    // record; ordinary pre-entry payments retain the live-board context.
+    let prohibition_board = state.pending_replacement.as_ref().and_then(|pending| {
+        if super::replacement::parked_entry_payment_is_copy_surface(pending) {
+            let WaitingFor::PayAmountChoice { source_id, .. } = &state.waiting_for else {
+                unreachable!("a live entry payment owns its prompt")
+            };
+            Some(super::replacement::copy_entry_board(state, *source_id).into_owned())
+        } else {
+            None
+        }
+    });
     // Take the outer record FIRST so the inner life-loss ordering (which owns
     // `pending_replacement` while IT resolves) cannot collide with it; pin the
     // taken local's delivery boundary BEFORE the payment can change the
@@ -2473,7 +2486,13 @@ pub(super) fn handle_entry_payment(
         .expect("a live pre-entry payment owns the pending replacement");
     pending.pin_delivery_boundary();
     let resume_at_resolution_depth = state.resolution_stack.len();
-    match pay_life_as_cost(state, player, amount, events) {
+    match super::life_costs::pay_life_as_cost_with_prohibition_board(
+        state,
+        player,
+        amount,
+        prohibition_board.as_ref(),
+        events,
+    ) {
         PayLifeCostResult::Paid { .. } => {
             if let Some(slot) =
                 super::replacement::proposed_entry_choices_mut(&mut pending.proposed)
