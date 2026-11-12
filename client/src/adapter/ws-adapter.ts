@@ -3170,7 +3170,7 @@ export class WebSocketAdapter implements EngineAdapter {
             sayingPendingResolved = true;
           }
         }
-        const pending = isSaying ? null : this.submission.take(msg.command_id);
+        const pending = isSaying && msg.command_id === undefined ? null : this.submission.take(msg.command_id);
         // A correlated saying's promise already carries these events to its
         // caller, which commits them; emitting them again would present the
         // saying twice. A native bridge still needs the view to fan it out.
@@ -3280,7 +3280,7 @@ export class WebSocketAdapter implements EngineAdapter {
               withheldSaying = true;
             }
           }
-          const pending = withheldSaying ? null : this.submission.take(msg.command_id);
+          const pending = withheldSaying && msg.command_id === undefined ? null : this.submission.take(msg.command_id);
           if (pending) {
             pending.resolve({ events: [], log_entries: [] });
             this.emit({ type: "actionPendingChanged", pending: false });

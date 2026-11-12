@@ -4142,7 +4142,10 @@ function SayPhrasePanel({
     seq.current += 1;
     const attemptSeq = seq.current;
     const attemptPayment = paymentId;
-    setInFlight((current) => new Map(current).set(attemptSeq, at));
+    const nextInFlight = new Map(inFlightRef.current);
+    nextInFlight.set(attemptSeq, at);
+    inFlightRef.current = nextInFlight;
+    setInFlight(nextInFlight);
     void dispatch({
       type: "SayPhrase",
       data: { payment: attemptPayment, seq: attemptSeq, at_ms: at, report: "Saying" },
@@ -4151,25 +4154,45 @@ function SayPhrasePanel({
       // rejection from an older payment must never decrement a replacement's
       // count, and a stale attempt must not retract a newer one.
       if (paymentIdRef.current !== attemptPayment) return;
-      setInFlight((current) => {
-        if (!current.has(attemptSeq)) return current;
-        const next = new Map(current);
-        next.delete(attemptSeq);
-        return next;
-      });
-      if (!(err instanceof AdapterError && err.code === AdapterErrorCode.ACTION_NOT_SENT)) {
-        return;
-      }
-      if (retriesLeft > 0) {
+      const updatedInFlight = new Map(inFlightRef.current);
+      updatedInFlight.delete(attemptSeq);
+      inFlightRef.current = updatedInFlight;
+      setInFlight(updatedInFlight);
+      const remainingCount = updatedInFlight.size;
+
+      if (err instanceof AdapterError && err.code === AdapterErrorCode.ACTION_NOT_SENT && retriesLeft > 0) {
         // Definite no-send: the bytes never left this host. Retry the SAME
         // spoken instant as a fresh sequence. The engine requires a newer
         // sequence, and an observation that never arrived cannot consume one
         // of the sayings.
         submitSaying(at, retriesLeft - 1);
-      } else if (inFlightRef.current.size <= 1) {
-        // Nothing reached the authority; reopen the click instead of leaving a
-        // local count that blocks the next saying forever.
-        lastSaidAt.current = null;
+        return;
+      }
+
+      if (isDefinitivePaymentRefusal(err) || retriesLeft === 0) {
+        if (remainingCount === 0) {
+          lastSaidAt.current = null;
+        } else {
+          lastSaidAt.current = Math.max(...updatedInFlight.values());
+        }
+        if (said === 0 && lastSaidAt.current === null) {
+          if (timerRef.current) {
+            clearTimeout(timerRef.current);
+            timerRef.current = undefined;
+          }
+          deadlineRef.current = null;
+        } else {
+          const deadline = computeDeadline();
+          deadlineRef.current = deadline;
+          if (deadline === null) {
+            if (timerRef.current) {
+              clearTimeout(timerRef.current);
+              timerRef.current = undefined;
+            }
+          } else {
+            startTimer();
+          }
+        }
       }
     });
   };

@@ -4,6 +4,10 @@ import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection.t
 import type { PeerSession } from "../../network/peer.ts";
 import { WIRE_PROTOCOL_VERSION, type P2PMessage } from "../../network/protocol.ts";
 import type { TransportConnection, TransportPeer } from "../../network/transport.ts";
+import type {
+  InteractionChoiceId,
+  InteractionId,
+} from "../generated/interaction/index.ts";
 import { NativeP2PBridge, P2PGuestAdapter, P2PHostAdapter } from "../p2p-adapter.ts";
 import {
   AdapterError,
@@ -12,6 +16,7 @@ import {
   type GameAction,
   type GameEvent,
   type GameState,
+  type InteractionSubmission,
   type SayPhraseExpiryTarget,
   type SubmitResult,
 } from "../types.ts";
@@ -160,7 +165,7 @@ function createFakePeer(): {
   };
 }
 
-async function authenticatedGuest(conn: FakeDataConnection): Promise<P2PGuestAdapter> {
+async function authenticatedGuest(conn: FakeDataConnection, playerId = 1): Promise<P2PGuestAdapter> {
   const { peer } = createFakePeer();
   const adapter = new P2PGuestAdapter(
     { player: { main_deck: [], sideboard: [] } },
@@ -172,8 +177,8 @@ async function authenticatedGuest(conn: FakeDataConnection): Promise<P2PGuestAda
   await conn.simulateData({
     type: "game_setup",
     wireProtocolVersion: WIRE_PROTOCOL_VERSION,
-    assignedPlayerId: 1,
-    playerToken: "seat-token",
+    assignedPlayerId: playerId,
+    playerToken: `seat-token-${playerId}`,
     revision: 1,
     state: remoteState("initial"),
     events: [],
@@ -1178,6 +1183,326 @@ describe("P2P saying reply lane", () => {
 
     await vi.waitFor(() => expect(ordinarySettled).toBe(true));
     guest.dispose();
+  });
+
+  it("correlates opaque saying in Browser P2P mode while another guest's preference command is parked", async () => {
+    const conn1 = new FakeDataConnection();
+    const conn2 = new FakeDataConnection();
+    const guest1 = await authenticatedGuest(conn1, 1);
+    const guest2 = await authenticatedGuest(conn2, 2);
+
+    const session1 = {
+      send: vi.fn(async (msg) => {
+        await conn1.simulateData(msg as P2PMessage);
+        return true;
+      }),
+      drain: vi.fn(async () => {}),
+      latencyMs: 10,
+    } as unknown as PeerSession;
+
+    const session2 = {
+      send: vi.fn(async (msg) => {
+        await conn2.simulateData(msg as P2PMessage);
+        return true;
+      }),
+      drain: vi.fn(async () => {}),
+      latencyMs: 10,
+    } as unknown as PeerSession;
+
+    // Guest 2 has a preference command parked (e.g. SetPhaseStops):
+    const setPhaseStopsAction: GameAction = {
+      type: "SetPhaseStops",
+      data: { stops: [] },
+    };
+    const guest2Promise = guest2.submitAction(setPhaseStopsAction, 2);
+    let guest2Settled = false;
+    void guest2Promise.then(
+      () => { guest2Settled = true; },
+      () => { guest2Settled = true; },
+    );
+
+    const hostBroadcasts: Array<{ saying?: boolean }> = [];
+    const host = Object.create(P2PHostAdapter.prototype) as unknown as {
+      disposed: boolean;
+      ownsAuthority: () => boolean;
+      concedingSeats: Set<number>;
+      eliminatedSeats: Set<number>;
+      gameRunState: string;
+      guestSessions: Map<number, unknown>;
+      wasm: {
+        submitInteraction: (submission: unknown, player: number, atMs?: number) => Promise<SubmitResult>;
+      };
+      applyBrowserMutation: <T>(fn: () => Promise<T>) => Promise<{ result: T }>;
+      publishHostSnapshot: (result: SubmitResult) => Promise<boolean>;
+      broadcastStateUpdate: (transition: unknown, terminalReason?: string, saying?: boolean) => Promise<void>;
+      runAiLoop: (saying?: boolean) => Promise<void>;
+      persistAuthoritativeState: () => void;
+      send: (s: unknown, m: unknown) => Promise<boolean>;
+      authenticatedGuestPlayerId: (s: unknown, m: unknown) => number | null;
+      handlePendingTerminalReconnectFrame: (s: unknown, m: unknown) => boolean;
+    };
+    host.disposed = false;
+    host.ownsAuthority = () => true;
+    host.concedingSeats = new Set();
+    host.eliminatedSeats = new Set();
+    host.gameRunState = "running";
+    host.guestSessions = new Map([
+      [1, session1],
+      [2, session2],
+    ]);
+    host.authenticatedGuestPlayerId = (_s, m: unknown) => (m as { senderPlayerId?: number }).senderPlayerId ?? null;
+    host.handlePendingTerminalReconnectFrame = () => false;
+    host.applyBrowserMutation = async (fn) => ({ result: await fn() });
+    host.publishHostSnapshot = vi.fn(async () => true);
+    host.persistAuthoritativeState = vi.fn();
+    host.send = vi.fn(async (s: unknown, m: unknown) => {
+      const sess = s as PeerSession;
+      return sess.send(m as P2PMessage);
+    });
+
+    host.broadcastStateUpdate = vi.fn(async (_transition, _terminalReason, saying) => {
+      hostBroadcasts.push({ saying });
+      const updateMsg: P2PMessage = {
+        type: "state_update",
+        revision: hostBroadcasts.length + 1,
+        saying,
+        state: remoteState("after-saying"),
+        events: [{ type: "PhraseSaid", phrase: "Toy Boat" } as unknown as GameEvent],
+        logEntries: [],
+        legalActions: [],
+        ...EMPTY_LEGAL_ACTIONS,
+      };
+      await conn1.simulateData(updateMsg);
+      await conn2.simulateData(updateMsg);
+    });
+    host.runAiLoop = vi.fn(async (saying) => {
+      hostBroadcasts.push({ saying });
+      const aiMsg: P2PMessage = {
+        type: "state_update",
+        revision: hostBroadcasts.length + 1,
+        saying,
+        state: remoteState("ai-followup"),
+        events: [],
+        logEntries: [],
+        legalActions: [],
+        ...EMPTY_LEGAL_ACTIONS,
+      };
+      await conn1.simulateData(aiMsg);
+      await conn2.simulateData(aiMsg);
+    });
+
+    host.wasm = {
+      submitInteraction: vi.fn(async (_sub, _player, _atMs) => ({
+        events: [{ type: "PhraseSaid", phrase: "Toy Boat" } as unknown as GameEvent],
+        log_entries: [],
+      })),
+    };
+
+    const submission: InteractionSubmission = {
+      interactionId: "say-boat-1" as InteractionId,
+      response: { type: "choose", data: { choiceId: "say-toy-boat" as InteractionChoiceId } },
+    };
+    const guest1Promise = guest1.submitInteraction(submission, 1);
+
+    await P2PHostAdapter.prototype["handleGuestMessage"].call(
+      host,
+      session1,
+      {
+        type: "interaction",
+        senderPlayerId: 1,
+        submission,
+      },
+      1_730_000_000_100,
+    );
+
+    // Guest 1's submission resolves!
+    await expect(guest1Promise).resolves.toEqual({ events: [], log_entries: [] });
+
+    // Host updates carry saying: true
+    expect(hostBroadcasts.length).toBe(2);
+    expect(hostBroadcasts[0].saying).toBe(true);
+    expect(hostBroadcasts[1].saying).toBe(true);
+
+    // Guest 2's parked command remains parked!
+    expect(guest2Settled).toBe(false);
+
+    // Deliver ordinary state update to Guest 2:
+    await conn2.simulateData({
+      type: "state_update",
+      revision: 10,
+      state: remoteState("settled"),
+      events: [{ marker: "pref-saved" } as unknown as GameEvent],
+      logEntries: [],
+      ...EMPTY_LEGAL_ACTIONS,
+    });
+    await expect(guest2Promise).resolves.toEqual({
+      events: [{ marker: "pref-saved" }],
+      log_entries: [],
+    });
+    expect(guest2Settled).toBe(true);
+
+    guest1.dispose();
+    guest2.dispose();
+  });
+
+  it("correlates opaque saying in Native P2P mode while another guest's preference command is parked", async () => {
+    const conn1 = new FakeDataConnection();
+    const conn2 = new FakeDataConnection();
+    const guest1 = await authenticatedGuest(conn1, 1);
+    const guest2 = await authenticatedGuest(conn2, 2);
+
+    const session1 = {
+      send: vi.fn(async (msg) => {
+        await conn1.simulateData(msg as P2PMessage);
+        return true;
+      }),
+      drain: vi.fn(async () => {}),
+      latencyMs: 10,
+    } as unknown as PeerSession;
+
+    const session2 = {
+      send: vi.fn(async (msg) => {
+        await conn2.simulateData(msg as P2PMessage);
+        return true;
+      }),
+      drain: vi.fn(async () => {}),
+      latencyMs: 10,
+    } as unknown as PeerSession;
+
+    // Guest 2 has a preference command parked:
+    const setPhaseStopsAction: GameAction = {
+      type: "SetPhaseStops",
+      data: { stops: [] },
+    };
+    const guest2Promise = guest2.submitAction(setPhaseStopsAction, 2);
+    let guest2Settled = false;
+    void guest2Promise.then(
+      () => { guest2Settled = true; },
+      () => { guest2Settled = true; },
+    );
+
+    const hostBroadcasts: Array<{ saying?: boolean }> = [];
+    const host = Object.create(P2PHostAdapter.prototype) as unknown as {
+      disposed: boolean;
+      ownsAuthority: () => boolean;
+      concedingSeats: Set<number>;
+      eliminatedSeats: Set<number>;
+      gameRunState: string;
+      guestSessions: Map<number, unknown>;
+      nativeBridge: {
+        submitInteraction: (submission: unknown, player: number, atMs?: number) => Promise<SubmitResult>;
+      };
+      applyBrowserMutation: <T>(fn: () => Promise<T>) => Promise<{ result: T }>;
+      publishHostSnapshot: (result: SubmitResult) => Promise<boolean>;
+      broadcastStateUpdate: (transition: unknown, terminalReason?: string, saying?: boolean) => Promise<void>;
+      runAiLoop: (saying?: boolean) => Promise<void>;
+      persistAuthoritativeState: () => void;
+      send: (s: unknown, m: unknown) => Promise<boolean>;
+      authenticatedGuestPlayerId: (s: unknown, m: unknown) => number | null;
+      handlePendingTerminalReconnectFrame: (s: unknown, m: unknown) => boolean;
+    };
+    host.disposed = false;
+    host.ownsAuthority = () => true;
+    host.concedingSeats = new Set();
+    host.eliminatedSeats = new Set();
+    host.gameRunState = "running";
+    host.guestSessions = new Map([
+      [1, session1],
+      [2, session2],
+    ]);
+    host.authenticatedGuestPlayerId = (_s, m: unknown) => (m as { senderPlayerId?: number }).senderPlayerId ?? null;
+    host.handlePendingTerminalReconnectFrame = () => false;
+    host.applyBrowserMutation = async (fn) => ({ result: await fn() });
+    host.publishHostSnapshot = vi.fn(async () => true);
+    host.persistAuthoritativeState = vi.fn();
+    host.send = vi.fn(async (s: unknown, m: unknown) => {
+      const sess = s as PeerSession;
+      return sess.send(m as P2PMessage);
+    });
+
+    host.broadcastStateUpdate = vi.fn(async (_transition, _terminalReason, saying) => {
+      hostBroadcasts.push({ saying });
+      const updateMsg: P2PMessage = {
+        type: "state_update",
+        revision: hostBroadcasts.length + 1,
+        saying,
+        state: remoteState("after-native-saying"),
+        events: [{ type: "PhraseSaid", phrase: "Toy Boat" } as unknown as GameEvent],
+        logEntries: [],
+        legalActions: [],
+        ...EMPTY_LEGAL_ACTIONS,
+      };
+      await conn1.simulateData(updateMsg);
+      await conn2.simulateData(updateMsg);
+    });
+    host.runAiLoop = vi.fn(async (saying) => {
+      hostBroadcasts.push({ saying });
+      const aiMsg: P2PMessage = {
+        type: "state_update",
+        revision: hostBroadcasts.length + 1,
+        saying,
+        state: remoteState("native-ai-followup"),
+        events: [],
+        logEntries: [],
+        legalActions: [],
+        ...EMPTY_LEGAL_ACTIONS,
+      };
+      await conn1.simulateData(aiMsg);
+      await conn2.simulateData(aiMsg);
+    });
+
+    host.nativeBridge = {
+      submitInteraction: vi.fn(async (_sub, _player, _atMs) => ({
+        events: [{ type: "PhraseSaid", phrase: "Toy Boat" } as unknown as GameEvent],
+        log_entries: [],
+      })),
+    };
+
+    const submission: InteractionSubmission = {
+      interactionId: "say-boat-native" as InteractionId,
+      response: { type: "choose", data: { choiceId: "say-toy-boat" as InteractionChoiceId } },
+    };
+    const guest1Promise = guest1.submitInteraction(submission, 1);
+
+    await P2PHostAdapter.prototype["handleGuestMessage"].call(
+      host,
+      session1,
+      {
+        type: "interaction",
+        senderPlayerId: 1,
+        submission,
+      },
+      1_730_000_000_200,
+    );
+
+    // Guest 1 settles:
+    await expect(guest1Promise).resolves.toEqual({ events: [], log_entries: [] });
+
+    // Host updates carry saying: true:
+    expect(hostBroadcasts.length).toBe(2);
+    expect(hostBroadcasts[0].saying).toBe(true);
+    expect(hostBroadcasts[1].saying).toBe(true);
+
+    // Guest 2's parked command remains parked:
+    expect(guest2Settled).toBe(false);
+
+    // Deliver ordinary state update to guest 2:
+    await conn2.simulateData({
+      type: "state_update",
+      revision: 10,
+      state: remoteState("native-settled"),
+      events: [{ marker: "native-pref-saved" } as unknown as GameEvent],
+      logEntries: [],
+      ...EMPTY_LEGAL_ACTIONS,
+    });
+    await expect(guest2Promise).resolves.toEqual({
+      events: [{ marker: "native-pref-saved" }],
+      log_entries: [],
+    });
+    expect(guest2Settled).toBe(true);
+
+    guest1.dispose();
+    guest2.dispose();
   });
 
 });

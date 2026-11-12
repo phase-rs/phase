@@ -593,9 +593,16 @@ impl StateUpdatePublisher {
                 transition.decision.is_none() || index + 1 == transition_count,
                 "only the final AI transition may carry a decision",
             );
+            // Carry the accepted action's saying classification into continuation transitions,
+            // or mark saying if the AI itself performed a phrase saying.
+            let is_saying = saying
+                || transition
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, GameEvent::PhraseSaid { .. }));
             self = executor
                 .run(move || {
-                    let source = StateUpdateSource::from_transition(&transition).saying(saying);
+                    let source = StateUpdateSource::from_transition(&transition).saying(is_saying);
                     let revision = source.revision;
                     match source.guarded(&self.full_key.game_code) {
                         Ok(source) => self.publish(&source),

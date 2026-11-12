@@ -10991,4 +10991,42 @@ mod hosted_takeback_tests {
             "Toy Boat survives"
         );
     }
+
+    /// Regenerates the real-WASM integration fixture used by
+    /// `client/src/game/__tests__/toyBoatSayPrompt.integration.test.ts`.
+    ///
+    /// Run manually from the repository root:
+    /// `cargo test -p engine-wasm --lib hosted_takeback_tests::write_toy_boat_say_prompt_fixture -- --ignored --exact`
+    ///
+    /// The fixture is the engine's own trusted export of the exact prompt state
+    /// (Toy Boat on the battlefield with one age counter, its timed payment
+    /// armed). The browser-boundary test restores that snapshot instead of
+    /// re-deriving Toy Boat's upkeep in TypeScript.
+    #[test]
+    #[ignore]
+    fn write_toy_boat_say_prompt_fixture() {
+        const TOY_BOAT_ORACLE: &str = "Cumulative upkeep\u{2014}Say \"Toy Boat\" quickly. (At the beginning of your upkeep, put an age counter on this creature, then sacrifice it unless you say \"Toy Boat\" once for each age counter on it\u{2014}without pausing between or fumbling it.)";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Untap);
+        let toy_boat = scenario
+            .add_creature_from_oracle(P0, "Toy Boat", 3, 3, TOY_BOAT_ORACLE)
+            .with_mana_cost(engine::types::mana::ManaCost::generic(3))
+            .id();
+        scenario.with_counter(toy_boat, engine::types::counter::CounterType::Age, 1);
+        let filler = ["Filler"; 4];
+        scenario.with_library_top(P0, &filler);
+        scenario.with_library_top(P1, &filler);
+        let mut runner = scenario.build();
+        runner.state_mut().un_actions.set_enabled(P0, true);
+        runner.advance_to_upkeep();
+        runner.resolve_top();
+
+        host(runner.state().clone());
+        let json = export_game_state_json().expect("the prompt state exports");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../client/src/game/__tests__/fixtures/toyBoatSayPrompt.json");
+        std::fs::create_dir_all(path.parent().expect("the fixture has a parent directory"))
+            .expect("the fixture directory exists");
+        std::fs::write(&path, json).expect("the fixture writes");
+    }
 }

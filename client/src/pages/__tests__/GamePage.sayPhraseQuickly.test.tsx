@@ -707,4 +707,38 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     fireEvent.click(button);
     expect(payCalls()).toHaveLength(1);
   });
+
+  it("retires speculative expiry after a definitively refused first saying and allows subsequent attempt", async () => {
+    setup(2);
+
+    // The first saying attempt is definitively refused by the authority (e.g. ACTION_REJECTED).
+    dispatchMock.mockRejectedValueOnce(
+      new AdapterError(AdapterErrorCode.ACTION_REJECTED, "Action rejected by authority", true),
+    );
+
+    render(gamePageTree());
+    expect(await screen.findByText("0 of 2 said")).toBeInTheDocument();
+
+    vi.useFakeTimers();
+
+    // Click the phrase box: first attempt fails.
+    fireEvent.click(phraseBox());
+
+    // Flush promises so the rejection handler runs.
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Advance fake timer well past the pace window.
+    // No Expiry report should be emitted because the refused first saying has no gap to measure.
+    advance(GAP_MS * 10);
+    expect(expiryCalls()).toHaveLength(0);
+
+    vi.useRealTimers();
+
+    // Now click again: subsequent saying succeeds and moves progress to 1 of 2.
+    fireEvent.click(phraseBox());
+    expect(await screen.findByText("1 of 2 said")).toBeInTheDocument();
+    expect(sayingCalls().filter((c) => c.seq === 2)).toHaveLength(1);
+  });
 });

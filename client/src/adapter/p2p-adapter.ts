@@ -2546,7 +2546,11 @@ export class P2PHostAdapter implements EngineAdapter {
       staleRetries = 0;
       const transition = this.stampBrowserMutation(outcome.result);
       await this.publishHostSnapshot(transition.result);
-      await this.broadcastStateUpdate(transition, undefined, saying);
+      // Carry the originating action's saying classification into AI follow-ups,
+      // or mark saying if the AI itself performed a phrase saying (e.g. Toy Boat upkeep).
+      const aiAction = proposal.action;
+      const isSaying = Boolean(saying || aiAction.type === "SayPhrase");
+      await this.broadcastStateUpdate(transition, undefined, isSaying);
       void this.persistAuthoritativeState();
     }
   }
@@ -3502,9 +3506,10 @@ export class P2PHostAdapter implements EngineAdapter {
     const transition = await this.applyBrowserMutation(() => this.nativeBridge
       ? this.nativeBridge.submitInteraction(submission, actor)
       : this.wasm.submitInteraction(submission, actor));
+    const isSaying = transition.result.events.some((e) => e.type === "PhraseSaid");
     this.scheduleSayPhraseExpiry();
-    await this.broadcastStateUpdate(transition);
-    await this.runAiLoop();
+    await this.broadcastStateUpdate(transition, undefined, isSaying);
+    await this.runAiLoop(isSaying);
     void this.persistAuthoritativeState();
     return transition.result;
   }
@@ -4635,7 +4640,7 @@ export class P2PHostAdapter implements EngineAdapter {
       const transition = await this.applyBrowserMutation(() => this.wasm.submitAction(action, target.submitter));
       await this.publishHostSnapshot(transition.result);
       await this.broadcastStateUpdate(transition, undefined, true);
-      await this.runAiLoop(true);
+      await this.runAiLoop();
       void this.persistAuthoritativeState();
     } catch (err) {
       // Refused — e.g. while a takeback vote is pending. The payment stays
@@ -5440,13 +5445,20 @@ export class P2PHostAdapter implements EngineAdapter {
           break;
         }
         // Applied — same delivery contract as the "action" case above (#7924).
+        const isSaying = transition.result.events.some((e) => e.type === "PhraseSaid");
         try {
           await this.publishHostSnapshot(transition.result);
-          await this.broadcastStateUpdate(transition);
-          await this.runAiLoop();
+          await this.broadcastStateUpdate(transition, undefined, isSaying);
+          await this.runAiLoop(isSaying);
           void this.persistAuthoritativeState();
         } catch (err) {
           console.error("[P2PHost] delivery after an applied guest interaction failed:", err);
+        }
+        if (isSaying) {
+          // Sent after the state fan-out (FIFO), so the guest's authoritative
+          // progress is already in hand when its saying settles.
+          const session = this.guestSessions.get(pid);
+          if (session) void this.send(session, { type: "action_noop" });
         }
         break;
       }

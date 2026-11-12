@@ -8522,6 +8522,7 @@ struct AppliedHumanSubmission {
     takeback_after: Option<ServerMessage>,
     publisher: game_executor::StateUpdatePublisher,
     ai: std::ops::ControlFlow<AiRunOutcome, server_core::session::AiRunCursor>,
+    is_saying: bool,
 }
 
 /// Maps engine and lifecycle session refusals onto their ordinary response
@@ -8812,7 +8813,12 @@ async fn handle_full_concession(
         let (session, result) = context
             .game_executor
             .with_session(session, move |session| {
-                let (revision, HandledAction { result, takeback }) = match scope {
+                let (
+                    revision,
+                    HandledAction {
+                        result, takeback, ..
+                    },
+                ) = match scope {
                     ConcessionScope::Game => {
                         let handled = session.handle_action_with_card_db_outcome(
                             &player_token,
@@ -9148,15 +9154,15 @@ async fn apply_and_publish_full_submission(
     let persistence_executor = executor.clone();
     let code = game_code.clone();
     let player_token = player_token.to_string();
-    let is_saying = matches!(
-        &submission,
-        GameSubmission::Action(GameAction::SayPhrase { .. })
-    );
     // The owned game guard spans admission waits, AI continuations and all
     // publication. Other games can use the CPU between these work units.
     let (mut session, applied) = executor
         .with_session(session, move |session| {
-            let HandledAction { result, takeback } = match submission {
+            let HandledAction {
+                result,
+                takeback,
+                action,
+            } = match submission {
                 GameSubmission::Action(action) => session.handle_action_with_card_db_outcome_at(
                     &player_token,
                     action,
@@ -9170,17 +9176,17 @@ async fn apply_and_publish_full_submission(
                         } else {
                             host_received_at_ms
                         };
-                    session
-                        .handle_interaction_with_rejection_at(&player_token, submission, ingress_ms)
-                        .map(|result| HandledAction {
-                            result,
-                            takeback: None,
-                        })
+                    session.handle_interaction_with_rejection_at(
+                        &player_token,
+                        submission,
+                        ingress_ms,
+                    )
                 }
             }?;
             if is_zero_count_debug_create {
                 return Ok(None);
             }
+            let is_saying = matches!(&action, GameAction::SayPhrase { .. });
             let revision = session.advance_state_revision();
             let ai = session.begin_ai_run();
             let mut publisher = publisher.expect("a non-noop submission captures its routes");
@@ -9226,6 +9232,7 @@ async fn apply_and_publish_full_submission(
                 takeback_after,
                 publisher,
                 ai,
+                is_saying,
             }))
         })
         .await;
@@ -9261,6 +9268,7 @@ async fn apply_and_publish_full_submission(
         takeback_after,
         publisher,
         ai,
+        is_saying,
     } = applied;
     let Some(human_result) = unpublished else {
         publisher.finish(executor).await;

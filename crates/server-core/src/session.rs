@@ -140,6 +140,7 @@ pub type RevisionedActionResult = (u64, ActionResult);
 pub struct HandledAction {
     pub result: ActionResult,
     pub takeback: Option<TakebackResolution>,
+    pub action: GameAction,
 }
 
 /// The atomic decision fields derived from one authoritative state.
@@ -2038,6 +2039,7 @@ impl GameSession {
                     by_object,
                 ),
                 takeback: None,
+                action,
             });
         }
         let debug_card_source = match &action {
@@ -2151,6 +2153,7 @@ impl GameSession {
                 by_object,
             ),
             takeback,
+            action,
         })
     }
 
@@ -2186,6 +2189,7 @@ impl GameSession {
         submission: InteractionSubmission,
     ) -> Result<ActionResult, String> {
         self.handle_interaction_with_rejection(player_token, submission)
+            .map(|handled| handled.result)
             .map_err(SessionActionError::into_legacy_reason)
     }
 
@@ -2197,7 +2201,7 @@ impl GameSession {
         &mut self,
         player_token: &str,
         submission: InteractionSubmission,
-    ) -> Result<ActionResult, SessionActionError> {
+    ) -> Result<HandledAction, SessionActionError> {
         self.handle_interaction_with_rejection_at(player_token, submission, now_ms())
     }
 
@@ -2215,7 +2219,7 @@ impl GameSession {
         player_token: &str,
         submission: InteractionSubmission,
         host_received_at_ms: u64,
-    ) -> Result<ActionResult, SessionActionError> {
+    ) -> Result<HandledAction, SessionActionError> {
         self.reject_if_ai_driver_faulted()?;
 
         let player = self
@@ -2274,15 +2278,19 @@ impl GameSession {
         self.game_log
             .write_game_log_entries(&self.game_code, &applied.result.log_entries);
 
-        Ok((
-            post_state,
-            applied.result.events,
-            new_legal_actions,
-            applied.result.log_entries,
-            auto_pass,
-            spell_costs,
-            by_object,
-        ))
+        Ok(HandledAction {
+            result: (
+                post_state,
+                applied.result.events,
+                new_legal_actions,
+                applied.result.log_entries,
+                auto_pass,
+                spell_costs,
+                by_object,
+            ),
+            takeback: None,
+            action: applied.action,
+        })
     }
 
     /// Applies the payload-free match-concede intent after binding its
@@ -2335,6 +2343,7 @@ impl GameSession {
                     by_object,
                 ),
                 takeback,
+                action: GameAction::Concede { player_id: player },
             },
         ))
     }
