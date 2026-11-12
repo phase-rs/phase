@@ -20,6 +20,7 @@ pub(crate) enum InstructionStep {
     DelayedPayload,
     Mode(usize),
     ChoiceBranch(usize),
+    ContestWinner,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -36,6 +37,10 @@ impl InstructionPath {
                 InstructionStep::ElseAbility => def.else_ability.as_deref()?,
                 InstructionStep::DelayedPayload => match def.effect.as_ref() {
                     Effect::CreateDelayedTrigger { effect, .. } => effect,
+                    _ => return None,
+                },
+                InstructionStep::ContestWinner => match def.effect.as_ref() {
+                    Effect::ExileTopCardContest { winner_effect } => winner_effect,
                     _ => return None,
                 },
                 InstructionStep::Mode(index) => def.mode_abilities.get(*index)?,
@@ -105,7 +110,7 @@ pub(crate) fn capture_own_history(clause: &mut ParsedEffectClause, text: &str, c
         .to_ascii_lowercase();
     clause
         .history
-        .retain(|record| !record.instruction.0.is_empty());
+        .retain(|record| !record.instruction.0.is_empty() || !record.lineage.is_empty());
     let mut own = Vec::new();
     let mut remaining = lower.as_str();
     while let Some((before, parsed, rest)) = scan_preceded(remaining, parse_block_history_clause) {
@@ -193,6 +198,9 @@ fn walk(
         for (index, branch) in branches.iter().enumerate() {
             child(InstructionStep::ChoiceBranch(index), branch);
         }
+    }
+    if let Effect::ExileTopCardContest { winner_effect } = def.effect.as_ref() {
+        child(InstructionStep::ContestWinner, winner_effect);
     }
     for (index, mode) in def.mode_abilities.iter().enumerate() {
         child(InstructionStep::Mode(index), mode);
@@ -293,20 +301,22 @@ pub(crate) fn audit_history<'a>(
 
 impl PendingHistory {
     pub(crate) fn nested(record: HistoryProvenance, step: InstructionStep) -> Self {
-        let mut instruction = record.producer.instruction;
-        instruction.prepend(step.clone());
-        let mut locator = record.locator;
-        if let Some(path) = &mut locator {
-            path.prepend(step);
-        }
+        let mut pending = Self::relocated(record);
+        pending.prepend(step);
+        pending
+    }
+
+    /// Carry a lowered producer into a clause without changing its root path.
+    /// The lineage distinguishes it from freshly captured wrapper history.
+    pub(crate) fn relocated(record: HistoryProvenance) -> Self {
         let mut lineage = record.producer.lineage;
         lineage.insert(0, record.producer.clause);
         Self {
             occurrence: record.occurrence,
             expected: record.expected,
-            instruction,
+            instruction: record.producer.instruction,
             lineage,
-            locator,
+            locator: record.locator,
         }
     }
 
@@ -410,6 +420,10 @@ mod tests {
                 InstructionStep::ElseAbility => {
                     def.else_ability.as_deref_mut().expect("else instruction")
                 }
+                InstructionStep::ContestWinner => match def.effect.as_mut() {
+                    Effect::ExileTopCardContest { winner_effect } => winner_effect,
+                    other => panic!("contest winner, got {other:?}"),
+                },
                 InstructionStep::Mode(index) => def.mode_abilities.get_mut(*index).expect("mode"),
                 InstructionStep::ChoiceBranch(index) => match def.effect.as_mut() {
                     Effect::ChooseOneOf { branches, .. } => {
@@ -430,7 +444,8 @@ mod tests {
         match def.effect.as_mut() {
             Effect::SetTapState { target, .. }
             | Effect::Destroy { target, .. }
-            | Effect::DestroyAll { target, .. } => *target = replacement,
+            | Effect::DestroyAll { target, .. }
+            | Effect::Sacrifice { target, .. } => *target = replacement,
             Effect::GenericEffect {
                 target: None,
                 static_abilities,
@@ -749,6 +764,53 @@ mod tests {
         assert!(flagged(text, &finished));
         // Keep the original allocation live through transport sealing.
         assert!(!flagged(text, &lowered));
+    }
+
+    #[test]
+    fn compound_subject_each_carries_the_bodys_producer() {
+        let text =
+            "You and target creature's controller each sacrifice a creature ~ blocked this turn.";
+        let mut lowered = lower(text, source_context());
+        assert!(matches!(
+            lowered.value.effect.as_ref(),
+            Effect::TargetOnly { .. }
+        ));
+        let path = InstructionPath(vec![InstructionStep::SubAbility]);
+        assert!(matches!(
+            path.resolve(&lowered.value).unwrap().effect.as_ref(),
+            Effect::Sacrifice { .. }
+        ));
+        assert_eq!(lowered.history.len(), 1);
+        assert_eq!(lowered.history[0].locator.as_ref(), Some(&path));
+        assert!(!flagged(text, &lowered));
+        replace_population(resolve_mut(&path, &mut lowered.value), bare());
+        // Evidence on the target-declaration wrapper cannot satisfy its child.
+        lowered.value.effect = Box::new(Effect::TargetOnly {
+            target: population(CombatRelationSubject::Source),
+        });
+        assert!(flagged(text, &lowered));
+    }
+
+    #[test]
+    fn top_card_contest_carries_the_winner_instruction_producer() {
+        let text = "Each player exiles the top card of their library. The player who exiled the card with the greatest mana value taps all creatures ~ blocked this turn. If two or more players' cards are tied for greatest, the tied players repeat this process until the tie is broken.";
+        let mut lowered = lower(text, source_context());
+        let path = InstructionPath(vec![InstructionStep::ContestWinner]);
+        assert!(matches!(
+            lowered.value.effect.as_ref(),
+            Effect::ExileTopCardContest { .. }
+        ));
+        assert!(matches!(
+            path.resolve(&lowered.value).unwrap().effect.as_ref(),
+            Effect::SetTapState { .. }
+        ));
+        assert_eq!(lowered.history.len(), 1);
+        assert_eq!(lowered.history[0].locator.as_ref(), Some(&path));
+        assert!(!flagged(text, &lowered));
+        let other = path.resolve(&lowered.value).unwrap().clone();
+        replace_population(resolve_mut(&path, &mut lowered.value), bare());
+        lowered.value.sub_ability = Some(Box::new(other));
+        assert!(flagged(text, &lowered));
     }
 
     /// The transport follows a producer into a choice branch: sealed, the record

@@ -26433,7 +26433,15 @@ fn try_parse_compound_subject_each(
     // Throwaway (`ChosenColorQualifierScope` rule 1) — the parsed body is
     // kept, `body_ctx` is dropped.
     let mut body_ctx = ctx.clone_throwaway();
-    let parsed_body = parse_effect_chain_with_context(body_text, AbilityKind::Spell, &mut body_ctx);
+    let lowered_body = parse_nested_effect_chain_with_damage_context_and_provenance(
+        body_text,
+        AbilityKind::Spell,
+        &mut body_ctx,
+        DamageTargetContext::InheritedTargets,
+    );
+    let parsed_body = lowered_body.value;
+    let body_history = lowered_body.history;
+    let owner_text = text[..consumed_prefix].to_string();
 
     // A body that already carries its own iteration scope is refused by the
     // channel, so the set never overwrites that scope; it takes the halves path.
@@ -26445,13 +26453,19 @@ fn try_parse_compound_subject_each(
         // through a `TargetOnly` head; a possessive actor announces its object.
         let head = declares_target
             .or_else(|| is_targeted_player_conjunct(&second_filter).then(|| second_filter.clone()));
-        return Some(bind_coordinated_player_set(
-            parsed_body,
-            member,
-            head,
-            text,
-            ctx,
-        ));
+        let has_head = head.is_some();
+        let mut clause = bind_coordinated_player_set(parsed_body, member, head, text, ctx);
+        if !matches!(clause.effect, Effect::Unimplemented { .. }) {
+            clause.head_text = Some(owner_text);
+            clause.history = body_history.into_iter().map(|record| {
+                let mut pending = crate::parser::oracle_ir::history_provenance::PendingHistory::relocated(record);
+                if has_head {
+                    pending.prepend(crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility);
+                }
+                pending
+            }).collect();
+        }
+        return Some(clause);
     }
 
     // CR 508.6: "those players" names a player SET; only the coordinated channel
@@ -26515,14 +26529,32 @@ fn try_parse_compound_subject_each(
     // at the TAIL of half A's chain so half A's own deeper links (e.g. a
     // MustAttack rider) survive. A plain overwrite would clobber them.
     let mut tail = &mut half_a;
+    let mut second_half_depth = 1;
     while tail.sub_ability.is_some() {
         tail = tail.sub_ability.as_mut().unwrap();
+        second_half_depth += 1;
     }
     tail.sub_ability = Some(Box::new(half_b));
 
+    // Both clones represent the printed body. Preserve its logical origin in
+    // each half and address the second copy after the entire first chain.
+    let mut history: Vec<_> = body_history
+        .iter()
+        .cloned()
+        .map(crate::parser::oracle_ir::history_provenance::PendingHistory::relocated)
+        .collect();
+    history.extend(body_history.into_iter().map(|record| {
+        let mut pending =
+            crate::parser::oracle_ir::history_provenance::PendingHistory::relocated(record);
+        for _ in 0..second_half_depth {
+            pending
+                .prepend(crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility);
+        }
+        pending
+    }));
     let distributed = ParsedEffectClause {
-        history: Vec::new(),
-        head_text: None,
+        history,
+        head_text: Some(owner_text),
         optional_targeting: false,
         unlowered_guard: None,
         effect: *half_a.effect,
@@ -26548,6 +26580,7 @@ fn try_parse_compound_subject_each(
     };
     let (definition, history) = ability_definition_from_clause(AbilityKind::Spell, distributed);
     let mut clause = parsed_clause(Effect::TargetOnly { target });
+    clause.head_text = Some(text[..consumed_prefix].to_string());
     clause.sub_ability = Some(Box::new(definition));
     carry_nested_clause_history(
         &mut clause.history,
