@@ -3509,7 +3509,7 @@ pub(crate) struct CoverProjection<'a> {
 }
 
 enum CoverStackSource<'a> {
-    Cached(&'a [(StackEntry, Option<TriggerFiring>)]),
+    Cached(&'a [NormalizedStackEntry]),
     Projected {
         entries: im::Vector<StackEntry>,
         firings: HashMap<ObjectId, TriggerFiring>,
@@ -3517,7 +3517,7 @@ enum CoverStackSource<'a> {
 }
 
 impl<'a> CoverStackSource<'a> {
-    fn into_normalized(self) -> Cow<'a, [(StackEntry, Option<TriggerFiring>)]> {
+    fn into_normalized(self) -> Cow<'a, [NormalizedStackEntry]> {
         match self {
             Self::Cached(entries) => Cow::Borrowed(entries),
             Self::Projected { entries, firings } => {
@@ -3567,7 +3567,7 @@ pub(crate) struct SharedCurrentFrames<'a> {
     current: &'a GameState,
     projected: ResourceProjectedFrame,
     cover: ResourceProjectedFrame,
-    cover_stack: Vec<(StackEntry, Option<TriggerFiring>)>,
+    cover_stack: Vec<NormalizedStackEntry>,
 }
 
 impl<'a> SharedCurrentFrames<'a> {
@@ -7117,6 +7117,8 @@ fn eq_except_growable(
         // shields (a spent one can never apply again, CR 615.3 + CR 614.3), so identical
         // live growth covers and any differing live shield does not.
         && crate::types::game_state::pending_shields_loop_eq(&a, &b)
+        // CR 400.7 + CR 601.2h: `PartialEq` reads `cost_paid_objects` by object id only.
+        && a.loop_paid_record_incarnations() == b.loop_paid_record_incarnations()
 }
 
 /// CR 400.7 + CR 608.2k: whether a damage fact's recipient is still the
@@ -7820,10 +7822,16 @@ pub(crate) fn unmeasured_resource_axes_match(prior: &GameState, current: &GameSt
 /// `subject_match_count`, `die_result`, `description`, `source_name`) — a residual
 /// content difference only SUPPRESSES a match (fail-safe). Two same-controller
 /// entries differing only in `source_id` (two Blight-Priest copies) normalize to one kind.
+/// A stack entry in the growth covers' comparand: the normalized entry, its trigger-firing
+/// class, and the ranked incarnations its paid-object records name, which the entry's own
+/// `PartialEq` does not compare
+/// ([`ResolvedAbility::paid_record_incarnations_for_loop`](crate::types::ability::ResolvedAbility::paid_record_incarnations_for_loop)).
+type NormalizedStackEntry = (StackEntry, Option<TriggerFiring>, Vec<Option<u64>>);
+
 fn normalized_stack_entries(
     entries: &im::Vector<StackEntry>,
     trigger_firings: &HashMap<ObjectId, TriggerFiring>,
-) -> Vec<(StackEntry, Option<TriggerFiring>)> {
+) -> Vec<NormalizedStackEntry> {
     entries
         .iter()
         .map(|entry| {
@@ -7834,6 +7842,7 @@ fn normalized_stack_entries(
                     TriggerFiring::ReceiptEligible(_) => TriggerFiring::LegacyDelayed,
                     firing => firing,
                 });
+            let carrier_source = entry.source_id;
             let mut norm = entry.clone();
             norm.id = ObjectId(0);
             norm.source_id = ObjectId(0);
@@ -7842,16 +7851,16 @@ fn normalized_stack_entries(
                     source_id, ability, ..
                 } => {
                     *source_id = ObjectId(0);
-                    ability.clear_source_provenance_for_loop_recursive();
+                    ability.clear_source_provenance_for_loop_recursive(carrier_source);
                 }
                 StackEntryKind::ActivatedAbility { source_id, ability } => {
                     *source_id = ObjectId(0);
-                    ability.clear_source_provenance_for_loop_recursive();
+                    ability.clear_source_provenance_for_loop_recursive(carrier_source);
                 }
                 StackEntryKind::Spell {
                     ability: Some(ability),
                     ..
-                } => ability.clear_source_provenance_for_loop_recursive(),
+                } => ability.clear_source_provenance_for_loop_recursive(carrier_source),
                 StackEntryKind::Spell { ability: None, .. }
                 | StackEntryKind::KeywordAction { .. } => {}
                 // The payload keeps its `ObjectIncarnationRef`s: `norm.id` /
@@ -7863,7 +7872,11 @@ fn normalized_stack_entries(
                 // live assignments.
                 StackEntryKind::CombatDamage { .. } => {}
             }
-            (norm, firing)
+            let mut paid = Vec::new();
+            if let Some(ability) = norm.ability() {
+                ability.paid_record_incarnations_for_loop(&mut paid);
+            }
+            (norm, firing, paid)
         })
         .collect()
 }
@@ -7876,10 +7889,7 @@ fn normalized_stack_entries(
 ///
 // ponytail: greedy embedding + per-kind linear counts, n = stack depth (small);
 // revisit only if a deep-stack combo profiles hot.
-fn stack_covers(
-    prior: &[(StackEntry, Option<TriggerFiring>)],
-    current: &[(StackEntry, Option<TriggerFiring>)],
-) -> bool {
+fn stack_covers(prior: &[NormalizedStackEntry], current: &[NormalizedStackEntry]) -> bool {
     // (2a) greedy two-pointer subsequence embedding, bottom-up.
     let mut ci = 0usize;
     for pe in prior {
@@ -8966,7 +8976,7 @@ pub(crate) fn project_object_for_loop(object: &mut crate::game::game_object::Gam
 #[cfg(test)]
 thread_local! {
     // Deterministic per-thread work observation; absent from production builds.
-    static DAMAGE_RECIPIENT_JOURNAL_VISITS: std::cell::Cell<usize> =
+    pub(crate) static DAMAGE_RECIPIENT_JOURNAL_VISITS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
 
@@ -10531,14 +10541,20 @@ mod tests {
         /// A spell on the stack whose announced target carries its positional pin
         /// (CR 601.2c), the form the old refusal never read.
         AnnouncedSpellTarget,
+        /// Synthetic: an activated ability on the stack, untargeted, whose cost recorded the
+        /// recipient as a captured `cost_paid_objects` record (CR 601.2h). The runtime reader
+        /// of that record's liveness is `choose_from_zone`, which offers a paid object only
+        /// while the record names the live one; `PartialEq` compares the list by id only.
+        PaidRecord,
     }
 
-    const PIN_CARRIERS: [PinCarrier; 5] = [
+    const PIN_CARRIERS: [PinCarrier; 6] = [
         PinCarrier::RegisteredDestroy,
         PinCarrier::FiredDestroy,
         PinCarrier::RegisteredSacrifice,
         PinCarrier::FiredSacrifice,
         PinCarrier::AnnouncedSpellTarget,
+        PinCarrier::PaidRecord,
     ];
 
     /// A priority frame whose one carrier pins the recipient at `pin` while the recipient is
@@ -10546,7 +10562,8 @@ mod tests {
     /// `(live, pin)`, so two frames differ in the pin relation alone.
     fn pinned_frame(carrier: PinCarrier, live: u64, pin: u64) -> GameState {
         use crate::types::ability::{
-            DelayedTriggerCondition, Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+            CostPaidObjectRecord, CostPaidObjectSnapshot, DelayedTriggerCondition, Effect,
+            QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
         };
         use crate::types::game_state::{DelayedTrigger, StackEntry};
         use crate::types::identifiers::ObjectIncarnationRef;
@@ -10573,15 +10590,23 @@ mod tests {
                 target: TargetFilter::Any,
                 cant_regenerate: false,
             },
+            PinCarrier::PaidRecord => Effect::Investigate,
         };
-        let mut ability = ResolvedAbility::new(
-            effect,
-            vec![TargetRef::Object(recipient)],
-            source,
-            PlayerId(0),
-        );
+        let targets = match carrier {
+            PinCarrier::PaidRecord => vec![],
+            _ => vec![TargetRef::Object(recipient)],
+        };
+        let mut ability = ResolvedAbility::new(effect, targets, source, PlayerId(0));
         match carrier {
             PinCarrier::AnnouncedSpellTarget => ability.target_pins = vec![Some(reference)],
+            PinCarrier::PaidRecord => {
+                ability.cost_paid_objects =
+                    vec![CostPaidObjectRecord::Captured(CostPaidObjectSnapshot {
+                        object_id: recipient,
+                        lki: state.objects[&recipient].snapshot_public_characteristics(),
+                        incarnation: pin,
+                    })]
+            }
             _ => ability.target_incarnations = vec![reference],
         }
         let entry = |kind: StackEntryKind| StackEntry {
@@ -10625,6 +10650,14 @@ mod tests {
                     actual_mana_spent: 0,
                 }));
             }
+            PinCarrier::PaidRecord => {
+                state
+                    .stack
+                    .push_back(entry(StackEntryKind::ActivatedAbility {
+                        source_id: source,
+                        ability: Box::new(ability),
+                    }));
+            }
         }
         state
     }
@@ -10647,8 +10680,12 @@ mod tests {
             let later = pinned_frame(carrier, 8, 8);
             let stale = pinned_frame(carrier, 8, 5);
             let older = pinned_frame(carrier, 8, 3);
-            assert_ne!(
-                live, later,
+            // `PartialEq` reads `cost_paid_objects` by id only, so the paid record's frames
+            // differ in the comparand the loop comparators add for it.
+            assert!(
+                live != later
+                    || live.loop_paid_record_incarnations()
+                        != later.loop_paid_record_incarnations(),
                 "{carrier:?}: reach guard, the raw frames differ"
             );
 
@@ -10726,6 +10763,7 @@ mod tests {
             (PinCarrier::FiredDestroy, false),
             (PinCarrier::FiredSacrifice, false),
             (PinCarrier::AnnouncedSpellTarget, false),
+            (PinCarrier::PaidRecord, false),
             (PinCarrier::FiredDestroy, true),
         ] {
             let pinned_frame = |live: u64, pin: u64| {
@@ -10800,9 +10838,62 @@ mod tests {
         }
     }
 
+    /// CR 400.7 + CR 601.2h: the growth covers' remainder compares ability carriers by
+    /// `PartialEq`, which reads `cost_paid_objects` by object id only, so it also compares the
+    /// records' ranked incarnations. Synthetic: the `PaidRecord` ability registered as a
+    /// delayed trigger, in a steady inert-token engine grown by one token. The same record
+    /// live in both frames, or stale in both, covers; live against stale does not.
+    #[test]
+    fn loop_growth_cover_remainder_compares_paid_record_incarnations() {
+        use crate::types::ability::DelayedTriggerCondition;
+        use crate::types::game_state::DelayedTrigger;
+
+        let grown = |live: u64, pin: u64| {
+            let donor = pinned_frame(PinCarrier::PaidRecord, live, pin);
+            let ability = donor.stack[0].ability().unwrap().clone();
+            let (mut prior, mut current) = og_cover_base();
+            for frame in [&mut prior, &mut current] {
+                for id in [ObjectId(20), ObjectId(21)] {
+                    frame.objects.insert(id, donor.objects[&id].clone());
+                    frame.battlefield.push_back(id);
+                }
+                frame.delayed_triggers.push(DelayedTrigger::new(
+                    DelayedTriggerCondition::AtNextPhase {
+                        phase: Phase::EndCombat,
+                    },
+                    Box::new(ability.clone()),
+                    PlayerId(0),
+                    ObjectId(20),
+                    true,
+                ));
+                frame.waiting_for = donor.waiting_for.clone();
+            }
+            (prior, current)
+        };
+        let (live_prior, live_current) = grown(8, 8);
+        let (stale_prior, stale_current) = grown(8, 5);
+        assert!(
+            loop_states_cover_modulo_object_growth(&live_prior, &live_current),
+            "reach guard: the grown pair with a live record covers"
+        );
+        assert!(
+            loop_states_cover_modulo_object_growth(&stale_prior, &stale_current),
+            "the same stale record in both frames covers"
+        );
+        assert!(
+            !loop_states_cover_modulo_object_growth(&live_prior, &stale_current),
+            "live then stale"
+        );
+        assert!(
+            !loop_states_cover_modulo_object_growth(&stale_prior, &live_current),
+            "stale then live"
+        );
+    }
+
     /// The growth covers compare the stack apart from the board, through
     /// `normalized_stack_entries`. That comparand is cut from the ranked projection and must
-    /// keep the ranked pin: it used to strip every pin after the fact.
+    /// keep the ranked pin: it used to strip every pin after the fact. It carries a paid-object
+    /// record's ranked incarnation beside the entry, which the entry's `PartialEq` does not read.
     #[test]
     fn loop_cover_stack_comparand_keeps_the_ranked_pin() {
         let entries = |state: &GameState| {
@@ -10813,6 +10904,7 @@ mod tests {
             PinCarrier::FiredDestroy,
             PinCarrier::FiredSacrifice,
             PinCarrier::AnnouncedSpellTarget,
+            PinCarrier::PaidRecord,
         ] {
             let live = entries(&pinned_frame(carrier, 5, 5));
             let later = entries(&pinned_frame(carrier, 8, 8));

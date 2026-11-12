@@ -23626,9 +23626,9 @@ mod stage2_injector_tests {
         );
     }
 
-    /// CR 732.2a + CR 732.2c: the FIXED-CYCLE caller on a take that COMMITS. One targeted
-    /// drainer and the feedback engine in a three-player game: each life gain makes exactly
-    /// one drain, so the cascade holds a constant depth and, with the pinned opponent far
+    /// CR 732.2a + CR 732.2c: the FIXED-CYCLE caller on a take that COMMITS. Vito, Thorn of
+    /// the Dusk Rose and Exquisite Blood in a three-player game ([`committed_drain_take`]):
+    /// each life gain makes exactly one drain, so the cascade holds a constant depth and, with the pinned opponent far
     /// from lethal, no seat leaves. The drive reaches the settle arm and returns `Recurred`
     /// ("The game advances to the last proposed ending point").
     ///
@@ -23640,20 +23640,29 @@ mod stage2_injector_tests {
     /// built. A take whose own carrier reads a damage recipient pays one journal pass per
     /// projection; that cost is measured by
     /// `loop_relational_take_boundary_defers_history_through_first_settle`, not here.
-    #[test]
-    fn drive_one_cycle_recurs_on_a_committed_take_without_reading_unrelated_damage_history() {
-        use crate::types::game_state::{DamageRecord, LOOP_DAMAGE_JOURNAL_VISITS};
+    /// The committed take of the three-player drain rig, primed to a settle beat INSIDE the
+    /// cascade: the printed Vito, Thorn of the Dusk Rose ("Whenever you gain life, target
+    /// opponent loses that much life.") and Exquisite Blood ("Whenever an opponent loses life,
+    /// you gain that much life."), started by a synthetic "You gain 1 life." sorcery, with
+    /// `rows` injected damage rows from Vito to P1's Grizzly Bears. Returns the frame, the
+    /// take's template, the drive's cap, and the dealer and recipient those rows name.
+    fn committed_drain_take(
+        rows: usize,
+    ) -> (GameState, DecisionTemplate, usize, ObjectId, ObjectId) {
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::test_support::shared_card_db;
+        use crate::types::game_state::DamageRecord;
 
-        const ROWS: usize = 256;
+        let db = shared_card_db();
         let mut scenario = GameScenario::new_n_player(3, 7);
         scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
         scenario.with_life(P0, 20);
         scenario.with_life(P1, 400);
         scenario.with_life(P2, 400);
-        let drainer = scenario
-            .add_creature_from_oracle(P0, "Drainer A", 1, 4, TARGET_DRAIN)
-            .id();
-        scenario.add_creature_from_oracle(P0, "Feedback", 3, 4, FEEDBACK);
+        let drainer =
+            scenario.add_real_card(P0, "Vito, Thorn of the Dusk Rose", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Exquisite Blood", Zone::Battlefield, db);
+        let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
         let kickoff = scenario
             .add_spell_to_hand_from_oracle(P0, "Kickoff", false, KICKOFF)
             .id();
@@ -23716,9 +23725,8 @@ mod stage2_injector_tests {
         assert!(primed, "must reach a primed Priority{{P0}} settle beat");
         let mut committed = runner.state().clone();
         let cap = auto_pass_loop_max_iterations(&committed);
-        let dealer = committed.battlefield[0];
-        let recipient = committed.battlefield[1];
-        for _ in 0..ROWS {
+        let (dealer, recipient) = (drainer, bears);
+        for _ in 0..rows {
             committed.damage_dealt_this_turn.push_back(DamageRecord {
                 source_id: dealer,
                 source_incarnation: Some(committed.objects[&dealer].incarnation),
@@ -23728,6 +23736,15 @@ mod stage2_injector_tests {
                 ..Default::default()
             });
         }
+        (committed, template, cap, dealer, recipient)
+    }
+
+    #[test]
+    fn drive_one_cycle_recurs_on_a_committed_take_without_reading_unrelated_damage_history() {
+        use crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS;
+
+        const ROWS: usize = 256;
+        let (committed, template, cap, _, _) = committed_drain_take(ROWS);
         let lives_before = [life(&committed, P1), life(&committed, P2)];
 
         LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
@@ -23780,6 +23797,119 @@ mod stage2_injector_tests {
         assert_eq!(
             visits, 0,
             "{visits} journal visits from boundary construction through the committed take"
+        );
+    }
+
+    /// CR 732.2a + CR 732.2c + CR 608.2k: the FIXED-CYCLE caller on a take that COMMITS
+    /// while a recipient reader waits under the loop. The drain rig of
+    /// `drive_one_cycle_recurs_on_a_committed_take_without_reading_unrelated_damage_history`,
+    /// with one more entry at the bottom of the stack: a triggered ability that taps the
+    /// creature its damage event names. Synthetic, standing for Matsu-Tribe Sniper's "tap that
+    /// creature"; its event and the 256 rows from Vito to P1's Grizzly Bears are injected. The period never reaches it (CR 405.5), so every settle frame keeps it and
+    /// every projection keeps its recipient key and must read the history to answer it.
+    ///
+    /// What it shows: the drive returns `Recurred`; the recipient scan reads at most one pass
+    /// of the history per projection; and the identity pass visits the history only through
+    /// that one reduction per projection plus the reduced witnesses, where a strict boundary
+    /// would rank the whole history again.
+    #[test]
+    fn drive_one_cycle_recurs_over_a_buried_recipient_reader_reading_history_once_per_projection() {
+        use crate::analysis::resource::{
+            loop_detect_cost, reset_loop_detect_cost, DAMAGE_RECIPIENT_JOURNAL_VISITS,
+        };
+        use crate::types::ability::{
+            Effect, EffectScope, ResolvedAbility, TapStateChange, TargetFilter,
+        };
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{StackEntry, StackEntryKind, LOOP_DAMAGE_JOURNAL_VISITS};
+
+        const ROWS: usize = 256;
+        let (mut committed, template, cap, dealer, recipient) = committed_drain_take(ROWS);
+        let reader = ObjectId(9_000);
+        committed.stack.push_front(StackEntry {
+            id: reader,
+            source_id: dealer,
+            controller: P0,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: dealer,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::SetTapState {
+                        target: TargetFilter::EventTarget,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                    vec![],
+                    dealer,
+                    P0,
+                )),
+                condition: None,
+                trigger_event: Some(GameEvent::DamageDealt {
+                    source_id: dealer,
+                    source_incarnation: Some(committed.objects[&dealer].incarnation),
+                    target: TargetRef::Object(recipient),
+                    amount: 1,
+                    is_combat: false,
+                    excess: 0,
+                }),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        let lives_before = [life(&committed, P1), life(&committed, P2)];
+
+        reset_loop_detect_cost();
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let boundary = take_boundary(&committed);
+        let outcome = drive_one_shortcut_cycle(
+            &committed,
+            &boundary,
+            Some(&template),
+            0,
+            cap,
+            None,
+            DepartureStop::EndsRepetition,
+        )
+        .expect("the fixture's shortcut cycle is representable");
+        let scans = DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get);
+        let ranks = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
+        let projections = loop_detect_cost().projected_clones as usize;
+
+        let state = match outcome {
+            CycleOutcome::Recurred { state, .. } => state,
+            CycleOutcome::SeatLeft { .. } => panic!("expected `Recurred`, got `SeatLeft`"),
+            CycleOutcome::CrossLethal { .. } => panic!("expected `Recurred`, got `CrossLethal`"),
+            CycleOutcome::Abort => panic!("expected `Recurred`, got `Abort`"),
+        };
+        assert!(
+            life(&state, P1) < lives_before[0] && life(&state, P2) == lives_before[1],
+            "the committed take performed the cycle ({:?} -> {:?})",
+            lives_before,
+            [life(&state, P1), life(&state, P2)]
+        );
+        assert_eq!(
+            state.stack.front().map(|entry| entry.id),
+            Some(reader),
+            "reach guard: the reader is still buried under the loop"
+        );
+        assert!(
+            scans >= ROWS,
+            "reach guard: the buried reader made a projection read the history ({scans} visits)"
+        );
+        assert!(
+            scans <= projections * ROWS,
+            "{scans} recipient-scan visits over {projections} projections of {ROWS} rows: \
+             more than one pass per projection"
+        );
+        // Each projection reduces the history once before it ranks the bounded witnesses;
+        // a strict boundary would rank the whole history on top of that.
+        assert!(
+            ranks <= projections * ROWS + 16,
+            "{ranks} identity-rank visits over {projections} projections of {ROWS} rows: \
+             more than one reduction pass per projection plus the witnesses"
         );
     }
 

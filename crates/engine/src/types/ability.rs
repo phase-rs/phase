@@ -4811,10 +4811,23 @@ impl ResolvedAbility {
     /// object by `GameState::canonicalize_lki_incarnations_for_loop`
     /// ([`Self::for_each_loop_pin_mut`]), so a zone-cycling loop still
     /// confirms while a live pin never compares equal to a stale one.
-    pub(crate) fn clear_source_provenance_for_loop_recursive(&mut self) {
+    ///
+    /// The source's captured incarnation is such a pin too: `source_is_current`
+    /// and `self_ref_is_current` read it, so an ability whose source left and
+    /// returned does nothing to "this creature" (CR 400.7). It is KEPT on every
+    /// node whose source is `carrier_source`, the carrier's own source, which
+    /// is the object the visitor ranks it against; on a node of another source
+    /// it is erased with the rest of the provenance. A node an earlier pass
+    /// already normalized (its source erased to the null object) keeps what that
+    /// pass kept, so normalizing twice is normalizing once.
+    pub(crate) fn clear_source_provenance_for_loop_recursive(&mut self, carrier_source: ObjectId) {
+        let kept = (self.source_id == carrier_source || self.source_id == ObjectId(0))
+            .then_some(self.source_incarnation)
+            .flatten();
         self.clear_source_provenance();
+        self.source_incarnation = kept;
         for (_, child) in self.child_links_mut() {
-            child.clear_source_provenance_for_loop_recursive();
+            child.clear_source_provenance_for_loop_recursive(carrier_source);
         }
     }
 
@@ -4829,17 +4842,26 @@ impl ResolvedAbility {
     ///   instruction produced or selected (CR 608.2c);
     /// - the Attach bindings: attachments, host and candidates (CR 701.3a);
     /// - the paid, effect-context and amassed-army object snapshots' own
-    ///   incarnations (CR 608.2h);
-    /// - two bare epochs of the SOURCE, the announcement epoch (CR 602.2a) and
-    ///   the noted mana payment's. A bare epoch names no object, so the caller
-    ///   supplies it: `source_id` is the CARRIER's source, which normalization
-    ///   leaves in place while it zeroes the ability's own.
+    ///   incarnations, and those of every captured `cost_paid_objects` record
+    ///   (CR 608.2h + CR 601.2h). `PartialEq` compares that list by object id
+    ///   only, so the loop comparators read its ranked incarnations through
+    ///   [`Self::paid_record_incarnations_for_loop`];
+    /// - three bare epochs of the SOURCE: the incarnation the source had when
+    ///   the ability was created or put on the stack (CR 400.7, read by
+    ///   `source_is_current`), the announcement epoch (CR 602.2a) and the noted
+    ///   mana payment's. A bare epoch names no object, so the caller supplies
+    ///   it: `source_id` is the CARRIER's source, which normalization leaves in
+    ///   place while it zeroes the ability's own; the first is kept only on
+    ///   nodes of that source
+    ///   ([`Self::clear_source_provenance_for_loop_recursive`]).
     ///
     /// Not visited here, each for a stated reason:
     ///
-    /// - `source_incarnation`, `trigger_source`, `trigger_definition_ref` and
+    /// - `trigger_source`, `trigger_definition_ref` and
     ///   `context.triggering_spell` are erased with `source_id` by
-    ///   `clear_source_provenance`;
+    ///   `clear_source_provenance` (the source's liveness rides
+    ///   `source_incarnation`, which a trigger stamps from the same captured
+    ///   identity);
     /// - the last-known-information snapshots and the creation lookback event
     ///   are walked by their own visitors
     ///   ([`Self::for_each_loop_lki_snapshot_mut`],
@@ -4848,19 +4870,17 @@ impl ResolvedAbility {
     /// - `control_change_instruction` holds a capture id, not an incarnation:
     ///   it keys a resolution-scoped table loop normalization clears, and a
     ///   frame holding a resolution in progress is not loop-comparable;
-    /// - `cast_occurrence` is a journal coordinate, zeroed separately;
-    /// - `cost_paid_objects`: `PartialEq` compares that list by object id only
-    ///   (CR 601.2h), so ranking its records' incarnations would change no
-    ///   comparison. A record whose object left and returned between two frames
-    ///   is therefore not told apart from a live one, though
-    ///   `choose_from_zone` reads its liveness; this predates the loop pins and
-    ///   is a known residual.
+    /// - `cast_occurrence` is a journal coordinate, zeroed separately.
     pub(crate) fn for_each_loop_pin_mut(
         &mut self,
         source_id: ObjectId,
         f: &mut impl FnMut(ObjectId, &mut u64),
     ) {
-        if let Some(incarnation) = self.announced_source_incarnation.as_mut() {
+        for incarnation in self
+            .source_incarnation
+            .iter_mut()
+            .chain(self.announced_source_incarnation.iter_mut())
+        {
             f(source_id, incarnation);
         }
         for pin in self
@@ -4894,6 +4914,11 @@ impl ResolvedAbility {
             .iter_mut()
             .chain(self.effect_context_object.iter_mut())
             .chain(self.amassed_army_object.iter_mut())
+            .chain(
+                self.cost_paid_objects
+                    .iter_mut()
+                    .filter_map(CostPaidObjectRecord::snapshot_mut),
+            )
         {
             f(snapshot.object_id, &mut snapshot.incarnation);
         }
@@ -4909,7 +4934,8 @@ impl ResolvedAbility {
     /// carries, so loop normalization ranks the incarnations inside it (its
     /// attachment pins) through the same visitor it uses for the stored
     /// snapshots: the activation record's source, a discarded card's, and the
-    /// paid, effect-context and amassed-army objects'.
+    /// paid, effect-context and amassed-army objects', and every captured
+    /// `cost_paid_objects` record's.
     pub(crate) fn for_each_loop_lki_snapshot_mut(
         &mut self,
         f: &mut impl FnMut(&mut crate::types::game_state::LKISnapshot),
@@ -4925,11 +4951,33 @@ impl ResolvedAbility {
             .iter_mut()
             .chain(self.effect_context_object.iter_mut())
             .chain(self.amassed_army_object.iter_mut())
+            .chain(
+                self.cost_paid_objects
+                    .iter_mut()
+                    .filter_map(CostPaidObjectRecord::snapshot_mut),
+            )
         {
             f(&mut snapshot.lki);
         }
         for (_, child) in self.child_links_mut() {
             child.for_each_loop_lki_snapshot_mut(f);
+        }
+    }
+
+    /// CR 400.7 + CR 601.2h: the loop comparand of this chain's `cost_paid_objects`,
+    /// in order: the incarnation each captured record names (ranked by loop
+    /// normalization through [`Self::for_each_loop_pin_mut`]), `None` for a
+    /// membership-only record. `PartialEq` compares that list by object id only, so
+    /// without this a record whose object left and returned would compare equal to one
+    /// naming the live object, though `choose_from_zone` offers only the live one.
+    pub(crate) fn paid_record_incarnations_for_loop(&self, out: &mut Vec<Option<u64>>) {
+        out.extend(
+            self.cost_paid_objects
+                .iter()
+                .map(|record| record.snapshot().map(|snapshot| snapshot.incarnation)),
+        );
+        for (_, child) in self.child_links() {
+            child.paid_record_incarnations_for_loop(out);
         }
     }
 

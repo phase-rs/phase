@@ -35639,41 +35639,7 @@ impl GameState {
                     &mut retained_copy_sources,
                 );
             };
-            for entry in clone.stack.iter().chain(clone.resolving_stack_entry.iter()) {
-                if let Some(ability) = entry.ability() {
-                    collect(ability);
-                }
-            }
-            for pending in clone
-                .pending_trigger
-                .as_deref()
-                .into_iter()
-                .chain(clone.deferred_triggers.iter().map(|ctx| &ctx.pending))
-                .chain(
-                    clone
-                        .pending_trigger_order
-                        .iter()
-                        .flat_map(|order| order.groups.iter())
-                        .flat_map(|group| group.triggers.iter())
-                        .map(|ctx| &ctx.pending),
-                )
-            {
-                collect(&pending.ability);
-            }
-            for trigger in &clone.delayed_triggers {
-                collect(&trigger.ability);
-            }
-            if let Some(resume) = clone.pending_triggered_mana_resume.as_ref() {
-                collect(&resume.current.pending.ability);
-                for ctx in resume.accepted_tail.iter().chain(
-                    resume
-                        .collected_batches
-                        .iter()
-                        .flat_map(|batch| batch.contexts.iter()),
-                ) {
-                    collect(&ctx.pending.ability);
-                }
-            }
+            clone.for_each_loop_ability_carrier(&mut |_, ability| collect(ability));
             for epic in &clone.epic_effects {
                 collect(&epic.spell);
             }
@@ -35723,15 +35689,17 @@ impl GameState {
                 .map_or(id, |first| EpicEffectId(first as u64))
         };
         for entry in clone.stack.iter_mut() {
+            let carrier_source = entry.source_id;
             if let Some(ability) = entry.ability_mut() {
-                ability.clear_source_provenance_for_loop_recursive();
+                ability.clear_source_provenance_for_loop_recursive(carrier_source);
                 ability.normalize_cast_occurrence_for_loop_recursive();
                 ability.rename_epic_effect_handles_recursive(&rename_stack_epic_handle);
             }
         }
         if let Some(entry) = clone.resolving_stack_entry.as_mut() {
+            let carrier_source = entry.source_id;
             if let Some(ability) = entry.ability_mut() {
-                ability.clear_source_provenance_for_loop_recursive();
+                ability.clear_source_provenance_for_loop_recursive(carrier_source);
                 ability.normalize_cast_occurrence_for_loop_recursive();
                 ability.rename_epic_effect_handles_recursive(&rename_stack_epic_handle);
             }
@@ -35743,7 +35711,9 @@ impl GameState {
         // `game::triggers`.
         let normalize_pending_trigger = |pending: &mut crate::game::triggers::PendingTrigger| {
             pending.timestamp = 0;
-            pending.ability.clear_source_provenance_for_loop_recursive();
+            pending
+                .ability
+                .clear_source_provenance_for_loop_recursive(pending.source_id);
         };
         if let Some(pt) = clone.pending_trigger.as_mut() {
             normalize_pending_trigger(pt);
@@ -35759,7 +35729,8 @@ impl GameState {
             }
         }
         for dt in clone.delayed_triggers.iter_mut() {
-            dt.ability.clear_source_provenance_for_loop_recursive();
+            dt.ability
+                .clear_source_provenance_for_loop_recursive(dt.source_id);
             dt.provenance = DelayedInstallIdentity::LegacyDelayed;
         }
         // The triggered-mana sidecar is eq-compared like its sibling carriers
@@ -35885,6 +35856,18 @@ impl GameState {
         self.for_each_trigger_event_carrier_mut(&mut |event| record_event(event));
         self.for_each_loop_ability_carrier_mut(&mut |_, ability| {
             ability.for_each_creation_lookback_event_mut(&mut |event| record_event(event));
+        });
+        // CR 608.2h + CR 400.7: the exact departure snapshot each ability's own pins select.
+        // A source stamp is one of them: an activated ability whose cost moved its source
+        // reads "this artifact" from the snapshot of the incarnation it announced
+        // (`quantity::source_intensity`, `AbilityCondition::SourceMatchesFilter`), not from the
+        // latest history of the object. The pins are the ones loop normalization ranks
+        // ([`ResolvedAbility::for_each_loop_pin_mut`]), so a retained row keeps the rank its
+        // stamp has.
+        self.for_each_loop_ability_carrier_mut(&mut |source_id, ability| {
+            ability.for_each_loop_pin_mut(source_id, &mut |object_id, incarnation| {
+                referenced_lki.insert(ObjectIncarnationRef::of(object_id, *incarnation));
+            });
         });
 
         // CR 608.2c: the departure snapshots the frame's live tracked-set
@@ -38184,6 +38167,74 @@ impl GameState {
         }
     }
 
+    /// [`Self::for_each_loop_ability_carrier_mut`] read-only: the same carriers in the same
+    /// order (the stack and the resolving entry, the pending, deferred and ordering triggers, a
+    /// paused triggered mana ability's contexts, the delayed triggers), each with its
+    /// CARRIER's `source_id`.
+    pub(crate) fn for_each_loop_ability_carrier(
+        &self,
+        f: &mut impl FnMut(ObjectId, &ResolvedAbility),
+    ) {
+        for entry in self.stack.iter().chain(self.resolving_stack_entry.iter()) {
+            if let Some(ability) = entry.ability() {
+                f(entry.source_id, ability);
+            }
+        }
+        let ordering = self
+            .pending_trigger_order
+            .iter()
+            .flat_map(|order| order.groups.iter())
+            .flat_map(|group| group.triggers.iter())
+            .map(|context| &context.pending);
+        let mana_resume = self
+            .pending_triggered_mana_resume
+            .as_deref()
+            .into_iter()
+            .flat_map(|resume| {
+                std::iter::once(&*resume.current)
+                    .chain(resume.accepted_tail.iter())
+                    .chain(
+                        resume
+                            .collected_batches
+                            .iter()
+                            .flat_map(|batch| batch.contexts.iter()),
+                    )
+            })
+            .map(|context| &context.pending);
+        for pending in self
+            .pending_trigger
+            .as_deref()
+            .into_iter()
+            .chain(
+                self.deferred_triggers
+                    .iter()
+                    .map(|deferred| &deferred.pending),
+            )
+            .chain(ordering)
+            .chain(mana_resume)
+        {
+            f(pending.source_id, &pending.ability);
+        }
+        for trigger in self.delayed_triggers.iter() {
+            f(trigger.source_id, &trigger.ability);
+        }
+    }
+
+    /// CR 400.7 + CR 601.2h: per loop ability carrier, the ranked incarnations its
+    /// `cost_paid_objects` records name
+    /// ([`ResolvedAbility::paid_record_incarnations_for_loop`]). Every loop comparator that
+    /// compares ability carriers by `PartialEq` compares this too, because `PartialEq` reads
+    /// that list by object id only.
+    pub(crate) fn loop_paid_record_incarnations(&self) -> Vec<Vec<Option<u64>>> {
+        let mut carriers = Vec::new();
+        self.for_each_loop_ability_carrier(&mut |_, ability| {
+            let mut incarnations = Vec::new();
+            ability.paid_record_incarnations_for_loop(&mut incarnations);
+            carriers.push(incarnations);
+        });
+        carriers
+    }
+
     /// Every trigger-event carrier that can still resume or resolve: the stack,
     /// pending/deferred/ordering triggers, current and batched trigger events,
     /// every parked resolution frame, the pre-roll die instruction, and a paused
@@ -39106,6 +39157,7 @@ pub(crate) fn projected_states_equal(a: &GameState, b: &GameState) -> bool {
         && a.stack_trigger_firings == b.stack_trigger_firings
         && objects_content_eq(&a.objects, &b.objects)
         && pending_shields_loop_eq(a, b)
+        && a.loop_paid_record_incarnations() == b.loop_paid_record_incarnations()
 }
 
 /// CR 615.3 + CR 614.3: the LIVE floating shields in `state`, in registry order — the
@@ -52907,6 +52959,12 @@ mod tests {
         AmassedArmyObject,
         /// The source epoch a noted mana payment was stamped with.
         NotedManaPayment,
+        /// CR 400.7: the incarnation the source had when the ability was created or put on
+        /// the stack, which `source_is_current` and `self_ref_is_current` read.
+        SourceIncarnation,
+        /// CR 601.2h: the incarnation a captured `cost_paid_objects` record names, which
+        /// `PartialEq` does not read.
+        CostPaidObjects,
         /// An attachment pin inside a last-known-information snapshot the ability carries.
         CostPaidLki,
         DiscardResultLki,
@@ -52935,7 +52993,7 @@ mod tests {
         named: u64,
     ) -> ResolvedAbility {
         use crate::types::ability::{
-            CostPaidObjectSnapshot, DiscardedCardResult, NotedManaPayment,
+            CostPaidObjectRecord, CostPaidObjectSnapshot, DiscardedCardResult, NotedManaPayment,
         };
         let reference = ObjectIncarnationRef::of(x, named);
         // A snapshot of `x` whose own incarnation, or whose one attachment pin, is `named`.
@@ -53007,12 +53065,16 @@ mod tests {
                 .attach_target_bindings
                 .bind_attachment_candidates(vec![reference]),
             AbilityPinSlot::CostPaidObject => ability.cost_paid_object = Some(snapshot(false)),
+            AbilityPinSlot::CostPaidObjects => {
+                ability.cost_paid_objects = vec![CostPaidObjectRecord::Captured(snapshot(false))]
+            }
             AbilityPinSlot::EffectContextObject => {
                 ability.effect_context_object = Some(snapshot(false))
             }
             AbilityPinSlot::AmassedArmyObject => {
                 ability.amassed_army_object = Some(snapshot(false))
             }
+            AbilityPinSlot::SourceIncarnation => ability.source_incarnation = Some(named),
             AbilityPinSlot::NotedManaPayment => {
                 ability.noted_mana_payment = Some(NotedManaPayment {
                     types: Vec::new(),
@@ -53590,6 +53652,36 @@ mod tests {
             StackActivated
         ),
         ability_pin_case!(
+            "stack trigger source_incarnation",
+            SourceIncarnation,
+            StackTrigger
+        ),
+        ability_pin_case!(
+            "stack activated ability source_incarnation",
+            SourceIncarnation,
+            StackActivated
+        ),
+        ability_pin_case!(
+            "pending_trigger source_incarnation",
+            SourceIncarnation,
+            Pending
+        ),
+        ability_pin_case!(
+            "delayed_triggers source_incarnation",
+            SourceIncarnation,
+            Delayed
+        ),
+        ability_pin_case!(
+            "stack activated ability cost_paid_objects record",
+            CostPaidObjects,
+            StackActivated
+        ),
+        ability_pin_case!(
+            "delayed_triggers cost_paid_objects record",
+            CostPaidObjects,
+            Delayed
+        ),
+        ability_pin_case!(
             "stack activated ability cost_paid_object.lki attachment",
             CostPaidLki,
             StackActivated
@@ -53693,12 +53785,62 @@ mod tests {
         for case in RANKED_CARRIERS {
             let early = (case.split)(3);
             let late = (case.split)(8);
-            assert_ne!(early, late, "{}: reach guard", case.name);
+            // `PartialEq` reads `cost_paid_objects` by id only, so the paid-record rows differ
+            // in the comparand the loop comparators add for them.
+            assert!(
+                early != late
+                    || early.loop_paid_record_incarnations()
+                        != late.loop_paid_record_incarnations(),
+                "{}: reach guard",
+                case.name
+            );
             if !normalized_equal(&early, &late) {
                 unranked.push(case.name);
             }
         }
         assert!(unranked.is_empty(), "not ranked: {unranked:#?}");
+    }
+
+    /// CR 608.2h + CR 602.2a: an ability that announced its source at one incarnation and
+    /// paid with it reads "this artifact" from that incarnation's departure snapshot. Drix
+    /// Interlacer ("{T}, Sacrifice this artifact: Draw X cards, where X is half this artifact's
+    /// intensity, rounded down.") is the printed shape; this fixture is synthetic: a draw
+    /// ability on the stack whose source stamp (the announced epoch, then the as-placed
+    /// one) names incarnation 5 of an object now at 8, beside a departure snapshot of
+    /// incarnation 5. Two frames with the same stamp and the same latest last-known
+    /// information but different selected snapshots are different positions; the same
+    /// snapshot in both is the same position.
+    #[test]
+    fn normalization_keeps_the_departure_snapshot_a_source_stamp_selects() {
+        for stamp in ["announced_source_incarnation", "source_incarnation"] {
+            let frame = |intensity: u32| {
+                let (mut state, x) = records_naming(8, &[]);
+                let mut ability = draw_one(x);
+                match stamp {
+                    "announced_source_incarnation" => {
+                        ability.announced_source_incarnation = Some(5)
+                    }
+                    _ => ability.source_incarnation = Some(5),
+                }
+                carry_ability(&mut state, AbilityCarrier::StackActivated, x, ability);
+                let mut departed = state.objects[&x].snapshot_public_characteristics();
+                departed.intensity = intensity;
+                state
+                    .lki_by_incarnation
+                    .entry(x)
+                    .or_default()
+                    .insert(5, departed);
+                state
+            };
+            assert!(
+                normalized_equal(&frame(2), &frame(2)),
+                "{stamp}: reach guard, the same selected snapshot is the same position"
+            );
+            assert!(
+                !normalized_equal(&frame(2), &frame(4)),
+                "{stamp}: the snapshot the stamp selects differs, so the positions differ"
+            );
+        }
     }
 
     /// Every ranked carrier keeps the merge direction: a pin left at a superseded
