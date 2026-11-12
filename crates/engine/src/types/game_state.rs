@@ -6843,14 +6843,13 @@ impl<'de> Deserialize<'de> for PendingCounterRemovalQueue {
 /// CR 730.3: an explicit delegation of one merged member's departure from the
 /// logical owner that announced it — a parked batch delivery or a paused
 /// `ChangeZone` iteration, named by `parent_group_id` — to its component
-/// batch. The capture key (`member`, `expected_event`) remains distinct from
-/// the event approved after replacements; load validation checks both.
+/// batch. The capture key (`member`, `expected_event`) is the one the owner's
+/// parked pause captures; load validation checks it against that pause.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingComponentDeliveryParent {
     pub parent_group_id: LogicalZoneChangeGroupId,
     pub member: ObjectIncarnationRef,
     pub expected_event: ProposedEvent,
-    pub approved_event: ProposedEvent,
 }
 
 /// CR 603.10a + CR 616.1: The not-yet-delivered tail of a simultaneous

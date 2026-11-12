@@ -18,7 +18,7 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
-use super::elimination::{DepartureResume, DepartureTriggers};
+use super::elimination::{DepartureResume, DepartureTriggers, LookedBackDeparture};
 use super::filter::{matches_target_filter, FilterContext};
 use super::speed::{controls_start_your_engines_in, set_speed};
 use super::zones;
@@ -141,6 +141,26 @@ fn run_state_based_actions(
     waiting: &[crate::game::triggers::PendingTriggerContext],
     departures: DepartureTriggers,
 ) -> DepartureResume {
+    let mut departed = Vec::new();
+    let resume =
+        run_state_based_action_iterations(state, events, waiting, departures, &mut departed);
+    // CR 704.3 + CR 603.10a: the state-based-action event is complete and stamped
+    // as one simultaneous event, so the abilities a player's departure in it
+    // triggered are collected now, once, against the observers latched before
+    // that departure. A game that ended triggers nothing (`collect`, CR 104.1).
+    for departure in departed {
+        departure.collect(state, events);
+    }
+    resume
+}
+
+fn run_state_based_action_iterations(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
+    departures: DepartureTriggers,
+    departed: &mut Vec<LookedBackDeparture>,
+) -> DepartureResume {
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
     if state.layers_dirty.is_dirty() {
         // Snapshot P/T before layer re-evaluation for delta logging.
@@ -209,7 +229,9 @@ fn run_state_based_actions(
             for &loser in &losers {
                 events.push(GameEvent::PlayerLost { player_id: loser });
             }
-            let resume = super::elimination::eliminate_players(state, &losers, departures, events);
+            let outcome = super::elimination::eliminate_players(state, &losers, departures, events);
+            let resume = outcome.resume;
+            departed.extend(outcome.looked_back);
 
             // If the game ended (a sole winner or a CR 104.4a draw), stop now.
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {

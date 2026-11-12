@@ -73,6 +73,7 @@ fn process_combat_damage_triggers(
     // processing (dies triggers). Repeat until no new SBAs and no new triggers.
     loop {
         let events_before = all_events.len();
+        let deferred_before = state.deferred_triggers.len();
         // CR 704.3 + CR 510.3a + CR 704.5v: SBAs run before this batch is put
         // on the stack, but its abilities have already triggered — a Siege
         // whose CR 310.12b victory trigger waits here is not put into its
@@ -81,8 +82,27 @@ fn process_combat_damage_triggers(
 
         // If SBAs generated new events, process triggers for those events.
         if all_events.len() > events_before {
-            let new_events: Vec<_> = all_events[events_before..].to_vec();
-            before_priority_events.extend_from_slice(&new_events);
+            // CR 603.10a + CR 603.2c: a player's departure in that SBA event was
+            // collected, once, against the observers as they were immediately
+            // before it, and its occurrences claimed: its triggers join this
+            // batch and the scans below skip the claimed events.
+            let departure_triggers = state
+                .deferred_triggers
+                .split_off(deferred_before.min(state.deferred_triggers.len()));
+            pending.extend(departure_triggers);
+            let consumed = state.consumed_before_priority_trigger_events.clone();
+            let new_events = triggers::filter_already_collected_trigger_events_from(
+                state,
+                all_events,
+                events_before,
+                &consumed,
+            );
+            before_priority_events.extend(triggers::filter_consumed_trigger_events_from(
+                all_events,
+                events_before,
+                triggers::TriggerCollectionRequester::Delayed,
+                &consumed,
+            ));
             pending.extend(triggers::collect_triggers_for_batch(state, &new_events));
         } else {
             break;

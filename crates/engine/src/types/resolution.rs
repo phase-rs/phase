@@ -1988,7 +1988,6 @@ impl ResolutionStack {
                 && link.parent_group_id != child.logical_zone_change_group.logical_group_id
                 && owner_state
                 && matches!(&link.expected_event, crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, .. } if *object_id == link.member.object_id)
-                && matches!(&link.approved_event, crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, .. } if *object_id == link.member.object_id)
                 && child.logical_zone_change_group.prospective_battlefield_members.iter()
                     .any(|member| member.identity == link.member)
         });
@@ -7552,7 +7551,6 @@ mod tests {
                 parent_group_id,
                 member: identity,
                 expected_event: event.clone(),
-                approved_event: event.clone(),
             }),
         );
         let mut stack = ResolutionStack::default();
@@ -7604,24 +7602,6 @@ mod tests {
         assert!(
             wrong_incarnation.validate(&waiting).is_err(),
             "a same-id new incarnation cannot stand in for the parked member"
-        );
-
-        let (mut wrong_approved, _, _) = component_batch_pair(313);
-        wrong_approved
-            .active_batch_delivery_mut()
-            .expect("child owns the top")
-            .component_delivery_parent
-            .as_mut()
-            .expect("child retains its relation")
-            .approved_event = ProposedEvent::zone_change(
-            crate::types::identifiers::ObjectId(9_999),
-            Zone::Battlefield,
-            Zone::Graveyard,
-            None,
-        );
-        assert!(
-            wrong_approved.validate(&waiting).is_err(),
-            "the approved event must retain the original member"
         );
 
         let (mut missing_parent, _, _) = component_batch_pair(314);

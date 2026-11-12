@@ -9333,6 +9333,29 @@ pub(crate) fn collect_unclaimed_triggers_into_deferred(
     collect_unclaimed_delayed_triggers_into_deferred(state, events, &delayed);
 }
 
+/// CR 603.2c + CR 603.10a: the single collection of a player departure's
+/// triggers. Collects `events[event_start..]` through
+/// [`collect_unclaimed_triggers_into_deferred`], matching the departure's
+/// look-back events against the observers latched before it, then claims every
+/// occurrence it scanned (at its position in the full action buffer) so a
+/// later scan of the same buffer, the caller's post-action pipeline, the
+/// state-based-action loop or a resumed resolution's settlement, cannot
+/// collect the departure a second time under the live controllers.
+pub(crate) fn collect_departure_triggers_into_deferred(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+    looked_back: Option<(ImmediatelyBeforeObservers, usize)>,
+) {
+    collect_unclaimed_triggers_into_deferred(state, events, event_start, looked_back);
+    let claims = (event_start..events.len()).map(|index| ConsumedTriggerEventOccurrence {
+        event: events[index].clone(),
+        occurrence: trigger_event_occurrence(events, index),
+        scope: ConsumedTriggerEventScope::AllCollectors,
+    });
+    state.consumed_before_priority_trigger_events.extend(claims);
+}
+
 /// Collect `events`' triggers into the queue stamped `origin`: a priority
 /// boundary's own batch, or an SBA batch parked behind a choice.
 ///

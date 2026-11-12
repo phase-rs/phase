@@ -38,6 +38,10 @@
 //!    control to its owner's hand."
 //!   Ninth Bridge Patrol: "Whenever another creature you control leaves the
 //!    battlefield, put a +1/+1 counter on this creature."
+//!   Turn Against: "Devoid / Gain control of target creature until end of turn.
+//!    Untap that creature. It gains haste until end of turn."
+//!   Extractor Demon: "Flying / Whenever another creature leaves the battlefield,
+//!    you may have target player mill two cards. / Unearth {2}{B} (...)"
 //!   Karn, Silver Golem and Traxos, Scourge of Kroog: legendary artifact
 //!    creatures, each its owner's commander in the two-commander row.
 //!
@@ -251,6 +255,29 @@ fn shredder_triggers(state: &GameState) -> usize {
         .count()
 }
 
+/// How many of `source`'s waiting triggers name the departure of `object`.
+fn triggers_for_departure_of(state: &GameState, source: ObjectId, object: ObjectId) -> usize {
+    let names_object = |events: &[GameEvent]| {
+        events.iter().any(|event| {
+            matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == object)
+        })
+    };
+    let queued = state.pending_trigger_order.iter().flat_map(|order| {
+        order
+            .groups
+            .iter()
+            .flat_map(|group| group.triggers.iter())
+            .filter(|context| context.pending.source_id == source)
+            .filter(|context| names_object(&context.trigger_events))
+    });
+    let placed = state.stack.iter().filter(|entry| {
+        entry.source_id == source
+            && matches!(&entry.kind, StackEntryKind::TriggeredAbility { trigger_event: Some(event), .. }
+                if names_object(std::slice::from_ref(event)))
+    });
+    queued.count() + placed.count()
+}
+
 /// The controllers of Ninth Bridge Patrol triggers: each one observed one
 /// creature its controller controlled leaving the battlefield.
 fn patrol_triggers(state: &GameState) -> Vec<PlayerId> {
@@ -341,7 +368,7 @@ fn unparked_control_triggers(spell_name: &str, pile_shape: Pile) -> Vec<PlayerId
     let spell = scenario.add_real_card(P0, spell_name, Zone::Hand, db);
     scenario.with_library_top(P1, &["Library Card A", "Library Card B"]);
     let mut pool = mana(ManaType::Blue, 5);
-    pool.extend(mana(ManaType::Red, 3));
+    pool.extend(mana(ManaType::Red, 5));
     scenario.with_mana_pool(P0, pool);
     let mut runner = scenario.build();
     let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, false);
@@ -355,14 +382,17 @@ fn unparked_control_triggers(spell_name: &str, pile_shape: Pile) -> Vec<PlayerId
     mender_departure_triggers(runner.state())
 }
 
-/// The unparked control. With Circuit Mender as the survivor its own trigger
-/// fires once. With Brokkos as the survivor it is not pinned: it is missing
-/// because of the known look-back defect in the module note, and the rows only
-/// require the parked run to match it.
+/// The unparked control, pinned for both piles. With Circuit Mender as the
+/// survivor its own trigger fires once. With Brokkos as the survivor it does not
+/// fire at all: that is the known look-back defect in the module note, pinned
+/// here as it is so a fix of it fails this row and is noticed, while the rows
+/// require the parked run to match the control either way.
 fn assert_control(spell_name: &str, pile_shape: Pile, control: &[PlayerId]) {
-    if matches!(pile_shape, Pile::BrokkosUnderMender) {
-        assert_eq!(control, [P1], "{spell_name} {pile_shape:?} control");
-    }
+    let expected: &[PlayerId] = match pile_shape {
+        Pile::BrokkosUnderMender => &[P1],
+        Pile::MenderOverBrokkos => &[],
+    };
+    assert_eq!(control, expected, "{spell_name} {pile_shape:?} control");
 }
 
 /// CR 730.3 + CR 701.24a + CR 608.2c: Chaos Warp's owner shuffle runs through a
@@ -385,7 +415,7 @@ fn chaos_warp_hands_a_parked_component_back_to_the_owner_iteration() {
             scenario.add_real_card(P1, "Ninth Bridge Patrol", Zone::Battlefield, db);
             let warp = scenario.add_real_card(P0, "Chaos Warp", Zone::Hand, db);
             scenario.with_library_top(P1, &["Library Card A", "Library Card B"]);
-            scenario.with_mana_pool(P0, mana(ManaType::Red, 3));
+            scenario.with_mana_pool(P0, mana(ManaType::Red, 5));
             let mut runner = scenario.build();
             let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, true);
             let label = format!("{pile_shape:?}, answer {answer_index}");
@@ -831,6 +861,10 @@ fn concession_resume_that_ends_the_game_leaves_nothing_owed() {
 /// prompt; the ceremony is
 /// finished and put into P0's graveyard before the remaining state-based
 /// actions, so the Lord survives and nothing is parked when priority is given.
+/// P0 also has an Extractor Demon that P1 stole: P0's own Super Shredder, the
+/// unstolen observer, triggers once for each permanent that left, and the stolen
+/// Demon triggers for none, because the departure is collected once, against the
+/// observers as they were before P1 left.
 #[test]
 fn player_loss_during_the_prompt_finishes_the_resolution_before_priority() {
     let db = shared_card_db().expect("integration card fixture must load");
@@ -840,14 +874,34 @@ fn player_loss_during_the_prompt_finishes_the_resolution_before_priority() {
     let angel = scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db);
     scenario.add_real_card(P1, "Circuit Mender", Zone::Graveyard, db);
     let lord = scenario.add_real_card(P0, "Lord of Extinction", Zone::Battlefield, db);
-    scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
+    let shredder = scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
+    let stolen_demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
+    let turn_against = scenario.add_real_card(P1, "Turn Against", Zone::Hand, db);
     let patrol = scenario.add_real_card(P1, "Ninth Bridge Patrol", Zone::Battlefield, db);
     let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
     scenario.with_life(P1, 0);
     scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
+    scenario.with_mana_pool(P1, mana(ManaType::Red, 5));
     let mut runner = scenario.build();
     let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
     assert_eq!(runner.state().objects[&lord].toughness, Some(1));
+
+    // CR 603.10a + CR 800.4d: P1 steals P0's Extractor Demon with a real
+    // control-changing spell (P0 passes, P1 casts it, and it resolves back
+    // to P0), so at P1's loss that observer is P1's.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("priority passes to P1");
+    runner
+        .cast(turn_against)
+        .target_object(stolen_demon)
+        .resolve();
+    assert_eq!(runner.state().objects[&stolen_demon].controller, P1);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "the resolved spell returns priority to the active player"
+    );
 
     cast_until_resolved_or_asked(&mut runner, ceremony, &[pile.survivor, angel]);
     // CR 401.4: both cards go on top of P1's library, so P1 arranges them.
@@ -868,14 +922,6 @@ fn player_loss_during_the_prompt_finishes_the_resolution_before_priority() {
         runner.state().players[1].is_eliminated,
         "CR 704.5a: without Platinum Angel, P1 at 0 life loses"
     );
-    assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::Priority { player: P0 }
-        ),
-        "{:?}",
-        runner.state().waiting_for
-    );
     resolution_finished(runner.state());
     assert_eq!(runner.state().objects[&ceremony].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&pile.brokkos].zone, Zone::Exile);
@@ -887,9 +933,32 @@ fn player_loss_during_the_prompt_finishes_the_resolution_before_priority() {
     assert_eq!(runner.state().objects[&lord].toughness, Some(1));
     assert_eq!(runner.state().objects[&patrol].zone, Zone::Exile);
     assert_eq!(
+        runner.state().objects[&stolen_demon].controller,
+        P0,
+        "CR 800.4a: P1's control effect ended with P1"
+    );
+    assert_eq!(
+        runner.state().objects[&stolen_demon].zone,
+        Zone::Battlefield
+    );
+    assert_eq!(runner.state().objects[&shredder].zone, Zone::Battlefield);
+    assert_eq!(
         shredder_triggers(runner.state()),
         3,
-        "CR 603.6c: Super Shredder saw the Angel, the merged permanent and the departed player's Patrol leave, once each"
+        "CR 603.6c: P0's own Super Shredder saw the Angel, the merged permanent and the departed \
+         player's Patrol leave, once each"
+    );
+    assert_eq!(
+        triggers_for_departure_of(runner.state(), shredder, patrol),
+        1,
+        "CR 603.6c: P0's own Super Shredder triggers once for the Patrol that left with P1"
+    );
+    assert_eq!(
+        triggers_for_departure_of(runner.state(), stolen_demon, patrol),
+        0,
+        "CR 603.10a + CR 800.4d: the Extractor Demon P1 had stolen looked back to a source P1 \
+         controlled when the Patrol left the game with P1, so that trigger is P1's and leaves \
+         with P1"
     );
 }
 
@@ -958,7 +1027,7 @@ fn spell_controller_concession_during_the_owners_prompt_leaves_nothing_parked() 
             let karn = scenario.add_real_card(P2, "Karn, Silver Golem", Zone::Battlefield, db);
             let spell = scenario.add_real_card(P0, spell_name, Zone::Hand, db);
             scenario.with_library_top(P1, &["Library Card A", "Library Card B"]);
-            let mut pool = mana(ManaType::Red, 3);
+            let mut pool = mana(ManaType::Red, 5);
             pool.extend(mana(ManaType::Green, 5));
             scenario.with_mana_pool(P0, pool);
             let mut runner = scenario.build();
@@ -1037,7 +1106,7 @@ fn chaos_warp_owner_concession_during_the_prompt_finishes_before_priority() {
         let (mender, brokkos) = add_pile(&mut scenario, P1);
         let warp = scenario.add_real_card(P0, "Chaos Warp", Zone::Hand, db);
         scenario.with_library_top(P1, &["Library Card A"]);
-        scenario.with_mana_pool(P0, mana(ManaType::Red, 3));
+        scenario.with_mana_pool(P0, mana(ManaType::Red, 5));
         let mut runner = scenario.build();
         let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, true);
         let label = format!("{pile_shape:?}");
@@ -1232,7 +1301,7 @@ fn another_seat_concession_leaves_a_parked_owner_iteration_intact() {
         let bystander = scenario.add_real_card(P2, "Circuit Mender", Zone::Battlefield, db);
         let warp = scenario.add_real_card(P0, "Chaos Warp", Zone::Hand, db);
         scenario.with_library_top(P1, &["Library Card A", "Library Card B"]);
-        scenario.with_mana_pool(P0, mana(ManaType::Red, 3));
+        scenario.with_mana_pool(P0, mana(ManaType::Red, 5));
         let mut runner = scenario.build();
         let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
         let label = format!("answer {answer_index}");
@@ -1480,7 +1549,7 @@ fn resumed_merged_member_settles_once_whether_its_components_park_or_not() {
             let spell = scenario.add_real_card(P0, spell_name, Zone::Hand, db);
             scenario.with_library_top(P1, &["Library Card A", "Library Card B"]);
             let mut pool = mana(ManaType::Blue, 5);
-            pool.extend(mana(ManaType::Red, 3));
+            pool.extend(mana(ManaType::Red, 5));
             scenario.with_mana_pool(P0, pool);
             scenario
                 .add_creature(P0, "Synthetic member-level library redirect", 0, 0)

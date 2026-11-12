@@ -161,12 +161,17 @@ pub fn eliminate_players_simultaneously(
     // pause (none is live while an effect or an ordinary SBA pass runs), so no
     // resume is owed here; the CR 704.5a safety net uses
     // `sba::check_state_based_actions_reporting_departure` instead.
-    let _ = eliminate_players(
+    let outcome = eliminate_players(
         state,
         players_to_eliminate,
         DepartureTriggers::ScannedByCaller,
         events,
     );
+    // CR 603.2: an effect's loss is no state-based-action batch, so nothing
+    // stamps the departure after it: collect it now.
+    if let Some(looked_back) = outcome.looked_back {
+        looked_back.collect(state, events);
+    }
 }
 
 /// CR 104.3a + CR 800.4a: A player concedes and leaves the game.
@@ -187,6 +192,7 @@ pub fn concede(
         DepartureTriggers::CollectedByDeparture,
         events,
     )
+    .resume
 }
 
 /// CR 117.2e + CR 608.2c: what a departure leaves owed to the action that
@@ -204,18 +210,64 @@ pub enum DepartureResume {
 }
 
 /// CR 603.2 + CR 603.6c: who collects the triggered abilities a departure's own
-/// events trigger.
+/// events trigger. Every route collects them exactly once, through the same
+/// look-back authority (CR 603.10a): the departure latches the observers as
+/// they were immediately before it, and the collection matches its look-back
+/// events against them.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DepartureTriggers {
-    /// The caller's post-action pipeline scans its event buffer: a loss by
-    /// state-based action (CR 704.5a) or by an effect (CR 104.3e).
+    /// The caller collects once its own batch is complete: a loss by
+    /// state-based action (CR 704.5a), after the whole state-based-action event
+    /// is stamped as one simultaneous event (CR 704.3), or by an effect
+    /// (CR 104.3e). The departure hands back the latched observers
+    /// ([`DepartureOutcome::looked_back`]) and the caller's later scans find the
+    /// departure's events claimed.
     ScannedByCaller,
-    /// A post-action pass in progress scans the events and places the waiting queue at its
-    /// own settle (CR 117.5).
+    /// [`Self::ScannedByCaller`] inside a post-action pass in progress, which
+    /// places the waiting queue at its own settle (CR 117.5).
     PlacedByPass,
     /// Nothing scans the departure's events after it returns (a concession,
     /// CR 104.3a), so the departure queues their triggers itself.
     CollectedByDeparture,
+}
+
+/// What a departure leaves owed to its caller: the surviving resolution's tail
+/// (CR 117.2e), and, on a route where the caller collects, the look-back
+/// collection of the departure's own triggers.
+#[must_use]
+pub(crate) struct DepartureOutcome {
+    pub(crate) resume: DepartureResume,
+    pub(crate) looked_back: Option<LookedBackDeparture>,
+}
+
+/// CR 603.10a + CR 603.2c: a departure's look-back collection, held by a caller
+/// that collects once its batch is complete.
+pub(crate) struct LookedBackDeparture {
+    observers: super::triggers::ImmediatelyBeforeObservers,
+    first_event: usize,
+    departure_end: usize,
+}
+
+impl LookedBackDeparture {
+    /// CR 603.10a + CR 603.3a: queue the triggers the departure's events
+    /// trigger, matching its look-back events against the observers latched
+    /// before it, and claim the occurrences (CR 603.2c) so no later scan of the
+    /// buffer collects the departure again under its live controllers. The
+    /// triggers wait in `deferred_triggers` for the caller's normal settlement
+    /// (CR 603.3b). CR 104.1: nothing triggers once the game is over, and
+    /// CR 800.4d: a trigger whose controller left is retired.
+    pub(crate) fn collect(self, state: &mut GameState, events: &[GameEvent]) {
+        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            return;
+        }
+        super::triggers::collect_departure_triggers_into_deferred(
+            state,
+            &events[..self.departure_end],
+            self.first_event,
+            Some((self.observers, self.departure_end)),
+        );
+        prune_deferred_triggers_for_eliminated_players(state);
+    }
 }
 
 pub(crate) fn eliminate_players(
@@ -223,7 +275,7 @@ pub(crate) fn eliminate_players(
     players_to_eliminate: &[PlayerId],
     departure_triggers: DepartureTriggers,
     events: &mut Vec<GameEvent>,
-) -> DepartureResume {
+) -> DepartureOutcome {
     let mut resume = DepartureResume::Settled;
     let first_event = events.len();
     let first_record = state.zone_changes_this_turn.len();
@@ -351,9 +403,8 @@ pub(crate) fn eliminate_players(
     // ability reads its source as it was immediately before that event, so an
     // observer a leaving player stole triggers under that player and is retired
     // with them (CR 800.4d) rather than handed to its owner.
-    let looked_back_observers = (departure_triggers == DepartureTriggers::CollectedByDeparture
-        && !leaving_set.is_empty())
-    .then(|| super::triggers::ImmediatelyBeforeObservers::latch(state));
+    let mut looked_back_observers = (!leaving_set.is_empty())
+        .then(|| super::triggers::ImmediatelyBeforeObservers::latch(state));
 
     for &player in players_to_eliminate {
         // Skip if already eliminated (e.g. a teammate eliminated alongside an
@@ -379,7 +430,10 @@ pub(crate) fn eliminate_players(
     }
 
     if !eliminated_any {
-        return resume;
+        return DepartureOutcome {
+            resume,
+            looked_back: None,
+        };
     }
     mark_left_game_departures_simultaneous(state, events, first_event, first_record);
     let departure_end = events.len();
@@ -489,7 +543,9 @@ pub(crate) fn eliminate_players(
             state,
             events,
             first_event,
-            looked_back_observers.map(|observers| (observers, departure_end)),
+            looked_back_observers
+                .take()
+                .map(|observers| (observers, departure_end)),
         );
     }
 
@@ -820,7 +876,21 @@ pub(crate) fn eliminate_players(
     state
         .resolution_stack
         .retire_orphaned_component_delivery_parent();
-    resume
+    // CR 603.10a: the observers latched before the departure go to the caller
+    // that collects (`ScannedByCaller`, `PlacedByPass`); `CollectedByDeparture`
+    // consumed them above. A finished game triggers nothing (CR 104.1).
+    let looked_back = looked_back_observers
+        .take()
+        .filter(|_| game_over_winner.is_none())
+        .map(|observers| LookedBackDeparture {
+            observers,
+            first_event,
+            departure_end,
+        });
+    DepartureOutcome {
+        resume,
+        looked_back,
+    }
 }
 
 /// CR 103.5 + CR 800.4a: Prune eliminated players from the in-flight
@@ -2973,7 +3043,6 @@ mod tests {
                 parent_group_id: owner_group_id,
                 member: paused.member,
                 expected_event: paused.expected_event.clone(),
-                approved_event: paused.expected_event.clone(),
             }),
             logical_zone_change_group: child_group,
             paused_current: None,
@@ -3084,7 +3153,6 @@ mod tests {
                 parent_group_id,
                 member: paused.member,
                 expected_event: paused.expected_event.clone(),
-                approved_event: paused.expected_event.clone(),
             }),
             logical_zone_change_group: child_group,
             paused_current: None,

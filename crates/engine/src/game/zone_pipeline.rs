@@ -4005,7 +4005,6 @@ fn deliver_replaced_batch_member(
                 parent_group_id: owner.group,
                 member: owner.member,
                 expected_event: owner.expected_event.unwrap_or_else(|| event.clone()),
-                approved_event: event.clone(),
             });
     if let ProposedEvent::ZoneChange {
         object_id,
@@ -5573,10 +5572,6 @@ mod w3_library_placement_tests {
             &relation.expected_event,
             ProposedEvent::ZoneChange { object_id, .. } if *object_id == survivor.object_id
         ));
-        assert!(matches!(
-            &relation.approved_event,
-            ProposedEvent::ZoneChange { object_id, .. } if *object_id == survivor.object_id
-        ));
         let parent = state
             .resolution_stack
             .batch_delivery_owner_mut(relation.parent_group_id)
@@ -7122,9 +7117,6 @@ mod w3_library_placement_tests {
     /// second final delivery becomes a plain Library move and auto-shuffles.
     #[test]
     fn batch_library_placement_tail_survives_pause() {
-        use crate::game::engine::apply_as_current;
-        use crate::types::actions::GameAction;
-
         let (mut state, first, second, sentinels) = positioned_batch_fixture();
         let reqs = vec![
             ZoneMoveRequest::effect(first, Zone::Library, first)

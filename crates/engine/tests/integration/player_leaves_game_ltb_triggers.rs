@@ -6,6 +6,7 @@
 
 use engine::game::game_object::{PhaseOutCause, PhaseStatus};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::game::zones::apply_resolved_zone_change;
 use engine::types::ability::{
@@ -14,10 +15,13 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::game_state::{DelayedTrigger, WaitingFor, ZoneDeparture};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::resolved_commands::{ResolvedRulesCommand, ResolvedZoneChangeCommand};
 use engine::types::zones::Zone;
+
+use crate::support::shared_card_db;
 
 const P2: PlayerId = PlayerId(2);
 
@@ -886,4 +890,170 @@ fn concession_after_stealing_equipment_retires_its_unattach_trigger() {
         "CR 603.10c + CR 800.4d: the unattach trigger was P2's, and P2 left"
     );
     assert!(runner.state().deferred_triggers.is_empty());
+}
+
+/// How the losing players leave the game in a stolen-observer test.
+#[derive(Clone, Copy, Debug)]
+enum Loss {
+    /// CR 104.3a: the player concedes.
+    Concede,
+    /// CR 704.5a: the player is at 0 life and loses to the state-based action
+    /// at the next priority boundary.
+    ZeroLife,
+}
+
+/// A board with `players` seats where P0 controls two Extractor Demons (the
+/// "unstolen" observer and the one P2 steals) and the `leavers` own one bear each.
+/// P2 steals P0's Demon with a real control-changing spell, so the stolen Demon
+/// is controlled by P2 at the moment P2 leaves.
+struct StolenObserverBoard {
+    runner: GameRunner,
+    stolen_demon: ObjectId,
+    unstolen_demon: ObjectId,
+    bears: Vec<ObjectId>,
+}
+
+fn red_mana(amount: usize) -> Vec<ManaUnit> {
+    (0..amount)
+        .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+        .collect()
+}
+
+fn stolen_observer_board(players: u8, leavers: &[PlayerId]) -> StolenObserverBoard {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(players, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let stolen_demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
+    let unstolen_demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
+    // SYNTHETIC: a vanilla 2/2 per leaver, the permanent each leaver owns.
+    let bears = leavers
+        .iter()
+        .map(|player| {
+            scenario
+                .add_creature(*player, &format!("{player:?} Bear"), 2, 2)
+                .id()
+        })
+        .collect();
+    let aggression = scenario.add_real_card(P2, "Turn Against", Zone::Hand, db);
+    scenario.with_mana_pool(P2, red_mana(5));
+    let mut runner = scenario.build();
+    // P0 and P1 pass; P2 receives priority and steals the Demon.
+    for _ in 0..2 {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes to P2");
+    }
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P2 }
+    );
+    runner
+        .cast(aggression)
+        .target_object(stolen_demon)
+        .resolve();
+    // Reach guard: the control effect is live and P2 has priority again.
+    assert_eq!(runner.state().objects[&stolen_demon].controller, P2);
+    assert!(runner.state().stack.is_empty());
+    StolenObserverBoard {
+        runner,
+        stolen_demon,
+        unstolen_demon,
+        bears,
+    }
+}
+
+/// Make every player in `leavers` leave the game by `loss`, through the public
+/// actions, with P2 holding priority.
+fn lose_the_game(runner: &mut GameRunner, leavers: &[PlayerId], loss: Loss) {
+    match loss {
+        Loss::Concede => {
+            for player in leavers {
+                runner
+                    .act(GameAction::Concede { player_id: *player })
+                    .expect("the player concedes");
+            }
+        }
+        Loss::ZeroLife => {
+            for player in leavers {
+                runner
+                    .state_mut()
+                    .players
+                    .iter_mut()
+                    .find(|candidate| candidate.id == *player)
+                    .expect("seat exists")
+                    .life = 0;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("the pass reaches the state-based-action check");
+        }
+    }
+}
+
+/// CR 603.10a + CR 603.3a + CR 800.4a + CR 800.4d: P2 steals P0's Extractor
+/// Demon and then leaves the game owning a bear, by each route a player can
+/// leave. The bear leaves in the same event that ends P2's control effects, so
+/// the stolen Demon's leaves-the-battlefield ability looks back to a source P2
+/// controlled: P2 controls that trigger, and it isn't put on the stack. P0's
+/// other Demon is the reach guard and triggers exactly once for the bear.
+fn assert_stolen_observer_retired(loss: Loss) {
+    let mut board = stolen_observer_board(3, &[P2]);
+    lose_the_game(&mut board.runner, &[P2], loss);
+    let runner = &mut board.runner;
+    assert!(runner.state().players[2].is_eliminated, "{loss:?}");
+    assert_eq!(zone(runner, board.bears[0]), Zone::Exile, "{loss:?}");
+    assert_eq!(
+        runner.state().objects[&board.stolen_demon].controller,
+        P0,
+        "{loss:?}: the control effect ended"
+    );
+    drive_trigger_prompts(runner);
+    assert_eq!(
+        triggers_from(runner, board.unstolen_demon),
+        1,
+        "{loss:?}: CR 603.6c: P0's own Demon sees the bear leave the game once"
+    );
+    assert_eq!(
+        triggers_from(runner, board.stolen_demon),
+        0,
+        "{loss:?}: CR 603.3a + CR 800.4d: the stolen Demon's trigger was P2's, and P2 left"
+    );
+}
+
+/// REVERT-FAILING (zero-life loss): collecting the departure against the board
+/// after the control effects ended gives the stolen Demon's trigger to P0.
+#[test]
+fn zero_life_after_stealing_an_observer_retires_the_stolen_observers_trigger() {
+    assert_stolen_observer_retired(Loss::ZeroLife);
+}
+
+/// The concession twin of the zero-life row above, through the same helper.
+#[test]
+fn concession_after_stealing_an_observer_retires_the_stolen_observers_trigger_by_the_same_helper() {
+    assert_stolen_observer_retired(Loss::Concede);
+}
+
+/// CR 104.4a + CR 603.10a: P1 and P2 lose at once in a four-player game, each
+/// owning a bear; P2 holds the stolen Demon. One state-based-action event takes
+/// both players out, so both bears leave together: P0's Demon sees each bear
+/// once, and the stolen Demon triggers for neither.
+#[test]
+fn two_players_losing_at_zero_life_at_once_each_trigger_the_survivors_observer_once() {
+    let mut board = stolen_observer_board(4, &[P1, P2]);
+    lose_the_game(&mut board.runner, &[P1, P2], Loss::ZeroLife);
+    let runner = &mut board.runner;
+    assert!(runner.state().players[1].is_eliminated);
+    assert!(runner.state().players[2].is_eliminated);
+    assert!(!runner.state().players[0].is_eliminated);
+    drive_trigger_prompts(runner);
+    assert_eq!(
+        triggers_from(runner, board.unstolen_demon),
+        2,
+        "CR 603.6c: P0's Demon sees each of the two bears leave once"
+    );
+    assert_eq!(
+        triggers_from(runner, board.stolen_demon),
+        0,
+        "CR 800.4d: the stolen Demon's triggers were P2's"
+    );
 }
