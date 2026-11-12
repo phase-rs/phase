@@ -204,6 +204,14 @@
         "label": "Label",
         "fallback": "Choice"
       }
+    },
+    "attacking": {
+      "you": "Attacking you",
+      "player": "Attacking {{player}}",
+      "yourPlaneswalker": "Attacking your planeswalker {{name}}",
+      "planeswalker": "Attacking {{player}}'s planeswalker {{name}}",
+      "battle": "Attacking battle {{name}}",
+      "nothing": "Attacking, but not any player, planeswalker, or battle"
     }
   },
   "actionButton": {
@@ -346,7 +354,6 @@
     "pickNone": "None",
     "underAttack_one": "Attacked by {{count}} creature",
     "underAttack_other": "Attacked by {{count}} creatures",
-    "target": "Target",
     "sacrifice": "Sacrifice",
     "token": "Token",
     "tokenTooltip": "Token copy of a real card",
@@ -469,7 +476,12 @@
     "assignRemaining_other": "Assign {{count}} more",
     "confirmDistribute_one": "Declare {{count}} Attacker",
     "confirmDistribute_other": "Declare {{count}} Attackers",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Attack totals",
+    "targetTotal_few": "{{count}} attackers · {{damage}} damage",
+    "targetTotal_many": "{{count}} attackers · {{damage}} damage",
+    "targetTotal_one": "{{count}} attacker · {{damage}} damage",
+    "targetTotal_other": "{{count}} attackers · {{damage}} damage"
   },
   "fullControl": {
     "label": "Control",
@@ -595,7 +607,9 @@
     "dungeonTooltip": "Venturing in {{name}}",
     "poisonAriaLabel_one": "{{count}} poison counter",
     "poisonAriaLabel_other": "{{count}} poison counters",
-    "poisonTooltip": "Poison counters: {{count}}\nA player with ten or more poison counters loses the game.",
+    "poisonTooltip": "Poison counters: {{count}}",
+    "poisonLossPlayer": "A player with {{threshold}} or more poison counters loses the game.",
+    "poisonLossTeam": "A team with {{threshold}} or more poison counters loses the game.",
     "energyAriaLabel_one": "{{count}} energy counter",
     "energyAriaLabel_other": "{{count}} energy counters",
     "energyTooltip": "Energy counters: {{count}}\nEnergy counters are a player-held resource spent by card abilities.",
@@ -855,7 +869,12 @@
     "lethalBadge": "Lethal",
     "planeswalkerLoyalty": "Planeswalker (loyalty: {{loyalty}})",
     "defendingPlayerTrample": "Defending Player (Trample)",
-    "pwControllerTrample": "PW Controller (Trample Over PW)"
+    "pwControllerTrample": "PW Controller (Trample Over PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Assign the remaining {{count}} damage to {{target}}",
+    "assignRemainingTo_many": "Assign the remaining {{count}} damage to {{target}}",
+    "assignRemainingTo_one": "Assign the remaining {{count}} damage to {{target}}",
+    "assignRemainingTo_other": "Assign the remaining {{count}} damage to {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
@@ -1222,7 +1241,10 @@
       "subtitleKeepWithBottom": "Keep this hand (you'll put {{count}} on the bottom) or mulligan again for a fresh 7.",
       "subtitleKeepFree": "Keep this hand (free mulligan — no cards to the bottom) or mulligan again for a fresh 7.",
       "subtitleOpeningFree": "Keep this hand or take a free mulligan (no cards to the bottom).",
-      "subtitleOpeningOne": "Keep this hand or mulligan for a fresh 7 (you'll put 1 on the bottom when you keep)."
+      "subtitleOpeningOne": "Keep this hand or mulligan for a fresh 7 (you'll put 1 on the bottom when you keep).",
+      "onThePlay": "You're on the play",
+      "onTheDraw": "You're on the draw",
+      "takeTurn": "You take turn {{turn}}"
     },
     "companion": {
       "eyebrow": "Pre-Game",
@@ -1439,6 +1461,8 @@
     },
     "config": {
       "startingLife": "Starting Life",
+      "commanderDamage": "Commander Damage",
+      "poisonCounters": "Poison Counters",
       "players": "Players",
       "whoGoesFirst": "Who Goes First",
       "firstPlayer": {

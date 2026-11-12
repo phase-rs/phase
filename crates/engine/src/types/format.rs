@@ -1545,6 +1545,14 @@ pub struct FormatConfig {
     pub singleton: bool,
     pub command_zone: bool,
     pub commander_damage_threshold: Option<u8>,
+    /// CR 104.3d / CR 704.5c: the poison-counter count at which an individual
+    /// player loses. `None` exactly when CR 704.5c does not apply to the format —
+    /// the Two-Headed Giant family ("Ignore this rule in Two-Headed Giant games"),
+    /// whose team threshold CR 704.6b / CR 810.8d (fifteen) governs instead and
+    /// stays fixed. The magnitude is a house-rule dial like
+    /// `commander_damage_threshold`'s.
+    #[serde(default)]
+    pub poison_counter_threshold: Option<u8>,
     #[serde(default, deserialize_with = "deserialize_range_of_influence")]
     pub range_of_influence: Option<Box<RangeOfInfluenceConfig>>,
     pub team_based: bool,
@@ -1744,6 +1752,25 @@ pub fn validate_starting_life_bounds(config: &FormatConfig) -> Result<(), String
     Ok(())
 }
 
+/// CR 704.5c playability floor on a resolved `FormatConfig`'s individual
+/// poison-loss threshold: `Some(0)` is rejected because `poison_counters >= 0`
+/// holds for every player — an immediate loss, not a threshold. The single
+/// shared authority, called from both arms of `FormatConfig::deserialize`
+/// (the built-in arm through `built_in_axes_no_looser_than_rules`'s
+/// `poison_counter_threshold` row; the Custom arm directly, because its
+/// blanket equality only proves self-consistency).
+pub fn validate_poison_counter_threshold(config: &FormatConfig) -> Result<(), String> {
+    if config.poison_counter_threshold == Some(0) {
+        return Err(format!(
+            "FormatConfig.poison_counter_threshold is Some(0) for {} — a zero threshold makes \
+             every player an immediate poison loss (CR 704.5c), so the threshold must be at \
+             least 1",
+            config.format,
+        ));
+    }
+    Ok(())
+}
+
 /// CR 100.2a / CR 100.4a / CR 903.5a / CR 903.5b / CR 904.2a: a BUILT-IN
 /// format's rules are fixed by the Comprehensive Rules and the engine
 /// registry except where the CR itself grants a host a choice — CR 103.4's
@@ -1751,7 +1778,7 @@ pub fn validate_starting_life_bounds(config: &FormatConfig) -> Result<(), String
 /// and the seat count no CR fixes (CR 100.1a / CR 100.1b / CR 800.1 fix only
 /// that a game begins with two players or with more than two). Re-derive the
 /// authoritative config with `FormatConfig::for_format` and check every one
-/// of this struct's 17 fields against it under one of six verdicts:
+/// of this struct's fields against it under one of six verdicts:
 ///
 /// - Locked: must equal the registry value exactly.
 /// - NoLooserThan: must be no more permissive than the registry value,
@@ -1767,13 +1794,15 @@ pub fn validate_starting_life_bounds(config: &FormatConfig) -> Result<(), String
 ///   carries is governed by that row's second verdict, stated alongside.
 ///   Applies to: `deck_size` (bidirectional, the `DeckSizeRule` discriminant),
 ///   `commander_damage_threshold` (bidirectional, the `Option` discriminant),
+///   `poison_counter_threshold` (bidirectional, the `Option` discriminant),
 ///   `archenemy_player` (one-directional, the `Option` discriminant — behavior
 ///   unchanged, this is a relabel of its existing row).
 /// - HostChoiceWithin(set): free inside a stated admissible set; each row
 ///   names its set and the set's source. Applies to: `max_players` (registry
 ///   range `min_players..=max_players`), `deck_size`'s magnitude (the
 ///   registry's closed option list), `commander_damage_threshold`'s magnitude
-///   (`>= 1`, playability), `starting_life` (resolved per-seat total `>= 1`
+///   (`>= 1`, playability), `poison_counter_threshold`'s magnitude (`>= 1`,
+///   playability), `starting_life` (resolved per-seat total `>= 1`
 ///   for playability; raw declared value `<= MAX_STARTING_LIFE` as an engine
 ///   overflow-safety invariant, not a rules bound).
 ///
@@ -1977,6 +2006,38 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
         (Some(_), Some(_)) | (None, None) => {}
     }
 
+    // poison_counter_threshold: ShapeLocked(bidirectional) on the Option
+    // discriminant, plus HostChoiceWithin `>= 1` on the magnitude.
+    //
+    // The SHAPE is the rules fact: CR 704.5c applies to every format except
+    // the Two-Headed Giant family, which ignores it in favor of the team
+    // rule (CR 704.6b / CR 810.8d). The MAGNITUDE is a house-rule dial like
+    // `commander_damage_threshold`'s; `validate_poison_counter_threshold`
+    // bounds it. A legacy payload's absent field has already been migrated
+    // to the registry value by `FormatConfig::deserialize`.
+    match (
+        config.poison_counter_threshold,
+        rules.poison_counter_threshold,
+    ) {
+        (Some(declared), None) => {
+            return Err(format!(
+                "FormatConfig.poison_counter_threshold is Some({declared}), but {} ignores CR \
+                 704.5c — the Two-Headed Giant family loses to team poison only (CR 704.6b / CR \
+                 810.8d), so this format may not declare an individual threshold",
+                config.format,
+            ));
+        }
+        (None, Some(registry)) => {
+            return Err(format!(
+                "FormatConfig.poison_counter_threshold is null, but {} loses a player at \
+                 {registry} poison counters (CR 704.5c) — a payload may set the threshold but \
+                 never remove it",
+                config.format,
+            ));
+        }
+        (Some(_), Some(_)) | (None, None) => validate_poison_counter_threshold(config)?,
+    }
+
     // range_of_influence: Deferred, NOT checked here — a hard equality row
     // was tried and reverted. It's unsound: legacy payloads don't only omit
     // this field (which would resolve to the `None` default and be safe),
@@ -2125,9 +2186,21 @@ impl<'de> Deserialize<'de> for FormatConfig {
     where
         D: Deserializer<'de>,
     {
-        let config = Self::deserialize(deserializer)?;
+        let mut config = Self::deserialize(deserializer)?;
         crate::types::custom_format::validate_custom_rules_consistency(&config)
             .map_err(serde::de::Error::custom)?;
+        // A pre-field payload carries no `poison_counter_threshold`, which serde
+        // defaults to `None`. `None` is never a legal declaration for a format whose
+        // resolver answers `Some` (the row below forbids deleting the SBA), so a
+        // `None` there can only be such a payload: adopt the resolver's value. An
+        // explicit `null` for such a format is migrated the same way, to the
+        // CR 704.5c value.
+        if config.poison_counter_threshold.is_none() {
+            config.poison_counter_threshold = match &config.custom_rules {
+                Some(rules) => Some(rules.structural.poison_counter_threshold),
+                None => config.format.default_poison_counter_threshold(),
+            };
+        }
         // `validate_custom_rules_consistency` has already established the
         // `format == Custom(id) <=> custom_rules == Some(rules with that id)`
         // biconditional, so `Some(_)` here means a Custom config and `None`
@@ -2172,8 +2245,8 @@ impl<'de> Deserialize<'de> for FormatConfig {
                          derives from the declared rules (allow_debug_actions \
                          excepted). Derived: \
                          starting_life {}, players {}-{}, deck_size {:?}, singleton {}, \
-                         command_zone {}, commander_damage_threshold {:?}, uses_commander {}, \
-                         team_based {}, archenemy_player {:?}, supplies_fixed_deck {}, \
+                         command_zone {}, commander_damage_threshold {:?}, \
+                         poison_counter_threshold {:?}, uses_commander {}, team_based {}, archenemy_player {:?}, supplies_fixed_deck {}, \
                          sideboard_policy {:?}, default_deck_copy_limit {:?}, \
                          range_of_influence set {}",
                         config.format,
@@ -2184,6 +2257,7 @@ impl<'de> Deserialize<'de> for FormatConfig {
                         expected.singleton,
                         expected.command_zone,
                         expected.commander_damage_threshold,
+                        expected.poison_counter_threshold,
                         expected.uses_commander,
                         expected.team_based,
                         expected.archenemy_player,
@@ -2202,6 +2276,9 @@ impl<'de> Deserialize<'de> for FormatConfig {
                 // 810.8c) or overflow-prone (`MAX_STARTING_LIFE`) starting
                 // life just because it is internally consistent about it.
                 validate_starting_life_bounds(&config).map_err(serde::de::Error::custom)?;
+                // Likewise for the declared poison threshold: equality admits a
+                // self-consistent `Some(0)`, which this call rejects (CR 704.5c).
+                validate_poison_counter_threshold(&config).map_err(serde::de::Error::custom)?;
             }
             // A built-in format's rules are fixed by the Comprehensive Rules
             // and the engine registry, except where the CR itself grants a
@@ -2210,9 +2287,9 @@ impl<'de> Deserialize<'de> for FormatConfig {
             // NoLooserThan, Derived, HostChoice, ShapeLocked, and
             // HostChoiceWithin). `built_in_axes_no_looser_than_rules`
             // re-derives the authoritative config via `FormatConfig::for_format`
-            // and checks every one of this struct's 18 fields against it —
+            // and checks every one of this struct's fields against it —
             // absorbing what was previously a single ad hoc
-            // `default_deck_copy_limit` check as one of its 18 rows, rather
+            // `default_deck_copy_limit` check as one of its rows, rather
             // than adding a parallel second check. `range_of_influence`'s row
             // is a documented `Deferred` non-check (see that function's own
             // comment on the field), not an omission.
@@ -2330,6 +2407,9 @@ impl<'de> Deserialize<'de> for SelectedFormat {
         GameFormat::deserialize(deserializer).map(SelectedFormat::Tag)
     }
 }
+
+/// CR 104.3d / CR 704.5c: ten poison counters.
+pub const INDIVIDUAL_POISON_LOSS_THRESHOLD: u8 = 10;
 
 impl GameFormat {
     /// Which authority decides this format's deck-construction card pool —
@@ -2868,6 +2948,16 @@ impl GameFormat {
             self,
             GameFormat::TwoHeadedGiant | GameFormat::TwoHeadedGiantCommander
         )
+    }
+
+    /// CR 104.3d / CR 704.5c: ten or more poison counters → loss, except in the
+    /// Two-Headed Giant family, which ignores CR 704.5c (CR 704.6b / CR 810.8d).
+    pub fn default_poison_counter_threshold(self) -> Option<u8> {
+        if self.is_two_headed_giant_family() {
+            None
+        } else {
+            Some(INDIVIDUAL_POISON_LOSS_THRESHOLD)
+        }
     }
 
     /// Whether this format seats one archenemy against a team of heroes on
@@ -4189,6 +4279,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: false,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::Standard.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4212,6 +4303,7 @@ impl FormatConfig {
             singleton: true,
             command_zone: true,
             commander_damage_threshold: Some(21),
+            poison_counter_threshold: GameFormat::Commander.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4252,6 +4344,7 @@ impl FormatConfig {
             command_zone: true,
             // CR 903.10a (via CR 903.13g): 21 combat damage from one commander.
             commander_damage_threshold: Some(21),
+            poison_counter_threshold: GameFormat::CommanderDraft.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4347,6 +4440,7 @@ impl FormatConfig {
             singleton: true,
             command_zone: true,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::TinyLeaders.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4374,6 +4468,7 @@ impl FormatConfig {
             singleton: true,
             command_zone: true,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::Oathbreaker.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4436,6 +4531,8 @@ impl FormatConfig {
             command_zone: true,
             // CR 903.10a: 21 combat damage from one commander.
             commander_damage_threshold: Some(21),
+            poison_counter_threshold: GameFormat::FreeformCommander
+                .default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4461,6 +4558,7 @@ impl FormatConfig {
             singleton: true,
             command_zone: true,
             commander_damage_threshold: Some(21),
+            poison_counter_threshold: GameFormat::Brawl.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4495,6 +4593,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: false,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::FreeForAll.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4520,6 +4619,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: false,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::Limited.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4556,6 +4656,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: true,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::Momir.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4582,6 +4683,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: false,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::Dandan.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4605,6 +4707,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: false,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::TwoHeadedGiant.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: true,
             archenemy_player: None,
@@ -4639,6 +4742,8 @@ impl FormatConfig {
             singleton: true,
             command_zone: true,
             commander_damage_threshold: Some(21),
+            poison_counter_threshold: GameFormat::TwoHeadedGiantCommander
+                .default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: true,
             archenemy_player: None,
@@ -4665,6 +4770,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: false,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::Planechase.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4693,6 +4799,8 @@ impl FormatConfig {
             singleton: true,
             command_zone: true,
             commander_damage_threshold: Some(21),
+            poison_counter_threshold: GameFormat::PlanechaseCommander
+                .default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: None,
@@ -4725,6 +4833,8 @@ impl FormatConfig {
             singleton: true,
             command_zone: true,
             commander_damage_threshold: Some(21),
+            poison_counter_threshold: GameFormat::ArchenemyCommander
+                .default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: Some(PlayerId(0)),
@@ -4750,6 +4860,7 @@ impl FormatConfig {
             singleton: false,
             command_zone: true,
             commander_damage_threshold: None,
+            poison_counter_threshold: GameFormat::Archenemy.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             archenemy_player: Some(PlayerId(0)),
@@ -4817,6 +4928,7 @@ impl FormatConfig {
             singleton,
             command_zone: true,
             commander_damage_threshold,
+            poison_counter_threshold: GameFormat::Horde.default_poison_counter_threshold(),
             range_of_influence: None,
             team_based: false,
             // The Horde occupies seat 0; survivors take the remaining seats and
@@ -4967,7 +5079,8 @@ impl FormatConfig {
     /// - Direct copies from `rules.structural`: `starting_life`,
     ///   `min_players`, `max_players`, `deck_size`, `singleton`,
     ///   `range_of_influence`, `team_based`, `sideboard_policy`,
-    ///   `default_deck_copy_limit`.
+    ///   `default_deck_copy_limit`, and `poison_counter_threshold` (wrapped in
+    ///   `Some`).
     /// - `CommandZoneMode`-derived (CR 408.1 / CR 903.10a): `Disabled` gives
     ///   `command_zone: false`, `commander_damage_threshold: None`,
     ///   `uses_commander: false`. `Enabled` gives `command_zone: true`, the
@@ -5004,6 +5117,9 @@ impl FormatConfig {
             singleton: structural.singleton,
             command_zone,
             commander_damage_threshold,
+            // CR 704.5c: a custom format never takes the Two-Headed Giant
+            // shared-poison topology, so its individual threshold always exists.
+            poison_counter_threshold: Some(structural.poison_counter_threshold),
             range_of_influence: structural.range_of_influence.clone(),
             team_based: structural.team_based,
             archenemy_player: None,
@@ -5103,6 +5219,7 @@ mod tests {
             singleton: _,
             command_zone: _,
             commander_damage_threshold: _,
+            poison_counter_threshold: _,
             range_of_influence: _,
             team_based: _,
             archenemy_player: _,
@@ -5114,6 +5231,35 @@ mod tests {
             horde_ruleset: _,
             custom_rules: _,
         } = config;
+    }
+
+    /// V7: every built-in registry config passes its own poison gate, and the
+    /// formats with no individual poison threshold are exactly the Two-Headed
+    /// Giant family (CR 704.5c: "Ignore this rule in Two-Headed Giant games").
+    #[test]
+    fn registry_poison_counter_threshold_round_trips_and_is_none_only_for_two_headed_giant() {
+        for meta in GameFormat::registry() {
+            assert_eq!(
+                meta.format.default_poison_counter_threshold().is_none(),
+                meta.format.is_two_headed_giant_family(),
+                "{:?}",
+                meta.format
+            );
+            let resolved = FormatConfig::for_format(meta.format).unwrap();
+            for config in [&meta.default_config, &resolved] {
+                assert_eq!(
+                    config.poison_counter_threshold,
+                    meta.format.default_poison_counter_threshold(),
+                    "{:?}",
+                    meta.format
+                );
+                let json = serde_json::to_value(config).unwrap();
+                let restored: FormatConfig = serde_json::from_value(json).unwrap_or_else(|error| {
+                    panic!("{:?} must pass its own gate: {error}", meta.format)
+                });
+                assert_eq!(&restored, config);
+            }
+        }
     }
 
     /// V1 (Verification Matrix): `SelectedFormat`'s wire form is the bare
@@ -5992,6 +6138,7 @@ mod tests {
                     team_based: false,
                     sideboard_policy: SideboardPolicy::Forbidden,
                     default_deck_copy_limit: DeckCopyLimit::UpTo(1),
+                    poison_counter_threshold: INDIVIDUAL_POISON_LOSS_THRESHOLD,
                 },
                 legality: LegalityRules {
                     legal_sets: None,

@@ -204,6 +204,14 @@
         "label": "Etichetta",
         "fallback": "Scelta"
       }
+    },
+    "attacking": {
+      "you": "Ti sta attaccando",
+      "player": "Sta attaccando {{player}}",
+      "yourPlaneswalker": "Sta attaccando il tuo planeswalker {{name}}",
+      "planeswalker": "Sta attaccando il planeswalker {{name}} di {{player}}",
+      "battle": "Sta attaccando la battaglia {{name}}",
+      "nothing": "Sta attaccando, ma nessun giocatore, planeswalker o battaglia"
     }
   },
   "actionButton": {
@@ -346,7 +354,6 @@
     "pickNone": "Nessuno",
     "underAttack_one": "Attaccato da {{count}} creatura",
     "underAttack_other": "Attaccato da {{count}} creature",
-    "target": "Bersaglio",
     "token": "Pedina",
     "tokenTooltip": "Pedina che è una copia di una carta reale",
     "copy": "Copia",
@@ -436,7 +443,12 @@
     "assignRemaining_other": "Assegna ancora {{count}}",
     "confirmDistribute_one": "Dichiara {{count}} attaccante",
     "confirmDistribute_other": "Dichiara {{count}} attaccanti",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Totali d'attacco",
+    "targetTotal_few": "{{count}} attaccanti · {{damage}} danni",
+    "targetTotal_many": "{{count}} attaccanti · {{damage}} danni",
+    "targetTotal_one": "{{count}} attaccante · {{damage}} danni",
+    "targetTotal_other": "{{count}} attaccanti · {{damage}} danni"
   },
   "fullControl": {
     "label": "Controllo",
@@ -562,7 +574,9 @@
     "dungeonTooltip": "Avventura in {{name}}",
     "poisonAriaLabel_one": "{{count}} segnalino veleno",
     "poisonAriaLabel_other": "{{count}} segnalini veleno",
-    "poisonTooltip": "Segnalini veleno: {{count}}\nUn giocatore con dieci o più segnalini veleno perde la partita.",
+    "poisonTooltip": "Segnalini veleno: {{count}}",
+    "poisonLossPlayer": "Un giocatore con {{threshold}} o più segnalini veleno perde la partita.",
+    "poisonLossTeam": "Una squadra con {{threshold}} o più segnalini veleno perde la partita.",
     "energyAriaLabel_one": "{{count}} segnalino energia",
     "energyAriaLabel_other": "{{count}} segnalini energia",
     "energyTooltip": "Segnalini energia: {{count}}\nI segnalini energia sono una risorsa del giocatore spesa dalle abilità delle carte.",
@@ -822,7 +836,12 @@
     "lethalBadge": "Letale",
     "planeswalkerLoyalty": "Planeswalker (lealtà: {{loyalty}})",
     "defendingPlayerTrample": "Giocatore in difesa (Travolgere)",
-    "pwControllerTrample": "Controllore del PW (Travolgere sul PW)"
+    "pwControllerTrample": "Controllore del PW (Travolgere sul PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Assegna i {{count}} danni rimanenti a {{target}}",
+    "assignRemainingTo_many": "Assegna i {{count}} danni rimanenti a {{target}}",
+    "assignRemainingTo_one": "Assegna {{count}} danno rimanente a {{target}}",
+    "assignRemainingTo_other": "Assegna i {{count}} danni rimanenti a {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
@@ -1189,7 +1208,10 @@
       "subtitleKeepWithBottom": "Tieni questa mano (metterai {{count}} in fondo) o fai di nuovo mulligan per 7 carte nuove.",
       "subtitleKeepFree": "Tieni questa mano (mulligan gratuito — nessuna carta in fondo) o fai di nuovo mulligan per 7 carte nuove.",
       "subtitleOpeningFree": "Tieni questa mano o fai un mulligan gratuito (nessuna carta in fondo).",
-      "subtitleOpeningOne": "Tieni questa mano o fai mulligan per 7 carte nuove (metterai 1 carta in fondo quando tieni)."
+      "subtitleOpeningOne": "Tieni questa mano o fai mulligan per 7 carte nuove (metterai 1 carta in fondo quando tieni).",
+      "onThePlay": "Giochi per primo",
+      "onTheDraw": "Peschi per primo",
+      "takeTurn": "Giochi il turno {{turn}}"
     },
     "companion": {
       "eyebrow": "Pre-partita",
@@ -1401,6 +1423,8 @@
     },
     "config": {
       "startingLife": "Punti vita iniziali",
+      "commanderDamage": "Danno da comandante",
+      "poisonCounters": "Segnalini veleno",
       "players": "Giocatori",
       "whoGoesFirst": "Chi inizia",
       "firstPlayer": {

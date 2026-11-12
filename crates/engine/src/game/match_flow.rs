@@ -337,6 +337,11 @@ pub fn apply_trusted_match_forfeit(
         winner: Some(winner),
     };
 
+    // The admitted, recorded match forfeit is a terminal authority of its own.
+    // Retire the abandoned resolution here, outside any active resolver, without
+    // manufacturing a game result or running the spell's remaining instructions.
+    super::elimination::retire_finished_game_resolution(state);
+
     // CR 104.1 + CR 723.1: a match forfeit does not go through
     // `elimination::end_game`, so it ends player control itself.
     crate::game::turn_control::end_all_player_control(state);

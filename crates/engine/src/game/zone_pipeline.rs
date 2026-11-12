@@ -3777,6 +3777,7 @@ pub(crate) fn deliver_replaced_zone_change(
         enter_tapped: should_tap,
         enters_attacking,
         enter_with_counters,
+        enter_with_grants,
         controller_override: ctrl_override,
         face_down_profile,
         face_down_in_exile,
@@ -4202,6 +4203,39 @@ pub(crate) fn deliver_replaced_zone_change(
             }
             crate::game::layers::mark_layers_full(state);
         }
+        // CR 614.1c + CR 611.2a + CR 616.1: install every "and with …" entry
+        // grant the applied replacements folded onto this event, in
+        // application order — the post-entry drain holds a single ready
+        // continuation, so resolving them here (through the same chain
+        // authority the drain uses) is what preserves the second and later
+        // same-entry riders. Gated on a battlefield arrival like the counters
+        // below; a redirected entry drops its grants with them.
+        if entered_battlefield {
+            for grant in &enter_with_grants {
+                // The source-as-SelfRef hook, mirroring the drain's Template
+                // dispatch: the grant binds the entering object.
+                let resolved = crate::game::ability_utils::build_resolved_from_def_with_targets(
+                    &grant.grant,
+                    object_id,
+                    grant.controller,
+                    vec![TargetRef::Object(object_id)],
+                );
+                // Entry-grant links are prompt-free by construction (pure
+                // static registration — `effects::effect` performs no
+                // `waiting_for` write), so a prompt here is unreachable; the
+                // resolver reports one rather than installing it, keeping the
+                // invariant explicit.
+                let prompt = crate::game::engine_replacement::resolve_post_replacement_chain(
+                    state, &resolved, events,
+                );
+                if prompt.is_some() {
+                    debug_assert!(false, "entry-grant install must not prompt: {prompt:?}");
+                }
+            }
+            if !enter_with_grants.is_empty() {
+                crate::game::layers::mark_layers_full(state);
+            }
+        }
         // CR 614.12a + CR 616.1c + CR 707.2: An enter-as-copy replacement
         // selected its copy source before this delivery and carried those
         // copiable values on the proposed event. Install the copy effect before
@@ -4345,6 +4379,18 @@ pub(crate) fn deliver_replaced_zone_change(
                 Some(object_id)
             };
             counters_to_apply.extend(pending);
+            // CR 614.1c + CR 122.6 + CR 614.5: all entry contributions of one
+            // kind form ONE placement, so a counter replacement gets one
+            // opportunity — not one per contributing row. Dual-kicker
+            // Degavolver's (2, 1) rows consult Hardened Scales once as 3
+            // (4 total), not twice (5 total). Mirrors the copy-entry
+            // boundary, which coalesces before its own apply call.
+            if counters_to_apply.len() > 1 {
+                counters_to_apply =
+                    crate::game::effects::counters::coalesce_entry_counters(counters_to_apply);
+            } else {
+                counters_to_apply.retain(|(_, count)| *count != 0);
+            }
             if !counters_to_apply.is_empty()
                 && !crate::game::engine_replacement::apply_etb_counters(
                     state,

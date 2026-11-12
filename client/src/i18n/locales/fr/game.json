@@ -204,6 +204,14 @@
         "label": "Libellé",
         "fallback": "Choix"
       }
+    },
+    "attacking": {
+      "you": "Vous attaque",
+      "player": "Attaque {{player}}",
+      "yourPlaneswalker": "Attaque votre planeswalker {{name}}",
+      "planeswalker": "Attaque le planeswalker {{name}} de {{player}}",
+      "battle": "Attaque la bataille {{name}}",
+      "nothing": "Attaque, mais aucun joueur, planeswalker ni bataille"
     }
   },
   "actionButton": {
@@ -346,7 +354,6 @@
     "pickNone": "Aucun",
     "underAttack_one": "Attaqué par {{count}} créature",
     "underAttack_other": "Attaqué par {{count}} créatures",
-    "target": "Cible",
     "token": "Jeton",
     "tokenTooltip": "Jeton qui est une copie d'une vraie carte",
     "copy": "Copie",
@@ -436,7 +443,12 @@
     "assignRemaining_other": "Assigner {{count}} de plus",
     "confirmDistribute_one": "Déclarer {{count}} attaquant",
     "confirmDistribute_other": "Déclarer {{count}} attaquants",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Totaux d'attaque",
+    "targetTotal_few": "{{count}} attaquants · {{damage}} blessures",
+    "targetTotal_many": "{{count}} attaquants · {{damage}} blessures",
+    "targetTotal_one": "{{count}} attaquant · {{damage}} blessures",
+    "targetTotal_other": "{{count}} attaquants · {{damage}} blessures"
   },
   "fullControl": {
     "label": "Contrôle",
@@ -562,7 +574,9 @@
     "dungeonTooltip": "Aventure dans {{name}}",
     "poisonAriaLabel_one": "{{count}} marqueur poison",
     "poisonAriaLabel_other": "{{count}} marqueurs poison",
-    "poisonTooltip": "Marqueurs poison : {{count}}\nUn joueur avec dix marqueurs poison ou plus perd la partie.",
+    "poisonTooltip": "Marqueurs poison : {{count}}",
+    "poisonLossPlayer": "Un joueur avec {{threshold}} marqueurs poison ou plus perd la partie.",
+    "poisonLossTeam": "Une équipe avec {{threshold}} marqueurs poison ou plus perd la partie.",
     "energyAriaLabel_one": "{{count}} marqueur énergie",
     "energyAriaLabel_other": "{{count}} marqueurs énergie",
     "energyTooltip": "Marqueurs énergie : {{count}}\nLes marqueurs énergie sont une ressource détenue par un joueur et dépensée par des capacités de cartes.",
@@ -822,7 +836,12 @@
     "lethalBadge": "Létal",
     "planeswalkerLoyalty": "Planeswalker (loyauté : {{loyalty}})",
     "defendingPlayerTrample": "Joueur défenseur (Piétinement)",
-    "pwControllerTrample": "Contrôleur du PW (Piétinement sur PW)"
+    "pwControllerTrample": "Contrôleur du PW (Piétinement sur PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Assigner les {{count}} blessures restantes à {{target}}",
+    "assignRemainingTo_many": "Assigner les {{count}} blessures restantes à {{target}}",
+    "assignRemainingTo_one": "Assigner la {{count}} blessure restante à {{target}}",
+    "assignRemainingTo_other": "Assigner les {{count}} blessures restantes à {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
@@ -1189,7 +1208,10 @@
       "subtitleKeepWithBottom": "Gardez cette main (vous placerez {{count}} en dessous) ou refaites un mulligan pour 7 cartes fraîches.",
       "subtitleKeepFree": "Gardez cette main (mulligan gratuit — aucune carte en dessous) ou refaites un mulligan pour 7 cartes fraîches.",
       "subtitleOpeningFree": "Gardez cette main ou prenez un mulligan gratuit (aucune carte en dessous).",
-      "subtitleOpeningOne": "Gardez cette main ou faites un mulligan pour 7 cartes fraîches (vous placerez 1 carte en dessous quand vous gardez)."
+      "subtitleOpeningOne": "Gardez cette main ou faites un mulligan pour 7 cartes fraîches (vous placerez 1 carte en dessous quand vous gardez).",
+      "onThePlay": "Vous jouez en premier",
+      "onTheDraw": "Vous piochez en premier",
+      "takeTurn": "Vous jouez au tour {{turn}}"
     },
     "companion": {
       "eyebrow": "Avant-partie",
@@ -1401,6 +1423,8 @@
     },
     "config": {
       "startingLife": "Points de vie de départ",
+      "commanderDamage": "Blessures de commandant",
+      "poisonCounters": "Marqueurs poison",
       "players": "Joueurs",
       "whoGoesFirst": "Qui commence",
       "firstPlayer": {
