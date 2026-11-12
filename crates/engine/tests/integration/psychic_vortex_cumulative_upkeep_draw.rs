@@ -2330,6 +2330,63 @@ fn a_payment_past_a_work_slice_continues_at_a_boundary_without_priority() {
     );
 }
 
+/// Sol Ring, verbatim Oracle text.
+const SOL_RING_ORACLE: &str = "{T}: Add {C}{C}.";
+
+/// CR 605.3a + CR 702.24a: the continuation asks for no mana payment, so the
+/// payer's mana abilities, which an unless-payment prompt otherwise admits,
+/// are refused at a work-slice boundary: P0 can neither tap a land nor
+/// activate Sol Ring there, and the prompt and its owed cursor are unchanged.
+#[test]
+fn the_payer_cannot_activate_mana_abilities_at_a_work_slice_boundary() {
+    const AGE: u32 = WORK_SLICE + 2;
+    let (mut runner, _, (ring, island)) = vortex_board(AGE - 1, &STAGED_LIBRARY, |scenario| {
+        scenario.add_creature_from_oracle(P1, "Hullbreacher", 3, 2, HULLBREACHER_ORACLE);
+        let ring = scenario
+            .add_artifact_from_oracle(P0, "Sol Ring", SOL_RING_ORACLE)
+            .id();
+        (ring, scenario.add_basic_land(P0, ManaColor::Blue))
+    });
+    advance_through_upkeep(&mut runner);
+    assert_draw_cost_prompt(&runner, AGE as usize, 1);
+    let selection =
+        engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P0)
+            .into_iter()
+            .find(|selection| selection.source.object_id == island)
+            .expect("reach guard: the Island's mana ability is activatable");
+    let tap_island = GameAction::TapLandForMana { selection };
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("paying is never refused");
+    assert_continuation_boundary(&mut runner, 2, "before the mana actions");
+    let pool_before = runner.state().players[P0.0 as usize].mana_pool.clone();
+    let mut mana_actions = vec![GameAction::ActivateAbility {
+        source_id: ring,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    }];
+    mana_actions.push(tap_island);
+    for action in mana_actions {
+        let refused = runner.act(action.clone());
+        assert!(
+            matches!(
+                &refused,
+                Err(engine::game::engine::EngineError::InvalidAction(reason))
+                    if reason.contains("only continues")
+            ),
+            "{action:?} is refused at the boundary: {refused:?}"
+        );
+    }
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool,
+        pool_before,
+        "no mana was produced"
+    );
+    assert!(!runner.state().objects[&ring].tapped);
+    assert!(!runner.state().objects[&island].tapped);
+    assert_continuation_boundary(&mut runner, 2, "after the mana actions");
+}
+
 /// CR 702.24a: a payment parked at a work-slice boundary survives a checked
 /// save and restore with its exact owed cursor, and continues to the end. A
 /// save whose prompt disagrees with the cursor its owner holds is refused.

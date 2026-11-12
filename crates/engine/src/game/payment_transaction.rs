@@ -541,7 +541,7 @@ pub(crate) fn settle_after_outside_action(
 
     // A checkpoint parked on a prompt outside the checkpoint contract
     // ([`departure_can_change_parked_prompt`]) is dropped: the payment
-    // re-materializes on the departed base below, as on main.
+    // re-materializes on the departed base below.
     if transaction
         .recovered
         .as_deref()
@@ -951,19 +951,23 @@ fn resettle_parked_replacement_after_departure(
 /// The checkpoint contract. A departure keeps a staged payment's accepted
 /// prefix on a checkpoint only while the prompt it is parked on is one another
 /// player's departure cannot change: a replacement choice (re-settled through
-/// the replacement authority), a choice among the payer's own cards (CR 400.3:
-/// a hand or graveyard holds only its owner's cards), or a prompt that names no
-/// object. A `PayCost` selection among battlefield permanents is outside it:
-/// which permanents it may list depends on control and characteristics that
-/// effects of other players grant, and those end when their player leaves
-/// (CR 800.4a). No printed card reaches that shape: the five resolution-time
-/// `PayCost { Composite }` nodes in the card data are all `[Mana, PayLife]`.
-/// The guard routes it to the behaviour main has for every staged payment: no
-/// checkpoint, and the payment re-materializes on the departed base, where the
-/// cost authority derives the prompt and its eligible objects afresh and a
-/// cost that can no longer be paid fails whole.
+/// the replacement authority) or a discard from the payer's own hand
+/// (CR 400.3: a hand holds only its owner's cards). Every other prompt is
+/// outside it. A selection among battlefield permanents or among cards in
+/// graveyards may list objects another player owns, or objects eligible only
+/// through an effect another player's departure ends (CR 800.4a), and no
+/// printed card reaches such a prompt in a staged payment: the five
+/// resolution-time `PayCost { Composite }` nodes in the card data are all
+/// `[Mana, PayLife]`. The guard routes everything outside the contract away
+/// from the checkpoint: the payment keeps its descriptor and transcript and
+/// re-materializes on the departed base, where the cost authority derives the
+/// prompt and its eligible objects afresh and a cost that can no longer be
+/// paid fails whole, as a staged cost that fails does on main.
 fn departure_can_change_parked_prompt(shadow: &GameState) -> bool {
-    matches!(shadow.waiting_for, WaitingFor::PayCost { .. })
+    !matches!(
+        shadow.waiting_for,
+        WaitingFor::ReplacementChoice { .. } | WaitingFor::DiscardChoice { .. }
+    )
 }
 
 /// CR 104.3a: a concession must stand even when the staged payment's recovery or

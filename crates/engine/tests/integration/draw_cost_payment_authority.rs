@@ -2847,9 +2847,9 @@ fn assert_tap_prompt_was_rederived(runner: &GameRunner, lent: ObjectId, own: Obj
 
 /// CR 800.4a + CR 400.7: a tap-creatures selection is outside the checkpoint
 /// contract, because what it may list depends on control another player's
-/// effect grants. When the lender concedes, the guard routes the payment to
-/// main's behaviour: it re-materializes on the departed board, where the cost
-/// authority lists only P0's own creature, and the payment completes.
+/// effect grants. When the lender concedes, the guard keeps no checkpoint: the
+/// payment re-materializes on the departed board, where the cost authority
+/// lists only P0's own creature, and the payment completes.
 #[test]
 fn a_concession_that_removes_a_listed_creature_rederives_the_tap_prompt() {
     let (mut runner, lent, own) = lent_creature_tap_prompt(true, false);
@@ -2867,10 +2867,11 @@ fn a_concession_that_removes_a_listed_creature_drops_the_checkpoint() {
     assert_tap_prompt_was_rederived(&runner, lent, own.expect("P0 controls its own creature"));
 }
 
-/// CR 800.4a + CR 601.2h: the same departure when the lent creature was the only
+/// CR 800.4a + CR 118.3: the same departure when the lent creature was the only
 /// one listed. Re-materialized on the departed board, the cost can no longer be
-/// paid, and it fails whole as a staged cost does on main: nothing of the
-/// payment is committed, no prompt remains, and the save restores.
+/// paid in full, and it fails whole, as a staged cost that fails does on main:
+/// nothing of the payment is committed, no prompt remains, and the save
+/// restores.
 #[test]
 fn a_concession_that_removes_the_only_listed_creature_fails_the_payment_whole() {
     let (mut runner, _, _) = lent_creature_tap_prompt(false, false);
@@ -2892,4 +2893,101 @@ fn a_concession_that_removes_the_only_listed_creature_fails_the_payment_whole() 
         "a failed staged cost commits none of its legs"
     );
     checked_round_trip(state).expect("the settled state restores");
+}
+
+/// CR 800.4a + CR 400.7: a zone choice among cards in graveyards is outside the
+/// checkpoint contract too: it may list another player's card. Synthetic: no
+/// printed card has a resolution-time composite cost with an exile leg; the
+/// nearest printed cost is The Mimeoplasm's "exile two creature cards from
+/// graveyards". P0's staged `PayCost{Composite[Draw 1; exile a card from a
+/// graveyard]}` lists P3's graveyard card. When P3 concedes, the guard keeps no
+/// checkpoint: the payment re-materializes on the departed board, where the
+/// cost authority no longer lists P3's card, the save restores, and exiling
+/// P0's own card completes the payment.
+#[test]
+fn a_concession_that_removes_a_listed_graveyard_card_rederives_the_zone_choice() {
+    let mut scenario = GameScenario::new_n_player(4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in 0..4 {
+        scenario.with_library_top(PlayerId(player), &STAGED_LIBRARY);
+    }
+    let source = scenario.add_creature(P0, "Draw Cost Source", 1, 1).id();
+    scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP_ORACLE);
+    let theirs = scenario
+        .add_creature_to_graveyard(PlayerId(3), "Their Graveyard Creature", 1, 1)
+        .id();
+    let mut runner = scenario.build();
+    let root = ResolvedAbility::new(
+        pay_cost(AbilityCost::Composite {
+            costs: vec![
+                draw_cost(1),
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                },
+            ],
+        }),
+        vec![],
+        source,
+        P0,
+    );
+    let state = runner.state_mut();
+    resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining leg 1's Dredge accepts the draw");
+    let WaitingFor::EffectZoneChoice { cards, .. } = &state.waiting_for else {
+        panic!(
+            "reach guard: leg 2 asks which card to exile: {:?}",
+            state.waiting_for
+        );
+    };
+    assert!(
+        cards.contains(&theirs),
+        "reach guard: P3's graveyard card is listed: {cards:?}"
+    );
+    let hand_before = state.players[P0.0 as usize].hand.len();
+
+    apply(
+        state,
+        PlayerId(3),
+        GameAction::Concede {
+            player_id: PlayerId(3),
+        },
+    )
+    .expect("a player can concede at any time");
+    assert!(
+        state
+            .payment_transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.recovered.is_none()),
+        "the payment is kept without a checkpoint"
+    );
+    let WaitingFor::EffectZoneChoice { cards, .. } = &state.waiting_for else {
+        panic!("leg 2 still asks: {:?}", state.waiting_for);
+    };
+    assert!(
+        !cards.is_empty() && !cards.contains(&theirs),
+        "P3's card is no longer listed: {cards:?}"
+    );
+    let mine = cards[0];
+    let mut restored = checked_round_trip(state).expect("the re-derived prompt restores");
+    apply(
+        &mut restored,
+        P0,
+        GameAction::SelectCards { cards: vec![mine] },
+    )
+    .expect("exiling P0's own card pays leg 2");
+    assert!(
+        restored.payment_transaction.is_none(),
+        "the payment completed"
+    );
+    assert_eq!(restored.objects[&mine].zone, Zone::Exile);
+    assert_eq!(
+        restored.players[P0.0 as usize].hand.len(),
+        hand_before + 1,
+        "the card drawn through the declined Dredge is in hand"
+    );
 }

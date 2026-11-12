@@ -2263,7 +2263,10 @@ fn park_owed_instructions(
 /// above a library's cards (the payments a game produces end inside one
 /// slice, at a fixed point or a game end) and keeps a replacement that creates
 /// an object for every draw of an enormous count (Hullbreacher's Treasure)
-/// from growing the board without bound inside one dispatch.
+/// from growing the board without bound inside one dispatch. The slice counts
+/// instructions, not objects: effects that multiply what one instruction
+/// creates (token doublers under Hullbreacher) multiply the objects of a
+/// slice by the same factor, still a fixed bound per dispatch.
 pub(crate) const WORK_SLICE_INSTRUCTIONS: u32 = 1_024;
 
 /// CR 702.24a + CR 117.2e: the continuation prompt of a repeated draw payment
@@ -2302,6 +2305,21 @@ pub(crate) fn payment_continuation_prompt(state: &GameState) -> Option<WaitingFo
 /// Whether the game waits on a repeated draw payment's continuation prompt.
 pub(crate) fn awaits_payment_continuation(state: &GameState) -> bool {
     payment_continuation_prompt(state).is_some_and(|prompt| prompt == state.waiting_for)
+}
+
+/// CR 605.3a + CR 702.24a: a mana ability can be activated while "a rule or
+/// effect asks for a mana payment". The continuation of a repeated draw payment
+/// asks for none: its only answer is to continue, so the mana actions an
+/// unless-payment prompt otherwise admits are refused there. (A mana ability
+/// that pauses on a replacement choice would also take the slot the owed
+/// cursor is parked in.)
+fn refuse_mana_at_payment_continuation(state: &GameState) -> Result<(), EngineError> {
+    if awaits_payment_continuation(state) {
+        return Err(EngineError::InvalidAction(
+            "CR 702.24a: a repeated payment already begun only continues".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// CR 702.24a: answer a repeated draw payment's continuation prompt. "Partial
@@ -2674,6 +2692,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
     selection: &ManaSourceSelection,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    refuse_mana_at_payment_continuation(state)?;
     let WaitingFor::UnlessPayment {
         player,
         cost,
@@ -2717,6 +2736,7 @@ pub(super) fn handle_unless_payment_untap_land_for_mana(
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    refuse_mana_at_payment_continuation(state)?;
     let WaitingFor::UnlessPayment {
         player,
         cost,
@@ -2751,6 +2771,7 @@ pub(super) fn handle_unless_payment_activate_ability(
     ability_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    refuse_mana_at_payment_continuation(state)?;
     let WaitingFor::UnlessPayment {
         player,
         cost,
@@ -3099,13 +3120,12 @@ pub(super) fn resume_ward_sacrifice_payment(
 /// suffix is never issued on top of an unfinished instruction.
 ///
 /// The exhaustive `match` on `CostMoveDrainBoundary` is kept as an ELIGIBILITY
-/// ASSERTION, not a verdict producer. It holds `PriorityBoundary` at
-/// `unreachable!` — `drain_pending_cost_move_resume` admits only
-/// a Delve-commit `Cast`, `ManaAbilityPayment`, and a counter-cost root whose
-/// replacement subtree has retired at that boundary, and dispatches each ahead of
-/// this root — and it turns any future widening of the boundary enum or
-/// of that eligibility table into a compile error at the one site whose rules
-/// reasoning would have to be re-derived.
+/// ASSERTION, not a verdict producer: every boundary resumes the payment the
+/// same way. `drain_pending_cost_move_resume` admits this root at
+/// `PriorityBoundary` too, once an interactive draw substitute's subtree has
+/// retired (CR 614.11a). The match turns any future widening of the boundary
+/// enum into a compile error at the one site whose rules reasoning would have
+/// to be re-derived.
 ///
 /// Interpreting the boundary here rather than at the dispatcher is deliberate: the
 /// sibling `resume_random_discard_unless_payment` maps the very same boundaries
