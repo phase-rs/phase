@@ -448,7 +448,10 @@ current for the replies it still owes, but new seat-bound submissions (game
 commands, draft picks, decisions and decks) are refused with the typed unsent
 error, and an `Error` it receives answers only its own request. A close, an
 `Error` refusal, an abort or the bound (`SETUP_CONFIRMATION_TIMEOUT_MS`, counted
-from the write) retires both sockets and settles the incumbent's work; the
+from the write) retires both sockets and settles the incumbent's work (an abort
+while the write receipt is still pending retires the candidate and releases the
+gate at once, and the receipt's fate, under the same bound, decides the
+incumbent); the
 bound defers once to a decode already in flight, whose own deadline then
 decides (a game reconnect can decode its bootstrap Full inside the interval; a
 draft reattach is answered by a plain frame first, so this server never puts a

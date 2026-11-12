@@ -6646,30 +6646,56 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       }
     });
 
-    it("retires the candidate and releases the gate at once when disposal lands while the setup receipt is pending", async () => {
-      MockWebSocket.last = null;
-      const codec = scriptedCodec();
-      const provider = vi.fn(() => Promise.resolve(codec.session));
-      const { adapter, raw } = await establishCodecAdapter(provider);
-      expect(adapter.tryReconnect(session() as never)).toBe(true);
-      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
-      const candidate = latestSocket();
-      // The write receipt never settles: its fate is unknown.
-      candidate.sendReceipt = vi.fn(() => new Promise<void>(() => undefined));
-      try {
-        candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
-        await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
-        adapter.dispose();
-        await vi.advanceTimersByTimeAsync(0);
-        // Not after the 60 s bound: the candidate and its lease are released
-        // in the same turn, and the interval's gate is down.
-        expect(candidate.close).toHaveBeenCalled();
-        expect(codec.close).toHaveBeenCalled();
-        expect((adapter as unknown as { confirmingPreparation: unknown }).confirmingPreparation).toBeNull();
-      } finally {
-        adapter.dispose();
-      }
-    });
+    it.each(["reject", "bound"] as const)(
+      "decides the incumbent by the receipt's fate when a newer attachment aborts a pending setup receipt (%s)",
+      async (fate) => {
+        const random = vi.spyOn(Math, "random").mockReturnValue(0);
+        // One session per attachment, so each lease is witnessed on its own.
+        const incumbentCodec = scriptedCodec();
+        const candidateCodec = scriptedCodec();
+        const sessions = [incumbentCodec, candidateCodec];
+        const provider = vi.fn(() => Promise.resolve((sessions.shift() ?? scriptedCodec()).session));
+        const { adapter, raw } = await establishCodecAdapter(provider);
+        let successorInitialization: Promise<unknown> = Promise.resolve(undefined);
+        try {
+          expect(adapter.tryReconnect(session() as never)).toBe(true);
+          await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+          const candidate = latestSocket();
+          let failWrite!: (error: Error) => void;
+          candidate.sendReceipt = vi.fn(() => new Promise<void>((_, reject) => { failWrite = reject; }));
+          candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+          await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+          // A newer attachment aborts the write while its receipt is pending.
+          successorInitialization = adapter.initialize().catch(() => undefined);
+          await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(candidate));
+          // The candidate and its own lease are released at once, the gate is
+          // down, and the incumbent is untouched: the receipt's fate is unknown.
+          expect(candidate.close).toHaveBeenCalled();
+          expect(candidateCodec.close).toHaveBeenCalled();
+          expect(incumbentCodec.close).not.toHaveBeenCalled();
+          expect((adapter as unknown as { confirmingPreparation: unknown }).confirmingPreparation).toBeNull();
+          expect(raw.close).not.toHaveBeenCalled();
+          if (fate === "reject") {
+            // The frame was not written: the incumbent still owns the seat.
+            failWrite(new Error("write failed"));
+            await vi.advanceTimersByTimeAsync(0);
+            await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS + 1000);
+            expect(raw.close).not.toHaveBeenCalled();
+          } else {
+            // The receipt never settles: at the bound the frame counts as
+            // written and the incumbent is retired with the candidate.
+            await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS - 1000);
+            expect(raw.close).not.toHaveBeenCalled();
+            await vi.advanceTimersByTimeAsync(1000);
+            await vi.waitFor(() => expect(raw.close).toHaveBeenCalledOnce());
+          }
+        } finally {
+          random.mockRestore();
+          void successorInitialization;
+          adapter.dispose();
+        }
+      },
+    );
 
     it("fails the attachment when the settling bootstrap throws before it decides the episode", async () => {
       const { adapter, raw, candidate, events } = await sentCandidate();

@@ -4476,6 +4476,58 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
+    it.each(["reject", "resolve", "bound"] as const)(
+      "decides the incumbent by the receipt's fate when a create aborts a pending reattach receipt (%s)",
+      async (fate) => {
+        vi.useFakeTimers();
+        const session = draftCodecSession(decodeEnvelope);
+        const { adapter, ws, provider } = await startCodecDraft(session.session);
+        const events: unknown[] = [];
+        adapter.onEvent((event) => events.push(event));
+        await enterCodecMatch(ws, events);
+        provider.mockResolvedValueOnce(draftCodecSession(decodeEnvelope).session);
+        void watch(adapter.reconnectDraft());
+        await drainArt();
+        const candidate = MockWebSocket.last!;
+        let settle!: { resolve: () => void; reject: (error: Error) => void };
+        candidate.sendReceipt = vi.fn(() => new Promise<void>((resolve, reject) => { settle = { resolve, reject }; }));
+        try {
+          candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+          await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+          provider.mockResolvedValueOnce(draftCodecSession(decodeEnvelope).session);
+          void adapter.createDraft({
+            displayName: "Contender", setCodes: ["TST"], kind: "Premier", public: false,
+            tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+          }).catch(() => undefined);
+          await drainArt();
+          expect(candidate.close).toHaveBeenCalled();
+          expect(ws.close).not.toHaveBeenCalled();
+          if (fate === "reject") {
+            // The frame was not written: the incumbent still owns the seat.
+            settle.reject(new Error("write failed"));
+            await vi.advanceTimersByTimeAsync(0);
+            await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS + 1000);
+            expect(ws.close).not.toHaveBeenCalled();
+          } else if (fate === "resolve") {
+            // The frame was written: the incumbent is deaf and is retired.
+            settle.resolve();
+            await drainArt();
+            await vi.waitFor(() => expect(ws.close).toHaveBeenCalledOnce());
+          } else {
+            // The receipt never settles: at the bound the frame counts as
+            // written and the incumbent is retired.
+            await vi.advanceTimersByTimeAsync(SETUP_CONFIRMATION_TIMEOUT_MS - 1000);
+            expect(ws.close).not.toHaveBeenCalled();
+            await vi.advanceTimersByTimeAsync(1000);
+            await vi.waitFor(() => expect(ws.close).toHaveBeenCalledOnce());
+          }
+        } finally {
+          adapter.dispose();
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it("leaves a join that supersedes the reattach to its own attachment when the incumbent is retired", async () => {
       vi.useFakeTimers();
       const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();
