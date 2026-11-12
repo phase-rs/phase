@@ -1206,7 +1206,10 @@
       "subtitleKeepWithBottom": "Tieni questa mano (metterai {{count}} in fondo) o fai di nuovo mulligan per 7 carte nuove.",
       "subtitleKeepFree": "Tieni questa mano (mulligan gratuito — nessuna carta in fondo) o fai di nuovo mulligan per 7 carte nuove.",
       "subtitleOpeningFree": "Tieni questa mano o fai un mulligan gratuito (nessuna carta in fondo).",
-      "subtitleOpeningOne": "Tieni questa mano o fai mulligan per 7 carte nuove (metterai 1 carta in fondo quando tieni)."
+      "subtitleOpeningOne": "Tieni questa mano o fai mulligan per 7 carte nuove (metterai 1 carta in fondo quando tieni).",
+      "onThePlay": "Giochi per primo",
+      "onTheDraw": "Peschi per primo",
+      "takeTurn": "Giochi il turno {{turn}}"
     },
     "companion": {
       "eyebrow": "Pre-partita",

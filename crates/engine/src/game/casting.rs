@@ -28773,8 +28773,8 @@ fn manual_activation_life_retry_possible(
     let Some(def) = activation_ability_definition(state, source_id, ability_index) else {
         return false;
     };
-    // CR 605.3a: a mana ability is activated during a payment, not paid for by
-    // hand, so it has no manual payment to relax.
+    // CR 605.3a: a mana ability's manual offer is derived from its automatic one
+    // (`interaction::actor_candidates`), so no life retry is offered for it here.
     if super::mana_abilities::is_mana_ability(&def) {
         return false;
     }
@@ -29386,22 +29386,40 @@ fn activation_mana_leg_waits_for_player(pending: &PendingCast) -> bool {
 
 /// CR 605.3a + CR 605.3b: whether `action` activates a mana ability, wherever its
 /// source sits (battlefield, hand, graveyard). A mana ability is itself what pays
-/// a mana payment, resolves at once without the stack, and has no payment window
-/// of its own, so there is no manual way to pay for it.
+/// a mana payment and resolves at once without the stack.
 pub(crate) fn activates_mana_ability(state: &GameState, action: &GameAction) -> bool {
+    activated_mana_ability(state, action).is_some()
+}
+
+/// CR 605.3a + CR 601.2g: `action` activates a mana ability whose cost holds no
+/// mana payment (Sol Ring, Krark-Clan Ironworks, Elvish Spirit Guide) — it has
+/// no payment window of its own, so there is no manual way to pay it.
+pub(crate) fn activates_mana_ability_without_mana_payment(
+    state: &GameState,
+    action: &GameAction,
+) -> bool {
+    activated_mana_ability(state, action)
+        .is_some_and(|ability| super::mana_abilities::mana_sub_cost_of(&ability.cost).is_none())
+}
+
+/// The mana ability `action` activates, if it activates one.
+fn activated_mana_ability<'a>(
+    state: &'a GameState,
+    action: &GameAction,
+) -> Option<&'a AbilityDefinition> {
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
         ..
     } = action
     else {
-        return false;
+        return None;
     };
     state
         .objects
         .get(source_id)
         .and_then(|obj| obj.abilities.get(*ability_index))
-        .is_some_and(super::mana_abilities::is_mana_ability)
+        .filter(|ability| super::mana_abilities::is_mana_ability(ability))
 }
 
 /// CR 602.2b + CR 601.2g: whether the player chose to activate the mana
@@ -29413,7 +29431,7 @@ pub(super) fn activation_pays_mana_manually(pending: &PendingCast) -> bool {
 /// CR 602.2b + CR 601.2g: the payment mode in which the player activates the mana
 /// abilities that pay an activation themself. `AutoExceptSacrificialMana` is an
 /// automatic mode for an activation.
-pub(super) fn payment_mode_pays_mana_manually(payment_mode: CastPaymentMode) -> bool {
+pub(crate) fn payment_mode_pays_mana_manually(payment_mode: CastPaymentMode) -> bool {
     match payment_mode {
         CastPaymentMode::Manual => true,
         CastPaymentMode::Auto | CastPaymentMode::AutoExceptSacrificialMana => false,

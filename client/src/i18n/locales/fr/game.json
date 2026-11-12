@@ -1206,7 +1206,10 @@
       "subtitleKeepWithBottom": "Gardez cette main (vous placerez {{count}} en dessous) ou refaites un mulligan pour 7 cartes fraîches.",
       "subtitleKeepFree": "Gardez cette main (mulligan gratuit — aucune carte en dessous) ou refaites un mulligan pour 7 cartes fraîches.",
       "subtitleOpeningFree": "Gardez cette main ou prenez un mulligan gratuit (aucune carte en dessous).",
-      "subtitleOpeningOne": "Gardez cette main ou faites un mulligan pour 7 cartes fraîches (vous placerez 1 carte en dessous quand vous gardez)."
+      "subtitleOpeningOne": "Gardez cette main ou faites un mulligan pour 7 cartes fraîches (vous placerez 1 carte en dessous quand vous gardez).",
+      "onThePlay": "Vous jouez en premier",
+      "onTheDraw": "Vous piochez en premier",
+      "takeTurn": "Vous jouez au tour {{turn}}"
     },
     "companion": {
       "eyebrow": "Avant-partie",

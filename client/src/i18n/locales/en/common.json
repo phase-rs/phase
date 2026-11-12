@@ -303,16 +303,13 @@
     "skip": "Tap to skip",
     "continue": "Tap to continue",
     "you": "You",
-    "youPlayFirst": "You play first",
-    "playerPlaysFirst": "{{name}} plays first",
+    "youWonRoll": "You won the roll",
+    "playerWonRoll": "{{name}} won the roll",
     "heads": "Heads",
     "tails": "Tails",
     "coinFlip": "Coin flip",
     "wonCoinFlip": "{{name}} won the flip",
     "lostCoinFlip": "{{name}} lost the flip",
-    "turnOrder": "Turn order",
-    "turnOrderItem": "Turn {{turn}}: {{name}}",
-    "youTakeTurn": "You take turn {{turn}}",
     "ignoredDie": "Ignored"
   },
   "chrome": {

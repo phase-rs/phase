@@ -21,6 +21,7 @@ import type {
   GameFormat,
   MatchConfig,
   ObjectId,
+  PlayDrawPosition,
   SerializedAbilityCost,
   AiDecisionDiagnosticReceipt,
   TakebackEvent,
@@ -1000,25 +1001,15 @@ function GamePageContent({
   // identity-ref latch makes the consume idempotent under React StrictMode's
   // double-invoke and after the clear (the re-run sees `null`).
   const startingContest = useGameStore((s) => s.startingContest);
-  const openingTurnOrder = useGameStore((s) => s.gameState?.derived?.turn_order);
-  const openingViewerTurnNumber = useGameStore(
-    (s) => s.gameState?.derived?.viewer_turn_number,
-  );
   const consumedContestRef = useRef<typeof startingContest>(null);
   useEffect(() => {
     if (!startingContest || consumedContestRef.current === startingContest) return;
     consumedContestRef.current = startingContest;
-    flashStartingPlayerContest(
-      startingContest.events,
-      startingContest.startingPlayer,
-      openingTurnOrder,
-      openingViewerTurnNumber,
-    );
+    flashStartingPlayerContest(startingContest.events);
     useGameStore.getState().clearStartingContest();
-  }, [openingTurnOrder, openingViewerTurnNumber, startingContest]);
+  }, [startingContest]);
   // CR 103.1 before CR 103.5: the starting-player contest must finish before the
-  // mulligan UI appears (the roll determines who's on the play, which precedes
-  // drawing opening hands). True from `initGame` setting the carrier through the
+  // mulligan UI appears (the roll-off precedes drawing opening hands). True from `initGame` setting the carrier through the
   // dice overlay's full life — the store hands `startingContest` off to
   // `uiStore.diceRoll` atomically, so there's no gap. Degrades to `false`
   // immediately for instant speed and explicit play/draw (no contest).
@@ -2454,6 +2445,31 @@ interface MulliganDecisionPromptProps {
   onChoose: (id: string) => void;
 }
 
+// CR 103.1: engine-provided play/draw label keys; `satisfies` makes a new
+// engine variant a type error here.
+const PLAY_DRAW_LABEL_KEYS = {
+  OnThePlay: "gamePage.mulligan.onThePlay",
+  OnTheDraw: "gamePage.mulligan.onTheDraw",
+} as const satisfies Record<PlayDrawPosition, ParseKeys<"game">>;
+
+/** The viewer's engine-provided opening turn position (CR 103.1). Formats only. */
+function OpeningTurnPosition() {
+  const { t } = useTranslation("game");
+  const playDraw = useGameStore((s) => s.gameState?.derived?.viewer_play_draw);
+  const turnNumber = useGameStore((s) => s.gameState?.derived?.viewer_turn_number);
+  const label = playDraw
+    ? t(PLAY_DRAW_LABEL_KEYS[playDraw])
+    : turnNumber != null
+      ? t("gamePage.mulligan.takeTurn", { turn: turnNumber })
+      : null;
+  if (!label) return null;
+  return (
+    <div className="mt-1 inline-flex w-fit items-center rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-0.5 text-xs font-semibold text-cyan-200">
+      {label}
+    </div>
+  );
+}
+
 interface MulliganPanelProps {
   eyebrow: string;
   title: string;
@@ -2506,6 +2522,7 @@ function MulliganPanel({
               <p className="modal-subtitle max-w-2xl text-slate-400">
                 {subtitle}
               </p>
+              <OpeningTurnPosition />
             </div>
 
             <div className="flex flex-1 flex-col px-2 py-2 lg:px-5 lg:py-5">{children}</div>
