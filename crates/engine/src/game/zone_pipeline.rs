@@ -2402,7 +2402,16 @@ fn schedule_staged_decisions(
         .filter(|(_, player, _)| *player == chooser)
         .collect();
     if let [(index, _, _)] = mine.as_slice() {
-        publish_held_decision(state, owner, *index);
+        let index = *index;
+        let decision = owner.staged.as_ref().expect("staged").members[index]
+            .held_decision
+            .clone()
+            .expect("held");
+        if !held_decision_stands(state, &decision) {
+            requeue_held_member(owner, index);
+            return StagedConsult::Continue;
+        }
+        publish_held_decision(state, owner, index);
     } else {
         state.waiting_for = WaitingFor::ReplacementDecisionOrder {
             player: chooser,
@@ -2452,6 +2461,40 @@ fn staged_member_is_live(state: &GameState, member: &StagedBatchMember) -> bool 
         .get(&member.identity.object_id)
         .map(ObjectIncarnationRef::from_object)
         == Some(member.identity)
+}
+
+/// CR 616.1 + CR 614.5: whether a held decision still stands: its event can
+/// still happen and its candidates and chooser are what the replacement
+/// pipeline would offer now (`pending_replacement_needs_reconsult`).
+fn held_decision_stands(state: &mut GameState, decision: &HeldReplacementDecision) -> bool {
+    let published = state.pending_replacement.replace(decision.pending.clone());
+    let stands = crate::game::players::is_alive(state, decision.chooser)
+        && replacement::replacement_event_survives(state, &decision.pending.proposed)
+        && !replacement::pending_replacement_needs_reconsult(state, Some(decision.chooser));
+    state.pending_replacement = published;
+    stands
+}
+
+/// Drop member `index`'s held decision so the sweep consults it again. A held
+/// decision applied nothing to the game (its replacements only rewrote its own
+/// pending event and its drain has not run), so a new consultation asks the
+/// question as it now stands.
+fn requeue_held_member(owner: &mut PendingBatchDeliveries, index: usize) {
+    let member = &mut owner.staged.as_mut().expect("staged").members[index];
+    member.held_decision = None;
+    if member.state == StagedBatchMemberState::Abandoned {
+        return;
+    }
+    member.state = StagedBatchMemberState::Unconsulted;
+    member.pending_outcome = None;
+    member.approved_post_replacement = None;
+    member.blocked = false;
+    if let StagedMemberOperation::Destroy(operation) = member.operation {
+        member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
+            outer: StagedDestroyOuterApproval::Unapproved,
+            ..operation
+        });
+    }
 }
 
 /// Publish member `index`'s held decision: put back exactly what the
@@ -2675,6 +2718,7 @@ pub(crate) fn validate_restored_staged_scheduler(state: &GameState) -> Result<()
 pub(crate) fn publish_selected_staged_decision(
     state: &mut GameState,
     object: ObjectId,
+    events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     let index = state.active_batch_delivery().and_then(|owner| {
         owner.staged.as_ref()?.members.iter().position(|member| {
@@ -2692,6 +2736,24 @@ pub(crate) fn publish_selected_staged_decision(
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
+    let decision = owner.staged.as_ref().expect("staged").members[index]
+        .held_decision
+        .clone()
+        .expect("held");
+    if !held_decision_stands(state, &decision) {
+        // The chosen decision changed since it was held: consult its member
+        // again and ask in order.
+        requeue_held_member(&mut owner, index);
+        let run_start = events.len();
+        return Some(
+            match continue_staged_batch_after_answer(state, owner, events, run_start, boundary) {
+                StagedConsultationHandback::Parked(waiting) => *waiting,
+                StagedConsultationHandback::Settled | StagedConsultationHandback::NotOwned => {
+                    state.waiting_for.clone()
+                }
+            },
+        );
+    }
     publish_held_decision(state, &mut owner, index);
     sync_staged_requests(&mut owner);
     state.repark_batch_owner_below_children(owner, boundary);
@@ -3114,43 +3176,11 @@ fn record_staged_member_approval(
     owner.paused_current = None;
 }
 
-/// CR 701.8a: whether an outer-approved Destroy member's terminal is witnessed
-/// as a destruction by this instruction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StagedDestroyWitness {
-    /// The instruction reached the member's object: its outer approval is the
-    /// witness, whether the inner move happened, was prevented or remained.
-    OuterApproval,
-    /// CR 400.7: the approved object left before delivery (another member's
-    /// replacement may have destroyed it, as an Umbra's armor destroys the
-    /// Aura). This instruction destroyed nothing; whatever moved it reported
-    /// its own destruction.
-    ObjectGone,
-}
-
 fn mark_staged_member_terminal(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
     index: usize,
     terminal: ZoneMoveCompletion,
-    events: &mut Vec<GameEvent>,
-) {
-    mark_staged_member_terminal_witnessed(
-        state,
-        owner,
-        index,
-        terminal,
-        StagedDestroyWitness::OuterApproval,
-        events,
-    );
-}
-
-fn mark_staged_member_terminal_witnessed(
-    state: &mut GameState,
-    owner: &mut PendingBatchDeliveries,
-    index: usize,
-    terminal: ZoneMoveCompletion,
-    witness: StagedDestroyWitness,
     events: &mut Vec<GameEvent>,
 ) {
     // CR 608.2c: the mass hand-exile counter is the completion's typed
@@ -3199,9 +3229,7 @@ fn mark_staged_member_terminal_witnessed(
         staged.cursor = staged.cursor.max(index + 1);
     }
     owner.paused_current = None;
-    if let (Some((object_id, source_id)), StagedDestroyWitness::OuterApproval) =
-        (destroyed, witness)
-    {
+    if let Some((object_id, source_id)) = destroyed {
         // CR 701.8a: the singleton emits `CreatureDestroyed` for both an inner
         // `Moved` and an inner `Prevented`; the outer approval is the witness.
         events.push(GameEvent::CreatureDestroyed {
@@ -3579,14 +3607,14 @@ fn deliver_staged_members(
             .get(&member.identity.object_id)
             .map(ObjectIncarnationRef::from_object);
         if live_identity != Some(member.identity) {
-            mark_staged_member_terminal_witnessed(
-                state,
-                owner,
-                cursor,
-                ZoneMoveCompletion::Remained,
-                StagedDestroyWitness::ObjectGone,
-                events,
-            );
+            // CR 400.7: the approved object left before delivery (moved by
+            // another member's replacement, such as an Umbra's armor destroying
+            // its Aura, or by anything else while a decision was asked). It is
+            // a new object this instruction cannot move, exactly as a member
+            // that left before consultation: preempted, with no terminal of
+            // its own and no `CreatureDestroyed`. A departure inside this
+            // logical action is finalized from its own occurrence.
+            mark_staged_member_preempted(owner, cursor);
             continue;
         }
         let Some(event) = member.approved_event.clone() else {
@@ -4724,31 +4752,11 @@ fn settle_held_decisions_after_departure(
         let member = staged.members[index].clone();
         let decision = member.held_decision.as_ref().expect("held");
         let own_event_live = decision.boundary.is_none() || staged_member_is_live(state, &member);
-        state.pending_replacement = Some(decision.pending.clone());
-        let stands = own_event_live
-            && crate::game::players::is_alive(state, decision.chooser)
-            && replacement::replacement_event_survives(state, &decision.pending.proposed)
-            && !replacement::pending_replacement_needs_reconsult(state, Some(decision.chooser));
-        state.pending_replacement = None;
-        if stands {
+        if own_event_live && held_decision_stands(state, decision) {
             continue;
         }
         settlement = HeldDepartureSettlement::Reconsulting;
-        let member = &mut owner.staged.as_mut().expect("staged").members[index];
-        member.held_decision = None;
-        if member.state == StagedBatchMemberState::Abandoned {
-            continue;
-        }
-        member.state = StagedBatchMemberState::Unconsulted;
-        member.pending_outcome = None;
-        member.approved_post_replacement = None;
-        member.blocked = false;
-        if let StagedMemberOperation::Destroy(operation) = member.operation {
-            member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
-                outer: StagedDestroyOuterApproval::Unapproved,
-                ..operation
-            });
-        }
+        requeue_held_member(owner, index);
     }
     state.pending_replacement = published;
     settlement
@@ -14868,6 +14876,14 @@ mod staged_batch_tests {
                 StagedBatchMemberState::PreventedWithChild,
                 StagedBatchMemberState::Unconsulted,
             ] {
+                // An unconsulted member behind the approval cursor is not
+                // unfinished: the sweep consults it again (the row in
+                // `staged_transport_checks_every_state_at_approval_cursor`).
+                if stage == BatchDeliveryStage::Approving
+                    && forbidden == StagedBatchMemberState::Unconsulted
+                {
+                    continue;
+                }
                 let mut state = member_stage_fixture(stage);
                 let mut wire =
                     serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
@@ -15065,13 +15081,13 @@ mod staged_batch_tests {
                 );
             }
         }
-        // The sweep consulted every member behind the cursor: an unconsulted
-        // one there is refused unless it waits on a decision; abandonment can
-        // affect any slot.
+        // An unconsulted member behind the cursor waits on another member's
+        // decision, or was put back by a departure and is consulted again
+        // before anything is asked; abandonment can affect any slot.
         assert_approval_position_row(
             StagedBatchMemberState::Unconsulted,
             ApprovalPosition::BehindCursor { asking: false },
-            false,
+            true,
             precedes,
         );
         assert_approval_position_row(

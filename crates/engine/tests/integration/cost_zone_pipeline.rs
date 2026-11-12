@@ -278,6 +278,15 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
         runner.state().chain_tracked_set_id.is_none(),
         "the kept set cannot publish while a rest placement remains undecided"
     );
+    // CR 701.20a: ordering the held decisions is part of the same instruction,
+    // so the first placement's choice is still asked with the cards revealed,
+    // as it was before the order prompt existed.
+    for card_id in [kept, rest_a, rest_b] {
+        assert!(
+            runner.state().revealed_cards.contains(&card_id),
+            "the reveal survives the decision-order answer"
+        );
+    }
 
     let first_redirect = runner
         .act(GameAction::ChooseReplacement { index: 0 })
@@ -320,6 +329,109 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
         .expect("first attempted rest card is outside the parked suffix");
     assert_ne!(runner.state().objects[&redirected_id].zone, Zone::Library);
     assert_eq!(runner.state().objects[&parked_order[0]].zone, Zone::Library);
+}
+
+/// CR 616.1: a held decision is asked only if it still stands when it is about
+/// to be published. Here P0 holds one placement decision per rest card and is
+/// choosing which to make first when both competing redirects stop existing;
+/// the selected decision and the one behind it are consulted again instead of
+/// being asked, and the rest pile goes to the library bottom unredirected.
+///
+/// Synthetic: the redirect permanents carry hand-built `Moved` replacements
+/// and lose them by direct state edit while the order prompt is up (no game
+/// action is legal there except the selection and a concession). The printed
+/// shape this stands for is a held decision whose replacement source is gone
+/// by the time its turn comes.
+#[test]
+fn held_decisions_whose_replacements_are_gone_are_not_asked_when_selected() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature(P0, "Dig Source", 1, 1).id();
+    let kept = scenario
+        .add_spell_to_library_top(P0, "Dig Kept Card", true)
+        .id();
+    let rest_a = scenario
+        .add_spell_to_library_top(P0, "Dig Rest Card A", true)
+        .id();
+    let rest_b = scenario
+        .add_spell_to_library_top(P0, "Dig Rest Card B", true)
+        .id();
+    let redirect_sources = [
+        scenario
+            .add_creature(P0, "Dig Library To Graveyard", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .id(),
+        scenario
+            .add_creature(P0, "Dig Library To Exile", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .id(),
+    ];
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![kept, rest_a, rest_b];
+    let ability = ResolvedAbility::new(
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 3 },
+            destination: None,
+            keep_count: Some(1),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
+            reveal: true,
+            enter_tapped: false,
+            enters_attacking: false,
+            source: DigSource::Library,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("Dig reaches its selection");
+    runner
+        .act(GameAction::SelectCards { cards: vec![kept] })
+        .expect("Dig submits the kept card");
+    let WaitingFor::ReplacementDecisionOrder {
+        player: P0,
+        objects,
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "P0 orders its two held placements, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(objects.len(), 2);
+    for redirect_source in redirect_sources {
+        let redirect_source = runner
+            .state_mut()
+            .objects
+            .get_mut(&redirect_source)
+            .expect("synthetic redirect source remains on the battlefield");
+        redirect_source.replacement_definitions.clear();
+        Arc::make_mut(&mut redirect_source.base_replacement_definitions).clear();
+    }
+    let selected = runner
+        .act(GameAction::SelectCards {
+            cards: vec![objects[0]],
+        })
+        .expect("the selection is accepted");
+    assert!(
+        matches!(selected.waiting_for, WaitingFor::Priority { .. }),
+        "neither stale decision is asked, got {:?}",
+        selected.waiting_for
+    );
+    for rest in [rest_a, rest_b] {
+        assert_eq!(runner.state().objects[&rest].zone, Zone::Library);
+    }
+    assert!(runner.state().resolution_stack.is_empty());
 }
 
 /// CR 608.2c + CR 616.1: declining an up-to Dig selection publishes its empty
@@ -11902,22 +12014,18 @@ fn cascade_bottom_batch_pauses_for_library_redirect_before_completion() {
             .replacement_definitions
             .clear();
     }
-    let mut completed = runner
+    let completed = runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the now-unredirected parked cascade suffix drains");
-    // The last miss's decision was held while the redirects were active, so
-    // it is still asked; it now drains the same way as the one just answered.
+    // CR 616.1: the last miss's decision was held while the redirects were
+    // active. They are gone when it would be asked, so the scheduler consults
+    // that placement again instead of asking a choice that no longer exists,
+    // and the batch completes.
     assert!(
-        matches!(completed.waiting_for, WaitingFor::ReplacementChoice { .. }),
-        "the last held placement is asked after the previous answer, got {:?}",
+        matches!(completed.waiting_for, WaitingFor::Priority { .. }),
+        "a held decision whose replacements are gone is not asked, got {:?}",
         completed.waiting_for
     );
-    let last = runner
-        .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("the last held placement drains");
-    completed.events.extend(last.events);
-    completed.waiting_for = last.waiting_for;
-    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
     let library: Vec<_> = runner.state().players[P0.0 as usize]
         .library
         .iter()

@@ -12385,6 +12385,11 @@ fn apply_action(
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
             | WaitingFor::DigBottomOrder { .. }
+            // CR 701.20a + CR 101.4c: choosing which of a staged population's
+            // replacement decisions to make first is part of delivering that
+            // same instruction, so a reveal-dig's cards stay public through it
+            // until the first decision itself is answered.
+            | WaitingFor::ReplacementDecisionOrder { .. }
     ) && !ripple_resolution_cast_in_flight(state)
     {
         state.revealed_cards.clear();

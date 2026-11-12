@@ -9077,13 +9077,14 @@ pub(super) fn handle_resolution_choice(
                     "That object has no replacement decision to make".to_string(),
                 ));
             }
-            let waiting =
-                crate::game::zone_pipeline::publish_selected_staged_decision(state, *object)
-                    .ok_or_else(|| {
-                        EngineError::InvalidAction(
-                            "No staged replacement decision is held for that object".to_string(),
-                        )
-                    })?;
+            let waiting = crate::game::zone_pipeline::publish_selected_staged_decision(
+                state, *object, events,
+            )
+            .ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "No staged replacement decision is held for that object".to_string(),
+                )
+            })?;
             ResolutionChoiceOutcome::WaitingFor(waiting)
         }
         (WaitingFor::ChooseLegend { candidates, .. }, GameAction::ChooseLegend { keep }) => {
