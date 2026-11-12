@@ -19665,13 +19665,15 @@ fn commit_land_play(
     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
         controller_override,
         performed_by,
+        ownership_actor,
         ..
     } = &mut proposed
     {
         *controller_override = Some(player);
         // CR 116.2a: the player performs the land play, which a format's
-        // entry-ownership axis may read as the land's new owner.
+        // entry-ownership axis reads as the land's new owner.
         *performed_by = Some(player);
+        *ownership_actor = Some(player);
     }
 
     // CR 306.5b + CR 310.4b + CR 614.1c: Seed the intrinsic "enters with N

@@ -8720,8 +8720,8 @@ fn effect_fields_read_filter_population(
 ) -> bool {
     use crate::types::ability::{
         CastingPermission, ChoiceType, ConjureSource, CopyRecipient, CounterSourceRider,
-        ExiledSpellRider, GameRestriction, GuessSubject, LibraryInstructionActor, ManaTargetRole,
-        SearchSelectionConstraint, UntilCondition, VoteSubject,
+        ExiledSpellRider, GameRestriction, GuessSubject, ManaTargetRole, SearchSelectionConstraint,
+        UntilCondition, VoteSubject,
     };
     use crate::types::mana::ManaSpellGrant;
 
@@ -9101,12 +9101,16 @@ fn effect_fields_read_filter_population(
         Effect::DestroyAll { target, .. } => has_filter(target),
         Effect::ChangeZone {
             target,
+            actor,
             conditional_enter_with_counters,
             enters_modified_if,
             face_down_profile,
             ..
         } => {
             has_filter(target)
+                // CR 608.2c: the move's named performer is a player slot of
+                // its own, read like `ExileTop`'s.
+                || actor.player_filter().is_some_and(has_filter)
                 || face_down_profile.as_ref().is_some_and(has_face_down)
                 || conditional_enter_with_counters
                     .iter()
@@ -9115,9 +9119,14 @@ fn effect_fields_read_filter_population(
         }
         Effect::ChangeZoneAll {
             target,
+            actor,
             face_down_profile,
             ..
-        } => has_filter(target) || face_down_profile.as_ref().is_some_and(has_face_down),
+        } => {
+            has_filter(target)
+                || actor.player_filter().is_some_and(has_filter)
+                || face_down_profile.as_ref().is_some_and(has_face_down)
+        }
         Effect::Dig {
             player,
             filter,
@@ -9238,15 +9247,10 @@ fn effect_fields_read_filter_population(
         Effect::Reveal { target } => has_filter(target),
         Effect::RevealTop { player, .. } => has_filter(player),
         Effect::ExileTop { player, actor, .. } => {
-            has_filter(player)
-                || match actor {
-                    // CR 608.2c: the controller and the library's owner carry no
-                    // filter of their own; a named subject's player filter is read
-                    // at resolution (`exile_top.rs`).
-                    LibraryInstructionActor::Controller
-                    | LibraryInstructionActor::LibraryPlayer => false,
-                    LibraryInstructionActor::Player { player } => has_filter(player),
-                }
+            // CR 608.2c: the controller and the library's owner carry no filter
+            // of their own; a named subject's player filter is read at
+            // resolution (`exile_top.rs`).
+            has_filter(player) || actor.player_filter().is_some_and(has_filter)
         }
         Effect::ExileFaceDownPile { object, player, .. } => {
             has_filter(object) || has_filter(player)
@@ -52422,6 +52426,72 @@ mod tests {
             assert!(!effect_fields_read_filter_population(
                 &exile_top(fieldless),
                 last_created,
+            ));
+        }
+    }
+
+    /// CR 608.2c: `ChangeZone.actor` and `ChangeZoneAll.actor` name the player
+    /// who performs the move; a named subject's player filter is an own-field
+    /// read position exactly like `ExileTop`'s, the fieldless roles are not.
+    /// Revert-probe: drop the `actor` reads from the two zone-move arms of
+    /// `effect_fields_read_filter_population` ⇒ the named-subject rows read
+    /// `false`.
+    #[test]
+    fn zone_move_named_actor_is_a_filter_population_read() {
+        let change_zone = |actor| Effect::ChangeZone {
+            actor,
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+            library_shuffle: Default::default(),
+        };
+        let change_zone_all = |actor| Effect::ChangeZoneAll {
+            actor,
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: Default::default(),
+            random_order: false,
+        };
+        let last_created: &dyn Fn(&TargetFilter) -> bool = &filter_contains_last_created;
+        let named = || LibraryInstructionActor::Player {
+            player: TargetFilter::LastCreated,
+        };
+        assert!(effect_fields_read_filter_population(
+            &change_zone(named()),
+            last_created
+        ));
+        assert!(effect_fields_read_filter_population(
+            &change_zone_all(named()),
+            last_created
+        ));
+        for fieldless in [
+            LibraryInstructionActor::Controller,
+            LibraryInstructionActor::LibraryPlayer,
+        ] {
+            assert!(!effect_fields_read_filter_population(
+                &change_zone(fieldless.clone()),
+                last_created
+            ));
+            assert!(!effect_fields_read_filter_population(
+                &change_zone_all(fieldless),
+                last_created
             ));
         }
     }

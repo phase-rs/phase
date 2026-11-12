@@ -4878,9 +4878,10 @@ pub struct PendingChangeZoneIteration {
     /// (CR 603.6a).
     pub remaining: Vec<ChangeZoneMemberEntry>,
     pub source_id: ObjectId,
-    /// Family controller and controller-relative duration anchor on direct,
-    /// mass and search paths. The pre-existing interactive `EffectZoneChoice`
-    /// path still carries its chooser here, not an independently captured owner.
+    /// Family controller, controller-relative duration anchor, and the
+    /// `EntryOwnership::ActorOwns` input on direct, mass and search paths. The
+    /// pre-existing interactive `EffectZoneChoice` path still carries its
+    /// chooser here, not an independently captured owner.
     pub controller: PlayerId,
     /// Instruction performer, captured independently across every pause.
     /// Required: a missing actor cannot safely be inferred from the controller.
@@ -6974,6 +6975,10 @@ pub struct PendingBatchZoneMoveRequest {
     /// CR 608.2c + CR 406.6: the player performing this parked move.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub performed_by: Option<PlayerId>,
+    /// The parked move's ownership input under `EntryOwnership::ActorOwns`,
+    /// kept apart from `performed_by` (`zone_pipeline::MoveActors`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership_actor: Option<PlayerId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<LibraryPosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47728,6 +47733,7 @@ mod tests {
                         destination: Zone::Exile,
                         source: ObjectIncarnationRef::of(ObjectId(99), 0),
                         grant: None,
+                        actor: Default::default(),
                     },
                 ),
             },
@@ -47769,6 +47775,7 @@ mod tests {
                     destination: Zone::Exile,
                     source: ObjectIncarnationRef::of(ObjectId(99), 0),
                     grant: None,
+                    actor: Default::default(),
                 },
             ),
         }];
@@ -47820,6 +47827,7 @@ mod tests {
                         destination: Zone::Exile,
                         source: ObjectIncarnationRef::of(ObjectId(99), 0),
                         grant: None,
+                        actor: Default::default(),
                     },
                 ),
             },

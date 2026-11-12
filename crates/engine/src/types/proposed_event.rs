@@ -49,6 +49,36 @@ pub struct BoundSearchFoundDisposition {
     /// independently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<BoundSearchFoundGrant>,
+    /// CR 608.2c: who performs the found card's move. `LibraryPlayer` is the
+    /// searcher, whose own library is searched ("they exile each card they
+    /// find"); `Controller` records no performer. A named `Player` is never
+    /// bound.
+    #[serde(
+        default,
+        skip_serializing_if = "super::ability::LibraryInstructionActor::is_controller"
+    )]
+    pub actor: super::ability::LibraryInstructionActor,
+}
+
+impl BoundSearchFoundDisposition {
+    /// CR 608.2c + CR 406.6: the player recorded as having exiled the found
+    /// card, given the event's searcher. Only a move that requests exile
+    /// records a performer, and an exile never rebinds entry ownership, so the
+    /// delivery supplies no ownership input on any destination, as before. (A
+    /// later replacement that redirected the requested exile to a hand would
+    /// let the delivery's legacy fallback read the searcher; no printed card
+    /// does that.)
+    pub fn performer(&self, searcher: PlayerId) -> Option<PlayerId> {
+        use super::ability::LibraryInstructionActor;
+        match &self.actor {
+            LibraryInstructionActor::LibraryPlayer if self.destination == Zone::Exile => {
+                Some(searcher)
+            }
+            LibraryInstructionActor::LibraryPlayer
+            | LibraryInstructionActor::Controller
+            | LibraryInstructionActor::Player { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,10 +534,17 @@ pub enum ProposedEvent {
         /// event through replacement and CR 616.1 pause/resume so delivery can
         /// record, per CR 406.6 + CR 400.8, who exiled the new exile object.
         /// `None` for moves no player performs (rules processes, raw movers).
-        /// Under `EntryOwnership::ActorOwns` delivery also reads it as the
-        /// player who becomes the card's owner (`zone_pipeline::entry_receiver`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         performed_by: Option<PlayerId>,
+        /// The player whose action decides entry ownership under
+        /// `EntryOwnership::ActorOwns` (`zone_pipeline::entry_receiver`), kept
+        /// apart from `performed_by`: an instruction's subject performs the move
+        /// while the instruction's controller (the zone prompt's chooser on the
+        /// interactive route) stays the ownership input. Absent
+        /// on events saved before the split, whose writers used `performed_by`
+        /// for both roles.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ownership_actor: Option<PlayerId>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -922,6 +959,7 @@ impl ProposedEvent {
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: None,
             applied: HashSet::new(),
         }
     }
@@ -1958,5 +1996,35 @@ mod tests {
         };
         assert!(applied.contains(&AppliedReplacementKey::floating(2)));
         assert!(!applied.contains(&AppliedReplacementKey::step_end_mana(2)));
+    }
+
+    /// CR 608.2c + CR 406.6: the searcher is recorded only for the found
+    /// card's exile; any other destination records nobody, so the delivery's
+    /// legacy ownership fallback never reads the searcher.
+    #[test]
+    fn search_found_performer_is_recorded_only_for_an_exile() {
+        use crate::types::ability::LibraryInstructionActor;
+        let disposition = |destination, actor| BoundSearchFoundDisposition {
+            destination,
+            source: crate::types::identifiers::ObjectIncarnationRef::of(
+                crate::types::identifiers::ObjectId(9),
+                0,
+            ),
+            grant: None,
+            actor,
+        };
+        let searcher = PlayerId(1);
+        assert_eq!(
+            disposition(Zone::Exile, LibraryInstructionActor::LibraryPlayer).performer(searcher),
+            Some(searcher)
+        );
+        assert_eq!(
+            disposition(Zone::Hand, LibraryInstructionActor::LibraryPlayer).performer(searcher),
+            None
+        );
+        assert_eq!(
+            disposition(Zone::Exile, LibraryInstructionActor::Controller).performer(searcher),
+            None
+        );
     }
 }

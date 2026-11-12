@@ -630,6 +630,7 @@ fn deliver_search_found_event(
 ) -> bool {
     let crate::types::proposed_event::ProposedEvent::SearchFound {
         object_id,
+        searcher,
         disposition,
         ..
     } = event
@@ -650,11 +651,18 @@ fn deliver_search_found_event(
     };
     let move_result = super::zone_pipeline::move_object(
         state,
+        // CR 608.2c: the searcher's exile records the searcher. No ownership
+        // input, as before: `performer` names nobody off Exile, and an exile
+        // never rebinds entry ownership.
         super::zone_pipeline::ZoneMoveRequest::effect(
             object_id,
             disposition.destination,
             disposition.source.object_id,
-        ),
+        )
+        .actors(super::zone_pipeline::MoveActors {
+            performed_by: disposition.performer(searcher),
+            ownership_actor: None,
+        }),
         events,
     );
     match move_result {

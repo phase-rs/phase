@@ -2191,6 +2191,7 @@ fn discard_applier(
             enter_with_choices: None,
             discard_frame,
             performed_by: None,
+            ownership_actor: None,
             applied,
         }),
         other => ApplyResult::Modified(other),
@@ -5993,7 +5994,7 @@ fn bind_search_found_definition(
     }
     let execute = definition.execute.as_deref()?;
     let Effect::ChangeZone {
-        actor: _,
+        actor,
         origin,
         destination,
         target,
@@ -6011,6 +6012,13 @@ fn bind_search_found_definition(
     } = execute.effect.as_ref()
     else {
         return None;
+    };
+    // CR 608.2c: the searcher's own move (`LibraryPlayer`) is recorded at
+    // delivery; a move naming any other player is not one this binder delivers.
+    let actor = match actor {
+        crate::types::ability::LibraryInstructionActor::Controller
+        | crate::types::ability::LibraryInstructionActor::LibraryPlayer => actor.clone(),
+        crate::types::ability::LibraryInstructionActor::Player { .. } => return None,
     };
     if origin.is_some()
         || *target != TargetFilter::ParentTarget
@@ -6095,6 +6103,7 @@ fn bind_search_found_definition(
         destination: *destination,
         source: ObjectIncarnationRef::from_object(source),
         grant,
+        actor,
     })
 }
 
@@ -15896,6 +15905,7 @@ mod tests {
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: None,
             applied: HashSet::new(),
             face_down_profile: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
@@ -19955,6 +19965,7 @@ mod tests {
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: None,
             applied: HashSet::new(),
             face_down_profile: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
@@ -21432,6 +21443,7 @@ mod tests {
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: None,
             applied: HashSet::new(),
             face_down_profile: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
@@ -24844,6 +24856,7 @@ mod tests {
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: None,
             applied: HashSet::new(),
         };
         let cast_matches = find_applicable_replacements(&state, &cast_event, &registry);
@@ -24896,6 +24909,7 @@ mod tests {
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
             discard_frame: None,
             performed_by: None,
+            ownership_actor: None,
             applied: HashSet::new(),
         };
         let put_matches = find_applicable_replacements(&state, &put_event, &registry);

@@ -495,9 +495,9 @@ fn resolution_zone_candidates(
 /// and is the controller's exile. A named subject that resolves to no player
 /// (an announced player slot that is authoritatively empty) leaves the
 /// controller as the performer of whatever the filter still moves.
-/// `LibraryPlayer` is `ExileTop`'s library-owner role; no zone move is parsed
-/// with it, and it reads as `filter_controller`, the player whose zone the move
-/// reads.
+/// `LibraryPlayer` is the library owner's role; the zone move parsed with it
+/// (a SearchFound searcher's exile) is delivered by the found-card binder, and
+/// here it reads as `filter_controller`, the player whose zone the move reads.
 fn instruction_performer(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1337,8 +1337,12 @@ pub fn resolve(
                 // CR 610.3: the return duration remains relative to the resolving
                 // controller, independently of the subject performing the move.
                 Some(ability.controller),
-                // CR 608.2c: the instruction's subject performs the move.
-                Some(performer),
+                // CR 608.2c: the instruction's subject performs the move; entry
+                // ownership keeps reading the controller.
+                crate::game::zone_pipeline::MoveActors {
+                    performed_by: Some(performer),
+                    ownership_actor: Some(ability.controller),
+                },
                 events,
             ) {
                 ZoneMoveResult::Done => {
@@ -1416,8 +1420,12 @@ pub fn resolve(
                 // CR 610.3: the return duration remains relative to the resolving
                 // controller, independently of the subject performing the move.
                 Some(ability.controller),
-                // CR 608.2c: the instruction's subject performs the move.
-                Some(performer),
+                // CR 608.2c: the instruction's subject performs the move; entry
+                // ownership keeps reading the controller.
+                crate::game::zone_pipeline::MoveActors {
+                    performed_by: Some(performer),
+                    ownership_actor: Some(ability.controller),
+                },
                 events,
             ) {
                 ZoneMoveResult::Done => {
@@ -2001,8 +2009,9 @@ pub(crate) fn resolving_stack_ability_for_source(
 #[derive(Clone)]
 pub(crate) struct ChangeZoneIterationCtx {
     pub source_id: ObjectId,
-    /// Family controller and controller-relative duration anchor on direct,
-    /// mass and search paths. The interactive `EffectZoneChoice` resume
+    /// Family controller, controller-relative duration anchor, and the
+    /// `EntryOwnership::ActorOwns` input (`MoveActors::ownership_actor`) on
+    /// direct, mass and search paths. The interactive `EffectZoneChoice` resume
     /// supplies its chooser here.
     pub controller: PlayerId,
     /// Instruction performer (CR 608.2c), independent of the family and
@@ -2131,8 +2140,12 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.enter_attached_to,
         Some(ctx.controller),
         // CR 608.2c: attribution follows the captured instruction performer,
-        // not the controller-relative duration anchor above.
-        Some(ctx.performed_by),
+        // not the controller-relative duration anchor above; entry ownership
+        // keeps reading that controller.
+        crate::game::zone_pipeline::MoveActors {
+            performed_by: Some(ctx.performed_by),
+            ownership_actor: Some(ctx.controller),
+        },
         events,
     );
 
@@ -3199,8 +3212,12 @@ pub fn resolve_all(
             // CR 610.3: the return duration remains relative to the resolving
             // controller, independently of the subject performing the exile.
             Some(ability.controller),
-            // CR 608.2c: the instruction's subject performs the move.
-            Some(performer),
+            // CR 608.2c: the instruction's subject performs the move; entry
+            // ownership keeps reading the controller.
+            crate::game::zone_pipeline::MoveActors {
+                performed_by: Some(performer),
+                ownership_actor: Some(ability.controller),
+            },
             events,
         ) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
@@ -13573,6 +13590,62 @@ mod tests {
             state.objects[&card].exiled_by,
             Some(PlayerId(1)),
             "the owner performs the move, not the controller of the moved permanent"
+        );
+    }
+
+    /// CR 614.6 + CR 608.2c: in a draw replacement ("that player exiles the top
+    /// card of one of their opponents' libraries face down instead", Shared
+    /// Fate) three players are told apart: the drawer, whose replaced draw it
+    /// is and who performs the exile; the owner of the library the card leaves;
+    /// and the controller of the replacement. The parser stamps the drawer as
+    /// `Player { PostReplacementDamageTarget }` (`subject_actor_tests`); this
+    /// row resolves that actor against a replaced draw. Synthetic: the
+    /// printed Shared Fate parses its target as the drawer too, so no printed
+    /// card reaches this shape end to end; the move is the resolver's own
+    /// exile of an announced card.
+    ///
+    /// Revert sensitivity: crediting `ability.controller` records P0; crediting
+    /// the library owner records P2.
+    #[test]
+    fn draw_replacement_drawer_performs_apart_from_library_owner_and_controller() {
+        let (controller, drawer, library_owner) = (PlayerId(0), PlayerId(1), PlayerId(2));
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let card = create_object(
+            &mut state,
+            CardId(9751),
+            library_owner,
+            "Opponent library card".to_string(),
+            Zone::Library,
+        );
+        let placeholder = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(9701), controller);
+        let mut drain = crate::types::game_state::PostReplacementDrain::ready(
+            crate::types::ability::PostReplacementContinuation::Resolved(Box::new(placeholder)),
+        );
+        drain.event_target = Some(TargetRef::Player(drawer));
+        let mut drains = crate::types::game_state::PostReplacementDrainStack::default();
+        assert!(drains.install(
+            drain,
+            crate::types::game_state::ResidentDrainPolicy::KeepResident,
+        ));
+        state.resolution_stack.push_post_replacement(drains);
+
+        let mut ability = performer_test_pick_exile(
+            None,
+            TargetFilter::ParentTarget,
+            controller,
+            LibraryInstructionActor::Player {
+                player: TargetFilter::PostReplacementDamageTarget,
+            },
+        );
+        ability.targets = vec![TargetRef::Object(card)];
+        resolve(&mut state, &ability, &mut Vec::new()).expect("the exile resolves");
+
+        assert_eq!(state.objects[&card].zone, Zone::Exile);
+        assert_eq!(state.objects[&card].owner, library_owner);
+        assert_eq!(
+            state.objects[&card].exiled_by,
+            Some(drawer),
+            "the drawing player performs the exile, not the controller or the library's owner"
         );
     }
 

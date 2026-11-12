@@ -793,19 +793,30 @@ fn deliver_collected_cards(
             if object.incarnation != frozen.identity.incarnation {
                 return None;
             }
-            let (move_destination, source_id) = match frozen.disposition {
+            let (move_destination, source_id, performed_by) = match frozen.disposition {
                 crate::types::proposed_event::SearchFoundDisposition::Original => {
-                    (destination, pending.ability.source_id)
+                    (destination, pending.ability.source_id, None)
                 }
                 crate::types::proposed_event::SearchFoundDisposition::Modified(disposition) => {
                     if let Some(grant) = disposition.grant {
                         grants.push((frozen.identity, grant));
                     }
-                    (disposition.destination, disposition.source.object_id)
+                    (
+                        disposition.destination,
+                        disposition.source.object_id,
+                        disposition.performer(frozen.searcher),
+                    )
                 }
             };
+            // CR 608.2c: the searcher's exile records the searcher. No
+            // ownership input, as before: `performer` names nobody off Exile,
+            // and an exile never rebinds entry ownership.
             let mut request =
-                ZoneMoveRequest::effect(frozen.identity.object_id, move_destination, source_id);
+                ZoneMoveRequest::effect(frozen.identity.object_id, move_destination, source_id)
+                    .actors(crate::game::zone_pipeline::MoveActors {
+                        performed_by,
+                        ownership_actor: None,
+                    });
             request.mods.enter_tapped = enter_tapped;
             Some(request)
         })
@@ -1813,6 +1824,7 @@ mod tests {
                                 destination: Zone::Hand,
                                 source: ObjectIncarnationRef::from_object(&state.objects[&source]),
                                 grant: None,
+                                actor: Default::default(),
                             },
                         ),
                     },
@@ -1905,6 +1917,9 @@ mod tests {
                                 destination: Zone::Exile,
                                 source,
                                 grant: None,
+                                // CR 608.2c: the searcher exiles the card they find.
+                                actor:
+                                    crate::types::ability::LibraryInstructionActor::LibraryPlayer,
                             },
                         ),
                     },
@@ -1939,6 +1954,12 @@ mod tests {
 
         assert_eq!(state.objects[&cards[0]].zone, Zone::Hand);
         assert_eq!(state.objects[&cards[1]].zone, Zone::Exile);
+        // CR 406.6 + CR 608.2c: the batch delivery records the searching
+        // player (P1) as the exiler of the redirected member; the member that
+        // kept its original disposition records nobody. Synthetic: a
+        // `LibraryPlayer` exile disposition bound onto a mixed scoped search.
+        assert_eq!(state.objects[&cards[1]].exiled_by, Some(PlayerId(1)));
+        assert_eq!(state.objects[&cards[0]].exiled_by, None);
         let moved: Vec<_> = result
             .events
             .iter()

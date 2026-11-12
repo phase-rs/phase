@@ -169,10 +169,47 @@ pub struct EntryMods {
     pub attach_to: Option<AttachTarget>,
     /// CR 608.2c: the player performing the instruction that moves the object;
     /// seeded onto `ProposedEvent::ZoneChange.performed_by` so delivery records
-    /// who exiled it (CR 406.6). `None` when no player performs the move. Under
-    /// `EntryOwnership::ActorOwns` delivery also reads it as the player who
-    /// becomes the card's owner ([`entry_receiver`]).
+    /// who exiled it (CR 406.6). `None` when no player performs the move.
     pub performed_by: Option<PlayerId>,
+    /// The player whose action decides entry ownership under
+    /// `EntryOwnership::ActorOwns` ([`entry_receiver`]), kept apart from
+    /// `performed_by` so recording who performed a move never changes where the
+    /// card goes or who owns it. Seeded onto
+    /// `ProposedEvent::ZoneChange.ownership_actor`. Delivery falls back to
+    /// `performed_by` when this is `None`, for events saved before the split,
+    /// so a writer that records a performer on a move that can rebind
+    /// ownership (anything but an exile) supplies this input too.
+    pub ownership_actor: Option<PlayerId>,
+}
+
+/// CR 608.2c + CR 406.6: the two players a zone move can name, passed apart.
+/// `performed_by` is recorded as the player who performed the move (who exiled
+/// it); `ownership_actor` is the input `EntryOwnership::ActorOwns` reads for the
+/// receiving hand and the entering card's owner. An instruction's subject
+/// ("that player exiles …") is its performer, while ownership stays with the
+/// player whose action the format has always read: the controller of the
+/// instruction, or the zone prompt's chooser on the interactive route.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MoveActors {
+    pub performed_by: Option<PlayerId>,
+    pub ownership_actor: Option<PlayerId>,
+}
+
+impl MoveActors {
+    /// A move no player performs (rules processes, raw movers).
+    pub(crate) const NONE: Self = Self {
+        performed_by: None,
+        ownership_actor: None,
+    };
+
+    /// A move whose performer is also the ownership input: a draw, a cast, a
+    /// land play, a player taking a card into their own hand.
+    pub(crate) fn performer_and_owner(player: PlayerId) -> Self {
+        Self {
+            performed_by: Some(player),
+            ownership_actor: Some(player),
+        }
+    }
 }
 
 /// Exile-link context carried through the delivery tail. Replaces the old
@@ -257,6 +294,7 @@ impl ZoneMoveRequest {
             chain_referent: self.mods.chain_referent,
             attach_to: self.mods.attach_to,
             performed_by: self.mods.performed_by,
+            ownership_actor: self.mods.ownership_actor,
             library_placement: self.placement,
             exile_duration: self.exile_links.duration,
             exile_controller: self.exile_links.controller,
@@ -304,6 +342,7 @@ impl ZoneMoveRequest {
                 chain_referent: pending.chain_referent,
                 attach_to: pending.attach_to,
                 performed_by: pending.performed_by,
+                ownership_actor: pending.ownership_actor,
             },
             placement: pending.library_placement,
             exile_links: ExileLinkSpec {
@@ -399,6 +438,7 @@ impl ZoneMoveRequest {
             },
             mods: EntryMods {
                 performed_by: Some(drawer),
+                ownership_actor: Some(drawer),
                 ..EntryMods::default()
             },
             placement: None,
@@ -418,6 +458,7 @@ impl ZoneMoveRequest {
             cause: ZoneChangeCause::CastingToStack { source },
             mods: EntryMods {
                 performed_by: Some(caster),
+                ownership_actor: Some(caster),
                 ..EntryMods::default()
             },
             placement: None,
@@ -559,9 +600,11 @@ impl ZoneMoveRequest {
     }
 
     /// CR 608.2c + CR 406.6: name the player performing this move, so a
-    /// delivery that settles the object in exile records who exiled it.
-    pub fn performed_by(mut self, player: PlayerId) -> Self {
-        self.mods.performed_by = Some(player);
+    /// delivery that settles the object in exile records who exiled it, and,
+    /// separately, the player `EntryOwnership::ActorOwns` reads for ownership.
+    pub(crate) fn actors(mut self, actors: MoveActors) -> Self {
+        self.mods.performed_by = actors.performed_by;
+        self.mods.ownership_actor = actors.ownership_actor;
         self
     }
 
@@ -571,7 +614,7 @@ impl ZoneMoveRequest {
     /// keeps it.
     pub fn hand_taker(self, player: PlayerId) -> Self {
         if self.to == Zone::Hand {
-            self.performed_by(player)
+            self.actors(MoveActors::performer_and_owner(player))
         } else {
             self
         }
@@ -917,11 +960,13 @@ pub(crate) fn move_object_with_terminal(
                 face_down_in_exile: conceal_in_exile,
                 chain_referent,
                 performed_by,
+                ownership_actor,
                 ..
             } = &mut proposed
             {
                 *chain_referent = req.mods.chain_referent;
                 *performed_by = req.mods.performed_by;
+                *ownership_actor = req.mods.ownership_actor;
                 *applied = req.replacement_applied.clone();
                 *conceal_in_exile = req.face_down_in_exile;
             }
@@ -1001,11 +1046,13 @@ pub(crate) fn move_object_with_terminal(
             face_down_in_exile: conceal_in_exile,
             chain_referent,
             performed_by,
+            ownership_actor,
             ..
         } = &mut proposed
         {
             *chain_referent = req.mods.chain_referent;
             *performed_by = req.mods.performed_by;
+            *ownership_actor = req.mods.ownership_actor;
             *applied = req.replacement_applied;
             applied.extend(seed_applied);
             *conceal_in_exile = req.face_down_in_exile;
@@ -1121,11 +1168,13 @@ pub(crate) fn move_object_with_terminal(
             face_down_in_exile: conceal_in_exile,
             chain_referent,
             performed_by,
+            ownership_actor,
             applied,
             ..
         } = &mut proposed
         {
             *performed_by = req.mods.performed_by;
+            *ownership_actor = req.mods.ownership_actor;
             *enter_transformed = req.mods.enter_transformed;
             if !req.mods.enter_tapped.is_unspecified() {
                 *enter_tapped = req.mods.enter_tapped;
@@ -1183,7 +1232,10 @@ pub(crate) fn move_object_with_terminal(
         None,
         None,
         exile_links.controller,
-        req.mods.performed_by,
+        MoveActors {
+            performed_by: req.mods.performed_by,
+            ownership_actor: req.mods.ownership_actor,
+        },
         req.replacement_applied,
         events,
     )
@@ -1592,11 +1644,13 @@ fn anticipated_zone_change_delivery(
         chain_referent,
         attach_to,
         performed_by,
+        ownership_actor,
         applied,
         ..
     } = &mut expected_event
     {
         *performed_by = request.mods.performed_by;
+        *ownership_actor = request.mods.ownership_actor;
         *enter_tapped = request.mods.enter_tapped;
         *enters_attacking = request.mods.enters_attacking;
         *enter_transformed = request.mods.enter_transformed;
@@ -3719,8 +3773,10 @@ fn compute_merged_card_component_route(
 /// The player who owns `object_id` once it enters `to`, when that differs from
 /// its current owner.
 ///
-/// Under `EntryOwnership::ActorOwns` the performer becomes the owner of a card
-/// it takes into hand out of a container both seats read as one (CR 400.3
+/// Under `EntryOwnership::ActorOwns` the ownership actor
+/// (`MoveActors::ownership_actor`; an event saved before that field existed
+/// supplies its one recorded player) becomes the owner of a card it takes
+/// into hand out of a container both seats read as one (CR 400.3
 /// otherwise routes it to its owner's hand), of a spell it casts (CR 601.2a),
 /// and of a land it plays (CR 305.1). A Battlefield entry rebinds only when the
 /// event has no source object: effect moves (Reanimate, blink) carry one and
@@ -3729,22 +3785,22 @@ fn entry_receiver(
     state: &GameState,
     object_id: ObjectId,
     to: Zone,
-    performer: Option<PlayerId>,
+    ownership_actor: Option<PlayerId>,
     cause: Option<ObjectId>,
 ) -> Option<PlayerId> {
-    let performer = performer?;
+    let actor = ownership_actor?;
     match state.format_config.format.entry_ownership() {
         EntryOwnership::OwnerKept => return None,
         EntryOwnership::ActorOwns => {}
     }
     let object = state.objects.get(&object_id)?;
     let rebinds = match to {
-        Zone::Hand => state.object_in_players_zone(object, object.zone, performer),
+        Zone::Hand => state.object_in_players_zone(object, object.zone, actor),
         Zone::Stack => true,
         Zone::Battlefield => cause.is_none(),
         Zone::Library | Zone::Graveyard | Zone::Exile | Zone::Command => false,
     };
-    (rebinds && object.owner != performer).then_some(performer)
+    (rebinds && object.owner != actor).then_some(actor)
 }
 
 /// Deliver a zone-change event that has already passed through replacement.
@@ -3787,6 +3843,7 @@ pub(crate) fn deliver_replaced_zone_change(
         enter_with_choices,
         discard_frame,
         performed_by,
+        ownership_actor,
         applied,
         ..
     } = event
@@ -4017,7 +4074,18 @@ pub(crate) fn deliver_replaced_zone_change(
                     // `ProposedEvent::ZoneChange.enter_transformed` above; the
                     // flag is inert for any non-battlefield destination (the guard
                     // gates on `to == Battlefield`).
-                    let receiver = entry_receiver(state, object_id, to, performed_by, cause);
+                    // `ownership_actor` decides ownership. An event saved before
+                    // the field existed recorded one player for both roles in
+                    // `performed_by`, so it supplies the input there; current
+                    // writers set both, or record a performer only on an exile,
+                    // which never rebinds (`entry_receiver`).
+                    let receiver = entry_receiver(
+                        state,
+                        object_id,
+                        to,
+                        ownership_actor.or(performed_by),
+                        cause,
+                    );
                     zones::move_to_zone_with_entry_flags(
                         state,
                         object_id,
@@ -4522,7 +4590,7 @@ pub(crate) fn execute_zone_move_with_controller(
     library_placement: Option<LibraryPosition>,
     enter_attached_to: Option<AttachTarget>,
     exile_controller: Option<PlayerId>,
-    performed_by: Option<PlayerId>,
+    actors: MoveActors,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
     execute_zone_move_with_terminal_and_controller(
@@ -4543,7 +4611,7 @@ pub(crate) fn execute_zone_move_with_controller(
         library_placement,
         enter_attached_to,
         exile_controller,
-        performed_by,
+        actors,
         events,
     )
     .into_zone_move_result()
@@ -4586,7 +4654,7 @@ pub(crate) fn execute_zone_move_with_terminal(
         library_placement,
         enter_attached_to,
         None,
-        None,
+        MoveActors::NONE,
         events,
     )
 }
@@ -4610,7 +4678,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
     library_placement: Option<LibraryPosition>,
     enter_attached_to: Option<AttachTarget>,
     exile_controller: Option<PlayerId>,
-    performed_by: Option<PlayerId>,
+    actors: MoveActors,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
     execute_zone_move_with_applied_terminal(
@@ -4632,7 +4700,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
         library_placement,
         enter_attached_to,
         exile_controller,
-        performed_by,
+        actors,
         HashSet::new(),
         events,
     )
@@ -4732,8 +4800,9 @@ fn execute_zone_move_with_applied_terminal(
     library_placement: Option<LibraryPosition>,
     enter_attached_to: Option<AttachTarget>,
     exile_controller: Option<PlayerId>,
-    // CR 608.2c + CR 406.6: the player performing this move, if any.
-    performed_by: Option<PlayerId>,
+    // CR 608.2c + CR 406.6: the player performing this move and, apart, the
+    // ownership input (`MoveActors`).
+    actors: MoveActors,
     replacement_applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveTerminalResult {
@@ -4796,13 +4865,15 @@ fn execute_zone_move_with_applied_terminal(
         face_down_in_exile: ref mut conceal_in_exile,
         chain_referent: ref mut intent,
         performed_by: ref mut performer,
+        ownership_actor: ref mut ownership,
         ..
     } = &mut proposed
     {
         *applied = replacement_applied;
         *conceal_in_exile = face_down_in_exile;
         *intent = chain_referent;
-        *performer = performed_by;
+        *performer = actors.performed_by;
+        *ownership = actors.ownership_actor;
     }
 
     // CR 712.14a: Set enter_transformed on the proposed event so replacement effects
@@ -7554,7 +7625,8 @@ mod exiling_player_record_tests {
 
         move_object(
             &mut state,
-            ZoneMoveRequest::effect(card, Zone::Exile, ObjectId(100)).performed_by(PlayerId(0)),
+            ZoneMoveRequest::effect(card, Zone::Exile, ObjectId(100))
+                .actors(MoveActors::performer_and_owner(PlayerId(0))),
             &mut events,
         );
 
@@ -7644,7 +7716,8 @@ mod hand_entry_receiver_tests {
     }
 
     fn take(state: &mut GameState, card: ObjectId, taker: PlayerId) {
-        let request = ZoneMoveRequest::effect(card, Zone::Hand, ObjectId(100)).performed_by(taker);
+        let request = ZoneMoveRequest::effect(card, Zone::Hand, ObjectId(100))
+            .actors(MoveActors::performer_and_owner(taker));
         move_object(state, request, &mut Vec::new());
     }
 
@@ -7821,8 +7894,10 @@ mod hand_entry_receiver_tests {
                     .destination_zone(Zone::Hand),
             );
         let requests = vec![
-            ZoneMoveRequest::effect(first, Zone::Hand, first).performed_by(P1),
-            ZoneMoveRequest::effect(second, Zone::Hand, second).performed_by(P1),
+            ZoneMoveRequest::effect(first, Zone::Hand, first)
+                .actors(MoveActors::performer_and_owner(P1)),
+            ZoneMoveRequest::effect(second, Zone::Hand, second)
+                .actors(MoveActors::performer_and_owner(P1)),
         ];
         assert!(matches!(
             move_objects_simultaneously(&mut state, requests, &mut Vec::new()),

@@ -328,7 +328,9 @@ pub(crate) fn resolve_explore_effect(
                 crate::types::zones::Zone::Hand,
                 ability.source_id,
             )
-            .performed_by(controller)],
+            .actors(crate::game::zone_pipeline::MoveActors::performer_and_owner(
+                controller,
+            ))],
             Some(BatchCompletion::ExploreLandDeliveryComplete { explorer_id }),
             events,
         );
