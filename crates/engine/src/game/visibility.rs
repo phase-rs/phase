@@ -3117,23 +3117,93 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         ref conditional_enter_with_counters,
         count_param,
         ref library_position,
-        mass_library_order: _,
+        ref mass_library_order,
         is_cost_payment: _,
         enters_modified_if: _,
         ref duration,
+        ref privacy_zones,
     } = state.waiting_for
     {
         // A private-zone choice reveals exactly which cards can be selected,
         // including a mass library-order prompt whose members still occupy the
         // battlefield. The placement parameters are public, but the offered
         // ids and their identity/origin provenance are not.
-        if !can_view_private_for_player(player) && matches!(zone, Zone::Hand | Zone::Library) {
+        //
+        // CR 402.3: an opponent may count the cards in a hand but may not learn
+        // which of them are eligible. A mixed hand/command choice (Next of Kin)
+        // would leak that subset through the placeholder count: the opponent can
+        // subtract the public command-zone candidates from the number of
+        // offered placeholders. For a mixed private/public set, clear the list
+        // entirely for non-choosers. A pure Library set keeps one placeholder per
+        // eligible card (the existing count-only disclosure); a Hand-scoped set
+        // is cleared even when unmixed because the eligible subset's size is
+        // hand information CR 402.3 withholds; a pure public set is not
+        // redacted at all.
+        // CR 402.3: the prompt owns its producer-captured scope; archived
+        // prompts that predate the field fall back to the exact paused
+        // producer.
+        let privacy_scope = privacy_zones
+            .clone()
+            .or_else(|| state.effect_zone_choice_privacy_scope());
+        let scope_private = privacy_scope
+            .as_ref()
+            .is_some_and(|zones| zones.iter().any(|zone| !zone.is_public()));
+        let scope_public = privacy_scope
+            .as_ref()
+            .is_some_and(|zones| zones.iter().any(|zone| zone.is_public()));
+        let has_private_card = cards.iter().any(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|object| !object.zone.is_public())
+        });
+        let has_public_card = cards.iter().any(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone.is_public())
+        });
+        // The producer's exact scan scope is authoritative. Candidate-zone
+        // inspection remains only as a fallback for prompts restored from
+        // saves that predate the scope-carrying producer.
+        // Legacy saves carry no producer-captured scope; fall back to the
+        // prompt's stored zone plus candidate zones.
+        let fallback_private = privacy_scope.is_none() && (!zone.is_public() || has_private_card);
+        // CR 401.4: a Library arrangement prompt hides its member ids even when
+        // every candidate is currently public; its bounds are public (the
+        // batch size), so only the cards are redacted. Keep the base projection
+        // for BOTH typed and archived forms; the archived Terminus prompt
+        // carries no typed batch but must still hide the ordering ids.
+        let library_arrangement = matches!(zone, Zone::Library);
+        let _ = mass_library_order;
+        let private_scope = scope_private || (fallback_private && !library_arrangement);
+        let mixed_private_public = (scope_private && scope_public)
+            || (privacy_scope.is_none()
+                && fallback_private
+                && (has_public_card || zone.is_public()));
+        let redact_cards = private_scope || library_arrangement;
+        // CR 401.4: an ordering prompt's bounds are the public batch size, so
+        // they stay visible even when the producer carried a Library scope
+        // (Library is a hidden zone, but the number of cards being ordered is
+        // not). Hidden *eligibility* bounds for non-library prompts stay
+        // redacted.
+        let redact_bounds = private_scope && !library_arrangement;
+        if !can_view_private_for_player(player) && redact_cards {
             filtered.waiting_for = WaitingFor::EffectZoneChoice {
                 player,
-                cards: cards.iter().map(|_| ObjectId(0)).collect(),
-                count,
-                min_count,
-                up_to,
+                cards: if library_arrangement {
+                    cards.iter().map(|_| ObjectId(0)).collect()
+                } else if mixed_private_public || zone == Zone::Hand {
+                    Vec::new()
+                } else {
+                    cards.iter().map(|_| ObjectId(0)).collect()
+                },
+                count: if redact_bounds { 0 } else { count },
+                min_count: if redact_bounds { 0 } else { min_count },
+                // Normalize the selection mode too: an empty mixed prompt and
+                // a singleton/ordinary private prompt must not differ through
+                // `up_to` in the observer envelope.
+                up_to: if redact_bounds { true } else { up_to },
                 source_id,
                 effect_kind,
                 zone,
@@ -3158,6 +3228,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 // The bounded-move duration is a public effect parameter, not
                 // private hand info — pass it through the redaction.
                 duration: duration.clone(),
+                // The prompt keeps its own classification after projection;
+                // only the viewer-visible members are replaced.
+                privacy_zones: privacy_zones.clone(),
             };
         }
     }

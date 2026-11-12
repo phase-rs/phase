@@ -52601,6 +52601,7 @@ pub mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         crate::game::engine::apply_as_current(

@@ -1139,6 +1139,7 @@ fn park_resolution_attachment_choice(
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
 
     if let Some(active) = state.active_ability_continuation_frame() {

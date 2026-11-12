@@ -606,6 +606,7 @@ pub fn resolve(
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses

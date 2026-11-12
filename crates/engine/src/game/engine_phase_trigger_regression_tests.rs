@@ -2997,6 +2997,7 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
     state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
         Box::new(ResolvedAbility::new(
@@ -3075,6 +3076,7 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
 
     let result = apply_as_current(
@@ -3128,6 +3130,7 @@ fn effect_zone_choice_up_to_respects_min_count() {
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] });

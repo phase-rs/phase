@@ -8,6 +8,7 @@ use engine::ai_support::legal_actions;
 use engine::game::effects::change_zone::resolve_all;
 use engine::game::engine::apply_as_current;
 use engine::game::game_object::ObjectIncarnationRefExt;
+use engine::game::visibility::filter_state_for_viewer;
 use engine::types::ability::{
     ControllerRef, Effect, LibraryPosition, ResolvedAbility, TargetFilter, TypedFilter,
 };
@@ -149,10 +150,13 @@ fn turn15_legacy_mass_order_survives_save_reload_and_both_owners_complete() {
         .into_game_state()
         .expect("saved legacy state restores through the production chokepoint");
 
-    let current_cards = match &state.waiting_for {
+    let (current_cards, current_bounds) = match &state.waiting_for {
         WaitingFor::EffectZoneChoice {
             player,
             cards,
+            count,
+            min_count,
+            up_to,
             mass_library_order,
             ..
         } => {
@@ -161,11 +165,40 @@ fn turn15_legacy_mass_order_survives_save_reload_and_both_owners_complete() {
                 mass_library_order.is_none(),
                 "the archive must exercise migration"
             );
-            cards.clone()
+            (cards.clone(), (*count, *min_count, *up_to))
         }
         other => panic!("turn-15 must restore its legacy ordering prompt, got {other:?}"),
     };
     assert_eq!(current_cards, vec![ObjectId(199)]);
+    // CR 401.4: the archived form carries no typed batch, so the Library
+    // branch must still project placeholders for non-arrangers while leaving
+    // the public ordering bounds intact.
+    let opponent = filter_state_for_viewer(&state, PlayerId(1));
+    let WaitingFor::EffectZoneChoice {
+        cards: opponent_cards,
+        count: opponent_count,
+        min_count: opponent_min_count,
+        up_to: opponent_up_to,
+        mass_library_order: opponent_batch,
+        ..
+    } = &opponent.waiting_for
+    else {
+        panic!("opponent must still see the archived ordering envelope");
+    };
+    assert_eq!(opponent_cards.len(), current_cards.len());
+    assert!(
+        opponent_cards.iter().all(|id| *id == ObjectId(0)),
+        "the archived ordering prompt must hide the member ids; got {opponent_cards:?}"
+    );
+    assert_eq!(
+        (*opponent_count, *opponent_min_count, *opponent_up_to),
+        current_bounds,
+        "the archived ordering prompt's public bounds must not be redacted"
+    );
+    assert!(
+        opponent_batch.is_none(),
+        "the archived prompt has no typed batch to project"
+    );
     assert_select_cards_is_publicly_legal(&state, &current_cards);
     apply_as_current(
         &mut state,
@@ -434,4 +467,58 @@ fn ordinary_unmarked_battlefield_library_prompt_is_rejected() {
         .is_err(),
         "an unmarked battlefield prompt must not receive the mass-order exception"
     );
+}
+
+/// CR 401.4: the library arrangement order is not revealed to other players.
+/// This Library-scoped prompt over public battlefield permanents hides the
+/// member ids from non-choosers, matching the base projection; the arranger
+/// keeps the exact ids.
+#[test]
+fn mass_library_order_prompt_redacts_public_ids_from_opponent() {
+    let (state, cards) = real_single_owner_mass_library_order_state(
+        Zone::Battlefield,
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+    );
+    let (count, min_count) = match &state.waiting_for {
+        WaitingFor::EffectZoneChoice {
+            count, min_count, ..
+        } => (*count, *min_count),
+        other => panic!("arranger must hold the ordering prompt, got {other:?}"),
+    };
+
+    let opponent = filter_state_for_viewer(&state, PlayerId(1));
+    let WaitingFor::EffectZoneChoice {
+        cards: opponent_cards,
+        count: opponent_count,
+        min_count: opponent_min_count,
+        mass_library_order: opponent_batch,
+        ..
+    } = &opponent.waiting_for
+    else {
+        panic!("opponent must still see the redacted ordering envelope");
+    };
+    assert_eq!(opponent_cards.len(), cards.len());
+    assert_eq!(
+        (*opponent_count, *opponent_min_count),
+        (count, min_count),
+        "public ordering bounds stay visible to non-arrangers"
+    );
+    assert!(
+        opponent_batch.is_none(),
+        "the typed batch must be cleared for non-arrangers"
+    );
+    assert!(
+        opponent_cards.iter().all(|id| *id == ObjectId(0)),
+        "opponent must receive placeholders, not battlefield ids; got {opponent_cards:?}"
+    );
+
+    let arranger = filter_state_for_viewer(&state, PlayerId(0));
+    let WaitingFor::EffectZoneChoice {
+        cards: arranger_cards,
+        ..
+    } = &arranger.waiting_for
+    else {
+        panic!("arranger must retain the ordering prompt");
+    };
+    assert_eq!(arranger_cards, &cards);
 }

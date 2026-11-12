@@ -426,8 +426,17 @@ mod tests {
         let filtered = filter_state_for_player(&state, PlayerId(1));
 
         match filtered.waiting_for {
-            WaitingFor::EffectZoneChoice { cards, .. } => {
-                assert_eq!(cards, vec![ObjectId(0), ObjectId(0)]);
+            WaitingFor::EffectZoneChoice {
+                cards,
+                count,
+                min_count,
+                ..
+            } => {
+                assert!(
+                    cards.is_empty(),
+                    "a Hand-scoped choice must not expose even the eligible count"
+                );
+                assert_eq!((count, min_count), (0, 0));
             }
             other => panic!("Expected EffectZoneChoice, got {:?}", other),
         }

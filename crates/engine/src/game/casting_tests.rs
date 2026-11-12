@@ -1350,6 +1350,10 @@ fn worldsouls_rage_resolves_hand_graveyard_both_and_neither_land_matrix() {
         id
     }
 
+    // CR 402.3: the observer's whole prompt envelope must be identical across
+    // hidden-eligibility cases. `source_id` differs because each case builds a
+    // fresh object graph, so normalize that one coordinate before comparing.
+    let mut normalized_observer_prompt: Option<WaitingFor> = None;
     for (has_hand_land, has_graveyard_land) in
         [(true, false), (false, true), (true, true), (false, false)]
     {
@@ -1458,8 +1462,59 @@ fn worldsouls_rage_resolves_hand_graveyard_both_and_neither_land_matrix() {
                     assert!(up_to);
                     assert_eq!(cards.len(), expected.len());
                     assert!(expected.iter().all(|id| cards.contains(id)));
+                    let mut exact_offered = cards.clone();
+                    exact_offered.sort();
+                    let mut exact_expected = expected.clone();
+                    exact_expected.sort();
+                    assert_eq!(
+                        exact_offered, exact_expected,
+                        "the chooser's pool must be exact, with no extra or missing ids"
+                    );
                     assert!(!cards.contains(&opposing_land));
                     assert!(!cards.contains(&nonland));
+                    let WaitingFor::EffectZoneChoice {
+                        privacy_zones: Some(privacy),
+                        ..
+                    } = &state.waiting_for
+                    else {
+                        panic!("the producer's mixed scan scope must ride the prompt");
+                    };
+                    assert!(
+                        privacy.contains(&Zone::Hand) && privacy.contains(&Zone::Graveyard),
+                        "the carried scope must name both mixed legs; got {privacy:?}"
+                    );
+
+                    // CR 402.3: the observer envelope is fully normalized even
+                    // when the hidden hand contributes an eligible land.
+                    let observer =
+                        crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+                    let WaitingFor::EffectZoneChoice {
+                        cards: observer_cards,
+                        count: observer_count,
+                        min_count: observer_min_count,
+                        up_to: observer_up_to,
+                        ..
+                    } = &observer.waiting_for
+                    else {
+                        panic!("observer must retain the prompt envelope");
+                    };
+                    assert!(observer_cards.is_empty());
+                    assert_eq!(
+                        (*observer_count, *observer_min_count, *observer_up_to),
+                        (0, 0, true),
+                        "observer envelope must not expose hidden eligibility"
+                    );
+                    let mut normalized = observer.waiting_for.clone();
+                    if let WaitingFor::EffectZoneChoice { source_id, .. } = &mut normalized {
+                        *source_id = ObjectId(0);
+                    }
+                    match &normalized_observer_prompt {
+                        Some(first) => assert_eq!(
+                            &normalized, first,
+                            "the full observer prompt must not vary with hidden eligibility"
+                        ),
+                        None => normalized_observer_prompt = Some(normalized),
+                    }
                     apply_as_current(
                         &mut state,
                         GameAction::SelectCards {
@@ -1467,6 +1522,16 @@ fn worldsouls_rage_resolves_hand_graveyard_both_and_neither_land_matrix() {
                         },
                     )
                     .expect("every eligible hand/graveyard land should be selectable");
+                    assert!(
+                        !matches!(
+                            &state.waiting_for,
+                            WaitingFor::EffectZoneChoice {
+                                privacy_zones: Some(_),
+                                ..
+                            }
+                        ),
+                        "the answered prompt must retire its carried privacy scope"
+                    );
                 }
                 WaitingFor::Priority { .. } => break,
                 other => panic!("unexpected Rage resolution boundary: {other:?}"),
@@ -1475,7 +1540,13 @@ fn worldsouls_rage_resolves_hand_graveyard_both_and_neither_land_matrix() {
 
         assert_eq!(state.players[1].life, 18, "Rage must deal its X damage");
         assert!(state.stack.is_empty(), "Rage should fully resolve");
-        assert_eq!(saw_choice, !expected.is_empty());
+        // A mixed hand/graveyard scope keeps the prompt present even with no
+        // eligible cards, so the opponent's observable sequence cannot reveal
+        // whether the hidden hand contained a match.
+        assert!(
+            saw_choice,
+            "the mixed scope must prompt even with no candidates"
+        );
         for id in expected {
             assert_eq!(state.objects[&id].zone, Zone::Battlefield);
             assert!(state.objects[&id].tapped);

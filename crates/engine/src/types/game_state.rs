@@ -16439,6 +16439,48 @@ impl GameState {
         }
     }
 
+    /// CR 402.3: the exact paused producer's scan scope for an
+    /// `EffectZoneChoice`, used by viewer projection so privacy is decided
+    /// independently of the prompt's validation `zone`.
+    ///
+    /// Only the current paused instruction (active continuation root or
+    /// resolving stack ability) may answer. Walking later instructions would
+    /// let a public ordering/sacrifice prompt inherit a following operation's
+    /// private zone.
+    pub(crate) fn effect_zone_choice_privacy_scope(&self) -> Option<Vec<Zone>> {
+        let WaitingFor::EffectZoneChoice { effect_kind, .. } = &self.waiting_for else {
+            return None;
+        };
+        if !matches!(
+            effect_kind,
+            crate::types::ability::EffectKind::ChangeZone
+                | crate::types::ability::EffectKind::ChangeZoneAll
+                | crate::types::ability::EffectKind::BounceAll
+        ) {
+            return None;
+        }
+
+        fn scope(ability: &crate::types::ability::ResolvedAbility) -> Option<Vec<Zone>> {
+            let target = match &ability.effect {
+                crate::types::ability::Effect::ChangeZone { target, .. }
+                | crate::types::ability::Effect::ChangeZoneAll { target, .. }
+                | crate::types::ability::Effect::BounceAll { target, .. } => target,
+                _ => return None,
+            };
+            let zones = target.extract_zones();
+            (!zones.is_empty()).then_some(zones)
+        }
+
+        self.active_ability_continuation()
+            .and_then(|continuation| scope(&continuation.chain))
+            .or_else(|| {
+                self.resolving_stack_entry
+                    .as_ref()
+                    .and_then(|entry| entry.ability())
+                    .and_then(scope)
+            })
+    }
+
     /// CR 109.5 + CR 611.2a: drop any restored restriction whose affected player
     /// is still the raw `RestrictionPlayerScope::SourceController` placeholder
     /// (Conduit of Worlds' "you can't cast additional spells this turn").
@@ -18324,6 +18366,13 @@ pub enum WaitingFor {
         /// the `face_down_profile` / `enters_modified_if` carry-through above.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration: Option<crate::types::ability::Duration>,
+        /// CR 402.3: the producer-captured scan scope for THIS choice. It
+        /// belongs to the prompt, so it is retired atomically when an accepted
+        /// answer replaces `waiting_for` and it survives save/restore with the
+        /// prompt. Only a scope that reaches a hidden zone is stored; archived
+        /// prompts omit the field and fall back to the exact paused producer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        privacy_zones: Option<Vec<Zone>>,
     },
     /// Player chooses which drawn-this-turn hand cards to put on top of their
     /// library. Each unchosen required card is kept by paying life.
@@ -39598,6 +39647,121 @@ mod drain_stack_reentrancy_tests {
         AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation,
     };
 
+    /// CR 402.3 + CR 608.2: a public battlefield sacrifice prompt must not
+    /// inherit the private scope of a later hand ChangeZone instruction in the
+    /// same chain (Strefan's Blood-token sacrifice followed by a Vampire put).
+    /// The producer-paused authority declines non-ChangeZone prompts, and the
+    /// observer sees the sacrifice envelope exactly.
+    #[test]
+    fn sacrifice_prompt_does_not_inherit_a_later_hand_change_zone_scope() {
+        let mut state = GameState::new_two_player(42);
+        let blood = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(9_001),
+            PlayerId(0),
+            "Blood".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![blood],
+            count: 2,
+            min_count: 2,
+            up_to: false,
+            source_id: ObjectId(100),
+            effect_kind: crate::types::ability::EffectKind::Sacrifice,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+            face_down_profile: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            count_param: 0,
+            library_position: None,
+            mass_library_order: None,
+            is_cost_payment: false,
+            enters_modified_if: None,
+            duration: None,
+            privacy_zones: None,
+        };
+        let target = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature().properties(vec![
+                crate::types::ability::FilterProp::InAnyZone {
+                    zones: vec![Zone::Hand, Zone::Command],
+                },
+            ]),
+        );
+        let chain = Box::new(ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                library_shuffle: Default::default(),
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        ));
+        let pending = PendingContinuation::new(chain, &state);
+        state
+            .resolution_stack
+            .push_ability_continuation(AbilityContinuationFrame {
+                pending,
+                choose_zone_trigger_context: None,
+            });
+
+        assert!(
+            state.effect_zone_choice_privacy_scope().is_none(),
+            "a sacrifice prompt must not read the following hand leg's scope"
+        );
+        let WaitingFor::EffectZoneChoice { privacy_zones, .. } = &state.waiting_for else {
+            panic!("the sacrifice prompt must be open");
+        };
+        assert!(
+            privacy_zones.is_none(),
+            "a public battlefield choice carries no producer privacy scope"
+        );
+        let observer = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let WaitingFor::EffectZoneChoice {
+            zone,
+            cards,
+            count,
+            min_count,
+            up_to,
+            ..
+        } = &observer.waiting_for
+        else {
+            panic!("observer must retain the sacrifice prompt");
+        };
+        assert_eq!(
+            *zone,
+            Zone::Battlefield,
+            "a sacrifice prompt's validation zone must not be rewritten from a later hand leg"
+        );
+        assert_eq!(cards, &vec![blood]);
+        assert_eq!(
+            (*count, *min_count, *up_to),
+            (2, 2, false),
+            "the public sacrifice envelope must stay exact for observers"
+        );
+    }
+
     fn ready_drain(name: &str) -> PostReplacementDrain {
         PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
             AbilityDefinition::new(
@@ -53647,6 +53811,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         }));
         variants.push(Box::new(WaitingFor::DefilerPayment {
             player: PlayerId(0),
@@ -54561,6 +54726,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
         let json = serde_json::to_string(&wf).unwrap();
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
@@ -55360,6 +55526,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
         let json = serde_json::to_string(&wf).expect("serialize");
         // Modern shape must be emitted, NOT the legacy bool field.

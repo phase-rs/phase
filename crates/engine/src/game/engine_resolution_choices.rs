@@ -6510,7 +6510,6 @@ pub(super) fn handle_resolution_choice(
                     "Selected cards must be distinct".to_string(),
                 ));
             }
-
             let current_hand: std::collections::HashSet<ObjectId> = state
                 .players
                 .iter()
@@ -6824,6 +6823,9 @@ pub(super) fn handle_resolution_choice(
                 is_cost_payment,
                 enters_modified_if,
                 duration,
+                // The prompt-owned scope is retired by replacing
+                // `waiting_for`; the answer path does not read it.
+                privacy_zones: _,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -15258,6 +15260,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
         state.waiting_for = waiting.clone();
 
@@ -15369,6 +15372,7 @@ mod tests {
                     is_cost_payment: false,
                     enters_modified_if: None,
                     duration: None,
+                    privacy_zones: None,
                 };
                 state.waiting_for = waiting.clone();
                 let life_before = state.players[0].life;
