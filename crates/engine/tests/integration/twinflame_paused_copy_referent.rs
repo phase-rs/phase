@@ -31,7 +31,9 @@
 //!
 //! Every pause row also pins owner custody: the CopyToken owner stays on the
 //! resolution stack across every non-final answer, and its one
-//! `EffectResolved{CopyTokenOf}` follows the last `TokenCreated` of its batches.
+//! `EffectResolved{CopyTokenOf}` follows the last `TokenCreated` of its batches,
+//! and the owner completes in the answer that settles the resolution, with no
+//! priority window and no phase change before it (CR 117.2e).
 
 use std::collections::HashSet;
 
@@ -81,6 +83,7 @@ const KIKI_JIKI: &str = "Kiki-Jiki, Mirror Breaker";
 const RAISE_THE_ALARM: &str = "Raise the Alarm";
 const MOONLIT_MEDITATION: &str = "Moonlit Meditation";
 const ESIX: &str = "Esix, Fractal Bloom";
+const METALLIC_MIMIC: &str = "Metallic Mimic";
 
 /// Targets set up before every other permanent: a creature that "may enter as
 /// a copy of any creature on the battlefield" would otherwise prompt its own
@@ -262,6 +265,7 @@ fn settle_with(
     mut driven: Driven,
     mut answer: impl FnMut(&WaitingFor, &mut Driven) -> Option<GameAction>,
 ) -> Driven {
+    let phase = driven.runner.state().phase;
     if is_paused(&driven.runner) {
         assert!(
             has_copy_token_frame(&driven.runner),
@@ -300,6 +304,10 @@ fn settle_with(
         frame_kinds(&driven.runner)
     );
     assert!(state.stack.is_empty(), "the stack must be empty");
+    assert_eq!(
+        state.phase, phase,
+        "CR 500.2 + CR 117.2e: the step cannot end while the resolution is in progress"
+    );
 
     // Owner custody: the producer's one terminal, after every token it created.
     let producer = driven.producer;
@@ -1601,6 +1609,7 @@ fn run_kiki_jiki_with(
             "REACH-GUARD: before the activation LastCreated names the Soldiers"
         );
     }
+    let phase = runner.state().phase;
     let mut actions = vec![runner
         .activate(kiki, 0)
         .target_object(target)
@@ -1634,6 +1643,35 @@ fn run_kiki_jiki_with(
         prompts.push(prompt);
         actions.push(runner.act(action).expect("answer must be accepted").events);
     }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().resolution_stack.is_empty(),
+        "CR 117.2e + CR 608.2: the activation finishes resolving in the answer to its last \
+         prompt, waiting {:?}, frames {:?}, prompts {prompts:?}",
+        runner.state().waiting_for,
+        frame_kinds(&runner)
+    );
+    assert_eq!(
+        runner.state().phase,
+        phase,
+        "CR 117.4 + CR 500.2: the phase cannot end while Kiki-Jiki's ability is resolving"
+    );
+    assert!(
+        actions
+            .last()
+            .expect("at least the activation")
+            .iter()
+            .any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::CopyTokenOf,
+                    source_id,
+                    ..
+                } if *source_id == kiki
+            )),
+        "custody: Kiki-Jiki's copy owner completes in the action that settles the resolution, \
+         prompts {prompts:?}"
+    );
     let activation: Vec<GameEvent> = actions.iter().flatten().cloned().collect();
     assert!(
         activation.iter().any(|event| matches!(
@@ -1799,6 +1837,48 @@ fn r17_control_copy_is_sacrificed_at_the_end_step() {
     }
 }
 
+/// R7k: Kiki-Jiki copies Metallic Mimic. The copy has Mimic's "As this
+/// creature enters, choose a creature type" (CR 707.2), made before it enters
+/// (CR 614.12a), so Kiki-Jiki's owner is parked at the choice. The choice's
+/// answer enters the copy, and only then does the owner complete: "it" is the
+/// Mimic copy, sacrificed at the next end step (CR 608.2c).
+#[test]
+fn r7k_as_enters_choice_on_kiki_jikis_copy_enters_before_the_owner_completes() {
+    let run = run_kiki_jiki_with(
+        KikiJikiBoard {
+            target: METALLIC_MIMIC,
+            board: vec![],
+            moonlit: false,
+            raise_the_alarm: false,
+        },
+        |waiting, _, _| match waiting {
+            WaitingFor::NamedChoice { options, .. } => Some(GameAction::ChooseOption {
+                choice: options[0].clone(),
+            }),
+            _ => None,
+        },
+    );
+    let Some(run) = run else {
+        return;
+    };
+    assert_eq!(
+        run.prompts,
+        vec![KikiJikiPrompt {
+            kind: "NamedChoice",
+            candidates: Vec::new(),
+            copy_token_frames: 1,
+        }],
+        "REACH-GUARD: one prompt, the copy's as-enters creature-type choice, raised with \
+         Kiki-Jiki's copy owner parked"
+    );
+    assert_eq!(
+        run.token_names,
+        vec![METALLIC_MIMIC.to_string()],
+        "the one token is the Mimic copy"
+    );
+    assert_kiki_jiki_sacrifices_its_token(&run, METALLIC_MIMIC, &[KIKI_JIKI, METALLIC_MIMIC]);
+}
+
 /// The index of `source`'s accepting answer at an optional replacement prompt.
 fn accept_index(candidates: &[ReplacementCandidateSummary], source: &str) -> usize {
     candidates
@@ -1834,16 +1914,6 @@ fn moonlit_kiki_board(target: &'static str, board: Vec<(PlayerId, &'static str)>
         moonlit: true,
         raise_the_alarm: false,
     }
-}
-
-/// The resolution's copy owner can be left parked at a priority window after
-/// the substitute's last answer, with nothing on the stack; passing priority
-/// resumes it. That is a residual of its own (the owner should complete in the
-/// answer that settles the substitute); these rows judge only what the owner
-/// names once it completes.
-fn pass_stranded_priority(waiting: &WaitingFor, runner: &GameRunner) -> Option<GameAction> {
-    (matches!(waiting, WaitingFor::Priority { .. }) && has_copy_token_frame(runner))
-        .then_some(GameAction::PassPriority)
 }
 
 /// CR 614.6 + CR 608.2c: Kiki-Jiki's "it" is the one token its instruction
@@ -2016,7 +2086,7 @@ fn moonlit_then_jinnie(
             branch_frames.push(frame_kinds(runner));
             Some(GameAction::ChooseBranch { index: 0 })
         }
-        _ => pass_stranded_priority(waiting, runner),
+        _ => None,
     }
 }
 
@@ -2074,7 +2144,7 @@ fn r19_moonlit_copy_paused_inside_a_declined_jinnie_prompt_is_kiki_jikis_it() {
 fn r19b_moonlit_copy_paused_on_a_counter_prompt_is_kiki_jikis_it() {
     let run = run_kiki_jiki_with(
         moonlit_kiki_board(TRISKELION, counter_board()),
-        |waiting, runner, _| match waiting {
+        |waiting, _, _| match waiting {
             WaitingFor::ReplacementChoice { candidates, .. }
                 if only_from(candidates, MOONLIT_MEDITATION) =>
             {
@@ -2093,7 +2163,7 @@ fn r19b_moonlit_copy_paused_on_a_counter_prompt_is_kiki_jikis_it() {
                     .expect("REACH-GUARD: the counter ordering offers Hardened Scales");
                 Some(GameAction::ChooseReplacement { index })
             }
-            _ => pass_stranded_priority(waiting, runner),
+            _ => None,
         },
     );
     let Some(run) = run else {
@@ -2164,6 +2234,48 @@ fn r22_jinnie_cat_replacing_moonlits_copy_is_kiki_jikis_it() {
     );
 }
 
+/// R22p: R22's board and answers, with passing priority allowed whenever a
+/// priority window opens while the resolution is still under way. No player
+/// receives priority while Kiki-Jiki's ability resolves (CR 117.2e), so no
+/// such window opens, and the main phase cannot end mid-resolution
+/// (CR 117.4 + CR 500.2).
+#[test]
+fn r22p_no_priority_window_while_kiki_jikis_ability_resolves() {
+    let mut branch_frames = Vec::new();
+    let mut stranded: Vec<(Phase, Vec<FrameKind>)> = Vec::new();
+    let mut answer = moonlit_then_jinnie(true, &mut branch_frames);
+    let run = run_kiki_jiki_with(
+        moonlit_kiki_board(BEARS, vec![(P0, JINNIE)]),
+        |waiting, runner, prompts| {
+            if matches!(waiting, WaitingFor::Priority { .. })
+                && !runner.state().resolution_stack.is_empty()
+            {
+                stranded.push((runner.state().phase, frame_kinds(runner)));
+                return Some(GameAction::PassPriority);
+            }
+            answer(waiting, runner, prompts)
+        },
+    );
+    let Some(run) = run else {
+        return;
+    };
+    assert!(
+        stranded.is_empty(),
+        "no player receives priority while Kiki-Jiki's ability resolves, passes taken at \
+         {stranded:?}"
+    );
+    assert_eq!(
+        run.token_names,
+        vec!["Cat".to_string()],
+        "REACH-GUARD: the token is Jinnie Fay's Cat"
+    );
+    assert_kiki_jiki_sacrifices_its_token(
+        &run,
+        "Cat",
+        &[KIKI_JIKI, BEARS, MOONLIT_MEDITATION, JINNIE],
+    );
+}
+
 /// R20: Twinflame on two Grizzly Bears with P0's Esix, Fractal Bloom. Esix is
 /// accepted on the first copy's event and the second Bears is chosen, so the
 /// first batch's token is Esix's copy (CR 614.6), and it is one of "those
@@ -2181,7 +2293,7 @@ fn r20_esix_copy_joins_those_tokens() {
             WaitingFor::CopyTargetChoice { .. } => GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(driven.sources[1])),
             },
-            _ => return pass_stranded_priority(waiting, &driven.runner),
+            _ => return None,
         };
         prompts.push((
             waiting.variant_name(),
@@ -2249,7 +2361,7 @@ fn r21_jinnie_cat(carry: PauseCarry) {
                 index: accept_index(candidates, JINNIE),
             },
             WaitingFor::ChooseOneOfBranch { .. } => GameAction::ChooseBranch { index: 0 },
-            _ => return pass_stranded_priority(waiting, &driven.runner),
+            _ => return None,
         };
         prompts.push(waiting.variant_name());
         let owner = copy_token_owner(&driven.runner)
