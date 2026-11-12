@@ -19228,6 +19228,16 @@ fn resolve_after_scope_with_created_seats(
     outcome
 }
 
+/// CR 608.2: is this node a per-seat leg of a `player_scope` clause — one whose
+/// acting controller the driver rebound to the seat (`bind_scoped_seat`), so it
+/// differs from the ability's original controller? A node resolving for its own
+/// controller (Court of Locthwain's linked-exile permission) is not one.
+fn is_rebound_player_scope_seat(ability: &ResolvedAbility) -> bool {
+    ability
+        .original_controller
+        .is_some_and(|original| original != ability.controller)
+}
+
 /// CR 608.2c + CR 400.1: can this effect move objects between zones, so that
 /// its own result is what a later "this way" gate reads? Reuses the producer
 /// action table ([`this_way_cause_for_effect`] +
@@ -24571,11 +24581,15 @@ fn resolve_chain_body(
     // so it leaves the moving instruction's ledger in place for the head.
     if !permission_node_keeps_ledger_for_this_way_head(ability)
         && !(zone_changed_ids.is_empty() && gated_run_keeps_ledger_for_this_way_head(ability))
-        // CR 608.2c: a node whose effect cannot move objects (Xathrid Demon's
-        // "each opponent loses life ...") is not the instruction "this way"
-        // names, so it leaves the moving instruction's ledger for the
-        // fallback that follows it.
-        && (!zone_changed_ids.is_empty() || effect_moves_objects(&ability.effect))
+        // CR 608.2c: a per-seat leg of a player-scope clause whose effect cannot move objects
+        // (Xathrid Demon's "each opponent loses life ...") is not the
+        // instruction "this way" names, so it leaves the moving instruction's
+        // ledger for the fallback that follows it. Every other non-moving node
+        // keeps the reset: a linked-exile cast permission (Court of Locthwain,
+        // CR 406.6) relies on it to leave older linked cards castable.
+        && (!zone_changed_ids.is_empty()
+            || !is_rebound_player_scope_seat(ability)
+            || effect_moves_objects(&ability.effect))
     {
         state.last_zone_changed_ids = zone_changed_ids;
     }
