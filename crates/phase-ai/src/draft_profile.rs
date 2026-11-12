@@ -3671,6 +3671,30 @@ mod tests {
     }
 
     #[test]
+    fn leveler_library_exile_is_not_removal() {
+        let p = DraftProfile::kamigawa_block();
+        // Leveler: "When this creature enters, exile all cards from your library."
+        // This is a bulk exile from library, not battlefield — not removal.
+        let leveler = oracle_face(serde_json::json!({
+            "name": "Leveler",
+            "manaCost": "{3}",
+            "manaValue": 3.0,
+            "colors": [],
+            "type": "Artifact Creature — Construct",
+            "types": ["Artifact", "Creature"],
+            "subtypes": ["Construct"],
+            "power": "10",
+            "toughness": "10",
+            "text": "When this creature enters, exile all cards from your library.",
+        }));
+        // Classic reading: should NOT be removal because origin is library, not battlefield.
+        assert!(!classify(&leveler).contains(&CardClass::Removal));
+        assert!(!roles(&leveler).contains(&DeckRole::Removal));
+        let scored = first_pick(p, &card("Leveler", "CHK", &[], &leveler));
+        assert_eq!(scored.class_bonus, 0.0, "Leveler is not removal");
+    }
+
+    #[test]
     fn reciprocate_battlefield_exile_with_typed_target_is_removal() {
         let p = DraftProfile::kamigawa_block();
         let white = vec!["W".to_string()];
