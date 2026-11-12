@@ -32433,7 +32433,12 @@ fn repeat_for_each_this_way_suffix(pred_lower: &str) -> Option<QuantityExpr> {
 /// (`Controller`), a bare "that player" placeholder (`Player`), or the generic
 /// subject-parser default (`ParentTargetController`). Does not touch effects
 /// that already carry an explicit owner anaphor (`ParentTargetOwner`).
-fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherits_anchor: bool) {
+fn apply_anchor_subject(
+    effect: &mut Effect,
+    anchor: &TargetFilter,
+    draw_inherits_anchor: bool,
+    preserve_reveal_controller: bool,
+) {
     // `ParentTarget` reaches this chain-local applier only from
     // `bind_player_anchor_in_chain`'s player-only `TargetOnly` wrapper
     // branch. It is a player reference there, but remains excluded from the
@@ -32474,12 +32479,13 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherit
         // actor authority; bind it here, at the clause that resolves the
         // subject, instead of rewriting the completed ability tree.
         Effect::RevealUntil { player, .. }
-            if matches!(*player, TargetFilter::ParentTarget | TargetFilter::Player)
-                || (draw_inherits_anchor
-                    && matches!(
-                        *player,
-                        TargetFilter::Controller | TargetFilter::ParentTargetController
-                    )) =>
+            if !preserve_reveal_controller
+                && (matches!(*player, TargetFilter::ParentTarget | TargetFilter::Player)
+                    || (draw_inherits_anchor
+                        && matches!(
+                            *player,
+                            TargetFilter::Controller | TargetFilter::ParentTargetController
+                        ))) =>
         {
             *player = anchor.clone();
         }
@@ -32540,12 +32546,25 @@ fn apply_anchor_subject_to_clause(
     text_lower: &str,
 ) {
     let draw_inherits_anchor = chunk_continues_anchored_subject(text_lower);
+    // CR 109.5: an explicit "your library" possession is printed, not an
+    // inherited actor; never let the previous clause's anchor overwrite it.
+    let preserve_reveal_controller = scan_contains_phrase(text_lower, "your library");
     apply_their_library_reveal_anchor(&mut clause.effect, anchor, text_lower);
-    apply_anchor_subject(&mut clause.effect, anchor, draw_inherits_anchor);
+    apply_anchor_subject(
+        &mut clause.effect,
+        anchor,
+        draw_inherits_anchor,
+        preserve_reveal_controller,
+    );
     let mut sub = clause.sub_ability.as_deref_mut();
     while let Some(def) = sub {
         apply_their_library_reveal_anchor(def.effect.as_mut(), anchor, text_lower);
-        apply_anchor_subject(def.effect.as_mut(), anchor, draw_inherits_anchor);
+        apply_anchor_subject(
+            def.effect.as_mut(),
+            anchor,
+            draw_inherits_anchor,
+            preserve_reveal_controller,
+        );
         sub = def.sub_ability.as_deref_mut();
     }
 }

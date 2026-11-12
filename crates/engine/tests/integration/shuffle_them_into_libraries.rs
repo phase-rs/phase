@@ -2,11 +2,14 @@
 //! into the library before the shuffle — never a bare shuffle that leaves them
 //! where they were.
 
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter,
+    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter, TargetRef,
 };
+use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -359,46 +362,6 @@ fn serene_remembrance_same_owner_shuffles_once() {
     assert_eq!(outcome.state().objects[&second].zone, Zone::Library);
 }
 
-/// CR 701.24c: the source of a compound "this creature and target …" move can
-/// leave before resolution (here sacrificed as the activation cost). The
-/// source's owner is still an affected owner and shuffles once; the legal
-/// target's owner shuffles once. The stale source itself is not moved.
-#[test]
-fn compound_shuffle_stale_source_still_shuffles_its_owner() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let source = scenario
-        .add_creature_from_oracle(
-            P0,
-            "Sacrificial Shuffler",
-            1,
-            1,
-            "{T}, Sacrifice this creature: Shuffle this creature and target creature into their owners' libraries.",
-        )
-        .id();
-    let target = scenario.add_creature(P1, "P1 Target", 1, 1).id();
-    let mut runner = scenario.build();
-    let outcome = runner.activate(source, 0).target_object(target).resolve();
-    let events = outcome.events();
-
-    assert_eq!(
-        outcome.state().objects[&source].zone,
-        Zone::Graveyard,
-        "the sacrificed source stays in the graveyard, not the library"
-    );
-    assert_eq!(outcome.state().objects[&target].zone, Zone::Library);
-    assert_eq!(
-        shuffles_for(events, P0),
-        1,
-        "the stale source's owner still shuffles once: {events:?}"
-    );
-    assert_eq!(
-        shuffles_for(events, P1),
-        1,
-        "the target's owner shuffles once: {events:?}"
-    );
-}
-
 /// CR 400.7 + CR 701.24c: a plain "when this creature dies, shuffle it into its
 /// owner's library" (Alabaster Dragon class) moves the card from the graveyard,
 /// not from an expected battlefield. The one library shuffle belongs to its
@@ -434,4 +397,149 @@ fn alabaster_dragon_dies_trigger_shuffles_from_the_graveyard() {
         "the owner shuffles exactly once: {events:?}"
     );
     assert_eq!(shuffles_for(events, P1), 0, "{events:?}");
+}
+
+/// Put a source's activated ability on the stack and stop before resolution,
+/// selecting its object target. Mirrors the shared response-test driver.
+fn activate_onto_stack(runner: &mut GameRunner, source: ObjectId, index: usize, target: ObjectId) {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activation is accepted");
+    for _ in 0..8 {
+        match &runner.state().waiting_for {
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    })
+                    .expect("the target is accepted");
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected prompt while activating: {other:?}"),
+        }
+    }
+    assert!(
+        !runner.state().stack.is_empty(),
+        "the ability is on the stack, not resolved"
+    );
+}
+
+/// CR 400.7j: Assemble from Parts grants "Exile this card from your graveyard:
+/// Shuffle it into its owner's library." The cost moves the source to exile, and
+/// the ability's self-reference binds that public-zone successor, so the card is
+/// shuffled from exile, not skipped as a stale battlefield object.
+#[test]
+fn exiled_cost_self_shuffle_finds_the_public_successor() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Assemble Shape",
+            1,
+            1,
+            "{1}{B}{B}, Exile this card from your graveyard: Shuffle it into its owner's library.",
+        )
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, source, false, vec![]),
+            ManaUnit::new(ManaType::Black, source, false, vec![]),
+            ManaUnit::new(ManaType::Black, source, false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    runner.cast(murder).target_object(source).resolve();
+    assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
+
+    let outcome = runner.activate(source, 0).resolve();
+    let events = outcome.events();
+
+    assert_eq!(
+        outcome.state().objects[&source].zone,
+        Zone::Library,
+        "the exiled cost successor is shuffled into its owner's library"
+    );
+    assert_eq!(
+        shuffles_for(events, P0),
+        1,
+        "the owner shuffles exactly once: {events:?}"
+    );
+}
+
+/// CR 701.24c: Floodpits Drowner can be destroyed in response while its other
+/// owner's target remains legal. The stale source does not move, but its known
+/// owner still shuffles; the legal target's owner also shuffles.
+#[test]
+fn drowner_destroyed_in_response_still_shuffles_both_owners() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    const DROWNER: &str = "Flash\nVigilance\nWhen this creature enters, tap target creature an opponent controls and put a stun counter on it.\n{1}{U}, {T}: Shuffle this creature and target creature with a stun counter on it into their owners' libraries.";
+    let drowner = scenario
+        .add_creature_from_oracle(P0, "Floodpits Drowner", 2, 1, DROWNER)
+        .id();
+    let target = scenario.add_creature(P1, "Stunned Target", 1, 1).id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P1, "Murder", true, "Destroy target creature.")
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, drowner, false, vec![]),
+            ManaUnit::new(ManaType::Blue, drowner, false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&target)
+        .unwrap()
+        .counters
+        .insert(CounterType::Stun, 1);
+
+    activate_onto_stack(&mut runner, drowner, 0, target);
+    // Give P1 priority so it can destroy the source before the ability resolves.
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority to P1");
+    }
+    let outcome = runner.cast(murder).target_object(drowner).resolve();
+    let events = outcome.events();
+
+    assert_eq!(
+        outcome.state().objects[&drowner].zone,
+        Zone::Graveyard,
+        "the source was destroyed before resolution"
+    );
+    assert_eq!(
+        outcome.state().objects[&target].zone,
+        Zone::Library,
+        "the legal target still moves"
+    );
+    assert_eq!(
+        shuffles_for(events, P0),
+        1,
+        "the stale source's owner still shuffles: {events:?}"
+    );
+    assert_eq!(
+        shuffles_for(events, P1),
+        1,
+        "the target's owner shuffles: {events:?}"
+    );
 }
