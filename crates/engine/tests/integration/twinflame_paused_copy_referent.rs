@@ -1544,6 +1544,15 @@ fn run_kiki_jiki(halving: bool) -> Option<KikiJikiRun> {
 /// answering), and resolve the next end step's triggers.
 fn run_kiki_jiki_with(
     spec: KikiJikiBoard,
+    answer: impl FnMut(&WaitingFor, &GameRunner, &[KikiJikiPrompt]) -> Option<GameAction>,
+) -> Option<KikiJikiRun> {
+    run_kiki_jiki_with_pause_carry(spec, PauseCarry::Live, answer)
+}
+
+/// Carry each answered prompt either live or through the production restore pipeline.
+fn run_kiki_jiki_with_pause_carry(
+    spec: KikiJikiBoard,
+    carry: PauseCarry,
     mut answer: impl FnMut(&WaitingFor, &GameRunner, &[KikiJikiPrompt]) -> Option<GameAction>,
 ) -> Option<KikiJikiRun> {
     let db = shared_card_db()?;
@@ -1618,12 +1627,35 @@ fn run_kiki_jiki_with(
         .events()
         .to_vec()];
     let mut prompts: Vec<KikiJikiPrompt> = Vec::new();
+    let mut restores = 0;
+    let mut replacement_prompt_restores = 0;
     for _ in 0..MAX_PROMPTS {
         let waiting = runner.state().waiting_for.clone();
         if matches!(waiting, WaitingFor::Priority { .. })
             && runner.state().resolution_stack.is_empty()
         {
             break;
+        }
+        match carry {
+            PauseCarry::Live => {}
+            PauseCarry::SavedAndRestored => {
+                assert!(
+                    !matches!(waiting, WaitingFor::Priority { .. }),
+                    "REACH-GUARD: restore only while paused at a prompt"
+                );
+                let frames = runner.state().resolution_stack.clone();
+                let has_offered_batch = frames.iter().any(|frame| {
+                    matches!(frame, ResolutionFrame::CopyToken(owner)
+                        if owner.offered_batch == OfferedBatchCustody::AtReplacementPrompt)
+                });
+                runner = save_and_restore(&runner);
+                restores += 1;
+                if has_offered_batch {
+                    replacement_prompt_restores += 1;
+                }
+                assert_eq!(runner.state().waiting_for, waiting);
+                assert_eq!(runner.state().resolution_stack, frames);
+            }
         }
         let candidates = match &waiting {
             WaitingFor::ReplacementChoice { candidates, .. } => candidates
@@ -1642,6 +1674,20 @@ fn run_kiki_jiki_with(
         };
         prompts.push(prompt);
         actions.push(runner.act(action).expect("answer must be accepted").events);
+    }
+    match carry {
+        PauseCarry::Live => {}
+        PauseCarry::SavedAndRestored => {
+            assert_eq!(
+                restores,
+                prompts.len(),
+                "every answered prompt was restored"
+            );
+            assert!(
+                replacement_prompt_restores > 0,
+                "REACH-GUARD: restored a CopyToken owner awaiting its substitute batch"
+            );
+        }
     }
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
@@ -2213,6 +2259,42 @@ fn r22_jinnie_cat_replacing_moonlits_copy_is_kiki_jikis_it() {
     // The substitute's drain went into the frame beneath Moonlit's copy owner,
     // which the zero-token delivery of Moonlit's replaced event re-parked on
     // top: that delivery completed having created nothing.
+    assert_eq!(
+        branch_frames,
+        vec![vec![
+            FrameKind::AbilityContinuation,
+            FrameKind::CopyToken,
+            FrameKind::PostReplacement,
+            FrameKind::CopyToken,
+        ]],
+        "REACH-GUARD: one branch prompt, raised with Moonlit's copy owner on top"
+    );
+    assert_eq!(
+        run.token_names[0], "Cat",
+        "REACH-GUARD: the token is Jinnie Fay's Cat"
+    );
+    assert_kiki_jiki_sacrifices_its_token(
+        &run,
+        "Cat",
+        &[KIKI_JIKI, BEARS, MOONLIT_MEDITATION, JINNIE],
+    );
+}
+
+/// R22s: R22's nonempty Cat substitute crosses save/restore at every prompt.
+/// The restored owners adopt the twice-replaced creation's Cat (CR 614.6),
+/// completing resolution without a priority window (CR 117.2e).
+#[test]
+fn r22s_jinnie_cat_replacing_moonlits_copy_is_kiki_jikis_it_across_save_and_restore() {
+    let mut branch_frames = Vec::new();
+    let run = run_kiki_jiki_with_pause_carry(
+        moonlit_kiki_board(BEARS, vec![(P0, JINNIE)]),
+        PauseCarry::SavedAndRestored,
+        moonlit_then_jinnie(true, &mut branch_frames),
+    );
+    let Some(run) = run else {
+        return;
+    };
+    assert_jinnie_prompted_on_moonlits_copy_event(&run);
     assert_eq!(
         branch_frames,
         vec![vec![
