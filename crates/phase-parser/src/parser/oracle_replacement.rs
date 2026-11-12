@@ -6054,10 +6054,16 @@ fn enters_counter_amount_override_present(work_text: &str) -> bool {
 /// the slice after the clause's counters — its first "<type> counter" token,
 /// or the end of a conjoined counter list — with any ", where X is …"
 /// definition already cut; the scan stops at the first sentence end, so a
-/// later sentence's "for each" never counts.
+/// later sentence's "for each" never counts. An "equal to <quantity>" count is
+/// the count itself, read wholesale by `parse_enters_counter_equal_to_quantity`
+/// (CR 122.6), so the scan also stops there: its arithmetic ("equal to one plus
+/// the number of other creatures you control" — Boss's Chauffeur) is the
+/// quantity, not a per-each connective.
 fn enters_counter_sentence_has_per_each_connective(after_counter: &str) -> bool {
     let sentence = nom_primitives::split_once_on(after_counter, ".")
         .map_or(after_counter, |(_, (before, _))| before);
+    let sentence = nom_primitives::split_once_on(sentence, "equal to ")
+        .map_or(sentence, |(_, (before, _))| before);
     nom_primitives::scan_at_word_boundaries(sentence, parse_enters_per_each_connective).is_some()
 }
 

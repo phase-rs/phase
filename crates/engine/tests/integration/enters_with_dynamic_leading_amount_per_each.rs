@@ -312,6 +312,34 @@ fn dynamic_base_plus_additional_for_each_sums_base_and_bonus() {
     assert_represented(&dynamic);
 }
 
+/// CR 122.6 + CR 614.1c: an "equal to <quantity>" count whose quantity has its
+/// own arithmetic ("one plus the number of …") is read whole as the count. The
+/// "plus" belongs to the quantity, not a per-each connective, so the line stays
+/// represented with the offset count (Boss's Chauffeur).
+#[test]
+fn equal_to_count_with_plus_arithmetic_stays_represented() {
+    let chauffeur = face(
+        "Boss's Chauffeur",
+        "This creature enters with a number of +1/+1 counters on it equal to one plus the number of other creatures you control.",
+    );
+    assert_eq!(
+        enters_with_counts(&chauffeur),
+        vec![QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::Another]),
+                    ),
+                },
+            }),
+            offset: 1,
+        }]
+    );
+    assert_represented(&chauffeur);
+}
+
 /// CR 614.1c + CR 107.3m: a conjoined counter list whose later element carries
 /// its own count arithmetic ("and X plus one charge counters on it") has no
 /// per-each tail: the list reads every element, so the line stays represented
