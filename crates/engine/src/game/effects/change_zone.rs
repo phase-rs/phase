@@ -806,19 +806,23 @@ fn self_ref_owner_move_origin(
     let Some(source) = state.objects.get(&ability.source_id) else {
         return origin;
     };
-    // A plain "when this creature dies, shuffle it into its owner's library"
-    // names the card in the graveyard; a compound "this creature and target …"
-    // names the permanent only while it is on the battlefield. The compound
-    // carries a second ChangeZone leg; use that shape to keep the stale-source
-    // guard without stranding the dies-trigger class.
-    let compound = ability.sub_ability.as_deref().is_some_and(|sub| {
-        matches!(
-            &sub.effect,
-            Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. }
-        )
-    });
-    if !compound && source.zone == Zone::Graveyard {
-        return Some(Zone::Graveyard);
+    // CR 400.7j: a cost that moved the source to a public zone followed by the
+    // ability can find that exact successor. This is the Assemble from Parts
+    // "Exile this card from your graveyard: Shuffle it …" path, and also the
+    // dies-trigger's recorded graveyard successor.
+    if let Some(binding) = ability.self_ref_binding(state) {
+        if let Some(bound) = state.objects.get(&binding) {
+            return Some(bound.zone);
+        }
+    }
+    if let Some(paid) = ability.cost_paid_object.as_ref() {
+        if paid.object_id == ability.source_id {
+            if let Some(bound) = state.objects.get(&paid.object_id) {
+                if bound.zone.is_public() {
+                    return Some(bound.zone);
+                }
+            }
+        }
     }
     use crate::types::card_type::CoreType;
     let is_permanent = source.card_types.core_types.iter().any(|core| {
@@ -1248,10 +1252,14 @@ pub fn resolve(
         enters_modified_if: effect_enters_modified_if.as_ref(),
     };
 
-    if !targeted_objects.is_empty() {
-        // CR 701.24c-e + CR 400.3: freeze the prospective owner population
-        // after target legality is known and before any replacement can redirect
-        // a member away from the library.
+    // CR 701.24c-e + CR 400.3: freeze the prospective owner population after
+    // target legality is known and before any replacement can redirect a member
+    // away from the library. A stale SelfRef still names a known owner (the
+    // source's live-or-LKI owner) even when it contributes no movable objects,
+    // so the owner's shuffle survives a source that left in response.
+    let stale_self_ref_owner = matches!(target_filter, TargetFilter::SelfRef)
+        && super::source_owner(state, ability).is_some();
+    if !targeted_objects.is_empty() || stale_self_ref_owner {
         publish_finalized_owner_library_subjects(state, ability, &targeted_objects);
     }
 

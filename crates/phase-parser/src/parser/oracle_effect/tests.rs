@@ -47061,6 +47061,41 @@ fn owner_anchor_does_not_leak_into_following_search_or_shuffle() {
     assert!(checked > 0, "reach guard: the search/shuffle parsed");
 }
 
+/// CR 109.5 + CR 608.2c: a subjectless conjugated continuation can inherit a
+/// prior actor, but an explicit "your library" possession must survive that
+/// carry. Pair it with "their library" in the same conjugated fixture.
+#[test]
+fn conjugated_reveal_keeps_explicit_library_possessor() {
+    for (possessive, expected) in [
+        ("your", TargetFilter::Controller),
+        ("their", TargetFilter::Owner),
+    ] {
+        let def = parse_effect_chain(
+            &format!(
+                "This creature's owner shuffles it into their library. That player draws a card, then reveals cards from the top of {possessive} library until they reveal a creature card."
+            ),
+            AbilityKind::Activated,
+        );
+        let mut node = Some(&def);
+        let mut reveal = None;
+        while let Some(def) = node {
+            if matches!(&*def.effect, Effect::RevealUntil { .. }) {
+                reveal = Some(def);
+                break;
+            }
+            node = def.sub_ability.as_deref();
+        }
+        let reveal = reveal.expect("the conjugated reveal is present");
+        let Effect::RevealUntil { player, .. } = &*reveal.effect else {
+            unreachable!()
+        };
+        assert_eq!(
+            *player, expected,
+            "the {possessive} library possession must survive the conjugated carry"
+        );
+    }
+}
+
 /// CR 109.5 + CR 608.2c: the reveal's printed library possessor controls the
 /// actor. "your library" forces the activator even under an owner anchor;
 /// "their library" keeps the owner antecedent.
