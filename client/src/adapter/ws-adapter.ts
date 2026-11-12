@@ -2855,10 +2855,13 @@ export class WebSocketAdapter implements EngineAdapter {
           // there does not undo the committed adoption: it is reported as an
           // uncaught error (as a raw socket's handler reports it; the gzip and
           // codec transports swallow it on live delivery) and the adopted
-          // socket and the remaining frames carry on.
+          // socket and the remaining frames carry on. The exception is the
+          // frame that settled the confirmation throwing before it decided the
+          // episode: nothing else would settle it, so it fails the attachment.
           try {
             handleSocketMessage(messages[index]!);
           } catch (error) {
+            if (this.reconnectInFlight && parsedSetupFrames.has(messages[index]!)) throw error;
             reportUncaughtError(error);
           }
         }

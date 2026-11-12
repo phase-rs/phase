@@ -1494,9 +1494,15 @@ export class ServerDraftAdapter implements EngineAdapter {
         // adoption: it is reported as an uncaught error (as a raw socket's
         // handler reports it; the gzip and codec transports swallow it on live
         // delivery) and the adopted socket and the remaining frames carry on.
+        // The exception is the frame that settled the confirmation throwing
+        // before it settled the reattach: nothing else would, so it fails the
+        // attachment.
         try {
           handleMessage(setupMessages[index]!);
         } catch (error) {
+          if (initOwner !== null && this.pendingInit === initOwner && parsedSetupFrames.has(setupMessages[index]!)) {
+            throw error;
+          }
           reportUncaughtError(error);
         }
       }

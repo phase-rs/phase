@@ -4609,6 +4609,24 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
+    it("fails the reattach when the settling frame throws before it settles it", async () => {
+      vi.useFakeTimers();
+      const { adapter, candidate, reconnecting } = await sentCandidate();
+      try {
+        // Synthetic: a positive-tagged DraftStateUpdate without its view. The
+        // tag confirms the candidate, and handling the frame throws before the
+        // reattach is settled.
+        receive(candidate, "DraftStateUpdate", {});
+        // Nothing else would settle the reattach, so it fails and the
+        // candidate is retired, as before the drain was isolated.
+        await vi.waitFor(() => expect(reconnecting.value()).toBeInstanceOf(Error));
+        await vi.waitFor(() => expect(candidate.close).toHaveBeenCalled());
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
     it("keeps a malformed frame ahead of the bootstrap from undoing the adopted reattach", async () => {
       vi.useFakeTimers();
       const { adapter, candidate, reconnecting } = await sentCandidate();

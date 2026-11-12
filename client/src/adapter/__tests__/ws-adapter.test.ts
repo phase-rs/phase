@@ -6465,6 +6465,9 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
     ] as const)("adopts on the pregame seat return frame %s", async (type, data) => {
       const { adapter, raw, candidate } = await sentCandidate();
       try {
+        // Each frame alone is synthetic: this server sends GameCreated and then
+        // SessionAttached for a pregame seat (main.rs:2389-2400). The classifier
+        // treats either as the positive bootstrap.
         candidate.dispatchSynthetic("message", JSON.stringify({ type, data }));
         await vi.waitFor(() => expect(raw.close).toHaveBeenCalledOnce());
         expect(candidate.close).not.toHaveBeenCalled();
@@ -6638,6 +6641,29 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
         deliverCodec(candidate, "Full", codecGameStarted(5, 5));
         await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
         expect(events).not.toContainEqual({ type: "reconnectFailed" });
+      } finally {
+        adapter.dispose();
+      }
+    });
+
+    it("fails the attachment when the settling bootstrap throws before it decides the episode", async () => {
+      const { adapter, raw, candidate, events } = await sentCandidate();
+      try {
+        // Synthetic: a positive-tagged GameStarted without its state. The tag
+        // confirms the candidate, and handling the frame throws before the
+        // episode is decided.
+        deliverCodec(candidate, "Full", {
+          type: "GameStarted",
+          data: { state_revision: 5, your_player: 0, player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY },
+        });
+        // Nothing else would settle the episode, so the attachment fails as
+        // it did before the drain was isolated: candidate retired, failure
+        // announced, no adopted socket left half open.
+        await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnectFailed" }));
+        await vi.waitFor(() => expect(candidate.close).toHaveBeenCalled());
+        expect(events).not.toContainEqual({ type: "reconnected", inGame: true });
+        expect((adapter as unknown as { reconnectInFlight: boolean }).reconnectInFlight).toBe(false);
+        void raw;
       } finally {
         adapter.dispose();
       }
