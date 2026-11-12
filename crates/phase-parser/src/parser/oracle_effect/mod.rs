@@ -29417,7 +29417,9 @@ fn withhold_resolution_timing_from_choices_feeding_printed_targets(clauses: &mut
 /// a clause that prints no "target". Runs before
 /// `withhold_resolution_timing_from_choices_feeding_printed_targets`, whose
 /// withheld choices are kept at cast for their own reason and do not hold the rest
-/// of the chain back.
+/// of the chain back; so an independent choice written before such a withheld one
+/// still resolves at resolution, which is the intended split (the printed target's
+/// antecedent is announced at cast, CR 601.2c).
 fn withhold_resolution_timing_beside_a_cast_time_choice(
     clauses: &mut [ClauseIr],
     ctx: &ParseContext,
@@ -29486,6 +29488,15 @@ fn withhold_resolution_timing_from_repeated_choices(clauses: &mut [ClauseIr]) {
     {
         if matches!(clause.parsed.effect, Effect::TargetOnly { .. }) {
             clause.declared_target_choice_timing = None;
+        }
+        // A compound continuation's choice ("For each opponent, exile all
+        // graveyards and choose a creature you control.") repeats with its clause.
+        let mut node = clause.parsed.sub_ability.as_deref_mut();
+        while let Some(def) = node {
+            if matches!(def.effect.as_ref(), Effect::TargetOnly { .. }) {
+                def.target_choice_timing = TargetChoiceTiming::Stack;
+            }
+            node = def.sub_ability.as_deref_mut();
         }
     }
 }
@@ -32587,7 +32598,7 @@ impl CarriedPlayerSubject {
 /// is never a player chooser).
 fn non_controller_subject_chooser(subject: &TargetFilter) -> Option<ClauseChooser> {
     (!matches!(subject, TargetFilter::Controller | TargetFilter::SelfRef))
-        .then(|| ClauseChooser::Subject(subject.clone()))
+        .then_some(ClauseChooser::Subject)
 }
 
 /// CR 608.2c + CR 608.2d: the chooser a chunk that names no subject of its own
@@ -32613,11 +32624,11 @@ fn sentence_chooser_before(earlier: &[ClauseChunk], ctx: &ParseContext) -> Optio
         .find_map(|chunk| {
             let (is_optional, accepting_players, player_scope, rest) =
                 strip_optional_effect_prefix(strip_leading_sequence_connector(&chunk.text).trim());
-            if let Some(scope) = accepting_players {
-                return Some(Some(ClauseChooser::AcceptingPlayers(scope)));
+            if accepting_players.is_some() {
+                return Some(Some(ClauseChooser::AcceptingPlayers));
             }
-            if let Some(scope) = player_scope {
-                return Some(Some(ClauseChooser::Scope(scope)));
+            if player_scope.is_some() {
+                return Some(Some(ClauseChooser::Scope));
             }
             if is_optional {
                 // A bare "you may" names the controller.

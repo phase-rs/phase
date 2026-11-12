@@ -80704,6 +80704,19 @@ fn bare_choose_repeated_per_opponent_keeps_base_timing() {
         TargetChoiceTiming::Stack,
         "{text}"
     );
+    // A compound continuation's choice repeats with its clause and keeps its base
+    // timing too.
+    let text = "For each opponent, exile all graveyards and choose a creature you control.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        def.repeat_for.is_some(),
+        "{text}: reach guard for the repeat: {def:#?}"
+    );
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![TargetChoiceTiming::Stack],
+        "{text}: {def:#?}"
+    );
     let control = parse_effect_chain("Choose a creature you control.", AbilityKind::Spell);
     assert_eq!(control.target_choice_timing, TargetChoiceTiming::Resolution);
 }

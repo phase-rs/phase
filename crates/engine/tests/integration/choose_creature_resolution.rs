@@ -1955,6 +1955,7 @@ fn goliath_hatchery_upkeep_trigger_offers_the_controllers_creatures_at_resolutio
         shroud,
         "Goliath Hatchery",
     );
+    assert_resolution_settled(&runner, "Goliath Hatchery");
 }
 
 #[test]
@@ -1984,4 +1985,5 @@ fn ascent_of_the_worthy_first_chapter_offers_the_controllers_creatures_at_resolu
         shroud,
         "Ascent of the Worthy",
     );
+    assert_resolution_settled(&runner, "Ascent of the Worthy");
 }

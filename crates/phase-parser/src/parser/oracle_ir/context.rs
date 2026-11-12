@@ -17,19 +17,19 @@ use crate::types::zones::Zone;
 /// lowered, when that is not proven to be the ability's controller. `TargetOnly`'s
 /// resolution-time chooser prompts only the controller, so a bare choice owned by
 /// any of these keeps the timing it had before the bare-choice producer existed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClauseChooser {
     /// A subject other than the controller or the source: printed on the
     /// predicate ("an opponent chooses ..."), carried by a conjugated
     /// continuation, or named by an earlier chunk of the same sentence (CR 608.2c).
-    Subject(TargetFilter),
+    Subject,
     /// A player scope peeled from an earlier chunk of the same sentence that this
     /// subjectless chunk continues ("each opponent may draw a card, then choose
     /// ...").
-    Scope(PlayerFilter),
+    Scope,
     /// An accepting-player scope peeled from an earlier chunk of the same sentence
     /// ("any opponent may ..., then choose ...").
-    AcceptingPlayers(OpponentMayScope),
+    AcceptingPlayers,
     /// An earlier chunk of the same sentence names a subject the parser does not
     /// recognize ("your opponents each draw a card, then choose ..."; "an opponent
     /// does the same, then chooses ..."). It is not proven to be the controller, so
@@ -815,9 +815,15 @@ pub struct ParseContext {
     /// on the compound continuations it owns, which is the timing those clauses had
     /// before the producer existed. The object-and-player producer declares
     /// `Resolution` for every subject, as it always did. The bare choice's
-    /// `Resolution` declaration is withdrawn after the chain is built when a later
-    /// clause's printed "target" was bound to the chosen object or left
-    /// unimplemented (`withhold_resolution_timing_from_choices_feeding_printed_targets`).
+    /// `Resolution` declaration is withdrawn after the chain is built, in three
+    /// passes that restore the timing the choice had before the producer existed:
+    /// when the choice is repeated per player or object
+    /// (`withhold_resolution_timing_from_repeated_choices`); when the chain holds
+    /// another cast-time bare choice, such as another player's
+    /// (`withhold_resolution_timing_beside_a_cast_time_choice`); and when a later
+    /// clause's printed "target" was bound to the choice or left unimplemented
+    /// (`withhold_resolution_timing_from_choices_feeding_printed_targets`, which
+    /// withdraws only that clause's antecedent choice).
     ///
     /// Set and consumed within a single chunk parse; never serialized. A
     /// speculative sub-parse that discards its cloned context discards this too.
