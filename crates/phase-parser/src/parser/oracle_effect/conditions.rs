@@ -12344,14 +12344,15 @@ mod tests {
 
     /// CR 608.2c: a card whose spell is rewritten at cast has no spell line
     /// proven to be its spell's resolved root with its printed targets, and the
-    /// fact is read from the card's own printed keyword line, the input
-    /// production supplies:
+    /// fact is read from the card's own printed keyword line (and, for gift,
+    /// the MTGJSON keyword), the input production supplies:
     /// - fuse (CR 702.102d): Tear's printed text with the suffix, as a split
     ///   card's half reaches the parser (with the export's
     ///   `__force_keyword_extract__` sentinel instead of MTGJSON names);
     /// - splice (CR 702.47a): Glacial Ray's printed splice line;
-    /// - gift (CR 702.174j): Long River's Pull's printed gift line, read from
-    ///   the printed line or the MTGJSON gift keyword;
+    /// - gift (CR 702.174j): Long River's Pull's printed gift line, once with
+    ///   the MTGJSON gift keyword and once with the typed line alone (a
+    ///   multi-face card gets the sentinel instead of MTGJSON names);
     /// - overload (CR 702.96b): Cyclonic Rift's printed overload line;
     /// - awaken (CR 702.113a): Scatter to the Winds' printed awaken line;
     /// - a splice host (CR 702.47b): the same spell line on an Arcane instant.
@@ -12416,6 +12417,15 @@ mod tests {
                      If you do, they draw a card before its other effects.)\n{spell}"
                 ),
                 vec!["Gift".to_owned()],
+                no_subtypes.clone(),
+                Some(gift),
+            ),
+            (
+                format!(
+                    "Gift a card (You may promise an opponent a gift as you cast this spell. \
+                     If you do, they draw a card before its other effects.)\n{spell}"
+                ),
+                Vec::new(),
                 no_subtypes.clone(),
                 Some(gift),
             ),
@@ -12771,9 +12781,12 @@ mod tests {
     /// synthesized Equip sits under it), so an activated ability's effect on a
     /// gift card is no resolved root and its suffix is an explicit gap. The
     /// engine keys on the MTGJSON gift keyword, and the keyword router cannot
-    /// type every printed gift line, so each row passes the MTGJSON keyword and
+    /// type every printed gift line, so the rows pass the MTGJSON keyword with
     /// one printed line: Long River's Pull's (typed), Archival Whorl's "Gift a
-    /// Rhystic Study" and Octomancer's "Gift an Octopus" (both untyped). Synthetic
+    /// Rhystic Study" and Octomancer's "Gift an Octopus" (both untyped); one
+    /// more row passes the typed line with no MTGJSON keyword (a multi-face
+    /// card gets the sentinel instead), which only the printed-line read
+    /// declines. Synthetic
     /// text: those lines with `target_controller_suffix_on_an_activated_ability_binds`'s
     /// activated ability. The reach guards parse the same activated line without
     /// a gift line and assert it binds, and assert whether the router types
@@ -12789,16 +12802,26 @@ mod tests {
             "reach guard: it binds without gift"
         );
 
-        for (gift, router_types_it) in [
+        let mtgjson_gift = vec!["Gift".to_owned()];
+        for (gift, keywords, router_types_it) in [
             (
                 "Gift a card (You may promise an opponent a gift as you cast this spell. If \
                  you do, they draw a card before its other effects.)",
+                mtgjson_gift.clone(),
                 true,
             ),
-            ("Gift a Rhystic Study", false),
+            // The typed line alone, with no MTGJSON keyword (a multi-face card).
+            (
+                "Gift a card (You may promise an opponent a gift as you cast this spell. If \
+                 you do, they draw a card before its other effects.)",
+                Vec::new(),
+                true,
+            ),
+            ("Gift a Rhystic Study", mtgjson_gift.clone(), false),
             (
                 "Gift an Octopus (You may promise an opponent a gift as you cast this spell. If \
                  you do, when it enters, they create an 8/8 blue Octopus creature token.)",
+                mtgjson_gift.clone(),
                 false,
             ),
         ] {
@@ -12814,13 +12837,8 @@ mod tests {
                 "reach guard: {gift}: whether the router types the gift line"
             );
             let text = format!("{gift}\n{activated}");
-            let parsed = parse_oracle_text(
-                &text,
-                "Synthetic",
-                &["Gift".to_owned()],
-                &["Creature".to_owned()],
-                &[],
-            );
+            let parsed =
+                parse_oracle_text(&text, "Synthetic", &keywords, &["Creature".to_owned()], &[]);
             let definitions = all_chain_definitions(&parsed);
             assert!(
                 definitions

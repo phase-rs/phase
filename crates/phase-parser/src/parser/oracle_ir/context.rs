@@ -949,8 +949,8 @@ pub struct ParseContext {
     pub resolved_chain_root: ResolvedChainRoot,
     /// CR 608.2c: the card-level proof for the effects of this card's activated
     /// abilities ([`ResolvedChainRoot`]), set once by the pipeline from the
-    /// card's printed keyword lines and read by the activated-ability entry
-    /// point. `Unproven` by default, so a context built elsewhere proves
+    /// card's gift keyword (MTGJSON or printed line) and read by the
+    /// activated-ability entry point. `Unproven` by default, so a context built elsewhere proves
     /// nothing. Never serialized.
     pub activated_chain_root: ResolvedChainRoot,
     /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
