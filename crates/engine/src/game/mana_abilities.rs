@@ -3900,7 +3900,8 @@ fn finish_mana_ability_cost_payment(
             |state, resolved_for_prompt| {
                 // The production node — the root for a plain mana ability, a
                 // later link when instructions precede the mana.
-                let production = find_mana_effect(resolved_for_prompt).unwrap_or(resolved_for_prompt);
+                let production =
+                    find_mana_effect(resolved_for_prompt).unwrap_or(resolved_for_prompt);
                 mana_choice_prompt(
                     &production.effect,
                     state,

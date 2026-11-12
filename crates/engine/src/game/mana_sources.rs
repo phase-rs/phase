@@ -2420,13 +2420,26 @@ pub(crate) fn feasible_mana_capacity(
     controller: PlayerId,
     payment_context: Option<&PaymentContext<'_>>,
 ) -> u32 {
+    feasible_mana_capacity_for_cast(state, object_id, controller, payment_context, None)
+}
+
+/// [`feasible_mana_capacity`] while `casting_spell` is being cast: a
+/// resolution-time reveal choice (Metalworker) is sized without that spell
+/// (CR 601.2a, via [`reveal_eligible_hand_cards`]).
+pub(crate) fn feasible_mana_capacity_for_cast(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    payment_context: Option<&PaymentContext<'_>>,
+    casting_spell: Option<ObjectId>,
+) -> u32 {
     mana_capacity(
         state,
         object_id,
         controller,
         payment_context,
         CapacityUse::Castability,
-        None,
+        casting_spell,
     )
 }
 
@@ -2714,11 +2727,16 @@ pub(crate) fn has_activatable_player_choice_mana_ability_for_payment(
             // `is_active_tap_mana_ability` on the auto-tap path; a tap cost that
             // chooses an object (CR 605.3a) belongs here with the ambiguous
             // non-tap costs (KCI's "Sacrifice an artifact", discard, pay-life).
-            if (has_tap_component(&ability.cost)
-                && !mana_abilities::cost_requires_object_choice(
-                    state, controller, object_id, ability,
-                ))
-                || has_unambiguous_self_sacrifice_component(&ability.cost)
+            // A reveal-then-mana ability (Metalworker) is never auto-tapped: its
+            // reveal is the payer's choice at resolution (CR 107.1c), so it stays
+            // here even though its cost is a plain {T}.
+            let payer_chooses_at_resolution = reveal_then_mana_shape(ability).is_some();
+            if !payer_chooses_at_resolution
+                && ((has_tap_component(&ability.cost)
+                    && !mana_abilities::cost_requires_object_choice(
+                        state, controller, object_id, ability,
+                    ))
+                    || has_unambiguous_self_sacrifice_component(&ability.cost))
             {
                 return false;
             }
@@ -2738,7 +2756,15 @@ pub(crate) fn has_activatable_player_choice_mana_ability_for_payment(
                     object_id,
                     payment_context,
                 ),
-                _ => false,
+                _ => reveal_then_mana_shape(ability).is_some_and(|shape| {
+                    mana_ability_allowed_for_payment(
+                        ability,
+                        shape.restrictions,
+                        state,
+                        object_id,
+                        payment_context,
+                    )
+                }),
             }
         })
     })
@@ -2943,6 +2969,7 @@ fn activatable_mana_profiles_for_object(
     object_id: ObjectId,
     controller: PlayerId,
     payment_context: Option<&PaymentContext<'_>>,
+    casting_spell: Option<ObjectId>,
 ) -> Vec<ActivatableManaProfile> {
     let Some(obj) = state.objects.get(&object_id) else {
         return Vec::new();
@@ -2990,7 +3017,7 @@ fn activatable_mana_profiles_for_object(
             controller,
             ability,
             CapacityUse::Castability,
-            None,
+            casting_spell,
         ) {
             capacity = capacity.max(net);
         }
@@ -3028,7 +3055,7 @@ fn activatable_mana_profiles_for_object(
                 controller,
                 ability,
                 CapacityUse::Castability,
-                None,
+                casting_spell,
             ) {
                 capacity = capacity.max(net);
             }
@@ -3104,7 +3131,10 @@ fn collect_activatable_mana_profiles(
         .battlefield
         .iter()
         .filter(|id| Some(**id) != exclude)
-        .flat_map(|&id| activatable_mana_profiles_for_object(state, id, player, payment_context))
+        .flat_map(|&id| {
+            // `exclude` is the spell being cast when payment is planned for a cast.
+            activatable_mana_profiles_for_object(state, id, player, payment_context, exclude)
+        })
         .collect()
 }
 
@@ -7377,7 +7407,7 @@ mod paid_object_label_tests {
     /// battlefield before it.
     fn profiles(member: &str, others: &[&str]) -> Vec<ActivatableManaProfileKind> {
         let (runner, id) = board(member, others);
-        activatable_mana_profiles_for_object(runner.state(), id, P0, None)
+        activatable_mana_profiles_for_object(runner.state(), id, P0, None, None)
             .into_iter()
             .map(|profile| profile.kind)
             .collect()

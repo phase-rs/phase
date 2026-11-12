@@ -24048,7 +24048,13 @@ fn manual_mana_payment_route(
         .iter()
         .filter(|id| Some(**id) != excluded)
         .map(|&id| {
-            super::mana_sources::feasible_mana_capacity(state, id, player, spell_ctx.as_ref())
+            super::mana_sources::feasible_mana_capacity_for_cast(
+                state,
+                id,
+                player,
+                spell_ctx.as_ref(),
+                source_id,
+            )
         })
         .sum::<u32>()
         .saturating_sub(shard_charge);

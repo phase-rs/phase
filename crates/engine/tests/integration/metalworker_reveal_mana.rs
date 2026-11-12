@@ -854,7 +854,8 @@ fn cast_walking_ballista_with(
 /// paid by revealing them while paying.
 #[test]
 fn metalworker_capacity_counts_the_artifacts_it_could_reveal_for_announced_x() {
-    let (mut runner, _metalworker, artifacts, max) = cast_walking_ballista(2);
+    let (mut runner, metalworker, artifacts, ballista, max) =
+        cast_walking_ballista_with(2, CastPaymentMode::Auto);
     assert_eq!(
         max, 2,
         "four colorless from revealing two artifacts pays X=2"
@@ -863,33 +864,36 @@ fn metalworker_capacity_counts_the_artifacts_it_could_reveal_for_announced_x() {
     runner
         .act(GameAction::ChooseX { value: 2 })
         .expect("announcing X=2 is legal");
-    // Pay by revealing both artifact cards through the mana ability.
-    for _ in 0..6 {
-        match &runner.state().waiting_for {
-            WaitingFor::RevealChoice { .. } => {
-                runner
-                    .act(GameAction::SelectCards {
-                        cards: artifacts.clone(),
-                    })
-                    .expect("revealing both artifacts is legal");
-            }
-            WaitingFor::ManaPayment { .. } => {
-                if colorless(&runner) >= 4 {
-                    runner.act(GameAction::PassPriority).expect("pay");
-                } else {
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
+    // Auto cannot choose the reveal itself: payment is the payer's, with nothing
+    // yet revealed or pooled.
     assert!(
-        runner
-            .state()
-            .stack
-            .iter()
-            .any(|entry| entry.source_id != ObjectId(0)),
-        "Walking Ballista was cast; waiting_for = {:?}",
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "expected the payer's ManaPayment, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(colorless(&runner), 0);
+
+    // Pay by revealing both artifact cards through the mana ability.
+    activate(&mut runner, metalworker);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::RevealChoice { .. }),
+        "expected the payer's RevealChoice, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: artifacts.clone(),
+        })
+        .expect("revealing both artifacts is legal");
+    assert_eq!(colorless(&runner), 4);
+    runner.act(GameAction::PassPriority).expect("pay");
+    // CR 601.2h: payment finalized — the spell is on the stack, the cast is no
+    // longer pending, and the caster holds priority again.
+    assert_eq!(runner.state().objects[&ballista].zone, Zone::Stack);
+    assert!(runner.state().pending_cast.is_none(), "payment finalized");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the cast completes to P0's priority, got {:?}",
         runner.state().waiting_for
     );
 }
@@ -995,5 +999,76 @@ fn x_announcement_projection_is_independent_of_private_hand_contents() {
         json(filter_state_for_unseated_viewer(rich.state())),
         json(filter_state_for_unseated_viewer(poor.state())),
         "spectator projection must not encode the payer's private hand"
+    );
+}
+
+/// CR 601.2g + CR 605.3a: Metalworker plus two artifact cards in hand is the only
+/// source able to pay Juggernaut's {4}. Auto payment cannot choose a reveal
+/// itself, so it must hand the payment to the payer (manual payment) rather
+/// than fail; the payer reveals, and the cast then completes.
+#[test]
+fn auto_cast_with_metalworker_as_only_source_reaches_the_payer_reveal() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let metalworker = scenario
+        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
+        .as_artifact()
+        .id();
+    let art1 = scenario
+        .add_creature_to_hand(P0, "Ornithopter", 0, 2)
+        .as_artifact()
+        .id();
+    let art2 = scenario
+        .add_creature_to_hand(P0, "Memnite", 1, 1)
+        .as_artifact()
+        .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Juggernaut", true)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Auto cast must not fail while Metalworker can pay");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "Auto hands the payment to the payer, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().objects[&art1].zone == Zone::Hand
+            && runner.state().objects[&art2].zone == Zone::Hand,
+        "Auto never reveals or moves cards itself"
+    );
+
+    activate(&mut runner, metalworker);
+    match &runner.state().waiting_for {
+        WaitingFor::RevealChoice { cards, .. } => {
+            assert_eq!(cards.len(), 2, "both other artifacts are offered");
+        }
+        other => panic!("expected the payer's RevealChoice, got {other:?}"),
+    }
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![art1, art2],
+        })
+        .expect("reveal selection is legal");
+    assert_eq!(colorless(&runner), 4);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the pooled mana pays the spell");
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert!(runner.state().pending_cast.is_none(), "payment finalized");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the cast completes to P0's priority, got {:?}",
+        runner.state().waiting_for
     );
 }
