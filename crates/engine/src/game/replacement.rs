@@ -1085,16 +1085,27 @@ fn is_entry_grant_link(link: &AbilityDefinition) -> bool {
 fn strip_entry_grant_links(
     ability: Option<&AbilityDefinition>,
 ) -> Option<(Option<AbilityDefinition>, Vec<AbilityDefinition>)> {
-    let mut links: Vec<&AbilityDefinition> = Vec::new();
-    let mut current = ability;
+    // Fast path FIRST: walk the chain by reference to learn whether it holds
+    // a grant link before collecting or cloning anything, so ordinary
+    // no-grant entry stays allocation-free. The grant case walks twice; the
+    // common case allocates nothing.
+    let mut probe = ability;
     let mut has_grant = false;
-    while let Some(link) = current {
-        has_grant |= is_entry_grant_link(link);
-        links.push(link);
-        current = link.sub_ability.as_deref();
+    while let Some(link) = probe {
+        if is_entry_grant_link(link) {
+            has_grant = true;
+            break;
+        }
+        probe = link.sub_ability.as_deref();
     }
     if !has_grant {
         return None;
+    }
+    let mut links: Vec<&AbilityDefinition> = Vec::new();
+    let mut current = ability;
+    while let Some(link) = current {
+        links.push(link);
+        current = link.sub_ability.as_deref();
     }
     let mut grants = Vec::new();
     let mut filtered_tail: Option<AbilityDefinition> = None;
