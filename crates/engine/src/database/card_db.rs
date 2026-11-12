@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -104,6 +104,10 @@ pub struct CardDatabase {
     /// (Coat of Arms, Changeling expansion) see every printed creature type,
     /// not just the subset present in the loaded decks.
     pub(crate) creature_type_vocabulary: Vec<String>,
+    /// Lazily-built coverage subtype lexicon (see `valid_subtypes`). Built on
+    /// first use so repeated deck-compatibility requests do not rescan every
+    /// face; the database is immutable once loaded.
+    pub(crate) valid_subtypes: OnceLock<HashSet<String>>,
 }
 
 impl CardDatabase {
@@ -199,6 +203,7 @@ impl CardDatabase {
             bracket_lists: BracketLists::default(),
             bracket_signals_by_name,
             creature_type_vocabulary,
+            valid_subtypes: OnceLock::new(),
         }
     }
 
@@ -462,6 +467,13 @@ impl CardDatabase {
         self.search_face_keys
             .iter()
             .filter_map(|key| self.face_index.get(key))
+    }
+
+    /// Coverage subtype lexicon: every subtype printed on a loaded face, the same
+    /// set `analyze_coverage` uses. Computed once per database and cached.
+    pub fn valid_subtypes(&self) -> &HashSet<String> {
+        self.valid_subtypes
+            .get_or_init(|| crate::game::coverage::collect_valid_subtypes(self))
     }
 
     /// CR 205.3m: Returns the full creature subtype vocabulary derived from

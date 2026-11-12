@@ -769,11 +769,15 @@ pub fn default_planar_deck_entries(db: &CardDatabase) -> Vec<DeckEntry> {
 }
 
 pub fn default_scheme_deck_entries(db: &CardDatabase) -> Vec<DeckEntry> {
+    let valid_subtypes = db.valid_subtypes();
     let mut schemes: Vec<CardFace> = db
         .face_iter()
         .map(|(_, face)| face)
         .filter(|face| face.card_type.core_types.contains(&CoreType::Scheme))
-        .filter(|face| crate::game::coverage::card_face_gaps(face).is_empty())
+        .filter(|face| {
+            crate::game::coverage::card_face_coverage_with_subtypes(face, valid_subtypes)
+                .is_supported()
+        })
         .cloned()
         .collect();
     schemes.sort_by(|a, b| a.name.cmp(&b.name));

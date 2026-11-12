@@ -87,6 +87,7 @@
     "sandboxTools": "Ferramentas de Sandbox",
     "sandboxToolsTitle": "Ferramentas de Sandbox — configure qualquer estado de tabuleiro (`)",
     "openSandboxTools": "Abrir Ferramentas de Sandbox",
+    "clickMode": "Modo de clique",
     "clickModeButton": "Botão de modo de clique",
     "shown": "Visível",
     "hidden": "Oculto",
@@ -256,6 +257,10 @@
         "title": "Painel de depuração avançada",
         "body": "Abra o painel de depuração avançada. A maioria dos jogadores deve começar pelas Ferramentas de Recuperação primeiro."
       },
+      "toggleClickMode": {
+        "title": "Alternar modo de clique",
+        "body": "Em partidas com Ferramentas de Sandbox, ativa ou desativa o modo de clique. Enquanto ativo, clicar em uma carta abre o menu de depuração dela (zonas, P/R, marcadores, palavras-chave) em vez de jogá-la."
+      },
       "reportOrExportState": {
         "title": "Reportar ou exportar estado",
         "body": "Se uma carta se comportar mal, exporte o estado atual do jogo para que a posição exata do tabuleiro possa ser reproduzida."
@@ -298,16 +303,13 @@
     "skip": "Toque para pular",
     "continue": "Toque para continuar",
     "you": "Você",
-    "youPlayFirst": "Você joga primeiro",
-    "playerPlaysFirst": "{{name}} joga primeiro",
+    "youWonRoll": "Você venceu a rolagem",
+    "playerWonRoll": "{{name}} venceu a rolagem",
     "heads": "Cara",
     "tails": "Coroa",
     "coinFlip": "Cara ou coroa",
     "wonCoinFlip": "{{name}} venceu o lançamento",
     "lostCoinFlip": "{{name}} perdeu o lançamento",
-    "turnOrder": "Ordem dos turnos",
-    "turnOrderItem": "Turno {{turn}}: {{name}}",
-    "youTakeTurn": "Você joga no turno {{turn}}",
     "ignoredDie": "Ignorado"
   },
   "chrome": {
