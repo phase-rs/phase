@@ -3771,3 +3771,304 @@ fn a_parked_may_gets_no_automatic_yes_in_combat() {
     // (`ResolverFeature:structural:damage_replacement_choice_unasked_in_combat`).
     assert_eq!(life(&runner, P1), 20);
 }
+
+/// CR 701.14a + CR 615.5: the reverse hit's prevention rider finishes before Fight.
+#[test]
+fn reverse_fight_rider_holds_fight_completion_until_its_answer() {
+    let mut scenario = scenario();
+    let fighter = scenario.add_creature(P0, "Siege Mastodon", 3, 5).id();
+    let opponent = scenario.add_creature(P1, "Eager Cadet", 1, 1).id();
+    let scales = scenario
+        .add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES)
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
+    let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    // Verbatim Oracle text also used by unpreventable_damage_prevention_effects::PIT_FIGHT.
+    let fight = instant(&mut scenario, "Pit Fight", "Target creature you control fights another target creature. (Each deals damage equal to its power to the other.)");
+    let mut runner = scenario.build();
+    cast(&mut runner, faith, vec![object_target(fighter)]);
+    assert_at_rest(&runner);
+    let mut events = cast(
+        &mut runner,
+        fight,
+        vec![object_target(fighter), object_target(opponent)],
+    );
+    let WaitingFor::ReplacementChoice { player, .. } = runner.state().waiting_for else {
+        panic!(
+            "expected counter order, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    assert_eq!(completions(&events, EffectKind::Fight, fight).len(), 0);
+    assert_eq!(plus_counters(&runner, fighter), 0);
+    choose_source(&mut runner, &mut events, scales);
+    // One prevented damage puts (1 + 1) * 2 counters, choosing Scales before Season.
+    assert_eq!(plus_counters(&runner, fighter), 4);
+    assert_eq!(completions(&events, EffectKind::Fight, fight).len(), 1);
+    assert_eq!(damage(&runner, fighter), 0);
+    assert_at_rest(&runner);
+}
+
+/// CR 616.1 + CR 101.4: P2's outstanding order precedes a new P3 order after redirect.
+#[test]
+fn redirected_damage_choices_follow_four_player_apnap_order() {
+    let p3 = PlayerId(3);
+    let mut scenario = GameScenario::new_n_player(4, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+    scenario.add_creature(P2, "Hill Giant", 3, 3);
+    let wall = scenario.add_creature(p3, "Wall", 0, 20).id();
+    let pariah = scenario
+        .add_enchantment_from_oracle(P1, "Pariah", PARIAH)
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(&["Enchant"], PARIAH)
+        .id();
+    furnace(&mut scenario);
+    let bubble = force_bubble(&mut scenario, P2);
+    scenario.add_enchantment_from_oracle(P2, "Delaying Shield", DELAYING_SHIELD);
+    let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+    let charm = instant(&mut scenario, "Rakdos Charm", RAKDOS_CHARM);
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), pariah, wall);
+    assert!(runner.state().objects[&wall].attachments.contains(&pariah));
+    assert_eq!(runner.state().objects[&pariah].controller, P1);
+    assert_eq!(runner.state().objects[&wall].controller, p3);
+    cast(&mut runner, faith, vec![object_target(wall)]);
+    assert_at_rest(&runner);
+    let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
+    let prompts = answer_batch_prompts(&mut runner, &mut events, |player, _| {
+        if player == P1 {
+            Some(pariah)
+        } else if player == P2 {
+            Some(bubble)
+        } else {
+            Some(wall)
+        }
+    });
+    let order: Vec<_> = prompts
+        .iter()
+        .map(|(kind, player, _)| (*kind, *player))
+        .collect();
+    eprintln!("four-player redirect prompt order: {order:?}");
+    assert_eq!(order, vec![("order", P1), ("order", P2), ("order", p3)]);
+    assert_eq!(counters(&runner, bubble, &depletion()), 1);
+    assert_eq!(plus_counters(&runner, wall), 1);
+    assert_completes_once_after_its_damage(&events, EffectKind::EachSourceDealsDamage, charm);
+    assert_at_rest(&runner);
+}
+
+/// CR 104.1: a terminal replacement ANSWER suppresses pending sources and completion.
+/// This checks the public terminal boundary; the answer itself can stop before batch re-entry.
+#[test]
+fn terminal_replacement_answer_suppresses_later_batch_sources() {
+    let mut scenario = scenario();
+    let cached = scenario.add_creature(P0, "Eager Cadet", 1, 1).id();
+    let first = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let later = scenario.add_creature(P1, "Hill Giant", 3, 3).id();
+    let lich = nefarious_lich(&mut scenario, 0);
+    force_bubble(&mut scenario, P1);
+    let charm = instant(&mut scenario, "Rakdos Charm", RAKDOS_CHARM);
+    let mut runner = scenario.build();
+    let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
+    let WaitingFor::ReplacementChoice { player, .. } = runner.state().waiting_for else {
+        panic!(
+            "expected damage order, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P1);
+    assert!(runner.state().game_end.is_none());
+    assert!(self::player(&runner, P1).graveyard.is_empty());
+    assert_eq!(dealt(&events), 0);
+    choose_source(&mut runner, &mut events, lich);
+    assert_game_over(&runner, P0);
+    assert!(events.iter().any(
+        |e| matches!(e, GameEvent::ReplacementApplied { source_id, .. } if *source_id == lich)
+    ));
+    assert!(!events.iter().any(|e| matches!(e, GameEvent::DamageDealt { source_id, .. } if *source_id == first || *source_id == later)));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, GameEvent::DamageDealt { source_id, .. } if *source_id == cached)));
+    assert_eq!(life(&runner, P0), 20);
+    assert!(completions(&events, EffectKind::EachSourceDealsDamage, charm).is_empty());
+}
+
+/// Two Pariahs let P1 redirect its two sources to different later players.
+fn two_redirect_fixture(
+    lifelink: bool,
+    first_controller: PlayerId,
+) -> (
+    GameRunner,
+    ObjectId,
+    [ObjectId; 2],
+    [ObjectId; 2],
+    Vec<ObjectId>,
+) {
+    let p3 = PlayerId(3);
+    let mut scenario = GameScenario::new_n_player(4, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    if lifelink {
+        scenario
+            .add_creature(P1, "Aardvark Sloth", 3, 3)
+            .from_oracle_text_with_keywords(&["Lifelink"], AARDVARK_SLOTH);
+    } else {
+        scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+    }
+    scenario.add_creature(P1, "Hill Giant", 3, 3);
+    let walls = [
+        scenario
+            .add_creature(first_controller, "Wall of Stone", 0, 8)
+            .id(),
+        scenario.add_creature(p3, "Wall of Stone", 0, 8).id(),
+    ];
+    let pariahs = std::array::from_fn(|_| {
+        scenario
+            .add_enchantment_from_oracle(P1, "Pariah", PARIAH)
+            .with_subtypes(vec!["Aura"])
+            .from_oracle_text_with_keywords(&["Enchant"], PARIAH)
+            .id()
+    });
+    let mut furnaces = vec![furnace(&mut scenario)];
+    if lifelink {
+        furnaces.push(furnace(&mut scenario));
+    }
+    let faiths = [
+        instant(&mut scenario, "Test of Faith", TEST_OF_FAITH),
+        instant(&mut scenario, "Test of Faith", TEST_OF_FAITH),
+    ];
+    let charm = instant(&mut scenario, "Rakdos Charm", RAKDOS_CHARM);
+    let mut runner = scenario.build();
+    for (aura, wall) in pariahs.into_iter().zip(walls) {
+        attach_to(runner.state_mut(), aura, wall);
+    }
+    for (faith, wall) in faiths.into_iter().zip(walls) {
+        cast(&mut runner, faith, vec![object_target(wall)]);
+        assert_at_rest(&runner);
+    }
+    (runner, charm, pariahs, walls, furnaces)
+}
+
+#[track_caller]
+fn assert_damage_chooser(runner: &GameRunner, expected: PlayerId) {
+    let WaitingFor::ReplacementChoice { player, .. } = runner.state().waiting_for else {
+        panic!(
+            "expected replacement choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, expected);
+}
+
+/// CR 101.4: both redirected portions remain outstanding, ordered by their new choosers.
+#[test]
+fn two_redirected_outstanding_choices_follow_apnap_and_complete_once() {
+    let (mut runner, charm, pariahs, walls, _) = two_redirect_fixture(false, P2);
+    let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
+    assert_damage_chooser(&runner, P1);
+    choose_source(&mut runner, &mut events, pariahs[0]);
+    assert_damage_chooser(&runner, P1);
+    choose_source(&mut runner, &mut events, pariahs[1]);
+    let prompts = answer_batch_prompts(&mut runner, &mut events, |player, _| {
+        Some(walls[if player == P2 { 0 } else { 1 }])
+    });
+    assert_eq!(
+        prompts.iter().map(|(_, p, _)| *p).collect::<Vec<_>>(),
+        vec![P2, PlayerId(3)]
+    );
+    assert_eq!(plus_counters(&runner, walls[0]), 1);
+    assert_eq!(plus_counters(&runner, walls[1]), 1);
+    assert_completes_once_after_its_damage(&events, EffectKind::EachSourceDealsDamage, charm);
+    assert_at_rest(&runner);
+}
+
+/// CR 101.4d: redirecting P1's choice to P0 restarts ahead of the outstanding P1 choice.
+#[test]
+fn redirected_damage_restarts_apnap_for_an_earlier_player() {
+    let (mut runner, charm, pariahs, walls, _) = two_redirect_fixture(false, P0);
+    let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
+    assert_damage_chooser(&runner, P1);
+    choose_source(&mut runner, &mut events, pariahs[0]);
+    assert_damage_chooser(&runner, P0);
+    choose_source(&mut runner, &mut events, walls[0]);
+    assert_damage_chooser(&runner, P1);
+    choose_source(&mut runner, &mut events, pariahs[1]);
+    assert_damage_chooser(&runner, PlayerId(3));
+    choose_source(&mut runner, &mut events, walls[1]);
+    assert_eq!(plus_counters(&runner, walls[0]), 1);
+    assert_eq!(plus_counters(&runner, walls[1]), 1);
+    assert_completes_once_after_its_damage(&events, EffectKind::EachSourceDealsDamage, charm);
+    assert_at_rest(&runner);
+}
+
+/// CR 101.4: a parked later-player choice survives a full GameState save and restore.
+#[test]
+fn deferred_damage_queue_survives_game_state_serde_round_trip() {
+    let (mut runner, charm, pariahs, walls, _) = two_redirect_fixture(false, P2);
+    let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
+    choose_source(&mut runner, &mut events, pariahs[0]);
+    assert_damage_chooser(&runner, P1);
+    assert_eq!(
+        runner
+            .state()
+            .active_ability_continuation()
+            .unwrap()
+            .chain
+            .context
+            .deferred_damage_choices
+            .len(),
+        1,
+        "reach: a choice is deferred"
+    );
+    let mut uninterrupted = GameRunner::from_state(runner.state().clone());
+    // Same full-state round trip as yunas_whistle::round_trip.
+    let json = serde_json::to_string(runner.state()).expect("serialize GameState");
+    *runner.state_mut() = serde_json::from_str(&json).expect("deserialize GameState");
+    let mut uninterrupted_events = events.clone();
+    for (r, e) in [
+        (&mut runner, &mut events),
+        (&mut uninterrupted, &mut uninterrupted_events),
+    ] {
+        choose_source(r, e, pariahs[1]);
+        let prompts = answer_batch_prompts(r, e, |player, _| {
+            Some(walls[if player == P2 { 0 } else { 1 }])
+        });
+        assert_eq!(
+            prompts.iter().map(|(_, p, _)| *p).collect::<Vec<_>>(),
+            vec![P2, PlayerId(3)]
+        );
+        assert_completes_once_after_its_damage(e, EffectKind::EachSourceDealsDamage, charm);
+        assert_at_rest(r);
+    }
+    assert_eq!(
+        serde_json::to_value(runner.state()).unwrap(),
+        serde_json::to_value(uninterrupted.state()).unwrap()
+    );
+    assert_eq!(events, uninterrupted_events);
+}
+
+/// CR 120.3f: a deferred lifelink source gains once for its damage remaining after prevention.
+#[test]
+fn deferred_damage_source_keeps_lifelink_exactly_once() {
+    let (mut runner, charm, pariahs, walls, furnaces) = two_redirect_fixture(true, P2);
+    let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
+    choose_source(&mut runner, &mut events, pariahs[0]);
+    assert_damage_chooser(&runner, P1);
+    choose_source(&mut runner, &mut events, pariahs[1]);
+    let prompts = answer_batch_prompts(&mut runner, &mut events, |player, candidates| {
+        furnaces
+            .iter()
+            .copied()
+            .find(|id| candidates.iter().any(|c| c.source_id == *id))
+            .or(Some(walls[if player == P2 { 0 } else { 1 }]))
+    });
+    assert_eq!(
+        prompts.iter().map(|(_, p, _)| *p).collect::<Vec<_>>(),
+        vec![P2, P2, PlayerId(3), PlayerId(3)]
+    );
+    // Both Furnaces turn 1 into 4; Test of Faith prevents 3, leaving 1 damage.
+    assert_eq!(damage(&runner, walls[0]), 1);
+    assert_eq!(life(&runner, P1), 21);
+    assert_completes_once_after_its_damage(&events, EffectKind::EachSourceDealsDamage, charm);
+    assert_at_rest(&runner);
+}

@@ -12,9 +12,10 @@ use crate::game::quantity::{
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     names_resolution_chosen_recipient, quantity_expr_uses_recipient, DamageContextSnapshot,
-    DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind, ExcessRecipient,
-    PlayerFilter, QuantityExpr, RawDamagePortion, ReplacedDamagePortion, ResolvedAbility,
-    SubAbilityLink, TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetRef,
+    DamageSource, DeferredDamageChoice, EachDamageRecipient, Effect, EffectError, EffectKind,
+    ExcessRecipient, PlayerFilter, QuantityExpr, RawDamagePortion, ReplacedDamagePortion,
+    ResolvedAbility, SubAbilityLink, TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter,
+    TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -1425,6 +1426,7 @@ fn run_damage_batch(
     kind: EffectKind,
     mut replaced: Vec<(DamageContext, ProposedEvent)>,
     portions: Vec<BatchPortion>,
+    mut deferred: Vec<DeferredDamageChoice>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     // CR 104.1: "A game ends immediately when a player wins": a batch resumed after the game
@@ -1433,9 +1435,33 @@ fn run_damage_batch(
         return Ok(());
     }
     let boundary = state.resolution_stack.capture_child_boundary();
-    let mut portions = in_apnap_order(state, portions).into_iter();
-    // Phase B: replacement (CR 120.4b + CR 614 + CR 615).
-    while let Some(portion) = portions.next() {
+    let order = crate::game::players::apnap_order(state);
+    let mut portions: std::collections::VecDeque<BatchPortion> =
+        in_apnap_order(state, portions).into();
+    // Phase B: replacement (CR 120.4b + CR 614 + CR 615). CR 616.1 + CR 101.4: the next
+    // choice is the outstanding one whose player comes first in APNAP order: a deferred
+    // choice (handed to its player by a redirect) ahead of a portion whose affected player
+    // comes later.
+    loop {
+        let next_portion_rank = portions
+            .front()
+            .and_then(BatchPortion::raw)
+            .map(|raw| affected_rank(state, &order, &raw.target));
+        let earliest_deferred = deferred
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, choice)| player_rank(&order, choice.chooser))
+            .map(|(index, choice)| (index, player_rank(&order, choice.chooser)));
+        let portion = match (earliest_deferred, next_portion_rank) {
+            (Some((index, rank)), Some(next)) if rank <= next => {
+                deferred_portion(state, ability, deferred.remove(index))
+            }
+            (Some((index, _)), None) => deferred_portion(state, ability, deferred.remove(index)),
+            _ => match portions.pop_front() {
+                Some(portion) => portion,
+                None => break,
+            },
+        };
         // CR 800.4a: damage to a player who left the game, or to an object that is gone, is not
         // dealt; the batch goes on for the rest.
         if portion
@@ -1481,8 +1507,10 @@ fn run_damage_batch(
                 // CR 608.2c + CR 616.1: a rider that left its prompt standing holds the rest of
                 // the batch behind its answer.
                 if replacement::damage_batch_has_paused_rider(state) {
-                    let remaining = portions.filter_map(|portion| portion.raw()).collect();
-                    park_damage_batch(state, ability, kind, &replaced, remaining, None, boundary)?;
+                    let remaining = portions.iter().filter_map(BatchPortion::raw).collect();
+                    park_damage_batch(
+                        state, ability, kind, &replaced, remaining, None, deferred, boundary,
+                    )?;
                     return Ok(());
                 }
             }
@@ -1495,9 +1523,9 @@ fn run_damage_batch(
                     pending.excess_recipient = ctx.excess_recipient;
                     pending.lifelink_bonus = ctx.lifelink_bonus;
                 }
-                let remaining = portions.filter_map(|portion| portion.raw()).collect();
+                let remaining = portions.iter().filter_map(BatchPortion::raw).collect();
                 park_damage_batch(
-                    state, ability, kind, &replaced, remaining, awaiting, boundary,
+                    state, ability, kind, &replaced, remaining, awaiting, deferred, boundary,
                 )?;
                 return Ok(());
             }
@@ -1525,6 +1553,7 @@ fn run_damage_batch(
                 &replaced[index + 1..],
                 Vec::new(),
                 None,
+                Vec::new(),
                 boundary,
             )?;
             return Ok(());
@@ -1539,6 +1568,136 @@ fn run_damage_batch(
         subject: None,
     });
     Ok(())
+}
+
+/// CR 616.1 + CR 614.5: a deferred choice's event, back as a portion already through the gate,
+/// keeping the replacements already applied to it.
+fn deferred_portion(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    choice: DeferredDamageChoice,
+) -> BatchPortion {
+    let mut ctx = DamageContext::from_source(state, choice.source)
+        .unwrap_or_else(|| DamageContext::fallback(choice.source, ability.controller));
+    ctx.excess_recipient = choice.excess_recipient;
+    ctx.lifelink_bonus = choice.lifelink_bonus;
+    BatchPortion::Gated {
+        ctx,
+        event: ProposedEvent::Damage {
+            source_id: choice.source,
+            target: choice.target,
+            amount: choice.amount,
+            is_combat: choice.is_combat,
+            applied: choice.applied.into_iter().collect(),
+        },
+    }
+}
+
+/// CR 101.4: a player's place in APNAP order (`players::apnap_order`); a player who left sorts
+/// last.
+fn player_rank(order: &[PlayerId], player: PlayerId) -> usize {
+    order
+        .iter()
+        .position(|seat| *seat == player)
+        .unwrap_or(usize::MAX)
+}
+
+/// CR 616.1: the APNAP rank of the player a damage recipient makes choose: a player recipient,
+/// or an object recipient's controller.
+fn affected_rank(state: &GameState, order: &[PlayerId], target: &TargetRef) -> usize {
+    let affected = match target {
+        TargetRef::Player(player) => Some(*player),
+        TargetRef::Object(id) => state.objects.get(id).map(|object| object.controller),
+    };
+    affected.map_or(usize::MAX, |player| player_rank(order, player))
+}
+
+/// CR 616.1 + CR 101.4: an order choice a redirect just handed to `chooser` while the parked
+/// batch it belongs to still has an outstanding choice for a player earlier in APNAP order
+/// (Pariah sending P1's damage to P3's creature while P2's choice is outstanding). The choice
+/// waits in the batch, which asks the earlier players first ("If a choice made by a nonactive
+/// player causes the active player, or a different nonactive player earlier in the turn order,
+/// to have to make a choice, APNAP order is restarted for all outstanding choices."). `false`
+/// when no outstanding choice comes earlier, so the choice is asked now.
+pub(crate) fn defer_choice_behind_earlier_players(
+    state: &mut GameState,
+    chooser: PlayerId,
+) -> bool {
+    let order = crate::game::players::apnap_order(state);
+    let chooser_rank = player_rank(&order, chooser);
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return false;
+    };
+    let ProposedEvent::Damage {
+        source_id,
+        target,
+        amount,
+        is_combat,
+        applied,
+    } = &pending.proposed
+    else {
+        return false;
+    };
+    let Some(frame) = state.active_ability_continuation() else {
+        return false;
+    };
+    let Effect::ResumeDamageBatch {
+        remaining,
+        awaiting,
+        ..
+    } = &frame.chain.effect
+    else {
+        return false;
+    };
+    if !awaiting
+        .as_ref()
+        .is_some_and(|portion| portion.source == *source_id)
+    {
+        return false;
+    }
+    let earliest_outstanding = remaining
+        .iter()
+        .map(|portion| affected_rank(state, &order, &portion.target))
+        .chain(
+            frame
+                .chain
+                .context
+                .deferred_damage_choices
+                .iter()
+                .map(|choice| player_rank(&order, choice.chooser)),
+        )
+        .min();
+    if !earliest_outstanding.is_some_and(|rank| rank < chooser_rank) {
+        return false;
+    }
+    let choice = DeferredDamageChoice {
+        chooser,
+        source: *source_id,
+        target: target.clone(),
+        amount: *amount,
+        is_combat: *is_combat,
+        applied: {
+            let mut applied: Vec<_> = applied.iter().copied().collect();
+            applied.sort_unstable();
+            applied
+        },
+        excess_recipient: pending.excess_recipient,
+        lifelink_bonus: pending.lifelink_bonus,
+    };
+    state.pending_replacement = None;
+    let Some(frame) = state.active_ability_continuation_frame_mut() else {
+        return false;
+    };
+    if let Effect::ResumeDamageBatch { awaiting, .. } = &mut frame.pending.chain.effect {
+        *awaiting = None;
+    }
+    frame
+        .pending
+        .chain
+        .context
+        .deferred_damage_choices
+        .push(choice);
+    true
 }
 
 /// CR 800.4a: whether a damage recipient is still in the game: a player who hasn't left, or an
@@ -1578,13 +1737,14 @@ fn in_apnap_order(state: &GameState, mut portions: Vec<BatchPortion>) -> Vec<Bat
 /// parks the instruction's later instructions beneath it; with none raised (an order choice,
 /// a delivery choice), on top, with the later instructions parked beneath it here.
 #[allow(clippy::too_many_arguments)]
-fn park_damage_batch(
+pub(crate) fn park_damage_batch(
     state: &mut GameState,
     ability: &ResolvedAbility,
     kind: EffectKind,
     replaced: &[(DamageContext, ProposedEvent)],
     remaining: Vec<RawDamagePortion>,
     awaiting: Option<RawDamagePortion>,
+    deferred: Vec<DeferredDamageChoice>,
     boundary: ChildStackDepth,
 ) -> Result<(), EffectError> {
     let replaced = replaced
@@ -1619,6 +1779,8 @@ fn park_damage_batch(
         ),
         ability,
     );
+    let mut node = node;
+    node.context.deferred_damage_choices = deferred;
     let pending = PendingContinuation::new(Box::new(node), state);
     if state.resolution_stack.capture_child_boundary() > boundary {
         state
@@ -1733,8 +1895,9 @@ pub fn resolve_resume_damage_batch(
         })
         .collect();
     let kind = *kind;
+    let deferred = ability.context.deferred_damage_choices.clone();
     replacement::with_damage_batch(state, ability, |state| {
-        run_damage_batch(state, ability, kind, replaced, portions, events)
+        run_damage_batch(state, ability, kind, replaced, portions, deferred, events)
     })
 }
 
@@ -1854,6 +2017,8 @@ fn keep_chain_identity(
     // CR 608.2f + CR 700.1: a remaining portion of a simultaneous batch keeps the guards
     // the batch read; nothing else is such a portion (`apply_parent_chain_context`).
     node.context.settled_damage_guards = replacement::settled_damage_guards(state);
+    // CR 616.1 + CR 101.4: deferred choices belong to the batch that parks them only.
+    node.context.deferred_damage_choices = Vec::new();
     node
 }
 
@@ -2781,6 +2946,7 @@ fn resolve_each_target_power_damage(
         EffectKind::from(&ability.effect),
         Vec::new(),
         portions,
+        Vec::new(),
         events,
     )
 }
@@ -3765,6 +3931,7 @@ fn resolve_each_deals_equal_to_power_portions(
         EffectKind::from(&ability.effect),
         Vec::new(),
         portions,
+        Vec::new(),
         events,
     )
 }
@@ -3951,6 +4118,7 @@ fn resolve_each_source_deals_damage_portions(
         EffectKind::from(&ability.effect),
         Vec::new(),
         portions,
+        Vec::new(),
         events,
     )
 }

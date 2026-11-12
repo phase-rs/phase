@@ -4942,8 +4942,11 @@ pub(crate) fn apply_parent_chain_context(
     // CR 510.2 + CR 700.1: settled damage guards belong to the remaining portions of one
     // simultaneous batch, stamped node by node. A later instruction is a new event.
     let child_settled_guards = std::mem::take(&mut child.context.settled_damage_guards);
+    // CR 616.1 + CR 101.4: so do a parked batch's deferred choices.
+    let child_deferred_choices = std::mem::take(&mut child.context.deferred_damage_choices);
     child.context = parent.context.clone();
     child.context.settled_damage_guards = child_settled_guards;
+    child.context.deferred_damage_choices = child_deferred_choices;
     child.context.face_down_in_exile |= child_face_down_in_exile;
     for event in child_duration_events {
         if !child.context.duration_events.contains(&event) {

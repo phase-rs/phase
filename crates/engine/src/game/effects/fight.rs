@@ -1,8 +1,8 @@
-use crate::game::ability_utils::append_to_sub_chain;
-use crate::game::effects::deal_damage::{apply_damage_to_target, DamageContext, DamageResult};
-use crate::game::effects::{append_to_pending_continuation, mark_pending_continuation_parent};
+use crate::game::effects::deal_damage::{
+    apply_damage_to_target, park_damage_batch, DamageContext, DamageResult,
+};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, RawDamagePortion, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -226,24 +226,34 @@ fn resolve_fight(
         (obj.power.unwrap_or(0), obj.controller)
     };
 
+    // CR 608.2c: where a pause parks the rest of the fight (`deal_damage::park_damage_batch`).
+    let boundary = state.resolution_stack.capture_child_boundary();
+
     // CR 701.14c: Self-fight deals twice the creature's power as a single damage instance.
     if source_id == target_id {
         if source_power > 0 {
             let amount = (source_power as u32).saturating_mul(2);
             let source_ctx = DamageContext::from_source(state, source_id)
                 .unwrap_or_else(|| DamageContext::fallback(source_id, source_controller));
-            if let DamageResult::NeedsChoice = apply_damage_to_target(
+            let result = apply_damage_to_target(
                 state,
                 &source_ctx,
                 TargetRef::Object(source_id),
                 amount,
                 false,
                 events,
-            )? {
-                if let Some(sub) = ability.sub_ability.as_ref() {
-                    append_to_pending_continuation(state, Some(Box::new(sub.as_ref().clone())));
-                }
-                mark_pending_continuation_parent(state, EffectKind::Fight);
+            )?;
+            if fight_waits(state, &result) {
+                park_damage_batch(
+                    state,
+                    ability,
+                    EffectKind::Fight,
+                    &[],
+                    Vec::new(),
+                    None,
+                    Vec::new(),
+                    boundary,
+                )?;
                 return Ok(());
             }
         }
@@ -272,40 +282,28 @@ fn resolve_fight(
         // choice on its own event, or a choice its rider asks (Dralnu, Lich Lord: "If damage would
         // be dealt to Dralnu, sacrifice that many permanents instead."). One prompt stands at a
         // time, so the second direction waits behind that answer instead of opening its own
-        // prompt over it.
-        if matches!(first, DamageResult::NeedsChoice)
-            || crate::game::replacement::damage_batch_has_paused_rider(state)
-        {
-            // CR 701.14a: Stash a continuation so the second direction (target → source)
-            // resumes after the answer. The parent's sub_ability (if any) is appended
-            // to the continuation's tail so downstream effects still fire.
-            if target_power > 0 {
-                // Second direction: target_id (the fight target) deals damage equal
-                // to its power to source_id (the fighter).
-                let mut second = build_fight_damage_node(
-                    target_id,
-                    source_id,
-                    target_power as u32,
-                    target_controller,
-                );
-                // CR 701.14a + CR 608.2f + CR 700.1: the second direction is a remaining
-                // portion of the same simultaneous event, so it resumes under the guards
-                // this batch read. Its appended tail is a later instruction and keeps
-                // its own (empty) carrier, so it reads guards live.
-                second.context.settled_damage_guards =
-                    crate::game::replacement::settled_damage_guards(state);
-                if let Some(sub) = ability.sub_ability.as_ref() {
-                    append_to_sub_chain(&mut second, sub.as_ref().clone());
-                }
-                append_to_pending_continuation(state, Some(Box::new(second)));
-            } else if let Some(sub) = ability.sub_ability.as_ref() {
-                append_to_pending_continuation(state, Some(Box::new(sub.as_ref().clone())));
-            }
-            // CR 701.14a: Tag the stashed chain with the parent `EffectKind::Fight`
-            // so the drain re-emits the parent `EffectResolved` that the non-pause
-            // tail (line ~154) fires. "When a creature fights" triggers in
-            // `trigger_matchers.rs::match_fight` key on this event.
-            mark_pending_continuation_parent(state, EffectKind::Fight);
+        // prompt over it. CR 701.14a + CR 608.2f + CR 700.1: it is a remaining portion of the same
+        // simultaneous event, so the parked fight resumes it under the guards this batch read,
+        // and the fight completes once, after both directions.
+        if fight_waits(state, &first) {
+            let remaining = (target_power > 0)
+                .then_some(RawDamagePortion {
+                    source: target_id,
+                    target: TargetRef::Object(source_id),
+                    amount: target_power as u32,
+                })
+                .into_iter()
+                .collect();
+            park_damage_batch(
+                state,
+                ability,
+                EffectKind::Fight,
+                &[],
+                remaining,
+                None,
+                Vec::new(),
+                boundary,
+            )?;
             return Ok(());
         }
     }
@@ -314,26 +312,28 @@ fn resolve_fight(
     if target_power > 0 {
         let target_ctx = DamageContext::from_source(state, target_id)
             .unwrap_or_else(|| DamageContext::fallback(target_id, target_controller));
-        if let DamageResult::NeedsChoice = apply_damage_to_target(
+        let second = apply_damage_to_target(
             state,
             &target_ctx,
             TargetRef::Object(source_id),
             target_power as u32,
             false,
             events,
-        )? {
-            // CR 701.14a: Second direction is waiting on a replacement choice — no more
-            // damage to deal, but propagate the parent's sub_ability if present.
-            if let Some(sub) = ability.sub_ability.as_ref() {
-                append_to_pending_continuation(state, Some(Box::new(sub.as_ref().clone())));
-            }
-            // CR 701.14a: Tag the stashed chain (the sub_ability, if any) with the
-            // parent `EffectKind::Fight` so the drain re-emits the parent event the
-            // non-pause tail (line ~154) fires. If there is no sub_ability the chain
-            // is absent and the parent event cannot ride anything out — the replacement
-            // delivery still resolves the fight's second direction, but fight triggers
-            // are lost in that corner case (a 0-power fighter with no follow-up sub).
-            mark_pending_continuation_parent(state, EffectKind::Fight);
+        )?;
+        // CR 701.14a + CR 608.2c: the second direction waits on an answer too (a replacement
+        // choice, or its rider's prompt: Test of Faith's counters under Hardened Scales and
+        // Doubling Season). The fight completes once that answer is given, not before.
+        if fight_waits(state, &second) {
+            park_damage_batch(
+                state,
+                ability,
+                EffectKind::Fight,
+                &[],
+                Vec::new(),
+                None,
+                Vec::new(),
+                boundary,
+            )?;
             return Ok(());
         }
     }
@@ -347,29 +347,11 @@ fn resolve_fight(
     Ok(())
 }
 
-/// CR 701.14a: Build a one-shot, single-target non-combat `DealDamage` node representing
-/// one direction of a fight. `source_id` deals `amount` damage to `target_id`.
-/// Used as a continuation when the first direction of fight damage pauses for a
-/// replacement choice.
-fn build_fight_damage_node(
-    source_id: ObjectId,
-    target_id: ObjectId,
-    amount: u32,
-    controller: crate::types::player::PlayerId,
-) -> ResolvedAbility {
-    ResolvedAbility::new(
-        Effect::DealDamage {
-            amount: QuantityExpr::Fixed {
-                value: amount as i32,
-            },
-            target: TargetFilter::Any,
-            damage_source: None,
-            excess: None,
-        },
-        vec![TargetRef::Object(target_id)],
-        source_id,
-        controller,
-    )
+/// CR 608.2c + CR 616.1: whether a direction of the fight waits on a player's answer: a
+/// replacement choice on its own event, or a prompt its rider left standing.
+fn fight_waits(state: &GameState, result: &DamageResult) -> bool {
+    matches!(result, DamageResult::NeedsChoice)
+        || crate::game::replacement::damage_batch_has_paused_rider(state)
 }
 
 #[cfg(test)]
@@ -749,31 +731,30 @@ mod tests {
             state.waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ));
-        // A continuation was stashed for the second direction — previously this
+        // The rest of the fight was parked for the second direction — previously this
         // branch silently returned Ok(()) and the second direction was dropped.
         let cont = state
             .active_ability_continuation()
             .expect("expected pending_continuation for second-direction fight damage");
-        // Continuation is a single-target DealDamage from wolf to bear.
+        // CR 701.14a: the parked fight holds the wolf's 2 to the bear, and completes the
+        // fight itself once that direction is dealt.
         match &cont.chain.effect {
-            Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value },
-                ..
+            Effect::ResumeDamageBatch {
+                kind, remaining, ..
             } => {
-                assert_eq!(*value, 2, "wolf.power = 2 should drive second direction");
+                assert_eq!(*kind, EffectKind::Fight);
+                assert_eq!(
+                    remaining,
+                    &vec![crate::types::ability::RawDamagePortion {
+                        source: wolf,
+                        target: TargetRef::Object(bear),
+                        amount: 2,
+                    }],
+                    "wolf.power = 2 should drive second direction"
+                );
             }
-            other => panic!("expected DealDamage continuation, got {other:?}"),
+            other => panic!("expected the parked fight, got {other:?}"),
         }
-        assert_eq!(
-            cont.chain.source_id, wolf,
-            "wolf deals the second-direction damage"
-        );
-        assert_eq!(cont.chain.targets, vec![TargetRef::Object(bear)]);
-        assert_eq!(
-            cont.parent_kind,
-            Some(EffectKind::Fight),
-            "fight pause must record parent kind so the drain re-emits the Fight event",
-        );
         // Bear hasn't taken damage yet — second direction is still pending.
         assert_eq!(state.objects[&bear].damage_marked, 0);
     }

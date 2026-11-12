@@ -1818,6 +1818,16 @@ fn handle_replacement_choice_inner(
                     pending.inherit_delivery_boundary(&paused.expected_event);
                 }
             }
+            // CR 616.1 + CR 101.4: a choice this answer handed to a player later in APNAP order
+            // than another outstanding choice of the same parked damage batch waits in the
+            // batch, which resumes now and asks the earlier player first.
+            if super::effects::deal_damage::defer_choice_behind_earlier_players(state, player) {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                super::engine::resume_pending_continuation_if_priority(state, events)?;
+                return Ok(state.waiting_for.clone());
+            }
             Ok(super::replacement::replacement_choice_waiting_for(
                 player, state,
             ))

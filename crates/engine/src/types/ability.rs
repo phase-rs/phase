@@ -1822,6 +1822,26 @@ pub enum DamageGuardReading {
     Fails,
 }
 
+/// CR 616.1 + CR 101.4: a damage portion's replacement choice that a redirect handed to a player
+/// later in APNAP order than another outstanding choice of the same batch. The batch asks it once
+/// every earlier player's outstanding choice is answered. The event keeps the replacements
+/// already applied to it, so none applies twice (CR 614.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredDamageChoice {
+    pub chooser: PlayerId,
+    pub source: ObjectId,
+    pub target: TargetRef,
+    pub amount: u32,
+    #[serde(default)]
+    pub is_combat: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied: Vec<AppliedReplacementKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excess_recipient: Option<ExcessRecipient>,
+    #[serde(default)]
+    pub lifelink_bonus: u32,
+}
+
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1830,6 +1850,11 @@ pub struct SpellContext {
     /// remaining portion of. Node-local: a later instruction reads live (CR 700.1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settled_damage_guards: Vec<SettledDamageGuard>,
+    /// CR 616.1 + CR 101.4: the replacement choices a parked two-phase damage batch
+    /// (`Effect::ResumeDamageBatch`) deferred behind earlier players' outstanding choices.
+    /// Node-local, like `settled_damage_guards`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_damage_choices: Vec<DeferredDamageChoice>,
     /// Typed SearchLibrary intent for a face-down Exile destination.
     /// This is carried in the existing resolution context so it survives
     /// ordinary ability-chain handoffs without widening every ability literal.
