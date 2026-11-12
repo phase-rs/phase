@@ -10,6 +10,7 @@
 //! population is produced by a public cast.
 
 use engine::game::game_object::AttachTarget;
+use engine::game::replacement::ReplacementWork;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::ChosenAttribute;
 use engine::types::actions::GameAction;
@@ -600,7 +601,7 @@ const AKROMAS_VENGEANCE: &str = "Destroy all artifacts, creatures, and enchantme
 /// asked choice's chooser and subject; selections pick announcement order.
 fn answer_all(runner: &mut GameRunner) -> Vec<(PlayerId, ObjectId)> {
     let mut asked = Vec::new();
-    for _ in 0..16 {
+    for _ in 0..256 {
         match runner.state().waiting_for.clone() {
             WaitingFor::ReplacementDecisionOrder { objects, .. } => {
                 select_decision(runner, objects[0]);
@@ -827,4 +828,86 @@ fn open_the_vaults_asks_as_enters_choices_in_apnap_order() {
         .chosen_attributes
         .iter()
         .any(|attribute| matches!(attribute, ChosenAttribute::CardName(name) if *name == named)));
+}
+
+/// Wrath of God over `n` of P1's creatures with Rest in Peace on the
+/// battlefield; with `umbras`, each creature also wears Hyena Umbra and Spider
+/// Umbra, so every member holds an armor choice. Returns the replacement work
+/// of the whole resolution, answered through public actions.
+fn wrath_work(n: usize, umbras: bool) -> ReplacementWork {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE);
+    let mut attachments = Vec::new();
+    let mut creatures = Vec::new();
+    for _ in 0..n {
+        let creature = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        creatures.push(creature);
+        if umbras {
+            attachments.push((
+                umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA),
+                creature,
+            ));
+            attachments.push((
+                umbra(&mut scenario, P1, "Spider Umbra", SPIDER_UMBRA),
+                creature,
+            ));
+        }
+    }
+    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+    let mut runner = scenario.build();
+    for (aura, host) in attachments {
+        attach(&mut runner, aura, host);
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    let ((), work) = engine::game::replacement::measure_replacement_work(|| {
+        cast_until_decision(&mut runner, wrath);
+        let asked = answer_all(&mut runner);
+        assert_eq!(asked.len(), if umbras { n } else { 0 });
+        finish(&mut runner);
+    });
+    let expected = if umbras {
+        Zone::Battlefield
+    } else {
+        Zone::Exile
+    };
+    for creature in creatures {
+        assert_eq!(zone(&runner, creature), expected);
+    }
+    work
+}
+
+/// Review 20: "Bound the work per pending choice and measure it on a
+/// population with many replacements." Each member is consulted once through
+/// the replacement pipeline, and the work per member is a constant, measured at
+/// three population sizes so the fixed cost of casting cancels out:
+/// - no choice: exactly two pipeline entries (the outer destruction and its
+///   move, CR 701.8a) and two index rebuilds per member; the removed forecast
+///   ran the pipeline twice more per member before the live consult;
+/// - an Umbra armor choice per member (CR 702.89a): at most four entries and
+///   four rebuilds per member, covering its consult, the answer's
+///   continuation and the chosen Aura's own destruction.
+#[test]
+fn staged_scheduler_consults_each_member_once() {
+    for umbras in [false, true] {
+        let [w1, w2, w3] = [8, 16, 24].map(|n| wrath_work(n, umbras));
+        let per_member = |pick: fn(&ReplacementWork) -> u64| {
+            let first = (pick(&w2) - pick(&w1)) / 8;
+            assert_eq!(
+                pick(&w3) - pick(&w2),
+                first * 8,
+                "umbras={umbras}: linear in the population: {w1:?} {w2:?} {w3:?}"
+            );
+            first
+        };
+        let entries = per_member(|work| work.pipeline_entries);
+        let rebuilds = per_member(|work| work.index_rebuilds);
+        if umbras {
+            assert!(entries <= 4, "{entries} pipeline entries per member");
+            assert!(rebuilds <= 4, "{rebuilds} index rebuilds per member");
+        } else {
+            assert_eq!(entries, 2, "no choice: each member is consulted once");
+            assert_eq!(rebuilds, 2, "one index rebuild per consult");
+        }
+    }
 }

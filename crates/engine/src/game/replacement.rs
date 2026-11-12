@@ -8836,6 +8836,7 @@ fn object_replacement_candidates(
 }
 
 fn rebuild_replacement_index(state: &mut GameState) {
+    count_replacement_work(|work| work.index_rebuilds += 1);
     let mut by_event: im::HashMap<ReplacementEvent, im::Vector<ReplacementIndexEntry>> =
         im::HashMap::new();
     for (ordinal, (index, obj, repl_def)) in
@@ -9713,6 +9714,44 @@ pub(crate) fn event_is_accounted(event: &ProposedEvent) -> bool {
         | ProposedEvent::Planeswalk { .. }
         | ProposedEvent::Attach { .. } => false,
     }
+}
+
+/// Replacement-pipeline work counted by [`measure_replacement_work`]: one
+/// `pipeline_entries` per entry into the replacement loop (a fresh event or an
+/// answered decision continuing it) and one `index_rebuilds` per full rebuild
+/// of the active replacement index, which scans every object.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReplacementWork {
+    pub pipeline_entries: u64,
+    pub index_rebuilds: u64,
+}
+
+thread_local! {
+    /// Armed only inside `measure_replacement_work`; `None` everywhere else.
+    static REPLACEMENT_WORK: std::cell::Cell<Option<ReplacementWork>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Count the replacement-pipeline work `f` performs. Purely observational:
+/// nothing branches on the counter, so a measured run and an unmeasured run
+/// cannot diverge.
+#[cfg(any(test, feature = "test-support"))]
+pub fn measure_replacement_work<R>(f: impl FnOnce() -> R) -> (R, ReplacementWork) {
+    let previous = REPLACEMENT_WORK.with(|cell| cell.replace(Some(ReplacementWork::default())));
+    let result = f();
+    let work = REPLACEMENT_WORK
+        .with(|cell| cell.replace(previous))
+        .unwrap_or_default();
+    (result, work)
+}
+
+fn count_replacement_work(bump: impl FnOnce(&mut ReplacementWork)) {
+    REPLACEMENT_WORK.with(|cell| {
+        if let Some(mut work) = cell.get() {
+            bump(&mut work);
+            cell.set(Some(work));
+        }
+    });
 }
 
 thread_local! {
@@ -13252,6 +13291,7 @@ fn pipeline_loop(
     // built (`push_appended_token_batch`).
     // Disarmed (a no-op) outside a speculative probe.
     record_proposed_event(&proposed);
+    count_replacement_work(|work| work.pipeline_entries += 1);
 
     loop {
         // Engine numeric capacity: an applier recorded that the modified life,
