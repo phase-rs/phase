@@ -5990,8 +5990,10 @@ fn parse_normalized_oracle_ir(
     //   splice names; the "instant or sorcery" and "Anything" qualities are not
     //   subtypes, so the engine offers them no host. Supporting them would make
     //   every instant and sorcery a host;
-    // - a second spell paragraph: the engine appends it below the first
-    //   (`combined_spell_ability_def`), with any condition of its own.
+    // - any second non-keyword line: a second spell paragraph is appended
+    //   below the first by the engine (`combined_spell_ability_def`), with any
+    //   condition of its own; a static or triggered line is declined with it,
+    //   conservatively, because the parser does not classify it here.
     // The keywords are read from the card's own printed keyword lines, typed by
     // the strict keyword router: a split card's halves reach this parser without
     // their MTGJSON keyword names, but each half prints its "Fuse" line.

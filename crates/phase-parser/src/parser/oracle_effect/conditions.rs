@@ -5492,8 +5492,9 @@ fn parse_target_controller_control_condition_prefix(
 pub(super) enum GatedInstructionPosition {
     /// The first instruction of a chain its entry point proved to be the
     /// ability's resolved root (`ResolvedChainRoot::Proven`: a triggered
-    /// ability's body, an activated ability's effect, or the only spell line of
-    /// a card whose spell is not rewritten at cast). The engine
+    /// ability's body, an activated ability's effect, or the spell line of a
+    /// card whose only non-keyword line it is and whose spell is not rewritten
+    /// at cast). The engine
     /// evaluates its gate on its own resolved node before its effect, so a
     /// target-controller read sees the targets this instruction announced.
     ChainRoot,
@@ -12282,8 +12283,9 @@ mod tests {
     }
 
     /// CR 608.2c: a chain is proven to be its ability's resolved root only at a
-    /// trigger body, an activated ability's effect, or the only spell line of a
-    /// card whose spell is not rewritten at cast. A second targeted
+    /// trigger body, an activated ability's effect, or the spell line of a card
+    /// whose only non-keyword line it is and whose spell is not rewritten at
+    /// cast. A second targeted
     /// instruction joined to a first by " and " is a later chunk of the same
     /// chain and declines (synthetic; printed shape: Gurmag Rakshasa, "target
     /// creature an opponent controls gets -2/-2 until end of turn and target
@@ -12527,8 +12529,8 @@ mod tests {
     /// with any condition of its own, which a false gate would skip; the first
     /// line is parsed before the second, so the card-level proof declines any
     /// second non-keyword line. That is conservative for this synthetic row,
-    /// whose two lines the parser joins into one chain with an unconditional
-    /// tail. The reach guard proves the first line alone binds.
+    /// whose second line is an unconditional instruction. The reach guard
+    /// proves the first line alone binds.
     #[test]
     fn target_controller_suffix_on_a_spell_with_a_second_paragraph_is_an_explicit_gap() {
         let condition = "its controller controls no creatures";
@@ -12559,10 +12561,10 @@ mod tests {
         assert_only_condition_gap(&parsed, condition);
     }
 
-    /// CR 608.2c: the mirror positive. A card's only spell line is its spell's
-    /// resolved root, and an unconditional later sentence on it is the root's
-    /// independent next instruction, which a false gate still runs, so the
-    /// suffix binds on the root and the later instruction stays ungated.
+    /// CR 608.2c: the mirror positive. A card's only non-keyword line is its
+    /// spell's resolved root, and an unconditional later sentence on it is the
+    /// root's independent next instruction, which a false gate still runs, so
+    /// the suffix binds on the root and the later instruction stays ungated.
     /// Synthetic text; nearest printed card: Unified Will.
     #[test]
     fn target_controller_suffix_on_the_only_spell_line_binds() {

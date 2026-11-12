@@ -415,8 +415,8 @@ pub enum ResolvedChainRoot {
     Unproven,
     /// Set by a top-level entry point whose chain is its ability's resolved
     /// root with its printed targets (a triggered ability's body, an activated
-    /// ability's effect, the only spell line of a card whose spell is not
-    /// rewritten at cast).
+    /// ability's effect, the spell line of a card whose only non-keyword line
+    /// it is and whose spell is not rewritten at cast).
     Proven,
 }
 

@@ -4805,10 +4805,13 @@ fn filter_is_spell_slot(filter: &TargetFilter) -> bool {
 }
 
 /// CR 115.1: whether the declared target slot can be the object the referent
-/// names. "That spell" requires a spell slot; "that creature" and "that
-/// permanent" require a typed slot on the corresponding type axis. Fail closed
-/// for a shape this projection cannot classify (a disjunction or a bare
-/// subtype-only filter) rather than binding by name alone.
+/// names. Every noun requires a slot that guarantees an object controller. "That
+/// spell" requires a spell slot. "That creature" requires a type axis that is
+/// creature, and "that permanent" a type axis that is a permanent type or a
+/// property-only typed slot (such as "target token an opponent controls");
+/// neither matches a stack object. A disjunction matches only when every branch
+/// does and a conjunction when any conjunct does. Any other shape (no type axis,
+/// a non-typed filter) fails closed rather than binding by name alone.
 pub(crate) fn referent_noun_matches_slot(noun: ObjectReferentNoun, filter: &TargetFilter) -> bool {
     let guarantees_controller = filter_guarantees_object_controller(filter);
     match noun {
@@ -4830,8 +4833,9 @@ pub(crate) fn referent_noun_matches_slot(noun: ObjectReferentNoun, filter: &Targ
     }
 }
 
-/// CR 110.1 + CR 111.1: a property-only typed filter on the battlefield (a
-/// token) denotes a permanent even without a type axis.
+/// CR 110.1 + CR 111.1: a property-only typed filter (a token) denotes a
+/// permanent even without a type axis; the caller's controller guard
+/// (`filter_guarantees_object_controller`) confines it to battlefield objects.
 fn property_only_permanent_slot(filter: &TargetFilter) -> bool {
     matches!(filter, TargetFilter::Typed(tf)
         if tf.type_filters.is_empty() && !tf.properties.is_empty())

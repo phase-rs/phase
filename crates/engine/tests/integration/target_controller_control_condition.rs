@@ -431,8 +431,8 @@ fn shrink_then_draw_against_hill_giant(
     (runner, giant, drawn)
 }
 
-/// T-R1: CR 608.2c: the gate holds (P1 controls only the Giant), so the
-/// instruction resolves and then the independent draw.
+/// T-R1: CR 608.2c: the gate holds (P1 controls only the Giant), so both the
+/// gated instruction and the independent draw resolve.
 #[test]
 fn gate_holds_then_the_independent_draw_resolves() {
     let (runner, giant, drawn) = shrink_then_draw_against_hill_giant(false);
