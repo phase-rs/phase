@@ -1021,3 +1021,46 @@ fn a_pre_scheduler_save_without_its_pause_is_refused() {
         "{error}"
     );
 }
+
+/// CR 101.4c: at the replacement decision order prompt, the AI's legal actions
+/// are exactly one selection per held decision, and each is accepted.
+#[test]
+fn ai_offers_one_selection_per_held_decision() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let first_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let first_spider = umbra(&mut scenario, P1, "Spider Umbra", SPIDER_UMBRA);
+    let second = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let second_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let second_spider = umbra(&mut scenario, P1, "Spider Umbra", SPIDER_UMBRA);
+    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+    let mut runner = scenario.build();
+    attach(&mut runner, first_hyena, first);
+    attach(&mut runner, first_spider, first);
+    attach(&mut runner, second_hyena, second);
+    attach(&mut runner, second_spider, second);
+    engine::game::layers::flush_layers(runner.state_mut());
+    cast_until_decision(&mut runner, wrath);
+
+    let mut legal = engine::ai_support::legal_actions(runner.state());
+    legal.sort_by_key(|action| format!("{action:?}"));
+    let mut expected = vec![
+        GameAction::SelectCards { cards: vec![first] },
+        GameAction::SelectCards {
+            cards: vec![second],
+        },
+    ];
+    expected.sort_by_key(|action| format!("{action:?}"));
+    assert_eq!(legal, expected);
+    for action in legal {
+        let mut probe = GameRunner::from_state(runner.state().clone());
+        probe
+            .act(action)
+            .expect("each offered selection is accepted");
+        assert!(matches!(
+            probe.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P1, .. }
+        ));
+    }
+}
