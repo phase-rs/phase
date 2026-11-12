@@ -574,7 +574,9 @@
     "dungeonTooltip": "Aventurando-se em {{name}}",
     "poisonAriaLabel_one": "{{count}} marcador de veneno",
     "poisonAriaLabel_other": "{{count}} marcadores de veneno",
-    "poisonTooltip": "Marcadores de veneno: {{count}}\nUm jogador com dez ou mais marcadores de veneno perde o jogo.",
+    "poisonTooltip": "Marcadores de veneno: {{count}}",
+    "poisonLossPlayer": "Um jogador com {{threshold}} ou mais marcadores de veneno perde o jogo.",
+    "poisonLossTeam": "Uma equipe com {{threshold}} ou mais marcadores de veneno perde o jogo.",
     "energyAriaLabel_one": "{{count}} marcador de energia",
     "energyAriaLabel_other": "{{count}} marcadores de energia",
     "energyTooltip": "Marcadores de energia: {{count}}\nMarcadores de energia são um recurso do jogador gasto por habilidades de cards.",
@@ -1422,6 +1424,7 @@
     "config": {
       "startingLife": "Vida Inicial",
       "commanderDamage": "Dano de Comandante",
+      "poisonCounters": "Marcadores de veneno",
       "players": "Jogadores",
       "whoGoesFirst": "Quem Começa",
       "firstPlayer": {

@@ -606,7 +606,9 @@
     "dungeonTooltip": "{{name}}を踏破中",
     "poisonAriaLabel_one": "毒カウンター{{count}}個",
     "poisonAriaLabel_other": "毒カウンター{{count}}個",
-    "poisonTooltip": "毒カウンター: {{count}}\n毒カウンターが10個以上あるプレイヤーはゲームに敗北します。",
+    "poisonTooltip": "毒カウンター: {{count}}",
+    "poisonLossPlayer": "毒カウンターが{{threshold}}個以上あるプレイヤーはゲームに敗北します。",
+    "poisonLossTeam": "毒カウンターが{{threshold}}個以上あるチームはゲームに敗北します。",
     "energyAriaLabel_one": "エネルギー・カウンター{{count}}個",
     "energyAriaLabel_other": "エネルギー・カウンター{{count}}個",
     "energyTooltip": "エネルギー・カウンター: {{count}}\nエネルギー・カウンターはカード能力が使う、プレイヤーが持つリソースです。",
@@ -1460,6 +1462,7 @@
     "config": {
       "startingLife": "開始時のライフ",
       "commanderDamage": "統率者ダメージ",
+      "poisonCounters": "毒カウンター",
       "players": "プレイヤー",
       "whoGoesFirst": "先攻プレイヤー",
       "firstPlayer": {

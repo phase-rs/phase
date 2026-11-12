@@ -2434,14 +2434,22 @@ fn retire_finished_game_triggers(state: &mut GameState) {
 /// performed either). Work the resolution parked outside the stack
 /// (`retire_parked_resolution_work`) goes first, then its frames, then its carrier.
 ///
-/// Called only at the action boundary (`engine::settle_finished_game`, which every boundary
-/// that reconciles a terminal result reaches), after every resolver has unwound. `end_game`
-/// is not the place: a resolution reaches it mid-chain (CR 104.3e / CR 104.2b effects, the
-/// CR 104.4b draw inside a repeat) while its caller still owns its frames, and the same chain
-/// can park a further prompt after it. `game_end` is the authority, not `waiting_for`: a
-/// best-of-three match may already have replaced `GameOver` with its sideboarding prompt.
+/// Ordinary game ends enter at the action boundary (`engine::settle_finished_game`), after
+/// every resolver has unwound, with `game_end` as their authority. CR 117.2e: a resolver
+/// still owns its choices and frames while it runs. `end_game` is not the place: a resolution
+/// reaches it mid-chain (CR 104.2b effects, the CR 104.4b draw inside a repeat), and the same
+/// chain can park a further prompt after it. A best-of-three match may already have replaced
+/// `GameOver` with its sideboarding prompt; the wait is not the terminal authority.
+///
+/// An admitted trusted match forfeit enters at `match_flow::apply_trusted_match_forfeit`'s
+/// own synchronous terminal boundary, outside any active resolver. Its authority is
+/// `MatchPhase::Completed` together with `match_forfeit_result`: application-policy match
+/// completion, not a CR game loss, so it needs no manufactured `game_end`. Neither a wait
+/// nor a completed match phase alone authorizes this additional retirement path.
 pub(super) fn retire_finished_game_resolution(state: &mut GameState) {
-    if state.game_end.is_none() {
+    if state.game_end.is_none()
+        && !(state.match_phase == MatchPhase::Completed && state.match_forfeit_result.is_some())
+    {
         return;
     }
     // A resolving spell may already have completed its final part. Its queued

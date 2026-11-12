@@ -574,7 +574,9 @@
     "dungeonTooltip": "Aventure dans {{name}}",
     "poisonAriaLabel_one": "{{count}} marqueur poison",
     "poisonAriaLabel_other": "{{count}} marqueurs poison",
-    "poisonTooltip": "Marqueurs poison : {{count}}\nUn joueur avec dix marqueurs poison ou plus perd la partie.",
+    "poisonTooltip": "Marqueurs poison : {{count}}",
+    "poisonLossPlayer": "Un joueur avec {{threshold}} marqueurs poison ou plus perd la partie.",
+    "poisonLossTeam": "Une équipe avec {{threshold}} marqueurs poison ou plus perd la partie.",
     "energyAriaLabel_one": "{{count}} marqueur énergie",
     "energyAriaLabel_other": "{{count}} marqueurs énergie",
     "energyTooltip": "Marqueurs énergie : {{count}}\nLes marqueurs énergie sont une ressource détenue par un joueur et dépensée par des capacités de cartes.",
@@ -1422,6 +1424,7 @@
     "config": {
       "startingLife": "Points de vie de départ",
       "commanderDamage": "Blessures de commandant",
+      "poisonCounters": "Marqueurs poison",
       "players": "Joueurs",
       "whoGoesFirst": "Qui commence",
       "firstPlayer": {
