@@ -562,11 +562,17 @@ export const PermanentCard = memo(function PermanentCard({
   const isUnderAttack = incomingAttackerCount > 0;
 
   // Glow ring styles.
-  // Priority tiers: (1) action I'm taking — attacking / blocking, (2) passive
-  // imposed state — under attack, (3) affordances offered — mana cost selection,
-  // valid target, activatable, tap undo, (4) idle selection.
+  // Priority tiers: (0) a candidate of the current target/choice prompt — the
+  // lime outline is the only target signal (no label), so it outranks combat
+  // rings; combat keeps its arrow/slide and ⚔ badge, (1) action I'm taking —
+  // attacking / blocking, (2) passive imposed state — under attack,
+  // (3) affordances offered — mana cost selection, activatable, tap undo,
+  // (4) idle selection.
   let glowClass = "";
-  if (isAttacking) {
+  if (isValidTarget) {
+    glowClass =
+      "outline outline-2 outline-black/80 ring-4 ring-lime-300 shadow-[0_0_18px_6px_rgba(190,242,100,0.72),inset_0_0_18px_4px_rgba(190,242,100,0.22)]";
+  } else if (isAttacking) {
     glowClass =
       "ring-2 ring-teal-300 shadow-[0_0_12px_3px_rgba(94,234,212,0.6)]";
   } else if (isBlocking) {
@@ -585,9 +591,6 @@ export const PermanentCard = memo(function PermanentCard({
   } else if (isSelectableForManaCost) {
     glowClass =
       "ring-2 ring-emerald-300/70 shadow-[0_0_10px_3px_rgba(74,222,128,0.35)]";
-  } else if (isValidTarget) {
-    glowClass =
-      "outline outline-2 outline-black/80 ring-4 ring-lime-300 shadow-[0_0_18px_6px_rgba(190,242,100,0.72),inset_0_0_18px_4px_rgba(190,242,100,0.22)]";
   } else if (isActivatable) {
     glowClass =
       "ring-2 ring-cyan-400 shadow-[0_0_14px_4px_rgba(34,211,238,0.55)]";
@@ -1121,30 +1124,22 @@ export const PermanentCard = memo(function PermanentCard({
         />
       )}
 
-      {isValidTarget && (
-        <div
-          className={`pointer-events-none absolute ${isUnderAttack ? "left-1 top-7" : "left-1 top-1"} z-40 rounded bg-lime-300 px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal text-black ring-1 ring-black/70 shadow-[0_1px_4px_rgba(0,0,0,0.75)]`}
-        >
-          {t("permanent.target")}
-        </div>
-      )}
-
       {isSelectableForBoardChoice && boardChoice && (
         // Selected cards get a checkmark + solid, white-ringed badge; eligible-
         // but-unselected cards get the same opaque label, so the current
         // selection is unambiguous and the badge reads as a toggle.
         <div
-          className={`pointer-events-none absolute ${isUnderAttack || isValidTarget ? "right-1 top-7" : "right-1 top-1"} z-40 rounded ${boardChoiceBadgeClass(boardChoice.intent)} px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal shadow-[0_1px_4px_rgba(0,0,0,0.75)] ${isSelectedForBoardChoice ? "ring-1 ring-white/90" : "ring-1 ring-black/70"}`}
+          className={`pointer-events-none absolute ${isUnderAttack ? "right-1 top-7" : "right-1 top-1"} z-40 rounded ${boardChoiceBadgeClass(boardChoice.intent)} px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal shadow-[0_1px_4px_rgba(0,0,0,0.75)] ${isSelectedForBoardChoice ? "ring-1 ring-white/90" : "ring-1 ring-black/70"}`}
         >
           {isSelectedForBoardChoice ? `✓ ${t(`permanent.boardChoiceBadges.${boardChoice.intent}`)}` : t(`permanent.boardChoiceBadges.${boardChoice.intent}`)}
         </div>
       )}
 
       {/* CR 707.2: provenance badge for card-art token copies and nontoken
-          permanents under copy effects. Hidden while the card is a valid target
-          (the lime "Target" tag owns the corner during targeting) and shifted
-          down under attack to clear the ⚔ badge. */}
-      {(isTokenCopy || isNontokenCopy) && !isValidTarget && (
+          permanents under copy effects. Stays visible while the card is a valid
+          target — the lime outline marks the candidate — and shifts down under
+          attack to clear the ⚔ badge. */}
+      {(isTokenCopy || isNontokenCopy) && (
         <div
           className={`pointer-events-none absolute left-1 ${isUnderAttack ? "top-7" : "top-1"} z-20 rounded bg-indigo-600/90 px-1 py-0.5 text-[9px] font-black uppercase leading-none tracking-wide text-white ring-1 ring-black/60 shadow-[0_1px_4px_rgba(0,0,0,0.6)]`}
           title={t(isTokenCopy ? "permanent.tokenTooltip" : "permanent.copyTooltip")}

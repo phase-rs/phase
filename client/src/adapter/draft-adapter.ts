@@ -935,6 +935,22 @@ export interface DraftPlayerViewFields {
   next_pairing_round: number;
   tournament_format: TournamentFormat;
   pod_policy: PodPolicy;
+  /**
+   * Engine-published procedure fact: whether a submitted deck faces in-session
+   * rounds (`TournamentPairings`) or the pod completes after deckbuilding
+   * (`CompleteImmediately`, Commander Draft). Optional because hosts predating
+   * the field omit it; absent is read as "unknown", which the submit
+   * confirmation words as a final deck — the wording that promises no later
+   * change the pod may not offer.
+   */
+  post_draft_play?: PostDraftPlay;
+  /**
+   * Whether the viewer may submit (or revise) a deck now. Engine-derived from
+   * `DraftSession::deck_submission_open` so clients never re-derive it from
+   * `status` + `pod_policy`. Defaulted for views from hosts predating it:
+   * absent is false.
+   */
+  deck_submission_open?: boolean;
   pairings: PairingView[];
   match_config: MatchConfig;
   /**
