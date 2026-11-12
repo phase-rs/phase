@@ -5290,6 +5290,42 @@ pub(crate) fn has_active_state_triggers(state: &GameState) -> bool {
         })
 }
 
+/// CR 614.12a + CR 611.3b + CR 611.3c + CR 603.10: payment observers see the
+/// battlefield before the entry group and its continuous effects exist.
+/// The projection owns only observation; admission and occurrence ledgers
+/// continue to be written through the live collection session.
+struct TriggerObservationBoard {
+    pre_entry: Option<Box<GameState>>,
+}
+
+impl TriggerObservationBoard {
+    fn prepare(state: &GameState) -> Self {
+        let pre_entry = super::replacement::copy_entry_payment_source(state).and_then(|entrant| {
+            let mut absent = super::effects::token_copy::entering_token_co_entrants(state, entrant);
+            absent.push(entrant);
+            match super::filter::pre_entry_board(state, &absent) {
+                Cow::Borrowed(_) => None,
+                Cow::Owned(board) => Some(Box::new(board)),
+            }
+        });
+        Self { pre_entry }
+    }
+
+    fn candidates_for_event(
+        &mut self,
+        live: &mut GameState,
+        event: &GameEvent,
+    ) -> smallvec::SmallVec<[ObjectId; 16]> {
+        let board = self.pre_entry.as_deref_mut().unwrap_or(live);
+        super::trigger_index::ensure_ready(board);
+        super::trigger_index::candidates_for_event(board, event)
+    }
+
+    fn read<'a>(&'a self, live: &'a GameState) -> &'a GameState {
+        self.pre_entry.as_deref().unwrap_or(live)
+    }
+}
+
 fn collect_pending_triggers_with_collection(
     state: &mut GameState,
     events: &[GameEvent],
@@ -5318,6 +5354,7 @@ fn collect_pending_triggers_with_collection(
     // occurrence-count == 1 for the placement that just fired. Same chokepoint as
     // the tap ledger, so effect, ETB, and ability counter placements all count.
     session.prepare(state, events);
+    let mut observation = TriggerObservationBoard::prepare(state);
     let mut pending: Vec<PendingTriggerContext> = Vec::new();
     // CR 603.2c: Track which batched triggers (source_id, trig_idx) have already
     // fired in this pass so "one or more" triggers fire at most once per batch.
@@ -5331,12 +5368,12 @@ fn collect_pending_triggers_with_collection(
     } else if let Some(sources) = &session.bulk_member_sources {
         sources.clone()
     } else {
-        off_zone_trigger_source_caches(state)
+        off_zone_trigger_source_caches(observation.read(state))
     };
     let active_suppress_triggers = if events.is_empty() {
         Vec::new()
     } else {
-        active_suppress_trigger_statics(state)
+        active_suppress_trigger_statics(observation.read(state))
     };
     // CR 603.2 + CR 400.7: `events` accumulates every event produced across a
     // WHOLE resolved ability chain (e.g. Living Death's exile, then sacrifice,
@@ -5400,8 +5437,7 @@ fn collect_pending_triggers_with_collection(
         // `evaluate_layers` rebuild at the top of `collect_pending_triggers`
         // guarantees the index reflects post-layer trigger sets.
         //
-        super::trigger_index::ensure_ready(state);
-        let candidates = crate::game::trigger_index::candidates_for_event(state, event);
+        let candidates = observation.candidates_for_event(state, event);
 
         // CR 603.2 differential test (debug-only): run a SHADOW scan over the
         // full battlefield with cloned dedup sets and verify every matched
@@ -5434,6 +5470,7 @@ fn collect_pending_triggers_with_collection(
                 has_decayed,
                 matched_triggers,
             ) = {
+                let state = observation.read(state);
                 let obj = match state.objects.get(&obj_id) {
                     Some(o) => o,
                     None => continue,
@@ -5884,6 +5921,7 @@ fn collect_pending_triggers_with_collection(
         #[cfg(debug_assertions)]
         {
             if audit_trigger_index {
+                let state = observation.read(state);
                 // CR 113.6: "Abilities of an instant or sorcery spell usually function only
                 // while that object is on the stack. Abilities of all other objects usually
                 // function only while that object is on the battlefield." The shadow
@@ -6458,6 +6496,7 @@ fn collect_pending_triggers_with_collection(
                     continue;
                 }
                 let matched_triggers = {
+                    let state = observation.read(state);
                     let obj = match state
                         .objects
                         .get(&obj_id)

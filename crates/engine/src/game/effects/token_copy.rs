@@ -6939,6 +6939,101 @@ mod tests {
         );
     }
 
+    /// Constructed custody fixture: the first batch is already committed and the
+    /// second is offered. This deliberately makes no claim about Clone Legion's
+    /// grouping. CR 614.12a: the Voice choice precedes the shared entry, so the
+    /// held owner's Margle must remain absent while the order answer delivers it.
+    #[test]
+    fn held_copy_owner_publishes_earlier_tokens_during_replacement_answer() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        let mut scenario = GameScenario::new();
+        let margle = scenario.add_creature_from_oracle(P0, "Margle, Cousin of Yargle", 5, 2,
+            "Other creatures you control lose all abilities, can't gain abilities, and get +2/+2.").id();
+        let voice = scenario.add_creature_from_oracle(P1, "Voice of All", 2, 2,
+            "Flying\nAs this creature enters, choose a color.\nThis creature has protection from the chosen color.").id();
+        scenario.add_enchantment_from_oracle(P0, "Parallel Lives",
+            "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.");
+        scenario.add_enchantment_from_oracle(P1, "Halving Season",
+            "If an opponent would create one or more tokens, they create half that many of each of those kinds of tokens instead, rounded down.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.");
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&margle)
+            .unwrap()
+            .is_token = true;
+        let mut copy = named_attack_copy_spec(runner.state(), voice, Vec::new());
+        copy.tapped = false;
+        copy.enters_attacking = false;
+        copy.attack_request = crate::types::proposed_event::TokenAttackRequest::Unspecified;
+        runner
+            .state_mut()
+            .push_copy_token(PendingCopyTokenResolution {
+                created_ids: vec![margle],
+                remaining: VecDeque::from([PendingCopyTokenBatch {
+                    owner: P0,
+                    copy: Box::new(copy),
+                    count: 1,
+                }]),
+                effect_kind: EffectKind::CopyTokenOf,
+                source_id: voice,
+                referent_set: None,
+                offered_batch: OfferedBatchCustody::Settled,
+            });
+        let mut events = Vec::new();
+        drain_pending_copy_token_resolution(runner.state_mut(), &mut events);
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("required order prompt: {:?}", runner.state().waiting_for);
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(candidates.len(), 2);
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_name == "Parallel Lives")
+            .unwrap();
+        assert_eq!(
+            runner.state().active_copy_token().unwrap().created_ids,
+            vec![margle]
+        );
+        runner.act(GameAction::ChooseReplacement { index }).unwrap();
+        let WaitingFor::NamedChoice {
+            player, options, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "the held owner's publication must preserve Voice's entry choice: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        let choice = options[0].clone();
+        runner.act(GameAction::ChooseOption { choice }).unwrap();
+        let copies: Vec<_> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|obj| obj.is_token && obj.name == "Voice of All")
+            .collect();
+        assert_eq!(copies.len(), 1);
+        assert!(copies[0]
+            .chosen_attributes
+            .iter()
+            .any(|choice| matches!(choice, ChosenAttribute::Color(_))));
+        assert_eq!(
+            runner.state().last_created_token_ids,
+            vec![margle, copies[0].id]
+        );
+        assert!(runner.state().active_copy_token().is_none());
+        assert!(runner.state().active_copy_token_resolution_tokens.is_none());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+
     /// R16 constructed ledger fixture, independent of any spell's batch grouping.
     /// The earlier batch and owner are seeded; only the next batch is delivered.
     /// CR 614.6 + CR 609.3: a batch halved to zero creates nothing and cannot
