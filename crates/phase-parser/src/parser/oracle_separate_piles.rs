@@ -36,8 +36,9 @@ use crate::types::ability::{
 };
 use crate::types::zones::{EtbTapState, Zone};
 
-use super::oracle_effect::parse_effect_chain_with_context;
+use super::oracle_effect::parse_effect_chain_with_context_and_provenance;
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::history_provenance::{InstructionStep, PendingHistory, PileDisposition};
 use super::oracle_ir::trigger::PileIr;
 
 /// CR 700.3: Detect and parse the full pile-separation block into typed trigger
@@ -62,6 +63,7 @@ pub(crate) fn parse_separate_into_piles_ir(
     ctx: &ParseContext,
 ) -> Option<PileIr> {
     // Try the reveal-from-library shape first (Fact or Fiction family).
+    let mut history = Vec::new();
     let effect = try_parse_reveal_separate(text, kind).or_else(|| {
         // Fall through to the battlefield partition shape (Make an Example family).
         let (rest, partition_subject) = parse_separates_line(text)?;
@@ -79,10 +81,14 @@ pub(crate) fn parse_separate_into_piles_ir(
         // wired by the resolver per-object, not via the parsed `target_filter`.
         // CR 608.2c: this continues the partition/choice instruction; it is
         // applied per selected object, not placed on the stack as a new ability.
-        let parsed = parse_effect_chain_with_context(trailing, kind, &mut ParseContext::default());
+        let parsed = parse_effect_chain_with_context_and_provenance(
+            trailing,
+            kind,
+            &mut ParseContext::default(),
+        );
         // Reject if the trailing sentence didn't yield a real effect (the parser
         // returns an Unimplemented stub on failure).
-        if matches!(*parsed.effect, Effect::Unimplemented { .. }) {
+        if matches!(*parsed.value.effect, Effect::Unimplemented { .. }) {
             return None;
         }
         // CR 700.3 + CR 608.2c: Build a sub-effect with a generic ParentTarget
@@ -90,7 +96,14 @@ pub(crate) fn parse_separate_into_piles_ir(
         // the target via `TargetRef::Object`. Force-rewrite the sub-effect's
         // target filter to `ParentTarget` so the per-object pipeline routes
         // through the standard sacrifice handler unambiguously.
-        let mut sub_def = parsed;
+        history = parsed
+            .history
+            .into_iter()
+            .map(|record| {
+                PendingHistory::nested(record, InstructionStep::Pile(PileDisposition::Chosen))
+            })
+            .collect();
+        let mut sub_def = parsed.value;
         rewrite_sub_effect_target_to_parent(&mut sub_def.effect);
 
         Some(Effect::SeparateIntoPiles {
@@ -107,7 +120,12 @@ pub(crate) fn parse_separate_into_piles_ir(
         })
     })?;
 
-    Some(PileIr::new(effect).with_source(text).with_context(ctx))
+    Some(
+        PileIr::new(effect)
+            .with_history(history)
+            .with_source(text)
+            .with_context(ctx),
+    )
 }
 
 /// CR 700.3 + CR 700.3a: Consume the "Each opponent separates the creatures

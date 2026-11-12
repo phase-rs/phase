@@ -544,6 +544,12 @@ fn history_root<'a>(
             .iter()
             .position(|id| *id == entry.item)
             .and_then(|index| parsed.abilities.get(index)),
+        HistoryRoot::ReplacementExecute => tracks
+            .replacements
+            .iter()
+            .position(|id| *id == entry.item)
+            .and_then(|index| parsed.replacements.get(index))
+            .and_then(|replacement| replacement.execute.as_deref()),
         HistoryRoot::TriggerExecute => tracks
             .triggers
             .iter()

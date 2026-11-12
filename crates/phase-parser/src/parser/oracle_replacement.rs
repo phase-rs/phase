@@ -19,12 +19,13 @@ use super::oracle_effect::lower::{
     apply_where_x_quantity_expression, parse_where_x_quantity_core, WhereXBinding,
 };
 use super::oracle_effect::{
-    excise_selection_qualifier, parse_effect_chain, parse_effect_chain_with_context,
+    excise_selection_qualifier, parse_effect_chain, parse_effect_chain_with_context_and_provenance,
     parse_effect_clause, parse_named_choice_object, try_parse_named_choice,
     try_parse_named_choice_conjunction,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::OracleNodeIr;
+use super::oracle_ir::history_provenance::{HistoryProvenance, Lowered};
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
@@ -93,13 +94,15 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
 
 /// IR production: parse a replacement line into `ReplacementIr` (pre-lowering).
 pub(crate) fn parse_replacement_line_ir(text: &str, card_name: &str) -> Option<ReplacementIr> {
-    let mut definition = parse_replacement_line_inner(text, card_name)?;
+    let mut history = Vec::new();
+    let mut definition = parse_replacement_line_inner(text, card_name, &mut history)?;
     if definition.condition.is_none() {
         if let Some(condition) = parse_replacement_ability_word_condition(text) {
             definition = definition.condition(condition);
         }
     }
     Some(ReplacementIr {
+        history,
         definition,
         source_text: text.to_string(),
         execute_ir: None,
@@ -110,11 +113,24 @@ pub(crate) fn parse_replacement_line_ir(text: &str, card_name: &str) -> Option<R
 ///
 /// Currently identity — replacement definitions are fully assembled during parsing.
 pub(crate) fn lower_replacement_ir(ir: &ReplacementIr) -> ReplacementDefinition {
-    ir.definition.clone()
+    lower_replacement_ir_with_provenance(ir).value
+}
+
+pub(crate) fn lower_replacement_ir_with_provenance(
+    ir: &ReplacementIr,
+) -> Lowered<ReplacementDefinition> {
+    Lowered {
+        value: ir.definition.clone(),
+        history: ir.history.clone(),
+    }
 }
 
 /// Internal dispatch body for replacement line parsing.
-fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<ReplacementDefinition> {
+fn parse_replacement_line_inner(
+    text: &str,
+    card_name: &str,
+    history: &mut Vec<HistoryProvenance>,
+) -> Option<ReplacementDefinition> {
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
     let normalized = replace_self_refs(&text, card_name);
@@ -428,11 +444,17 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     if let Some(def) = parse_damage_to_player_instead_followup(&norm_lower, &text) {
         return Some(def);
     }
-    if let Some(def) = parse_damage_to_self_instead_followup(&norm_lower, &normalized, &text) {
-        return Some(def);
+    if let Some(lowered) =
+        parse_damage_to_self_instead_followup_with_provenance(&norm_lower, &normalized, &text)
+    {
+        *history = lowered.history;
+        return Some(lowered.value);
     }
-    match parse_damage_prevention_replacement(&norm_lower, &text) {
-        Ok(def) => return Some(def),
+    match parse_damage_prevention_replacement_with_provenance(&norm_lower, &text) {
+        Ok(lowered) => {
+            *history = lowered.history;
+            return Some(lowered.value);
+        }
         // CR 615.1a: a prevention shield with a printed part it cannot carry is
         // claimed by no later parser; the route lands the line as
         // `Effect::unimplemented` (`damage_prevention_fails_closed`).
@@ -13955,11 +13977,11 @@ fn parse_damage_heal_self_replacement(
     )
 }
 
-fn parse_damage_to_self_instead_followup(
+fn parse_damage_to_self_instead_followup_with_provenance(
     norm_lower: &str,
     normalized: &str,
     original_text: &str,
-) -> Option<ReplacementDefinition> {
+) -> Option<Lowered<ReplacementDefinition>> {
     let total_len = norm_lower.len();
     let ((effect_start, effect_len, recipient_scope), rest) =
         nom_on_lower(normalized, norm_lower, |i| {
@@ -14017,11 +14039,15 @@ fn parse_damage_to_self_instead_followup(
     };
     // CR 614.1a: this substitutes the affected event inside the same ability;
     // it is not a new activated/triggered ability body.
-    let followup = parse_effect_chain_with_context(&followup_text, AbilityKind::Spell, &mut ctx);
+    let followup = parse_effect_chain_with_context_and_provenance(
+        &followup_text,
+        AbilityKind::Spell,
+        &mut ctx,
+    );
 
     let mut def = ReplacementDefinition::new(ReplacementEvent::DealtDamage)
         .prevention_shield(PreventionAmount::All)
-        .execute(followup)
+        .execute(followup.value)
         .description(original_text.to_string());
     if let Some(scope) = recipient_scope {
         // CR 614.1: scope the replacement to damage dealt TO the source's own
@@ -14033,7 +14059,20 @@ fn parse_damage_to_self_instead_followup(
         // source's own combat damage (#5652).
         def = def.valid_card(scope);
     }
-    Some(def)
+    Some(Lowered {
+        value: def,
+        history: followup.history,
+    })
+}
+
+#[cfg(test)]
+fn parse_damage_to_self_instead_followup(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    parse_damage_to_self_instead_followup_with_provenance(norm_lower, normalized, original_text)
+        .map(|lowered| lowered.value)
 }
 
 fn parse_damage_to_player_instead_followup(
@@ -14584,7 +14623,7 @@ pub(crate) fn damage_prevention_fails_closed(
 ) -> Option<PreventionFailClosed> {
     let text = strip_reminder_text(text);
     let norm_lower = replace_self_refs(&text, card_name).to_lowercase();
-    match parse_damage_prevention_replacement(&norm_lower, &text) {
+    match parse_damage_prevention_replacement_with_provenance(&norm_lower, &text) {
         Err(PreventionDecline::FailsClosed(reason)) => Some(reason),
         Ok(_) | Err(PreventionDecline::NotThisShape) => None,
     }
@@ -14640,10 +14679,10 @@ fn has_coordinated_predicate_conjunct(working_lower: &str) -> bool {
 /// Declines are typed (`PreventionDecline`) so the route can tell "not my shape"
 /// from "my shape, a printed part of it cannot be carried"
 /// (`damage_prevention_fails_closed`).
-fn parse_damage_prevention_replacement(
+fn parse_damage_prevention_replacement_with_provenance(
     norm_lower: &str,
     original_text: &str,
-) -> Result<ReplacementDefinition, PreventionDecline> {
+) -> Result<Lowered<ReplacementDefinition>, PreventionDecline> {
     // CR 614.1a: An "as long as <cond>, " prefix on a prevention replacement gates
     // the shield itself, not its post-replacement followup. Strip the gate first
     // and lift it to a typed `ReplacementCondition` so the rest of the parser
@@ -15043,6 +15082,7 @@ fn parse_damage_prevention_replacement(
     // which the runtime fires as a post-replacement follow-up after the shield
     // consumes the damage. Class members: Phyrexian Hydra, Vigor, Stormwild
     // Capridor, Hostility.
+    let mut history = Vec::new();
     if let Some(followup) = extract_prevention_followup(original_text) {
         // CR 608.2k: Static self-prevention replacements split into two
         // anaphor cohorts depending on what the rider counter/effect targets:
@@ -15074,8 +15114,13 @@ fn parse_damage_prevention_replacement(
         };
         // CR 615.5: the additional effect continues this prevention effect.
         // In particular, a spell-driven shield may already declare a target.
-        let mut followup_def =
-            parse_effect_chain_with_context(&followup, AbilityKind::Spell, &mut followup_ctx);
+        let lowered = parse_effect_chain_with_context_and_provenance(
+            &followup,
+            AbilityKind::Spell,
+            &mut followup_ctx,
+        );
+        history = lowered.history;
+        let mut followup_def = lowered.value;
         // CR 615.5 + CR 609.7: `parse_target` maps "the source's controller" /
         // "that source's controller" to `ParentTargetController` (correct for
         // anaphoric "its controller" in non-prevention contexts). Inside a
@@ -15126,7 +15171,19 @@ fn parse_damage_prevention_replacement(
         def = def.execute(followup_def);
     }
 
-    Ok(def)
+    Ok(Lowered {
+        value: def,
+        history,
+    })
+}
+
+#[cfg(test)]
+fn parse_damage_prevention_replacement(
+    norm_lower: &str,
+    original_text: &str,
+) -> Result<ReplacementDefinition, PreventionDecline> {
+    parse_damage_prevention_replacement_with_provenance(norm_lower, original_text)
+        .map(|lowered| lowered.value)
 }
 
 /// CR 615.1a: Extract the typed event-recipient filter from a damage-prevention

@@ -44894,7 +44894,7 @@ pub(crate) fn parse_ability_ir_standalone_with_spell_anaphor(
 /// Parse an explicit ability root in `WithContext` mode.
 ///
 /// Shares the whole-body recognizers and lowering pipeline with
-/// [`parse_effect_chain_with_context`], but not its damage-target default: this
+/// [`parse_effect_chain_with_context_and_provenance`], but not its damage-target default: this
 /// root permits fresh chunks to authorize parent-target population binding,
 /// whereas the nested wrapper withholds it. Converting a caller changes that
 /// permission default. Preserve `Standalone` versus `WithContext` mode separately:
@@ -44952,17 +44952,13 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
 /// callers that retain clause provenance use the explicit-context sibling.
 /// Withheld permission leaves the pre-existing unbound population fallback;
 /// this entry does not turn that fallback into a strict failure.
-pub fn parse_effect_chain_with_context(
+#[cfg(test)]
+pub(super) fn parse_effect_chain_with_context(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,
 ) -> AbilityDefinition {
-    parse_nested_effect_chain_with_damage_context(
-        text,
-        kind,
-        ctx,
-        DamageTargetContext::InheritedTargets,
-    )
+    parse_effect_chain_with_context_and_provenance(text, kind, ctx).value
 }
 
 /// Parse the first instruction of an independent ability, retaining subject context.
@@ -44985,14 +44981,18 @@ pub(crate) fn parse_effect_chain_with_context_ability_root(
     ))
 }
 
-fn parse_nested_effect_chain_with_damage_context(
+/// Nested lowering always returns its parser-only provenance companion.
+pub(crate) fn parse_effect_chain_with_context_and_provenance(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,
-    damage_context: DamageTargetContext,
-) -> AbilityDefinition {
-    parse_nested_effect_chain_with_damage_context_and_provenance(text, kind, ctx, damage_context)
-        .value
+) -> crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition> {
+    parse_nested_effect_chain_with_damage_context_and_provenance(
+        text,
+        kind,
+        ctx,
+        DamageTargetContext::InheritedTargets,
+    )
 }
 
 fn parse_nested_effect_chain_with_damage_context_and_provenance(

@@ -21,6 +21,15 @@ pub(crate) enum InstructionStep {
     Mode(usize),
     ChoiceBranch(usize),
     ContestWinner,
+    VoteChoice(usize),
+    Pile(PileDisposition),
+    ReplacementExecute,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PileDisposition {
+    Chosen,
+    Unchosen,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,6 +46,31 @@ impl InstructionPath {
                 InstructionStep::ElseAbility => def.else_ability.as_deref()?,
                 InstructionStep::DelayedPayload => match def.effect.as_ref() {
                     Effect::CreateDelayedTrigger { effect, .. } => effect,
+                    _ => return None,
+                },
+                InstructionStep::VoteChoice(index) => match def.effect.as_ref() {
+                    Effect::Vote {
+                        per_choice_effect, ..
+                    } => per_choice_effect.get(*index)?,
+                    _ => return None,
+                },
+                InstructionStep::Pile(PileDisposition::Chosen) => match def.effect.as_ref() {
+                    Effect::SeparateIntoPiles {
+                        chosen_pile_effect, ..
+                    } => chosen_pile_effect,
+                    _ => return None,
+                },
+                InstructionStep::Pile(PileDisposition::Unchosen) => match def.effect.as_ref() {
+                    Effect::SeparateIntoPiles {
+                        unchosen_pile_effect,
+                        ..
+                    } => unchosen_pile_effect.as_deref()?,
+                    _ => return None,
+                },
+                InstructionStep::ReplacementExecute => match def.effect.as_ref() {
+                    Effect::AddTargetReplacement { replacement, .. } => {
+                        replacement.execute.as_deref()?
+                    }
                     _ => return None,
                 },
                 InstructionStep::ContestWinner => match def.effect.as_ref() {
@@ -202,6 +236,34 @@ fn walk(
     if let Effect::ExileTopCardContest { winner_effect } = def.effect.as_ref() {
         child(InstructionStep::ContestWinner, winner_effect);
     }
+    match def.effect.as_ref() {
+        Effect::Vote {
+            per_choice_effect, ..
+        } => {
+            for (index, effect) in per_choice_effect.iter().enumerate() {
+                child(InstructionStep::VoteChoice(index), effect);
+            }
+        }
+        Effect::SeparateIntoPiles {
+            chosen_pile_effect,
+            unchosen_pile_effect,
+            ..
+        } => {
+            child(
+                InstructionStep::Pile(PileDisposition::Chosen),
+                chosen_pile_effect,
+            );
+            if let Some(effect) = unchosen_pile_effect {
+                child(InstructionStep::Pile(PileDisposition::Unchosen), effect);
+            }
+        }
+        Effect::AddTargetReplacement { replacement, .. } => {
+            if let Some(effect) = &replacement.execute {
+                child(InstructionStep::ReplacementExecute, effect);
+            }
+        }
+        _ => {}
+    }
     for (index, mode) in def.mode_abilities.iter().enumerate() {
         child(InstructionStep::Mode(index), mode);
     }
@@ -266,6 +328,7 @@ impl HistoryTransport {
 pub(crate) enum HistoryRoot {
     Ability,
     TriggerExecute,
+    ReplacementExecute,
 }
 
 #[derive(Debug, Clone)]
@@ -420,6 +483,32 @@ mod tests {
                 InstructionStep::ElseAbility => {
                     def.else_ability.as_deref_mut().expect("else instruction")
                 }
+                InstructionStep::VoteChoice(index) => match def.effect.as_mut() {
+                    Effect::Vote {
+                        per_choice_effect, ..
+                    } => per_choice_effect.get_mut(*index).expect("vote choice"),
+                    other => panic!("vote, got {other:?}"),
+                },
+                InstructionStep::Pile(PileDisposition::Chosen) => match def.effect.as_mut() {
+                    Effect::SeparateIntoPiles {
+                        chosen_pile_effect, ..
+                    } => chosen_pile_effect,
+                    other => panic!("piles, got {other:?}"),
+                },
+                InstructionStep::Pile(PileDisposition::Unchosen) => match def.effect.as_mut() {
+                    Effect::SeparateIntoPiles {
+                        unchosen_pile_effect,
+                        ..
+                    } => unchosen_pile_effect.as_deref_mut().expect("unchosen pile"),
+                    other => panic!("piles, got {other:?}"),
+                },
+                InstructionStep::ReplacementExecute => match def.effect.as_mut() {
+                    Effect::AddTargetReplacement { replacement, .. } => replacement
+                        .execute
+                        .as_deref_mut()
+                        .expect("replacement execute"),
+                    other => panic!("replacement, got {other:?}"),
+                },
                 InstructionStep::ContestWinner => match def.effect.as_mut() {
                     Effect::ExileTopCardContest { winner_effect } => winner_effect,
                     other => panic!("contest winner, got {other:?}"),
@@ -764,6 +853,321 @@ mod tests {
         assert!(flagged(text, &finished));
         // Keep the original allocation live through transport sealing.
         assert!(!flagged(text, &lowered));
+    }
+
+    fn lower_vote(text: &str) -> Lowered<AbilityDefinition> {
+        let vote = crate::parser::oracle_vote::parse_vote_block_ir(
+            text,
+            AbilityKind::Spell,
+            &source_context(),
+        )
+        .expect("production vote recognizer");
+        crate::parser::oracle_effect::lower::lower_effect_chain_ir_with_provenance(
+            &vote.effect_chain(AbilityKind::Spell),
+        )
+    }
+
+    #[test]
+    fn vote_outcome_history_belongs_to_its_outcome() {
+        let text = "Each player votes for mercy or wrath. If wrath gets more votes, tap all creatures ~ blocked this turn.";
+        let mut lowered = lower_vote(text);
+        let path = InstructionPath(vec![InstructionStep::VoteChoice(1)]);
+        assert!(matches!(
+            lowered.value.effect.as_ref(),
+            Effect::Vote {
+                tally_mode: crate::types::ability::VoteTally::TopVotes { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            path.resolve(&lowered.value).unwrap().effect.as_ref(),
+            Effect::SetTapState { .. }
+        ));
+        assert_eq!(lowered.history.len(), 1);
+        assert_eq!(lowered.history[0].locator.as_ref(), Some(&path));
+        assert!(!flagged(text, &lowered));
+        let misplaced = lower("Tap all creatures ~ blocked this turn.", source_context()).value;
+        replace_population(resolve_mut(&path, &mut lowered.value), bare());
+        let Effect::Vote {
+            per_choice_effect, ..
+        } = lowered.value.effect.as_mut()
+        else {
+            unreachable!()
+        };
+        per_choice_effect[0] = Box::new(misplaced);
+        assert!(flagged(text, &lowered));
+    }
+
+    #[test]
+    fn per_choice_vote_history_belongs_to_its_choice() {
+        let text = "Each player votes for mercy or wrath. For each mercy vote, draw a card. For each wrath vote, tap all creatures ~ blocked this turn.";
+        let mut lowered = lower_vote(text);
+        let path = InstructionPath(vec![InstructionStep::VoteChoice(1)]);
+        assert!(matches!(
+            lowered.value.effect.as_ref(),
+            Effect::Vote {
+                tally_mode: crate::types::ability::VoteTally::PerVote,
+                ..
+            }
+        ));
+        assert!(matches!(
+            path.resolve(&lowered.value).unwrap().effect.as_ref(),
+            Effect::SetTapState { .. }
+        ));
+        assert_eq!(lowered.history.len(), 1);
+        assert_eq!(lowered.history[0].locator.as_ref(), Some(&path));
+        assert!(!flagged(text, &lowered));
+        let misplaced = path.resolve(&lowered.value).unwrap().clone();
+        replace_population(resolve_mut(&path, &mut lowered.value), bare());
+        let Effect::Vote {
+            per_choice_effect, ..
+        } = lowered.value.effect.as_mut()
+        else {
+            unreachable!()
+        };
+        per_choice_effect[0] = Box::new(misplaced);
+        assert!(flagged(text, &lowered));
+    }
+
+    #[test]
+    fn replacement_followup_history_belongs_to_its_execute_instruction() {
+        for text in [
+            "If damage would be dealt to ~, tap all creatures ~ blocked this turn instead.",
+            "If damage would be dealt to ~, prevent that damage. Tap all creatures ~ blocked this turn.",
+        ] {
+            let ir = crate::parser::oracle_replacement::parse_replacement_line_ir(text, "History witness")
+                .expect("production replacement recognizer");
+            let replacement = crate::parser::oracle_replacement::lower_replacement_ir_with_provenance(&ir);
+            assert!(replacement.value.execute.is_some());
+            let mut lowered = Lowered {
+                value: *replacement.value.execute.unwrap(),
+                history: replacement.history,
+            };
+            assert!(matches!(lowered.value.effect.as_ref(), Effect::SetTapState { .. }));
+            assert_eq!(lowered.history.len(), 1);
+            assert_eq!(lowered.history[0].locator, Some(InstructionPath::default()));
+            assert!(!flagged(text, &lowered));
+            let misplaced = lower("Tap all creatures ~ blocked this turn.", source_context()).value;
+            replace_population(&mut lowered.value, bare());
+            lowered.value.sub_ability = Some(Box::new(misplaced));
+            assert!(flagged(text, &lowered));
+        }
+    }
+
+    #[test]
+    fn pile_followup_history_belongs_to_the_chosen_pile_chain() {
+        let text = "Each opponent separates the creatures they control into two piles. For each opponent, you choose one of their piles. Each opponent sacrifices the creatures in their chosen pile. Tap all creatures ~ blocked this turn.";
+        let pile = crate::parser::oracle_separate_piles::parse_separate_into_piles_ir(
+            text,
+            AbilityKind::Spell,
+            &source_context(),
+        )
+        .expect("production pile recognizer");
+        let mut lowered =
+            crate::parser::oracle_effect::lower::lower_effect_chain_ir_with_provenance(
+                &pile.effect_chain(AbilityKind::Spell),
+            );
+        let path = InstructionPath(vec![
+            InstructionStep::Pile(PileDisposition::Chosen),
+            InstructionStep::SubAbility,
+        ]);
+        assert!(matches!(
+            lowered.value.effect.as_ref(),
+            Effect::SeparateIntoPiles { .. }
+        ));
+        assert!(matches!(
+            path.resolve(&lowered.value).unwrap().effect.as_ref(),
+            Effect::SetTapState { .. }
+        ));
+        assert_eq!(lowered.history.len(), 1);
+        assert_eq!(lowered.history[0].locator.as_ref(), Some(&path));
+        assert!(!flagged(text, &lowered));
+        let misplaced = path.resolve(&lowered.value).unwrap().clone();
+        replace_population(resolve_mut(&path, &mut lowered.value), bare());
+        lowered.value.sub_ability = Some(Box::new(misplaced));
+        assert!(flagged(text, &lowered));
+    }
+
+    fn document_flagged(doc: &mut super::super::doc::OracleDocIr) -> bool {
+        crate::parser::oracle::lower_oracle_ir(doc).parse_warnings.iter().any(|warning| matches!(
+            warning, crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause { detector, .. }
+                if detector == "CombatHistoryRelation"
+        ))
+    }
+
+    #[test]
+    fn replacement_document_seam_keeps_execute_history() {
+        let text = "If damage would be dealt to ~, tap all creatures ~ blocked this turn instead.";
+        let mut doc = crate::parser::oracle::parse_oracle_ir(
+            text,
+            "History witness",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let replacement = doc
+            .items
+            .iter_mut()
+            .find_map(|item| match &mut item.node {
+                super::super::doc::OracleNodeIr::Replacement(replacement) => Some(replacement),
+                _ => None,
+            })
+            .expect("replacement document route");
+        assert_eq!(replacement.history.len(), 1);
+        assert!(matches!(
+            replacement
+                .definition
+                .execute
+                .as_ref()
+                .unwrap()
+                .effect
+                .as_ref(),
+            Effect::SetTapState { .. }
+        ));
+        assert!(!document_flagged(&mut doc));
+        let replacement = doc
+            .items
+            .iter_mut()
+            .find_map(|item| match &mut item.node {
+                super::super::doc::OracleNodeIr::Replacement(replacement) => Some(replacement),
+                _ => None,
+            })
+            .unwrap();
+        let execute = replacement.definition.execute.as_mut().unwrap();
+        replace_population(execute, bare());
+        execute.sub_ability = Some(Box::new(
+            lower("Tap all creatures ~ blocked this turn.", source_context()).value,
+        ));
+        assert!(document_flagged(&mut doc));
+    }
+
+    #[test]
+    fn saga_vote_document_seam_keeps_outcome_history() {
+        let text = "I — Each player votes for mercy or wrath. If wrath gets more votes, tap all creatures ~ blocked this turn.";
+        let mut doc = crate::parser::oracle::parse_oracle_ir(
+            text,
+            "History witness",
+            &[],
+            &["Enchantment".to_string()],
+            &["Saga".to_string()],
+        );
+        let (definition, history) = doc
+            .items
+            .iter_mut()
+            .find_map(|item| match &mut item.node {
+                super::super::doc::OracleNodeIr::Trigger(
+                    super::super::trigger::TriggerNodeIr::Assembled {
+                        definition,
+                        history,
+                        ..
+                    },
+                ) => Some((definition, history)),
+                _ => None,
+            })
+            .expect("assembled chapter document route");
+        let path = InstructionPath(vec![InstructionStep::VoteChoice(1)]);
+        assert!(matches!(
+            definition.execute.as_ref().unwrap().effect.as_ref(),
+            Effect::Vote { .. }
+        ));
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].locator.as_ref(), Some(&path));
+        assert!(!document_flagged(&mut doc));
+        let definition = doc
+            .items
+            .iter_mut()
+            .find_map(|item| match &mut item.node {
+                super::super::doc::OracleNodeIr::Trigger(
+                    super::super::trigger::TriggerNodeIr::Assembled { definition, .. },
+                ) => Some(definition),
+                _ => None,
+            })
+            .unwrap();
+        let execute = definition.execute.as_mut().unwrap();
+        replace_population(resolve_mut(&path, execute), bare());
+        execute.sub_ability = Some(Box::new(
+            lower("Tap all creatures ~ blocked this turn.", source_context()).value,
+        ));
+        assert!(document_flagged(&mut doc));
+    }
+
+    #[test]
+    fn gotcha_document_seam_keeps_execute_history() {
+        let text = "Gotcha — If an opponent laughs, you may say \"Gotcha!\" When you do, tap all creatures ~ blocked this turn.";
+        let mut doc = crate::parser::oracle::parse_oracle_ir(
+            text,
+            "History witness",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let (definition, history) = doc
+            .items
+            .iter_mut()
+            .find_map(|item| match &mut item.node {
+                super::super::doc::OracleNodeIr::Trigger(
+                    super::super::trigger::TriggerNodeIr::Assembled {
+                        definition,
+                        history,
+                        ..
+                    },
+                ) => Some((definition, history)),
+                _ => None,
+            })
+            .expect("assembled Gotcha document route");
+        assert!(matches!(
+            definition.mode,
+            crate::types::triggers::TriggerMode::GotchaSaid
+        ));
+        assert_eq!(history.len(), 1);
+        assert!(matches!(
+            definition.execute.as_ref().unwrap().effect.as_ref(),
+            Effect::SetTapState { .. }
+        ));
+        assert!(!document_flagged(&mut doc));
+        let definition = doc
+            .items
+            .iter_mut()
+            .find_map(|item| match &mut item.node {
+                super::super::doc::OracleNodeIr::Trigger(
+                    super::super::trigger::TriggerNodeIr::Assembled { definition, .. },
+                ) => Some(definition),
+                _ => None,
+            })
+            .unwrap();
+        let execute = definition.execute.as_mut().unwrap();
+        replace_population(execute, bare());
+        execute.sub_ability = Some(Box::new(
+            lower("Tap all creatures ~ blocked this turn.", source_context()).value,
+        ));
+        assert!(document_flagged(&mut doc));
+    }
+
+    #[test]
+    fn transport_reaches_replacement_execute_payloads() {
+        let text = "Tap all creatures ~ blocked this turn.";
+        let lowered = lower(text, source_context());
+        let transport = HistoryTransport::from_lowered(&lowered.value, lowered.history);
+        let wrapper = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::AddTargetReplacement {
+                replacement: Box::new(
+                    crate::types::ability::ReplacementDefinition::new(
+                        crate::types::replacements::ReplacementEvent::DealtDamage,
+                    )
+                    .execute(lowered.value),
+                ),
+                target: crate::types::ability::TargetFilter::None,
+            },
+        );
+        let mut finished = transport.finish(wrapper);
+        let path = InstructionPath(vec![InstructionStep::ReplacementExecute]);
+        assert_eq!(finished.history[0].locator.as_ref(), Some(&path));
+        assert!(!flagged(text, &finished));
+        let misplaced = path.resolve(&finished.value).unwrap().clone();
+        replace_population(resolve_mut(&path, &mut finished.value), bare());
+        finished.value.sub_ability = Some(Box::new(misplaced));
+        assert!(flagged(text, &finished));
     }
 
     #[test]

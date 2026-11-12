@@ -1508,6 +1508,7 @@ pub(crate) fn lower_oracle_block_ir(
             // as-enters header. The execute choice is a typed replacement payload,
             // never a document-level pre-lowered node.
             let replacement = ReplacementIr {
+                history: Vec::new(),
                 definition: ReplacementDefinition::new(ReplacementEvent::Moved)
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,

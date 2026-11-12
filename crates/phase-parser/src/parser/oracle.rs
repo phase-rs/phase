@@ -80,8 +80,8 @@ use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     ability_chain_grants_chosen_color_keyword, lower_ability_ir, parse_ability_ir_standalone,
     parse_ability_ir_with_context, parse_additional_cost_instead_condition_fragment,
-    parse_effect_chain, parse_effect_chain_with_context,
-    parse_effect_chain_with_context_ability_root, parse_phase_name_set,
+    parse_effect_chain, parse_effect_chain_with_context_ability_root,
+    parse_effect_chain_with_context_and_provenance, parse_phase_name_set,
     parse_windowed_replacement_install_ir, rewrite_condition_keyword, target_filter_controller_ref,
     try_parse_temporal_delayed_trigger_ability,
 };
@@ -4108,7 +4108,12 @@ fn is_spell_resolution_instruction_line(
     // A classification probe, not an ability-body producer. Keep the nested
     // default: the line may continue a spell with earlier target declarations.
     let snapshot = ctx.diagnostics.len();
-    let parsed = parse_effect_chain_with_context(&prepared.effect_text, AbilityKind::Spell, ctx);
+    let parsed = parse_effect_chain_with_context_and_provenance(
+        &prepared.effect_text,
+        AbilityKind::Spell,
+        ctx,
+    )
+    .value;
     ctx.diagnostics.truncate(snapshot);
     !has_unimplemented(&parsed)
 }
@@ -4596,10 +4601,10 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
                     TriggerNodeIr::Parsed(trigger) => {
                         crate::parser::oracle_trigger::lower_trigger_ir_with_provenance(trigger)
                     }
-                    TriggerNodeIr::Assembled { .. } => {
+                    TriggerNodeIr::Assembled { history, .. } => {
                         crate::parser::oracle_ir::history_provenance::Lowered {
                             value: lower_trigger_node_ir(trigger_node),
-                            history: Vec::new(),
+                            history: history.clone(),
                         }
                     }
                 };
@@ -4634,6 +4639,13 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
                 static_ids.push(item.id);
             }
             OracleNodeIr::Replacement(replacement_ir) => {
+                history_provenance.extend(replacement_ir.history.iter().cloned().map(|record| {
+                    crate::parser::oracle_ir::history_provenance::DocumentHistory {
+                        item: item.id,
+                        root: crate::parser::oracle_ir::history_provenance::HistoryRoot::ReplacementExecute,
+                        record,
+                    }
+                }));
                 result
                     .replacements
                     .push(lower_replacement_ir(replacement_ir));
@@ -6079,7 +6091,11 @@ fn parse_normalized_oracle_ir(
             // overwrite that would replace it with `source_text`.
             emitter.trigger_ir_at_route(
                 line,
-                TriggerNodeIr::from_definition(lines[line], trigger),
+                TriggerNodeIr::from_definition_with_history(
+                    lines[line],
+                    trigger.value,
+                    trigger.history,
+                ),
                 OuterRoute::Saga,
             );
         }
@@ -6404,10 +6420,16 @@ fn parse_normalized_oracle_ir(
         if let Some((condition, effect_text)) = super::oracle_un::split_gotcha_line(&line, &lower) {
             ctx.subject = None;
             ctx.actor = None;
-            let effect_def =
-                parse_effect_chain_with_context(effect_text.trim(), AbilityKind::Spell, &mut ctx);
-            let trigger = super::oracle_un::gotcha_trigger(condition, effect_def, &line);
-            emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
+            let lowered = parse_effect_chain_with_context_and_provenance(
+                effect_text.trim(),
+                AbilityKind::Spell,
+                &mut ctx,
+            );
+            let trigger = super::oracle_un::gotcha_trigger(condition, lowered.value, &line);
+            emitter.trigger_ir_at(
+                item_line,
+                TriggerNodeIr::from_definition_with_history(&line, trigger, lowered.history),
+            );
             i += 1;
             continue;
         }
