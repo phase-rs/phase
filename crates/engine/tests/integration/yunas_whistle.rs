@@ -1629,6 +1629,16 @@ fn owner_ordered_placement_retires_overlapping_reveal_lease() {
         other => panic!("expected EffectZoneChoice, got {other:?}"),
     }
 
+    // CR 701.20a: the whole pile stays revealed while its owner arranges it.
+    // L has no other reveal carrier — only this membership reaches retirement.
+    let nonland_before = runner.state().objects[&nonland].incarnation;
+    let land_before = runner.state().objects[&land].incarnation;
+    assert!(
+        runner.state().revealed_cards.contains(&land)
+            && runner.state().revealed_cards.contains(&nonland),
+        "reach guard: both revealed cards stay public across the owner-order choice"
+    );
+
     // Choose C, then L for bottom placement.
     // C's first delivery is in place and L's second delivery moves C up.
     runner
@@ -1637,11 +1647,28 @@ fn owner_ordered_placement_retires_overlapping_reveal_lease() {
         })
         .expect("select owner-order for bottom placement");
 
-    // CR 701.20d: On completion of the multi-card arrangement, C stops being
-    // revealed and becomes a new object. The old occurrence's reveal lease retires.
+    // CR 701.20d: On completion of the multi-card arrangement the whole pile
+    // stops being revealed and each reordered card becomes a new object — C
+    // through its stack lease, and L through the membership carried across the
+    // choice (it moved without any other reveal carrier).
+    assert_eq!(
+        runner.state().objects[&nonland].incarnation,
+        nonland_before + 1,
+        "C is a new object after the owner-ordered placement"
+    );
+    assert_eq!(
+        runner.state().objects[&land].incarnation,
+        land_before + 1,
+        "L is a new object after the owner-ordered placement"
+    );
     assert!(
         !runner.state().holds_stack_bound_reveal(nonland),
         "C's old occurrence lease must retire after owner-ordered placement"
+    );
+    assert!(
+        !runner.state().revealed_cards.contains(&land)
+            && !runner.state().revealed_cards.contains(&nonland),
+        "the reordered pile stops being revealed"
     );
 
     // Verify final library order: C then L at the bottom.

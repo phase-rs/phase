@@ -9765,6 +9765,17 @@ mod tests {
         assert_eq!(state.priority_player, PlayerId(1));
         assert_eq!(put_at_library_position_resolutions(&conceded.events), 0);
 
+        // CR 701.20a + CR 401.4: the reveal membership of an owner-ordered pile
+        // must survive the elections standing between the reveal and the
+        // placement, or the CR 701.20d retirement never finds the cards.
+        let seeded: Vec<(ObjectId, u64)> = [p1_a, p1_b, p2_a, p2_b]
+            .into_iter()
+            .map(|card| {
+                state.revealed_cards.insert(card);
+                (card, state.objects[&card].incarnation)
+            })
+            .collect();
+
         // (3) P2 is elected and arranges P1's batch.
         apply_as_current(
             &mut state,
@@ -9778,6 +9789,12 @@ mod tests {
             (PlayerId(2), PlayerId(1), Some(PlayerId(2)))
         );
         assert_eq!(state.priority_player, PlayerId(2));
+        assert!(
+            seeded
+                .iter()
+                .all(|(card, _)| state.revealed_cards.contains(card)),
+            "the election answer keeps the arrangement's reveal membership"
+        );
 
         // (4) REVERT-FAILING: the queued batch still names the departed P0, so
         // it is elected too, by P1 again.
@@ -9828,6 +9845,19 @@ mod tests {
         assert_eq!(library_ids(&state, PlayerId(2)), vec![p2_b, p2_a, p2_deep]);
         assert_eq!(put_at_library_position_resolutions(&completed.events), 1);
         assert!(state.pending_mass_library_order_choice.is_none());
+        // CR 701.20d: the one simultaneous arrangement reorders both piles, so
+        // every revealed member retires and becomes a new object.
+        for (card, incarnation) in seeded {
+            assert_eq!(
+                state.objects[&card].incarnation,
+                incarnation + 1,
+                "{card:?} is a new object after the arrangement"
+            );
+        }
+        assert!(
+            state.revealed_cards.is_empty(),
+            "no arranged card is still revealed"
+        );
     }
 
     /// CR 608.2m + CR 800.4g + CR 800.4h: a departed controller's resolution

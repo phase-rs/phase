@@ -12384,46 +12384,75 @@ fn private_look_outlives_action_boundary(state: &GameState) -> bool {
         })
 }
 
+/// CR 701.20a: Whether the transient reveal set
+/// ([`GameState::revealed_cards`]) must survive the action now being applied
+/// because the pending prompt is a later step of the very instruction that
+/// revealed those cards. A revealed card "remains revealed for as long as
+/// necessary to complete the parts of the effect that card is relevant to", so
+/// the membership is kept while a prompt of that instruction is still open and
+/// dropped at the next boundary once none is.
+///
+/// The same list carries the reveal-"until" retirement paths (`zones.rs`
+/// `retire_reordered_library_reveals`): an owner-ordered placement must still
+/// find the pile it revealed when the owner's answer arrives (CR 701.20d).
+fn transient_reveal_outlives_action_boundary(state: &GameState) -> bool {
+    match &state.waiting_for {
+        WaitingFor::RevealChoice { .. }
+        | WaitingFor::ManifestDreadChoice { .. }
+        | WaitingFor::DigChoice { .. }
+        // CR 701.20a + CR 608.2c: a reveal-dig's remainder split is a later
+        // pause in the SAME instruction — so its cards stay public across it
+        // exactly as they do across the keep selection above.
+        | WaitingFor::DigRestSplitChoice { .. }
+        // CR 700.3 + CR 701.20a: Fact or Fiction reveals persist through both
+        // the opponent's partition step and the controller's pile choice — the
+        // cards remain public while both players interact.
+        | WaitingFor::SeparatePilesChooseOpponent { .. }
+        | WaitingFor::SeparatePilesPartition { .. }
+        | WaitingFor::SeparatePilesChoice { .. }
+        // CR 702.60a + CR 701.20a: Ripple's revealed top-of-library cards stay
+        // in the library and remain public while the controller works through
+        // the same-named free-cast offers and the bottom-order step.
+        | WaitingFor::CastOffer {
+            kind: crate::types::game_state::CastOfferKind::Ripple { .. },
+            ..
+        }
+        | WaitingFor::RippleBottomOrder { .. }
+        | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::DigBottomOrder { .. } => true,
+        // CR 701.20a + CR 701.20d + CR 401.4: "Put the revealed cards on the
+        // bottom of your library in any order" pauses for the pile's owner to
+        // arrange it, and the pile stays revealed until that arrangement is
+        // placed (Goblin Machinist, Erratic Mutation). Dropping the membership
+        // at this boundary would let the placement move a revealed card while
+        // the CR 701.20d retirement — which reads exactly this set — no longer
+        // finds it.
+        WaitingFor::EffectZoneChoice {
+            mass_library_order, ..
+        } => mass_library_order.is_some(),
+        // CR 800.4g: a substitute-arranger election is the same arrangement
+        // instruction's next prompt after the named arranger left (CR 608.2m),
+        // so it keeps the arrangement's reveal membership too.
+        WaitingFor::ChooseFromZoneOpponentChooser {
+            purpose: crate::types::game_state::ZoneOpponentChooserPurpose::SubstituteArranger,
+            ..
+        } => state.pending_mass_library_order_choice.is_some(),
+        _ => false,
+    }
+}
+
 fn apply_action(
     state: &mut GameState,
     actor: PlayerId,
     action: GameAction,
     stack_resolution_limit: Option<u32>,
 ) -> Result<ActionResult, EngineError> {
-    // Clear stale revealed_cards from the previous action.
-    // RevealTop reveals (e.g. Goblin Guide) are momentary — shown for one state update.
-    // RevealHand reveals (e.g. Thoughtseize) persist through the RevealChoice interaction.
-    // ManifestDread reveals persist through ManifestDreadChoice (cards come from WaitingFor).
-    // CR 701.20b: DigChoice reveals (reveal-dig, e.g. Satyr Wayfinder) persist through
-    // the selection — revealed cards remain public while the player chooses.
-    if !matches!(
-        state.waiting_for,
-        WaitingFor::RevealChoice { .. }
-            | WaitingFor::ManifestDreadChoice { .. }
-            | WaitingFor::DigChoice { .. }
-            // CR 701.20a + CR 608.2c: a revealed card "remains revealed for as
-            // long as necessary to complete the parts of the effect that card
-            // is relevant to", and a reveal-dig's remainder split is a later
-            // pause in the SAME instruction — so its cards stay public across
-            // it exactly as they do across the keep selection above.
-            | WaitingFor::DigRestSplitChoice { .. }
-            // CR 700.3 + CR 701.20a: Fact or Fiction reveals persist through
-            // both the opponent's partition step and the controller's pile
-            // choice — the cards remain public while both players interact.
-            | WaitingFor::SeparatePilesChooseOpponent { .. }
-            | WaitingFor::SeparatePilesPartition { .. }
-            | WaitingFor::SeparatePilesChoice { .. }
-            // CR 702.60a + CR 701.20a: Ripple's revealed top-of-library cards
-            // stay in the library and remain public while the controller works
-            // through the same-named free-cast offers and the bottom-order step.
-            | WaitingFor::CastOffer {
-                kind: crate::types::game_state::CastOfferKind::Ripple { .. },
-                ..
-            }
-            | WaitingFor::RippleBottomOrder { .. }
-            | WaitingFor::RevealUntilBottomOrder { .. }
-            | WaitingFor::DigBottomOrder { .. }
-    ) && !ripple_resolution_cast_in_flight(state)
+    // Clear stale revealed_cards from the previous action, except while a
+    // pending prompt still owns the reveal (`transient_reveal_outlives_action_boundary`:
+    // RevealHand/Thoughtseize, reveal-digs, Fact or Fiction, Ripple, reveal-until
+    // bottom orders, owner-ordered library piles). RevealTop reveals (e.g.
+    // Goblin Guide) are momentary — shown for one state update.
+    if !transient_reveal_outlives_action_boundary(state) && !ripple_resolution_cast_in_flight(state)
     {
         state.revealed_cards.clear();
     }
