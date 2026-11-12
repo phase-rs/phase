@@ -4385,8 +4385,12 @@ pub(crate) fn deliver_replaced_zone_change(
             // Degavolver's (2, 1) rows consult Hardened Scales once as 3
             // (4 total), not twice (5 total). Mirrors the copy-entry
             // boundary, which coalesces before its own apply call.
-            let counters_to_apply =
-                crate::game::effects::counters::coalesce_entry_counters(counters_to_apply);
+            if counters_to_apply.len() > 1 {
+                counters_to_apply =
+                    crate::game::effects::counters::coalesce_entry_counters(counters_to_apply);
+            } else {
+                counters_to_apply.retain(|(_, count)| *count != 0);
+            }
             if !counters_to_apply.is_empty()
                 && !crate::game::engine_replacement::apply_etb_counters(
                     state,
