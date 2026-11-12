@@ -1991,6 +1991,14 @@ export class WebSocketAdapter implements EngineAdapter {
    * server may already route the seat to the candidate.
    */
   private confirmingPreparation: AbortController | null = null;
+  /**
+   * The attachment whose interval refuses new submissions on the incumbent.
+   * Released when that attachment is aborted (its successor's submissions are
+   * not the old interval's to refuse), while `confirmingPreparation` keeps
+   * fencing the incumbent's frames and transport events until the attachment's
+   * continuation has settled the incumbent's standing.
+   */
+  private submissionGatePreparation: AbortController | null = null;
   /** Monotonic attach identity: a retry timer belongs to the attempt that scheduled it. */
   private attachGeneration = 0;
   private socketDiagnostics: SocketDiagnosticObserver | null = null;
@@ -2724,6 +2732,7 @@ export class WebSocketAdapter implements EngineAdapter {
       try {
         if (confirmsSetup) {
           this.confirmingPreparation = preparation;
+          this.submissionGatePreparation = preparation;
           const transport = socket.ws;
           confirmation = new SetupConfirmation(SETUP_CONFIRMATION_TIMEOUT_MS, () => (
             transport instanceof StateCodecSocket ? transport.decodeInFlight : null
@@ -2757,7 +2766,7 @@ export class WebSocketAdapter implements EngineAdapter {
           // whether the frame went out.
           const first = await Promise.race([write, confirmation.settled, whenAborted(preparation.signal)]);
           if (first === "abort") {
-            if (this.confirmingPreparation === preparation) this.confirmingPreparation = null;
+            if (this.submissionGatePreparation === preparation) this.submissionGatePreparation = null;
             retireSocket();
             const fate = await Promise.race([write, confirmation.settled]);
             written = typeof fate === "boolean" ? fate : true;
@@ -2782,6 +2791,7 @@ export class WebSocketAdapter implements EngineAdapter {
       } finally {
         if (this.setupWritePreparation === preparation) this.setupWritePreparation = null;
         if (this.confirmingPreparation === preparation) this.confirmingPreparation = null;
+        if (this.submissionGatePreparation === preparation) this.submissionGatePreparation = null;
         confirmation?.dispose();
       }
       if (!written) {
@@ -2994,7 +3004,7 @@ export class WebSocketAdapter implements EngineAdapter {
     // adopts the candidate, as they do during the backoff and handshake:
     // `send` reports an `error`. With a live incumbent (public API only) they
     // go to it, where a refusal answers only that request.
-    if (this.confirmingPreparation !== null) {
+    if (this.submissionGatePreparation !== null) {
       throw new AdapterError(
         AdapterErrorCode.ACTION_NOT_SENT,
         i18n.t("stateCodec.reconnectSubmissionNotSent"),

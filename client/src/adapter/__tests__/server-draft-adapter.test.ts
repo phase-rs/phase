@@ -4755,6 +4755,74 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
+    it.each([
+      ["a newer revision", 12, "rev12"],
+      ["an older revision", 9, "rev9"],
+    ] as const)(
+      "applies a retired reply at %s to the revision authority before the replacement's bootstrap",
+      async (_label, revision, replyLabel) => {
+        vi.useFakeTimers();
+        const session = draftCodecSession(decodeEnvelope);
+        const candidateSession = draftCodecSession(decodeEnvelope);
+        const { adapter, ws, provider } = await startCodecDraft(session.session);
+        const events: unknown[] = [];
+        adapter.onEvent((event) => events.push(event));
+        await enterCodecMatch(ws, events);
+        // A has applied revision 10 and owns a pending command.
+        ws.dispatchSynthetic("message", draftFrame("Full", {
+          type: "StateUpdate",
+          data: { state: matchState("rev10"), events: [], state_revision: 10, full_key: FULL_KEY },
+        }));
+        await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+          type: "gameStateUpdated", state: expect.objectContaining({ label: "rev10" }),
+        })));
+        const command = watch(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+        const commandId = lastSubmissionCommandId(ws);
+        provider.mockResolvedValueOnce(candidateSession.session);
+        void adapter.reconnectDraft().catch(() => undefined);
+        await drainArt();
+        const candidate = MockWebSocket.last!;
+        candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(
+          expect.stringContaining('"type":"ReconnectDraft"'),
+        ));
+        candidate.dispatchSynthetic("message", CODEC_SERVER_CONFIRMATION);
+        try {
+          // B adopts a same-match DraftMatchStart before its GameStarted.
+          receive(candidate, "DraftMatchStart", {
+            match_id: "r1-t0", round: 1, game_code: FULL_KEY.game_code, full_key: FULL_KEY,
+            player_token: "match-draft-token", your_player: 0, opponent_name: "Bob",
+          });
+          await vi.advanceTimersByTimeAsync(0);
+          // A's addressed completion arrives on the retired socket.
+          ws.dispatchSynthetic("message", JSON.stringify({
+            type: "StateUpdate", command_id: commandId,
+            data: {
+              state: matchState(replyLabel), events: [], state_revision: revision, full_key: FULL_KEY,
+            },
+          }));
+          await vi.waitFor(() => expect(command.value()).toMatchObject({ resolvedWith: expect.anything() }));
+          // The command settled either way; the snapshot is the newer of the
+          // applied revision and the reply: a reply older than it is not applied.
+          expect((await adapter.getSnapshot()).state).toMatchObject({
+            label: revision === 12 ? "rev12" : "rev10",
+          });
+          // B's same-key GameStarted at revision 11 is checked against it.
+          candidate.dispatchSynthetic("message", draftFrame("Full", {
+            type: "GameStarted",
+            data: { state: matchState("rev11-bootstrap"), state_revision: 11, your_player: 0, full_key: FULL_KEY },
+          }));
+          await vi.advanceTimersByTimeAsync(0);
+          await vi.waitFor(async () => expect(
+            (await adapter.getSnapshot()).state,
+          ).toMatchObject({ label: revision === 12 ? "rev12" : "rev11-bootstrap" }));
+        } finally {
+          adapter.dispose();
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it("keeps the adopted candidate when a listener throws while its bootstrap is dispatched", async () => {
       vi.useFakeTimers();
       const { adapter, candidate, reconnecting } = await sentCandidate();
@@ -5006,6 +5074,41 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
   });
+
+  it.each(["Action", "Interaction"] as const)(
+    "settles a sent %s command, and releases its slot, when its match ends on the same socket",
+    async (kind) => {
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      try {
+        await enterCodecMatch(ws, events);
+        const claimed = kind === "Action"
+          ? adapter.submitAction({ type: "PassPriority" }, 0)
+          : adapter.submitInteraction(interactionSubmission("match-ends"), 0);
+        const outcome = trackRejection(claimed);
+        const commandId = lastSubmissionCommandId(ws);
+        receive(ws, "GameOver", { winner: 0, reason: "concession" });
+        // The ended match does not leave the promise pending, and the slot is free.
+        expect(await outcome()).toMatchObject({ code: "REQUEST_FAILED", recoverable: true });
+        // A late exact answer for the same command changes nothing.
+        ws.dispatchSynthetic("message", JSON.stringify({
+          type: "ActionFailed", command_id: commandId, data: { message: "late" },
+        }));
+        await drainArt();
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "error", message: "late" }));
+        // The next command is not refused as pending.
+        const next = adapter.submitAction({ type: "PassPriority" }, 0).catch((error: unknown) => error);
+        await drainArt();
+        expect(await Promise.race([next, Promise.resolve("still-pending")])).not.toMatchObject({
+          code: "ACTION_NOT_SENT", message: expect.stringContaining("Another game submission is pending"),
+        });
+      } finally {
+        adapter.dispose();
+      }
+    },
+  );
 
   it("does not accept a same-key GameStarted Full older than the applied revision", async () => {
     const session = draftCodecSession(decodeEnvelope);

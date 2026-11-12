@@ -6646,6 +6646,56 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       }
     });
 
+    it.each(["Error", "close"] as const)(
+      "keeps the incumbent's late %s from settling the successor's initialization while the aborted receipt is pending",
+      async (event) => {
+        const random = vi.spyOn(Math, "random").mockReturnValue(0);
+        MockWebSocket.last = null;
+        const codec = scriptedCodec();
+        const provider = vi.fn(() => Promise.resolve(codec.session));
+        const { adapter, raw } = await establishCodecAdapter(provider);
+        try {
+          expect(adapter.tryReconnect(session() as never)).toBe(true);
+          await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+          const candidate = latestSocket();
+          // The write receipt never settles: the incumbent's fate is unknown.
+          candidate.sendReceipt = vi.fn(() => new Promise<void>(() => undefined));
+          candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+          await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+          // A newer attachment (C) supersedes the candidate before it settles.
+          const initialization = observe(adapter.initialize());
+          await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(candidate));
+          const successor = latestSocket();
+          // The incumbent's late answer must not settle C's initialization or
+          // end its episode.
+          if (event === "Error") {
+            raw.dispatchSynthetic("message", JSON.stringify({
+              type: "Error", data: { message: "An earlier request of the incumbent failed" },
+            }));
+          } else {
+            raw.readyState = 3;
+            raw.dispatchSynthetic("close");
+          }
+          await vi.advanceTimersByTimeAsync(0);
+          expect(initialization.value()).toBe("never settled");
+          // C completes: its bootstrap resolves the initialization exactly once.
+          successor.dispatchSynthetic("message", SERVER_HELLO);
+          await vi.waitFor(() => expect(successor.send.mock.calls.length).toBeGreaterThanOrEqual(2));
+          successor.dispatchSynthetic("message", JSON.stringify({
+            type: "GameStarted",
+            data: {
+              state_revision: 1, state: createMockState(), your_player: 0,
+              player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+            },
+          }));
+          await vi.waitFor(() => expect(initialization.value()).toMatchObject({ resolvedWith: undefined }));
+        } finally {
+          random.mockRestore();
+          adapter.dispose();
+        }
+      },
+    );
+
     it.each(["reject", "bound"] as const)(
       "decides the incumbent by the receipt's fate when a newer attachment aborts a pending setup receipt (%s)",
       async (fate) => {
@@ -6673,7 +6723,12 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
           expect(candidate.close).toHaveBeenCalled();
           expect(candidateCodec.close).toHaveBeenCalledOnce();
           expect(incumbentCodec.close).not.toHaveBeenCalled();
-          expect((adapter as unknown as { confirmingPreparation: unknown }).confirmingPreparation).toBeNull();
+          // The submission gate is down; the incumbent's frames stay fenced.
+          const internals = adapter as unknown as {
+            submissionGatePreparation: unknown; confirmingPreparation: unknown;
+          };
+          expect(internals.submissionGatePreparation).toBeNull();
+          expect(internals.confirmingPreparation).not.toBeNull();
           expect(raw.close).not.toHaveBeenCalled();
           if (fate === "reject") {
             // The frame was not written: the incumbent still owns the seat.

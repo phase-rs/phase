@@ -135,6 +135,7 @@ type ServerDraftAdapterEventListener = (event: ServerDraftAdapterEvent) => void;
 /** The state-bearing fields shared by the `GameStarted` and `StateUpdate` payloads. */
 interface StateBearingPayload {
   state: GameState;
+  state_revision?: number;
   legal_actions?: GameAction[];
   auto_pass_recommended?: boolean;
   end_continuous_effect_offers?: LegalActionsResult["endContinuousEffectOffers"];
@@ -1119,12 +1120,19 @@ export class ServerDraftAdapter implements EngineAdapter {
     if (!fullSessionKeysEqual(data.full_key, this.submissionFullKey)) return;
     const pending = this.takeSubmission(retired, msg.command_id);
     if (!pending) return;
-    if (data.state && fullSessionKeysEqual(data.full_key, this.activeFullKey)
+    // The retired reply answers its command either way, but its state joins the
+    // applied-revision authority like any other snapshot: one older than the
+    // applied revision is not applied, and one that is applied advances it.
+    const revision = typeof data.state_revision === "number" ? data.state_revision : null;
+    const regresses = this.cachedStateRevision !== null && revision !== null
+      && revision < this.cachedStateRevision;
+    if (data.state && !regresses && fullSessionKeysEqual(data.full_key, this.activeFullKey)
       && this.snapshotSource !== this.ws) {
       const { state, legalResult } = ServerDraftAdapter.snapshotPair(
         data as StateBearingPayload,
       );
       this.cacheSnapshot(state, legalResult, retired);
+      this.cachedStateRevision = revision ?? this.cachedStateRevision;
     }
     pending.resolve({ events: data.events ?? [], log_entries: data.log_entries });
     this.emit({ type: "actionPendingChanged", pending: false });
@@ -2027,6 +2035,21 @@ export class ServerDraftAdapter implements EngineAdapter {
         const data = msg.data as { winner: PlayerId | null; reason: string };
         // Transition back to between_rounds — server auto-reports the
         // match result. Per T-59-09: adapter does NOT send ReportMatchResult.
+        // A command already sent for the ending match on this socket can no
+        // longer be answered by an exact completion: the match key it is
+        // addressed to is cleared below. Settle it here, as a match transition
+        // does, so its promise and slot do not outlive the match.
+        if (this.submission.occupied && this.submissionSocket === sourceSocket && this.submissionSent) {
+          const revoked = this.submission.drop();
+          this.submissionSocket = null;
+          this.submissionFullKey = null;
+          this.submissionSent = false;
+          revoked?.reject(new AdapterError(
+            "REQUEST_FAILED",
+            "The draft match ended before this command completed",
+            true,
+          ));
+        }
         this.phase = "between_rounds";
         this.activeMatchId = null;
         this._gameCode = null;
