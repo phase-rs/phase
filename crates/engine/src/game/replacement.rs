@@ -8421,14 +8421,8 @@ fn object_replacement_candidate_applies(
                 // is paid, so an empty pre-payment lookup cannot disqualify
                 // that replacement.
                 if !matches!(target, TargetFilter::ExiledCardByIndex { .. })
-                    && super::engine_replacement::find_copy_targets(
-                        state,
-                        target,
-                        obj.id,
-                        replacement_player,
-                        None,
-                    )
-                    .is_empty()
+                    && find_entry_copy_targets(state, target, obj.id, replacement_player, None)
+                        .is_empty()
                 {
                     return false;
                 }
@@ -10190,6 +10184,31 @@ pub(super) fn copy_entry_board(
         state,
         &crate::game::effects::token_copy::entering_token_co_entrants(state, entrant),
     )
+}
+
+/// CR 614.12a + CR 707.5: applicability and selection read the same donors
+/// before entry, without the co-entrants or their continuous effects.
+pub(super) fn find_entry_copy_targets(
+    state: &GameState,
+    target: &TargetFilter,
+    entrant: ObjectId,
+    controller: PlayerId,
+    max_mana_value: Option<u32>,
+) -> Vec<ObjectId> {
+    let co_entrants = super::effects::token_copy::entering_token_co_entrants(state, entrant);
+    let board = super::filter::pre_entry_board(state, &co_entrants);
+    let mut donors = super::engine_replacement::find_copy_targets(
+        &board,
+        target,
+        entrant,
+        controller,
+        max_mana_value,
+    );
+    // The projection only phases out battlefield co-entrants; donors may be
+    // in other zones and must be excluded there too.
+    let co_entrant_set: HashSet<ObjectId> = co_entrants.into_iter().collect();
+    donors.retain(|id| !co_entrant_set.contains(id));
+    donors
 }
 
 /// CR 614.12 + CR 707.9: When an "enters as a copy" choice is made, the copy

@@ -4127,22 +4127,13 @@ pub(super) fn apply_post_replacement_effect(
         // *write* site), so the stamp stays 0 and the ceiling is Some(0) — never
         // unconstrained None from a missing PendingSpellResolution.
         let max_mana_value = copy_target_mana_value_ceiling(mana_spent_stamp, real_work);
-        // CR 614.12a + CR 707.5: evaluate the copy choice before entry, with
-        // co-entrants and their effects absent (Quicksilver Gargantuan ruling 2011-01-01).
-        let mut valid_targets = find_copy_targets(
-            &super::replacement::copy_entry_board(state, source_id),
+        let valid_targets = super::replacement::find_entry_copy_targets(
+            state,
             target,
             source_id,
             controller,
             max_mana_value,
         );
-        // The projection only phases out battlefield co-entrants. Copy sources can
-        // come from other zones.
-        let co_entrant_set: HashSet<ObjectId> =
-            super::effects::token_copy::entering_token_co_entrants(state, source_id)
-                .into_iter()
-                .collect();
-        valid_targets.retain(|id| !co_entrant_set.contains(id));
         if valid_targets.is_empty() {
             return None;
         }

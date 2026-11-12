@@ -1467,6 +1467,71 @@ fn clone_legion_copy_choice_excludes_artifact_animated_by_a_co_entrant() {
     assert_eq!(battlefield_tokens(&runner, TRISKELION_NAME).len(), 2);
 }
 
+#[test]
+fn clone_legion_frostkite_offers_donor_weakened_only_by_a_co_entrant() {
+    frostkite_pre_entry_donor(PauseCarry::Live);
+}
+
+#[test]
+fn clone_legion_frostkite_offers_donor_weakened_only_by_a_co_entrant_across_save_and_restore() {
+    assert_restored_row_matches_live(frostkite_pre_entry_donor, "Frostkite donor eligibility");
+}
+
+fn frostkite_pre_entry_donor(carry: PauseCarry) -> RowOutcome {
+    let mut scenario = board();
+    let geth = "Geth, Thane of Contracts";
+    scenario
+        .add_creature_from_oracle(P1, geth, 3, 4, "Other creatures you control get -1/-1.\n{1}{B}{B}, {T}: Return target creature card from your graveyard to the battlefield. It gains \"If this creature would leave the battlefield, exile it instead of putting it anywhere else.\" Activate only as a sorcery.");
+    let triskelion = scenario
+        .add_creature_from_oracle(P1, TRISKELION_NAME, 1, 1, TRISKELION)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Construct"])
+        .with_mana_cost(ManaCost::generic(6))
+        .id();
+    let frostkite = scenario
+        .add_creature_from_oracle(P1, "Deceptive Frostkite", 1, 1, "Flying\nYou may have this creature enter as a copy of a creature you control with power 4 or greater, except it's a Dragon in addition to its other types and it has flying.").id();
+    // Keep the opponent's printed 1/1 creatures alive beside Geth.
+    scenario.with_counter(triskelion, CounterType::Plus1Plus1, 3);
+    scenario.with_counter(frostkite, CounterType::Plus1Plus1, 1);
+    let baloth = scenario
+        .add_creature_from_oracle(P0, "Rumbling Baloth", 4, 4, "")
+        .with_subtypes(vec!["Beast"])
+        .id();
+    let spell = free_spell(&mut scenario, "Clone Legion", false, CLONE_LEGION);
+    let mut runner = scenario.build();
+    runner.cast(spell).target_player(P1).commit();
+    let answered = drive_carried(
+        &mut runner,
+        carry,
+        &Script {
+            copy_targets: vec![CopyPick::card("Rumbling Baloth", P0)],
+            ..Script::default()
+        },
+        |runner, prompt| {
+            if let Prompt::CopyTarget { .. } = prompt {
+                assert_co_entrant_parked(runner, geth, "Frostkite donor eligibility");
+                assert_eq!(
+                    power_toughness(runner, baloth),
+                    (Some(3), Some(3)),
+                    "REACH-GUARD: Geth weakens the resident donor on the live board"
+                );
+            }
+        },
+    );
+    // CR 614.12a: choose before entry, when the co-entering Geth is absent.
+    assert_eq!(
+        copy_offers(&answered.prompts),
+        vec![vec![CopyPick::card("Rumbling Baloth", P0)]]
+    );
+    assert_settled(&runner, "Frostkite donor eligibility");
+    let tokens = battlefield_tokens(&runner, "Rumbling Baloth");
+    assert_eq!(tokens.len(), 1);
+    let token = &runner.state().objects[&tokens[0]];
+    assert!(token.card_types.subtypes.iter().any(|s| s == "Dragon"));
+    assert!(token.has_keyword(&Keyword::Flying));
+    row_outcome(&runner, answered)
+}
+
 /// G1: Clone Legion over P1's [Margle, Quicksilver Gargantuan]. The Gargantuan copy
 /// accepts its copy offer and copies P0's Triskelion. The Margle copy co-enters, so the
 /// copied "enters with three +1/+1 counters" applies (CR 614.12 + CR 707.5), and the
