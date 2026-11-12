@@ -1163,16 +1163,24 @@ fn a_pinless_latch_still_cannot_state_a_zone_the_object_never_left() {
     }
 }
 
-/// CR 601.2c + CR 115.4: the POSITIVE witness that the slot-filter check does not over-refuse.
+/// CR 601.2c + CR 115.4: "any target" is NOT unrestricted. Lightning Bolt's "deals 3 damage to
+/// any target" admits "creatures, players, planeswalkers, or battles" — and nothing else — so an
+/// enchantment-only snapshot is an announcement the spell could never have made and must be
+/// REFUSED. The damage domain is resolved through
+/// `ability_utils::declared_slot_announcement_filter`, the same authority that builds the
+/// slot's legal targets.
 ///
-/// Lightning Bolt's declared slot is unrestricted ("any target"), so an enchantment-only
-/// snapshot legitimately satisfies it: this control rewrites the recorded type exactly as the
-/// Doom Blade control does, and the save is ADMITTED. That is the stated limit — for an `Any`
-/// slot no filter-based check can discriminate — and this test pins it so the guard cannot
-/// later be tightened into refusing it.
+/// The honest twin is `a_mid_payment_characteristics_change_keeps_the_announcement_through_resume`:
+/// Heliod's recorded CREATURE snapshot still satisfies the domain after its live type drifts,
+/// because the check reads the snapshot and never the live object.
 #[test]
-fn an_unrestricted_slot_admits_a_restated_type() {
-    let MidPaymentBoard { runner, heliod, .. } = bolt_announced_at_a_creature_heliod_mid_payment();
+fn a_damage_any_target_slot_refuses_a_restated_type() {
+    let MidPaymentBoard {
+        runner,
+        spell,
+        heliod,
+        ..
+    } = bolt_announced_at_a_creature_heliod_mid_payment();
 
     let mut state = runner.state().clone();
     let parked = state
@@ -1192,10 +1200,28 @@ fn an_unrestricted_slot_admits_a_restated_type() {
     };
     lki.card_types.retain(|kind| *kind != CoreType::Creature);
 
-    admitted(persisted_json(&state)).expect(
-        "CR 115.4: an unrestricted slot satisfies an enchantment-only snapshot, so this save is \
-         admitted — the guard must not be tightened past what the filter can decide",
-    );
+    match PersistedGameState::capture(state).into_game_state() {
+        Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+            spell_object_id,
+            reason:
+                AnnouncedTargetFactConflict::SnapshotContradictsDeclaredFilter {
+                    target: TargetRef::Object(refused),
+                },
+        }) => {
+            assert_eq!(
+                spell_object_id, spell,
+                "the refusal names the cast it is about"
+            );
+            assert_eq!(
+                refused, heliod,
+                "and the target whose snapshot was rewritten"
+            );
+        }
+        other => panic!(
+            "CR 115.4: a damage \"any target\" slot admits only creatures, players, \
+             planeswalkers and battles; an enchantment-only snapshot must be refused, got {other:?}"
+        ),
+    }
 }
 
 /// CR 601.2c + CR 115.4: the same target id, the pin still current, the zone still the

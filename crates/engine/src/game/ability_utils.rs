@@ -3029,13 +3029,7 @@ pub(crate) fn declared_target_entries_in_chain(
                         .map(|&position| DeclaredTargetEntry {
                             target: node.targets[position].clone(),
                             pin: node.target_pin_at(position),
-                            filter: if node.target_choice_timing
-                                == crate::types::ability::TargetChoiceTiming::Stack
-                            {
-                                extract_target_filter_from_effect(&node.effect).cloned()
-                            } else {
-                                None
-                            },
+                            filter: declared_slot_announcement_filter(node, position),
                         }),
                 );
             }
@@ -8978,6 +8972,41 @@ fn effect_slot_denotes_damage_any_target(effect: &Effect, slot: AbilityTargetSlo
         },
         _ => false,
     }
+}
+
+/// CR 115.4: the filter that DECLARED slot `index` of `node` actually imposes, for a
+/// consumer that must judge a recorded announcement rather than re-derive legal targets.
+///
+/// "Any target" is not unrestricted: on a damage effect it means "a creature, player,
+/// planeswalker or battle", and that narrowing lives in
+/// [`effect_slot_denotes_damage_any_target`]. A caller that evaluated the bare `Any`
+/// predicate would admit an enchantment-only snapshot the spell could never have announced.
+/// Returns `None` where the node declares no stack-time filter.
+pub(crate) fn declared_slot_announcement_filter(
+    node: &ResolvedAbility,
+    index: usize,
+) -> Option<TargetFilter> {
+    if node.target_choice_timing != TargetChoiceTiming::Stack {
+        return None;
+    }
+    let filter = extract_target_filter_from_effect(&node.effect)?;
+    if effect_slot_denotes_damage_any_target(
+        &node.effect,
+        AbilityTargetSlot::Declared { index, filter },
+    ) {
+        // CR 115.4: the damage domain, expressed as the filter a snapshot must satisfy.
+        return Some(TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Player,
+                TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::AnyOf(vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Planeswalker,
+                    TypeFilter::Battle,
+                ]))),
+            ],
+        });
+    }
+    Some(filter.clone())
 }
 
 fn damage_any_target_legal_targets(
