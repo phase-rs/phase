@@ -6447,6 +6447,13 @@ fn detect_damage_subject_conjunction(
 /// declined clause would leave no trace at all. An effect instruction that drops
 /// the clause already fails closed (`instruction_drops_block_partner`) and is
 /// skipped before this runs; the detector is the backstop for every other path.
+///
+/// Ownership limit: this works on a unit's text and its serialized definitions, which
+/// record no link from a clause to the instruction that wrote it. So it matches each
+/// clause to its own distinct relation anywhere in the unit (one whole filter per relation,
+/// on a subject the partner word can bind), not to that relation's instruction. Binding a
+/// clause to its own instruction is the guard's job, done where each instruction's text is
+/// known (`instruction_drops_block_partner`, and the compound split's per-conjunct check).
 fn detect_combat_history_relation(
     cleaned: &str,
     original: &str,

@@ -10119,6 +10119,7 @@ pub(super) fn try_parse_distribute_damage(
     };
 
     Some(ParsedEffectClause {
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::DealDamage {
@@ -10207,6 +10208,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
 
     let counter_name = counter_type.as_str().into_owned();
     Some(ParsedEffectClause {
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::PutCounter {
@@ -10269,6 +10271,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
     };
 
     Some(ParsedEffectClause {
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::PreventDamage {
@@ -10396,6 +10399,7 @@ pub(super) fn try_parse_bidirectional_prevent(
     by_ability.sub_link = SubAbilityLink::SequentialSibling;
 
     Some(ParsedEffectClause {
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: to_effect,

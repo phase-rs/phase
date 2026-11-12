@@ -74,6 +74,13 @@ pub(crate) struct ParsedEffectClause {
     /// resolved after line routing; see [`crate::types::ability::UnloweredGuard`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unlowered_guard: Option<UnloweredGuard>,
+    /// CR 608.2c: the text the head instruction owns, when a compound split separated it
+    /// from its "and" continuation (`try_split_targeted_compound`), which is then its own
+    /// `sub_ability` checked against its own text there. `None` when the clause's text is
+    /// the head's alone. Parser bookkeeping for the block-history guard
+    /// (`instruction_drops_block_partner`); never lowered.
+    #[serde(skip)]
+    pub(crate) head_text: Option<String>,
     /// CR 611.2e + CR 608.2c: when this clause's continuous effect begins to apply to a
     /// permanent an earlier instruction of the same resolution put onto the battlefield.
     /// Stamped by the clause parser that recognized the verb form ("is/has" ⇒ `WithEntry`);
@@ -2372,6 +2379,7 @@ pub(crate) fn assert_no_compound_remainder(rem: &str, context: &str) {
 
 pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
     ParsedEffectClause {
+        head_text: None,
         optional_targeting: false,
         effect,
         duration: None,
