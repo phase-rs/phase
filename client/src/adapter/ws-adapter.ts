@@ -47,6 +47,7 @@ import {
 import {
   SETUP_CONFIRMATION_TIMEOUT_MS,
   SetupConfirmation,
+  reportUncaughtError,
   type SetupConfirmationOutcome,
   type SetupFrameMessage,
 } from "../services/setupConfirmation";
@@ -2850,13 +2851,14 @@ export class WebSocketAdapter implements EngineAdapter {
             continue;
           }
           // A confirmed reconnect's buffered frames are the server's answers,
-          // which the merge base delivered to the live handler: a throwing
-          // listener there does not undo the committed adoption, just as it
-          // does not on live delivery (the transports isolate it).
+          // which the merge base delivered to the live socket handler. A throw
+          // there does not undo the committed adoption: it is reported as an
+          // uncaught error (as a raw socket's handler reports it) and the
+          // adopted socket and the remaining frames carry on.
           try {
             handleSocketMessage(messages[index]!);
-          } catch {
-            // The adopted socket and the remaining frames carry on.
+          } catch (error) {
+            reportUncaughtError(error);
           }
         }
       }
@@ -3338,6 +3340,17 @@ export class WebSocketAdapter implements EngineAdapter {
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     if (!this.initialFallbackActive()) this.emit({ type: "reconnected", inGame });
+  }
+
+  /**
+   * Whether a frame reaching `handleMessage` may decide the reconnect episode.
+   * While a reconnect interval is open the current socket is the incumbent
+   * (the candidate's frames are buffered until it is adopted): its frames may
+   * apply their state and answer its own requests, but only the candidate's
+   * answer completes or fails the episode.
+   */
+  private frameDecidesEpisode(): boolean {
+    return this.confirmingPreparation === null;
   }
 
   /** Whether the initialization-owned fallback is running right now. */
@@ -3943,7 +3956,7 @@ export class WebSocketAdapter implements EngineAdapter {
         if (data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
         this.hostWaitingForOpponent = true;
         // A hosting reconnect is answered with GameCreated, not GameStarted.
-        if (this.reconnectInFlight) this.completeReconnect(false);
+        if (this.reconnectInFlight && this.frameDecidesEpisode()) this.completeReconnect(false);
         this.emit({ type: "sessionChanged", session: this.currentSession() });
         this.emit({ type: "gameCreated", gameCode: data.game_code });
         this.emit({ type: "waitingForOpponent" });
@@ -4090,16 +4103,10 @@ export class WebSocketAdapter implements EngineAdapter {
         if (nativeReconnect) {
           if (!this.acceptFullSessionKey(data.full_key)) break;
         }
-        this.emit({ type: "bootstrapDelivered" });
-        if (this.reconnectInFlight) {
-          this.completeReconnect(true);
-        } else if (this.hostWaitingForOpponent) {
-          this.hostWaitingForOpponent = false;
-          this.emit({
-            type: "opponentJoined",
-            opponentName: data.opponent_name,
-          });
-        }
+        // Commit the bootstrap before any listener runs: `emit` does not isolate
+        // listener exceptions, so a listener that threw in an emit ahead of
+        // these would leave a delivered bootstrap unapplied and its codec
+        // binding pending on a live socket.
         const startedSnapshot = this.cacheSnapshot(
           { ...data.state, derived: data.derived ?? data.state.derived },
           {
@@ -4114,8 +4121,29 @@ export class WebSocketAdapter implements EngineAdapter {
           },
         );
         this.cachedStateRevision = data.state_revision ?? null;
-        this.settleWithheld();
         this._playerId = data.your_player;
+        this.receivedGameStarted = true;
+        // Joiners receive their player_token here (hosts get it via GameCreated).
+        // Set _gameCode from joinGameCode if not already set (host sets it via GameCreated).
+        if (!this._gameCode && this.joinGameCode) {
+          this._gameCode = this.joinGameCode;
+        }
+        if (!nativeReconnect && data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
+        if (!nativeReconnect && data.player_token) this.playerToken = data.player_token;
+        // The attachment is bootstrapped now: every identity guard above
+        // passed and the snapshot is cached.
+        this.stateCodec.accept(this.ws);
+        this.emit({ type: "bootstrapDelivered" });
+        if (this.reconnectInFlight) {
+          if (this.frameDecidesEpisode()) this.completeReconnect(true);
+        } else if (this.hostWaitingForOpponent) {
+          this.hostWaitingForOpponent = false;
+          this.emit({
+            type: "opponentJoined",
+            opponentName: data.opponent_name,
+          });
+        }
+        this.settleWithheld();
         if (nativeReconnect) {
           const attachment: NativeSessionAttachment = {
             gameCode: nativeReconnect.gameCode,
@@ -4129,19 +4157,11 @@ export class WebSocketAdapter implements EngineAdapter {
           this.pregameResolve = null;
           this.pregameReject = null;
         }
-        this.receivedGameStarted = true;
-        // Joiners receive their player_token here (hosts get it via GameCreated).
-        // Set _gameCode from joinGameCode if not already set (host sets it via GameCreated).
-        if (!this._gameCode && this.joinGameCode) {
-          this._gameCode = this.joinGameCode;
-        }
-        if (!nativeReconnect && data.full_key && !this.acceptFullSessionKey(data.full_key)) break;
         // A salvaged fallback's reply omits the token; the retained credentials
         // are published here, once, as the session this join now owns. A held
         // fallback's session was published by its SessionAttached and is not
         // repeated.
         if (!nativeReconnect && (data.player_token || fallback !== null)) {
-          if (data.player_token) this.playerToken = data.player_token;
           if (fallback === null || publishesRetainedSession) {
             this.emit({ type: "sessionChanged", session: this.currentSession() });
           }
@@ -4171,12 +4191,6 @@ export class WebSocketAdapter implements EngineAdapter {
           this.gameStartedResolve = null;
           this.gameStartedReject = null;
         }
-        // The attachment is bootstrapped now: every identity guard above
-        // passed and the snapshot is cached. Recorded before the final emit;
-        // `emit` does not isolate listener exceptions (pre-existing), so a
-        // listener that throws in the emits above this point still leaves the
-        // attachment pending.
-        this.stateCodec.accept(this.ws);
         // Always an array, never `undefined`: on this transport `undefined`
         // would mean "this transport does not publish", which is false here —
         // an omitted field means the server published none.
@@ -4320,7 +4334,7 @@ export class WebSocketAdapter implements EngineAdapter {
         if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
         if (data.withheld.type === "GameStarted") {
           this.emit({ type: "bootstrapDelivered" });
-          if (this.reconnectInFlight) this.completeReconnect(true);
+          if (this.reconnectInFlight && this.frameDecidesEpisode()) this.completeReconnect(true);
         } else {
           const pending = this.submission.take(msg.command_id);
           if (pending) {
@@ -4641,11 +4655,10 @@ export class WebSocketAdapter implements EngineAdapter {
 
       case "Error": {
         const data = msg.data as { message: string; code?: string };
-        // While a reconnect interval is open this frame came from the incumbent
-        // (the candidate's frames are buffered): it answers the incumbent's own
-        // request, for example the server's seat-authority refusal once the
-        // candidate owns the seat, and never decides the candidate's episode.
-        const episode = this.confirmingPreparation === null;
+        // While a reconnect interval is open this frame came from the incumbent:
+        // it answers the incumbent's own request, for example the server's
+        // seat-authority refusal once the candidate owns the seat.
+        const episode = this.frameDecidesEpisode();
         const terminal = episode && (this.reconnectInFlight || this.initReject !== null
           || this.pregameReject !== null || this.gameStartedReject !== null);
         if (episode) this.rejectInitialization(serverErrorInitializationError(data));

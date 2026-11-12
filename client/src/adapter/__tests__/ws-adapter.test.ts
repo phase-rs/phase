@@ -4426,7 +4426,11 @@ describe("WebSocketAdapter — negotiated StateCodecV1", () => {
         // On the old implementation this sends a second Action and never settles.
         expect(submissionTypes(raw)).toEqual(["Action"]);
         expect(await refused()).toBeInstanceOf(AdapterError);
-        expect((await adapter.getSnapshot()).state.turn_number).toBe(10);
+        // The adapter commits a decoded GameStarted before notifying anyone, so
+        // a throwing application leaves the cache on the authenticated Full;
+        // it still declines the recovery: nothing is published, submissions
+        // stay closed and the socket is retired.
+        expect((await adapter.getSnapshot()).state.turn_number).toBe(decline === "stale update" ? 10 : 11);
         expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: "stateChanged" }));
         expect(raw.close).toHaveBeenCalledOnce();
         expect(session.close).toHaveBeenCalledOnce();
@@ -6639,37 +6643,98 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       }
     });
 
-    it("keeps the adopted candidate when a listener throws while its bootstrap is dispatched", async () => {
-      const { adapter, raw, candidate, events } = await sentCandidate();
+    it("keeps the adopted candidate, with its bootstrap applied, when a listener throws while it is dispatched", async () => {
+      const { adapter, raw, candidate, events, codec } = await sentCandidate();
       let armed = true;
+      const failure = new Error("reconnected listener failed");
       adapter.onEvent((event) => {
         if (event.type !== "reconnected" || !armed) return;
         armed = false;
-        throw new Error("reconnected listener failed");
+        throw failure;
       });
+      // Reported as an uncaught error, which telemetry records as js_error.
+      const reported: unknown[] = [];
+      const onError = (event: ErrorEvent) => { reported.push(event.error); event.preventDefault(); };
+      window.addEventListener("error", onError);
       try {
         deliverCodec(candidate, "Full", codecGameStarted(5, 5));
         await vi.waitFor(() => expect(events).toContainEqual({ type: "reconnected", inGame: true }));
         await vi.waitFor(() => expect(raw.close).toHaveBeenCalledOnce());
         expect(armed).toBe(false);
+        expect(reported).toEqual([failure]);
         // The throw does not undo the adoption: the candidate stays open and
         // carries the next command, as it would on live delivery.
         expect(candidate.close).not.toHaveBeenCalled();
-        const command = adapter.submitAction({ type: "PassPriority" } as GameAction, 0).catch((error: unknown) => error);
-        await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith(expect.stringContaining('"type":"Action"')));
+        // The bootstrap was committed before any listener ran.
+        expect((await adapter.getSnapshot()).state.turn_number).toBe(5);
+        // Its codec binding is accepted: a later rejected Delta costs one
+        // resync on a healthy stream, not a terminal bootstrap rejection.
+        codec.rejectNext();
+        deliverCodec(candidate, "Delta", codecStateUpdate(6, 6));
+        await vi.waitFor(() => expect(candidate.send).toHaveBeenCalledWith('{"type":"ResyncState"}'));
+        expect(candidate.close).not.toHaveBeenCalled();
+        expect((adapter as unknown as { stateCodec: { deliveryPolicy: unknown } }).stateCodec.deliveryPolicy)
+          .toEqual({ kind: "negotiate" });
         expect(events).not.toContainEqual({ type: "reconnectFailed" });
-        void command;
       } finally {
+        window.removeEventListener("error", onError);
         adapter.dispose();
       }
     });
+
+    it.each(["GameStarted", "GameCreated", "StateWithheld"] as const)(
+      "keeps an incumbent %s from completing the candidate's episode; the candidate's close retries once",
+      async (type) => {
+        const random = vi.spyOn(Math, "random").mockReturnValue(0);
+        const { adapter, raw, candidate, events } = await sentCandidate();
+        const timers = vi.spyOn(globalThis, "setTimeout");
+        try {
+          // A bootstrap-shaped frame reaches the incumbent inside the interval
+          // (for example a game-start broadcast before the server handled the
+          // candidate's Reconnect).
+          if (type === "GameStarted") {
+            deliverCodec(raw, "Full", codecGameStarted(7, 7));
+          } else if (type === "GameCreated") {
+            raw.dispatchSynthetic("message", JSON.stringify({
+              type: "GameCreated",
+              data: { game_code: "GAME01", player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY },
+            }));
+          } else {
+            raw.dispatchSynthetic("message", JSON.stringify({
+              type: "StateWithheld",
+              data: {
+                full_key: REPLY_OWNERSHIP_FULL_KEY, state_revision: 7,
+                withheld: { type: "GameStarted", data: { your_player: 0 } }, reason: "too large",
+              },
+            }));
+          }
+          await vi.advanceTimersByTimeAsync(0);
+          expect(events).not.toContainEqual(expect.objectContaining({ type: "reconnected" }));
+          // The candidate closes before its own bootstrap: the episode is still
+          // open, so its one retry owner retries.
+          candidate.readyState = 3;
+          candidate.dispatchSynthetic("close");
+          await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "reconnecting" })));
+          expect(scheduledRetryDelays(timers)).toHaveLength(1);
+          const dialed = MockWebSocket.last;
+          await vi.advanceTimersByTimeAsync(800);
+          await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(dialed));
+          expect(events).not.toContainEqual(expect.objectContaining({ type: "reconnected" }));
+        } finally {
+          timers.mockRestore();
+          random.mockRestore();
+          adapter.dispose();
+        }
+      },
+    );
 
     it("does not adopt on a truncated canonical bootstrap: the bound retires both sockets and retries once", async () => {
       const random = vi.spyOn(Math, "random").mockReturnValue(0);
       const { adapter, raw, candidate, pending, events } = await sentCandidate();
       const timers = vi.spyOn(globalThis, "setTimeout");
       try {
-        // Canonical prefix, body that does not parse.
+        // Synthetic (this server sends whole frames): canonical prefix, body
+        // that does not parse.
         candidate.dispatchSynthetic("message", '{"type":"GameStarted","data":{"state":');
         await vi.advanceTimersByTimeAsync(4000);
         expect(raw.close).not.toHaveBeenCalled();

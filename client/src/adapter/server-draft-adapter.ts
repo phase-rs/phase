@@ -31,6 +31,7 @@ import {
 import {
   SETUP_CONFIRMATION_TIMEOUT_MS,
   SetupConfirmation,
+  reportUncaughtError,
   type SetupConfirmationOutcome,
   type SetupFrameMessage,
 } from "../services/setupConfirmation";
@@ -1400,11 +1401,11 @@ export class ServerDraftAdapter implements EngineAdapter {
       if (!written) {
         // The setup never reached the wire, so the kept incumbent still owns the
         // seat: a match transition it left to this reattach is its own to attach.
-        if (deferredMatch && this.draftCode && this.draftToken) {
+        if (deferredMatch && incumbent !== null && this.ws === incumbent && this.draftCode && this.draftToken) {
           this.send({
             type: "ReconnectDraft",
             data: { draft_code: this.draftCode, player_token: this.draftToken },
-          });
+          }, incumbent);
         }
         throw new AdapterError("WS_CLOSED", "Failed to send setup frame", true);
       }
@@ -1488,13 +1489,15 @@ export class ServerDraftAdapter implements EngineAdapter {
           continue;
         }
         // A confirmed reattach's buffered frames are the server's answers,
-        // which the merge base delivered to the live handler: a throwing
-        // listener, or a frame that does not parse, does not undo the
-        // committed adoption, just as it does not on live delivery.
+        // which the merge base delivered to the live socket handler. A throw
+        // there, or a frame that does not parse, does not undo the committed
+        // adoption: it is reported as an uncaught error (as a raw socket's
+        // handler reports it) and the adopted socket and the remaining frames
+        // carry on.
         try {
           handleMessage(setupMessages[index]!);
-        } catch {
-          // The adopted socket and the remaining frames carry on.
+        } catch (error) {
+          reportUncaughtError(error);
         }
       }
       if (!this.sockets.has(sourceSocket)) return;

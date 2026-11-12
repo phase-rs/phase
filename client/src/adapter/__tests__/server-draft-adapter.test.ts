@@ -4552,7 +4552,8 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       vi.useFakeTimers();
       const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();
       try {
-        // Canonical prefix, body that does not parse.
+        // Synthetic (this server sends whole frames): canonical prefix, body
+        // that does not parse.
         candidate.dispatchSynthetic("message", '{"type":"DraftStateUpdate","data":{"view":');
         await vi.advanceTimersByTimeAsync(4000);
         expect(ws.close).not.toHaveBeenCalled();
@@ -4602,6 +4603,7 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       const events: unknown[] = [];
       adapter.onEvent((event) => events.push(event));
       try {
+        // Synthetic (this server sends whole frames): a malformed frame first.
         candidate.dispatchSynthetic("message", '{"type":"DraftStateUpdate","data":{"view":');
         receive(candidate, "DraftStateUpdate", { view: createMockDraftView() });
         await vi.waitFor(() => expect(reconnecting.value()).toEqual({ resolvedWith: undefined }));

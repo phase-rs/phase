@@ -270,3 +270,16 @@ export class SetupConfirmation {
     this.resolve(outcome);
   }
 }
+
+/**
+ * Reports a listener failure that must not unwind its caller as an uncaught
+ * error: a window `error` event, which a raw socket's handler would raise and
+ * telemetry records as `js_error`.
+ */
+export function reportUncaughtError(error: unknown): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new ErrorEvent("error", {
+    error,
+    message: error instanceof Error ? error.message : String(error),
+  }));
+}
