@@ -42,14 +42,18 @@
 //!    creatures, each its owner's commander in the two-commander row.
 //!
 //! The mutate itself is staged with `merge_object_onto` (mutate casting is not
-//! under test). Known defect, not under test and not rules-correct: when
-//! Circuit Mender is on top of Brokkos as the survivor, the merged permanent has
-//! Circuit Mender's abilities (CR 730.2a) and its leaves-the-battlefield ability
-//! should look back and trigger (CR 603.10a), but it does not trigger even with
-//! nothing parked. For that pile the rows compare the parked run with the
-//! unparked one and use Ninth Bridge Patrol to observe the departure. Brokkos is a legendary creature and the designated commander
+//! under test). Brokkos is a legendary creature and the designated commander
 //! (CR 903.3); CR 903.9b offers its owner the command zone when it would be put
 //! into a library.
+//!
+//! Known defect, not under test and not rules-correct: when Brokkos is the
+//! survivor with Circuit Mender mutated on top (`Pile::MenderOverBrokkos`), the
+//! merged permanent has Circuit Mender's abilities (CR 730.2a) and its
+//! leaves-the-battlefield ability should look back and trigger (CR 603.10a), but
+//! it does not trigger even with nothing parked. For that pile the rows compare
+//! the parked run with the unparked one and use Ninth Bridge Patrol to observe
+//! the departure. The defect is at the merge base too (`merge.rs` removes the
+//! merge layer effect before the move) and has no upstream issue yet.
 
 use engine::game::merge::{merge_object_onto, MergeSide};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -978,7 +982,33 @@ fn spell_controller_concession_during_the_owners_prompt_leaves_nothing_parked() 
                 conceded.waiting_for
             );
             assert_commander_prompt(runner.state(), P1, pile.brokkos);
-            answer(&mut runner, answer_index);
+            let events = answer(&mut runner, answer_index);
+            // CR 608.2m: a resolution under way continues to resolve fully, so
+            // Chaos Warp's tail shuffles and reveals once for the owner.
+            let expected_tail = usize::from(spell_name == "Chaos Warp");
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::PlayerPerformedAction {
+                            player_id: P1,
+                            action: PlayerActionKind::ShuffledLibrary,
+                            ..
+                        }
+                    ))
+                    .count(),
+                expected_tail,
+                "{label}: the owner's shuffle runs {expected_tail} time(s)"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::CardsRevealed { player: P1, .. }))
+                    .count(),
+                expected_tail,
+                "{label}: the owner's reveal runs {expected_tail} time(s)"
+            );
             // The recipient of priority is not asserted: with a leave trigger
             // waiting, the engine hands it to the departed active player, as it
             // does at the merge base for an unmerged Rebuking Ceremony.
