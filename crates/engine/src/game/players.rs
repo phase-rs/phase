@@ -544,7 +544,7 @@ pub(crate) struct LossPool {
     /// CR 810.4 / CR 904.13b + CR 810.10: the living seats sharing the total; the player alone where
     /// nothing is shared.
     pub(crate) members: Vec<PlayerId>,
-    /// How far the total may move toward the threshold before reaching it; 0 or less once reached.
+    /// How far the total is from the threshold; 0 or less once reached.
     pub(crate) to_threshold: i64,
 }
 

@@ -30,8 +30,7 @@ use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 use crate::loop_shortcut::{
-    arm_responders, gunzip_dump, reach_2p_blight_priest_drain_offer, reach_2p_optional_drain_offer,
-    restore_dump,
+    arm_responders, gunzip_dump, reach_2p_blight_priest_drain_offer, restore_dump,
 };
 use crate::loop_shortcut_drain_boards::weird_drain_board;
 
@@ -124,19 +123,6 @@ fn weird_offer_bound() -> u32 {
         );
     };
     schema.deliverable_capacity
-}
-
-/// The driven two-player optional-drain rig, its responder armed, declared at `count` and parked
-/// at its responder.
-fn rig_window(count: IterationCount) -> GameState {
-    rig_window_with(count, arm_responders)
-}
-
-/// The driven two-player optional-drain rig, `prepare`d at its offer, declared at `count` and
-/// parked at its responder.
-fn rig_window_with(count: IterationCount, prepare: fn(&mut GameState)) -> GameState {
-    let (runner, _life, _cleric) = reach_2p_optional_drain_offer();
-    declared_window(runner, count, prepare)
 }
 
 /// Marauding Blight-Priest's two-player drain, its responder armed, declared at `count` and parked
@@ -798,7 +784,7 @@ fn a_zero_count_proposal_admits_no_place_while_accept_still_answers() {
 /// satisfy the row.
 #[test]
 fn the_engine_driven_seat_can_answer_a_window_whose_range_is_empty() {
-    let mut state = rig_window(IterationCount::Fixed(0));
+    let mut state = priest_window(IterationCount::Fixed(0));
     assert!(
         admitted_places(&state).is_empty(),
         "reach-guard: this window's proposal admits no place"
@@ -815,7 +801,7 @@ fn the_engine_driven_seat_can_answer_a_window_whose_range_is_empty() {
     apply(&mut state, responder, candidates[0].clone())
         .expect("the generated candidate must be one the reducer accepts");
 
-    let mut guard = rig_window(IterationCount::Fixed(2));
+    let mut guard = priest_window(IterationCount::Fixed(2));
     assert_eq!(
         admitted_places(&guard),
         0..=1,

@@ -567,9 +567,11 @@ pub(crate) fn live_mandatory_loop_winner(
     }
     // CR 704.5a + CR 704.5c: the live shortcut needs an opponent's life or poison loss axis,
     // never a pure advantage engine or mill.
-    let not_winner = |pid: PlayerId| pid != winner;
-    if !(opponent_loses_along(&not_winner, &delta.life, -1)
-        || opponent_loses_along(&not_winner, &delta.poison, 1))
+    // CR 102.3: a teammate is no opponent.
+    let opponents = crate::game::players::opponents(cycle_end, winner);
+    let is_opponent = |pid: PlayerId| opponents.contains(&pid);
+    if !(opponent_loses_along(&is_opponent, &delta.life, -1)
+        || opponent_loses_along(&is_opponent, &delta.poison, 1))
     {
         return None;
     }

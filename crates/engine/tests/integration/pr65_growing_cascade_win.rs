@@ -30,9 +30,11 @@ const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
 const P2: PlayerId = PlayerId(2);
 
-const DRAIN_CLERIC: &str = "Whenever you gain life, each opponent loses 1 life.";
-const BLOOD_SIPPER: &str = "Whenever an opponent loses life, you gain 1 life.";
-const KICKOFF: &str = "You gain 1 life.";
+/// Verbatim Oracle texts (Scryfall).
+const MARAUDING_BLIGHT_PRIEST: &str = "Whenever you gain life, each opponent loses 1 life.";
+const EXQUISITE_BLOOD: &str = "Whenever an opponent loses life, you gain that much life.";
+const BLESSED_WINE: &str =
+    "You gain 1 life.\nDraw a card at the beginning of the next turn's upkeep.";
 
 fn life(runner: &GameRunner, p: PlayerId) -> i32 {
     runner
@@ -54,19 +56,18 @@ fn is_eliminated(runner: &GameRunner, p: PlayerId) -> bool {
         .unwrap()
 }
 
-/// Build the 3-player drain engine controlled by P0, with `loop_detection` set to
-/// `mode`. Returns a runner positioned in P0's precombat main with the kick-off
-/// sorcery in hand (id returned).
+/// Marauding Blight-Priest and Exquisite Blood under P0 at three seats of 20, with `loop_detection`
+/// set to `mode`. Returns a runner in P0's precombat main with Blessed Wine in hand (id returned).
 fn setup(mode: LoopDetectionMode) -> (GameRunner, engine::types::ObjectId) {
     let mut scenario = GameScenario::new_n_player(3, 7);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P0, 20);
     scenario.with_life(P1, 20);
     scenario.with_life(P2, 20);
-    scenario.add_creature_from_oracle(P0, "Test Drain Cleric", 2, 2, DRAIN_CLERIC);
-    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
+    scenario.add_creature_from_oracle(P0, "Marauding Blight-Priest", 3, 2, MARAUDING_BLIGHT_PRIEST);
+    scenario.add_enchantment_from_oracle(P0, "Exquisite Blood", EXQUISITE_BLOOD);
     let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .add_spell_to_hand_from_oracle(P0, "Blessed Wine", true, BLESSED_WINE)
         .id();
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;

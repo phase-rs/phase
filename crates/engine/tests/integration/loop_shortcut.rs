@@ -22,6 +22,7 @@ use engine::game::perf_counters::{
     take_cost_records, take_cost_snapshot, TakeCostCounters, TakeCostRecord,
 };
 use engine::game::scenario::{GameRunner, GameScenario};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -84,21 +85,38 @@ fn is_eliminated(runner: &GameRunner, p: PlayerId) -> bool {
         .unwrap()
 }
 
-/// 2-player self-refilling mutual drain controlled by P0 (constant-depth). P1 starts low so
-/// the OFF natural-death stream is short. Returns runner + kick-off sorcery id.
-pub(crate) fn setup_2p_drain(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
-    let mut scenario = GameScenario::new_n_player(2, 7);
+/// Marauding Blight-Priest and Exquisite Blood under P0, Blessed Wine in P0's hand, each seat at
+/// its entry of `lives`, and twenty cards in each library so Blessed Wine's delayed draw finds one.
+/// Returns the scenario, Blessed Wine and Blight-Priest.
+fn priest_drain_scenario(lives: &[i32]) -> (GameScenario, ObjectId, ObjectId) {
+    let seats = u8::try_from(lives.len()).expect("a table of at most 255 seats");
+    let mut scenario = GameScenario::new_n_player(seats, 7);
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 20);
-    scenario.with_life(P1, 6);
-    scenario.add_creature_from_oracle(P0, "Test Drain Cleric", 2, 2, DRAIN_CLERIC);
-    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
-    let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+    for (seat, &total) in (0..seats).map(PlayerId).zip(lives) {
+        scenario.with_life(seat, total);
+    }
+    let priest = scenario
+        .add_creature_from_oracle(P0, "Marauding Blight-Priest", 3, 2, MARAUDING_BLIGHT_PRIEST)
         .id();
+    scenario.add_enchantment_from_oracle(P0, "Exquisite Blood", EXQUISITE_BLOOD);
+    let wine = scenario
+        .add_spell_to_hand_from_oracle(P0, "Blessed Wine", true, BLESSED_WINE)
+        .id();
+    let names: Vec<String> = (0..20).map(|i| format!("Library card {i}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    for seat in (0..seats).map(PlayerId) {
+        scenario.with_library_top(seat, &names);
+    }
+    (scenario, wine, priest)
+}
+
+/// [`priest_drain_scenario`] at P0 20 / P1 6 with no answer in P1's hand, so the drain is
+/// mandatory. Returns the runner and Blessed Wine.
+pub(crate) fn setup_2p_drain(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
+    let (scenario, wine, _priest) = priest_drain_scenario(&[20, 6]);
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
-    (runner, kickoff)
+    (runner, wine)
 }
 
 // ─────────── #7899: projected cost journals must not veto an unrelated recurrence ───────────
@@ -563,104 +581,74 @@ fn setup_2p_vito(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P0, 20);
     scenario.with_life(P1, 6);
-    scenario.add_creature_from_oracle(P0, "Vito, Thorn of the Dusk Rose", 1, 4, VITO);
+    scenario.add_creature_from_oracle(P0, "Vito, Thorn of the Dusk Rose", 1, 3, VITO);
     scenario.add_enchantment_from_oracle(P0, "Sanguine Bond", SANGUINE_BOND);
-    scenario.add_creature_from_oracle(P0, "Bloodthirsty Conqueror", 3, 4, BLOODTHIRSTY_CONQUEROR);
+    scenario.add_creature_from_oracle(P0, "Bloodthirsty Conqueror", 5, 5, BLOODTHIRSTY_CONQUEROR);
     let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .add_spell_to_hand_from_oracle(P0, "Blessed Wine", true, BLESSED_WINE)
         .id();
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
     (runner, kickoff)
-}
-
-/// 2-player drain (as above) but P1 also holds a castable Lightning Bolt off an untapped
-/// Mountain — a meaningful priority action that makes the loop OPTIONAL (CR 732.5 probe
-/// FALSE). Returns runner + (kickoff, bolt, drain-cleric enabler id).
-pub(crate) fn setup_2p_optional_drain(
-    mode: LoopDetectionMode,
-) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
-    let mut scenario = GameScenario::new_n_player(2, 7);
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 20);
-    scenario.with_life(P1, 20);
-    let cleric = scenario
-        .add_creature_from_oracle(P0, "Test Drain Cleric", 2, 2, DRAIN_CLERIC)
-        .id();
-    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
-    scenario.add_basic_land(P1, ManaColor::Red);
-    let bolt = scenario.add_bolt_to_hand(P1);
-    let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
-        .id();
-    let mut runner = scenario.build();
-    runner.state_mut().loop_detection = mode;
-    (runner, kickoff, bolt, cleric)
 }
 
 /// Marauding Blight-Priest and Exquisite Blood under P0, P1 holding Lightning Bolt off a
 /// Mountain, P0 with Blessed Wine in hand, and twenty cards in each library so the game can go on
 /// past Blessed Wine's delayed draw. Returns the runner, Blessed Wine, the Bolt and Blight-Priest.
 pub(crate) fn setup_2p_blight_priest_drain() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
-    let mut scenario = GameScenario::new_n_player(2, 7);
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 20);
-    scenario.with_life(P1, 20);
-    let priest = scenario
-        .add_creature_from_oracle(P0, "Marauding Blight-Priest", 3, 2, MARAUDING_BLIGHT_PRIEST)
-        .id();
-    scenario.add_enchantment_from_oracle(P0, "Exquisite Blood", EXQUISITE_BLOOD);
+    let (mut scenario, wine, priest) = priest_drain_scenario(&[20, 20]);
     scenario.add_basic_land(P1, ManaColor::Red);
     let bolt = scenario.add_bolt_to_hand(P1);
-    let wine = scenario
-        .add_spell_to_hand_from_oracle(P0, "Blessed Wine", true, BLESSED_WINE)
-        .id();
-    let names: Vec<String> = (0..20).map(|i| format!("Library card {i}")).collect();
-    let names: Vec<&str> = names.iter().map(String::as_str).collect();
-    scenario.with_library_top(P0, &names);
-    scenario.with_library_top(P1, &names);
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
     (runner, wine, bolt, priest)
 }
 
-/// 3-player growing μ=2 cascade controlled by P0 (both opponents drain), P1 holding a
-/// castable Bolt so the loop is OPTIONAL. The ω growing stack means the winner is confirmed
-/// via `loop_states_cover_modulo_growth`, not the constant-depth equality.
+/// [`priest_drain_scenario`] at three seats of 20, P1 holding Lightning Bolt off a Mountain so the
+/// loop is optional. Each of P0's gains drains both opponents and each loss is gained back, so the
+/// stack grows every repetition. Returns the runner and Blessed Wine.
 fn setup_3p_optional_cascade(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
-    let mut scenario = GameScenario::new_n_player(3, 7);
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 20);
-    scenario.with_life(P1, 20);
-    scenario.with_life(P2, 20);
-    scenario.add_creature_from_oracle(P0, "Test Drain Cleric", 2, 2, DRAIN_CLERIC);
-    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
+    let (mut scenario, wine, _priest) = priest_drain_scenario(&[20, 20, 20]);
     scenario.add_basic_land(P1, ManaColor::Red);
     scenario.add_bolt_to_hand(P1);
-    let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
-        .id();
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
-    (runner, kickoff)
+    (runner, wine)
 }
 
-/// 3-player MANDATORY, unstoppable, net-progress, NO-LOSS loop: P0 has a self-refilling
-/// "whenever you gain life, you gain 1 life" engine. Nobody drains, nobody can break it
-/// (opponents have empty hands / no abilities) ⇒ CR 732.4 draw.
-fn setup_3p_draw(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
-    let mut scenario = GameScenario::new_n_player(3, 7);
+/// Worldgorger Dragon in P0's graveyard and Animate Dead in P0's hand with {B}{B} floating, at
+/// `seats` players and with each card of `p0_battlefield` under P0. Animate Dead on the Dragon
+/// starts a loop of mandatory triggers: the Dragon exiles Animate Dead and those cards, Animate
+/// Dead's leaving sacrifices the Dragon, and the Dragon's leaving returns them. Returns the runner,
+/// Animate Dead and the Dragon.
+fn setup_worldgorger(
+    seats: u8,
+    p0_battlefield: &[&str],
+    mode: LoopDetectionMode,
+) -> (GameRunner, ObjectId, ObjectId) {
+    let db = crate::support::shared_card_db().expect("the committed card fixture loads");
+    let mut scenario = GameScenario::new_n_player(seats, 7);
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 20);
-    scenario.with_life(P1, 20);
-    scenario.with_life(P2, 20);
-    scenario.add_creature_from_oracle(P0, "Test Life Engine", 2, 2, SELF_LIFE_ENGINE);
-    let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
-        .id();
+    let dragon = scenario.add_real_card(P0, "Worldgorger Dragon", Zone::Graveyard, db);
+    let animate = scenario.add_real_card(P0, "Animate Dead", Zone::Hand, db);
+    for &name in p0_battlefield {
+        scenario.add_real_card(P0, name, Zone::Battlefield, db);
+    }
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
-    (runner, kickoff)
+    (runner, animate, dragon)
+}
+
+/// Three players, Worldgorger Dragon and Animate Dead alone: the loop moves no player toward
+/// losing and no player can stop it.
+fn setup_3p_draw(mode: LoopDetectionMode) -> (GameRunner, ObjectId, ObjectId) {
+    setup_worldgorger(3, &[], mode)
 }
 
 /// Drive PassPriority/OrderTriggers beats, accumulating events, until a state OTHER than
@@ -873,9 +861,6 @@ fn interactive_3p_optional_cascade_apnap_accept_win() {
 /// zero counters from being satisfied by an empty action list.
 #[test]
 fn shortcut_accept_validation_does_not_take_the_shortcut() {
-    // This measures the generic shortcut protocol using the existing composed synthetic loop.
-    // Nearest printed anchors: Marauding Blight-Priest and Exquisite Blood; the fixture's
-    // fixed-one Test Blood Sipper is not Exquisite Blood's variable-amount printed ability.
     let (mut runner, kickoff) = setup_3p_optional_cascade(LoopDetectionMode::Interactive);
     let _ = runner.cast(kickoff).resolve();
     let (_events, wf) = drive_collect(&mut runner, 500);
@@ -946,14 +931,14 @@ fn shortcut_accept_validation_does_not_take_the_shortcut() {
         refusal.is_some(),
         "REACH-GUARD: the issued Shorten is refused, so the Accept above is all that survives"
     );
-    // Every copy `legal_actions` makes is the issued Shorten's refusal; the Accept adds none. 19 is
+    // Every copy `legal_actions` makes is the issued Shorten's refusal; the Accept adds none. 20 is
     // that refusal alone: the CR 732.2b admission runs the take to place 1 on a scratch state, and
     // no cheaper rules-equivalent refusal exists.
     assert_eq!(
         during.state_copies, refusal_copies,
         "the Accept's legality verdict must not add a take's snapshot"
     );
-    assert_eq!(during.state_copies, 19);
+    assert_eq!(during.state_copies, 20);
 }
 
 /// CR 732.2a: a shortcut belongs to the player with priority, not necessarily the player whose loop
@@ -1043,8 +1028,8 @@ fn interactive_offer_separates_priority_proposer_from_predicted_winner() {
 /// pre-existing outcome.
 #[test]
 fn interactive_3p_mandatory_no_loss_draw() {
-    let (mut runner, kickoff) = setup_3p_draw(LoopDetectionMode::Interactive);
-    let _ = runner.cast(kickoff).resolve();
+    let (mut runner, animate, dragon) = setup_3p_draw(LoopDetectionMode::Interactive);
+    let _ = runner.cast(animate).target_object(dragon).resolve();
     let (_events, wf) = drive_collect(&mut runner, 500);
     assert_eq!(
         wf,
@@ -1054,8 +1039,8 @@ fn interactive_3p_mandatory_no_loss_draw() {
 
     // Discriminator: under Off the same fixture never draws via that branch (it grinds to the
     // iteration/growth backstop or keeps going — not GameOver{None} by this branch).
-    let (mut orunner, okickoff) = setup_3p_draw(LoopDetectionMode::Off);
-    let _ = orunner.cast(okickoff).resolve();
+    let (mut orunner, oanimate, odragon) = setup_3p_draw(LoopDetectionMode::Off);
+    let _ = orunner.cast(oanimate).target_object(odragon).resolve();
     let (_oevents, owf) = drive_collect(&mut orunner, 500);
     assert_ne!(
         owf,
@@ -1179,8 +1164,7 @@ fn interactive_shorten_hands_priority_and_breaks_loop() {
 /// object-growth test.
 #[test]
 fn interactive_optional_drain_decline_restores_priority_no_reoffer() {
-    let (mut runner, kickoff, _bolt, _cleric) =
-        setup_2p_optional_drain(LoopDetectionMode::Interactive);
+    let (mut runner, kickoff, _bolt, _cleric) = setup_2p_blight_priest_drain();
     let _ = runner.cast(kickoff).resolve();
     let (_events, wf) = drive_collect(&mut runner, 500);
 
@@ -1539,10 +1523,11 @@ fn interactive_proposer_concede_mid_apnap_does_not_crown_departed() {
 /// A QUEUED opponent (P2, not yet prompted) concedes AFTER the window opened. `Concede`
 /// bypasses the `WaitingFor` dispatch, so `remaining_players` still lists the departed seat.
 /// When the prompted opponent (P1) accepts, the liveness filter in
-/// `handle_respond_to_shortcut` (F2) must DROP the departed seat and — finding no living
-/// remainder — take the shortcut for the still-living proposer P0 instead of advancing onto
-/// the departed P2 (CR 800.4a: never wait on a player who has left; F1 then re-validates P0's
-/// own liveness before crowning). Reverting F2 makes P1's Accept set
+/// `handle_respond_to_shortcut` (F2) must DROP the departed seat instead of advancing onto the
+/// departed P2 (CR 800.4a: never wait on a player who has left). The accepted period includes P0
+/// ordering the two Exquisite Blood triggers that P1's and P2's losses raise (CR 603.3b); with P2
+/// gone a drain raises one trigger, so the period cannot be taken (CR 732.2a): nothing is taken and
+/// priority returns to P0, whose two-seat offer then crowns P0. Reverting F2 makes P1's Accept set
 /// `RespondToShortcut{player: P2}` — a permanent wait on a departed player.
 #[test]
 fn interactive_queued_opponent_concede_no_deadlock() {
@@ -1585,8 +1570,7 @@ fn interactive_queued_opponent_concede_no_deadlock() {
         "P0/P1 remain in the game"
     );
 
-    // P1 accepts. F2 drops departed P2 from the queue; no living remainder ⇒ take the
-    // shortcut for the still-living P0 — NOT advance onto departed P2.
+    // P1 accepts. F2 drops departed P2 from the queue — NOT advance onto departed P2.
     runner
         .act(GameAction::RespondToShortcut {
             response: ShortcutResponse::Accept,
@@ -1603,8 +1587,34 @@ fn interactive_queued_opponent_concede_no_deadlock() {
     );
     assert_eq!(
         runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "the three-seat period cannot be taken without P2, so priority returns to P0"
+    );
+    assert_eq!(life(&runner, P1), 19, "the untaken shortcut moved no life");
+
+    // P1 at 19 with a drain already on the stack: the first repetition costs 2, so the 18th is
+    // lethal (CR 704.5a).
+    let (_events, wf) = drive_collect(&mut runner, 500);
+    assert!(
+        matches!(wf, WaitingFor::LoopShortcut { proposer: P0, .. }),
+        "the two-seat loop is offered to P0, got {wf:?}"
+    );
+    assert_eq!(offered(runner.state()).1, IterationCount::Fixed(18));
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(18),
+            template: None,
+        })
+        .expect("P0 declares");
+    runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("P1 accepts");
+    assert_eq!(
+        runner.state().waiting_for,
         WaitingFor::GameOver { winner: Some(P0) },
-        "the last living opponent accepted ⇒ crown the still-living proposer P0"
+        "P1's elimination leaves P0 the last player in the game (CR 104.2a)"
     );
 }
 
@@ -1799,7 +1809,7 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
     };
 
     // ILLEGAL half: pin Player(P2), not in the offered legal set ⇒ rejected to Priority.
-    let (mut runner, _kickoff) = setup_3p_draw(LoopDetectionMode::Interactive);
+    let (mut runner, ..) = setup_3p_draw(LoopDetectionMode::Interactive);
     runner.state_mut().waiting_for = WaitingFor::LoopShortcut {
         proposer: P0,
         predicted_winner: Some(P0),
@@ -1822,7 +1832,7 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
     );
 
     // LEGAL half (reach-guard, not always-reject): pin Player(P1) ⇒ RespondToShortcut opens.
-    let (mut runner2, _kickoff2) = setup_3p_draw(LoopDetectionMode::Interactive);
+    let (mut runner2, ..) = setup_3p_draw(LoopDetectionMode::Interactive);
     runner2.state_mut().waiting_for = WaitingFor::LoopShortcut {
         proposer: P0,
         predicted_winner: Some(P0),
@@ -1850,22 +1860,10 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
 
 // ─────────────────── T-B3-materialize (Phase 4b) ───────────────────────
 
-/// Reach `LoopShortcut{P0}` on a fresh `setup_2p_optional_drain(Interactive)` fixture.
-/// Returns the runner parked at the offer, `life(P1)` at that instant, and the
-/// DRAIN_CLERIC object id (for template pins).
-pub(crate) fn reach_2p_optional_drain_offer() -> (GameRunner, i32, ObjectId) {
-    reach_drain_offer(setup_2p_optional_drain(LoopDetectionMode::Interactive))
-}
-
-/// [`reach_2p_optional_drain_offer`] on [`setup_2p_blight_priest_drain`]'s board; the id is
-/// Marauding Blight-Priest's.
+/// Reach `LoopShortcut{P0}` on a fresh [`setup_2p_blight_priest_drain`] board. Returns the runner
+/// parked at the offer, `life(P1)` at that instant, and Marauding Blight-Priest.
 pub(crate) fn reach_2p_blight_priest_drain_offer() -> (GameRunner, i32, ObjectId) {
-    reach_drain_offer(setup_2p_blight_priest_drain())
-}
-
-fn reach_drain_offer(
-    (mut runner, kickoff, _bolt, cleric): (GameRunner, ObjectId, ObjectId, ObjectId),
-) -> (GameRunner, i32, ObjectId) {
+    let (mut runner, kickoff, _bolt, cleric) = setup_2p_blight_priest_drain();
     let _ = runner.cast(kickoff).resolve();
     let (_events, wf) = drive_collect(&mut runner, 500);
     let WaitingFor::LoopShortcut { proposer, .. } = wf else {
@@ -1876,10 +1874,10 @@ fn reach_drain_offer(
     (runner, l0, cleric)
 }
 
-/// Probe the per-cycle P1 drain constant via an independent `Fixed(1)` materialization
-/// of the DRAIN_CLERIC/BLOOD_SIPPER pairing (one recurrence = one full cycle).
+/// Probe the per-cycle P1 drain constant via an independent `Fixed(1)` materialization of
+/// Marauding Blight-Priest and Exquisite Blood (one recurrence = one full cycle).
 fn probe_drain_delta() -> i32 {
-    let (mut runner, l0, _cleric) = reach_2p_optional_drain_offer();
+    let (mut runner, l0, _cleric) = reach_2p_blight_priest_drain_offer();
     runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(1),
@@ -1908,7 +1906,7 @@ fn probe_drain_delta() -> i32 {
 #[test]
 fn b3_materialize_stop_short() {
     let delta = probe_drain_delta();
-    let (mut runner, l0, _cleric) = reach_2p_optional_drain_offer();
+    let (mut runner, l0, _cleric) = reach_2p_blight_priest_drain_offer();
     let n: u32 = 3;
     assert!(
         (n as i32) * delta < l0,
@@ -1969,7 +1967,7 @@ fn b3_materialize_stop_short() {
 /// n ≤ cap, so T1's no-drive is the cap firing, not a dead fixture.
 #[test]
 fn over_cap_fixed_count_hands_back_with_no_drive() {
-    let (mut runner, l0, _cleric) = reach_2p_optional_drain_offer();
+    let (mut runner, l0, _cleric) = reach_2p_blight_priest_drain_offer();
 
     runner
         .act(GameAction::DeclareShortcut {
@@ -2013,41 +2011,40 @@ fn over_cap_fixed_count_hands_back_with_no_drive() {
 
 // ═══════════════════ Interactive draw gate ═══════════════════
 
-/// Poison rider for the DRAW-gate behavioral test: fires on the SAME "whenever you gain
-/// life" event the SELF_LIFE_ENGINE cascade pumps, dripping a poison counter onto each
-/// opponent every cycle. Non-targeted (no mid-drive target prompt ⇒ mandatory-preserving).
+/// Fires on the same gain as [`SELF_LIFE_ENGINE`], so every repetition gives each opponent a
+/// poison counter and none to P0.
 const POISON_RIDER: &str = "Whenever you gain life, each opponent gets a poison counter.";
 
-/// 3-player MANDATORY self-sustaining lifegain cascade (SELF_LIFE_ENGINE) that ALSO drips
-/// poison onto each opponent every cycle (POISON_RIDER, a SEPARATE second trigger), so P0 orders
-/// the two triggers each cycle. Nobody loses LIFE, so Path A's `live_mandatory_loop_winner` finds
-/// no faller; opponents accrue POISON.
-fn setup_3p_poison_draw(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
+/// Three players of 20, Blessed Wine in P0's hand and each `(name, text)` of `engines` as a 2/2
+/// under P0. Returns the runner and Blessed Wine.
+fn setup_3p_life_engine(engines: &[(&str, &str)]) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new_n_player(3, 7);
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 20);
-    scenario.with_life(P1, 20);
-    scenario.with_life(P2, 20);
-    scenario.add_creature_from_oracle(P0, "Test Life Engine", 2, 2, SELF_LIFE_ENGINE);
-    scenario.add_creature_from_oracle(P0, "Test Poison Dripper", 2, 2, POISON_RIDER);
-    let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+    for &(name, text) in engines {
+        scenario.add_creature_from_oracle(P0, name, 2, 2, text);
+    }
+    let wine = scenario
+        .add_spell_to_hand_from_oracle(P0, "Blessed Wine", true, BLESSED_WINE)
         .id();
     let mut runner = scenario.build();
-    runner.state_mut().loop_detection = mode;
-    (runner, kickoff)
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    (runner, wine)
 }
 
 /// CR 732.4 + CR 704.5c: the pure lifegain loop is a draw; the same loop with a poison rider is
 /// no draw. The loop continues whichever of P0's two triggers resolves first (CR 603.3b), so the
 /// order is no decision and P0 wins the mandatory loop outright.
+/// No printed card gains life or gives only opponents poison whenever you gain life; the nearest
+/// are Marauding Blight-Priest ("Whenever you gain life, each opponent loses 1 life.") and Ichor
+/// Rats ("When this creature enters, each player gets a poison counter.").
 #[test]
 fn interactive_recurring_poison_is_not_drawn() {
     // CONTROL (differential anchor): the SHARED pure-lifegain structure reaches the CR 732.4
     // gate and DRAWS — establishes that this fixture shape is one that CAN be certified a draw,
     // so the variant's not-drawing is attributable to the one added line (the poison rider).
-    let (mut control, ckickoff) = setup_3p_draw(LoopDetectionMode::Interactive);
-    let _ = control.cast(ckickoff).resolve();
+    let engine = ("Test Life Engine", SELF_LIFE_ENGINE);
+    let (mut control, cwine) = setup_3p_life_engine(&[engine]);
+    let _ = control.cast(cwine).resolve();
     let (_ce, cwf) = drive_collect(&mut control, 500);
     assert_eq!(
         cwf,
@@ -2056,8 +2053,8 @@ fn interactive_recurring_poison_is_not_drawn() {
          fixture change (the poison rider) is what makes the variant below not-draw"
     );
 
-    let (mut runner, kickoff) = setup_3p_poison_draw(LoopDetectionMode::Interactive);
-    let _ = runner.cast(kickoff).resolve();
+    let (mut runner, wine) = setup_3p_life_engine(&[engine, ("Test Poison Dripper", POISON_RIDER)]);
+    let _ = runner.cast(wine).resolve();
     let (events, wf) = drive_collect(&mut runner, 500);
     let players = &runner.state().players;
     assert_eq!(wf, WaitingFor::GameOver { winner: Some(P0) });
@@ -2910,17 +2907,17 @@ fn setup_2p_vito_optional_with_murder(
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P0, 20);
     scenario.with_life(P1, 6);
-    scenario.add_creature_from_oracle(P0, "Vito, Thorn of the Dusk Rose", 1, 4, VITO);
-    scenario.add_creature_from_oracle(P0, "Sanguine Bond", 2, 2, SANGUINE_BOND);
+    scenario.add_creature_from_oracle(P0, "Vito, Thorn of the Dusk Rose", 1, 3, VITO);
+    scenario.add_enchantment_from_oracle(P0, "Sanguine Bond", SANGUINE_BOND);
     let conqueror = scenario
-        .add_creature_from_oracle(P0, "Bloodthirsty Conqueror", 3, 4, BLOODTHIRSTY_CONQUEROR)
+        .add_creature_from_oracle(P0, "Bloodthirsty Conqueror", 5, 5, BLOODTHIRSTY_CONQUEROR)
         .id();
     // The red land + Bolt make the loop OPTIONAL (so it OFFERS instead of auto-crowning); keep it.
     scenario.add_basic_land(P1, ManaColor::Red);
     scenario.add_bolt_to_hand(P1);
     let murder = arm_murder(&mut scenario, P1);
     let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .add_spell_to_hand_from_oracle(P0, "Blessed Wine", true, BLESSED_WINE)
         .id();
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
@@ -4280,7 +4277,7 @@ fn recorded_loop_pins_are_redacted_for_a_viewer_who_cannot_see_the_pinned_object
 /// decision schema off the wire without any engine-side special casing.
 #[test]
 fn loop_shortcut_serializes_schema_under_data() {
-    let (runner, _l0, _cleric) = reach_2p_optional_drain_offer();
+    let (runner, _l0, _cleric) = reach_2p_blight_priest_drain_offer();
     let WaitingFor::LoopShortcut { schema, .. } = &runner.state().waiting_for else {
         panic!(
             "expected a LoopShortcut offer, got {:?}",
@@ -5467,9 +5464,9 @@ fn dump_drive_one_beat(
 /// choice, so its real offer publishes no decision point.
 #[test]
 fn the_untargeted_drain_offer_publishes_no_decision_point() {
-    let (shipped, _l0, _cleric) = reach_2p_optional_drain_offer();
+    let (shipped, _l0, _cleric) = reach_2p_blight_priest_drain_offer();
     let WaitingFor::LoopShortcut { schema, .. } = &shipped.state().waiting_for else {
-        unreachable!("reach_2p_optional_drain_offer stands on the offer")
+        unreachable!("reach_2p_blight_priest_drain_offer stands on the offer")
     };
     assert!(schema.points.is_empty(), "{:?}", schema.points);
 }
@@ -5622,7 +5619,7 @@ fn template_none_against_a_pin_consuming_schema_falls_back_to_manual_play() {
 
     let declare_with_period =
         |period: engine::game::period_confirm::ConfirmedPeriod| -> WaitingFor {
-            let (mut runner, _kickoff) = setup_3p_draw(LoopDetectionMode::Interactive);
+            let (mut runner, ..) = setup_3p_draw(LoopDetectionMode::Interactive);
             runner.state_mut().waiting_for = WaitingFor::LoopShortcut {
                 proposer: P0,
                 predicted_winner: Some(P0),
@@ -6707,7 +6704,6 @@ fn sprout_take_history_work_is_flat_per_cycle() {
 #[test]
 fn treasure_sacrifice_take_history_work_is_flat_per_cycle() {
     use crate::play_trace::{ability, activate, cast, is_offer, names, settle};
-    use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::zones::Zone;
 
     let db = crate::support::shared_card_db().expect("the committed card fixture loads");
@@ -7969,26 +7965,14 @@ fn drive_scenario_to_bounded_offer(runner: &mut GameRunner, cap: usize) -> Optio
 /// crowns nobody" regime the bounded offer exists to serve.
 #[test]
 fn multiplayer_pure_life_drain_offers_at_three_and_four_players() {
-    /// Marauding Blight-Priest, verbatim (Scryfall).
-    const BLIGHT_PRIEST: &str = "Whenever you gain life, each opponent loses 1 life.";
-    /// Exquisite Blood, verbatim (Scryfall).
-    const EXQUISITE_BLOOD: &str = "Whenever an opponent loses life, you gain that much life.";
-
     /// Build the cascade at `seats` players with staggered opponent life, cast the kick-off,
     /// and return the runner plus the seats the engine considers living opponents of P0.
     fn cascade(seats: u8) -> GameRunner {
-        let mut scenario = GameScenario::new_n_player(seats, 7);
-        scenario.at_phase(Phase::PreCombatMain);
-        scenario.with_life(P0, 20);
-        for (i, seat) in (1..seats).map(PlayerId).enumerate() {
-            // Staggered: pairwise-UNEQUAL absolute life, equal per-cycle delta.
-            scenario.with_life(seat, 1000 + 50 * i as i32);
-        }
-        scenario.add_creature_from_oracle(P0, "Test Blight Priest", 2, 2, BLIGHT_PRIEST);
-        scenario.add_creature_from_oracle(P0, "Test Exquisite Blood", 2, 2, EXQUISITE_BLOOD);
-        let kickoff = scenario
-            .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
-            .id();
+        // Staggered: pairwise-UNEQUAL absolute life, equal per-cycle delta.
+        let lives: Vec<i32> = std::iter::once(20)
+            .chain((1..i32::from(seats)).map(|i| 1000 + 50 * (i - 1)))
+            .collect();
+        let (scenario, kickoff, _priest) = priest_drain_scenario(&lives);
         let mut runner = scenario.build();
         runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
         let _ = runner.cast(kickoff).resolve();
@@ -10894,18 +10878,6 @@ fn a_zero_count_declaration_validates_over_an_empty_range_but_still_checks_cardi
 
 // ═════════════ PR-7 Phase 5c, ITEM 2 — the kill-declared-target stop-short row ═════════════
 
-/// Player-scope hexproof (CR 702.11c). The refuser is RULED to be
-/// hexproof rather than phasing: hexproof makes the pinned seat illegal at the DRIVE's
-/// spec-aware CR 608.2b re-validation (the `GameAction::SelectTargets` the injector submits),
-/// which is the backstop layer no other 5c row exercises. Phasing would instead fail at
-/// `resolve_target`'s EXISTENCE half and double-cover R1's seam.
-/// A SYNTHETIC harness prop, deliberately NOT named after any printing: it exists only to be
-/// the thing that makes the pinned seat illegal mid-window, and inventing a real card name for
-/// non-verbatim text is the fabrication hazard CLAUDE.md's "verify the card, not just the rule"
-/// principle warns about. The verbatim-Oracle rule is scoped to the card under test; the
-/// card under test here is the SANGUINE_BOND drain, whose text IS verbatim.
-const HEXPROOF_GRANT: &str = "You have hexproof.";
-
 const P3: PlayerId = PlayerId(3);
 
 /// The R5 board — 4 seats, P0 running the escalating TARGETED drain
@@ -10928,14 +10900,15 @@ fn r5_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
         scenario.with_life(PlayerId(seat), 1000);
     }
     let bond = scenario
-        .add_creature_from_oracle(P0, "Sanguine Bond", 2, 2, SANGUINE_BOND)
+        .add_enchantment_from_oracle(P0, "Sanguine Bond", SANGUINE_BOND)
         .id();
-    scenario.add_creature_from_oracle(P0, "Bloodthirsty Conqueror", 3, 4, BLOODTHIRSTY_CONQUEROR);
+    scenario.add_creature_from_oracle(P0, "Bloodthirsty Conqueror", 5, 5, BLOODTHIRSTY_CONQUEROR);
     let hexproof_src = scenario
-        .add_creature_to_hand_from_oracle(P1, "Test Hexproof Source", 0, 4, HEXPROOF_GRANT)
+        .add_creature_to_hand_from_oracle(P1, "Leyline of Sanctity", 0, 0, LEYLINE_OF_SANCTITY)
+        .as_enchantment()
         .id();
     let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .add_spell_to_hand_from_oracle(P0, "Blessed Wine", true, BLESSED_WINE)
         .id();
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
@@ -12317,15 +12290,9 @@ fn a_natural_drain_death_in_a_best_of_three_reaches_sideboarding() {
 /// and follows with sideboarding.
 #[test]
 fn a_mandatory_no_loss_loop_draw_in_a_best_of_three_reaches_sideboarding() {
-    let mut scenario = GameScenario::new_n_player(2, 7);
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.add_creature_from_oracle(P0, "Test Life Engine", 2, 2, SELF_LIFE_ENGINE);
-    let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
-        .id();
-    let mut runner = scenario.build();
+    let (mut runner, animate, dragon) = setup_worldgorger(2, &[], LoopDetectionMode::Interactive);
     install_match(&mut runner, MatchType::Bo3, LoopDetectionMode::Interactive);
-    let _ = runner.cast(kickoff).resolve();
+    let _ = runner.cast(animate).target_object(dragon).resolve();
     let _ = drive_collect(&mut runner, 500);
 
     let state = runner.state();
@@ -12434,21 +12401,13 @@ fn a_drain_crowned_after_an_auto_pass_advance_reaches_its_match() {
     assert_eq!(got, want);
 }
 
-/// Drain Cleric, Blood Sipper and Bloodthirsty Conqueror: each loss of P1's raises two
+/// [`priest_drain_scenario`] with Bloodthirsty Conqueror: each loss of P1's raises two
 /// simultaneous triggers for P0 to order. P1's castable Bolt keeps the loop optional.
 fn setup_2p_two_gainer_drain(mode: LoopDetectionMode) -> (GameRunner, ObjectId) {
-    let mut scenario = GameScenario::new_n_player(2, 7);
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 20);
-    scenario.with_life(P1, 20);
-    scenario.add_creature_from_oracle(P0, "Test Drain Cleric", 2, 2, DRAIN_CLERIC);
-    scenario.add_creature_from_oracle(P0, "Test Blood Sipper", 2, 2, BLOOD_SIPPER);
+    let (mut scenario, kickoff, _priest) = priest_drain_scenario(&[20, 20]);
     scenario.add_creature_from_oracle(P0, "Bloodthirsty Conqueror", 5, 5, BLOODTHIRSTY_CONQUEROR);
     scenario.add_basic_land(P1, ManaColor::Red);
     scenario.add_bolt_to_hand(P1);
-    let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
-        .id();
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
     (runner, kickoff)

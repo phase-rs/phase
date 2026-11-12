@@ -983,7 +983,7 @@ pub enum ExertOrigin {
 /// CR 104.3: why a player lost the game.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum LossReason {
-    /// CR 704.5a / CR 704.6a: their life total (in Two-Headed Giant, their team's) is 0 or less.
+    /// CR 704.5a / CR 704.6a / CR 904.13b: their life total (where life is shared, their team's) is 0 or less.
     LifeTotal,
     /// CR 704.5b: they attempted to draw from an empty library.
     DrewFromEmptyLibrary,
@@ -991,7 +991,7 @@ pub enum LossReason {
     Poison,
     /// CR 704.6c: 21 or more combat damage from one commander.
     CommanderDamage,
-    /// CR 104.3a / CR 810.8b: they (or, in Two-Headed Giant, their teammate) conceded.
+    /// CR 104.3a / CR 810.8b / CR 904.13b: they (or, where life is shared, their teammate) conceded.
     Conceded,
     /// CR 104.3e: an effect stated that they lose.
     EffectStatedLoss,

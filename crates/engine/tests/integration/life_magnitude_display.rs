@@ -281,10 +281,9 @@ fn a_pre_field_certificate_loads_with_no_rising_seat() {
     assert!(rising(&dump).is_empty());
 }
 
-/// A synthetic drain, not a printed board ("Whenever you gain life, each opponent loses 1 life."
-/// and "Whenever an opponent loses life, you gain 1 life."): P0's life rises and P1's falls
-/// (CR 704.5a), so on the mandatory crown only P0 reads ∞. A counted take of Marauding
-/// Blight-Priest's drain ends the game with nothing marked unbounded.
+/// Marauding Blight-Priest and Exquisite Blood with no answer in P1's hand: P0's life rises and
+/// P1's falls (CR 704.5a), so on the mandatory crown only P0 reads ∞. A counted take of the same
+/// drain beside P1's Lightning Bolt ends the game with nothing marked unbounded.
 #[test]
 fn crowned_drains_read_only_the_gaining_seat_as_unbounded() {
     let (mut runner, kickoff) = setup_2p_drain(LoopDetectionMode::Interactive);
