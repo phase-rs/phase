@@ -11742,7 +11742,7 @@ mod tests {
         assert_full_strip_declines(effect, condition);
     }
 
-    /// CR 115.1d + CR 601.2c: `EachDealsDamageEqualToPower` is enumerated as its
+    /// CR 115.1a + CR 601.2c: `EachDealsDamageEqualToPower` is enumerated as its
     /// recipient only, while production announces the sources first. It is safe
     /// only because every construction site stamps `multi_target`, which the
     /// probe declines. Printed Graceful Takedown and a synthetic
