@@ -303,16 +303,13 @@
     "skip": "Zum Überspringen tippen",
     "continue": "Zum Fortfahren tippen",
     "you": "Du",
-    "youPlayFirst": "Du beginnst",
-    "playerPlaysFirst": "{{name}} beginnt",
+    "youWonRoll": "Du hast den Wurf gewonnen",
+    "playerWonRoll": "{{name}} hat den Wurf gewonnen",
     "heads": "Kopf",
     "tails": "Zahl",
     "coinFlip": "Münzwurf",
     "wonCoinFlip": "{{name}} hat den Münzwurf gewonnen",
     "lostCoinFlip": "{{name}} hat den Münzwurf verloren",
-    "turnOrder": "Zugreihenfolge",
-    "turnOrderItem": "Zug {{turn}}: {{name}}",
-    "youTakeTurn": "Du bist in Zug {{turn}} dran",
     "ignoredDie": "Ignoriert"
   },
   "chrome": {

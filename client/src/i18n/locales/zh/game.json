@@ -281,7 +281,9 @@
     "pendingSpell": "下一个咒语",
     "poisonAriaLabel_one": "{{count}}个中毒指示物",
     "poisonAriaLabel_other": "{{count}}个中毒指示物",
-    "poisonTooltip": "中毒指示物：{{count}}\n拥有十个或更多中毒指示物的牌手输掉这盘游戏。",
+    "poisonTooltip": "中毒指示物：{{count}}",
+    "poisonLossPlayer": "拥有{{threshold}}个或更多中毒指示物的牌手输掉这盘游戏。",
+    "poisonLossTeam": "拥有{{threshold}}个或更多中毒指示物的队伍输掉这盘游戏。",
     "radAriaLabel_one": "{{count}}个辐射指示物",
     "radAriaLabel_other": "{{count}}个辐射指示物",
     "radTooltip": "辐射指示物：{{count}}\n在该牌手的战斗前主阶段开始时，该牌手磨等同于其辐射指示物数量的牌，然后每有一张以此法磨掉的非地牌，便失去1点生命。",
@@ -1614,7 +1616,10 @@
       "subtitleKeepWithBottom": "保留这手牌（你需将{{count}}张牌置于牌库底），或再次调度以获得全新的七张牌。",
       "subtitleOpeningFree": "保留这手牌，或进行一次免费调度（无需将牌置于牌库底）。",
       "subtitleOpeningOne": "保留这手牌，或调度以获得全新的七张牌（保留时你需将 1 张牌置于牌库底）。",
-      "usePowder": "使用{{name}}"
+      "usePowder": "使用{{name}}",
+      "onThePlay": "你先手",
+      "onTheDraw": "你后手",
+      "takeTurn": "你在第 {{turn}} 回合行动"
     },
     "opponentDisconnected": {
       "body": "等待对手重新连接…",
@@ -1706,6 +1711,7 @@
     "commanderNote": "指挥官：100 张单例套牌，指挥官伤害为 {{threshold}}",
     "config": {
       "commanderDamage": "指挥官伤害",
+      "poisonCounters": "中毒指示物",
       "firstPlayer": {
         "draw": "后手",
         "play": "先手",

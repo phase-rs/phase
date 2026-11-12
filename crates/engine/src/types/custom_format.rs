@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::format::{
     DeckCopyLimit, DeckSizeRule, FormatConfig, GameFormat, RangeOfInfluenceConfig, SideboardPolicy,
+    INDIVIDUAL_POISON_LOSS_THRESHOLD,
 };
 
 /// Lightweight, `Copy`, per-`GameState` transport tag for a custom format.
@@ -326,6 +327,19 @@ pub struct StructuralRules {
     /// `UpTo(1)` fallback — the same silent-data-loss bug `sideboard_policy`
     /// exists to prevent.
     pub default_deck_copy_limit: DeckCopyLimit,
+    /// CR 704.5c: the DECLARED individual poison loss threshold, mirroring
+    /// `FormatConfig.poison_counter_threshold`. A bare `u8`: a custom format never
+    /// takes the Two-Headed Giant shared-poison topology (`has_shared_poison` keys
+    /// on the built-in 2HG family), so CR 704.5c always applies to it.
+    /// Defaulted so definitions persisted before this field keep loading.
+    #[serde(default = "default_structural_poison_counter_threshold")]
+    pub poison_counter_threshold: u8,
+}
+
+/// Serde default for `StructuralRules.poison_counter_threshold`: a definition
+/// persisted before the field existed was written under CR 704.5c's ten.
+fn default_structural_poison_counter_threshold() -> u8 {
+    INDIVIDUAL_POISON_LOSS_THRESHOLD
 }
 
 impl StructuralRules {
@@ -358,6 +372,12 @@ impl StructuralRules {
             team_based: config.team_based,
             sideboard_policy: config.sideboard_policy,
             default_deck_copy_limit: config.default_deck_copy_limit,
+            // A Two-Headed Giant-family source has no individual rule (`None`),
+            // but the custom format it becomes never shares poison, so CR
+            // 704.5c's value is the rule that will govern it.
+            poison_counter_threshold: config
+                .poison_counter_threshold
+                .unwrap_or(INDIVIDUAL_POISON_LOSS_THRESHOLD),
         }
     }
 }

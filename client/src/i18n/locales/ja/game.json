@@ -606,7 +606,9 @@
     "dungeonTooltip": "{{name}}を踏破中",
     "poisonAriaLabel_one": "毒カウンター{{count}}個",
     "poisonAriaLabel_other": "毒カウンター{{count}}個",
-    "poisonTooltip": "毒カウンター: {{count}}\n毒カウンターが10個以上あるプレイヤーはゲームに敗北します。",
+    "poisonTooltip": "毒カウンター: {{count}}",
+    "poisonLossPlayer": "毒カウンターが{{threshold}}個以上あるプレイヤーはゲームに敗北します。",
+    "poisonLossTeam": "毒カウンターが{{threshold}}個以上あるチームはゲームに敗北します。",
     "energyAriaLabel_one": "エネルギー・カウンター{{count}}個",
     "energyAriaLabel_other": "エネルギー・カウンター{{count}}個",
     "energyTooltip": "エネルギー・カウンター: {{count}}\nエネルギー・カウンターはカード能力が使う、プレイヤーが持つリソースです。",
@@ -1239,7 +1241,10 @@
       "subtitleKeepWithBottom": "この手札で始める（{{count}}枚を一番下に置く）か、再びマリガンして新たに7枚引きます。",
       "subtitleKeepFree": "この手札で始める（フリー・マリガンのため一番下に置くカードなし）か、再びマリガンして新たに7枚引きます。",
       "subtitleOpeningFree": "この手札で始めるか、フリー・マリガンできます（一番下に置くカードなし）。",
-      "subtitleOpeningOne": "この手札で始めるか、マリガンして新たに7枚引きます（手札を確定する際に1枚を一番下に置きます）。"
+      "subtitleOpeningOne": "この手札で始めるか、マリガンして新たに7枚引きます（手札を確定する際に1枚を一番下に置きます）。",
+      "onThePlay": "あなたが先攻",
+      "onTheDraw": "あなたが後攻",
+      "takeTurn": "あなたの{{turn}}ターン目"
     },
     "companion": {
       "eyebrow": "ゲーム開始前",
@@ -1457,6 +1462,7 @@
     "config": {
       "startingLife": "開始時のライフ",
       "commanderDamage": "統率者ダメージ",
+      "poisonCounters": "毒カウンター",
       "players": "プレイヤー",
       "whoGoesFirst": "先攻プレイヤー",
       "firstPlayer": {
