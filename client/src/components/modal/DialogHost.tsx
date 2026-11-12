@@ -30,6 +30,7 @@ const NON_DIALOG_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = new Set<Wa
   "OpeningHandBottomCards",
   "BetweenGamesSideboard",
   "BetweenGamesChoosePlayDraw",
+  "ChooseStartingPlayer",
   "GameOver",
   // Eye to Eye / Mouth to Mouth render their own full-screen ContestOverlay.
   "PhysicalContest",

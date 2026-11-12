@@ -1219,6 +1219,11 @@
       "drawFirst": "Draw First",
       "drawFirstDescription": "Take the extra draw on your first turn"
     },
+    "startingPlayer": {
+      "title": "Choose Who Plays First",
+      "playerPlaysFirst": "{{name}} plays first",
+      "opponentChoosing": "{{name}} is choosing who plays first…"
+    },
     "mulligan": {
       "opponentDeciding": "Opponent is deciding their opening hand…",
       "londonTitle": "London Mulligan ({{count}} taken)",
