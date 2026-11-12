@@ -9801,11 +9801,16 @@ fn battlefield_entry_instruction_completed(state: &GameState, event: &GameEvent)
 /// The collectors that run as an action pauses or settles route through here:
 /// the post-action scan, and [`collect_action_end_triggers_into_deferred`] for
 /// the paused-observer helpers (the replacement and copy-choice answers among
-/// them) and the resolution-choice answers. Two existing owners of entries keep
-/// their own timing and do not pass through: a logical zone-change group's
-/// segment collection (an entry it retains is passed through unheld here), and
-/// the replay of an entry parked for its own mid-entry choice
-/// (`engine_replacement::collect_deferred_entry_replay`).
+/// them), the resolution-choice answers and the Tribute answer. Existing owners
+/// of entries keep their own timing and do not pass through: a logical
+/// zone-change group's segment collection (an entry it retains is passed through
+/// unheld here), the replay of an entry parked for its own mid-entry choice
+/// (`engine_replacement::collect_deferred_entry_replay`), the initial collection
+/// of a payment transaction's events
+/// (`payment_transaction::collect_initial_payment_events`), and the delayed-trigger
+/// scans (which read the acting buffer only). `meld::refresh_meld_entry_records`
+/// rewrites the records parked in `deferred_entry_events` and not the held ones; a
+/// meld result is not an entry the gate holds today.
 pub(crate) fn settle_entry_batch_scan(
     state: &mut GameState,
     candidates: Vec<GameEvent>,
