@@ -19078,7 +19078,15 @@ fn publish_player_scope_clause_results(
     // a permanent this way" / ZoneChangedThisWay gates see every player's
     // sacrifice — not only the last iteration's overwrite of
     // `last_zone_changed_ids`.
-    state.last_zone_changed_ids = clause_zone_changed_ids(scoped_events);
+    // CR 608.2c: "this way" names the instruction that performed the moves. A
+    // clause whose effect cannot move objects (Xathrid Demon's "each opponent
+    // loses life equal to the sacrificed creature's power") produced no
+    // zone-change result of its own, so it must leave the earlier
+    // instruction's ledger for the fallback ("If you can't sacrifice a
+    // creature, ...") to read rather than overwrite it with an empty span.
+    if effect_moves_objects(&scoped_template.effect) {
+        state.last_zone_changed_ids = clause_zone_changed_ids(scoped_events);
+    }
     if next_sub_needs_tracked_set(outer) {
         publish_tracked_set_for_resolution(
             state,
@@ -19218,6 +19226,19 @@ fn resolve_after_scope_with_created_seats(
     let outcome = resolve_ability_chain_step(state, after_scope, events, depth);
     state.resolving_created_token_seats = prior;
     outcome
+}
+
+/// CR 608.2c + CR 400.1: can this effect move objects between zones, so that
+/// its own result is what a later "this way" gate reads? Reuses the producer
+/// action table ([`this_way_cause_for_effect`] +
+/// [`ThisWayCause::is_zone_transition`]) and adds the destination-agnostic
+/// movers whose cause is not named (a library-bound `ChangeZone`).
+fn effect_moves_objects(effect: &Effect) -> bool {
+    this_way_cause_for_effect(effect).is_some_and(ThisWayCause::is_zone_transition)
+        || matches!(
+            EffectKind::from(effect),
+            EffectKind::ChangeZone | EffectKind::ChangeZoneAll | EffectKind::BounceAll
+        )
 }
 
 /// CR 608.2c + CR 608.2f: the "this way" ledger of a `player_scope` clause's
@@ -24550,6 +24571,11 @@ fn resolve_chain_body(
     // so it leaves the moving instruction's ledger in place for the head.
     if !permission_node_keeps_ledger_for_this_way_head(ability)
         && !(zone_changed_ids.is_empty() && gated_run_keeps_ledger_for_this_way_head(ability))
+        // CR 608.2c: a node whose effect cannot move objects (Xathrid Demon's
+        // "each opponent loses life ...") is not the instruction "this way"
+        // names, so it leaves the moving instruction's ledger for the
+        // fallback that follows it.
+        && (!zone_changed_ids.is_empty() || effect_moves_objects(&ability.effect))
     {
         state.last_zone_changed_ids = zone_changed_ids;
     }
