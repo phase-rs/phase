@@ -305,11 +305,17 @@ function sameStringArray(value: unknown, expected: readonly string[]): boolean {
 /** Validate the name-only publication before decorating a separate in-memory submission. */
 function matchesPublishedDraftPayload(value: unknown, run: DraftRunState): boolean {
   if (!hasExactKeys(value, ["player", "opponent", "ai_decks"], ["booster_pack_pool"])) return false;
-  const matchesDeck = (deck: unknown, mainDeck: string[]) => hasExactKeys(deck, ["main_deck", "sideboard", "commander"])
+  const matchesDeck = (deck: unknown, mainDeck: string[], companion: readonly string[] = []) =>
+    hasExactKeys(deck, ["main_deck", "sideboard", "commander"], ["companion"])
     && sameStringArray(deck.main_deck, mainDeck)
     && sameStringArray(deck.sideboard, [])
-    && sameStringArray(deck.commander, []);
-  if (!matchesDeck(value.player, run.playerDeck) || !matchesDeck(value.opponent, run.opponentDeck)
+    && sameStringArray(deck.commander, [])
+    // CR 702.139a: the designation is published (even when empty) for the seat
+    // that drafted it; it must be exactly the stored run's, and an absent key
+    // means no designation.
+    && sameStringArray(deck.companion ?? [], companion);
+  if (!matchesDeck(value.player, run.playerDeck, run.companion ? [run.companion] : [])
+    || !matchesDeck(value.opponent, run.opponentDeck)
     || !Array.isArray(value.ai_decks) || value.ai_decks.length !== 0) return false;
   const pool = run.booster_pack_pool;
   if (pool === undefined) return !Object.prototype.hasOwnProperty.call(value, "booster_pack_pool");
@@ -1832,7 +1838,12 @@ export function GameProvider({
           if (cancelled) return;
           const deckList = {
             booster_pack_pool: run.booster_pack_pool,
-            player: { main_deck: run.playerDeck, sideboard: [], commander: [] },
+            player: {
+              main_deck: run.playerDeck,
+              sideboard: [],
+              commander: [],
+              companion: run.companion ? [run.companion] : [],
+            },
             opponent: { main_deck: run.opponentDeck, sideboard: [], commander: [] },
             ai_decks: [],
           };

@@ -417,9 +417,14 @@ const COMMANDER_FORMAT_CONFIG: FormatConfig = {
   allow_debug_actions: false,
 };
 
-function publishedPayload(playerDeck = ["Player"], opponentDeck = ["Opponent"], pool?: string[] | null) {
+function publishedPayload(
+  playerDeck = ["Player"], opponentDeck = ["Opponent"], pool?: string[] | null, companion?: string[],
+) {
   return {
-    player: { main_deck: playerDeck, sideboard: [], commander: [] },
+    player: {
+      main_deck: playerDeck, sideboard: [], commander: [],
+      ...(companion === undefined ? {} : { companion }),
+    },
     opponent: { main_deck: opponentDeck, sideboard: [], commander: [] },
     ai_decks: [],
     ...(pool === undefined ? {} : { booster_pack_pool: pool }),
@@ -428,12 +433,13 @@ function publishedPayload(playerDeck = ["Player"], opponentDeck = ["Opponent"], 
 
 function seedSoloRun(draftId: string, gameId: string, options: {
   playerDeck?: string[]; opponentDeck?: string[]; pool?: string[] | null;
-  setCode?: string; phase?: string; currentGameId?: string;
+  setCode?: string; phase?: string; currentGameId?: string; companion?: string;
 } = {}) {
   const playerDeck = options.playerDeck ?? ["Player"];
   const opponentDeck = options.opponentDeck ?? ["Opponent"];
   const run = {
     format: "run", results: [], usedBotSeats: [1], playerDeck, opponentDeck,
+    ...(options.companion === undefined ? {} : { companion: options.companion }),
     ...(options.pool === undefined ? {} : { booster_pack_pool: options.pool }),
     activeMatch: { draftId, gameId, format: "run", resultCountAtLaunch: 0, botSeat: 1, opponentDeck },
   };
@@ -1109,6 +1115,49 @@ describe("GameProvider native AI routing", () => {
     expect(gameStoreState.initGame).not.toHaveBeenCalled();
     expect(sessionStorage.getItem(key)).toBe(raw);
   });
+
+  // CR 702.139a: the Quick Draft publisher always writes the seat's companion
+  // key (empty when none); the exact-run consumer must accept it, check it
+  // against the stored run, and carry it through reconstruction.
+  it.each([
+    ["no companion", undefined],
+    ["a companion", "Gyruda, Doom of Depths"],
+  ])("launches the real published Quick Draft payload with %s", async (_label, companion) => {
+    const run = seedSoloRun("run", "game", { companion });
+    const { matchPayload } = await import("../../stores/draftStore");
+    sessionStorage.setItem("phase:draft-deck:game", JSON.stringify(matchPayload(run as never)));
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    expect(onNoDeck).not.toHaveBeenCalled();
+    expect(gameStoreState.initGame.mock.calls[0][2].player.companion)
+      .toEqual(companion ? [companion] : []);
+  });
+
+  it.each([
+    ["a missing key for a stored companion", ["Gyruda, Doom of Depths"], undefined, "Gyruda, Doom of Depths"],
+    ["a different companion", ["Gyruda, Doom of Depths"], ["Lurrus of the Dream-Den"], undefined],
+    ["a companion the run never designated", ["Gyruda, Doom of Depths"], ["Gyruda, Doom of Depths"], undefined],
+  ] as const)("rejects a published payload with %s", async (_label, _stored, published, stored) => {
+    seedSoloRun("run", "game", { companion: stored });
+    sessionStorage.setItem(
+      "phase:draft-deck:game",
+      JSON.stringify(publishedPayload(["Player"], ["Opponent"], undefined, published as string[] | undefined)),
+    );
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "Gyruda, Doom of Depths"])(
+    "carries the stored companion (%s) through reconstruction when the handoff key is absent", async (companion) => {
+      seedSoloRun("run", "game", { companion });
+      render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+      await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+      expect(gameStoreState.initGame.mock.calls[0][2].player.companion)
+        .toEqual(companion ? [companion] : []);
+    });
 
   it("accepts a published null booster source on an ordinary run", async () => {
     seedSoloRun("run", "game", { pool: null });

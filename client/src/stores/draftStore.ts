@@ -1115,7 +1115,8 @@ function withBoosterPackPool(
   };
 }
 
-function matchPayload(run: DraftRunState): DraftMatchPayload {
+/** The name-only payload a Quick Draft launch publishes; the solo launch consumer validates it exactly. */
+export function matchPayload(run: DraftRunState): DraftMatchPayload {
   return {
     player: {
       main_deck: run.playerDeck,
