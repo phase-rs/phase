@@ -4175,9 +4175,6 @@ pub(crate) fn record_staged_batch_consultation_result(
     run_start: usize,
 ) -> StagedConsultationHandback {
     // CR 616.1: detach the approved drain before checking for its batch owner.
-    state
-        .resolution_stack
-        .drop_empty_post_replacement_above_batch(group_id);
     let mut retained = if matches!(outcome, StagedMemberOutcome::Approved(_)) {
         state
             .resolution_stack

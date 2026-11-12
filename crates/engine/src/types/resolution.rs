@@ -2196,28 +2196,6 @@ impl ResolutionStack {
         }
     }
 
-    /// Discard an emptied, unstamped PostReplacement frame directly above the
-    /// BatchDelivery owner of `group`: it carries no work.
-    pub(crate) fn drop_empty_post_replacement_above_batch(
-        &mut self,
-        group: crate::types::identifiers::LogicalZoneChangeGroupId,
-    ) {
-        let empty_top = self.frames.top().is_some_and(|top| {
-            matches!(
-                self.frames.get(top),
-                Some(ResolutionFrame::PostReplacement(drains))
-                    if drains.is_empty() && drains.frame_id().is_none()
-            )
-        });
-        if empty_top
-            && self
-                .batch_delivery_below_ready_post_replacement()
-                .is_some_and(|batch| batch.logical_zone_change_group.logical_group_id == group)
-        {
-            let _ = self.frames.pop();
-        }
-    }
-
     /// Every staged BatchDelivery owner on the stack, for checked restore.
     pub(crate) fn staged_batch_owners_mut(
         &mut self,
