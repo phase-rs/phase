@@ -22,7 +22,7 @@ import type {
   TournamentSummary,
   TournamentUpdateReply,
 } from "../adapter/types";
-import { AdapterError, AdapterErrorCode, isCustomGameFormat } from "../adapter/types";
+import { AdapterError, AdapterErrorCode, U8_MAX, isCustomGameFormat } from "../adapter/types";
 import { isFormatConfigShape } from "../adapter/format-config-shape";
 import { findSavedCustomFormat } from "../services/customFormats";
 import { AI_DIFFICULTIES } from "../constants/ai";
@@ -2293,7 +2293,7 @@ function isU16(value: unknown): value is number {
 }
 
 function isU8(value: unknown): value is number {
-  return isIntegerInRange(value, 255);
+  return isIntegerInRange(value, U8_MAX);
 }
 
 /**

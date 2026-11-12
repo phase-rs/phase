@@ -206,4 +206,36 @@ describe("GameSetupPage — poison counters", () => {
     const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
     expect(meta.formatConfig.poison_counter_threshold).toBe(10);
   });
+
+  // The engine field is a `u8`: 255 is the largest threshold it can hold.
+  it("hands a poison-counter threshold of 255 to the game it starts", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    const poisonInput = await screen.findByLabelText("Poison Counters");
+    await user.clear(poisonInput);
+    await user.type(poisonInput, "255");
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.poison_counter_threshold).toBe(255);
+  });
+
+  it("does not commit a poison-counter threshold past the engine's u8 range", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    const poisonInput = await screen.findByLabelText("Poison Counters");
+    await user.clear(poisonInput);
+    await user.type(poisonInput, "256");
+
+    await user.click(screen.getByRole("button", { name: /Start Match/i }));
+
+    // Reach guard: 25 is the in-range reading committed by the keystroke
+    // before the final "6", so the edit reached the config and only 256 was
+    // refused (an untouched field would still read the default 10).
+    const meta = JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY)!);
+    expect(meta.formatConfig.poison_counter_threshold).toBe(25);
+  });
 });

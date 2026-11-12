@@ -15,7 +15,7 @@
 //! card per cast, and every reach guard checks that P0 drew it and survived,
 //! so a row's elimination or survival can only come from the poison SBA.
 
-use engine::game::derived_views::{derive_views, PoisonLossView};
+use engine::game::derived_views::{derive_views, PoisonLossProximity, PoisonLossView};
 use engine::game::players::PoisonLossScope;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::format::FormatConfig;
@@ -174,7 +174,7 @@ fn derived_poison_loss_view_states_the_measured_rule() {
         Some(&PoisonLossView {
             scope: PoisonLossScope::Player,
             threshold: 15,
-            near_lethal: false,
+            proximity: PoisonLossProximity::Normal,
         })
     );
     // P0 has no poison: no entry (reach guard: P1's entry is present above).
@@ -190,7 +190,7 @@ fn derived_poison_loss_view_states_the_measured_rule() {
         Some(&PoisonLossView {
             scope: PoisonLossScope::Player,
             threshold: 15,
-            near_lethal: true,
+            proximity: PoisonLossProximity::NearLethal,
         })
     );
 
@@ -204,7 +204,7 @@ fn derived_poison_loss_view_states_the_measured_rule() {
         Some(&PoisonLossView {
             scope: PoisonLossScope::Player,
             threshold: 10,
-            near_lethal: true,
+            proximity: PoisonLossProximity::NearLethal,
         })
     );
 
@@ -220,7 +220,7 @@ fn derived_poison_loss_view_states_the_measured_rule() {
     let team_view = Some(&PoisonLossView {
         scope: PoisonLossScope::Team,
         threshold: 15,
-        near_lethal: true,
+        proximity: PoisonLossProximity::NearLethal,
     });
     assert_eq!(views.poison_loss.get(&P2), team_view);
     assert_eq!(views.poison_loss.get(&P3), team_view);

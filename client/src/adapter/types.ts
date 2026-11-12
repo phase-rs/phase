@@ -76,12 +76,16 @@ export interface DungeonPreview {
 // poison loss is measured on.
 export type PoisonLossScope = "Player" | "Team";
 
+// Mirrors `engine::game::derived_views::PoisonLossProximity` — the display
+// classification of how close a poison-loss count is to its threshold.
+export type PoisonLossProximity = "Normal" | "NearLethal";
+
 // Mirrors `engine::game::derived_views::PoisonLossView`, delivered on
 // `GameState.derived.poison_loss`.
 export interface PoisonLossView {
   scope: PoisonLossScope;
   threshold: number;
-  near_lethal: boolean;
+  proximity: PoisonLossProximity;
 }
 
 // Mirrors `engine::game::derived_views::DungeonRoomView` — where one player's
@@ -548,6 +552,11 @@ export interface RangeOfInfluenceConfig {
 export type DeckCopyLimit =
   | { type: "Unlimited" }
   | { type: "UpTo"; data: number };
+
+/** The largest value an engine `u8` field holds — the bound on
+ *  `FormatConfig`'s `u8` thresholds (`poison_counter_threshold`,
+ *  `commander_damage_threshold`). */
+export const U8_MAX = 255;
 
 export interface FormatConfig {
   format: GameFormat;

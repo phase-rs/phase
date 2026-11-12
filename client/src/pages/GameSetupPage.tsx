@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
 import type { FormatConfig, FormatGroup, GameFormat, LoopDetectionMode, MatchType } from "../adapter/types";
+import { U8_MAX } from "../adapter/types";
 import {
   formatMetadata,
   formatSuppliesDeck,
@@ -606,6 +607,7 @@ export function GameSetupPage() {
                       <IntegerField
                         value={formatConfig.poison_counter_threshold}
                         min={1}
+                        max={U8_MAX}
                         onCommit={(poison_counter_threshold) =>
                           setFormatConfig({ ...formatConfig, poison_counter_threshold })
                         }

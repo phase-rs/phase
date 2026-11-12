@@ -357,24 +357,22 @@ interface PoisonCounterBadgeProps {
  * Poison counters plus the loss rule the engine measures this player against
  * (`derived.poison_loss`): the house-rule individual threshold, or the
  * Two-Headed Giant team's shared fifteen. The threshold, scope and near-lethal
- * glow all come from the engine — never a client literal.
+ * glow all come from the engine — never a client literal. The loss rule is part
+ * of the accessible name as well as the hover tooltip, so it is not mouse-only.
  */
 export function PoisonCounterBadge({ playerId, value }: PoisonCounterBadgeProps) {
   const { t } = useTranslation("game");
   const lossRule = useGameStore((s) => s.gameState?.derived?.poison_loss?.[String(playerId)]);
-  const tooltip = [
-    t("badges.poisonTooltip", { count: value }),
-    lossRule && t(POISON_LOSS_KEY[lossRule.scope], { threshold: lossRule.threshold }),
-  ]
-    .filter(Boolean)
-    .join("\n");
+  const lossLine = lossRule && t(POISON_LOSS_KEY[lossRule.scope], { threshold: lossRule.threshold });
+  const tooltip = [t("badges.poisonTooltip", { count: value }), lossLine].filter(Boolean).join("\n");
+  const ariaLabel = [t("badges.poisonAriaLabel", { count: value }), lossLine].filter(Boolean).join(". ");
   return (
     <BadgeTip text={tooltip}>
       <span
         role="img"
-        aria-label={t("badges.poisonAriaLabel", { count: value })}
+        aria-label={ariaLabel}
         className={`relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[11px] font-black leading-none tabular-nums text-lime-950 ring-1 ${
-          lossRule?.near_lethal
+          lossRule?.proximity === "NearLethal"
             ? "bg-lime-300 ring-lime-100 shadow-[0_0_16px_rgba(217,249,157,0.55)]"
             : "bg-lime-400 ring-lime-200/70 shadow-[0_0_12px_rgba(190,242,100,0.34)]"
         }`}

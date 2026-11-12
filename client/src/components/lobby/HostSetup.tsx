@@ -10,6 +10,7 @@ import type {
   LoopDetectionMode,
   MatchType,
 } from "../../adapter/types";
+import { U8_MAX } from "../../adapter/types";
 import { AI_DIFFICULTIES, isAiDifficulty } from "../../constants/ai";
 import { FORMAT_REGISTRY, formatSuppliesDeck, isPlanechaseFamilyFormat } from "../../data/formatRegistry";
 import {
@@ -1298,6 +1299,7 @@ export function HostSetup({
                 id="host-setup-poison"
                 value={formatConfig.poison_counter_threshold}
                 min={1}
+                max={U8_MAX}
                 onCommit={(poison_counter_threshold) =>
                   setLocalFormatConfig((prev) => ({
                     ...prev,

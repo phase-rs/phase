@@ -1441,9 +1441,17 @@ fn dungeon_rooms(state: &GameState) -> BTreeMap<PlayerId, DungeonRoomView> {
 pub struct PoisonLossView {
     pub scope: PoisonLossScope,
     pub threshold: u32,
-    /// Display classification (no CR): within `POISON_NEAR_LETHAL_MARGIN`
-    /// counters of the loss threshold.
-    pub near_lethal: bool,
+    pub proximity: PoisonLossProximity,
+}
+
+/// Display classification (no CR): how close a player's poison-loss count is
+/// to its threshold, which the HUD badge styles from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PoisonLossProximity {
+    /// More than `POISON_NEAR_LETHAL_MARGIN` counters short of the threshold.
+    Normal,
+    /// Within `POISON_NEAR_LETHAL_MARGIN` counters of the threshold.
+    NearLethal,
 }
 
 /// Display-only: how many counters short of the loss threshold the HUD starts
@@ -1461,13 +1469,19 @@ fn poison_loss(state: &GameState) -> BTreeMap<PlayerId, PoisonLossView> {
         .filter_map(|player| {
             let measure = poison_loss_measure(state, player)?;
             (measure.count > 0).then(|| {
+                let proximity = if measure.count.saturating_add(POISON_NEAR_LETHAL_MARGIN)
+                    >= measure.threshold
+                {
+                    PoisonLossProximity::NearLethal
+                } else {
+                    PoisonLossProximity::Normal
+                };
                 (
                     player.id,
                     PoisonLossView {
                         scope: measure.scope,
                         threshold: measure.threshold,
-                        near_lethal: measure.count.saturating_add(POISON_NEAR_LETHAL_MARGIN)
-                            >= measure.threshold,
+                        proximity,
                     },
                 )
             })
