@@ -18,7 +18,7 @@
 //! settles at the completion boundary. The paused Clone Legion rows also run through the
 //! engine's save/restore pipeline at every prompt, and must settle exactly as they do live.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::support::shared_card_db;
 use engine::game::game_object::AttachTarget;
@@ -27,7 +27,9 @@ use engine::types::ability::{ChosenAttribute, Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
-use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization, WaitingFor};
+use engine::types::game_state::{
+    PersistedGameState, PersistedRestoreFinalization, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -367,6 +369,7 @@ enum PauseCarry {
 struct Answered {
     prompts: Vec<Prompt>,
     parked_created_ids: Vec<Option<Vec<ObjectId>>>,
+    stack_trigger_sources: BTreeSet<ObjectId>,
 }
 
 /// The engine's own save / undo / P2P restore pipeline (`PersistedGameState`'s trusted
@@ -452,8 +455,15 @@ fn drive_carried(
     let mut answered = Answered {
         prompts: Vec::new(),
         parked_created_ids: Vec::new(),
+        stack_trigger_sources: BTreeSet::new(),
     };
     for _ in 0..64 {
+        answered
+            .stack_trigger_sources
+            .extend(runner.state().stack.iter().filter_map(|entry| {
+                matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                    .then_some(entry.source_id)
+            }));
         if matches!(
             runner.state().waiting_for,
             WaitingFor::NamedChoice { .. }
@@ -2013,6 +2023,119 @@ fn copied_minion_beside_emperion(carry: PauseCarry) -> RowOutcome {
         P0
     );
     row_outcome(&runner, answered)
+}
+
+const VILIS_NAME: &str = "Vilis, Broker of Blood";
+const VILIS: &str = "Flying\n{B}, Pay 2 life: Target creature gets -1/-1 until end of turn.\nWhenever you lose life, draw that many cards. (Damage causes loss of life.)";
+const VILIS_DONOR: Donor = Donor {
+    name: VILIS_NAME,
+    oracle: VILIS,
+    power: 8,
+    toughness: 8,
+};
+
+/// CR 614.12a + CR 603.2: the payment precedes entry, so its life loss
+/// is visible to a resident Vilis but not to a simultaneous Vilis copy.
+fn copied_minion_payment_observers(carry: PauseCarry, resident: Option<Donor>) -> RowOutcome {
+    let minion = std::cell::Cell::new(None);
+    let hand_before_payment = std::cell::Cell::new(None);
+    let donors = match resident {
+        Some(_) => vec![EMPERION_DONOR, GARGANTUAN_DONOR],
+        None => vec![VILIS_DONOR, EMPERION_DONOR, GARGANTUAN_DONOR],
+    };
+    let (runner, answered) = clone_legion_carried(
+        &donors,
+        |scenario| {
+            if let Some(donor) = resident {
+                add_donor(scenario, P0, donor);
+            }
+            minion.set(Some(
+                scenario
+                    .add_creature_to_hand_from_oracle(P0, MINION_NAME, 0, 0, MINION_OF_THE_WASTES)
+                    .with_mana_cost(ManaCost::generic(0))
+                    .id(),
+            ));
+        },
+        |runner| cast_minion_paying_three(runner, minion.get().unwrap()),
+        carry,
+        &Script {
+            copy_targets: vec![CopyPick::card(MINION_NAME, P0)],
+            pays: vec![5],
+            ..Script::default()
+        },
+        |runner, prompt| {
+            if let Prompt::PayAmount { player, min, max } = prompt {
+                assert_eq!((*player, *min, *max), (P0, 0, 17));
+                assert_eq!(runner.state().players[0].life, 17);
+                hand_before_payment.set(Some(runner.state().players[0].hand.len()));
+                let WaitingFor::PayAmountChoice { source_id, .. } = runner.state().waiting_for
+                else {
+                    unreachable!("the copied payment owns its prompt")
+                };
+                assert!(runner.state().objects[&source_id].is_token);
+                assert_eq!(runner.state().objects[&source_id].name, MINION_NAME);
+            }
+        },
+    );
+    assert_eq!(
+        prompt_kinds(&answered.prompts),
+        vec!["Replacement", "CopyTarget", "PayAmount"]
+    );
+    assert_eq!(runner.state().players[0].life, 12);
+    assert_eq!(
+        chosen_number(&runner, the_token(&runner, MINION_NAME)),
+        Some(5)
+    );
+    assert_eq!(chosen_number(&runner, minion.get().unwrap()), Some(3));
+    let drawn = match resident {
+        Some(_) => 5,
+        None => 0,
+    };
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand_before_payment.get().unwrap() + drawn,
+        "only a Vilis present before the group enters may draw for the payment"
+    );
+    assert_settled(&runner, "G8 payment observers");
+    assert!(runner.state().deferred_triggers.is_empty());
+    match resident {
+        Some(_) => {
+            let vilis = runner
+                .state()
+                .objects
+                .values()
+                .find(|object| {
+                    object.name == VILIS_NAME && object.controller == P0 && !object.is_token
+                })
+                .expect("the resident Vilis is still present");
+            assert!(answered.stack_trigger_sources.contains(&vilis.id));
+        }
+        None => assert!(
+            !answered
+                .stack_trigger_sources
+                .contains(&the_token(&runner, VILIS_NAME)),
+            "the co-entering Vilis must not put a payment trigger on the stack"
+        ),
+    }
+    row_outcome(&runner, answered)
+}
+
+#[test]
+fn clone_legion_copied_minion_payment_excludes_co_entering_vilis() {
+    copied_minion_payment_observers(PauseCarry::Live, None);
+}
+
+#[test]
+fn clone_legion_copied_minion_payment_excludes_co_entering_vilis_across_save_and_restore() {
+    assert_restored_row_matches_live(
+        |carry| copied_minion_payment_observers(carry, None),
+        "G8 Vilis payment observers",
+    );
+}
+
+#[test]
+fn clone_legion_copied_minion_payment_is_observed_by_resident_vilis() {
+    copied_minion_payment_observers(PauseCarry::Live, Some(VILIS_DONOR));
 }
 
 /// C8: CR 614.12a + CR 119.8 + CR 119.4b: a resident Emperion prohibits

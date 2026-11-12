@@ -5349,7 +5349,19 @@ fn collect_pending_triggers_with_collection(
     // otherwise a permanent returned to the battlefield later in the chain
     // retroactively "sees" a sacrifice/etc. that occurred earlier in the same
     // chain, before it was there to observe it (issue #8160).
-    let battlefield_entry_index = battlefield_entry_observation_indices(events);
+    let mut battlefield_entry_index = battlefield_entry_observation_indices(events);
+    // CR 614.12a + CR 603.2: an as-enters payment precedes the whole group's
+    // entry even when earlier tokens have physically moved on a prior action.
+    // Extend the same observation boundary used by both indexed and shadow
+    // scans; no event in this payment batch is inside their entry lifetime.
+    if let Some(entrant) = super::replacement::copy_entry_payment_source(state) {
+        for source in super::effects::token_copy::entering_token_co_entrants(state, entrant)
+            .into_iter()
+            .chain(std::iter::once(entrant))
+        {
+            battlefield_entry_index.insert(source, events.len());
+        }
+    }
     // CR 603.10a: built on the first co-departure group this pass sees.
     let mut co_departure_index: Option<CoDepartureObserverIndex> = None;
 

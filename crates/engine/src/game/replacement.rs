@@ -10367,6 +10367,31 @@ pub(crate) fn parked_entry_payment_is_copy_surface(pending: &PendingReplacement)
     )
 }
 
+/// CR 614.12a: a copied as-enters payment remains before the token group's
+/// entry, including while its life-loss replacement owns the active prompt.
+/// Both owners are serialized, so the observer population survives restore.
+pub(crate) fn copy_entry_payment_source(state: &GameState) -> Option<ObjectId> {
+    let pending = state
+        .pending_replacement
+        .as_ref()
+        .filter(|pending| parked_entry_payment_is_copy_surface(pending))
+        .or_else(|| {
+            let crate::types::game_state::DeferredLifeCostResume::PayAmount {
+                pending_entry, ..
+            } = state.pending_deferred_life_cost_resume.as_ref()?
+            else {
+                return None;
+            };
+            pending_entry
+                .as_deref()
+                .filter(|pending| parked_entry_payment_is_copy_surface(pending))
+        })?;
+    let ProposedEvent::ZoneChange { object_id, .. } = &pending.proposed else {
+        unreachable!("a copy-surfaced entry payment is a ZoneChange proposal")
+    };
+    Some(*object_id)
+}
+
 fn battlefield_entry_current_tapped(event: &ProposedEvent) -> Option<bool> {
     match event {
         ProposedEvent::ZoneChange { enter_tapped, .. } => Some(enter_tapped.resolve(false)),
