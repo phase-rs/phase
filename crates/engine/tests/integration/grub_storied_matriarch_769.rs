@@ -4244,6 +4244,119 @@ fn a_mutated_pile_is_never_a_transformed_permanent() {
     );
 }
 
+/// CR 730.2i + CR 111.10i: "If a merged permanent contains one or more double-faced
+/// components that can transform …, transforming … that permanent causes each of those
+/// double-faced components to turn so that its other face is up", and "An Incubator token is
+/// a double-faced token". Converter Beast ("When this creature enters, incubate 5. …") makes
+/// an Incubator, Karn's Touch ("Target noncreature artifact becomes an artifact creature with
+/// power and toughness each equal to its mana value until end of turn. …") animates it, and
+/// Gemrazer is cast for its mutate cost under it. The pile, with the front-face-up Incubator
+/// on top, transforms through the Incubator's own "{2}: Transform this token."
+#[test]
+fn a_mutated_pile_with_an_incubator_on_top_transforms() {
+    let (mut runner, (beast, touch, gemrazer)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, CONVERTER_BEAST, CONVERTER_BEAST_ORACLE);
+        assert_oracle(db, KARNS_TOUCH, KARNS_TOUCH_ORACLE);
+        assert_oracle(db, GEMRAZER, GEMRAZER_ORACLE);
+        (
+            scenario.add_real_card(P0, CONVERTER_BEAST, Zone::Hand, db),
+            scenario.add_real_card(P0, KARNS_TOUCH, Zone::Hand, db),
+            scenario.add_real_card(P0, GEMRAZER, Zone::Hand, db),
+        )
+    });
+    fund(&mut runner, ManaType::Green, 4);
+    runner.cast(beast).resolve();
+    settle(&mut runner);
+    let incubator = tokens(&runner)[0];
+    assert!(!runner.state().objects[&incubator].transformed);
+    assert_eq!(
+        (
+            stored_face(&runner, incubator).name.as_str(),
+            stored_face(&runner, incubator).layout_kind
+        ),
+        ("Phyrexian Token", None),
+        "reach-guard: the front-face-up Incubator stores its Phyrexian face with no layout"
+    );
+
+    fund(&mut runner, ManaType::Blue, 2);
+    runner.cast(touch).target_object(incubator).resolve();
+    settle(&mut runner);
+    assert!(
+        runner.state().objects[&incubator]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature),
+        "reach-guard: Karn's Touch made the Incubator a creature Gemrazer can mutate onto"
+    );
+
+    fund(&mut runner, ManaType::Green, 3);
+    runner
+        .cast(gemrazer)
+        .alternative_cast(AlternativeCastDecision::Alternative)
+        .target_object(incubator)
+        .commit();
+    both_pass(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::MutateMergeChoice { .. }
+        ),
+        "CR 702.140c: the mutating spell merges with its target, over or under; got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseMutateMergeSide {
+            side: MergeSide::Bottom,
+        })
+        .expect("putting Gemrazer under must succeed");
+    settle(&mut runner);
+    assert_settled(&runner);
+    let pile = &runner.state().objects[&incubator];
+    assert_eq!(pile.merge_kind, Some(MergeKind::Mutate));
+    assert_eq!(
+        pile.merged_components,
+        vec![incubator, gemrazer],
+        "reach-guard: the Incubator is on top, Gemrazer under it"
+    );
+    assert!(
+        !pile.transformed,
+        "reach-guard: the Incubator is front face up"
+    );
+
+    fund(&mut runner, ManaType::Colorless, 2);
+    activate(&mut runner, incubator);
+    assert!(
+        matches!(
+            runner.state().stack.last().map(|entry| &entry.kind),
+            Some(StackEntryKind::ActivatedAbility { source_id, .. }) if *source_id == incubator
+        ),
+        "reach-guard: the Incubator's transform ability is on the stack; stack: {:?}",
+        runner.state().stack
+    );
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority must succeed")
+                .events,
+        );
+    }
+    settle(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(
+        transformed_events(&events, incubator),
+        1,
+        "CR 730.2i: the pile transforms; events: {events:?}"
+    );
+    let pile = &runner.state().objects[&incubator];
+    assert!(
+        pile.transformed,
+        "CR 730.2i: the Incubator component is back face up"
+    );
+    assert_eq!(pile.merge_kind, Some(MergeKind::Mutate));
+}
+
 // ===== CR 702.145b/e: daybound and nightbound read the face that is up =====
 
 /// Casts Into the Night ("It becomes night. Discard any number of cards, then

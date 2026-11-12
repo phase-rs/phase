@@ -117,6 +117,20 @@ fn layout_is_single_faced_alternative(layout: Option<crate::types::card::LayoutK
 /// Phyrexian face with no layout, and is double-faced (CR 111.10i).
 pub(crate) fn stored_double_face(obj: &GameObject) -> Option<&BackFaceData> {
     use crate::game::game_object::MergeKind;
+    match obj.merge_kind {
+        // CR 730.2i: a merged permanent is not a double-faced permanent even if it contains
+        // double-faced components.
+        Some(MergeKind::Mutate | MergeKind::Augment) => None,
+        // CR 712.1 + CR 712.16: meld cards are double-faced cards, and a melded permanent is
+        // a double-faced permanent.
+        Some(MergeKind::Meld) | None => own_stored_double_face(obj),
+    }
+}
+
+/// CR 712.1 + CR 111.10i: the gates of [`stored_double_face`] that read one object's own
+/// stored face and status, leaving out its merge structure. [`is_double_faced_permanent`]'s
+/// merged arm reads them for a pile whose topmost component is the survivor itself.
+fn own_stored_double_face(obj: &GameObject) -> Option<&BackFaceData> {
     use crate::types::card::LayoutKind;
     let face = obj.back_face.as_ref()?;
     // CR 708.2 + CR 712.15: a face-down object's `back_face` is its face-down stash.
@@ -130,14 +144,6 @@ pub(crate) fn stored_double_face(obj: &GameObject) -> Option<&BackFaceData> {
     // CR 710.4: a flipped permanent's `back_face` is its flip stash.
     if obj.flipped {
         return None;
-    }
-    match obj.merge_kind {
-        // CR 730.2i: a merged permanent is not a double-faced permanent even if it contains
-        // double-faced components.
-        Some(MergeKind::Mutate | MergeKind::Augment) => return None,
-        // CR 712.1 + CR 712.16: meld cards are double-faced cards, and a melded permanent is
-        // a double-faced permanent.
-        Some(MergeKind::Meld) | None => {}
     }
     // CR 709.5b: a Room's other half is a copiable value of a single-faced card. A token copy
     // stores it with no layout, so the printed type line is the discriminator — unless the
@@ -410,10 +416,17 @@ pub fn is_double_faced_permanent(obj: &crate::game::game_object::GameObject) -> 
         Some(MergeKind::Meld) => true,
         // CR 730.2j: a merged permanent keeps its own reading of a double-faced component.
         Some(MergeKind::Mutate | MergeKind::Augment) => {
-            matches!(
-                obj.back_face.as_ref().and_then(|b| b.layout_kind),
-                Some(LayoutKind::Transform | LayoutKind::Modal | LayoutKind::Meld)
-            ) || obj.transformed
+            // CR 730.2a + CR 730.2e: the survivor's face-down status is its topmost
+            // component's. When the survivor is that component, its stored face and status
+            // are its own, so the unmerged gates read them. A front-face-up Incubator token
+            // on top keeps its Phyrexian face with no layout (CR 111.10i).
+            let survivor_is_topmost = obj.merged_components.first() == Some(&obj.id);
+            (survivor_is_topmost && own_stored_double_face(obj).is_some())
+                || matches!(
+                    obj.back_face.as_ref().and_then(|b| b.layout_kind),
+                    Some(LayoutKind::Transform | LayoutKind::Modal | LayoutKind::Meld)
+                )
+                || obj.transformed
         }
         // CR 712.16 + CR 707.8a + CR 701.27a: the same face identity copying and the
         // transform stash use, so a permanent stays double-faced on either face, after any
@@ -1039,6 +1052,24 @@ mod tests {
             state.objects.get_mut(&id).unwrap().merge_kind = Some(kind);
             rows.push((format!("(k) merged by {kind:?}"), id, expected));
         }
+        // (k2) a Mutate pile with the survivor on top storing a face with no layout, as an
+        // Incubator token under Gemrazer does: still not a double-faced permanent (CR 730.2i),
+        // though `is_double_faced_permanent`'s merged arm reads it as containing one.
+        let pile = with_face(&mut state, "Incubator", None);
+        {
+            let obj = state.objects.get_mut(&pile).unwrap();
+            obj.merge_kind = Some(MergeKind::Mutate);
+            obj.merged_components = vec![pile, ObjectId(9_999)];
+        }
+        assert!(
+            is_double_faced_permanent(&state.objects[&pile]),
+            "(k2) CR 730.2j: the pile contains a double-faced component"
+        );
+        rows.push((
+            "(k2) Mutate pile, Incubator face on top".into(),
+            pile,
+            false,
+        ));
 
         // (l) no stored face.
         let plain = create_object(
@@ -1097,10 +1128,14 @@ mod tests {
     /// Kessig Prowler that Mirrorweave made a copy of the Room; (h) a card manifested by Soul
     /// Summons; (k) Gemrazer mutated onto Kessig Prowler; (o) Startled Awake // Persistent
     /// Nightmare on the battlefield as Persistent Nightmare, whose other face, the sorcery
-    /// Startled Awake, is never a transform destination (CR 701.27d).
+    /// Startled Awake, is never a transform destination (CR 701.27d); (p) Gemrazer mutated
+    /// under Converter Beast's Incubator token animated by Karn's Touch; (q) the
+    /// `owner_printing_projection` pile of a face-up creature mutated over a face-down morph.
     ///
-    /// Revert-failing: the layout-only check admitted (j) and (h). (a), (n) and (k) are the
-    /// positive rows; (o) shows the CR 701.27d conjunct is kept.
+    /// Revert-failing: the layout-only check admitted (j) and (h). A merged arm that reads
+    /// the stored layout alone refuses (p). (a), (n), (k) and (p) are the positive rows; (q)
+    /// and (r) show the merged arm still refuses a face-down stash; (o) shows the CR 701.27d
+    /// conjunct is kept.
     #[test]
     fn can_transform_requires_a_physical_other_face() {
         use crate::game::game_object::MergeKind;
@@ -1184,6 +1219,42 @@ mod tests {
         let mutated = with_face(&mut state, "Gemrazer", Some(LayoutKind::Transform));
         state.objects.get_mut(&mutated).unwrap().merge_kind = Some(MergeKind::Mutate);
         rows.push(("(k) merged by Mutate over a Transform face", mutated, true));
+
+        // (p) a Mutate pile whose topmost component is the survivor, which stores a face with
+        // no layout, as a front-face-up Incubator token does (CR 111.10i). (q) the same face
+        // on a survivor under another component, as a face-down stash under a face-up top is.
+        // (r) the survivor on top, face down: its stored face is its face-down stash.
+        let pile = |state: &mut GameState, name: &str, survivor_on_top: bool| {
+            let survivor = with_face(state, name, None);
+            let other = with_face(state, "Gemrazer", None);
+            let obj = state.objects.get_mut(&survivor).unwrap();
+            obj.merge_kind = Some(MergeKind::Mutate);
+            obj.merged_components = if survivor_on_top {
+                vec![survivor, other]
+            } else {
+                vec![other, survivor]
+            };
+            survivor
+        };
+        let incubator_on_top = pile(&mut state, "Incubator", true);
+        rows.push((
+            "(p) Mutate pile, Incubator face on top",
+            incubator_on_top,
+            true,
+        ));
+        let stash_under = pile(&mut state, "Morph", false);
+        rows.push((
+            "(q) Mutate pile, layout-less face under",
+            stash_under,
+            false,
+        ));
+        let face_down_top = pile(&mut state, "Morph", true);
+        state.objects.get_mut(&face_down_top).unwrap().face_down = true;
+        rows.push((
+            "(r) Mutate pile, face-down survivor on top",
+            face_down_top,
+            false,
+        ));
 
         // (o) a Transform-layout stored face that is a sorcery.
         let sorcery_face = with_face(&mut state, "Sorcery Face", Some(LayoutKind::Transform));
