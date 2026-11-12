@@ -105,11 +105,12 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AttachCardinality, AttachSelection, AttachmentReferent,
     AttackSubject, AttackedYouScope, CardTypeSetSource, CombatRelationSubject,
     ContinuousModification, ControllerRef, Duration, Effect, GuessSubject, KeeperConstraint,
-    ModalChoice, MultiTargetSpec, NameStickerSet, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerScope, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation,
-    ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
-    TokenAttackDestination, TriggerCondition, TriggerDefinition, TurnJournalKind, TypeFilter,
-    TypedFilter, ZoneChoiceCandidateSource, ZoneRef,
+    LibraryInstructionActor, ModalChoice, MultiTargetSpec, NameStickerSet, ObjectProperty,
+    ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementDefinition, ResolvedAbility,
+    StaticCondition, StaticDefinition, TargetFilter, TokenAttackDestination, TriggerCondition,
+    TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, ZoneChoiceCandidateSource,
+    ZoneRef,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -1920,12 +1921,8 @@ fn flag_source_combat_pairing(p: &mut RwProfile, target: &TargetFilter) {
 /// `legacy_batch_prompt` (CR 603.3b batch-ordering parity).
 fn contains_legacy_event_ref(a: &ResolvedAbility) -> bool {
     legacy_effect(&a.effect)
-        || a.sub_ability
-            .as_deref()
-            .is_some_and(contains_legacy_event_ref)
-        || a.else_ability
-            .as_deref()
-            .is_some_and(contains_legacy_event_ref)
+        || a.child_links()
+            .any(|(_, child)| contains_legacy_event_ref(child))
         || a.condition.as_ref().is_some_and(legacy_ability_condition)
         || a.duration.as_ref().is_some_and(legacy_duration)
         || a.player_scope.as_ref().is_some_and(legacy_player_filter)
@@ -2341,6 +2338,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
@@ -2354,6 +2352,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::PreviousEffectCount
         | QuantityRef::TurnsTaken
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::ChosenNumber
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::NotedNumber
@@ -3401,12 +3400,18 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Discover {
             mana_value_limit: count,
             player: target,
-        }
-        | Effect::ExileTop {
-            count,
-            player: target,
-            ..
         } => legacy_quantity_expr(count) || legacy_target_filter(target),
+        Effect::ExileTop {
+            count,
+            player,
+            position: _,
+            face_down: _,
+            actor,
+        } => {
+            legacy_quantity_expr(count)
+                || legacy_target_filter(player)
+                || legacy_library_instruction_actor(actor)
+        }
         Effect::ExileFaceDownPile {
             object,
             player,
@@ -3950,7 +3955,19 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::ManifestDread
         | Effect::Choose { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::HordePlayCard { .. } => false,
         | Effect::Unimplemented { .. } => false,
+    }
+}
+
+/// D5: the frozen tags a library instruction's performing player can carry
+/// (`Effect::ExileTop.actor`, CR 608.2c).
+fn legacy_library_instruction_actor(x: &LibraryInstructionActor) -> bool {
+    match x {
+        // Fieldless: the controller and the library's owner (the instruction's
+        // own `player`, visited by the calling arm) carry no tag here.
+        LibraryInstructionActor::Controller | LibraryInstructionActor::LibraryPlayer => false,
+        LibraryInstructionActor::Player { player } => legacy_target_filter(player),
     }
 }
 
@@ -4487,6 +4504,7 @@ fn walk_ability(
         effect,
         sub_ability,
         else_ability,
+        coin_branches,
         condition,
         duration,
         player_scope,
@@ -4584,6 +4602,14 @@ fn walk_ability(
     let child_root = own_scope.or(chain_root);
     let child_move_owner = effect_move_owner(effect).or(chain_move_owner);
 
+    if let Some(branches) = coin_branches {
+        for child in [branches.won.as_ref(), branches.lost.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            walk_ability(child, child_root, child_move_owner, pscope, acc);
+        }
+    }
     if let Some(sub) = sub_ability {
         walk_ability(sub, child_root, child_move_owner, pscope, acc);
     }
@@ -5443,6 +5469,7 @@ fn rw_effect(
             conditional_enter_with_counters,
             face_down_profile: _,
             enters_modified_if: _,
+            library_shuffle: _,
         } => {
             let (mut p, sc) = mem(target, *origin, *destination);
             // §4.3.6 / §10.4 ENGINE COUPLING (CR 110.2 + CR 110.2a; the entering
@@ -5517,7 +5544,7 @@ fn rw_effect(
             count,
             position: _,
             face_down: _,
-            actor: _,
+            actor,
         } => {
             let mut p = RwProfile::empty();
             place_membership_write(
@@ -5528,6 +5555,7 @@ fn rw_effect(
                 Zone::Exile,
             );
             p.merge(rw_quantity_expr(count));
+            p.merge(rw_library_instruction_actor(actor));
             (p, None)
         }
         Effect::ExileFaceDownPile {
@@ -5577,6 +5605,7 @@ fn rw_effect(
             keep_count: _,
             up_to: _,
             rest_destination: _,
+            rest_remainder: _,
             rest_order: _,
             reveal: _,
             enter_tapped: _,
@@ -5693,6 +5722,18 @@ fn rw_effect(
             p.writes_membership_external_census.merge(Census::Any);
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
             p.merge(rw_quantity_expr(mana_value_limit));
+            (p, None)
+        }
+        // Turtle Team-Up "play a card": reveals library cards into play — the
+        // Discover shape (library membership → anywhere), minus the stack:
+        // Boss libraries are all-token, so nothing is ever cast. The
+        // any-census/any-zone membership write covers creature ETBs, Event
+        // graveyarding, and the Events' own damage/destroy/life writes.
+        Effect::HordePlayCard { .. } => {
+            let mut p = ext_write(StateKind::SetMembership);
+            p.writes_external.set(StateKind::HandLibrary);
+            p.writes_membership_external_census.merge(Census::Any);
+            p.writes_membership_external_zones.merge(ZoneSpan::Any);
             (p, None)
         }
         Effect::RevealUntil {
@@ -6807,6 +6848,9 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
             reads_event_live()
         }
         QuantityRef::GraveyardSize { .. } => reads_zone_membership(),
+        // Turtle Team-Up: a command-zone pile census — zone membership like
+        // GraveyardSize, global (not per-source member-bound).
+        QuantityRef::DeployedBossCount => reads_zone_membership(),
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
@@ -6975,6 +7019,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         | QuantityRef::PreviousEffectCount
         | QuantityRef::TurnsTaken
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         // CR 701.65b/701.66b/701.67c: controller-scoped per-turn accumulator; no
@@ -7831,6 +7876,25 @@ fn rw_player_scope(x: &PlayerScope) -> RwProfile {
     }
 }
 
+/// CR 608.2c: the reads of the player who performs a library instruction
+/// (`Effect::ExileTop.actor`); the resolver (`effects/exile_top.rs`) resolves a
+/// named subject's player filter at resolution.
+fn rw_library_instruction_actor(x: &LibraryInstructionActor) -> RwProfile {
+    match x {
+        // The spell or ability's controller — a `ResolvedAbility` field, not a
+        // filter read.
+        LibraryInstructionActor::Controller => RwProfile::empty(),
+        // The library's owner — the instruction's own `player` selector. The rw
+        // walk does not profile that selector (the library-player convention
+        // shared with Dig/Mill/RevealTop); its frozen tags reach `legacy_effect`.
+        LibraryInstructionActor::LibraryPlayer => RwProfile::empty(),
+        // A named subject other than the library's owner ("Target opponent
+        // looks at the top card of your library, then exiles it face down" —
+        // Vulcan Mind-Meld) reads whatever its player filter reads.
+        LibraryInstructionActor::Player { player } => rw_target_filter(player),
+    }
+}
+
 /// CR 508.4: the reads of the defender a token instruction names.
 fn rw_token_attack_destination(x: &TokenAttackDestination) -> RwProfile {
     match x {
@@ -8589,8 +8653,86 @@ mod tests {
         }
     }
 
+    fn exile_top_performed_by(actor: LibraryInstructionActor) -> Effect {
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: qfix(1),
+            position: crate::types::ability::LibraryPosition::Top,
+            face_down: true,
+            actor,
+        }
+    }
+
+    /// CR 608.2c: the player who performs a library exile is profiled through
+    /// its own filter. The controller and library-owner roles carry no filter
+    /// and add nothing; a named subject adds what its player filter reads —
+    /// Vulcan Mind-Meld's bare targeted opponent nothing, a chosen-label
+    /// subject a player read.
+    /// Revert-probe: bind `actor: _` in the `rw_effect` `ExileTop` arm ⇒ the
+    /// chosen-label row equals the controller row.
+    #[test]
+    fn exile_top_actor_is_profiled_as_its_player_filter() {
+        let profile = |actor| ability_rw_profile(&ra(exile_top_performed_by(actor)));
+        let named = |player| LibraryInstructionActor::Player { player };
+        let controller = profile(LibraryInstructionActor::Controller);
+        assert_eq!(
+            profile(LibraryInstructionActor::LibraryPlayer),
+            controller,
+            "the library owner adds nothing beyond the instruction's `player`"
+        );
+        assert_eq!(
+            profile(named(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))),
+            controller,
+            "a bare targeted opponent reads nothing"
+        );
+        assert_ne!(
+            profile(named(TargetFilter::PlayerWhoChoseLabel {
+                label: "chosen".to_string(),
+            })),
+            controller,
+            "a chosen-label subject is a player read the controller form is not"
+        );
+    }
+
+    /// D5 (CR 603.10a): a frozen event-context tag on the performing player —
+    /// nested inside a composite filter, and on an `ExileTop` that is a
+    /// sub-ability — sets `legacy_batch_prompt`; the fieldless roles do not.
+    /// Revert-probe: bind `actor: _` (or restore `..`) in the `legacy_effect`
+    /// `ExileTop` arm ⇒ the tagged rows read `false`.
+    #[test]
+    fn exile_top_actor_frozen_tag_reaches_legacy_visitor() {
+        let tagged = LibraryInstructionActor::Player {
+            player: TargetFilter::Not {
+                filter: Box::new(TargetFilter::TriggeringPlayer),
+            },
+        };
+        assert!(!legacy_effect(&exile_top_performed_by(
+            LibraryInstructionActor::Controller
+        )));
+        assert!(!legacy_effect(&exile_top_performed_by(
+            LibraryInstructionActor::LibraryPlayer
+        )));
+        assert!(legacy_effect(&exile_top_performed_by(tagged.clone())));
+
+        let with_exile = |actor| {
+            ra(Effect::GainLife {
+                amount: qfix(1),
+                player: TargetFilter::Controller,
+            })
+            .sub_ability(ra(exile_top_performed_by(actor)))
+        };
+        assert!(
+            !ability_rw_profile(&with_exile(LibraryInstructionActor::Controller))
+                .legacy_batch_prompt()
+        );
+        assert!(ability_rw_profile(&with_exile(tagged)).legacy_batch_prompt());
+    }
+
     fn change_zone(origin: Option<Zone>, dest: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin,
             destination: dest,
             target,
@@ -10300,6 +10442,7 @@ mod tests {
     }
     fn change_zone_under(target: TargetFilter, enters_under: Option<ControllerRef>) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target,

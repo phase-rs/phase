@@ -688,6 +688,10 @@ fn parse_search_target_player(lower: &str, ctx: &ParseContext) -> Option<TargetF
     use nom::sequence::preceded;
 
     let has_declared_player = ctx.declared_player_scope.is_some();
+    let that_player_is_triggering = matches!(
+        super::imperative::that_player_library_filter(ctx),
+        TargetFilter::TriggeringPlayer
+    );
 
     // CR 701.23a: The possessive determiner identifies the searched player; the
     // zone(s) that follow ("library" for a single-zone tutor, or "graveyard,
@@ -698,6 +702,19 @@ fn parse_search_target_player(lower: &str, ctx: &ParseContext) -> Option<TargetF
         preceded(
             tag("search "),
             alt((
+                // CR 603.2 + CR 701.23a: "search that player's library" under a trigger that
+                // names a player (Thada Adel: "deals combat damage to a player") searches the
+                // triggering player's library while the controller remains the searcher —
+                // the object-relative `Typed` controller form, not `TriggeringPlayer`, which
+                // would make the triggering player the searcher.
+                value(
+                    TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::TriggeringPlayer),
+                    ),
+                    verify(tag("that player's "), |_: &str| {
+                        !has_declared_player && that_player_is_triggering
+                    }),
+                ),
                 value(
                     TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                     tag("target opponent's "),

@@ -204,6 +204,14 @@
         "label": "Label",
         "fallback": "Auswahl"
       }
+    },
+    "attacking": {
+      "you": "Greift dich an",
+      "player": "Greift {{player}} an",
+      "yourPlaneswalker": "Greift deinen Planeswalker {{name}} an",
+      "planeswalker": "Greift den Planeswalker {{name}} von {{player}} an",
+      "battle": "Greift die Schlacht {{name}} an",
+      "nothing": "Greift an, aber keinen Spieler, keinen Planeswalker und keine Schlacht"
     }
   },
   "actionButton": {
@@ -346,7 +354,6 @@
     "pickNone": "Keine",
     "underAttack_one": "Von {{count}} Kreatur angegriffen",
     "underAttack_other": "Von {{count}} Kreaturen angegriffen",
-    "target": "Ziel",
     "token": "Spielstein",
     "tokenTooltip": "Spielstein-Kopie einer echten Karte",
     "copy": "Kopie",
@@ -436,7 +443,12 @@
     "assignRemaining_other": "Noch {{count}} zuweisen",
     "confirmDistribute_one": "{{count}} Angreifer erklären",
     "confirmDistribute_other": "{{count}} Angreifer erklären",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Angriffssummen",
+    "targetTotal_few": "{{count}} Angreifer · {{damage}} Schaden",
+    "targetTotal_many": "{{count}} Angreifer · {{damage}} Schaden",
+    "targetTotal_one": "{{count}} Angreifer · {{damage}} Schaden",
+    "targetTotal_other": "{{count}} Angreifer · {{damage}} Schaden"
   },
   "fullControl": {
     "label": "Kontrolle",
@@ -449,7 +461,9 @@
     "done": "Fertig"
   },
   "lifeTotal": {
-    "playerLabel": "S{{seat}}"
+    "playerLabel": "S{{seat}}",
+    "libraryLabel": "KARTEN",
+    "libraryTooltip": "Die Horde hat keine Lebenspunkte. Schaden und Lebensverlust lassen sie stattdessen Karten von ihrer Bibliothek auf den Friedhof legen – sie ist besiegt, wenn ihre Bibliothek leer ist. Diese Zahl ist ihre echte Uhr."
   },
   "phaseStop": {
     "untapLabel": "Enttappschritt",
@@ -540,6 +554,7 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Horde-Deck-Regeln",
     "monarch": "Monarch",
     "monarchTooltip": "Der Monarch — zieht am Zugende eine zusätzliche Karte",
     "initiative": "Initiative",
@@ -648,6 +663,9 @@
   },
   "zone": {
     "commandZone": "Kommandozone",
+    "conspiracy": "Verschwörung",
+    "conspiracyTitle": "Verschwörung: {{name}}",
+    "turnFaceUp": "{{name}} aufdecken",
     "emblem": "Emblem",
     "emblemFallback": "Emblem",
     "commander": "Kommandeur",
@@ -816,7 +834,12 @@
     "lethalBadge": "Tödlich",
     "planeswalkerLoyalty": "Planeswalker (Loyalität: {{loyalty}})",
     "defendingPlayerTrample": "Verteidigender Spieler (Trampelschaden)",
-    "pwControllerTrample": "PW-Beherrscher (Trampelschaden über PW)"
+    "pwControllerTrample": "PW-Beherrscher (Trampelschaden über PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Die verbleibenden {{count}} Schaden {{target}} zuteilen",
+    "assignRemainingTo_many": "Die verbleibenden {{count}} Schaden {{target}} zuteilen",
+    "assignRemainingTo_one": "Den verbleibenden {{count}} Schaden {{target}} zuteilen",
+    "assignRemainingTo_other": "Die verbleibenden {{count}} Schaden {{target}} zuteilen"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
@@ -1183,7 +1206,10 @@
       "subtitleKeepWithBottom": "Behalte diese Hand (du legst {{count}} unter die Bibliothek) oder nimm einen weiteren Mulligan für frische 7.",
       "subtitleKeepFree": "Behalte diese Hand (Gratis-Mulligan — keine Karten unter die Bibliothek) oder nimm einen weiteren Mulligan für frische 7.",
       "subtitleOpeningFree": "Behalte diese Hand oder nimm einen Gratis-Mulligan (keine Karten unter die Bibliothek).",
-      "subtitleOpeningOne": "Behalte diese Hand oder nimm einen Mulligan für frische 7 (du legst beim Behalten 1 unter die Bibliothek)."
+      "subtitleOpeningOne": "Behalte diese Hand oder nimm einen Mulligan für frische 7 (du legst beim Behalten 1 unter die Bibliothek).",
+      "onThePlay": "Du spielst zuerst",
+      "onTheDraw": "Du ziehst zuerst",
+      "takeTurn": "Du bist in Zug {{turn}} dran"
     },
     "companion": {
       "eyebrow": "Vorspiel",
@@ -1395,6 +1421,7 @@
     },
     "config": {
       "startingLife": "Startleben",
+      "commanderDamage": "Kommandeurschaden",
       "players": "Spieler",
       "whoGoesFirst": "Wer beginnt",
       "firstPlayer": {
@@ -1406,6 +1433,11 @@
     "noLegalAiDecks": {
       "withFormat": "Füge ein in {{format}} legales Deck hinzu oder importiere es, damit die KI es nutzen kann.",
       "generic": "Füge ein in diesem Format legales Deck hinzu oder importiere es, damit die KI es nutzen kann."
+    },
+    "hordeDeck": {
+      "title": "Horde-Deck",
+      "subtitle": "Das selbstspielende Deck, dem euer Team gegenübersteht. Die Engine stellt es bereit – du brauchst kein KI-Deck.",
+      "selected": "Ausgewählt"
     }
   },
   "cardChoice": {
@@ -1439,7 +1471,8 @@
       "cast": "Wirken",
       "crew": "Bemannen ({{power}})",
       "saddle": "Satteln ({{power}})",
-      "station": "Stationieren (+{{power}})"
+      "station": "Stationieren (+{{power}})",
+      "destroy": "Destroy"
     },
     "buttons": {
       "confirm": "Bestätigen",
@@ -1795,7 +1828,8 @@
       "counterDiscard": "{{selected}} von {{cap}} abwerfen",
       "counterKeep": "{{selected}} von {{cap}} behalten",
       "keepInstead": "Stattdessen behalten",
-      "discardInstead": "Stattdessen abwerfen"
+      "discardInstead": "Stattdessen abwerfen",
+      "counterChoose": "Choose {{selected}} of {{cap}}"
     },
     "discard": {
       "title": "Abwerfen",
@@ -1894,6 +1928,42 @@
       "hint": "Ziehen zum Neuordnen · Position 1 landet oben auf diesem Stapel",
       "moveLeft": "Nach links verschieben",
       "moveRight": "Nach rechts verschieben"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     }
   },
   "specializeColor": {
@@ -2134,13 +2204,18 @@
   "freeCastWindow": {
     "eyebrow": "Kostenlos wirken",
     "title": "Wirke einen Zauberspruch kostenlos",
+    "titlePlay": "Karten kostenlos spielen",
     "subtitle": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig). Verbleibender Gesamtmanawert: {{budget}}.",
     "subtitleNoBudget": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig).",
+    "subtitlePlay": "Wähle ein Land zum Spielen oder einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig). Verbleibender Gesamtmanawert: {{budget}}.",
+    "subtitleNoBudgetPlay": "Wähle ein Land zum Spielen oder einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig).",
     "remainingAny": "beliebig viele",
     "castNamed": "{{name}} wirken",
+    "playNamed": "{{name}} spielen",
     "castSuffix": "(ohne seine Manakosten zu bezahlen)",
     "done": "Fertig",
-    "doneSuffix": "(keine weiteren Zaubersprüche auf diese Weise wirken)"
+    "doneSuffix": "(keine weiteren Zaubersprüche auf diese Weise wirken)",
+    "doneSuffixPlay": "(keine weiteren Karten auf diese Weise spielen)"
   },
   "castingVariant": {
     "eyebrow": "Wirken",
@@ -2223,7 +2298,8 @@
     "unitDamage": "Schaden",
     "unitLife": "Leben",
     "title": "{{total}} {{unit}} verteilen",
-    "subtitle": "Teile jedem Ziel mindestens 1 {{unit}} zu. Verbleibend: {{remaining}}"
+    "subtitle": "Teile jedem Ziel mindestens 1 {{unit}} zu. Verbleibend: {{remaining}}",
+    "subtitleAnyNumber": "Teile jedem gewählten Ziel mindestens 1 {{unit}} zu, beliebig viele davon. Verbleibend: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Wähle einen Dungeon",
@@ -2309,6 +2385,8 @@
       "fallback": "Triff eine Wahl"
     },
     "searchSubtitle": "Tippe, um alle Karten zu durchsuchen",
+    "secretAgendaTitle": "Nenne heimlich eine Karte ({{current}} von {{total}})",
+    "secretAgendaSubtitle": "Verborgen, bis du diese Verschwörung aufdeckst",
     "searchPlaceholder": "Nach Name suchen...",
     "noCardsFound": "Keine Karten gefunden",
     "buttonSubtitle": "Wähle eine Option",

@@ -4002,17 +4002,13 @@ fn stamp_explore_chain(
     applied: &HashSet<AppliedReplacementKey>,
 ) {
     ability.replacement_applied = applied.clone();
-    if !matches!(&ability.effect, Effect::Scry { .. }) {
+    if !matches!(&ability.effect, Effect::Scry { .. })
+        && !super::ability_utils::node_has_stack_target_declaration(ability)
+    {
         ability.set_unpinned_targets(vec![TargetRef::Object(explorer)]);
     }
-    if let Some(sub) = ability.sub_ability.as_deref_mut() {
-        stamp_explore_chain(sub, explorer, applied);
-    }
-    // Mirror `build_resolved_from_def`, which also populates `else_ability`, so a
-    // branching execute chain leaves no explore link with a stale target or an
-    // unseeded applied set.
-    if let Some(else_branch) = ability.else_ability.as_deref_mut() {
-        stamp_explore_chain(else_branch, explorer, applied);
+    for (_, child) in ability.child_links_mut() {
+        stamp_explore_chain(child, explorer, applied);
     }
 }
 
@@ -6010,6 +6006,7 @@ fn bind_search_found_definition(
         conditional_enter_with_counters,
         face_down_profile,
         enters_modified_if,
+        library_shuffle: _,
     } = execute.effect.as_ref()
     else {
         return None;
@@ -14437,6 +14434,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination,
                 target: TargetFilter::ParentTarget,
@@ -14690,6 +14688,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination,
                     target: TargetFilter::SelfRef,
@@ -15917,6 +15916,7 @@ mod tests {
         ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination,
                 target: TargetFilter::SelfRef,
@@ -18190,6 +18190,7 @@ mod tests {
         let return_to_hand = AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Hand,
                 target: TargetFilter::SelfRef,
@@ -20266,6 +20267,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::Any,
@@ -26922,6 +26924,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,
@@ -26954,6 +26957,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,

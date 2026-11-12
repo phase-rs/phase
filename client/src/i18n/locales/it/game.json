@@ -204,6 +204,14 @@
         "label": "Etichetta",
         "fallback": "Scelta"
       }
+    },
+    "attacking": {
+      "you": "Ti sta attaccando",
+      "player": "Sta attaccando {{player}}",
+      "yourPlaneswalker": "Sta attaccando il tuo planeswalker {{name}}",
+      "planeswalker": "Sta attaccando il planeswalker {{name}} di {{player}}",
+      "battle": "Sta attaccando la battaglia {{name}}",
+      "nothing": "Sta attaccando, ma nessun giocatore, planeswalker o battaglia"
     }
   },
   "actionButton": {
@@ -346,7 +354,6 @@
     "pickNone": "Nessuno",
     "underAttack_one": "Attaccato da {{count}} creatura",
     "underAttack_other": "Attaccato da {{count}} creature",
-    "target": "Bersaglio",
     "token": "Pedina",
     "tokenTooltip": "Pedina che è una copia di una carta reale",
     "copy": "Copia",
@@ -436,7 +443,12 @@
     "assignRemaining_other": "Assegna ancora {{count}}",
     "confirmDistribute_one": "Dichiara {{count}} attaccante",
     "confirmDistribute_other": "Dichiara {{count}} attaccanti",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Totali d'attacco",
+    "targetTotal_few": "{{count}} attaccanti · {{damage}} danni",
+    "targetTotal_many": "{{count}} attaccanti · {{damage}} danni",
+    "targetTotal_one": "{{count}} attaccante · {{damage}} danni",
+    "targetTotal_other": "{{count}} attaccanti · {{damage}} danni"
   },
   "fullControl": {
     "label": "Controllo",
@@ -449,7 +461,9 @@
     "done": "Fatto"
   },
   "lifeTotal": {
-    "playerLabel": "G{{seat}}"
+    "playerLabel": "G{{seat}}",
+    "libraryLabel": "CARTE",
+    "libraryTooltip": "L'Orda non ha punti vita. I danni e la perdita di punti vita le fanno invece macinare carte dal grimorio: è sconfitta quando il suo grimorio finisce, quindi questo numero è il suo vero orologio."
   },
   "phaseStop": {
     "untapLabel": "Passo di STAP",
@@ -540,6 +554,7 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Regole del mazzo dell'Orda",
     "monarch": "Monarca",
     "monarchTooltip": "Il Monarca — pesca una carta extra a fine turno",
     "initiative": "Iniziativa",
@@ -648,6 +663,9 @@
   },
   "zone": {
     "commandZone": "Zona di comando",
+    "conspiracy": "Cospirazione",
+    "conspiracyTitle": "Cospirazione: {{name}}",
+    "turnFaceUp": "Gira {{name}} a faccia in su",
     "emblem": "Emblema",
     "emblemFallback": "Emblema",
     "commander": "Comandante",
@@ -816,7 +834,12 @@
     "lethalBadge": "Letale",
     "planeswalkerLoyalty": "Planeswalker (lealtà: {{loyalty}})",
     "defendingPlayerTrample": "Giocatore in difesa (Travolgere)",
-    "pwControllerTrample": "Controllore del PW (Travolgere sul PW)"
+    "pwControllerTrample": "Controllore del PW (Travolgere sul PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Assegna i {{count}} danni rimanenti a {{target}}",
+    "assignRemainingTo_many": "Assegna i {{count}} danni rimanenti a {{target}}",
+    "assignRemainingTo_one": "Assegna {{count}} danno rimanente a {{target}}",
+    "assignRemainingTo_other": "Assegna i {{count}} danni rimanenti a {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
@@ -1183,7 +1206,10 @@
       "subtitleKeepWithBottom": "Tieni questa mano (metterai {{count}} in fondo) o fai di nuovo mulligan per 7 carte nuove.",
       "subtitleKeepFree": "Tieni questa mano (mulligan gratuito — nessuna carta in fondo) o fai di nuovo mulligan per 7 carte nuove.",
       "subtitleOpeningFree": "Tieni questa mano o fai un mulligan gratuito (nessuna carta in fondo).",
-      "subtitleOpeningOne": "Tieni questa mano o fai mulligan per 7 carte nuove (metterai 1 carta in fondo quando tieni)."
+      "subtitleOpeningOne": "Tieni questa mano o fai mulligan per 7 carte nuove (metterai 1 carta in fondo quando tieni).",
+      "onThePlay": "Giochi per primo",
+      "onTheDraw": "Peschi per primo",
+      "takeTurn": "Giochi il turno {{turn}}"
     },
     "companion": {
       "eyebrow": "Pre-partita",
@@ -1395,6 +1421,7 @@
     },
     "config": {
       "startingLife": "Punti vita iniziali",
+      "commanderDamage": "Danno da comandante",
       "players": "Giocatori",
       "whoGoesFirst": "Chi inizia",
       "firstPlayer": {
@@ -1406,6 +1433,11 @@
     "noLegalAiDecks": {
       "withFormat": "Aggiungi o importa un mazzo legale in {{format}} che l'IA possa usare.",
       "generic": "Aggiungi o importa un mazzo legale in questo formato che l'IA possa usare."
+    },
+    "hordeDeck": {
+      "title": "Mazzo dell'Orda",
+      "subtitle": "Il mazzo automatico che la tua squadra affronta. Lo fornisce il motore: non ti serve un mazzo IA.",
+      "selected": "Selezionato"
     }
   },
   "cardChoice": {
@@ -1439,7 +1471,8 @@
       "cast": "Lancia",
       "crew": "Equipaggio ({{power}})",
       "saddle": "Sella ({{power}})",
-      "station": "Stazione (+{{power}})"
+      "station": "Stazione (+{{power}})",
+      "destroy": "Destroy"
     },
     "buttons": {
       "confirm": "Conferma",
@@ -1795,7 +1828,8 @@
       "counterDiscard": "Scarta {{selected}} di {{cap}}",
       "counterKeep": "Tieni {{selected}} di {{cap}}",
       "keepInstead": "Tieni invece",
-      "discardInstead": "Scarta invece"
+      "discardInstead": "Scarta invece",
+      "counterChoose": "Choose {{selected}} of {{cap}}"
     },
     "discard": {
       "title": "Scarta",
@@ -1894,6 +1928,42 @@
       "hint": "Trascina per riordinare · la posizione 1 va in cima a questa pila",
       "moveLeft": "Sposta a sinistra",
       "moveRight": "Sposta a destra"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     }
   },
   "specializeColor": {
@@ -2134,13 +2204,18 @@
   "freeCastWindow": {
     "eyebrow": "Lancio gratuito",
     "title": "Lancia una magia gratuitamente",
+    "titlePlay": "Gioca carte gratuitamente",
     "subtitle": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i). Valore di mana totale rimanente: {{budget}}.",
     "subtitleNoBudget": "Scegli una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i).",
+    "subtitlePlay": "Scegli una terra da giocare o una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i). Valore di mana totale rimanente: {{budget}}.",
+    "subtitleNoBudgetPlay": "Scegli una terra da giocare o una magia da lanciare senza pagare il suo costo di mana ({{remaining}} rimanente/i).",
     "remainingAny": "un numero qualsiasi",
     "castNamed": "Lancia {{name}}",
+    "playNamed": "Gioca {{name}}",
     "castSuffix": "(senza pagare il suo costo di mana)",
     "done": "Fatto",
-    "doneSuffix": "(smetti di lanciare magie in questo modo)"
+    "doneSuffix": "(smetti di lanciare magie in questo modo)",
+    "doneSuffixPlay": "(smetti di giocare carte in questo modo)"
   },
   "castingVariant": {
     "eyebrow": "Lancia",
@@ -2223,7 +2298,8 @@
     "unitDamage": "danno",
     "unitLife": "vita",
     "title": "Distribuisci {{total}} {{unit}}",
-    "subtitle": "Assegna almeno 1 {{unit}} a ogni bersaglio. Rimanente: {{remaining}}"
+    "subtitle": "Assegna almeno 1 {{unit}} a ogni bersaglio. Rimanente: {{remaining}}",
+    "subtitleAnyNumber": "Assegna almeno 1 {{unit}} a ciascuno di quelli che scegli, tra un numero qualsiasi di essi. Rimanente: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Scegli un sotterraneo",
@@ -2309,6 +2385,8 @@
       "fallback": "Fai una scelta"
     },
     "searchSubtitle": "Digita per cercare tra tutte le carte",
+    "secretAgendaTitle": "Nomina segretamente una carta ({{current}} di {{total}})",
+    "secretAgendaSubtitle": "Nascosto finché non giri a faccia in su questa cospirazione",
     "searchPlaceholder": "Cerca per nome...",
     "noCardsFound": "Nessuna carta trovata",
     "buttonSubtitle": "Seleziona un'opzione",

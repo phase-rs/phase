@@ -1103,8 +1103,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![text(phase_label(*phase))]
         }
 
+        // CR 117.3d: `player_id` is the player who *receives* priority after
+        // the previous holder passed, not the passer.
         GameEvent::PriorityPassed { player_id } => {
-            vec![player_seg(state, *player_id), text(" passes priority")]
+            vec![text("Priority passes to "), player_seg(state, *player_id)]
         }
 
         GameEvent::PlayerPerformedAction {
@@ -3234,6 +3236,29 @@ mod tests {
             .iter()
             .flat_map(|entry| &entry.segments)
             .any(|segment| matches!(segment, LogSegment::Text(text) if text == " deals ")));
+    }
+
+    #[test]
+    fn priority_passed_names_the_receiving_player() {
+        let state = GameState::new_two_player(42);
+        let entries = resolve_log_entries(
+            &[GameEvent::PriorityPassed {
+                player_id: PlayerId(1),
+            }],
+            &state,
+            &state,
+        );
+        let segments: Vec<&LogSegment> = entries.iter().flat_map(|e| &e.segments).collect();
+        assert!(
+            matches!(segments.first(), Some(LogSegment::Text(t)) if t == "Priority passes to ")
+        );
+        assert!(matches!(
+            segments.get(1),
+            Some(LogSegment::PlayerName { player_id, .. }) if *player_id == PlayerId(1)
+        ));
+        assert!(!segments
+            .iter()
+            .any(|s| matches!(s, LogSegment::Text(t) if t.contains("passes priority"))));
     }
 
     #[test]

@@ -1003,6 +1003,7 @@ fn classify(action: &GameAction, prompt: &WaitingFor) -> Choice {
         | GameAction::ChooseRoomDoor { .. }
         | GameAction::TapForConvoke { .. }
         | GameAction::HarmonizeTap { .. }
+        | GameAction::ChooseSecretAgendaNames { .. }
         | GameAction::DeclareCompanion { .. }
         | GameAction::CompanionToHand
         | GameAction::DiscoverChoice { .. }
@@ -1071,6 +1072,7 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         | WaitingFor::PairChoice { .. }
         | WaitingFor::TributeChoice { .. }
         | WaitingFor::LearnChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. }
@@ -1136,6 +1138,11 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         WaitingFor::OutsideGameChoice { up_to, .. }
         | WaitingFor::ChooseFromZoneChoice { up_to, .. }
         | WaitingFor::DiscardChoice { up_to, .. } => optional_if(*up_to),
+        // A floored hero-event prompt (Krang's minimum) cannot be declined
+        // to zero, so it is mandatory like an exact prompt.
+        WaitingFor::HeroEventChoice { up_to, min, .. } => {
+            optional_if(*up_to && *min == 0)
+        }
         // CR 107.1c: "any number" always admits the empty selection.
         WaitingFor::RevealChoice {
             optional,
@@ -1172,6 +1179,7 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         | WaitingFor::SaddleMount { .. }
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::DigBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::CoinFlipKeepChoice { .. }
         | WaitingFor::DieKeepChoice { .. }

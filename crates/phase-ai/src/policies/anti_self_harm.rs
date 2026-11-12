@@ -1666,7 +1666,8 @@ fn pump_taps_blocker_penalty(ctx: &PolicyContext<'_>) -> f64 {
                     && obj.card_types.core_types.contains(&CoreType::Creature)
                     && !obj.card_types.core_types.contains(&CoreType::Land)
                     && !combat::has_summoning_sickness(obj)
-                    && obj.abilities.iter().any(mana_abilities::is_mana_ability)
+                    // CR 701.10f: a pool doubling is a mana ability but adds no mana by itself.
+                    && obj.abilities.iter().any(mana_abilities::is_mana_source_ability)
             })
         })
         .count();
@@ -2491,6 +2492,7 @@ mod tests {
         trigger.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Hand,
                 target: TargetFilter::Typed(creature_card),
@@ -2902,6 +2904,7 @@ mod tests {
         trigger.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SelfRef,
@@ -5980,6 +5983,7 @@ mod tests {
             condition: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::Any,
@@ -6658,6 +6662,7 @@ mod tests {
             condition: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::Any,
@@ -6769,6 +6774,7 @@ mod tests {
             condition: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::Any,
@@ -7492,6 +7498,7 @@ mod tests {
         let decline = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,
                 target: TargetFilter::SelfRef,
@@ -7872,6 +7879,7 @@ mod tests {
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
                 owner_library: false,
+                library_shuffle: Default::default(),
                 enter_transformed: false,
                 enters_under: Some(ControllerRef::You),
                 enter_tapped: engine::types::zones::EtbTapState::Unspecified,

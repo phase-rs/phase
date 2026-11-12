@@ -83,6 +83,7 @@ fn cast_window(source: ObjectId) -> ResolvedAbility {
 fn scoped_graveyard_exile(source: ObjectId, tail: ResolvedAbility) -> ResolvedAbility {
     let mut exile = ResolvedAbility::new(
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Exile,
             target: TargetFilter::Typed(TypedFilter {

@@ -286,6 +286,7 @@ mod tests {
     fn change_zone_effect(destination: Zone, target: TargetFilter) -> Effect {
         use crate::types::zones::EtbTapState;
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             destination,
             origin: None,
             target,

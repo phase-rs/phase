@@ -14,17 +14,19 @@ use crate::types::actions::{
     DebugAction, DebugCardCreationKind, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp,
     ResolveAllConsentDecision, ResolveAllScope, TriggerOrderTemplateOp,
 };
-use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
+#[cfg(test)]
+use crate::types::events::ManaTapState;
+use crate::types::events::{BendingType, ContestRound, GameEvent};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
-    CastingVariant, ConvokeMode, CostResume, CounterCostRootSubtree, GameState, LandPlayRecord,
-    LoopDetectionMode, ManaAbilityResume, MayTriggerAutoChoiceKey, PayCostKind,
-    PendingCostMoveCompletion, PendingCostMoveResume, PendingCounterPostAction,
-    PendingEffectResolved, PersistedRestoreError, PostReplacementDrainStack,
-    ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope,
-    RetargetSlotAddress, StackEntry, StackEntryKind, StackResolutionAutoPassOverlay,
-    StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
-    StackResolutionSession, WaitingFor,
+    CastingVariant, ConvokeMode, CostResume, CounterCostRootSubtree, DistributionScope,
+    DistributionUnit, GameState, LandPlayRecord, LoopDetectionMode, ManaAbilityResume,
+    MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveCompletion, PendingCostMoveResume,
+    PendingCounterPostAction, PendingEffectResolved, PendingManaAbility, PersistedRestoreError,
+    PostReplacementDrainStack, ResolveAllConsentParticipant, ResolveAllConsentRun,
+    ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress, StackEntry, StackEntryKind,
+    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
+    StackResolutionPolicy, StackResolutionSession, WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -42,7 +44,7 @@ use crate::types::statics::CastFrequency;
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
-    begin_target_selection_for_ability, build_target_slots, cap_distribution_target_slots,
+    self, begin_target_selection_for_ability, build_target_slots, cap_distribution_target_slots,
     compute_unavailable_modes, has_legal_target_assignment_for_ability, modal_choice_for_player,
 };
 use super::casting;
@@ -1356,7 +1358,7 @@ pub(super) fn apply_action_boundary_with_stack_limit(
 struct RawActionApplication {
     result: ActionResult,
     journal_start: usize,
-    records_cast_cost: bool,
+    cast_undo_action: Option<super::engine_casting::CastUndoAction>,
     independent_cast_action: Option<(PlayerId, PlayerId, GameAction)>,
     is_actor_scoped_preference: bool,
     suppress_auto_pass_once: bool,
@@ -1518,9 +1520,10 @@ fn apply_action_boundary_core(
     let mut journal_start = state.resolved_rules_journal.entries().len();
     let independent_cast_action = matches!(&action, GameAction::Concede { .. })
         .then(|| (authenticated_actor, semantic_owner, action.clone()));
-    let records_cast_cost = independent_cast_action.is_none()
+    let cast_undo_action = (independent_cast_action.is_none()
         && !matches!(&action, GameAction::Debug(_))
-        && !action.is_submitter_scoped();
+        && !action.is_submitter_scoped())
+    .then(|| super::engine_casting::CastUndoAction::of(&action));
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
     let suppress_auto_pass_once = recovered_stale_priority_pass
         || matches!(
@@ -1562,7 +1565,7 @@ fn apply_action_boundary_core(
         return Ok(RawActionApplication {
             result: ActionResult::applied(vec![], state.waiting_for.clone()),
             journal_start,
-            records_cast_cost,
+            cast_undo_action,
             independent_cast_action,
             is_actor_scoped_preference,
             suppress_auto_pass_once,
@@ -1607,12 +1610,13 @@ fn apply_action_boundary_core(
             ActionResult::reversed(WaitingFor::Priority { player })
         }
         Err(EngineError::SpellCastReversed { player, pending }) => {
-            if records_cast_cost {
+            if let Some(role) = cast_undo_action {
                 if let Err(error) = super::engine_casting::record_spell_cast_undo(
                     state,
                     &boundary_snapshot,
                     journal_start,
                     None,
+                    role,
                 ) {
                     let failure = boundary_life_change_failure(state);
                     lifecycle.discard();
@@ -1691,7 +1695,7 @@ fn apply_action_boundary_core(
         return Ok(RawActionApplication {
             result,
             journal_start,
-            records_cast_cost,
+            cast_undo_action,
             independent_cast_action,
             is_actor_scoped_preference,
             suppress_auto_pass_once,
@@ -1791,7 +1795,7 @@ fn apply_action_boundary_core(
     Ok(RawActionApplication {
         result,
         journal_start,
-        records_cast_cost,
+        cast_undo_action,
         independent_cast_action,
         is_actor_scoped_preference,
         suppress_auto_pass_once,
@@ -2313,7 +2317,7 @@ fn finish_action_boundary_with_lifecycle(
     let RawActionApplication {
         mut result,
         journal_start,
-        records_cast_cost,
+        cast_undo_action,
         independent_cast_action,
         is_actor_scoped_preference,
         suppress_auto_pass_once,
@@ -2452,7 +2456,7 @@ fn finish_action_boundary_with_lifecycle(
                 owner,
                 action,
             )?;
-        } else if records_cast_cost && !reversed {
+        } else if let Some(role) = cast_undo_action.filter(|_| !reversed) {
             let cast_start = cast_start_snapshot.as_ref().filter(|boundary| {
                 state
                     .spell_cast_reversal
@@ -2464,6 +2468,7 @@ fn finish_action_boundary_with_lifecycle(
                 &boundary_snapshot,
                 boundary_snapshot.resolved_rules_journal.entries().len(),
                 cast_start,
+                role,
             )?;
         }
         Ok::<_, EngineError>(())
@@ -2540,9 +2545,10 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     settle_finished_game(state, result);
 }
 
-/// CR 104.1 + CR 100.4: a finished game goes to its match here, and the wait the match leaves
-/// is the action's result.
+/// CR 104.1 + CR 100.4: a finished game first retires the resolution it was in the middle of,
+/// then goes to its match here; the wait the match leaves is the action's result.
 fn settle_finished_game(state: &mut GameState, result: &mut ActionResult) {
+    super::elimination::retire_finished_game_resolution(state);
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
         match_flow::handle_game_over_transition(state);
         result.waiting_for = state.waiting_for.clone();
@@ -5780,7 +5786,8 @@ fn synthesized_charge_points(
 }
 
 /// Whether this engine will drive `count` repetitions of `proposal` on this board — the one
-/// authority both the responder's seam and the consumption seam ask.
+/// authority the responder's seam, the consumption seam and `ai_support`'s structural legality
+/// hatch all ask.
 ///
 /// IMPLEMENTATION BUDGET BOUND (see `MAX_SHORTCUT_CYCLES`), deliberately NOT labelled as a
 /// CR 732.2a constraint, for the same reason the declare-site arm is not: the rules place no
@@ -5796,7 +5803,14 @@ fn synthesized_charge_points(
 /// Reads `state` and `proposal.per_cycle`; never `proposal.count`. That is what lets the
 /// responder's seam ask it about the count a named place would MINT, on a proposal still
 /// carrying the count that place replaces.
-fn shortcut_count_is_drivable(
+///
+/// Three callers, and they must stay one rule: this module's `handle_respond_to_shortcut` refusal,
+/// its consumption guard, and `ai_support`'s structural legality hatch
+/// (`structurally_valid_shortcut_response`), which admits a `Shorten` without cloning the state
+/// when this answers `true` and the place is inside the proposal's own range. A second derivation in the hatch would be free to drift
+/// from the reducer in either direction: dropping a legal answer, or admitting one the reducer
+/// refuses — which is the direction that spends a clone and still returns a rejection.
+pub(crate) fn shortcut_count_is_drivable(
     state: &GameState,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     count: u32,
@@ -6957,6 +6971,9 @@ fn take_route(
     if proposal.period.is_empty() {
         return TakeRoute::Ring;
     }
+    // CR 732.2c: a net-decreasing resource bounds the counting replay and is performed here.
+    // Refunded payments can instead leave the reserve unchanged while advancing its paid
+    // journal, so an unbounded certificate still needs the observed-cost check below.
     if n == 0
         || proposal.shortened_by.is_some()
         || !state.stack.is_empty()
@@ -6968,6 +6985,17 @@ fn take_route(
     // Every accept-time derivation below reads this one driven cycle.
     let frames = drive_one_period_frames(state, &proposal.period, proposal.proposer);
     if adds_restricted_mana(frames.as_ref(), proposal.proposer) || marks_damage(frames.as_ref()) {
+        return TakeRoute::Replay;
+    }
+    // CR 601.2f + CR 107.14 + CR 732.2c: the mark materializes token/counter/life growth but
+    // advances no per-turn journal, so a period that MOVES a journal a live cost modifier
+    // prices on (Blaster Hulk's `EnergyPaidOrLostThisTurn`) would leave a later cast reading a
+    // cost the period already paid for. Perform the period instead. The authority is the same
+    // period-tied one the recurrence gate uses, so a journal NO live modifier reads stays free
+    // to mark — a drain loop's `life_gained_this_turn` is not a cost input on most boards.
+    if frames.as_ref().is_some_and(|(before, after)| {
+        crate::analysis::resource::cost_modifier_reads_changed_projected_resource(before, after)
+    }) {
         return TakeRoute::Replay;
     }
     let growth = PeriodGrowth::derive(frames.as_ref(), proposal.proposer);
@@ -10386,11 +10414,12 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
             // session so the player can respond — unless they have pre-committed
             // to yield priority for that exact triggered ability, in which case
             // the session keeps auto-passing through it. CR 117.1d + CR 605.3a:
-            // the player's own object that can move one of their activatable
-            // mana sources off the battlefield (`Held`) ends it too, since that
-            // activation is lost once the object resolves. (`UntilStackEmpty` is
-            // consent to resolve the stack itself, so it passes through.) The standing rungs
-            // are `priority::standing_priority_pass`'s; Full Control already
+            // `Held` ends it too: the player's own object that can move one of
+            // their activatable mana sources off the battlefield, or their own
+            // activated ability that would waste an untap on its own source. That
+            // mana is lost once the object resolves. (`UntilStackEmpty` is
+            // consent to resolve the stack itself, so it passes through.) The standing rungs are
+            // `priority::standing_priority_pass`'s; Full Control already
             // returned above, so `Withheld` cannot reach this arm.
             let top_needs_response = state.stack.last().is_some_and(|top| {
                 matches!(
@@ -10688,6 +10717,36 @@ fn pass_priority_once_with_pipeline(
     // No else-branch: a bare handoff or an empty-stack pass-to-advance-phase does NOT
     // touch the ring (leave-intact), so accumulation survives the inter-resolution beats.
 
+    // Horde Magic: reveal-and-resolve the NEXT card of the Horde's wave. After a
+    // Horde spell resolves and priority returns to the active player with an
+    // empty stack, cast the next revealed card before the phase can advance.
+    // `maybe_reveal_next` self-gates on an empty stack and a positive budget
+    // (the budget IS the wave-active marker — see its doc comment for why no
+    // turn/phase gate is needed), so this fires only for a genuine wave
+    // continuation and is inert otherwise. The `player == active` guard skips
+    // beats where a non-active survivor holds priority (they may respond to
+    // each Horde spell first).
+    if matches!(wf, WaitingFor::Priority { player } if player == state.active_player) {
+        if let Some(next) = crate::game::horde::maybe_reveal_next(state, events) {
+            sync_waiting_for(state, &next);
+            return Ok(PriorityPassPipelineOutcome {
+                waiting_for: next,
+                session_restored,
+            });
+        }
+        // Horde Magic (advanced rule): after the precombat wave, the same seam
+        // drives the Horde's post-combat activation beat — one ability per
+        // empty-stack priority window. `maybe_activate_next_ability` self-gates on
+        // PostCombatMain + the ruleset axis, so this is inert otherwise.
+        if let Some(next) = crate::game::horde::maybe_activate_next_ability(state, events) {
+            sync_waiting_for(state, &next);
+            return Ok(PriorityPassPipelineOutcome {
+                waiting_for: next,
+                session_restored,
+            });
+        }
+    }
+
     Ok(PriorityPassPipelineOutcome {
         waiting_for: wf,
         session_restored,
@@ -10925,7 +10984,8 @@ fn stack_resolution_session_priority_decision(
                 }
                 StackResolutionPolicy::Committed => {
                     if !session.representatives.contains(&canonical_holder)
-                        && priority_player_has_meaningful_action(state)
+                        && (priority_player_has_meaningful_action(state)
+                            || window_held_for_mana(state, canonical_holder))
                     {
                         return StackResolutionSessionPriorityDecision::Pause;
                     }
@@ -10944,6 +11004,19 @@ fn stack_resolution_session_priority_decision(
     }
 }
 
+/// CR 117.1d + CR 605.3a + CR 117.3d: whether `player`'s own window over the
+/// top of the stack is held for a wasted untap on its own mana source. Another
+/// player's consent to resolve the stack doesn't pass it: the meaningful-action
+/// check never counts a mana activation, so it can't see that window. Only the
+/// bounded untap reason is asked (`priority::own_top_wastes_an_untap`): the
+/// departure reason's board read isn't run for another player's consent.
+fn window_held_for_mana(state: &GameState, player: PlayerId) -> bool {
+    state
+        .stack
+        .back()
+        .is_some_and(|top| priority::own_top_wastes_an_untap(state, player, top))
+}
+
 /// CR 117.3b + CR 117.3d + CR 117.4 + CR 732.2b: whether `participant` has
 /// authorized this stack-resolution session to pass its priority window over
 /// `window_top` inside the fenced cohort without a fresh decision. The single
@@ -10956,29 +11029,34 @@ fn stack_resolution_session_participant_authorizes_pass(
     participant: PlayerId,
     window_top: &StackEntry,
 ) -> bool {
-    let standing_pass = match priority::standing_priority_pass(state, participant, Some(window_top))
-    {
-        // CR 117.1: Full Control is a standing refusal to give up any window —
-        // the session's own representative's included.
-        priority::StandingPriorityPass::Withheld => return false,
-        priority::StandingPriorityPass::Granted => true,
-        // CR 117.1d + CR 605.3a: an own object that can remove an activatable
-        // mana source is no standing pass; only explicit consent skips it.
-        priority::StandingPriorityPass::Held | priority::StandingPriorityPass::Undecided => false,
-    };
     match session.policy {
+        // A representative consented to the session. A non-representative's
+        // skipped windows are not rechecked for a meaningful action (only its
+        // live window is, in `stack_resolution_session_priority_decision`).
+        // CR 117.1: Full Control is the one skipped window consent doesn't cover
+        // (an activated ability, the untap reason's entry, is never skipped), so
+        // the standing-pass ladder isn't read.
+        StackResolutionPolicy::Committed => !priority::holds_full_control(state, participant),
         // A verified AI pass authorizes later windows in this exact fenced
         // cohort; CR 117.3d + CR 732.2b: a representative's standing pass over
         // this window's top authorizes this window.
         StackResolutionPolicy::RecheckNoMeaningfulPriorityAction => {
+            let standing_pass =
+                match priority::standing_priority_pass(state, participant, Some(window_top)) {
+                    // CR 117.1: Full Control is a standing refusal to give up any
+                    // window — the session's own representative's included.
+                    priority::StandingPriorityPass::Withheld => return false,
+                    priority::StandingPriorityPass::Granted => true,
+                    // CR 117.1d + CR 605.3a: an own object that can remove an
+                    // activatable mana source, or an own activated ability that
+                    // would waste an untap on its own source, is no standing
+                    // pass; only explicit consent skips it.
+                    priority::StandingPriorityPass::Held
+                    | priority::StandingPriorityPass::Undecided => false,
+                };
             session.representatives.contains(&participant)
                 && (standing_pass || session.verified_pass_representatives.contains(&participant))
         }
-        // A representative consented to the session. A non-representative's
-        // skipped windows are not rechecked for a meaningful action (only its
-        // live window is, in `stack_resolution_session_priority_decision`);
-        // Full Control was enforced above.
-        StackResolutionPolicy::Committed => true,
     }
 }
 
@@ -11030,28 +11108,51 @@ pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Op
         .take_while(|(entry, fence)| fence.matches_captured_entry(entry))
         .map(|(entry, _)| entry);
     // `None` when the top entry is outside the fence.
-    fenced_prefix.next()?;
+    let top = fenced_prefix.next()?;
+    // Every run the resolver batches (`stack::resolve_next_with_limit`) is of
+    // triggered abilities, so a spell or an activated ability always resolves
+    // alone, and the window over one is read when it comes rather than looked
+    // ahead to: its window is judged against the board as it is then, after the
+    // entries above it resolved, not before (an untap above it may have untapped
+    // the source). Basalt Monolith's queued "{3}: Untap this artifact" entries
+    // each get their own window. A keyword action
+    // never batches either, but it isn't held for an untap, so its windows are
+    // still looked ahead to as before.
+    let resolves_alone = |entry: &StackEntry| match entry.kind {
+        StackEntryKind::Spell { .. } | StackEntryKind::ActivatedAbility { .. } => true,
+        StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => false,
+    };
+    if resolves_alone(top) {
+        return Some(1);
+    }
     // CR 117.3b + CR 117.4: resolving K entries skips every participant's
     // window over each of the next K − 1 entries, each with its own top; the
     // boundary ends before the first window a participant has not authorized
     // (CR 732.2b), so K = 1 + the authorized prefix of those windows. Each
     // window is judged against the board before anything resolves, so it cannot
     // see a mana source an earlier member untaps. That is sound for the `Held`
-    // rung because a batch consumes only windows this look-ahead authorized, and
-    // its members are either the resolver's fixed inert kinds or one repeated
-    // untargeted triggered ability. A member that untaps a mana source which a
-    // later identical member then removes, without pausing, is an accepted
+    // rung's removal reason, because a batch consumes only windows this
+    // look-ahead authorized, and its members are triggered abilities. A
+    // Committed session doesn't read it for a non-representative's skipped
+    // window: no batch kind (inert, self-counter, fixed life gain, fixed
+    // opponent effect, token) moves a mana source off the battlefield. Its untap
+    // reason is for an activated ability only, whose window is never looked
+    // ahead to. A member that untaps a mana source which a later
+    // identical member then removes, without pausing, is an accepted
     // under-approximation.
     let authorized_skipped_windows = fenced_prefix
         .take_while(|window_top| {
-            participants.iter().all(|&participant| {
-                stack_resolution_session_participant_authorizes_pass(
-                    state,
-                    session,
-                    participant,
-                    window_top,
-                )
-            })
+            !resolves_alone(window_top)
+                && participants.iter().all(|&participant| {
+                    stack_resolution_session_participant_authorizes_pass(
+                        state,
+                        session,
+                        participant,
+                        window_top,
+                    )
+                })
         })
         .count();
     let limit = u32::try_from(1 + authorized_skipped_windows).unwrap_or(u32::MAX);
@@ -11231,7 +11332,9 @@ fn run_auto_pass_loop(
                                 {
                                     break;
                                 }
-                                if priority_player_has_meaningful_action(state) {
+                                if priority_player_has_meaningful_action(state)
+                                    || window_held_for_mana(state, player)
+                                {
                                     break;
                                 }
                             }
@@ -12183,6 +12286,67 @@ fn revoke_resolve_all_consent(
     restore_resolve_all_priority_snapshot(state)
 }
 
+/// CR 702.60a + CR 701.20a: a Ripple free cast of a same-named revealed card
+/// can pause mid-announcement (targets, modes, X, payment of additional costs)
+/// before the remaining hits or the bottom-order step. The un-cast revealed
+/// cards are still revealed through those pauses, so the reveal must survive
+/// them. Retention is bound to the ACTIVE announcement only: the live
+/// `pending_cast` (or the pending `ModalFaceChoice`) must itself name the
+/// resolution-owned permission carrying `RippleOfferRemaining` cleanup. The
+/// permission lingers on a successfully cast hit while it sits on the stack,
+/// so its mere presence is not proof the announcement is still running.
+fn ripple_resolution_cast_in_flight(state: &GameState) -> bool {
+    if state.revealed_cards.is_empty() {
+        return false;
+    }
+    // CR 601.2 + CR 616.1: resolved through the typed `PendingCastOwner`
+    // custody — the prompt's inline cast; the cast-bearing cost-move, discard
+    // and deferred-life roots behind their replacement choice; and the external
+    // `pending_cast` behind the `ManaPayment` family, Assist, `DistributeAmong`,
+    // or a mana ability (CR 605.3b) — prompted or with its own cost parked —
+    // whose activation chain returns to the cast's payment. A bare
+    // `state.pending_cast` outside those carriers is not an active announcement.
+    let active_cast = state.active_cast_announcement();
+    let permission_index = match (active_cast, &state.waiting_for) {
+        (Some(pending), _) => pending
+            .casting_permission_index
+            .map(|index| (pending.object_id, index)),
+        (
+            None,
+            WaitingFor::ModalFaceChoice {
+                player,
+                object_id,
+                card_id,
+                ..
+            },
+        ) => {
+            casting::current_resolution_cast_permission_index(state, *player, *object_id, *card_id)
+                .map(|index| (*object_id, index))
+        }
+        (None, _) => None,
+    };
+    permission_index
+        .and_then(|(object_id, index)| {
+            state
+                .objects
+                .get(&object_id)?
+                .casting_permissions
+                .get(index.0)
+        })
+        .is_some_and(|permission| {
+            matches!(
+                permission,
+                crate::types::ability::CastingPermission::ExileWithAltCost {
+                    resolution_cleanup: Some(cleanup),
+                    ..
+                } if matches!(
+                    cleanup.success_action,
+                    crate::types::ability::ResolutionCastSuccessAction::RippleOfferRemaining { .. }
+                )
+            )
+        })
+}
+
 /// CR 701.20e + CR 701.20a: Whether the controller's private "look at" window
 /// must survive the action now being applied. Looking follows the rules for
 /// revealing, so a looked-at card stays looked-at only "for as long as
@@ -12258,7 +12422,9 @@ fn apply_action(
             }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
-    ) {
+            | WaitingFor::DigBottomOrder { .. }
+    ) && !ripple_resolution_cast_in_flight(state)
+    {
         state.revealed_cards.clear();
     }
 
@@ -12675,6 +12841,10 @@ fn apply_action(
                 .suspended_mana_abilities()
                 .next()
                 .is_some() => {}
+        // CR 605.3b: confirming a mana ability's own payment resolves a mana
+        // ability; it commits no play.
+        GameAction::PassPriority
+            if matches!(state.waiting_for, WaitingFor::ManaAbilityManaPayment { .. }) => {}
         GameAction::PassPriority
         | GameAction::PlayLand { .. }
         | GameAction::CastSpell { .. }
@@ -13057,7 +13227,7 @@ fn apply_non_priority_pass_action(
                     .card_types
                     .core_types
                     .contains(&crate::types::card_type::CoreType::Land);
-                let wf = mana_abilities::activate_mana_ability(
+                let wf = mana_abilities::activate_mana_ability_with_payment_mode(
                     state,
                     source_id,
                     *player,
@@ -13066,6 +13236,7 @@ fn apply_non_priority_pass_action(
                     &mut events,
                     crate::types::game_state::ManaAbilityResume::Priority,
                     None,
+                    payment_mode,
                 )?;
                 // CR 605.3b: Track land mana taps for undo (UntapLandForMana),
                 // matching the TapLandForMana path so dual lands are undoable
@@ -13268,22 +13439,22 @@ fn apply_non_priority_pass_action(
                     Some((permission_index, cleanup))
                 }
             };
-            // CR 701.18b + CR 712.12: under a Play instruction the back face
-            // of a spell//land modal card is a land face. Electing it plays
-            // the land during resolution instead of casting, so no face
-            // mutation happens here; the land-face completion elects the face
-            // itself. A back face whose land play is not admissible falls
-            // through to the cast path below, which rejects it and restores
-            // the object exactly as today.
-            let land_face = back_face
-                && resolution_cleanup.as_ref().is_some_and(|(_, cleanup)| {
-                    casting::resolution_land_face_admission(
-                        state,
-                        *player,
-                        *object_id,
-                        &cleanup.face_policy,
-                    )
-                });
+            // CR 701.18b + CR 712.12: under a Play instruction a land face of a
+            // modal card — the back face of a spell//land card, or either face
+            // of a land//land card — is played during resolution instead of
+            // cast, so no face mutation happens here; the land-face completion
+            // elects the face itself. A face whose land play is not admissible
+            // falls through to the cast path below, which rejects it and
+            // restores the object exactly as today.
+            let land_face = resolution_cleanup.as_ref().is_some_and(|(_, cleanup)| {
+                casting::resolution_land_face_choice_admission(
+                    state,
+                    *player,
+                    *object_id,
+                    &cleanup.face_policy,
+                    casting::ModalCardFace::from_back_face(back_face),
+                )
+            });
             match resolution_cleanup {
                 Some((permission_index, _)) if land_face => {
                     crate::game::engine_resolution_choices::complete_resolution_land_face_choice(
@@ -13292,6 +13463,7 @@ fn apply_non_priority_pass_action(
                         *object_id,
                         *card_id,
                         permission_index,
+                        casting::ModalCardFace::from_back_face(back_face),
                         &mut events,
                     )?
                 }
@@ -14003,14 +14175,19 @@ fn apply_non_priority_pass_action(
                     }
                     // CR 701.3d + CR 608.2k: Unattach a matching attachment from the
                     // source as an activation cost (Captain America's Throw). The
-                    // handler snapshots the detached Equipment as the cost-referent,
-                    // then re-surfaces the deferred damage division.
+                    // leg's cardinality authority is the prompt built at
+                    // `casting_costs::surface_next_interactive_activation_cost_leg`
+                    // (`WaitingFor::PayCost.{min_count, count}`), which the handler
+                    // enforces before touching state; it then snapshots the detached
+                    // Equipment as the cost-referent and re-surfaces the deferred
+                    // damage division.
                     PayCostKind::UnattachFrom { filter } => {
                         casting_costs::handle_unattach_for_cost(
                             state,
                             *player,
                             filter,
                             *pending_cast.clone(),
+                            (*min_count, *count),
                             choices,
                             &chosen,
                             &mut events,
@@ -14866,13 +15043,14 @@ fn apply_non_priority_pass_action(
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
-                ..
+                payment_mode,
             },
         ) => engine_payment_choices::handle_unless_payment_activate_ability(
             state,
             waiting_for.clone(),
             source_id,
             ability_index,
+            payment_mode,
             &mut events,
         )?,
         // CR 702.21a: Player selected a card to discard as ward cost payment.
@@ -14920,6 +15098,57 @@ fn apply_non_priority_pass_action(
             pending_mana_ability.resume.clone(),
             &mut events,
         )?,
+        // CR 118.3a: pin a pool unit to pay a manual mana ability's mana cost.
+        (
+            WaitingFor::ManaAbilityManaPayment {
+                player,
+                pending_mana_ability,
+            },
+            GameAction::SpendPoolMana { pip_id },
+        ) => WaitingFor::ManaAbilityManaPayment {
+            player: *player,
+            pending_mana_ability: Box::new(handle_spend_pool_mana_for_mana_ability(
+                state,
+                *player,
+                pending_mana_ability,
+                pip_id,
+            )?),
+        },
+        // CR 118.3a: remove a pin from a manual mana ability's payment.
+        (
+            WaitingFor::ManaAbilityManaPayment {
+                player,
+                pending_mana_ability,
+            },
+            GameAction::UnspendPoolMana { pip_id },
+        ) => WaitingFor::ManaAbilityManaPayment {
+            player: *player,
+            pending_mana_ability: Box::new(handle_unspend_pool_mana_for_mana_ability(
+                pending_mana_ability,
+                pip_id,
+            )?),
+        },
+        // CR 601.2h via CR 602.2b: the player confirms a manual mana ability's
+        // payment, which is paid from the pool as it stands.
+        (
+            WaitingFor::ManaAbilityManaPayment {
+                pending_mana_ability,
+                ..
+            },
+            GameAction::PassPriority,
+        ) => {
+            let wf = mana_abilities::confirm_manual_mana_ability_payment(
+                state,
+                (**pending_mana_ability).clone(),
+                &mut events,
+            )?;
+            if let Some(order_wf) =
+                super::triggers::preserve_order_triggers_resume(state, wf.clone())
+            {
+                return Ok(ActionResult::applied(events, order_wf));
+            }
+            wf
+        }
         (WaitingFor::ManaPayment { player, .. }, GameAction::CancelCast) => {
             // CR 601.2i: Cancelling at mana payment rolls back the cast — pop
             // the stack entry placed at announcement and return the object to
@@ -15041,6 +15270,26 @@ fn apply_non_priority_pass_action(
                 {
                     return Err(EngineError::InvalidAction(format!(
                         "X={value} cannot pay the activation cost"
+                    )));
+                }
+                // CR 601.6 + CR 601.2b + CR 202.3e: X is announced as part of
+                // the spell's proposal, and the announced spell must still be
+                // one its caster may cast. The proposal check let the cast
+                // begin because some X could evade a quality prohibition
+                // (CR 601.3a — Void Winnower and an even mana value); an X that
+                // gives the spell the prohibited quality is not a legal
+                // announcement.
+                if trial.activation_ability_index.is_none()
+                    && casting::announced_spell_is_prohibited(
+                        state,
+                        player,
+                        trial.object_id,
+                        value,
+                        trial.casting_variant == CastingVariant::Fuse,
+                    )
+                {
+                    return Err(EngineError::InvalidAction(format!(
+                        "X={value} gives this spell a quality a static ability prevents you from casting"
                     )));
                 }
                 if pending.deferred_target_selection {
@@ -15412,7 +15661,7 @@ fn apply_non_priority_pass_action(
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
-                ..
+                payment_mode,
             },
         ) => {
             let (player, resume) =
@@ -15425,7 +15674,9 @@ fn apply_non_priority_pass_action(
                 && mana_abilities::is_mana_ability(&obj.abilities[ability_index])
             {
                 let ability_def = obj.abilities[ability_index].clone();
-                let wf = mana_abilities::activate_mana_ability(
+                // CR 605.3a + CR 117.1d: a mana ability activated while paying is itself
+                // an activation whose own mana cost the player may direct.
+                let wf = mana_abilities::activate_mana_ability_with_payment_mode(
                     state,
                     source_id,
                     player,
@@ -15434,6 +15685,7 @@ fn apply_non_priority_pass_action(
                     &mut events,
                     resume,
                     None,
+                    payment_mode,
                 )?;
                 // CR 605.4a: no outer scan. `activate_mana_ability`
                 // builds a real typed cursor here, and its completed frame has
@@ -15613,7 +15865,7 @@ fn apply_non_priority_pass_action(
                 convoke_mode: convoke_mode.or(Some(ConvokeMode::Delve)),
             }
         }
-        // CR 702.51a / Waterbend: Tap a creature or artifact to pay mana.
+        // CR 702.51a / CR 702.126a / CR 701.67a: Tap a creature or artifact rather than pay mana.
         // CR 702.51a + CR 302.6: Convoke taps creatures to pay mana; summoning sickness
         // (CR 302.6) is not checked because convoke does not use the tap activated-ability mechanism.
         (
@@ -15649,6 +15901,15 @@ fn apply_non_priority_pass_action(
                         .to_string(),
                 ));
             }
+            // CR 701.67a: one tap "for each generic mana in that cost"; a tap past
+            // the generic count would pay nothing.
+            if mode == ConvokeMode::Waterbend
+                && super::casting::waterbend_taps_remaining(state, *player) == 0
+            {
+                return Err(EngineError::ActionNotAllowed(
+                    "No generic mana of this cost is left for a waterbend tap".to_string(),
+                ));
+            }
             let tapped_creature_for_convoke = mode == ConvokeMode::Convoke
                 && obj
                     .card_types
@@ -15671,7 +15932,7 @@ fn apply_non_priority_pass_action(
                         crate::types::mana::ManaType::Colorless
                     }
                 }
-                // Waterbend always produces colorless
+                // CR 701.67a: Waterbend pays generic mana only — always colorless.
                 ConvokeMode::Waterbend => crate::types::mana::ManaType::Colorless,
                 // CR 702.126a: Improvise pays generic mana only — always colorless.
                 ConvokeMode::Improvise => crate::types::mana::ManaType::Colorless,
@@ -15681,36 +15942,15 @@ fn apply_non_priority_pass_action(
             // authority so a "can't become tapped" creature is refused (no
             // summoning sickness check — CR 702.51a + CR 302.6).
             crate::game::restrictions::tap_permanent_for_cost(state, object_id, &mut events)?;
-            let unit = match mode {
-                ConvokeMode::Convoke => {
-                    crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id)
-                }
-                ConvokeMode::Waterbend => crate::types::mana::ManaUnit::new(
-                    resolved_mana_type,
-                    object_id,
-                    false,
-                    Vec::new(),
-                ),
-                // CR 702.126a/b: improvise mana exists only to pay this spell's
-                // generic cost — `convoke_payment` carries the restriction that
-                // keeps it from leaking into the pool as real mana.
-                ConvokeMode::Improvise => {
-                    crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id)
-                }
-                ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
-            };
-            // CR 118.3a: stamp a pip id on pool entry. Convoke/improvise markers
-            // are consumed by the shared algorithm and never pinned (the frontend
-            // filters ConvokePayment units); Waterbend produces real pinnable mana.
+            // CR 702.51a + CR 702.126a + CR 701.67a: each mode taps the permanent
+            // "rather than pay that mana", so no mana is produced (CR 106.3).
+            // `convoke_payment` is the one marker for that substitution: it
+            // satisfies the cost while staying out of every mana-spent record.
+            let unit = crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id);
+            // CR 118.3a: stamp a pip id on pool entry. These markers are consumed
+            // by the shared algorithm and never pinned (the frontend filters
+            // ConvokePayment units).
             let _ = state.add_mana_to_pool(*player, unit);
-            if mode == ConvokeMode::Waterbend {
-                events.push(GameEvent::ManaAdded {
-                    player_id: *player,
-                    mana_type: resolved_mana_type,
-                    source_id: object_id,
-                    tap_state: ManaTapState::NotFromTap,
-                });
-            }
             if tapped_creature_for_convoke {
                 let pending = state.pending_cast.as_mut().ok_or_else(|| {
                     EngineError::InvalidAction("No pending cast for convoke".to_string())
@@ -16908,6 +17148,20 @@ fn apply_non_priority_pass_action(
             let waiting_for = state.waiting_for.clone();
             engine_stack::handle_multi_target_selection(state, waiting_for, &selected, &mut events)?
         }
+        // CR 702.106a / CR 702.106f: Secret pregame agenda names.
+        (
+            WaitingFor::SecretAgendaChoice {
+                player, object_id, ..
+            },
+            GameAction::ChooseSecretAgendaNames { names },
+        ) => super::conspiracy::handle_secret_agenda_names(
+            state,
+            *player,
+            *object_id,
+            names,
+            &mut events,
+        )
+        .map_err(EngineError::InvalidAction)?,
         // CR 702.139a: Pre-game companion reveal
         (WaitingFor::CompanionReveal { player, .. }, GameAction::DeclareCompanion { choice }) => {
             super::companion::handle_declare_companion(state, *player, choice, &mut events)
@@ -17295,8 +17549,17 @@ fn apply_non_priority_pass_action(
                 &mut events,
             )?
         }
-        // CR 601.2d: Distribute among targets (casting-time distribution).
-        (WaitingFor::DistributeAmong { player, .. }, GameAction::CancelCast) => {
+        // CR 601.2d: Distribute among targets (casting-time distribution). A
+        // CR 608.2d resolution-time division belongs to a resolving ability,
+        // which cannot be cancelled — it falls to the catch-all rejection.
+        (
+            WaitingFor::DistributeAmong {
+                player,
+                scope: DistributionScope::AnnouncedTargets,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
             ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.as_deref().cloned() {
@@ -17315,166 +17578,201 @@ fn apply_non_priority_pass_action(
                 player,
                 total,
                 targets,
-                ..
+                unit,
+                scope,
             },
             GameAction::DistributeAmong { distribution },
         ) => {
             let p = *player;
-            let expected_total = *total;
 
-            // Validate: each target gets ≥ 1, and total matches.
-            let actual_total: u32 = distribution.iter().map(|(_, a)| *a).sum();
-            if actual_total != expected_total {
-                return Err(EngineError::InvalidAction(format!(
-                    "Distribution total {} != required {}",
-                    actual_total, expected_total
-                )));
-            }
-            for (t, amount) in &distribution {
-                if *amount == 0 {
-                    return Err(EngineError::InvalidAction(
-                        "Each target must receive at least 1".to_string(),
-                    ));
+            // CR 601.2d + CR 608.2d: the single division validator (sum, each
+            // entry ≥ 1, legal recipient, no duplicates) for both scopes.
+            ability_utils::validate_distribution(
+                &distribution,
+                *total,
+                targets,
+                ability_utils::DistributionCoverage::of(scope),
+            )
+            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+
+            match scope {
+                // CR 608.2d + CR 608.2c: an untargeted division chosen while the
+                // effect is applied. The damage follows the choice at once — no
+                // player receives priority in between (CR 704.3: SBAs are checked
+                // only when a player would receive priority), and afterwards the
+                // active player receives priority (CR 117.3b).
+                DistributionScope::ResolutionCandidates { pending_effect } => {
+                    let pending_effect = pending_effect.clone();
+                    let unit = unit.clone();
+                    // CR 117.3b: the placeholder is seated at the active player, who
+                    // receives priority once the ability finishes resolving — not the
+                    // chooser, who may be any player (the target's controller).
+                    let active = state.active_player;
+                    state.waiting_for = WaitingFor::Priority { player: active };
+                    state.priority_player = active;
+                    match unit {
+                        DistributionUnit::Damage => {
+                            effects::deal_damage::resume_resolution_division(
+                                state,
+                                &pending_effect,
+                                &distribution,
+                                &mut events,
+                            )
+                            .map_err(|err| EngineError::InvalidAction(err.to_string()))?
+                        }
+                        DistributionUnit::EvenSplitDamage
+                        | DistributionUnit::Counters(_)
+                        | DistributionUnit::Life => {
+                            return Err(EngineError::InvalidAction(
+                                "no resolver pauses for this division unit at resolution"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    resume_pending_continuation_if_priority(state, &mut events)?;
+                    state.waiting_for.clone()
                 }
-                if !targets.contains(t) {
-                    return Err(EngineError::InvalidAction(
-                        "Distribution target not in legal set".to_string(),
-                    ));
-                }
-            }
+                DistributionScope::AnnouncedTargets => {
+                    // Store on the pending cast's resolved ability if we're mid-casting.
+                    // The distribution will be read during effect resolution.
+                    if let Some(pending) = state.pending_cast.as_mut() {
+                        pending.ability.distribution =
+                            Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
+                    }
 
-            // Store on the pending cast's resolved ability if we're mid-casting.
-            // The distribution will be read during effect resolution.
-            if let Some(pending) = state.pending_cast.as_mut() {
-                pending.ability.distribution =
-                    Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
-            }
-
-            // CR 601.2d: Resume casting pipeline after distribution.
-            if state.pending_cast.is_some() {
-                let pending = state.pending_cast.take().unwrap();
-                if pending.activation_ability_index.is_some() {
-                    // CR 602.2b + CR 601.2d: an activated ability that divides
-                    // damage among targets goes on the stack as an ActivatedAbility
-                    // after the division is announced — not as a spell (Captain
-                    // America's Throw). The payment boundary retains the original
-                    // target-first root while it pays the residual mana leg.
-                    // The spell-only cost-determination authority used in the `else`
-                    // branch (`finish_pending_cast_cost_or_pay`) must NOT be reached
-                    // here: it routes into `finalize_cast`, which would commit the
-                    // source permanent to the stack as a spell.
-                    casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
+                    // CR 601.2d: Resume casting pipeline after distribution.
+                    if state.pending_cast.is_some() {
+                        let pending = state.pending_cast.take().unwrap();
+                        if pending.activation_ability_index.is_some() {
+                            // CR 602.2b + CR 601.2d: an activated ability that divides
+                            // damage among targets goes on the stack as an ActivatedAbility
+                            // after the division is announced — not as a spell (Captain
+                            // America's Throw). The payment boundary retains the original
+                            // target-first root while it pays the residual mana leg.
+                            // The spell-only cost-determination authority used in the `else`
+                            // branch (`finish_pending_cast_cost_or_pay`) must NOT be reached
+                            // here: it routes into `finalize_cast`, which would commit the
+                            // source permanent to the stack as a spell.
+                            casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
                         state,
                         p,
                         *pending,
                         &mut events,
                     )?
-                } else {
-                    // CR 601.2c + CR 601.2d + CR 601.2f: Targets and their division are now
-                    // committed, so the total cost — including any target-dependent
-                    // surcharge (Strive, CR 207.2c) — is finally determinable. Route through
-                    // the single cost-determination authority every other post-target-
-                    // selection path uses (`casting_targets::handle_select_targets` /
-                    // `handle_choose_target`) instead of calling `finalize_cast` directly
-                    // with the stale cost that was locked in at `ChooseXValue` time, before
-                    // targets (and hence any per-target surcharge) were known.
-                    //
-                    // CR 601.2h ("Unpayable costs can't be paid"): mirror
-                    // `finalize_mana_payment`'s `pending_for_restore` pattern
-                    // (casting_costs.rs ~8623-8627/8778-8787) — `finish_pending_cast_cost_or_pay`'s
-                    // downstream chain has no restore-on-error wrapper of its own, and
-                    // `state.pending_cast` is already `None` here (unlike
-                    // `handle_select_targets`, whose `pending_cast` lives inside the
-                    // `WaitingFor::TargetSelection` variant and so is never destructively
-                    // taken). Without this clone-and-restore, a recomputed cost that turns
-                    // out unpayable would return `Err` with `state.pending_cast` gone while
-                    // `state.waiting_for` still reports `DistributeAmong` — a resubmitted
-                    // `DistributeAmong` action would then fall through to the
-                    // resolution-time continuation branch below instead of being cleanly
-                    // rejected.
-                    let mut pending = pending;
-                    let pending_for_restore = pending.clone();
-                    // CR 601.2h + CR 702.66a: the delve exile is paid with the rest of the
-                    // total cost, after the division is announced.
-                    let paid = casting_costs::pay_delve_after_distribution(
-                        state,
-                        p,
-                        &mut pending,
-                        &mut events,
-                    )
-                    .and_then(|parked| match parked {
-                        Some(waiting_for) => Ok(waiting_for),
-                        None => {
-                            let ability = pending.ability.clone();
-                            let cost = pending.cost.clone();
-                            casting_costs::finish_pending_cast_cost_or_pay(
+                        } else {
+                            // CR 601.2c + CR 601.2d + CR 601.2f: Targets and their division are now
+                            // committed, so the total cost — including any target-dependent
+                            // surcharge (Strive, CR 207.2c) — is finally determinable. Route through
+                            // the single cost-determination authority every other post-target-
+                            // selection path uses (`casting_targets::handle_select_targets` /
+                            // `handle_choose_target`) instead of calling `finalize_cast` directly
+                            // with the stale cost that was locked in at `ChooseXValue` time, before
+                            // targets (and hence any per-target surcharge) were known.
+                            //
+                            // CR 601.2h ("Unpayable costs can't be paid"): mirror
+                            // `finalize_mana_payment`'s `pending_for_restore` pattern
+                            // (casting_costs.rs ~8623-8627/8778-8787) — `finish_pending_cast_cost_or_pay`'s
+                            // downstream chain has no restore-on-error wrapper of its own, and
+                            // `state.pending_cast` is already `None` here (unlike
+                            // `handle_select_targets`, whose `pending_cast` lives inside the
+                            // `WaitingFor::TargetSelection` variant and so is never destructively
+                            // taken). Without this clone-and-restore, a recomputed cost that turns
+                            // out unpayable would return `Err` with `state.pending_cast` gone while
+                            // `state.waiting_for` still reports `DistributeAmong` — a resubmitted
+                            // `DistributeAmong` action would then fall through to the
+                            // resolution-time continuation branch below instead of being cleanly
+                            // rejected.
+                            let mut pending = pending;
+                            let pending_for_restore = pending.clone();
+                            // CR 601.2h + CR 702.66a: the delve exile is paid with the rest of the
+                            // total cost, after the division is announced.
+                            let paid = casting_costs::pay_delve_after_distribution(
                                 state,
                                 p,
-                                *pending,
-                                *ability,
-                                cost,
+                                &mut pending,
                                 &mut events,
                             )
+                            .and_then(|parked| match parked {
+                                Some(waiting_for) => Ok(waiting_for),
+                                None => {
+                                    let ability = pending.ability.clone();
+                                    let cost = pending.cost.clone();
+                                    casting_costs::finish_pending_cast_cost_or_pay(
+                                        state,
+                                        p,
+                                        *pending,
+                                        *ability,
+                                        cost,
+                                        &mut events,
+                                    )
+                                }
+                            });
+                            match paid {
+                                Ok(waiting_for) => waiting_for,
+                                Err(err) => {
+                                    state.pending_cast = Some(pending_for_restore);
+                                    return Err(err);
+                                }
+                            }
                         }
-                    });
-                    match paid {
-                        Ok(waiting_for) => waiting_for,
-                        Err(err) => {
-                            state.pending_cast = Some(pending_for_restore);
-                            return Err(err);
-                        }
+                    } else if let Some(mut pending_trigger) = state.pending_trigger.take() {
+                        // CR 601.2d + CR 603.3d: Triggered abilities divide effects
+                        // while being put on the stack. The chosen per-target amounts
+                        // are resolution data on the resolved ability. The entry is
+                        // already on the stack (pushed at distribute-among pause time);
+                        // mutate its ability with the distribution and release the
+                        // construction cursors so the resolver may now fire it.
+                        pending_trigger.ability.distribution =
+                            Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
+                        let produced = if !triggers::finalize_pending_trigger_entry(
+                            state,
+                            &pending_trigger.ability,
+                        ) {
+                            // Unexpected dangling cursor: the entry is no longer on the
+                            // stack. Recover per CR 608.1 (resolution selects the
+                            // spell or ability on top of the stack, so an entry absent
+                            // from it is never selected to begin resolving) — record
+                            // the diagnostic, abandon, and return priority instead of
+                            // panicking (re-normalized next pass; CR 117.3b would give
+                            // the active player).
+                            triggers::abandon_ceased_pending_trigger(
+                                state,
+                                &pending_trigger.ability,
+                            );
+                            priority::clear_priority_passes(state);
+                            WaitingFor::Priority { player: p }
+                        } else {
+                            priority::clear_priority_passes(state);
+                            // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
+                            // behind this distribute-among trigger so each independent
+                            // instance reaches the stack (issue #416).
+                            debug_assert!(
+                                !triggers::is_pending_trigger_construction_active(state),
+                                "deferred-trigger drain entered with construction still active",
+                            );
+                            if let Some(waiting_for) =
+                                triggers::drain_deferred_trigger_queue(state, &mut events)
+                            {
+                                waiting_for
+                            } else {
+                                WaitingFor::Priority { player: p }
+                            }
+                        };
+                        // Round-20 seam 4: the trigger-owned division arm's produced
+                        // wait — dangling recovery, deferred sibling, or success — goes
+                        // through the construction finisher exactly once. The
+                        // resolution-time and cast-time distribution arms below are not
+                        // trigger-owned and are deliberately untouched.
+                        triggers::finish_trigger_construction_action(state, &mut events, produced)
+                    } else {
+                        // CR 601.2d: an announced division is always owned by a pending
+                        // cast or a pending trigger; with neither there is nothing to
+                        // resume, so the submission is rejected rather than guessed at.
+                        return Err(EngineError::InvalidAction(
+                            "an announced division has no pending cast or trigger".to_string(),
+                        ));
                     }
                 }
-            } else if let Some(mut pending_trigger) = state.pending_trigger.take() {
-                // CR 601.2d + CR 603.3d: Triggered abilities divide effects
-                // while being put on the stack. The chosen per-target amounts
-                // are resolution data on the resolved ability. The entry is
-                // already on the stack (pushed at distribute-among pause time);
-                // mutate its ability with the distribution and release the
-                // construction cursors so the resolver may now fire it.
-                pending_trigger.ability.distribution =
-                    Some(distribution.iter().map(|(t, a)| (t.clone(), *a)).collect());
-                let produced =
-                    if !triggers::finalize_pending_trigger_entry(state, &pending_trigger.ability) {
-                        // Unexpected dangling cursor: the entry is no longer on the
-                        // stack. Recover per CR 608.1 (resolution selects the
-                        // spell or ability on top of the stack, so an entry absent
-                        // from it is never selected to begin resolving) — record
-                        // the diagnostic, abandon, and return priority instead of
-                        // panicking (re-normalized next pass; CR 117.3b would give
-                        // the active player).
-                        triggers::abandon_ceased_pending_trigger(state, &pending_trigger.ability);
-                        priority::clear_priority_passes(state);
-                        WaitingFor::Priority { player: p }
-                    } else {
-                        priority::clear_priority_passes(state);
-                        // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred
-                        // behind this distribute-among trigger so each independent
-                        // instance reaches the stack (issue #416).
-                        debug_assert!(
-                            !triggers::is_pending_trigger_construction_active(state),
-                            "deferred-trigger drain entered with construction still active",
-                        );
-                        if let Some(waiting_for) =
-                            triggers::drain_deferred_trigger_queue(state, &mut events)
-                        {
-                            waiting_for
-                        } else {
-                            WaitingFor::Priority { player: p }
-                        }
-                    };
-                // Round-20 seam 4: the trigger-owned division arm's produced
-                // wait — dangling recovery, deferred sibling, or success — goes
-                // through the construction finisher exactly once. The
-                // resolution-time and cast-time distribution arms below are not
-                // trigger-owned and are deliberately untouched.
-                triggers::finish_trigger_construction_action(state, &mut events, produced)
-            } else {
-                // Resolution-time distribution continuation path.
-                state.waiting_for = WaitingFor::Priority { player: p };
-                state.priority_player = p;
-                resume_pending_continuation_if_priority(state, &mut events)?;
-                state.waiting_for.clone()
             }
         }
         (
@@ -17884,6 +18182,25 @@ pub fn preflight_debug_action(
         {
             return Err(EngineError::InvalidAction(
                 "Debug::CreateCard with ETB processing requires a Priority window".into(),
+            ));
+        }
+    }
+
+    // CR 616.1 + CR 603.3b: a simulated move runs the full destination
+    // pipeline whatever the destination, and two tails of it can park a private
+    // prompt: entry replacements and "as enters" choices (CR 614.12), and the
+    // state-based-action and trigger dispatch that publishes an `OrderTriggers`
+    // ordering choice, a commander-zone choice, a replacement-order choice, or
+    // a legend choice. Only a settled Priority boundary can own either frame; a
+    // second prompt opened under an open one never resumes the preempted one.
+    // The raw move (`simulate: false`) keeps its prior behavior: the debug zone
+    // pipeline never consults replacements or drains triggers, so it installs
+    // only the debug arm's characteristic counters (CR 306.5b / CR 310.4b) and
+    // opens no prompt.
+    if let DebugAction::MoveToZone { simulate: true, .. } = action {
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return Err(EngineError::InvalidAction(
+                "Debug::MoveToZone with simulated processing requires a Priority window".into(),
             ));
         }
     }
@@ -19045,10 +19362,10 @@ fn elect_modal_land_back_face(obj: &mut crate::game::game_object::GameObject) {
 }
 
 /// CR 712.12 + CR 305.2a + CR 305.2b + CR 305.3 + CR 101.2: whether `player` may play the
-/// land back face of the spell//land modal double-faced card `object_id` while
-/// an instructing ability resolves. The object's front face is not a land
-/// (CR 712.8a: outside the battlefield and stack it has only its front face's
-/// characteristics) and its back face is a modal land face. Legality is the
+/// land back face of the modal double-faced card `object_id` — a spell//land
+/// card or a land//land card — while an instructing ability resolves. Its back
+/// face is a modal land face (CR 712.8a: outside the battlefield and stack the
+/// object has only its front face's characteristics). Legality is the
 /// resolution-time land-play authority ([`resolution_land_play_is_legal`]:
 /// turn, prohibitions, allowance) evaluated against the elected land face, on
 /// a projected clone so the real object is not mutated.
@@ -19057,23 +19374,26 @@ pub(crate) fn resolution_back_land_face_play_is_legal(
     player: PlayerId,
     object_id: ObjectId,
 ) -> bool {
-    let Some(obj) = state.objects.get(&object_id) else {
-        return false;
-    };
-    if obj
-        .card_types
-        .core_types
-        .contains(&crate::types::card_type::CoreType::Land)
-        || !modal_land_face_election_available(obj)
-    {
-        return false;
+    project_modal_land_back_face(state, object_id)
+        .is_some_and(|projected| resolution_land_play_is_legal(&projected, player, object_id))
+}
+
+/// CR 712.12: a clone of `state` in which `object_id` presents its elected land
+/// back face — the face that would be played — or `None` when the card has no
+/// modal land back face. Only the face characteristics change; the card's
+/// owner, zone and exile links are untouched, so a filter read on the
+/// projection judges the played face's characteristics and the card's
+/// membership together. The real object is not mutated.
+pub(crate) fn project_modal_land_back_face(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<GameState> {
+    if !modal_land_face_election_available(state.objects.get(&object_id)?) {
+        return None;
     }
     let mut projected = state.clone();
-    let Some(projected_obj) = projected.objects.get_mut(&object_id) else {
-        return false;
-    };
-    elect_modal_land_back_face(projected_obj);
-    resolution_land_play_is_legal(&projected, player, object_id)
+    elect_modal_land_back_face(projected.objects.get_mut(&object_id)?);
+    Some(projected)
 }
 
 /// CR 701.18b + CR 712.12 + CR 305.2a + CR 116.2a: play the land back face of
@@ -19113,16 +19433,18 @@ pub(crate) fn play_land_face_during_resolution(
 /// CR 305.3 "ignore any part of an effect that instructs a player to do so":
 /// nothing happens and nothing is counted.
 ///
-/// No CR 712.12 face prompt is opened here: a land//land modal card bound
-/// outside the graveyard never reaches here from a Play instruction —
-/// `cast_from_zone::resolution_play_route` keeps it on the lingering grant,
-/// whose PlayLand authority (its front face is a Land) opens `ModalFaceChoice`.
-/// A spell//land MDFC never reaches here either: it takes the resolution-owned
-/// face election (`ResolutionPlayRoute::ElectFace`), whose land face is played
-/// by [`play_land_face_during_resolution`]. The `CastFromZone` graveyard route
-/// is excluded from the land//land fallback because base takes the immediate
-/// graveyard route there and never lingers; a graveyard land//land plays its
-/// front face (no printed carrier; its CR 712.12 election is a follow-up).
+/// No CR 712.12 face prompt is opened here: the face, when there is one to
+/// elect, was elected before this is called. A land//land modal card reaches
+/// here by its FRONT face only after the resolution-owned election
+/// (`casting::initiate_resolution_election` / `ModalFaceChoice`) chose it; its
+/// back face, and a spell//land card's land face, are played by
+/// [`play_land_face_during_resolution`]. On the single-card Play route
+/// `cast_from_zone::resolution_play_route` keeps a land//land card outside the
+/// graveyard on the lingering grant, whose PlayLand authority opens
+/// `ModalFaceChoice`; the `CastFromZone` graveyard route is excluded from that
+/// fallback because base takes the immediate graveyard route there and never
+/// lingers, so a graveyard land//land plays its front face (no printed carrier;
+/// moving that route onto the election is a follow-up).
 pub(crate) fn play_land_during_resolution(
     state: &mut GameState,
     player: PlayerId,
@@ -19182,7 +19504,7 @@ fn handle_play_land(
     // e.g. Mindslaver), which always act on the active player's own
     // resources regardless of who submits the choice — that path is
     // unaffected since it never uses shared team turns.
-    let player = if state.format_config.topology().has_shared_team_turns() {
+    let player = if super::topology::side_takes_shared_turn(state, state.active_player) {
         if !super::topology::team_members(state, state.active_player).contains(&acting_player) {
             return Err(EngineError::ActionNotAllowed(
                 "Only the active team may play lands during its turn".to_string(),
@@ -19770,17 +20092,6 @@ pub(super) fn handle_spend_pool_mana(
     player: PlayerId,
     pip_id: crate::types::mana::ManaPipId,
 ) -> Result<(), EngineError> {
-    // The unit must currently exist in the player's pool.
-    let unit = state
-        .players
-        .iter()
-        .find(|p| p.id == player)
-        .and_then(|p| p.mana_pool.shape_of_pip(pip_id))
-        .cloned()
-        .ok_or_else(|| {
-            EngineError::ActionNotAllowed("No such mana unit in pool to pin".to_string())
-        })?;
-
     let pending = state.pending_cast.as_ref().ok_or_else(|| {
         EngineError::ActionNotAllowed("No pending cast to pin mana for".to_string())
     })?;
@@ -19810,17 +20121,7 @@ pub(super) fn handle_spend_pool_mana(
             .map(crate::types::mana::PaymentContext::Spell)
     };
 
-    let mana_spend_permission = super::casting::player_mana_spend_permission_for_payment(
-        state,
-        player,
-        Some(object_id),
-        ctx.as_ref(),
-    );
-    if !mana_unit_eligible_for_cost(&unit, &cost, ctx.as_ref(), mana_spend_permission) {
-        return Err(EngineError::ActionNotAllowed(
-            "Mana unit cannot pay any part of this cost".to_string(),
-        ));
-    }
+    ensure_pool_unit_can_pay(state, player, pip_id, object_id, &cost, ctx.as_ref())?;
 
     if let Some(pc) = state.pending_cast.as_mut() {
         if !pc.pinned_pool_units.contains(&pip_id) {
@@ -19828,6 +20129,88 @@ pub(super) fn handle_spend_pool_mana(
         }
     }
     Ok(())
+}
+
+/// CR 118.3a + CR 106.6: `pip_id` names a unit in `player`'s pool that could
+/// pay part of `cost` under `ctx`; a pin that could never be honored is refused.
+fn ensure_pool_unit_can_pay(
+    state: &GameState,
+    player: PlayerId,
+    pip_id: crate::types::mana::ManaPipId,
+    source: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    ctx: Option<&crate::types::mana::PaymentContext<'_>>,
+) -> Result<(), EngineError> {
+    // The unit must currently exist in the player's pool.
+    let unit = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .and_then(|p| p.mana_pool.shape_of_pip(pip_id))
+        .ok_or_else(|| {
+            EngineError::ActionNotAllowed("No such mana unit in pool to pin".to_string())
+        })?;
+    let mana_spend_permission =
+        super::casting::player_mana_spend_permission_for_payment(state, player, Some(source), ctx);
+    if !mana_unit_eligible_for_cost(unit, cost, ctx, mana_spend_permission) {
+        return Err(EngineError::ActionNotAllowed(
+            "Mana unit cannot pay any part of this cost".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// CR 118.3a: pin a pool unit to pay a manual mana ability's mana sub-cost. A
+/// pin is offered only by the manual window, and only a unit that could pay
+/// part of that cost under the activation's context is accepted (CR 106.6).
+fn handle_spend_pool_mana_for_mana_ability(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingManaAbility,
+    pip_id: crate::types::mana::ManaPipId,
+) -> Result<PendingManaAbility, EngineError> {
+    ensure_manual_mana_ability_payment(pending)?;
+    let cost = mana_abilities::pending_mana_sub_cost(state, pending)?.ok_or_else(|| {
+        EngineError::InvalidAction("This mana ability has no mana cost to pay".to_string())
+    })?;
+    let activation_context =
+        casting::activation_payment_context(state, pending.source_id, pending.ability_index);
+    ensure_pool_unit_can_pay(
+        state,
+        player,
+        pip_id,
+        pending.source_id,
+        &cost,
+        Some(&activation_context.as_payment_context()),
+    )?;
+    let mut updated = pending.clone();
+    if !updated.pinned_pool_units.contains(&pip_id) {
+        updated.pinned_pool_units.push(pip_id);
+    }
+    Ok(updated)
+}
+
+/// CR 118.3a: remove a pin from a manual mana ability's payment.
+fn handle_unspend_pool_mana_for_mana_ability(
+    pending: &PendingManaAbility,
+    pip_id: crate::types::mana::ManaPipId,
+) -> Result<PendingManaAbility, EngineError> {
+    ensure_manual_mana_ability_payment(pending)?;
+    let mut updated = pending.clone();
+    updated.pinned_pool_units.retain(|id| *id != pip_id);
+    Ok(updated)
+}
+
+/// CR 601.2g via CR 602.2b: only a manually paid mana ability directs its pool
+/// units; an automatic one's window is paid by activating mana abilities alone.
+fn ensure_manual_mana_ability_payment(pending: &PendingManaAbility) -> Result<(), EngineError> {
+    if casting::payment_mode_pays_mana_manually(pending.payment_mode) {
+        Ok(())
+    } else {
+        Err(EngineError::ActionNotAllowed(
+            "Pool mana is directed only in a manual mana-ability payment".to_string(),
+        ))
+    }
 }
 
 /// CR 118.3a: Remove a previously-recorded pin. Always legal — a no-op if the
@@ -20813,7 +21196,20 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
     if let Some(archenemy) = super::topology::archenemy(state) {
         // CR 904.6: The archenemy takes the first turn. Default Archenemy does
         // not run the CR 103.1 starting-player contest.
-        return start_game_with_starting_player(state, archenemy);
+        //
+        // Horde Magic reuses the OneVsMany topology (the Horde is the archenemy
+        // seat) but INVERTS the turn order: the survivors take the first turn (and
+        // several setup turns) before the Horde acts. `FormatConfig::starting_player`
+        // already returns a survivor for Horde, and `GameState::new` seeds the
+        // Horde's `turns_to_skip` so the survivor team takes `survivor_setup_turns`
+        // turns first — but only if the game actually STARTS on the survivor. Use
+        // the configured starting player for Horde instead of forcing the archenemy.
+        let first = if state.format_config.format == crate::types::format::GameFormat::Horde {
+            state.format_config.starting_player()
+        } else {
+            archenemy
+        };
+        return start_game_with_starting_player(state, first);
     }
 
     // CR 103.1 / CR 706: roll one d20 per seat; the high roller becomes the
@@ -20863,7 +21259,15 @@ pub fn start_game_with_starting_player(
     let before = state.clone();
     let mut events = Vec::new();
     state.outside_game_cards_brought_in.clear();
-    let starting_player = super::topology::archenemy(state).unwrap_or(starting_player);
+    // CR 904.6: default Archenemy forces the archenemy to take the first turn,
+    // overriding any passed starter. Horde reuses the OneVsMany topology but the
+    // survivors go first, so it must honor the passed starting player (a survivor)
+    // rather than snapping back to the Horde seat.
+    let starting_player = if state.format_config.format == crate::types::format::GameFormat::Horde {
+        starting_player
+    } else {
+        super::topology::archenemy(state).unwrap_or(starting_player)
+    };
 
     if state.match_config.match_type == MatchType::Bo3
         && state.players.len() != 2
@@ -20913,12 +21317,10 @@ pub fn start_game_with_starting_player(
     // If players have cards in their libraries, start mulligan flow
     let has_libraries = state.players.iter().any(|p| !p.library.is_empty());
     let waiting_for = if has_libraries {
-        // CR 702.139a: Check for eligible companions before mulligans.
-        if let Some(companion_wf) = super::companion::check_all_companion_reveals(state) {
-            companion_wf
-        } else {
-            mulligan::start_mulligan(state, &mut events)
-        }
+        // CR 103.2b + CR 103.2e: companion reveals come before conspiracies
+        // enter the command zone and their hidden-agenda names are chosen;
+        // mulligans follow both.
+        super::conspiracy::begin_pregame(state, &mut events)
     } else {
         // No cards to mulligan with, skip straight to game
         crate::game::planechase::reveal_starting_plane(state);
@@ -29447,6 +29849,7 @@ mod resolving_carrier_settle_tests {
                                 .execute(AbilityDefinition::new(
                                     AbilityKind::Spell,
                                     Effect::ChangeZone {
+                                        library_shuffle: Default::default(),
                                         destination: Zone::Exile,
                                         origin: None,
                                         target: TargetFilter::SelfRef,
