@@ -4855,6 +4855,51 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
+    it("completes the reattach with the whole bootstrap applied when a matchStarting subscriber throws on its DraftMatchStart", async () => {
+      vi.useFakeTimers();
+      const { adapter, candidate, reconnecting } = await sentCandidate();
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      let armed = true;
+      const failure = new Error("matchStarting subscriber failed");
+      adapter.onEvent((event) => {
+        if (event.type !== "matchStarting" || !armed) return;
+        armed = false;
+        throw failure;
+      });
+      const reported: unknown[] = [];
+      const onError = (event: ErrorEvent) => { reported.push(event.error); event.preventDefault(); };
+      window.addEventListener("error", onError);
+      const roundTwo = {
+        match_id: "r2-t0", round: 2, game_code: "GAME02", full_key: { game_code: "GAME02", generation: 1 },
+        player_token: "match-draft-token", your_player: 0, opponent_name: "Bob",
+      };
+      try {
+        // The server's order for a reattach into a new match (main.rs:2812-2817).
+        receive(candidate, "DraftMatchStart", roundTwo);
+        candidate.dispatchSynthetic("message", draftFrame("Full", {
+          type: "GameStarted",
+          data: { state: matchState("round-two-start"), your_player: 0, full_key: roundTwo.full_key },
+        }));
+        receive(candidate, "DraftStateUpdate", { view: createMockDraftView({ status: "MatchInProgress" }) });
+        await vi.waitFor(() => expect(reconnecting.value()).toEqual({ resolvedWith: undefined }));
+        expect(armed).toBe(false);
+        expect(reported).toEqual([failure]);
+        expect(candidate.close).not.toHaveBeenCalled();
+        expect(adapter.currentMatchId).toBe("r2-t0");
+        // The rest of the bootstrap was applied: the round-two snapshot is
+        // published and the candidate carries on.
+        await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({
+          type: "gameStateUpdated", state: expect.objectContaining({ label: "round-two-start" }),
+        })));
+        expect((await adapter.getSnapshot()).state).toMatchObject({ label: "round-two-start" });
+      } finally {
+        window.removeEventListener("error", onError);
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
     it("fails the reattach when the settling frame throws before it settles it", async () => {
       vi.useFakeTimers();
       const { adapter, candidate, reconnecting } = await sentCandidate();

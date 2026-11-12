@@ -6780,6 +6780,37 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       }
     });
 
+    it.each(["join", "spectate"] as const)(
+      "settles an initial %s at once when its candidate closes while its setup receipt is held",
+      async (mode) => {
+        MockWebSocket.last = null;
+        const codec = scriptedCodec();
+        const adapter = new WebSocketAdapter(
+          "wss://localhost:9374/ws", mode, { main_deck: [], sideboard: [] }, "GAME01",
+          undefined, undefined, undefined,
+          { stateCodecSessionProvider: () => Promise.resolve(codec.session) },
+        );
+        const init = observe(adapter.initialize());
+        await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+        const candidate = latestSocket();
+        // The encoder holds the receipt: the frame's fate is unknown.
+        candidate.sendReceipt = vi.fn(() => new Promise<void>(() => undefined));
+        try {
+          candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+          await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+          // The peer's transport dies while the write is still held.
+          candidate.readyState = 3;
+          candidate.dispatchSynthetic("close");
+          await vi.advanceTimersByTimeAsync(0);
+          // Settled before the encoder answers, and the lease is released once.
+          expect(init.value()).toMatchObject({ code: "WS_CLOSED" });
+          expect(codec.close).toHaveBeenCalledOnce();
+        } finally {
+          adapter.dispose();
+        }
+      },
+    );
+
     it.each([
       ["frame count", 65, 1024],
       ["expanded text", 17, 1024 * 1024],
@@ -7074,6 +7105,63 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
           await vi.waitFor(() => expect(init.value()).toMatchObject({ resolvedWith: undefined }));
           expect(events).toContainEqual({ type: "reconnected", inGame: true });
         } finally {
+          adapter.dispose();
+        }
+      },
+    );
+
+    it.each([
+      ["before", "success", "raw"],
+      ["after", "success", "gzip"],
+      ["before", "close", "raw"],
+      ["after", "close", "raw"],
+    ] as const)(
+      "leaves the initialization and game-start waiters (created %s) to the candidate when the incumbent's GameStarted lands inside the interval (candidate %s, %s)",
+      async (timing, outcome, wire) => {
+        const random = vi.spyOn(Math, "random").mockReturnValue(0);
+        const { adapter, raw, candidate, events, init } = await pregameIncumbentWithCandidate(wire);
+        try {
+          let waiter = timing === "before" ? observe(adapter.waitForGameStarted()) : null;
+          // The incumbent's own, already-in-flight GameStarted arrives while the
+          // candidate's Reconnect is unanswered.
+          raw.dispatchSynthetic("message", JSON.stringify({
+            type: "GameStarted",
+            data: {
+              state_revision: 1, state: createMockState(), your_player: 0,
+              player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+            },
+          }));
+          await vi.advanceTimersByTimeAsync(0);
+          // Reach guard: the incumbent's frame was applied.
+          expect(events).toContainEqual({ type: "bootstrapDelivered" });
+          if (waiter === null) waiter = observe(adapter.waitForGameStarted());
+          await vi.advanceTimersByTimeAsync(0);
+          // Its state may be cached, but the operations the candidate owns stay open.
+          expect(init.value()).toBe("never settled");
+          expect(waiter.value()).toBe("never settled");
+          if (outcome === "success") {
+            const bootstrap = JSON.stringify({
+              type: "GameStarted",
+              data: {
+                state_revision: 2, state: createMockState(), your_player: 0,
+                player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+              },
+            });
+            candidate.dispatchSynthetic("message", wire === "gzip"
+              ? (await encodeJsonEnvelope(bootstrap)).buffer as unknown as string
+              : bootstrap);
+            await vi.waitFor(() => expect(init.value()).toMatchObject({ resolvedWith: undefined }));
+            await vi.waitFor(() => expect(waiter.value()).toMatchObject({ resolvedWith: undefined }));
+          } else {
+            candidate.readyState = 3;
+            candidate.dispatchSynthetic("close");
+            await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "reconnecting" })));
+            // The candidate decides: its failure ends the join as a failure, which
+            // the incumbent's earlier frame had not already turned into success.
+            expect(init.value()).toMatchObject({ code: "WS_CLOSED" });
+          }
+        } finally {
+          random.mockRestore();
           adapter.dispose();
         }
       },

@@ -1585,6 +1585,26 @@ describe("openPhaseSocket — codec stream, recovery and teardown", () => {
     expect(fake.close).toHaveBeenCalledOnce();
   });
 
+  // A session whose decode throws synchronously, instead of rejecting a promise,
+  // is the same decoder failure: one close, one lease release, no resync (the
+  // gzip wrapper is covered in the bounded-backlog suite below).
+  it("terminates the socket once when the decoder throws synchronously (raw)", async () => {
+    const fake = fakeSession();
+    fake.decode.mockImplementationOnce(() => { throw new Error("State codec session is closed"); });
+    const { raw, socket, received } = await negotiated(fake);
+    const closed = vi.fn();
+    socket.ws.onclose = closed;
+    raw.deliverMessage(JSON.stringify({ type: "Pong", data: { timestamp: 1 } }));
+    await vi.waitFor(() => expect(received).toHaveBeenCalledOnce());
+
+    raw.deliverMessage(codecFrame("Full"));
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    expect(fake.decode).toHaveBeenCalledOnce();
+    expect(fake.close).toHaveBeenCalledOnce();
+    expect(raw.close).toHaveBeenCalledOnce();
+    expect(raw.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+  });
+
   // A decoder/RPC failure is a transport failure, not codec integrity: the
   // socket must terminate (one close, one lease release) and must not ask the
   // server for a resync it could never decode.
@@ -1696,6 +1716,22 @@ describe("openPhaseSocket — bounded expanded codec backlog", () => {
     received.mockClear();
     return { raw, socket, received, recovery };
   }
+
+  it("terminates the socket once when the decoder throws synchronously (gzip)", async () => {
+    const fake = fakeSession();
+    fake.decode.mockImplementationOnce(() => { throw new Error("State codec session is closed"); });
+    const { raw, socket } = await negotiated(fake);
+    const closed = vi.fn();
+    socket.ws.onclose = closed;
+    const full = await encodeJsonEnvelope(paddedFrame("Full"));
+    expect(full[0]).toBe(0x01);
+    raw.deliverMessage(full.buffer);
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce());
+    expect(fake.decode).toHaveBeenCalledOnce();
+    expect(fake.close).toHaveBeenCalledOnce();
+    expect(raw.close).toHaveBeenCalledOnce();
+    expect(raw.send).not.toHaveBeenCalledWith('{"type":"ResyncState"}');
+  });
 
   it.each(["message count", "UTF-16 bytes"] as const)(
     "terminates an expanded %s overload before the active decode settles",

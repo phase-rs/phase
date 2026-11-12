@@ -1999,6 +1999,10 @@ export class WebSocketAdapter implements EngineAdapter {
    * continuation has settled the incumbent's standing.
    */
   private submissionGatePreparation: AbortController | null = null;
+  /** The incumbent the open interval fences: only its frames and events are held back. */
+  private fencedIncumbent: PhaseSocketTransport | null = null;
+  /** The socket whose frame `handleMessage` is dispatching right now. */
+  private frameSource: PhaseSocketTransport | null = null;
   /** Monotonic attach identity: a retry timer belongs to the attempt that scheduled it. */
   private attachGeneration = 0;
   private socketDiagnostics: SocketDiagnosticObserver | null = null;
@@ -2527,6 +2531,19 @@ export class WebSocketAdapter implements EngineAdapter {
     // Until setup completes, this continuation owns cleanup even if a public
     // listener throws, disposes the adapter, or starts another attachment.
     let retained = false;
+    // An unconfirmed attachment's setup write is pending, and whether its
+    // candidate closed meanwhile: a close that lands then settles the attachment
+    // at once, not when the held write answers.
+    let writePending = false;
+    let closedDuringWrite = false;
+    const failUnwrittenSetup = (message: string) => {
+      if (this.initialFallbackActive()) {
+        this.failInitialFallback(initialFallbackFailure());
+        return;
+      }
+      this.rejectInitialization(new AdapterError("WS_CLOSED", message, true));
+      if (this.reconnectInFlight) this.attemptReconnect();
+    };
     try {
       const superseded = this.isSupersededAttachment(preparation);
       // The opening latch belongs to the newest attachment.
@@ -2583,7 +2600,13 @@ export class WebSocketAdapter implements EngineAdapter {
           );
           return;
         }
-        return this.handleMessage(message as { type: string; data?: unknown });
+        const outer = this.frameSource;
+        this.frameSource = socket.ws;
+        try {
+          return this.handleMessage(message as { type: string; data?: unknown });
+        } finally {
+          this.frameSource = outer;
+        }
       };
       // Keep admission buffered through public handoff callbacks and the
       // entire drain: their synchronous replies follow already-admitted frames.
@@ -2621,7 +2644,7 @@ export class WebSocketAdapter implements EngineAdapter {
         // the initialization it may still hold belongs to the candidate's
         // episode (see `frameDecidesEpisode`): its transport error settles
         // nothing here, and its close follows.
-        if (!this.frameDecidesEpisode()) return;
+        if (!this.frameDecidesEpisode(socket.ws)) return;
         // The initialization is the single failure surface of an initial fallback.
         if (this.initialFallbackActive()) {
           this.failInitialFallback(initialFallbackFailure());
@@ -2640,6 +2663,16 @@ export class WebSocketAdapter implements EngineAdapter {
         // disposal must not request another physical close.
         closed = true;
         confirmation?.closed();
+        if (writePending && !this.disposed) {
+          closedDuringWrite = true;
+          const owns = this.stateCodecPreparation === preparation && !preparation.signal.aborted;
+          if (this.setupWritePreparation === preparation) this.setupWritePreparation = null;
+          retireSocket();
+          // A successor owns its own initialization: only an attachment that
+          // still owns the episode settles it.
+          if (owns) failUnwrittenSetup("Connection closed during setup");
+          return;
+        }
         if (this.ws !== socket.ws) return;
         this.ws = null;
         this.closeSocket = null;
@@ -2662,7 +2695,7 @@ export class WebSocketAdapter implements EngineAdapter {
           // transport resources; the initialization and game-start waiters it
           // may still hold transfer to the candidate's episode, whose result
           // decides them.
-          if (!this.frameDecidesEpisode()) return;
+          if (!this.frameDecidesEpisode(socket.ws)) return;
           // Initial fallback, unlike an ordinary reconnect, owns its join
           // promise across retryable losses until its episode ends.
           if (this.admitInitialFallback(bootstrap, socket.ws)) {
@@ -2733,6 +2766,7 @@ export class WebSocketAdapter implements EngineAdapter {
         if (confirmsSetup) {
           this.confirmingPreparation = preparation;
           this.submissionGatePreparation = preparation;
+          this.fencedIncumbent = previous;
           const transport = socket.ws;
           confirmation = new SetupConfirmation(SETUP_CONFIRMATION_TIMEOUT_MS, () => (
             transport instanceof StateCodecSocket ? transport.decodeInFlight : null
@@ -2751,9 +2785,11 @@ export class WebSocketAdapter implements EngineAdapter {
             retireSocket();
           };
           preparation.signal.addEventListener("abort", onAbort, { once: true });
+          writePending = true;
           try {
             written = await write;
           } finally {
+            writePending = false;
             preparation.signal.removeEventListener("abort", onAbort);
           }
         } else {
@@ -2790,18 +2826,19 @@ export class WebSocketAdapter implements EngineAdapter {
         }
       } finally {
         if (this.setupWritePreparation === preparation) this.setupWritePreparation = null;
-        if (this.confirmingPreparation === preparation) this.confirmingPreparation = null;
+        if (this.confirmingPreparation === preparation) {
+          this.confirmingPreparation = null;
+          this.fencedIncumbent = null;
+        }
         if (this.submissionGatePreparation === preparation) this.submissionGatePreparation = null;
         confirmation?.dispose();
       }
+      // The candidate closed while the write was pending: its close already
+      // settled (or left to the successor) the attachment.
+      if (closedDuringWrite) return;
       if (!written) {
         if (this.disposed || this.stateCodecPreparation !== preparation) return;
-        if (this.initialFallbackActive()) {
-          this.failInitialFallback(initialFallbackFailure());
-          return;
-        }
-        this.rejectInitialization(new AdapterError("WS_CLOSED", "Failed to send setup frame", true));
-        if (this.reconnectInFlight) this.attemptReconnect();
+        failUnwrittenSetup("Failed to send setup frame");
         return;
       }
       // The candidate's setup is on the wire (or its fate is unknown, above),
@@ -3414,14 +3451,15 @@ export class WebSocketAdapter implements EngineAdapter {
   }
 
   /**
-   * Whether a frame reaching `handleMessage` may decide the reconnect episode.
-   * While a reconnect interval is open the current socket is the incumbent
-   * (the candidate's frames are buffered until it is adopted): its frames may
-   * apply their state and answer its own requests, but only the candidate's
-   * answer completes or fails the episode.
+   * Whether a frame or transport event of `source` (by default the frame being
+   * dispatched) may decide the reconnect episode. While a reconnect interval is
+   * open the incumbent is fenced: its frames may apply their state and answer
+   * its own requests, but only the candidate's answer completes or fails the
+   * episode. The fence names the incumbent, so a successor attachment's own
+   * frames are never held back by it.
    */
-  private frameDecidesEpisode(): boolean {
-    return this.confirmingPreparation === null;
+  private frameDecidesEpisode(source: PhaseSocketTransport | null = this.frameSource): boolean {
+    return this.confirmingPreparation === null || source === null || source !== this.fencedIncumbent;
   }
 
   /** Whether the initialization-owned fallback is running right now. */
@@ -4198,7 +4236,11 @@ export class WebSocketAdapter implements EngineAdapter {
         );
         this.cachedStateRevision = data.state_revision ?? null;
         this._playerId = data.your_player;
-        this.receivedGameStarted = true;
+        // The waiters, and the latch that lets a late `waitForGameStarted` skip
+        // its wait, belong to the episode: an incumbent's GameStarted inside a
+        // reconnect interval applies its state but leaves them to the candidate.
+        const decidesWaiters = this.frameDecidesEpisode();
+        if (decidesWaiters) this.receivedGameStarted = true;
         // Joiners receive their player_token here (hosts get it via GameCreated).
         // Set _gameCode from joinGameCode if not already set (host sets it via GameCreated).
         if (!this._gameCode && this.joinGameCode) {
@@ -4258,8 +4300,8 @@ export class WebSocketAdapter implements EngineAdapter {
           opponentName: data.opponent_name ?? null,
           ...(playerNames === undefined ? {} : { playerNames }),
         });
-        const initializedNow = this.initResolve !== null;
-        if (this.initResolve) {
+        const initializedNow = decidesWaiters && this.initResolve !== null;
+        if (decidesWaiters && this.initResolve) {
           // CR 103.1: the server sends the StartingPlayerContest event only on
           // the initial GameStarted (drained server-side, so reconnects carry
           // none). Stash it for initializeGame() to return, routing it through
@@ -4269,7 +4311,7 @@ export class WebSocketAdapter implements EngineAdapter {
           this.initResolve = null;
           this.initReject = null;
         }
-        if (this.gameStartedResolve) {
+        if (decidesWaiters && this.gameStartedResolve) {
           this.gameStartedResolve();
           this.gameStartedResolve = null;
           this.gameStartedReject = null;

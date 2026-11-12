@@ -481,8 +481,10 @@ tag can settle it is parsed once there, must parse as that envelope, and is
 the envelope dispatched after adoption, so the bootstrap is parsed once.
 Frames already admitted for that candidate stay buffered through those
 callbacks and drain in wire order, so a synchronous
-peer reply cannot overtake an older bootstrap. A game command is also refused
-with the typed unsent error until the *current* socket has accepted its own
+peer reply cannot overtake an older bootstrap. While a reconnect interval is
+open, the game adapter refuses a submission with the typed unsent error; an
+ordinary game submission has no further accepted-bootstrap guard. The draft
+adapter refuses a command until the *current* socket has accepted its own
 validated `GameStarted`; a predecessor's Full never authorizes the replacement.
 The socket and its owning match key are bound together when the command is
 claimed, before pending-indicator listeners run, so a synchronous match change

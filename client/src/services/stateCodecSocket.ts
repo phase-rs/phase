@@ -734,7 +734,15 @@ export class StateCodecSocket implements PhaseSocketTransport {
   /** Decode, or terminate. `null` means the transport is already finished. */
   private async decode(text: string): Promise<StateCodecDecodeResult | null> {
     const frame = this.encoder.encode(text);
-    const pending = this.options.session.decode(frame);
+    let pending: Promise<StateCodecDecodeResult>;
+    try {
+      // A session may throw synchronously (a closed-session guard, say): that is
+      // the same decoder failure as a rejected promise, inside the same boundary.
+      pending = this.options.session.decode(frame);
+    } catch {
+      this.terminate("immediate", "decodeFailure", this.credentialsOf(text));
+      return null;
+    }
     this.decoding = pending;
     try {
       return await pending;
