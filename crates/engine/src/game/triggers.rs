@@ -9554,15 +9554,40 @@ pub(crate) fn park_entry_observer_triggers_if_paused(
     events: &mut Vec<GameEvent>,
     slice_start: usize,
 ) {
-    park_observer_triggers_if_paused_matching(state, events, slice_start, |event| {
-        matches!(
-            event,
-            GameEvent::ZoneChanged {
-                to: Zone::Battlefield,
-                ..
-            }
-        )
-    });
+    park_observer_triggers_if_paused_matching(state, events, slice_start, is_battlefield_entry);
+}
+
+/// CR 603.2 + CR 603.6a + CR 702.104a: the entry collector for an answer
+/// handler that returns its result directly, bypassing
+/// `run_post_action_pipeline` (the Tribute answer, which is what puts the
+/// creature onto the battlefield). Only this answer's battlefield entries,
+/// filtered as [`park_entry_observer_triggers_if_paused`] filters them; once the
+/// action has settled they are queued and the deferred queue is drained, as
+/// [`collect_and_drain_observer_triggers_if_settled`] drains it.
+pub(crate) fn collect_and_drain_entry_observer_triggers_if_settled(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+) {
+    if triggered_mana_sidecar_owns_local_collection(state) {
+        return;
+    }
+    collect_answer_slice_matching(state, events, slice_start, is_battlefield_entry);
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && !state.deferred_triggers.is_empty()
+    {
+        let _ = drain_deferred_trigger_queue(state, events);
+    }
+}
+
+fn is_battlefield_entry(event: &GameEvent) -> bool {
+    matches!(
+        event,
+        GameEvent::ZoneChanged {
+            to: Zone::Battlefield,
+            ..
+        }
+    )
 }
 
 fn park_observer_triggers_if_paused_matching(
@@ -9577,6 +9602,18 @@ fn park_observer_triggers_if_paused_matching(
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         return;
     }
+    collect_answer_slice_matching(state, events, slice_start, keep);
+}
+
+/// The slice an answer emitted, minus what a live announcement owns and what
+/// another collector already queued, narrowed by `keep`, through the action-end
+/// collector (and so the entry gate).
+fn collect_answer_slice_matching(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+    keep: impl Fn(&GameEvent) -> bool,
+) {
     // A resumed simultaneous move can hand back a buffer the batch drain has
     // already taken into its pending frame, leaving events shorter than the
     // anchor captured before the answer ran (zone_pipeline::drain_pending_batch_deliveries).

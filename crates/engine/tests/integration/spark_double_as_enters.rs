@@ -2767,7 +2767,12 @@ mod feldon_tokens {
             // Reach guard: the paid counter stopped on its order for each copy.
             // The second copy is not offered its own Tribute after the first
             // copy's ordered counter; the merge base behaves the same.
-            assert_eq!((tributes, counter_orders), (1, 2));
+            assert_eq!(
+                (tributes, counter_orders),
+                (1, 2),
+                "pre-existing, as at the merge base: the second copy is not offered its own \
+                 Tribute (CR 702.104a) after the first copy's ordered counter"
+            );
         } else {
             assert_eq!((tributes, counter_orders), (2, 0), "one Tribute per copy");
         }
@@ -2821,6 +2826,79 @@ mod feldon_tokens {
         let (copies, gained) = fanatic_copies_and_warden_life(2, P1, true);
         assert_eq!(copies.len(), 2, "Doubling Season makes two copies");
         assert_eq!(gained, 2, "Soul Warden sees both copies");
+    }
+
+    const SATORU: &str = "Menace\nWhenever Satoru and/or one or more other nontoken creatures you control enter, if none of them were cast or no mana was spent to cast them, draw a card.";
+    const EVER_AFTER: &str = "Return up to two target creature cards from your graveyard to the battlefield. Each of those creatures is a black Zombie in addition to its other colors and types. Put Ever After on the bottom of its owner's library.";
+
+    /// Put Hardened Scales first in each counter order, keep trigger order, and
+    /// pass priority until the stack is empty.
+    fn settle_answering(runner: &mut GameRunner, scales: ObjectId) {
+        for _ in 0..40 {
+            match &runner.state().waiting_for {
+                WaitingFor::ReplacementChoice { candidates, .. } => {
+                    let index = candidates
+                        .iter()
+                        .position(|candidate| candidate.source_id == scales)
+                        .expect("Hardened Scales is offered");
+                    runner.act(GameAction::ChooseReplacement { index }).unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        panic!("the game did not settle");
+    }
+
+    /// CR 603.2c + CR 616.1: Ever After returns two Servant of the Scale cards
+    /// as one event. Each enters with a counter whose Hardened Scales /
+    /// Doubling Season order stops the move, and each order's answer resumes the
+    /// logical zone-change owner. Satoru, the Infiltrator's "one or more other
+    /// nontoken creatures you control enter" ability triggers once for the
+    /// event: one draw. A positive witness that the answer parks leave a card
+    /// batch's batched observers to its owner; the merge base also draws once.
+    #[test]
+    fn a_counter_order_answer_inside_a_card_batch_triggers_a_one_or_more_observer_once() {
+        let (mut scenario, _feldon) = setup();
+        scenario
+            .add_creature_from_oracle(P0, "Satoru, the Infiltrator", 2, 3, SATORU)
+            .as_legendary()
+            .with_subtypes(vec!["Human", "Ninja", "Rogue"]);
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", SEASON);
+        let first = graveyard_servant_of_the_scale(&mut scenario);
+        let second = graveyard_servant_of_the_scale(&mut scenario);
+        let ever_after = scenario
+            .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+            .id();
+        let mut runner = scenario.build();
+        let library = runner.state().players[0].library.len();
+        runner
+            .cast(ever_after)
+            .target_objects(&[first, second])
+            .resolve();
+        // Reach guard: the batch stopped on a counter order.
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        settle_answering(&mut runner, scales);
+        assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+        assert_eq!(
+            library - runner.state().players[0].library.len(),
+            1,
+            "one draw for the one entry event"
+        );
     }
 
     #[test]
