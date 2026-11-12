@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import initDraft from "@wasm/draft";
 import initEngine, {
-  export_game_state_json, get_legal_actions_js, initialize_game, load_card_database as loadEngineCards,
+  export_game_state_json, get_legal_actions_js, initialize_draft_match_game, initialize_game, load_card_database as loadEngineCards,
 } from "@wasm/engine";
 
 const { hostRoom, saveDraftHostSession } = vi.hoisted(() => ({
@@ -137,7 +137,7 @@ describe("custom Cube submission to real Limited game", () => {
       ai_decks: [],
     };
     expect(payload.player.main_deck).toBe(exported.main_deck);
-    const result = initialize_game(
+    const result = initialize_draft_match_game(
       payload, 291, formatMetadata("Limited")!.default_config, { match_type: "Bo1" }, 2, 0,
       // The draft-match initializer's authority: the session's resolved minimum.
       view.min_deck_size,
@@ -150,7 +150,7 @@ describe("custom Cube submission to real Limited game", () => {
     expect((get_legal_actions_js() as { actions: unknown[] }).actions.length).toBeGreaterThan(0);
     console.info(`Cube proof: exported submission ${exported.main_deck.length}, game decks ${decks.map((deck) => deck.length).join("/")}`);
 
-    const invalid = initialize_game(
+    const invalid = initialize_draft_match_game(
       { ...payload, player: { ...payload.player, main_deck: [...exported.main_deck.slice(1), "Unknown proof card"] } },
       291, formatMetadata("Limited")!.default_config, { match_type: "Bo1" }, 2, 0, view.min_deck_size,
     ) as { error?: boolean; reasons?: string[] };
@@ -192,13 +192,16 @@ describe("custom Cube submission to real Limited game", () => {
   function launch(
     mainDeck: string[], minimum: number | undefined, config = formatMetadata("Limited")!.default_config,
   ): { error?: boolean; reasons?: string[] } {
-    return initialize_game(
-      {
-        player: { main_deck: mainDeck, sideboard: [], commander: [], companion: [YORION] },
-        opponent: { main_deck: Array<string>(20).fill("Forest"), sideboard: [], commander: [] },
-        ai_decks: [],
-      },
-      291, config, { match_type: "Bo1" }, 2, 0, minimum,
+    const payload = {
+      player: { main_deck: mainDeck, sideboard: [], commander: [], companion: [YORION] },
+      opponent: { main_deck: Array<string>(20).fill("Forest"), sideboard: [], commander: [] },
+      ai_decks: [],
+    };
+    // `undefined` is an ordinary launch through the generic initializer, which
+    // takes no minimum; a number is the accepted draft's match launch.
+    return (minimum === undefined
+      ? initialize_game(payload, 291, config, { match_type: "Bo1" }, 2, 0)
+      : initialize_draft_match_game(payload, 291, config, { match_type: "Bo1" }, 2, 0, minimum)
     ) as { error?: boolean; reasons?: string[] };
   }
 

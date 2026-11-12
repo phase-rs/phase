@@ -4,7 +4,7 @@ import { FORMAT_DEFAULTS } from "../../stores/multiplayerStore";
 import {
   limitedFormatConfigForSession,
   minimumDeckSizeOf,
-  splitDraftSessionAuthority,
+  draftSessionAuthorityOf,
 } from "../draftFormatConfig";
 
 // CR 100.2b + CR 702.139b: a draft match runs under the session's own minimum
@@ -12,34 +12,27 @@ import {
 describe("limitedFormatConfigForSession", () => {
   const base = FORMAT_DEFAULTS.Limited;
 
-  it("carries a Cube's configured minimum beside, never inside, the format payload", () => {
+  it("issues a Cube's minimum against the exact launch config, never inside the payload", () => {
     const config = limitedFormatConfigForSession(base, 50);
     expect(minimumDeckSizeOf(config)).toBe(50);
-    expect(config.draft_session_min_deck_size).toBe(50);
+    expect(draftSessionAuthorityOf(config)).toBe(50);
     // The payload keeps the registry rule and claims no provenance.
     expect(config.deck_size).toEqual(base.deck_size);
     expect(config.deck_size_origin).toBeUndefined();
+    expect(JSON.stringify(config)).toBe(JSON.stringify(base));
   });
 
   it("supports a minimum below 40", () => {
     expect(minimumDeckSizeOf(limitedFormatConfigForSession(base, 20))).toBe(20);
   });
 
-  it("lifts the carrier into the draft-match initializer parameter at the engine boundary", () => {
-    const { formatConfig, draftSessionMinDeckSize } = splitDraftSessionAuthority(
-      limitedFormatConfigForSession(base, 20),
-    );
-    expect(draftSessionMinDeckSize).toBe(20);
-    expect(formatConfig).toEqual(base);
-    expect(formatConfig).not.toHaveProperty("draft_session_min_deck_size");
-    expect(splitDraftSessionAuthority(base)).toEqual({
-      formatConfig: base,
-      draftSessionMinDeckSize: undefined,
-    });
-    expect(splitDraftSessionAuthority(null)).toEqual({
-      formatConfig: null,
-      draftSessionMinDeckSize: undefined,
-    });
+  it("carries no authority through a copy or a hand-edited config", () => {
+    const issued = limitedFormatConfigForSession(base, 20);
+    expect(draftSessionAuthorityOf({ ...issued })).toBeUndefined();
+    expect(draftSessionAuthorityOf(structuredClone(issued))).toBeUndefined();
+    expect(draftSessionAuthorityOf({ ...base, draft_session_min_deck_size: 20 } as never)).toBeUndefined();
+    expect(draftSessionAuthorityOf(base)).toBeUndefined();
+    expect(draftSessionAuthorityOf(null)).toBeUndefined();
   });
 
   it("keeps the base config when the session minimum is the format's own or unknown", () => {

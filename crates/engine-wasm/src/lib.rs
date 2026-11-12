@@ -1952,7 +1952,6 @@ pub fn initialize_game(
     match_config_js: JsValue,
     player_count: Option<u8>,
     first_player: Option<u8>,
-    draft_session_min_deck_size: Option<u32>,
 ) -> JsValue {
     if let Err(reason) = init_guard(InitSessionKind::Local) {
         return occupied_refusal(reason);
@@ -1964,7 +1963,38 @@ pub fn initialize_game(
         match_config_js,
         player_count,
         first_player,
-        draft_session_min_deck_size,
+        None,
+        InitSessionKind::Local,
+    )
+}
+
+/// Initialize the match of an ACCEPTED draft (CR 100.2b): the only entry that
+/// confers a draft session's minimum deck size on a Limited game. The generic
+/// initializers take no minimum at all, so an ordinary launch cannot grant
+/// itself the session's deck-size authority; the declared format config must
+/// still validate as an ordinary game, and `FormatConfig::
+/// with_draft_session_minimum` admits Limited only.
+#[wasm_bindgen]
+pub fn initialize_draft_match_game(
+    deck_data: JsValue,
+    seed: Option<f64>,
+    format_config_js: JsValue,
+    match_config_js: JsValue,
+    player_count: Option<u8>,
+    first_player: Option<u8>,
+    session_min_deck_size: u32,
+) -> JsValue {
+    if let Err(reason) = init_guard(InitSessionKind::Local) {
+        return occupied_refusal(reason);
+    }
+    initialize_game_impl(
+        deck_data,
+        seed,
+        format_config_js,
+        match_config_js,
+        player_count,
+        first_player,
+        Some(session_min_deck_size),
         InitSessionKind::Local,
     )
 }
@@ -1992,7 +2022,6 @@ pub fn initialize_multiplayer_host_game(
     match_config_js: JsValue,
     player_count: Option<u8>,
     first_player: Option<u8>,
-    draft_session_min_deck_size: Option<u32>,
 ) -> JsValue {
     if let Err(reason) = init_guard(InitSessionKind::MultiplayerHost) {
         return occupied_refusal(reason);
@@ -2004,7 +2033,35 @@ pub fn initialize_multiplayer_host_game(
         match_config_js,
         player_count,
         first_player,
-        draft_session_min_deck_size,
+        None,
+        InitSessionKind::MultiplayerHost,
+    )
+}
+
+/// The multiplayer-host sibling of [`initialize_draft_match_game`]: starts an
+/// accepted draft's P2P match and claims the engine for the host session in the
+/// same call.
+#[wasm_bindgen]
+pub fn initialize_draft_match_host_game(
+    deck_data: JsValue,
+    seed: Option<f64>,
+    format_config_js: JsValue,
+    match_config_js: JsValue,
+    player_count: Option<u8>,
+    first_player: Option<u8>,
+    session_min_deck_size: u32,
+) -> JsValue {
+    if let Err(reason) = init_guard(InitSessionKind::MultiplayerHost) {
+        return occupied_refusal(reason);
+    }
+    initialize_game_impl(
+        deck_data,
+        seed,
+        format_config_js,
+        match_config_js,
+        player_count,
+        first_player,
+        Some(session_min_deck_size),
         InitSessionKind::MultiplayerHost,
     )
 }
@@ -4358,9 +4415,11 @@ fn resume_multiplayer_host_state_inner(
                 state.players.len()
             )
         })?;
+        // An engine-issued snapshot keeps the draft session's deck-size origin
+        // its draft-match launch stamped; new-game ingress would refuse it.
         state
             .format_config
-            .validate_for_player_count(player_count)?;
+            .validate_restored_for_player_count(player_count)?;
         let fresh_seed: u64 = rand::rng().random();
         state.rng_seed = fresh_seed;
         state.rng = engine::types::game_state::GameRng::seed_from_u64(fresh_seed);
@@ -4580,6 +4639,38 @@ mod restored_card_db_requirements_tests {
         );
         assert!(!game_state_present());
         assert!(!is_multiplayer_mode());
+    }
+
+    /// CR 100.2b: a draft match's snapshot (the host's saved state) keeps the
+    /// draft session's deck-size origin its launch stamped, so the host can
+    /// resume it; new-game ingress with the same origin is still refused.
+    #[test]
+    fn multiplayer_host_resume_keeps_the_draft_sessions_deck_size_origin() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let config = resolve_initialize_format_config(Some(FormatConfig::limited()), 2, Some(20))
+            .expect("the draft-match initializer confers the session minimum");
+        let mut state = GameState::new_two_player(17);
+        state.format_config = config.clone();
+        let json = serde_json::to_string(&state).unwrap();
+
+        resume_multiplayer_host_state_inner(&json)
+            .expect("an engine-issued draft-match snapshot restores");
+        assert_eq!(
+            with_installed_state(|state| state.format_config.clone()).unwrap(),
+            config,
+            "the restored game keeps its session minimum and origin"
+        );
+        clear_game_state();
+        set_multiplayer_mode(false);
+
+        // The same origin arriving as a new-game payload is refused.
+        assert!(
+            resolve_and_validate_initialize_format_config(Some(config), 2)
+                .expect_err("generic ingress must refuse the origin")
+                .contains("conferred by a draft match")
+        );
     }
 
     #[test]
@@ -6407,7 +6498,6 @@ mod tests {
             malformed_format_config,
             JsValue::NULL,
             Some(2),
-            None,
             None,
         );
         let error: serde_json::Value =

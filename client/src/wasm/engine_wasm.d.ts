@@ -452,6 +452,23 @@ export function has_replay_recording(): boolean;
 export function init_panic_hook(): void;
 
 /**
+ * Initialize the match of an ACCEPTED draft (CR 100.2b): the only entry that
+ * confers a draft session's minimum deck size on a Limited game. The generic
+ * initializers take no minimum at all, so an ordinary launch cannot grant
+ * itself the session's deck-size authority; the declared format config must
+ * still validate as an ordinary game, and `FormatConfig::
+ * with_draft_session_minimum` admits Limited only.
+ */
+export function initialize_draft_match_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count: number | null | undefined, first_player: number | null | undefined, session_min_deck_size: number): any;
+
+/**
+ * The multiplayer-host sibling of [`initialize_draft_match_game`]: starts an
+ * accepted draft's P2P match and claims the engine for the host session in the
+ * same call.
+ */
+export function initialize_draft_match_host_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count: number | null | undefined, first_player: number | null | undefined, session_min_deck_size: number): any;
+
+/**
  * Initialize a new game for local (single-player / AI) play.
  * Accepts deck_data as a DeckList (name-only) or null/undefined for empty libraries.
  * format_config_js: optional FormatConfig JSON — defaults to Standard if null/undefined.
@@ -466,7 +483,7 @@ export function init_panic_hook(): void;
  * very worker, and overwriting its game would destroy the authoritative state
  * its guests are playing against.
  */
-export function initialize_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count?: number | null, first_player?: number | null, draft_session_min_deck_size?: number | null): any;
+export function initialize_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count?: number | null, first_player?: number | null): any;
 
 /**
  * Initialize a new game *and* claim this engine for a multiplayer host
@@ -485,7 +502,7 @@ export function initialize_game(deck_data: any, seed: number | null | undefined,
  *    a failed init leaves the flag set on an engine it never took. Mirrors
  *    `resume_multiplayer_host_state`, the resume-side sibling of this call.
  */
-export function initialize_multiplayer_host_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count?: number | null, first_player?: number | null, draft_session_min_deck_size?: number | null): any;
+export function initialize_multiplayer_host_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count?: number | null, first_player?: number | null): any;
 
 /**
  * Whether the named card can serve as this format's command-zone leader.
@@ -896,8 +913,10 @@ export interface InitOutput {
     readonly get_viewer_snapshot_js: (a: number) => any;
     readonly get_viewer_transition_snapshot_js: (a: number, b: any) => any;
     readonly has_replay_recording: () => number;
-    readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number, h: number) => any;
-    readonly initialize_multiplayer_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number, h: number) => any;
+    readonly initialize_draft_match_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number, h: number) => any;
+    readonly initialize_draft_match_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number, h: number) => any;
+    readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
+    readonly initialize_multiplayer_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly isCardCommanderEligibleForFormat: (a: number, b: number, c: any) => number;
     readonly isCardCompanion: (a: number, b: number) => number;
     readonly is_card_commander_eligible: (a: number, b: number) => number;
