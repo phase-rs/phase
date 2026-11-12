@@ -919,6 +919,16 @@ fn next_of_kin_offers_command_zone_and_moves_the_chosen_creature() {
         drain_priority_preferring_observed(&mut runner, &[command], &mut observations);
 
     assert!(
+        !matches!(
+            &runner.state().waiting_for,
+            WaitingFor::EffectZoneChoice {
+                privacy_zones: Some(_),
+                ..
+            }
+        ),
+        "answering the multi-origin choice must retire its carried scope"
+    );
+    assert!(
         observations.saw_optional,
         "the printed \"you may\" must reach an OptionalEffectChoice prompt"
     );
@@ -1180,6 +1190,16 @@ fn stormkeld_zero_public_matches_keeps_the_same_observer_sequence() {
             .expect("the chooser may select none");
         runner.advance_until_stack_empty();
         assert!(
+            !matches!(
+                &runner.state().waiting_for,
+                WaitingFor::EffectZoneChoice {
+                    privacy_zones: Some(_),
+                    ..
+                }
+            ),
+            "an empty answer must retire the prompt's carried scope"
+        );
+        assert!(
             !runner
                 .state()
                 .objects
@@ -1308,7 +1328,16 @@ fn open_next_of_kin_choice(
 
     for _ in 0..64 {
         match &runner.state().waiting_for {
-            WaitingFor::EffectZoneChoice { .. } => return runner,
+            WaitingFor::EffectZoneChoice { privacy_zones, .. } => {
+                let zones = privacy_zones
+                    .as_ref()
+                    .expect("the multi-origin scope must be carried on the prompt");
+                assert!(
+                    zones.contains(&Zone::Hand) && zones.contains(&Zone::Command),
+                    "the carried scope must name both Next of Kin legs; got {zones:?}"
+                );
+                return runner;
+            }
             WaitingFor::Priority { .. } => {
                 runner
                     .act(GameAction::PassPriority)
@@ -1546,28 +1575,107 @@ fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
         "chooser keeps the exact eligible bounds"
     );
 
-    // CR 402.3: an older save may still name the public first scan zone. The
-    // restore chokepoint must reconstruct the private leg from the paused
-    // ability, and the opponent view must be identical for zero vs one
-    // eligible hand cards including the candidate-derived bounds.
+    // CR 402.3: the prompt-owned scope must survive the modern wire, redact
+    // the observer, and leave the chooser a legal answer. A predecessor save
+    // has no prompt field at all; the paused producer must reconstruct the
+    // same private leg after a real decode, with the same chooser control.
     for (runner, label) in [(&zero_eligible, "zero"), (&one_eligible, "one")] {
+        // Modern wire: actual encode/decode, not an in-memory capture.
+        let live_saved =
+            serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+                .expect("the live prompt saves");
+        let live_restored = serde_json::from_str::<PersistedGameState>(&live_saved)
+            .expect("the live prompt decodes")
+            .into_game_state()
+            .expect("the live prompt restores");
+        let WaitingFor::EffectZoneChoice {
+            privacy_zones: live_privacy,
+            cards: live_offered,
+            ..
+        } = &live_restored.waiting_for
+        else {
+            panic!("{label}: the serde-restored prompt must be open");
+        };
+        let live_scope = live_privacy
+            .as_deref()
+            .expect("the producer scope must survive serialization");
+        assert!(
+            live_scope.contains(&Zone::Graveyard) && live_scope.contains(&Zone::Hand),
+            "{label}: the saved scope must name both scan zones; got {live_scope:?}"
+        );
+        let live_offered = live_offered.clone();
+        let live_opponent = filter_state_for_viewer(&live_restored, P1);
+        let WaitingFor::EffectZoneChoice {
+            cards: live_cards,
+            count: live_count,
+            min_count: live_min_count,
+            up_to: live_up_to,
+            ..
+        } = &live_opponent.waiting_for
+        else {
+            panic!("{label}: the serde-restored prompt must project");
+        };
+        assert!(
+            live_cards.is_empty(),
+            "{label}: the serde-restored scope must redact hidden ids; got {live_cards:?}"
+        );
+        assert_eq!(
+            (*live_count, *live_min_count, *live_up_to),
+            (0, 0, true),
+            "{label}: the serde-restored scope must normalize the observer envelope"
+        );
+        let mut live_runner = GameRunner::from_state(live_restored);
+        live_runner
+            .act(GameAction::SelectCards {
+                cards: live_offered,
+            })
+            .expect("the serde-restored prompt accepts its offered ids");
+        live_runner.advance_until_stack_empty();
+        assert!(
+            !matches!(
+                live_runner.state().waiting_for,
+                WaitingFor::EffectZoneChoice { .. }
+            ),
+            "{label}: the serde-restored prompt settles after its offered ids are submitted"
+        );
+
+        // Predecessor wire: the prompt carries no scope field at all, and the
+        // validation zone is the public first scan zone. The fallback must
+        // reconstruct privacy from the exact paused producer.
         let mut legacy = runner.state().clone();
-        let WaitingFor::EffectZoneChoice { zone, .. } = &mut legacy.waiting_for else {
+        let WaitingFor::EffectZoneChoice {
+            zone,
+            privacy_zones,
+            ..
+        } = &mut legacy.waiting_for
+        else {
             panic!("legacy state must hold the choice");
         };
         *zone = Zone::Graveyard;
-
-        let restored = PersistedGameState::capture(legacy)
+        *privacy_zones = None;
+        let legacy_saved = serde_json::to_string(&PersistedGameState::capture(legacy))
+            .expect("the predecessor-wire prompt saves");
+        assert!(
+            !legacy_saved.contains("privacy_zones"),
+            "{label}: the missing-field fixture must omit the prompt scope"
+        );
+        let restored = serde_json::from_str::<PersistedGameState>(&legacy_saved)
+            .expect("the predecessor-wire prompt decodes")
             .into_game_state()
-            .expect("legacy choice restores through the production chokepoint");
+            .expect("the predecessor-wire prompt restores");
         let WaitingFor::EffectZoneChoice {
             zone,
             cards: offered,
+            privacy_zones,
             ..
         } = &restored.waiting_for
         else {
             panic!("restored state must retain the choice");
         };
+        assert!(
+            privacy_zones.is_none(),
+            "{label}: the predecessor fixture must exercise the absent-field fallback"
+        );
         assert_eq!(
             *zone,
             Zone::Graveyard,
@@ -1613,7 +1721,6 @@ fn stormkeld_curator_public_first_scope_redacts_private_eligibility() {
         );
     }
 }
-
 /// Drive Stormkeld Curator's ETB to its `EffectZoneChoice` without selecting an
 /// Aura. The parsed target is `InAnyZone [Graveyard, Hand]` — a public-first
 /// mixed scope — so this fixture exercises the producer's private-zone

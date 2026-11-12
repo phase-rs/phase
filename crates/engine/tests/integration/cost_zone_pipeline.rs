@@ -14423,6 +14423,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         let completed = runner

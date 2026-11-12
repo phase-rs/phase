@@ -1442,7 +1442,14 @@ pub fn resolve(
             )));
         }
 
-        state.effect_zone_choice_privacy_zones = Some(scan_zones.clone());
+        // CR 402.3: carry the producer's scan scope on the prompt only when it
+        // reaches a private zone. The scope is part of `waiting_for`, so it is
+        // retired atomically when an accepted answer replaces the prompt and
+        // cannot ride into a later prompt that never declared its own scope.
+        let privacy_zones = scan_zones
+            .iter()
+            .any(|zone| !zone.is_public())
+            .then_some(scan_zones.clone());
         state.waiting_for = WaitingFor::EffectZoneChoice {
             player: filter_controller,
             cards: eligible,
@@ -1487,6 +1494,7 @@ pub fn resolve(
             // same `UntilSourceLeaves` exile link the single-candidate
             // shortcut does (Cloak and Dagger, Entwined — issue #4235 review).
             duration: ability.duration.clone(),
+            privacy_zones,
         };
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
         // (matching the DiscardChoice pattern — single authority for the event).
@@ -2170,6 +2178,7 @@ fn mass_library_order_effect_zone_choice(
         is_cost_payment: false,
         enters_modified_if: None,
         duration,
+        privacy_zones: None,
     }
 }
 
@@ -5061,6 +5070,58 @@ mod tests {
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),
         }
+        let WaitingFor::EffectZoneChoice {
+            privacy_zones: prompt_scope,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("the mixed choice must be open");
+        };
+        assert_eq!(
+            prompt_scope.as_deref(),
+            Some([Zone::Hand, Zone::Graveyard].as_slice()),
+            "the producer must carry the mixed scan scope on the prompt"
+        );
+        let observer = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let WaitingFor::EffectZoneChoice {
+            cards: observer_cards,
+            count: observer_count,
+            min_count: observer_min_count,
+            up_to: observer_up_to,
+            ..
+        } = &observer.waiting_for
+        else {
+            panic!("observer must retain the mixed-scope prompt");
+        };
+        assert!(
+            observer_cards.is_empty(),
+            "a mixed private/public scope must not expose ids; got {observer_cards:?}"
+        );
+        assert_eq!(
+            (*observer_count, *observer_min_count, *observer_up_to),
+            (0, 0, true),
+            "the full observer envelope must be normalized"
+        );
+
+        // A rejected answer leaves the prompt (and its scope) pending.
+        assert!(
+            apply_as_current(
+                &mut state,
+                GameAction::SelectCards {
+                    cards: vec![opposing_land],
+                },
+            )
+            .is_err(),
+            "an ineligible pick must be rejected"
+        );
+        let WaitingFor::EffectZoneChoice { privacy_zones, .. } = &state.waiting_for else {
+            panic!("a rejected answer must keep the mixed choice open");
+        };
+        assert!(
+            privacy_zones.is_some(),
+            "a rejected answer must preserve the prompt's privacy scope"
+        );
+
         apply_as_current(
             &mut state,
             GameAction::SelectCards {
@@ -5069,11 +5130,112 @@ mod tests {
         )
         .expect("one resolution-time choice must be able to select both source zones");
 
+        assert!(
+            !matches!(
+                &state.waiting_for,
+                WaitingFor::EffectZoneChoice {
+                    privacy_zones: Some(_),
+                    ..
+                }
+            ),
+            "the answered prompt must retire its carried privacy scope"
+        );
+
         for id in [hand_land, graveyard_land] {
             assert_eq!(state.objects[&id].zone, Zone::Battlefield);
             assert!(state.objects[&id].tapped);
         }
         assert_eq!(state.objects[&opposing_land].zone, Zone::Graveyard);
+
+        // CR 402.3: a following public-only producer carries no scope; its
+        // chooser and observer envelopes must stay exact rather than inherit
+        // the answered prompt's private classification.
+        let second_grave = create_object(
+            &mut state,
+            CardId(14),
+            PlayerId(0),
+            "Second Graveyard Forest".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&second_grave)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let mut second = ResolvedAbility::new(
+            Effect::ChangeZone {
+                library_shuffle: Default::default(),
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![crate::types::ability::TypeFilter::Land],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(101),
+            PlayerId(0),
+        );
+        second.multi_target = Some(crate::types::ability::MultiTargetSpec::up_to(
+            QuantityExpr::Fixed { value: 1 },
+        ));
+        second.target_choice_timing = crate::types::ability::TargetChoiceTiming::Resolution;
+        resolve(&mut state, &second, &mut events).unwrap();
+
+        let WaitingFor::EffectZoneChoice { privacy_zones, .. } = &state.waiting_for else {
+            panic!("the following public choice must be open");
+        };
+        assert!(
+            privacy_zones.is_none(),
+            "a public-only prompt must not carry a privacy scope"
+        );
+        let observer = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let WaitingFor::EffectZoneChoice {
+            cards: observer_cards,
+            count: observer_count,
+            min_count: observer_min_count,
+            up_to: observer_up_to,
+            ..
+        } = &observer.waiting_for
+        else {
+            panic!("observer must retain the following public prompt");
+        };
+        assert_eq!(
+            observer_cards,
+            &vec![second_grave],
+            "public graveyard candidates stay visible to the observer"
+        );
+        assert_eq!(
+            (*observer_count, *observer_min_count, *observer_up_to),
+            (1, 0, true)
+        );
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![second_grave],
+            },
+        )
+        .expect("the chooser retains a legal answer for the next prompt");
+        assert_eq!(
+            state.objects[&second_grave].zone,
+            Zone::Hand,
+            "the next prompt's accepted answer must still resolve"
+        );
     }
 
     /// CR 608.2c: an explicit one-zone `InAnyZone` filter is still an
@@ -5135,6 +5297,26 @@ mod tests {
             }
             other => panic!("expected graveyard EffectZoneChoice, got {other:?}"),
         }
+        let WaitingFor::EffectZoneChoice { privacy_zones, .. } = &choice_state.waiting_for else {
+            panic!("the public graveyard choice must be open");
+        };
+        assert!(
+            privacy_zones.is_none(),
+            "a public-only graveyard scope must not be carried on the prompt"
+        );
+        let observer = crate::game::visibility::filter_state_for_viewer(&choice_state, PlayerId(1));
+        let WaitingFor::EffectZoneChoice {
+            cards: observer_cards,
+            ..
+        } = &observer.waiting_for
+        else {
+            panic!("observer must retain the public graveyard prompt");
+        };
+        assert_eq!(
+            observer_cards,
+            &vec![graveyard_card],
+            "public graveyard candidates stay visible to the observer"
+        );
 
         let mut all_state = GameState::new_two_player(42);
         let all_graveyard_card = create_object(
@@ -13896,6 +14078,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         let _ = apply_as_current(

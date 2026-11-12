@@ -18366,6 +18366,13 @@ pub enum WaitingFor {
         /// the `face_down_profile` / `enters_modified_if` carry-through above.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration: Option<crate::types::ability::Duration>,
+        /// CR 402.3: the producer-captured scan scope for THIS choice. It
+        /// belongs to the prompt, so it is retired atomically when an accepted
+        /// answer replaces `waiting_for` and it survives save/restore with the
+        /// prompt. Only a scope that reaches a hidden zone is stored; archived
+        /// prompts omit the field and fall back to the exact paused producer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        privacy_zones: Option<Vec<Zone>>,
     },
     /// Player chooses which drawn-this-turn hand cards to put on top of their
     /// library. Each unchosen required card is kept by paying life.
@@ -23946,12 +23953,6 @@ declare_game_state! {
 
     // Game flow
     pub waiting_for: WaitingFor,
-    /// CR 402.3: the producer-captured scan scope for an `EffectZoneChoice`.
-    /// Persisted with the prompt so capture/restore keeps viewer privacy
-    /// independent of the prompt's validation `zone`; `None` falls back to the
-    /// exact paused producer for older saves.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effect_zone_choice_privacy_zones: Option<Vec<Zone>>,
     /// CR 104.1: the recorded result once the game has ended, written only by
     /// `elimination::end_game`. `waiting_for` is not a durable home for it: a game can end
     /// mid-resolution (the CR 104.4b mandatory-loop draw), and a later step of the SAME
@@ -33999,7 +34000,6 @@ impl GameState {
             waiting_for: WaitingFor::Priority {
                 player: starting_player,
             },
-            effect_zone_choice_privacy_zones: None,
             game_end: None,
             next_resolve_all_consent_epoch: initial_resolve_all_consent_epoch(),
             viewer_projection: None,
@@ -37925,7 +37925,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         rng: _,
         combat: _,
         waiting_for: _,
-        effect_zone_choice_privacy_zones: _,
         // `game_end` (CR 104.1 terminal record): EXCLUDED from `impl PartialEq for
         // GameState`, and that is the SAFE direction. It is written once, when the game
         // ends, and never cleared or grown, so it cannot be a per-cycle accumulator; and the
@@ -38399,7 +38398,6 @@ impl PartialEq for GameState {
             && self.rng_seed == other.rng_seed
             && self.combat == other.combat
             && self.waiting_for == other.waiting_for
-            && self.effect_zone_choice_privacy_zones == other.effect_zone_choice_privacy_zones
             && self.next_resolve_all_consent_epoch == other.next_resolve_all_consent_epoch
             && self.viewer_projection == other.viewer_projection
             && self.resolve_all_consent_run == other.resolve_all_consent_run
@@ -39649,12 +39647,13 @@ mod drain_stack_reentrancy_tests {
         AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation,
     };
 
-    /// CR 402.3 + CR 608.2: the restore-scope migration is for a paused
-    /// ChangeZone choice. A sacrifice prompt must keep the zone its validation
-    /// uses even when a later hand ChangeZone instruction exists in the chain
-    /// (Strefan's Blood-token sacrifice followed by a Vampire put).
+    /// CR 402.3 + CR 608.2: a public battlefield sacrifice prompt must not
+    /// inherit the private scope of a later hand ChangeZone instruction in the
+    /// same chain (Strefan's Blood-token sacrifice followed by a Vampire put).
+    /// The producer-paused authority declines non-ChangeZone prompts, and the
+    /// observer sees the sacrifice envelope exactly.
     #[test]
-    fn restore_scope_migration_leaves_non_change_zone_prompt_unchanged() {
+    fn sacrifice_prompt_does_not_inherit_a_later_hand_change_zone_scope() {
         let mut state = GameState::new_two_player(42);
         let blood = crate::game::zones::create_object(
             &mut state,
@@ -39689,6 +39688,7 @@ mod drain_stack_reentrancy_tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
         let target = TargetFilter::Typed(
             crate::types::ability::TypedFilter::creature().properties(vec![
@@ -39726,11 +39726,28 @@ mod drain_stack_reentrancy_tests {
                 choose_zone_trigger_context: None,
             });
 
-        let restored = PersistedGameState::capture(state)
-            .into_game_state()
-            .expect("state restores through the production chokepoint");
-        let WaitingFor::EffectZoneChoice { zone, cards, .. } = &restored.waiting_for else {
-            panic!("restored state must retain the sacrifice prompt");
+        assert!(
+            state.effect_zone_choice_privacy_scope().is_none(),
+            "a sacrifice prompt must not read the following hand leg's scope"
+        );
+        let WaitingFor::EffectZoneChoice { privacy_zones, .. } = &state.waiting_for else {
+            panic!("the sacrifice prompt must be open");
+        };
+        assert!(
+            privacy_zones.is_none(),
+            "a public battlefield choice carries no producer privacy scope"
+        );
+        let observer = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let WaitingFor::EffectZoneChoice {
+            zone,
+            cards,
+            count,
+            min_count,
+            up_to,
+            ..
+        } = &observer.waiting_for
+        else {
+            panic!("observer must retain the sacrifice prompt");
         };
         assert_eq!(
             *zone,
@@ -39738,6 +39755,11 @@ mod drain_stack_reentrancy_tests {
             "a sacrifice prompt's validation zone must not be rewritten from a later hand leg"
         );
         assert_eq!(cards, &vec![blood]);
+        assert_eq!(
+            (*count, *min_count, *up_to),
+            (2, 2, false),
+            "the public sacrifice envelope must stay exact for observers"
+        );
     }
 
     fn ready_drain(name: &str) -> PostReplacementDrain {
@@ -53789,6 +53811,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         }));
         variants.push(Box::new(WaitingFor::DefilerPayment {
             player: PlayerId(0),
@@ -54703,6 +54726,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
         let json = serde_json::to_string(&wf).unwrap();
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
@@ -55502,6 +55526,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
         let json = serde_json::to_string(&wf).expect("serialize");
         // Modern shape must be emitted, NOT the legacy bool field.
