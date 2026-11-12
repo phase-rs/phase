@@ -7111,6 +7111,49 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
     );
 
     it.each([
+      ["bootstrapDelivered", "raw"], ["reconnected", "raw"],
+      ["bootstrapDelivered", "gzip"], ["reconnected", "gzip"],
+    ] as const)(
+      "settles the join's initialization and game-start waiters once when a %s listener throws on the candidate's kept bootstrap (%s)",
+      async (throwingEvent, wire) => {
+        const { adapter, candidate, init } = await pregameIncumbentWithCandidate(wire);
+        const gameStarted = observe(adapter.waitForGameStarted());
+        let armed = true;
+        adapter.onEvent((event) => {
+          if (event.type !== throwingEvent || !armed) return;
+          armed = false;
+          throw new Error(`${throwingEvent} listener failed`);
+        });
+        const onError = (event: ErrorEvent) => { event.preventDefault(); };
+        window.addEventListener("error", onError);
+        try {
+          await vi.advanceTimersByTimeAsync(0);
+          expect(init.value()).toBe("never settled");
+          const bootstrap = JSON.stringify({
+            type: "GameStarted",
+            data: {
+              state_revision: 1, state: createMockState(), your_player: 0,
+              player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+            },
+          });
+          candidate.dispatchSynthetic("message", wire === "gzip"
+            ? (await encodeJsonEnvelope(bootstrap)).buffer as unknown as string
+            : bootstrap);
+          await vi.waitFor(() => expect(armed).toBe(false));
+          // The bootstrap was committed and kept: both waiters settle, once.
+          await vi.waitFor(() => expect(init.value()).toMatchObject({ resolvedWith: undefined }));
+          expect(gameStarted.value()).toMatchObject({ resolvedWith: undefined });
+          expect(candidate.close).not.toHaveBeenCalled();
+          // The latch now answers a later waiter at once.
+          await expect(adapter.waitForGameStarted()).resolves.toBeUndefined();
+        } finally {
+          window.removeEventListener("error", onError);
+          adapter.dispose();
+        }
+      },
+    );
+
+    it.each([
       ["before", "success", "raw"],
       ["after", "success", "gzip"],
       ["before", "close", "raw"],

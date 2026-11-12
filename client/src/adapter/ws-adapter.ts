@@ -4251,70 +4251,83 @@ export class WebSocketAdapter implements EngineAdapter {
         // The attachment is bootstrapped now: every identity guard above
         // passed and the snapshot is cached.
         this.stateCodec.accept(this.ws);
-        // The episode is settled in `finally`: a listener that throws on
-        // `bootstrapDelivered` must not leave a committed bootstrap with its
-        // reconnect episode open (the drain of a confirmed attachment isolates
-        // the throw and keeps the socket).
+        // The bootstrap's own waiters are captured before any listener runs: the
+        // snapshot and binding are committed, so a listener that throws on the
+        // announcements below must not leave them pending, and a waiter a
+        // reentrant listener installs belongs to its successor, not to this frame.
+        const initResolve = decidesWaiters ? this.initResolve : null;
+        const gameStartedResolve = decidesWaiters ? this.gameStartedResolve : null;
+        const initializedNow = initResolve !== null;
         try {
-          this.emit({ type: "bootstrapDelivered" });
-        } finally {
-          if (this.reconnectInFlight) {
-            if (this.frameDecidesEpisode()) this.completeReconnect(true);
-          } else if (this.hostWaitingForOpponent) {
-            this.hostWaitingForOpponent = false;
-            this.emit({
-              type: "opponentJoined",
-              opponentName: data.opponent_name,
-            });
+          // The episode is settled in `finally`: a listener that throws on
+          // `bootstrapDelivered` must not leave a committed bootstrap with its
+          // reconnect episode open (the drain of a confirmed attachment isolates
+          // the throw and keeps the socket).
+          try {
+            this.emit({ type: "bootstrapDelivered" });
+          } finally {
+            if (this.reconnectInFlight) {
+              if (this.frameDecidesEpisode()) this.completeReconnect(true);
+            } else if (this.hostWaitingForOpponent) {
+              this.hostWaitingForOpponent = false;
+              this.emit({
+                type: "opponentJoined",
+                opponentName: data.opponent_name,
+              });
+            }
           }
-        }
-        this.settleWithheld();
-        if (nativeReconnect) {
-          const attachment: NativeSessionAttachment = {
-            gameCode: nativeReconnect.gameCode,
-            playerId: nativeReconnect.playerId,
-            playerToken: nativeReconnect.playerToken,
-            fullKey: nativeReconnect.fullKey,
-          };
-          this.emit({ type: "sessionChanged", session: this.currentSession() });
-          this.emit({ type: "sessionAttached", attachment });
-          this.pregameResolve?.(attachment);
-          this.pregameResolve = null;
-          this.pregameReject = null;
-        }
-        // A salvaged fallback's reply omits the token; the retained credentials
-        // are published here, once, as the session this join now owns. A held
-        // fallback's session was published by its SessionAttached and is not
-        // repeated.
-        if (!nativeReconnect && (data.player_token || fallback !== null)) {
-          if (fallback === null || publishesRetainedSession) {
+          this.settleWithheld();
+          if (nativeReconnect) {
+            const attachment: NativeSessionAttachment = {
+              gameCode: nativeReconnect.gameCode,
+              playerId: nativeReconnect.playerId,
+              playerToken: nativeReconnect.playerToken,
+              fullKey: nativeReconnect.fullKey,
+            };
             this.emit({ type: "sessionChanged", session: this.currentSession() });
+            this.emit({ type: "sessionAttached", attachment });
+            this.pregameResolve?.(attachment);
+            this.pregameResolve = null;
+            this.pregameReject = null;
           }
-        }
-        const playerNames = data.player_names === undefined
-          ? undefined
-          : playerNamesFromWire(data.player_names);
-        this.emit({
-          type: "playerIdentity",
-          playerId: data.your_player,
-          opponentName: data.opponent_name ?? null,
-          ...(playerNames === undefined ? {} : { playerNames }),
-        });
-        const initializedNow = decidesWaiters && this.initResolve !== null;
-        if (decidesWaiters && this.initResolve) {
-          // CR 103.1: the server sends the StartingPlayerContest event only on
-          // the initial GameStarted (drained server-side, so reconnects carry
-          // none). Stash it for initializeGame() to return, routing it through
-          // the same gameStore.initGame contest path as local games.
-          this.initStartEvents = data.events ?? [];
-          this.initResolve();
-          this.initResolve = null;
-          this.initReject = null;
-        }
-        if (decidesWaiters && this.gameStartedResolve) {
-          this.gameStartedResolve();
-          this.gameStartedResolve = null;
-          this.gameStartedReject = null;
+          // A salvaged fallback's reply omits the token; the retained credentials
+          // are published here, once, as the session this join now owns. A held
+          // fallback's session was published by its SessionAttached and is not
+          // repeated.
+          if (!nativeReconnect && (data.player_token || fallback !== null)) {
+            if (fallback === null || publishesRetainedSession) {
+              this.emit({ type: "sessionChanged", session: this.currentSession() });
+            }
+          }
+          const playerNames = data.player_names === undefined
+            ? undefined
+            : playerNamesFromWire(data.player_names);
+          this.emit({
+            type: "playerIdentity",
+            playerId: data.your_player,
+            opponentName: data.opponent_name ?? null,
+            ...(playerNames === undefined ? {} : { playerNames }),
+          });
+        } finally {
+          if (initResolve) {
+            // CR 103.1: the server sends the StartingPlayerContest event only on
+            // the initial GameStarted (drained server-side, so reconnects carry
+            // none). Stash it for initializeGame() to return, routing it through
+            // the same gameStore.initGame contest path as local games.
+            this.initStartEvents = data.events ?? [];
+            initResolve();
+            if (this.initResolve === initResolve) {
+              this.initResolve = null;
+              this.initReject = null;
+            }
+          }
+          if (gameStartedResolve) {
+            gameStartedResolve();
+            if (this.gameStartedResolve === gameStartedResolve) {
+              this.gameStartedResolve = null;
+              this.gameStartedReject = null;
+            }
+          }
         }
         // Always an array, never `undefined`: on this transport `undefined`
         // would mean "this transport does not publish", which is false here —
