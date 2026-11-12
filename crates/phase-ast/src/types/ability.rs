@@ -8731,6 +8731,174 @@ pub enum TargetFilter {
     AllPlayers,
 }
 
+/// CR 115.1 + CR 601.2c: does this slot filter reference an object chosen in an
+/// EARLIER slot of the same ability, in a form a `.targets`-prefilled ability
+/// actually resolves? Exactly three encodings:
+///
+///   * `ObjectScope::Target` inside a quantity threshold (Puca's Mischief `Cmc`,
+///     Spawnbroker `PtComparison`) — resolved by `quantity::object_id_for_scope`.
+///   * `FilterProp::SharesQuality { reference: Some(ParentTarget) }` (Daring
+///     Thief) — resolved by `filter::parent_target_shared_quality_values`.
+///   * a `ParentTargetController` controller ("another target creature that
+///     player controls", Mutiny) — resolved by `filter::parent_target_controller_player`
+///     through `ability_utils::parent_target_controller`.
+///
+/// Each reads the first entry of `ability.targets`, and none consults
+/// `target_incarnations`.
+///
+/// DELIBERATELY EXCLUDED — the object-IDENTITY arm (`filter::filter_inner_for_object` —
+/// the `TargetFilter::ParentTarget` and `ParentTargetSlot { index }` arms) and
+/// the positional read in that same function's `ParentTargetSlot { index }` arm
+/// (via `targeting::resolve_live_parent_slot_from_root`). That arm additionally
+/// requires `!ability.target_incarnations.is_empty()` and
+/// `target_pin_is_current`, and `target_incarnations` means "pinned at
+/// DELAYED-TRIGGER creation" (`set_target_incarnations_recursive`, CR 400.7 +
+/// CR 603.7c) — announcement-time targets are pinned in the separate
+/// `target_pins`. Forging a pin here would lie to
+/// `live_object_targets` and `pinned_object_targets_all_stale`. Measured: a
+/// clone with `.targets` prefilled and pins empty returns the SAME empty set
+/// the ability-free door already returns, so excluding this arm changes no
+/// behaviour and avoids rerouting 30 corpus slots. See deferral D1.
+pub fn target_filter_binds_prior_target(filter: &TargetFilter) -> bool {
+    filter_contains(filter, &|inner| match inner {
+        TargetFilter::Typed(typed) => {
+            matches!(
+                typed.controller,
+                Some(ControllerRef::ParentTargetController)
+            ) || typed.properties.iter().any(filter_prop_binds_prior_target)
+        }
+        _ => false,
+    })
+}
+
+/// EXHAUSTIVE over `FilterProp` with NO wildcard.
+fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::Cmc { value, .. }
+        | FilterProp::Counters { count: value, .. }
+        | FilterProp::PtComparison { value, .. } => {
+            quantity_expr_contains_scope(value, ObjectScope::Target)
+        }
+        FilterProp::SharesQuality { reference, .. } => {
+            matches!(reference.as_deref(), Some(TargetFilter::ParentTarget))
+        }
+        // CR 701.3a: the filter-matched host axis boxes a `TargetFilter`; the
+        // OUTER `filter_contains` traversal visits it (through
+        // `filter_prop_contains`), mirroring `CanEnchant`, so no arm is needed
+        // for the nested filter's own position here.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        } => false,
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_binds_prior_target),
+        FilterProp::Not { prop } => filter_prop_binds_prior_target(prop),
+        // Every remaining prop enumerated explicitly (no `_ =>`) — see
+        // `filter_prop_contains_quantity_scope`'s doc for why props that box a
+        // nested `TargetFilter` (other than `SharesQuality`, handled above) need
+        // no arm here: the OUTER `filter_contains` traversal visits their nested
+        // filters independently.
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::CanEnchant { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo { to: AttachmentReferent::Source }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
+        | FilterProp::AttachedTo { to: AttachmentReferent::Player { .. } }
+        // CR 601.2c: carries no quantity threshold, and its declared-slot read is
+        // bound through `FilterContext::declared_slot_view`, not first-object binding.
+        | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Prepared
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => false,
+    }
+}
+
 /// Whether `filter`, or any filter nested anywhere inside it, satisfies `leaf`.
 ///
 /// The single authority for `TargetFilter`'s recursive shape. Every predicate

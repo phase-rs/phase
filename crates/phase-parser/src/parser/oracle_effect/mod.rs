@@ -29718,9 +29718,14 @@ fn effect_reads_announced_root_slots(
 }
 
 /// CR 608.2c + CR 115.10a: whether a later instruction's effect reads the chosen
-/// object as its target, which the anaphora rewrite rebinds to `ParentTarget`.
+/// object as its target (which the anaphora rewrite rebinds to `ParentTarget`) or
+/// through a filter that binds a prior target.
 fn effect_reads_chosen_object(effect: &Effect) -> bool {
     effect.target_filter() == Some(&TargetFilter::ParentTarget)
+        // A printed target whose own filter reads the chosen object ("Exile target
+        // creature that shares a creature type with it"): the engine enumerates
+        // it against the slot declared for the earlier choice.
+        || effect_slot_filters(effect).any(crate::types::ability::target_filter_binds_prior_target)
 }
 
 /// The nearest object-naming node of one clause, read from its own sub chain

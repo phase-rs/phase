@@ -80830,6 +80830,38 @@ fn bare_choose_does_not_change_how_later_clauses_lower() {
     assert_eq!(control.target_choice_timing, TargetChoiceTiming::Resolution);
 }
 
+/// SHAPE: a filter that reads an earlier object ("that shares a creature type with
+/// it") is enumerated against the slots declared as the spell is cast, so a
+/// resolution-time choice cannot supply the object it reads (CR 601.2c). Both
+/// directions keep base timing: a printed target whose filter reads the chosen
+/// object ("Exile target creature that shares a creature type with it") keeps the
+/// choice announced, and a bare choice whose own filter reads an earlier object
+/// does not declare `Resolution`. The control is a later printed target that reads
+/// nothing. Synthetic Oracle; the nearest printed filter that reads a prior target
+/// is Daring Thief's "target creature that shares a creature type with it".
+#[test]
+fn bare_choose_reading_a_prior_object_keeps_base_timing() {
+    for text in [
+        "Choose a creature you control. Exile target creature that shares a creature type with it.",
+        "Choose a creature you control. Exile target permanent that shares a card type with it.",
+        "Choose a creature you control, then exile target creature that shares a creature type with it.",
+        "Destroy target creature. Choose a creature you control that shares a creature type with it.",
+        "Choose a creature you control. Choose a creature you control that shares a color with it.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let timings = target_only_chain_timings(&def);
+        assert!(
+            !timings.is_empty() && timings.iter().all(|timing| *timing == TargetChoiceTiming::Stack),
+            "{text}: every bare choice stays announced: {timings:?}: {def:#?}"
+        );
+    }
+    let control = parse_effect_chain(
+        "Choose a creature you control. Exile target creature.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(control.target_choice_timing, TargetChoiceTiming::Resolution);
+}
+
 /// SHAPE: a bare choice repeated once per opponent keeps the timing it had before
 /// the producer existed (`Stack`): no printed card repeats one, and the
 /// resolution-time prompt's resume through the repeat loop is not exercised. The
