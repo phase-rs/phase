@@ -2196,7 +2196,9 @@ pub(crate) fn finalize_persisted_restore(
     recovered_terminal_rest: bool,
 ) -> Result<(), PersistedRestoreError> {
     // CR 702.16p: an older save's slot-keyed start snapshots move to their
-    // occurrence keys before the first flush, whose refresh would prune them.
+    // occurrence keys before the first flush. Otherwise that flush's refresh
+    // would take a fresh snapshot under the new key, and the migration would
+    // then keep the fresh one.
     crate::game::effects::attach::migrate_legacy_protection_start_snapshots(state);
     finalize_rules_state(state);
     let recovered_terminal_rest =

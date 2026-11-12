@@ -2104,7 +2104,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         mana_spent_source_snapshots: _,
         phase_status: _,
         protection_start_snapshots: _,
-        // OMITTED, LEGACY DECODE ONLY: emptied by the first layer flush.
+        // OMITTED, LEGACY DECODE ONLY: emptied by the persisted-restore migration.
         legacy_protection_start_exempt_attachments: _,
         // OMITTED, LAYER-DERIVED: re-derived with `keywords` by every layer flush.
         protection_provenance: _,

@@ -2369,9 +2369,13 @@ pub(crate) fn refresh_protection_start_attachment_snapshots(state: &mut GameStat
             // CR 109.5: "you" is the current controller of the object the
             // static is on, read after this pass's control-changing effects
             // (layer 2), not the controller the effect was gathered with.
+            // Only a battlefield source holds a snapshot: the prune above
+            // visits battlefield sources only, and the merge base snapshotted
+            // battlefield statics only.
             let Some(controller) = state
                 .objects
                 .get(&source_id)
+                .filter(|source| source.zone == Zone::Battlefield)
                 .map(|source| source.controller)
             else {
                 continue;

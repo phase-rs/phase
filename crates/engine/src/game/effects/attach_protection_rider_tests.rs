@@ -1370,8 +1370,8 @@ fn host_reentering_starts_a_new_snapshot() {
 /// started. After a persisted restore (immediate and deferred), Blessing holds
 /// the same snapshot: Pacifism stays legal and the later-white Equipment stays
 /// blocked, which a snapshot re-taken at restore would get wrong. A save written
-/// with the older slot key restores the same way: the restore's layer flush
-/// migrates its entry.
+/// with the older slot key restores the same way: the restore boundary
+/// migrates its entry before its layer flush.
 #[test]
 fn persisted_restore_keeps_the_start_snapshot_identity() {
     let mut s = scenario();
@@ -1646,4 +1646,53 @@ fn entrant_reached_by_a_granted_rider_takes_the_full_pass() {
             grant.key.occurrence,
             ProtectionGrantOccurrence::Granted { .. }
         )));
+}
+
+/// CR 702.16p: only a source on the battlefield holds a start snapshot, as at
+/// the merge base, which snapshotted battlefield statics only. Synthetic: a
+/// graveyard object whose ridered static functions from the graveyard (no
+/// printed card has one; the printed rider is Benevolent Blessing's, on an
+/// Aura on the battlefield) gives Grizzly Bears protection from white. It holds
+/// no snapshot, so the white Equipment already attached is not exempt.
+#[test]
+fn non_battlefield_source_holds_no_start_snapshot() {
+    let mut s = scenario();
+    let host = grizzly_bears(&mut s, P0);
+    let mut runner = s.build();
+    let state = runner.state_mut();
+    let equipment = spawn_synthetic_white_equipment(state, 127);
+    attach_to(state, equipment, host);
+    let source = create_object(
+        state,
+        CardId(128),
+        P0,
+        "Synthetic graveyard source".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .static_definitions
+        .push(
+            quoted_white_protection(
+                host,
+                ProtectionDoesNotRemove::ControlledAttachmentsAlreadyAttached,
+            )
+            .active_zones(vec![Zone::Graveyard]),
+        );
+    persist_last_static(state, source);
+    evaluate_protection_layers(state);
+
+    let riders = white_riders(state, host);
+    assert_eq!(riders.len(), 1, "reach guard: the graveyard static applies");
+    assert_eq!(riders[0].as_ref().map(|rider| rider.source), Some(source));
+    assert!(
+        state.objects[&source].protection_start_snapshots.is_empty(),
+        "a non-battlefield source holds no snapshot"
+    );
+    assert_eq!(
+        attachment_illegality(state, equipment, host),
+        Some(AttachIllegality::Protection)
+    );
 }

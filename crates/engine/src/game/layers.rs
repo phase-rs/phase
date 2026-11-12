@@ -15172,7 +15172,7 @@ mod tests {
     /// zero-assertion fails.
     #[test]
     fn incremental_flush_skips_protection_color_expansion_reaching_no_recipient() {
-        // Printed Empty-Shrine Kannushi ({1}{W}): "This creature has protection
+        // Printed Empty-Shrine Kannushi ({W}): "This creature has protection
         // from each color among permanents you control."
         let mut scenario = GameScenario::new();
         let source = scenario.add_real_card(
