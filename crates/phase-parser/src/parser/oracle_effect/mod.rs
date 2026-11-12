@@ -1476,12 +1476,47 @@ fn keyword_anaphor_referent_is_unpublished_resolution_pick(
         .is_some_and(|clause| {
             lower::target_choice_timing_for_clause(clause)
                 == crate::types::ability::TargetChoiceTiming::Resolution
+                && !bare_choice_resolution_is_pending(
+                    clause,
+                    &clause.parsed.effect,
+                    clause.parsed.sub_ability.is_some(),
+                )
                 && clause
                     .parsed
                     .effect
                     .target_filter()
                     .is_some_and(|target| !target.is_context_ref())
         })
+}
+
+/// The timing the in-loop readers see: a pending bare-choice `Resolution` reads as
+/// its base `Stack` (see `bare_choice_resolution_is_pending`).
+fn pending_as_stack(
+    clause: &ClauseIr,
+    effect: &Effect,
+    has_sub: bool,
+    timing: TargetChoiceTiming,
+) -> TargetChoiceTiming {
+    if timing == TargetChoiceTiming::Resolution
+        && bare_choice_resolution_is_pending(clause, effect, has_sub)
+    {
+        TargetChoiceTiming::Stack
+    } else {
+        timing
+    }
+}
+
+/// Whether a clause node's `Resolution` timing is the bare-choice producer's
+/// declaration, which the post-chain withhold passes may still return to its base
+/// `Stack`: a controller `TargetOnly` object choice with no chained sub-ability
+/// (the object-and-player choice chains one) and no accepting-player scope. While
+/// the chunk loop is still lowering later clauses, readers must see such a node as
+/// `Stack`, so every later clause lowers exactly as before the producer existed;
+/// the passes then decide the final timing.
+fn bare_choice_resolution_is_pending(clause: &ClauseIr, effect: &Effect, has_sub: bool) -> bool {
+    !has_sub
+        && clause.opponent_may_scope.is_none()
+        && matches!(effect, Effect::TargetOnly { target } if !target.denotes_player_target())
 }
 
 fn merge_clause_conditions(
@@ -28671,7 +28706,12 @@ fn chain_declared_slot_registry(clauses: &[ClauseIr]) -> DeclaredSlotRegistry {
     let mut entries = Vec::new();
     let mut next_index = Some(0usize);
     for clause in clauses {
-        let head_timing = lower::target_choice_timing_for_clause(clause);
+        let head_timing = pending_as_stack(
+            clause,
+            &clause.parsed.effect,
+            clause.parsed.sub_ability.is_some(),
+            lower::target_choice_timing_for_clause(clause),
+        );
         let head_multi = clause
             .multi_target
             .as_ref()
@@ -28685,7 +28725,12 @@ fn chain_declared_slot_registry(clauses: &[ClauseIr]) -> DeclaredSlotRegistry {
                 def.multi_target.as_ref(),
                 def.optional_targeting,
                 // CR 115.10a + CR 608.2d: the sub node's assembled timing.
-                lower::target_choice_timing_for_clause_sub(clause, def),
+                pending_as_stack(
+                    clause,
+                    &def.effect,
+                    def.sub_ability.is_some(),
+                    lower::target_choice_timing_for_clause_sub(clause, def),
+                ),
             ));
             sub = def.sub_ability.as_deref();
         }
@@ -29519,6 +29564,8 @@ fn cast_time_bare_choice(effect: &Effect, timing: TargetChoiceTiming) -> bool {
 /// occupies none, so the reader would bind another object, or the source:
 /// - a fight or an exchange of control that reads the chosen object
 ///   (`resolve_fight_fighters` recovers both fighters from the root slot pair);
+/// - a slot-indexed reader of a declared slot, or a keyword-anaphor condition that
+///   reads the announced pick ("If it has flying, draw a card.");
 /// - a delayed payload ("Sacrifice it at the beginning of the next end step") that
 ///   reads it, in a chain that announces a printed target
 ///   (`parent_chain_referents` ranks the root's declared slots ahead of the node's
@@ -29545,16 +29592,24 @@ fn withhold_resolution_timing_before_root_slot_readers(clauses: &mut [ClauseIr])
                 .chain((0..subs).map(move |depth| (clause_index, Some(depth))))
         })
         .collect();
-    let effect_at = |clauses: &[ClauseIr], (clause_index, depth): (usize, Option<usize>)| {
+    // The effect and the condition of a node, head or sub.
+    let node_at = |clauses: &[ClauseIr], (clause_index, depth): (usize, Option<usize>)| {
         let clause = &clauses[clause_index];
-        match depth {
-            None => clause.parsed.effect.clone(),
-            Some(depth) => std::iter::successors(clause.parsed.sub_ability.as_deref(), |node| {
+        let sub = depth.and_then(|depth| {
+            std::iter::successors(clause.parsed.sub_ability.as_deref(), |node| {
                 node.sub_ability.as_deref()
             })
             .nth(depth)
-            .map(|node| node.effect.as_ref().clone())
-            .unwrap_or_else(|| clause.parsed.effect.clone()),
+        });
+        match sub {
+            Some(node) => (node.effect.as_ref().clone(), node.condition.clone()),
+            None => (
+                clause.parsed.effect.clone(),
+                clause
+                    .condition
+                    .clone()
+                    .or_else(|| clause.parsed.condition.clone()),
+            ),
         }
     };
     let Some(last_reader) = positions.iter().rposition(|&position| {
@@ -29563,11 +29618,8 @@ fn withhold_resolution_timing_before_root_slot_readers(clauses: &mut [ClauseIr])
         let delayed = position.1.is_none()
             && (clauses[position.0].delayed_condition.is_some()
                 || clauses[position.0].prefix_delayed_condition.is_some());
-        effect_reads_announced_root_slots(
-            &effect_at(clauses, position),
-            delayed,
-            chain_prints_target,
-        )
+        let (effect, condition) = node_at(clauses, position);
+        effect_reads_announced_root_slots(&effect, condition.as_ref(), delayed, chain_prints_target)
     }) else {
         return;
     };
@@ -29600,12 +29652,59 @@ fn withhold_resolution_timing_before_root_slot_readers(clauses: &mut [ClauseIr])
     }
 }
 
+/// The filters an effect reads objects through: its target, its mass population,
+/// and the selection filter of a choice into a tracked set (the Aura tail of "Tap
+/// target creature. Destroy up to two Auras attached to that creature.").
+fn effect_slot_filters(effect: &Effect) -> impl Iterator<Item = &TargetFilter> {
+    let selection = match effect {
+        Effect::ChooseObjectsIntoTrackedSet { filter, .. } => Some(filter),
+        _ => None,
+    };
+    effect
+        .target_filter()
+        .into_iter()
+        .chain(crate::types::ability::mass_population_target(effect))
+        .chain(selection)
+}
+
+/// Whether a filter, at any depth, reads a declared slot of the chain: a
+/// `ParentTargetSlot` leg, or an `AttachedTo` read through a declared target.
+fn filter_reads_announced_slot(filter: &TargetFilter) -> bool {
+    crate::types::ability::filter_grammar_any(filter, &|node| match node {
+        crate::types::ability::FilterGrammarNode::Filter(TargetFilter::ParentTargetSlot {
+            ..
+        }) => true,
+        crate::types::ability::FilterGrammarNode::Prop(FilterProp::AttachedTo { to }) => {
+            to.reads_declared_slot()
+        }
+        _ => false,
+    })
+}
+
 fn effect_reads_announced_root_slots(
     effect: &Effect,
+    condition: Option<&AbilityCondition>,
     delayed: bool,
     chain_prints_target: bool,
 ) -> bool {
     let reads_parent = |filter: &TargetFilter| *filter == TargetFilter::ParentTarget;
+    // A slot-indexed reader (`ParentTargetSlot`, an attachment read through
+    // `AttachedTo DeclaredTarget`) numbers the slots declared as the spell is cast,
+    // and a keyword-anaphor condition ("If it has flying") reads the announced
+    // pick: both lower, as before the producer existed, against a choice that is
+    // announced.
+    if effect_slot_filters(effect).any(filter_reads_announced_slot)
+        || matches!(
+            condition,
+            Some(AbilityCondition::TargetMatchesFilter {
+                use_lki: false,
+                subject_slot: None,
+                ..
+            })
+        )
+    {
+        return true;
+    }
     if delayed {
         return chain_prints_target && effect.target_filter().is_some_and(reads_parent);
     }

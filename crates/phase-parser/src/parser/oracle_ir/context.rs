@@ -815,15 +815,19 @@ pub struct ParseContext {
     /// on the compound continuations it owns, which is the timing those clauses had
     /// before the producer existed. The object-and-player producer declares
     /// `Resolution` for every subject, as it always did. The bare choice's
-    /// `Resolution` declaration is withdrawn after the chain is built, in three
+    /// `Resolution` declaration is withdrawn after the chain is built, in four
     /// passes that restore the timing the choice had before the producer existed:
     /// when the choice is repeated per player or object
     /// (`withhold_resolution_timing_from_repeated_choices`); when the chain holds
     /// another cast-time bare choice, such as another player's
-    /// (`withhold_resolution_timing_beside_a_cast_time_choice`); and when a later
+    /// (`withhold_resolution_timing_beside_a_cast_time_choice`); when a later
     /// clause's printed "target" was bound to the choice or left unimplemented
     /// (`withhold_resolution_timing_from_choices_feeding_printed_targets`, which
-    /// withdraws only that clause's antecedent choice).
+    /// withdraws only that clause's antecedent choice); and when a later clause
+    /// reads the announced slots or pick (`withhold_resolution_timing_before_root_slot_readers`).
+    /// While later chunks are still being lowered, the in-loop readers see the
+    /// stamp as `Stack` (`bare_choice_resolution_is_pending`), so later clauses
+    /// lower as they did before the producer existed.
     ///
     /// Set and consumed within a single chunk parse; never serialized. A
     /// speculative sub-parse that discards its cloned context discards this too.

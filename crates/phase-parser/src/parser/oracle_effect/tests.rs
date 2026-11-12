@@ -80788,6 +80788,48 @@ fn bare_choose_in_another_zone_keeps_base_timing() {
     assert_eq!(control.target_choice_timing, TargetChoiceTiming::Resolution);
 }
 
+/// SHAPE: the bare-choice stamp must not change how later clauses lower. While the
+/// chunk loop lowers later chunks, a pending `Resolution` stamp would turn the
+/// declared-slot registry `Indeterminate` (a slot-indexed attachment read fails
+/// closed) and strict-fail a keyword-anaphor condition. Both read as `Stack`
+/// there, so each later clause lowers as before the producer existed, and the
+/// choice then stays announced because a later clause reads a declared slot or the
+/// announced pick. Synthetic Oracle: the Crush Underfoot damage plus an Aura tail,
+/// a keyword-anaphor condition ("If it has flying"), and the die-exile rider
+/// (Fiery Temper's shape).
+#[test]
+fn bare_choose_does_not_change_how_later_clauses_lower() {
+    fn nodes(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+        std::iter::successors(Some(def), |node| node.sub_ability.as_deref()).collect()
+    }
+    for text in [
+        "Choose a Giant creature you control. It deals damage equal to its power to target creature. Destroy up to two Auras attached to that creature.",
+        "Choose an artifact you control. Tap target creature. Destroy up to two Auras attached to that creature.",
+        "Choose a creature you control. If it has flying, draw a card.",
+        "Choose a creature you control. If it has flying, it gains haste until end of turn.",
+        "Choose an artifact you control. This spell deals 5 damage to target creature. Exile up to one target Equipment attached to that creature. If that creature would die this turn, exile it instead.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            !nodes(&def)
+                .iter()
+                .any(|node| matches!(node.effect.as_ref(), Effect::Unimplemented { .. })),
+            "{text}: every later clause lowers supported: {def:#?}"
+        );
+        assert_eq!(
+            target_only_chain_timings(&def),
+            vec![TargetChoiceTiming::Stack],
+            "{text}: the choice stays announced: {def:#?}"
+        );
+    }
+    // The control: nothing later reads a declared slot or the announced pick.
+    let control = parse_effect_chain(
+        "Choose a creature you control. It gains indestructible until end of turn.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(control.target_choice_timing, TargetChoiceTiming::Resolution);
+}
+
 /// SHAPE: a bare choice repeated once per opponent keeps the timing it had before
 /// the producer existed (`Stack`): no printed card repeats one, and the
 /// resolution-time prompt's resume through the repeat loop is not exercised. The
