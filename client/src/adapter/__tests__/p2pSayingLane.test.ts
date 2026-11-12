@@ -782,6 +782,7 @@ describe("P2P saying reply lane", () => {
       };
       host.disposed = false;
       host.ownsAuthority = () => true;
+      host.gameRunState = "running";
       host.sayExpiryGeneration = 1;
       host.sayExpiryTimerGeneration = 1;
       host.sayExpiryPayment = 7;
@@ -1295,6 +1296,7 @@ describe("P2P saying reply lane", () => {
       submitInteraction: vi.fn(async (_sub, _player, _atMs) => ({
         events: [{ type: "PhraseSaid", phrase: "Toy Boat" } as unknown as GameEvent],
         log_entries: [],
+        is_saying: true,
       })),
     };
 
@@ -1455,6 +1457,7 @@ describe("P2P saying reply lane", () => {
       submitInteraction: vi.fn(async (_sub, _player, _atMs) => ({
         events: [{ type: "PhraseSaid", phrase: "Toy Boat" } as unknown as GameEvent],
         log_entries: [],
+        is_saying: true,
       })),
     };
 

@@ -2632,7 +2632,10 @@ pub fn submit_interaction_js(actor: u8, submission: JsValue, at_ms: Option<f64>)
     };
     let submitted_at_ms = at_ms.and_then(|ms| if ms >= 0.0 { Some(ms as u64) } else { None });
     match submit_interaction_inner(PlayerId(actor), submission, submitted_at_ms) {
-        Ok(result) => action_outcome(result),
+        Ok(inner) => match inner {
+            Ok((result, is_saying)) => to_js(&InteractionOutcome::Applied { result, is_saying }),
+            Err(rejection) => to_js(&InteractionOutcome::Rejected { rejection }),
+        },
         Err(error) => JsValue::from_str(&error),
     }
 }
@@ -2644,7 +2647,7 @@ fn submit_interaction_inner(
     actor: PlayerId,
     submission: InteractionSubmission,
     submitted_at_ms: Option<u64>,
-) -> Result<Result<ActionResult, ActionRejection>, String> {
+) -> Result<Result<(ActionResult, bool), ActionRejection>, String> {
     with_installed_state_mut(|state| {
         let capture = hosted_capture(state, None)?;
         // Un-card (no CR entry): this bridge is the authoritative ingress of a
@@ -2656,12 +2659,19 @@ fn submit_interaction_inner(
             submission,
             submitted_at_ms.unwrap_or_else(engine::util::host_clock::epoch_ms),
         )?;
+        let is_saying = matches!(&applied.action, GameAction::SayPhrase { .. });
         // No vote is open here (refused above), so no resolution can arise.
         let (result, _) = hosted_record(state, actor, capture, &applied.action, applied.result);
         record_replay_action(false, actor, applied.action);
         invalidate_ai_proposals();
-        Ok(result)
+        Ok((result, is_saying))
     })
+}
+
+#[derive(Serialize)]
+enum InteractionOutcome {
+    Applied { result: ActionResult, is_saying: bool },
+    Rejected { rejection: ActionRejection },
 }
 
 /// Preview one opaque interaction response without committing. A REFUSED declaration is a

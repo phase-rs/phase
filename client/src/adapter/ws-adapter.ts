@@ -3300,7 +3300,7 @@ export class WebSocketAdapter implements EngineAdapter {
       case "ActionNoOp": {
         const pending = this.submission.take(msg.command_id);
         if (pending) {
-          pending.resolve({ events: [], log_entries: [] });
+          pending.resolve({ events: [], log_entries: [], is_saying: true });
           this.emit({ type: "actionPendingChanged", pending: false });
         } else if (this.submission.unmatched(msg.command_id).releasesIndicator) {
           // Legacy servers always released the pending indicator here.

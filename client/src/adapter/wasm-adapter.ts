@@ -603,11 +603,24 @@ export class WasmAdapter
   ): Promise<SubmitResult> {
     this.assertInitialized("submitInteraction");
     try {
-      const result = this.engine
+      const outcome = this.engine
         ? await this.engine.submitInteraction(actor, submission, atMs)
         : await this.fallback!.submitInteraction(submission, actor, atMs);
       this.invalidateAiDecisionDiagnostics();
-      return result;
+      if ("is_saying" in outcome) {
+        const interactionOutcome = outcome as { status: "applied" | "rejected"; result?: { events?: GameEvent[]; log_entries?: GameLogEntry[] }; is_saying?: boolean; rejection?: unknown };
+        if (interactionOutcome.status === "applied") {
+          return {
+            events: interactionOutcome.result?.events ?? [],
+            log_entries: interactionOutcome.result?.log_entries ?? [],
+            is_saying: interactionOutcome.is_saying ?? false,
+          };
+        } else {
+          throw new AdapterError("WASM_ERROR", "Interaction rejected", true);
+        }
+      }
+      // Fallback for native bridge compatibility
+      return outcome as SubmitResult;
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }

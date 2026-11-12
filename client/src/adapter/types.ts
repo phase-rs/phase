@@ -5547,6 +5547,8 @@ export interface SubmitResult {
   log_entries?: GameLogEntry[];
   /** Present when the action ended a takeback vote (a browser-hosted concession). */
   takeback?: TakebackNotice;
+  /** Whether this submission was a spoken payment (SayPhrase). */
+  is_saying?: boolean;
 }
 
 /** The `SubmitResult` of an applied `submit_action` outcome. */

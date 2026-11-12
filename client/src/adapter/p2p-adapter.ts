@@ -3506,7 +3506,7 @@ export class P2PHostAdapter implements EngineAdapter {
     const transition = await this.applyBrowserMutation(() => this.nativeBridge
       ? this.nativeBridge.submitInteraction(submission, actor)
       : this.wasm.submitInteraction(submission, actor));
-    const isSaying = transition.result.events.some((e) => e.type === "PhraseSaid");
+    const isSaying = transition.result.is_saying ?? transition.result.events.some((e) => e.type === "PhraseSaid");
     this.scheduleSayPhraseExpiry();
     await this.broadcastStateUpdate(transition, undefined, isSaying);
     await this.runAiLoop(isSaying);
@@ -4583,6 +4583,13 @@ export class P2PHostAdapter implements EngineAdapter {
    */
   private async expireSayPhrase(paymentId: number, timerGen = this.sayExpiryTimerGeneration): Promise<void> {
     if (!this.ownsSayExpiry(timerGen)) return;
+    // Defer expiry while the game is paused: the AI loop does not run while
+    // paused, so an expiry that creates an AI continuation would leave it
+    // unwoken on resume. Retry after resume instead.
+    if (this.gameRunState !== "running") {
+      this.retrySayPhraseExpiry(timerGen);
+      return;
+    }
     if (this.nativeBridge) {
       await this.expireNativeSayPhrase(this.nativeBridge, paymentId, timerGen);
       return;
@@ -4665,6 +4672,14 @@ export class P2PHostAdapter implements EngineAdapter {
     paymentId: number,
     timerGen: number,
   ): Promise<void> {
+    if (!this.ownsSayExpiry(timerGen)) return;
+    // Defer expiry while the game is paused: the AI loop does not run while
+    // paused, so an expiry that creates an AI continuation would leave it
+    // unwoken on resume. Retry after resume instead.
+    if (this.gameRunState !== "running") {
+      this.retrySayPhraseExpiry(timerGen);
+      return;
+    }
     let target: SayPhraseExpiryTarget | null;
     try {
       target = await this.readSayPhraseExpiry();
@@ -5444,31 +5459,12 @@ export class P2PHostAdapter implements EngineAdapter {
           void this.send(session, actionFailureFrame(err));
           break;
         }
-        // Applied — same delivery contract as the "action" case above (#7924).
-        // Classify as a saying if the engine was waiting for a SayPhrase payment
-        // before this interaction. The expired-opaque-choice path sacrifices Toy Boat
-        // without emitting PhraseSaid (CR 702.24a), so event-based classification
-        // fails for lapses. Use the authoritative waiting_for state, as the Full
-        // server route does at crates/phase-server/src/main.rs:9189.
-        let isSaying = false;
-        try {
-          if (this.nativeBridge) {
-            const hostSnapshot = this.nativeBridge.viewerSnapshot(0);
-            const waitingFor = hostSnapshot.state.waiting_for;
-            isSaying =
-              waitingFor?.type === "UnlessPayment" &&
-              waitingFor.data.cost?.type === "SayPhrase";
-          } else {
-            const state = await this.wasm.getState();
-            const waitingFor = state.waiting_for;
-            isSaying =
-              waitingFor?.type === "UnlessPayment" &&
-              waitingFor.data.cost?.type === "SayPhrase";
-          }
-        } catch {
-          // If we can't determine, conservatively assume not a saying.
-          isSaying = false;
-        }
+        // Applied — classify at authoritative materialization via the bridge's
+        // is_saying flag (WASM) or ActionNoOp response (native). The expired-opaque-
+        // choice path sacrifices Toy Boat without emitting PhraseSaid (CR 702.24a),
+        // so event-based classification fails for lapses. The bridge returns the
+        // authoritative classification from the engine's action type.
+        const isSaying = transition.result.is_saying ?? transition.result.events.some((e) => e.type === "PhraseSaid");
         try {
           await this.publishHostSnapshot(transition.result);
           await this.broadcastStateUpdate(transition, undefined, isSaying);
