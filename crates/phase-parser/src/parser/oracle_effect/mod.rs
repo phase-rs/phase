@@ -51494,8 +51494,9 @@ fn parse_effect_chain_ir_body(
 /// add nodes after the clause sequence is built (a chosen-color wrap puts a
 /// `Choose` root above the targeted grant), so the check lowers the finished
 /// chain with the production lowering and reads the result:
-/// - the gate is on the assembled root, which declares a target of its own
-///   (the engine evaluates a root's gate on the root, reading its targets);
+/// - the first clause still carries the gate, and the gate is on the assembled
+///   root, which declares a target of its own (the engine evaluates a root's
+///   gate on the root, reading its targets);
 /// - the root has no else branch, and its direct sub, if any, is an
 ///   independent instruction with no condition of its own: on a false gate
 ///   the engine runs such a direct sub (engine `effects/mod.rs`, the
@@ -51508,25 +51509,29 @@ fn keep_own_target_gate_readable(ir: &mut EffectChainIr, gate: Option<&AbilityCo
     let Some(gate) = gate else {
         return;
     };
-    if ir
+    // The gated clause is the chain's first clause (the strip binds only when no
+    // earlier clause was pushed). If something re-homed the gate since, the
+    // check cannot vouch for it, so it fails closed instead of returning.
+    let carries_gate = ir
         .clauses
         .first()
-        .is_none_or(|root| root.condition.as_ref() != Some(gate))
-    {
-        return;
-    }
-    let assembled = lower::lower_effect_chain_ir(ir);
-    let readable = assembled.condition.as_ref() == Some(gate)
-        && assembled
-            .effect
-            .target_filter()
-            .is_some_and(|filter| !filter.is_context_ref())
-        && assembled.else_ability.is_none()
-        && assembled.sub_ability.as_deref().is_none_or(|next| {
-            next.sub_link == SubAbilityLink::SequentialSibling && next.condition.is_none()
-        });
+        .is_some_and(|root| root.condition.as_ref() == Some(gate));
+    let readable = carries_gate && {
+        let assembled = lower::lower_effect_chain_ir(ir);
+        assembled.condition.as_ref() == Some(gate)
+            && assembled
+                .effect
+                .target_filter()
+                .is_some_and(|filter| !filter.is_context_ref())
+            && assembled.else_ability.is_none()
+            && assembled.sub_ability.as_deref().is_none_or(|next| {
+                next.sub_link == SubAbilityLink::SequentialSibling && next.condition.is_none()
+            })
+    };
     if !readable {
-        ir.clauses[0].replace_with_gap("target_controller_gate_unreadable");
+        if let Some(root) = ir.clauses.first_mut() {
+            root.replace_with_gap("target_controller_gate_unreadable");
+        }
     }
 }
 

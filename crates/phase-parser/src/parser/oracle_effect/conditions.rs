@@ -4723,6 +4723,10 @@ fn parse_trigger_event_target_exploited_by_source(input: &str) -> OracleResult<'
     Ok((rest, ()))
 }
 
+/// Test-only strip at a proven chain root: it hard-codes
+/// [`GatedInstructionPosition::ChainRoot`], so a test that uses it skips the
+/// entry points' root proof and the assembled-chain check
+/// (`keep_own_target_gate_readable`). Rows that rely on those add a full parse.
 #[cfg(test)]
 pub(super) fn strip_suffix_conditional(
     text: &str,
@@ -12755,6 +12759,52 @@ mod tests {
                     .is_some(),
                 !kept,
                 "{text}"
+            );
+        }
+    }
+
+    /// CR 608.2c: the assembled-chain check is total. If the first clause no
+    /// longer carries the gate it was asked to vouch for (a later composition
+    /// re-homed it, here under an `And`), the check cannot prove the gate is
+    /// readable, so the clause becomes an explicit gap rather than passing
+    /// silently. No input text reaches this today; the building block is pinned
+    /// directly. The reach guard is the same targeted root carrying the gate,
+    /// which the check keeps.
+    #[test]
+    fn own_target_gate_fails_closed_when_the_first_clause_lost_it() {
+        let (gate, _, _) = full_strip(
+            "Destroy target artifact",
+            "its controller controls no creatures",
+        );
+        let gate = gate.expect("reach guard: the strip binds at a root");
+        for (condition, kept) in [
+            (gate.clone(), true),
+            (
+                AbilityCondition::And {
+                    conditions: vec![AbilityCondition::effect_performed(), gate.clone()],
+                },
+                false,
+            ),
+        ] {
+            let mut ir = crate::parser::oracle_effect::parse_effect_chain_ir(
+                "Destroy target artifact.",
+                AbilityKind::Spell,
+                &mut ParseContext::default(),
+            );
+            let [root] = ir.clauses.as_mut_slice() else {
+                panic!("reach guard: one clause");
+            };
+            root.condition = Some(condition);
+            super::super::keep_own_target_gate_readable(&mut ir, Some(&gate));
+            assert_eq!(
+                ir.clauses[0]
+                    .parsed
+                    .effect
+                    .unimplemented_description()
+                    .is_none(),
+                kept,
+                "{:?}",
+                ir.clauses[0].condition
             );
         }
     }
