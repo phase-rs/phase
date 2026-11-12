@@ -2002,23 +2002,21 @@ impl ResolutionStack {
         }
     }
 
-    /// CR 730.3 + CR 800.4a: the absorbed components a merged permanent's
-    /// active component child still holds — its paused member and its
-    /// undelivered tail. Until delivered they are in no zone list, yet they
-    /// are objects their owner owns.
-    pub(crate) fn active_component_child_held_objects(&self) -> Vec<ObjectId> {
-        let Some(ResolutionFrame::BatchDelivery(child)) = self.last() else {
+    /// CR 730.3 + CR 800.4a: the objects the active batch delivery still holds —
+    /// its paused member and its undelivered tail. For a merged permanent's
+    /// component batch, linked to an announcing owner or not, the absorbed
+    /// components among them are in no zone list until delivered, yet they are
+    /// objects their owner owns.
+    pub(crate) fn active_batch_held_objects(&self) -> Vec<ObjectId> {
+        let Some(ResolutionFrame::BatchDelivery(batch)) = self.last() else {
             return Vec::new();
         };
-        if child.component_delivery_parent.is_none() {
-            return Vec::new();
-        }
-        child
+        batch
             .paused_current
             .iter()
             .map(|paused| paused.member.object_id)
-            .chain(child.remaining.iter().copied())
-            .chain(child.requests.iter().map(|request| request.object_id))
+            .chain(batch.remaining.iter().copied())
+            .chain(batch.requests.iter().map(|request| request.object_id))
             .collect()
     }
 

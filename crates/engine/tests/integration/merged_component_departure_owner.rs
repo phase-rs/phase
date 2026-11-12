@@ -26,6 +26,7 @@
 //!   Super Shredder: "Menace / Whenever another permanent leaves the
 //!    battlefield, put a +1/+1 counter on Super Shredder."
 //!   Benalish Marshal: "Other creatures you control get +1/+1."
+//!   Unsummon: "Return target creature to its owner's hand."
 //!   Kor Skyfisher: "Flying / When this creature enters, return a permanent you
 //!    control to its owner's hand."
 //!   Ninth Bridge Patrol: "Whenever another creature you control leaves the
@@ -224,6 +225,15 @@ fn mender_departure_triggers(state: &GameState) -> Vec<PlayerId> {
         .filter(|(_, text)| text.contains("leaves the battlefield, draw a card"))
         .map(|(controller, _)| controller)
         .collect()
+}
+
+/// Super Shredder's leave triggers waiting to be put on the stack: one per
+/// other permanent that left the battlefield.
+fn shredder_triggers(state: &GameState) -> usize {
+    waiting_triggers(state)
+        .into_iter()
+        .filter(|(_, text)| text.contains("another permanent leaves"))
+        .count()
 }
 
 /// The controllers of Ninth Bridge Patrol triggers: each one observed one
@@ -467,6 +477,7 @@ fn rebuking_ceremony_concession_during_the_prompt_places_the_surviving_artifact_
         scenario.at_phase(Phase::PreCombatMain);
         let (mender, brokkos) = add_pile(&mut scenario, P1);
         let surviving = scenario.add_real_card(P2, "Circuit Mender", Zone::Battlefield, db);
+        scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
         let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
         scenario.with_library_top(P2, &["Library Card A"]);
         scenario.with_library_top(P1, &["Library Card B"]);
@@ -519,6 +530,11 @@ fn rebuking_ceremony_concession_during_the_prompt_places_the_surviving_artifact_
             mender_departure_triggers(runner.state()),
             vec![P2],
             "{label}: only the surviving artifact's ability waits on the stack"
+        );
+        assert_eq!(
+            shredder_triggers(runner.state()),
+            2,
+            "{label}: Super Shredder saw the merged permanent and the surviving artifact leave, once each"
         );
     }
 }
@@ -766,8 +782,12 @@ fn concession_resume_that_ends_the_game_leaves_nothing_owed() {
     assert!(runner.state().pending_replacement.is_none());
 }
 
-/// CR 704.5a + CR 117.2e + CR 608.2n + CR 704.4: the chooser leaves through
-/// the player-loss state-based action instead of conceding. P1 is at 0 life
+/// CR 704.5a + CR 608.2n + CR 704.4 + CR 603.6c: the chooser leaves through
+/// the player-loss state-based action instead of conceding. The engine's
+/// player-loss safety net (#962) applies that loss at the prompt rather than at
+/// the next priority (CR 104.3b), so the resolution it interrupts must still be
+/// finished before anyone receives priority, and the departure's own leave
+/// triggers must still be collected. P1 is at 0 life
 /// with Platinum Angel and owns the merged commander pile; P1's graveyard holds
 /// the only graveyard card, and P0 controls Lord of Extinction. Rebuking
 /// Ceremony targets the pile and the Angel, and P1 arranges them (CR 401.4);
@@ -785,6 +805,8 @@ fn player_loss_during_the_prompt_finishes_the_resolution_before_priority() {
     let angel = scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db);
     scenario.add_real_card(P1, "Circuit Mender", Zone::Graveyard, db);
     let lord = scenario.add_real_card(P0, "Lord of Extinction", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
+    let patrol = scenario.add_real_card(P1, "Ninth Bridge Patrol", Zone::Battlefield, db);
     let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
     scenario.with_life(P1, 0);
     scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
@@ -828,6 +850,55 @@ fn player_loss_during_the_prompt_finishes_the_resolution_before_priority() {
         "CR 608.2n + CR 704.4: the ceremony was in a graveyard when the state-based actions ran"
     );
     assert_eq!(runner.state().objects[&lord].toughness, Some(1));
+    assert_eq!(runner.state().objects[&patrol].zone, Zone::Exile);
+    assert_eq!(
+        shredder_triggers(runner.state()),
+        3,
+        "CR 603.6c: Super Shredder saw the Angel, the merged permanent and the departed player's Patrol leave, once each"
+    );
+}
+
+/// CR 800.4a + CR 730.3 + CR 117.2e: a move no frame announced. Unsummon
+/// returns P1's merged commander pile through a single targeted move, so the
+/// component batch is its own owner. Brokkos's CR 903.9b prompt parks it and
+/// P1 concedes: the component the batch still holds leaves the game with P1,
+/// and Unsummon finishes before priority.
+#[test]
+fn unsummon_concession_during_the_prompt_exiles_the_held_component() {
+    for pile_shape in [Pile::BrokkosUnderMender, Pile::MenderOverBrokkos] {
+        let db = shared_card_db().expect("integration card fixture must load");
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let (mender, brokkos) = add_pile(&mut scenario, P1);
+        let unsummon = scenario.add_real_card(P0, "Unsummon", Zone::Hand, db);
+        scenario.with_mana_pool(P0, mana(ManaType::Blue, 1));
+        let mut runner = scenario.build();
+        let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, true);
+        let label = format!("{pile_shape:?}");
+
+        cast_until_resolved_or_asked(&mut runner, unsummon, &[pile.survivor]);
+        assert_commander_prompt(runner.state(), P1, pile.brokkos);
+        let conceded = concede(&mut runner, P1);
+
+        assert!(
+            matches!(conceded.waiting_for, WaitingFor::Priority { player: P0 }),
+            "{label}: {:?}",
+            conceded.waiting_for
+        );
+        resolution_finished(runner.state());
+        assert_eq!(
+            runner.state().objects[&unsummon].zone,
+            Zone::Graveyard,
+            "{label}"
+        );
+        for component in [pile.mender, pile.brokkos] {
+            assert_eq!(
+                runner.state().objects[&component].zone,
+                Zone::Exile,
+                "{label}: CR 800.4a: {component:?} leaves the game with its owner"
+            );
+        }
+    }
 }
 
 /// CR 800.4a + CR 117.2e + CR 730.3: Chaos Warp's owner iteration parks on

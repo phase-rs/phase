@@ -1044,9 +1044,22 @@ fn exile_owned_objects_on_player_left_game(
     // graveyard.
     let resolving_spell =
         super::stack::resolving_instant_or_sorcery_on_stack(state).map(|entry| entry.id);
-    // CR 730.3: a merged permanent's components still held by its active
-    // component child are in no zone list until delivered.
-    let held_components = state.resolution_stack.active_component_child_held_objects();
+    // CR 730.3: a merged permanent's absorbed components still held by the
+    // active component batch (whether or not a frame announced the move) are on
+    // no zone list until delivered: still "on the battlefield" as a component,
+    // but not a battlefield permanent.
+    let held_components: Vec<_> = state
+        .resolution_stack
+        .active_batch_held_objects()
+        .into_iter()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                && !state.battlefield.contains(id)
+        })
+        .collect();
     let mut to_exile: Vec<_> = state
         .battlefield
         .iter()
