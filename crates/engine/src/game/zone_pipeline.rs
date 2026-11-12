@@ -2558,51 +2558,6 @@ pub(crate) fn hold_answer_repark(
     }
 }
 
-/// Checked restore: a save written before the scheduler existed parks the
-/// member being asked AT the approval cursor. That member is the asking one;
-/// the cursor moves past it. A mid-consultation member at the cursor with no
-/// published decision is not resumable.
-pub(crate) fn upgrade_restored_staged_asking(state: &mut GameState) -> Result<(), String> {
-    let published = staged_decision_is_published(state);
-    for owner in state.resolution_stack.staged_batch_owners_mut() {
-        let paused_member = owner.paused_current.as_ref().map(|paused| paused.member);
-        let Some(staged) = owner.staged.as_mut() else {
-            continue;
-        };
-        if staged.stage != BatchDeliveryStage::Approving || staged.asking.is_some() {
-            continue;
-        }
-        let cursor = staged.cursor;
-        let Some(member) = staged.members.get(cursor) else {
-            continue;
-        };
-        let own = paused_member == Some(member.identity)
-            && matches!(
-                member.state,
-                StagedBatchMemberState::OuterConsulting | StagedBatchMemberState::InnerConsulting
-            );
-        let child = member.state == StagedBatchMemberState::PreventedWithChild
-            && paused_member.is_none()
-            && published;
-        let mid_consult = matches!(
-            member.state,
-            StagedBatchMemberState::OuterConsulting
-                | StagedBatchMemberState::InnerConsulting
-                | StagedBatchMemberState::PreventedWithChild
-        );
-        if own || child {
-            staged.asking = Some(member.identity);
-            staged.cursor = cursor + 1;
-        } else if mid_consult {
-            return Err(
-                "a staged member mid-consultation at the approval cursor has no published decision"
-                    .to_string(),
-            );
-        }
-    }
-    Ok(())
-}
-
 /// Checked restore of the replacement-choice scheduler (CR 616.1 + CR 101.4):
 /// every held decision has a living chooser in seat range and a present
 /// subject, an as-enters prompt is still live for its pending replacement,

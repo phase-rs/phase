@@ -911,3 +911,113 @@ fn staged_scheduler_consults_each_member_once() {
         }
     }
 }
+
+const FEEDCE4FC_UMBRA_ORDER: &str = include_str!("../fixtures/feedce4fc_staged_umbra_order.json");
+const FEEDCE4FC_LIVE_CHILD: &str =
+    include_str!("../fixtures/feedce4fc_staged_umbra_live_child.json");
+
+/// Restore a predecessor save through checked restore.
+fn restore_fixture(payload: &str) -> Result<GameRunner, String> {
+    let state = serde_json::from_str::<PersistedGameState>(payload)
+        .map_err(|error| error.to_string())?
+        .into_game_state()
+        .map_err(|error| error.to_string())?;
+    state
+        .resolution_stack
+        .validate_at_rest(&state.waiting_for)
+        .map_err(|error| error.to_string())?;
+    Ok(GameRunner::from_state(state))
+}
+
+/// The staged owner's asking member and sweep cursor.
+fn asking_and_cursor(runner: &GameRunner) -> (Option<ObjectId>, usize) {
+    runner
+        .state()
+        .resolution_stack
+        .iter()
+        .find_map(|frame| match frame {
+            engine::types::resolution::ResolutionFrame::BatchDelivery(batch) => {
+                batch.staged.as_ref().map(|staged| {
+                    (
+                        staged.asking.map(|identity| identity.object_id),
+                        staged.cursor,
+                    )
+                })
+            }
+            _ => None,
+        })
+        .expect("a staged owner is parked")
+}
+
+/// CR 616.1: a save written before the scheduler existed parks the member
+/// being asked at the approval cursor (Day of Judgment, Grizzly Bears wearing
+/// Hyena Umbra and Spider Umbra; the frozen fixture's provenance names the
+/// writer). Checked restore makes that member the asking one and moves the
+/// sweep past it, and the reopened choice settles the population.
+#[test]
+fn a_pre_scheduler_save_restores_its_member_as_the_asking_one() {
+    let (bears, hyena, spider, runeclaw) = (ObjectId(1), ObjectId(2), ObjectId(3), ObjectId(4));
+    let mut runner = restore_fixture(FEEDCE4FC_UMBRA_ORDER).expect("the old save restores");
+    assert_eq!(runner.state().objects[&bears].name, "Grizzly Bears");
+    assert_eq!(asking_and_cursor(&runner), (Some(bears), 1));
+    assert_eq!(asked_choice(&runner), (P1, bears));
+    choose_source(&mut runner, hyena);
+    finish(&mut runner);
+    assert_eq!(zone(&runner, bears), Zone::Battlefield);
+    assert_eq!(zone(&runner, hyena), Zone::Graveyard);
+    assert_eq!(attached_to(&runner, spider), Some(bears));
+    assert_eq!(zone(&runner, runeclaw), Zone::Graveyard);
+}
+
+/// CR 616.1 + CR 702.89a: the pre-scheduler save of a live child (Hyena
+/// Umbra's Aura waiting on P1's Dauthi Voidwalker vs Rest in Peace choice, with
+/// no pause boundary on its host) restores with the host as the asking member,
+/// and the answer settles the population.
+#[test]
+fn a_pre_scheduler_live_child_save_restores_its_host_as_the_asking_one() {
+    let (bears, hyena, dauthi) = (ObjectId(1), ObjectId(2), ObjectId(3));
+    let mut runner = restore_fixture(FEEDCE4FC_LIVE_CHILD).expect("the old save restores");
+    assert_eq!(runner.state().objects[&hyena].name, "Hyena Umbra");
+    assert_eq!(asking_and_cursor(&runner), (Some(bears), 1));
+    assert_eq!(asked_choice(&runner), (P1, hyena));
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P1 answers");
+    finish(&mut runner);
+    assert_eq!(zone(&runner, bears), Zone::Battlefield);
+    assert_eq!(zone(&runner, hyena), Zone::Exile);
+    assert_eq!(zone(&runner, dauthi), Zone::Exile);
+}
+
+/// Checked restore refuses a pre-scheduler save whose member is
+/// mid-consultation at the cursor with no pause of its own (the first fixture
+/// with its pause boundary removed): no published decision can be bound to it,
+/// so the staged frame fails validation.
+#[test]
+fn a_pre_scheduler_save_without_its_pause_is_refused() {
+    fn clear_paused(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.contains_key("staged") && map.contains_key("paused_current") {
+                    map.insert("paused_current".to_string(), serde_json::Value::Null);
+                }
+                for child in map.values_mut() {
+                    clear_paused(child);
+                }
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(clear_paused),
+            _ => {}
+        }
+    }
+    let mut value: serde_json::Value =
+        serde_json::from_str(FEEDCE4FC_UMBRA_ORDER).expect("the fixture is JSON");
+    clear_paused(&mut value);
+    let error = match restore_fixture(&value.to_string()) {
+        Ok(_) => panic!("a mid-consultation member with no pause must not restore"),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("a consulted staged member follows the approval cursor"),
+        "{error}"
+    );
+}

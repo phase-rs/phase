@@ -2228,6 +2228,41 @@ impl ResolutionStack {
         })
     }
 
+    /// CR 616.1: a save written before the replacement-choice scheduler
+    /// existed parks the member being asked AT the approval cursor. Make that
+    /// member the asking one and move the sweep past it: either its own pause
+    /// boundary captures it, or it is `PreventedWithChild` with no boundary and
+    /// a decision is published (`published`). Any other shape is left for the
+    /// stage validator to refuse.
+    pub(crate) fn upgrade_pre_scheduler_staged_owners(&mut self, published: bool) {
+        use crate::types::game_state::{BatchDeliveryStage, StagedBatchMemberState};
+        for owner in self.staged_batch_owners_mut() {
+            let paused_member = owner.paused_current.as_ref().map(|paused| paused.member);
+            let Some(staged) = owner.staged.as_mut() else {
+                continue;
+            };
+            if staged.stage != BatchDeliveryStage::Approving || staged.asking.is_some() {
+                continue;
+            }
+            let Some(member) = staged.members.get(staged.cursor) else {
+                continue;
+            };
+            let own = paused_member == Some(member.identity)
+                && matches!(
+                    member.state,
+                    StagedBatchMemberState::OuterConsulting
+                        | StagedBatchMemberState::InnerConsulting
+                );
+            let child = member.state == StagedBatchMemberState::PreventedWithChild
+                && paused_member.is_none()
+                && published;
+            if own || child {
+                staged.asking = Some(member.identity);
+                staged.cursor += 1;
+            }
+        }
+    }
+
     /// Every staged BatchDelivery owner on the stack, bottom first.
     pub(crate) fn staged_batch_owners(&self) -> impl Iterator<Item = &PendingBatchDeliveries> {
         self.frames.iter().filter_map(|frame| match frame {
@@ -6763,6 +6798,11 @@ impl ResolutionStateWire {
                 }
                 normalize_legacy_completed_resolution_carrier(&mut legacy);
                 crate::types::game_state::normalize_resolution_cast_offer_allocator(&mut legacy)?;
+                let published = legacy.pending_replacement.is_some()
+                    || !matches!(legacy.waiting_for, WaitingFor::Priority { .. });
+                legacy
+                    .resolution_stack
+                    .upgrade_pre_scheduler_staged_owners(published);
                 let frames = canonicalize_legacy_resolution_state(&legacy)?;
                 frames
                     .validate_at_rest(&legacy.waiting_for)
@@ -6816,6 +6856,10 @@ impl ResolutionStateWire {
                     );
                 }
                 let state = GameStateDecode::materialize_prepared(state_value)?;
+                frames.upgrade_pre_scheduler_staged_owners(
+                    state.pending_replacement.is_some()
+                        || !matches!(state.waiting_for, WaitingFor::Priority { .. }),
+                );
                 frames
                     .validate_at_rest(&state.waiting_for)
                     .map_err(|error| error.to_string())?;

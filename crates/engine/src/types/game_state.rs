@@ -18208,8 +18208,6 @@ impl PersistedGameState {
         if let Some(member) = state.resolution_stack.unresumable_shared_batch_pause() {
             return Err(PersistedRestoreError::UnresumableSharedBatchPause { member });
         }
-        crate::game::zone_pipeline::upgrade_restored_staged_asking(&mut state)
-            .map_err(PersistedRestoreError::InvalidStagedScheduler)?;
         crate::game::zone_pipeline::validate_restored_staged_scheduler(&state)
             .map_err(PersistedRestoreError::InvalidStagedScheduler)?;
         let recovered_terminal_rest =
