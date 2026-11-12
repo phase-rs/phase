@@ -1068,6 +1068,43 @@ fn a_riders_prompt_holds_the_next_players_order_prompt() {
     assert_at_rest(&runner);
 }
 
+/// Flame Rift cast by P1 on P1's turn. Each player's 4 meets that player's Nefarious Lich and
+/// Force Bubble, so each player chooses one (CR 616.1), and "choices are made in APNAP order":
+/// P1, the active player, first, then P0 (CR 101.4).
+#[test]
+fn simultaneous_replacement_choices_follow_apnap_order() {
+    let mut scenario = scenario();
+    for index in 0..5 {
+        scenario.add_creature_to_graveyard(P0, &format!("P0 Filler {index}"), 1, 1);
+    }
+    scenario.add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH);
+    let p0_bubble = force_bubble(&mut scenario, P0);
+    nefarious_lich(&mut scenario, 5);
+    let p1_bubble = force_bubble(&mut scenario, P1);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P1, "Flame Rift", false, FLAME_RIFT)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    let mut events = cast(&mut runner, spell, vec![]);
+
+    let mut choosers = Vec::new();
+    while let WaitingFor::ReplacementChoice { player, .. } = runner.state().waiting_for.clone() {
+        choosers.push(player);
+        let bubble = if player == P1 { p1_bubble } else { p0_bubble };
+        choose_source(&mut runner, &mut events, bubble);
+    }
+
+    assert_eq!(choosers, vec![P1, P0]);
+    for bubble in [p0_bubble, p1_bubble] {
+        assert_eq!(zone(&runner, bubble), Zone::Graveyard);
+    }
+    assert_eq!((life(&runner, P0), life(&runner, P1)), (20, 20));
+    assert_at_rest(&runner);
+}
+
 /// Rakdos Charm: "Each creature deals 1 damage to its controller." P0's Rhox Faithmender
 /// (lifelink) deals 1 to P0, and that gain meets Rhox Faithmender and Leyline of Hope (CR 616.1).
 /// P1's Bear, the batch's last source, deals 1 to P1, whose Nefarious Lich asks which of 3

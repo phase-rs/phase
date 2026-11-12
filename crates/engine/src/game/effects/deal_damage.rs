@@ -2917,6 +2917,17 @@ fn resolve_all_portions(
     Ok(())
 }
 
+/// CR 101.4 + CR 616.1: the living players in APNAP order, starting with the active player.
+/// Simultaneous replacement choices across players are made in that order ("If two or more
+/// players have to make these choices at the same time, choices are made in APNAP order").
+fn players_in_apnap_order(
+    state: &GameState,
+) -> impl Iterator<Item = &crate::types::player::Player> + '_ {
+    crate::game::players::apnap_order(state)
+        .into_iter()
+        .filter_map(move |id| state.players.iter().find(|player| player.id == id))
+}
+
 /// CR 120.3: Collect non-eliminated players matching the filter for simultaneous
 /// damage from a single source. Mirrors the filter evaluation used by
 /// `resolve_each_player` but returns only the matching ids.
@@ -2927,9 +2938,8 @@ fn collect_matching_players(
     source_id: crate::types::identifiers::ObjectId,
     granting_object: Option<crate::types::identifiers::ObjectIncarnationRef>,
 ) -> Vec<PlayerId> {
-    state
-        .players
-        .iter()
+    // CR 616.1: in APNAP order, as `resolve_each_player` collects them.
+    players_in_apnap_order(state)
         .filter(|p| {
             !p.is_eliminated
                 && match player_filter {
@@ -3241,10 +3251,9 @@ fn resolve_each_player_portions(
         _ => Vec::new(),
     };
 
-    // Collect matching player IDs first to avoid borrow issues.
-    let player_ids: Vec<PlayerId> = state
-        .players
-        .iter()
+    // Collect matching player IDs first to avoid borrow issues. CR 616.1: in APNAP order, so
+    // the players' simultaneous replacement choices are asked in that order.
+    let player_ids: Vec<PlayerId> = players_in_apnap_order(state)
         .filter(|p| {
             !p.is_eliminated
                 && match &player_filter {
