@@ -840,6 +840,151 @@ fn open_the_vaults_asks_as_enters_choices_in_apnap_order() {
         .any(|attribute| matches!(attribute, ChosenAttribute::CardName(name) if *name == named)));
 }
 
+const COLDSTEEL_HEART: &str = "This artifact enters tapped.\nAs this artifact enters, choose a color.\n{T}: Add one mana of the chosen color.";
+const HERALDIC_BANNER: &str = "As this artifact enters, choose a color.\nCreatures you control of the chosen color get +1/+0.\n{T}: Add one mana of the chosen color.";
+
+/// CR 614.12a + CR 616.1 + CR 101.4: Open the Vaults returns one artifact with
+/// an as-enters color choice to each player while Root Maze ("Artifacts and
+/// lands enter tapped") also applies to each entry. Coldsteel Heart adds its
+/// own "This artifact enters tapped". Whichever of an entry's replacements the
+/// pipeline reaches first, each held color choice is asked exactly once, P0's
+/// first, and both artifacts enter tapped with the chosen color.
+#[test]
+fn open_the_vaults_asks_each_held_color_choice_once() {
+    for (name, oracle) in [
+        ("Coldsteel Heart", COLDSTEEL_HEART),
+        ("Heraldic Banner", HERALDIC_BANNER),
+    ] {
+        for maze_owner in [P0, P1] {
+            let case = format!("{name}, Root Maze controlled by {maze_owner:?}");
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.add_enchantment_from_oracle(maze_owner, "Root Maze", ROOT_MAZE);
+            let mut artifact = |owner: PlayerId| {
+                scenario
+                    .add_artifact_to_graveyard(owner, name)
+                    .from_oracle_text(oracle)
+                    .id()
+            };
+            let p1_artifact = artifact(P1);
+            let p0_artifact = artifact(P0);
+            let vaults = zero_cost_spell(&mut scenario, "Open the Vaults", OPEN_THE_VAULTS);
+            let mut runner = scenario.build();
+
+            cast_until_decision(&mut runner, vaults);
+            let mut asked = Vec::new();
+            for color in ["Red", "Green"] {
+                let WaitingFor::NamedChoice { player, .. } = runner.state().waiting_for else {
+                    panic!(
+                        "{case}: expected a color choice, got {:?}",
+                        runner.state().waiting_for
+                    );
+                };
+                asked.push(player);
+                round_trip(&mut runner);
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: color.to_string(),
+                    })
+                    .expect("the entrant's controller chooses a color");
+            }
+            assert_eq!(asked, vec![P0, P1], "{case}");
+            finish(&mut runner);
+            for (artifact, color) in [(p0_artifact, "Red"), (p1_artifact, "Green")] {
+                let object = &runner.state().objects[&artifact];
+                assert_eq!(object.zone, Zone::Battlefield, "{case}");
+                assert!(object.tapped, "{case}: Root Maze taps the entrant");
+                assert!(
+                    object.chosen_attributes.iter().any(|attribute| matches!(
+                        attribute,
+                        ChosenAttribute::Color(chosen) if format!("{chosen:?}") == color
+                    )),
+                    "{case}: {:?}",
+                    object.chosen_attributes
+                );
+            }
+        }
+    }
+}
+
+/// CR 101.4c + CR 614.12a: Open the Vaults returns P0's two Heraldic Banners
+/// ("As this artifact enters, choose a color") while Root Maze also applies to
+/// each entry. P0 holds both color choices and chooses which to make first;
+/// the selected Banner's choice is the one asked, in either order.
+#[test]
+fn one_player_orders_their_held_color_choices() {
+    for second_first in [false, true] {
+        let case = format!("second_first={second_first}");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_enchantment_from_oracle(P1, "Root Maze", ROOT_MAZE);
+        let mut banner = || {
+            scenario
+                .add_artifact_to_graveyard(P0, "Heraldic Banner")
+                .from_oracle_text(HERALDIC_BANNER)
+                .id()
+        };
+        let banners = [banner(), banner()];
+        let vaults = zero_cost_spell(&mut scenario, "Open the Vaults", OPEN_THE_VAULTS);
+        let mut runner = scenario.build();
+
+        cast_until_decision(&mut runner, vaults);
+        let WaitingFor::ReplacementDecisionOrder {
+            player,
+            mut objects,
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "{case}: expected the order prompt, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        objects.sort();
+        assert_eq!((player, objects), (P0, banners.to_vec()), "{case}");
+        let order = if second_first {
+            [banners[1], banners[0]]
+        } else {
+            banners
+        };
+        select_decision(&mut runner, order[0]);
+        for (banner, color) in order.into_iter().zip(["Red", "Green"]) {
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::NamedChoice { player: P0, .. }
+                ),
+                "{case}: {:?}",
+                runner.state().waiting_for
+            );
+            let subject = runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .and_then(|pending| pending.proposed.affected_object_id());
+            assert_eq!(subject, Some(banner), "{case}");
+            runner
+                .act(GameAction::ChooseOption {
+                    choice: color.to_string(),
+                })
+                .expect("P0 chooses a color");
+        }
+        finish(&mut runner);
+        for (banner, color) in order.into_iter().zip(["Red", "Green"]) {
+            let object = &runner.state().objects[&banner];
+            assert_eq!(object.zone, Zone::Battlefield, "{case}");
+            assert!(object.tapped, "{case}: Root Maze taps the entrant");
+            assert!(
+                object.chosen_attributes.iter().any(|attribute| matches!(
+                    attribute,
+                    ChosenAttribute::Color(chosen) if format!("{chosen:?}") == color
+                )),
+                "{case}: {:?}",
+                object.chosen_attributes
+            );
+        }
+    }
+}
+
 /// Wrath of God over `n` of P1's creatures with Rest in Peace on the
 /// battlefield; with `umbras`, each creature also wears Hyena Umbra and Spider
 /// Umbra, so every member holds an armor choice. Returns the replacement work

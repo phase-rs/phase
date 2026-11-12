@@ -2012,13 +2012,16 @@ fn run_staged_batch(
     events: &mut Vec<GameEvent>,
     run_start: usize,
 ) -> StagedStop {
+    // The members this run consulted again because their held decision no
+    // longer stood; see `schedule_staged_decisions`.
+    let mut reconsulted = Vec::new();
     loop {
         let Some(stage) = owner.staged.as_ref().map(|staged| staged.stage) else {
             return StagedStop::Delivered;
         };
         match stage {
             BatchDeliveryStage::Approving => {
-                match drive_staged_approval(state, owner, events) {
+                match drive_staged_approval(state, owner, events, &mut reconsulted) {
                     StagedConsult::Continue => continue,
                     StagedConsult::Paused => {
                         // A paused batch is a savable state: project the
@@ -2103,6 +2106,7 @@ fn drive_staged_approval(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
     events: &mut Vec<GameEvent>,
+    reconsulted: &mut Vec<ObjectIncarnationRef>,
 ) -> StagedConsult {
     // The asking member continues only its own consultation: an answered
     // outer Destroy runs its inner move next.
@@ -2145,7 +2149,7 @@ fn drive_staged_approval(
         let result = consult_staged_member(state, owner, events, cursor);
         return settle_staged_consult(state, owner, cursor, result, point);
     }
-    schedule_staged_decisions(state, owner)
+    schedule_staged_decisions(state, owner, reconsulted)
 }
 
 /// After one member's consultation: a parked decision is held when it can be
@@ -2363,9 +2367,14 @@ fn refresh_staged_blocking(state: &GameState, owner: &mut PendingBatchDeliveries
 /// CR 101.4 + CR 101.4c + CR 616.1: ask the outstanding decisions. The
 /// APNAP-first chooser goes first; a chooser holding two or more decisions
 /// chooses which to make first. With nothing outstanding, approval is done.
+///
+/// A decision that no longer stands is not asked: its member is consulted
+/// again, at most once per run (`reconsulted`), so the run ends after at most
+/// one further consultation per member whatever the new consultation parks.
 fn schedule_staged_decisions(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
+    reconsulted: &mut Vec<ObjectIncarnationRef>,
 ) -> StagedConsult {
     retire_moved_held_members(state, owner);
     let staged = owner.staged.as_ref().expect("approving owner is staged");
@@ -2403,11 +2412,11 @@ fn schedule_staged_decisions(
         .collect();
     if let [(index, _, _)] = mine.as_slice() {
         let index = *index;
-        let decision = owner.staged.as_ref().expect("staged").members[index]
-            .held_decision
-            .clone()
-            .expect("held");
-        if !held_decision_stands(state, &decision) {
+        let member = &owner.staged.as_ref().expect("staged").members[index];
+        let identity = member.identity;
+        let decision = member.held_decision.clone().expect("held");
+        if !reconsulted.contains(&identity) && !held_decision_stands(state, &decision) {
+            reconsulted.push(identity);
             requeue_held_member(owner, index);
             return StagedConsult::Continue;
         }
@@ -2463,16 +2472,31 @@ fn staged_member_is_live(state: &GameState, member: &StagedBatchMember) -> bool 
         == Some(member.identity)
 }
 
-/// CR 616.1 + CR 614.5: whether a held decision still stands: its event can
-/// still happen and its candidates and chooser are what the replacement
-/// pipeline would offer now (`pending_replacement_needs_reconsult`).
+/// CR 616.1 + CR 614.5: whether a held decision still stands: its chooser is
+/// in the game, its event can still happen, and, for a choice among
+/// replacements, its candidates and chooser are what the replacement pipeline
+/// would offer now (`pending_replacement_needs_reconsult`).
+///
+/// CR 614.12a: an as-enters choice is raised for the one replacement the
+/// pipeline already selected, so its record lists that replacement alone and
+/// has no offer to compare; it stands with its event, as the published one
+/// does in `settle_replacement_after_departure_inner`.
 fn held_decision_stands(state: &mut GameState, decision: &HeldReplacementDecision) -> bool {
-    let published = state.pending_replacement.replace(decision.pending.clone());
-    let stands = crate::game::players::is_alive(state, decision.chooser)
-        && replacement::replacement_event_survives(state, &decision.pending.proposed)
-        && !replacement::pending_replacement_needs_reconsult(state, Some(decision.chooser));
-    state.pending_replacement = published;
-    stands
+    if !crate::game::players::is_alive(state, decision.chooser)
+        || !replacement::replacement_event_survives(state, &decision.pending.proposed)
+    {
+        return false;
+    }
+    match decision.prompt {
+        HeldDecisionPrompt::Replacement => {
+            let published = state.pending_replacement.replace(decision.pending.clone());
+            let stands =
+                !replacement::pending_replacement_needs_reconsult(state, Some(decision.chooser));
+            state.pending_replacement = published;
+            stands
+        }
+        HeldDecisionPrompt::Raised(_) => true,
+    }
 }
 
 /// Drop member `index`'s held decision so the sweep consults it again. A held
@@ -13981,7 +14005,7 @@ mod staged_batch_tests {
         let mut events = Vec::new();
         let mut owner = take_owner(&mut state, group_id);
         assert_eq!(
-            drive_staged_approval(&mut state, &mut owner, &mut events),
+            drive_staged_approval(&mut state, &mut owner, &mut events, &mut Vec::new()),
             StagedConsult::Continue
         );
         put_owner(&mut state, owner);
@@ -14001,7 +14025,7 @@ mod staged_batch_tests {
 
         let mut owner = take_owner(&mut state, group_id);
         assert_eq!(
-            drive_staged_approval(&mut state, &mut owner, &mut events),
+            drive_staged_approval(&mut state, &mut owner, &mut events, &mut Vec::new()),
             StagedConsult::Continue
         );
         put_owner(&mut state, owner);
