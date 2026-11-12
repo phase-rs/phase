@@ -287,9 +287,8 @@ fn assert_resolution_retired(runner: &GameRunner, winner: Option<PlayerId>) {
     assert_round_trips(runner);
 }
 
-/// Common retirement assertions for CR 104.1 game ends and application-policy
-/// trusted match completion. Neither boundary runs an abandoned spell's
-/// CR 608.2n final part.
+/// Common assertions after terminal retirement or normal resolution settlement.
+/// Terminal retirement does not run an abandoned spell's CR 608.2n final part.
 fn assert_resolution_state_retired(state: &GameState) {
     assert!(
         state.resolution_stack.is_empty(),
@@ -1295,7 +1294,7 @@ fn a_refused_wrong_seat_forfeit_preserves_both_cipher_responses() {
             matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0)
         );
         assert!(runner.state().stack.is_empty());
-        assert_resolution_state_retired(runner.state());
+        assert!(runner.state().resolution_stack.is_empty());
         assert_eq!(runner.state().players[1].life, 17);
         assert!(runner.state().game_end.is_none());
         assert!(runner.state().match_forfeit_result.is_none());
@@ -1307,6 +1306,16 @@ fn a_refused_wrong_seat_forfeit_preserves_both_cipher_responses() {
         assert_eq!(runner.state().match_phase, MatchPhase::InGame);
         assert_eq!(runner.state().match_score, MatchScore::default());
         assert_eq!(runner.state().game_number, 1);
+
+        // CR 117.3d: P0's pass gives P1 priority; settling the completed
+        // resolution at this action boundary must not reset that succession.
+        runner
+            .act(GameAction::PassPriority)
+            .expect("the completed cipher response leaves the next action usable");
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1)
+        );
+        assert_resolution_state_retired(runner.state());
     }
 }
 
