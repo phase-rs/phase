@@ -80608,6 +80608,34 @@ fn bare_choose_feeding_a_printed_target_through_the_chosen_object_keeps_stack_ti
         );
     }
 
+    // A reader of the chain's announced root slots (a fight; a delayed trigger not
+    // bound to a tracked set, in a chain that announces a printed target) withholds
+    // every earlier bare choice, whichever clause prints the "target" word.
+    // Synthetic Oracle; the nearest printed chains are Crush Underfoot and the
+    // delayed "Sacrifice it at the beginning of the next end step" riders.
+    for text in [
+        "Choose a creature you control. Tap target creature. It fights that creature.",
+        "Choose a creature you control. Choose target creature you don't control. Those creatures fight each other.",
+        "Choose a creature you control. Untap it. Sacrifice it at the beginning of the next end step. Target creature gets +1/+1 until end of turn.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let timings = target_only_chain_timings(&def);
+        assert!(
+            timings.contains(&TargetChoiceTiming::Stack)
+                && !timings.contains(&TargetChoiceTiming::Resolution),
+            "{text}: every bare choice stays announced: {timings:?}: {def:#?}"
+        );
+    }
+    // Controls: with no printed target the delayed trigger reads nothing the choice
+    // must occupy a slot for, so the choice resolves at resolution.
+    let text = "Choose a creature you control. Untap it. Sacrifice it at the beginning of the next end step.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert_eq!(
+        target_only_chain_timings(&def),
+        vec![TargetChoiceTiming::Resolution],
+        "{text}: {def:#?}"
+    );
+
     // An intervening announced target is the rebound printed target's antecedent,
     // not the earlier choice, which keeps `Resolution`. Synthetic.
     let text = "Choose a creature you control. Destroy target artifact. It deals damage equal to its power to target creature.";

@@ -2058,3 +2058,88 @@ fn bare_choice_feeding_a_fight_is_announced_and_the_fight_happens() {
         "the fought creature dealt damage back"
     );
 }
+
+/// CR 603.7c + CR 601.2c: "Choose a creature you control. Untap it. Sacrifice it at
+/// the beginning of the next end step. Target creature gets +1/+1 until end of
+/// turn." The delayed payload binds "it" from the chain's announced slots, so the
+/// chosen creature must stay announced at cast (not moved to resolution) or the
+/// payload would bind only the +1/+1 recipient. Synthetic Oracle: no printed card pairs
+/// a bare choice, a delayed sacrifice and a printed target.
+#[test]
+fn bare_choice_feeding_a_delayed_sacrifice_binds_the_chosen_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let chosen = scenario.add_creature(P0, "Chosen creature", 2, 2).id();
+    let recipient = scenario.add_creature(P1, "Pumped creature", 2, 2).id();
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Synthetic delayed sacrifice",
+            false,
+            "Choose a creature you control. Untap it. Sacrifice it at the beginning of the next end step. Target creature gets +1/+1 until end of turn.",
+        )
+        .with_mana_cost(parse_mtgjson_mana_cost("{G}"))
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    // Both picks are announced as the spell is cast.
+    let mut announced = Vec::new();
+    for _ in 0..4 {
+        let WaitingFor::TargetSelection { selection, .. } = &runner.state().waiting_for else {
+            break;
+        };
+        let pick = [chosen, recipient]
+            .into_iter()
+            .map(TargetRef::Object)
+            .find(|target| {
+                selection.current_legal_targets.contains(target) && !announced.contains(target)
+            })
+            .expect("a legal announcement");
+        announced.push(pick.clone());
+        runner
+            .act(GameAction::ChooseTarget { target: Some(pick) })
+            .unwrap();
+    }
+    assert_eq!(
+        announced,
+        vec![TargetRef::Object(chosen), TargetRef::Object(recipient)],
+        "the chosen creature and the +1/+1 recipient are both announced while casting"
+    );
+    runner.advance_until_stack_empty();
+    assert_resolution_settled(&runner, "the delayed-sacrifice spell");
+    // CR 513.1: the delayed trigger fires as the end step begins; no attack is made.
+    for _ in 0..60 {
+        if runner.state().objects[&chosen].zone != Zone::Battlefield {
+            break;
+        }
+        let action = match runner.state().waiting_for {
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            _ => GameAction::PassPriority,
+        };
+        runner.act(action).expect("the turn advances");
+    }
+    assert_eq!(
+        runner.state().objects[&chosen].zone,
+        Zone::Graveyard,
+        "the delayed sacrifice binds the chosen creature"
+    );
+    // The payload's "it" binds every announced slot of the chain, the +1/+1
+    // recipient included; that multi-slot binding is the lowering's existing
+    // behavior (the chain is lowered exactly as before the bare-choice change) and
+    // is not asserted here.
+}

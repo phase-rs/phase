@@ -29512,24 +29512,116 @@ fn cast_time_bare_choice(effect: &Effect, timing: TargetChoiceTiming) -> bool {
     timing != TargetChoiceTiming::Resolution && matches!(effect, Effect::TargetOnly { .. })
 }
 
-/// CR 608.2c: whether a later instruction's effect reads the chosen object through
-/// a slot the engine resolves from the chain's announced root slots: its target
-/// (rebound to `ParentTarget` by the anaphora rewrite), a fight's subject ("It
-/// fights target creature": `resolve_fight_fighters` recovers both fighters from
-/// the root slot pair), or an exchange's first side. Reading it through another
-/// slot is not claimed; over-withholding only returns a choice to its base timing.
+/// CR 601.2c + CR 608.2c: the choice-withholding passes keep an earlier bare choice
+/// announced when a later instruction reads it through a slot the engine resolves
+/// from the chain's announced root slots. Those readers recover the chosen object
+/// from the slots declared as the spell is cast; a choice made at resolution
+/// occupies none, so the reader would bind another object, or the source:
+/// - a fight or an exchange of control that reads the chosen object
+///   (`resolve_fight_fighters` recovers both fighters from the root slot pair);
+/// - a delayed payload ("Sacrifice it at the beginning of the next end step") that
+///   reads it, in a chain that announces a printed target
+///   (`parent_chain_referents` ranks the root's declared slots ahead of the node's
+///   own). The payload is still the clause's own effect here, carrying the delay;
+///   a delayed trigger another producer already wrapped reads context references,
+///   not a preceding choice, and is not claimed.
+/// Every earlier bare choice is withheld, not only the nearest antecedent, since
+/// such a reader may read several of them ("Those creatures fight each other").
+/// Reading the chosen object through any other slot is not claimed; over-withholding
+/// only returns a choice to its base timing.
+fn withhold_resolution_timing_before_root_slot_readers(clauses: &mut [ClauseIr]) {
+    let chain_prints_target =
+        lower::PrintedTargetWord::from_clauses(clauses) == lower::PrintedTargetWord::Present;
+    // Document order: each clause's head, then its sub chain.
+    let positions: Vec<(usize, Option<usize>)> = clauses
+        .iter()
+        .enumerate()
+        .flat_map(|(clause_index, clause)| {
+            let subs = std::iter::successors(clause.parsed.sub_ability.as_deref(), |node| {
+                node.sub_ability.as_deref()
+            })
+            .count();
+            std::iter::once((clause_index, None))
+                .chain((0..subs).map(move |depth| (clause_index, Some(depth))))
+        })
+        .collect();
+    let effect_at = |clauses: &[ClauseIr], (clause_index, depth): (usize, Option<usize>)| {
+        let clause = &clauses[clause_index];
+        match depth {
+            None => clause.parsed.effect.clone(),
+            Some(depth) => std::iter::successors(clause.parsed.sub_ability.as_deref(), |node| {
+                node.sub_ability.as_deref()
+            })
+            .nth(depth)
+            .map(|node| node.effect.as_ref().clone())
+            .unwrap_or_else(|| clause.parsed.effect.clone()),
+        }
+    };
+    let Some(last_reader) = positions.iter().rposition(|&position| {
+        // A delayed payload is still the clause's own effect here: the clause
+        // carries the delay and assembly wraps it later.
+        let delayed = position.1.is_none()
+            && (clauses[position.0].delayed_condition.is_some()
+                || clauses[position.0].prefix_delayed_condition.is_some());
+        effect_reads_announced_root_slots(
+            &effect_at(clauses, position),
+            delayed,
+            chain_prints_target,
+        )
+    }) else {
+        return;
+    };
+    for &(clause_index, depth) in &positions[..last_reader] {
+        let clause = &mut clauses[clause_index];
+        match depth {
+            None => {
+                if clause.declared_target_choice_timing == Some(TargetChoiceTiming::Resolution)
+                    && matches!(clause.parsed.effect, Effect::TargetOnly { .. })
+                    && clause.parsed.sub_ability.is_none()
+                {
+                    clause.declared_target_choice_timing = None;
+                }
+            }
+            Some(depth) => {
+                let mut node = clause.parsed.sub_ability.as_deref_mut();
+                for _ in 0..depth {
+                    node = node.and_then(|def| def.sub_ability.as_deref_mut());
+                }
+                if let Some(def) = node {
+                    if def.target_choice_timing == TargetChoiceTiming::Resolution
+                        && matches!(def.effect.as_ref(), Effect::TargetOnly { .. })
+                        && def.sub_ability.is_none()
+                    {
+                        def.target_choice_timing = TargetChoiceTiming::Stack;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn effect_reads_announced_root_slots(
+    effect: &Effect,
+    delayed: bool,
+    chain_prints_target: bool,
+) -> bool {
+    let reads_parent = |filter: &TargetFilter| *filter == TargetFilter::ParentTarget;
+    if delayed {
+        return chain_prints_target && effect.target_filter().is_some_and(reads_parent);
+    }
+    match effect {
+        Effect::Fight { target, subject } => reads_parent(target) || reads_parent(subject),
+        Effect::ExchangeControl { target_a, target_b } => {
+            reads_parent(target_a) || reads_parent(target_b)
+        }
+        _ => false,
+    }
+}
+
+/// CR 608.2c + CR 115.10a: whether a later instruction's effect reads the chosen
+/// object as its target, which the anaphora rewrite rebinds to `ParentTarget`.
 fn effect_reads_chosen_object(effect: &Effect) -> bool {
     effect.target_filter() == Some(&TargetFilter::ParentTarget)
-        || matches!(
-            effect,
-            Effect::Fight {
-                subject: TargetFilter::ParentTarget,
-                ..
-            } | Effect::ExchangeControl {
-                target_a: TargetFilter::ParentTarget,
-                ..
-            }
-        )
 }
 
 /// The nearest object-naming node of one clause, read from its own sub chain
@@ -51768,6 +51860,7 @@ fn parse_effect_chain_ir_body(
     withhold_resolution_timing_from_repeated_choices(builder.clauses_mut());
     withhold_resolution_timing_beside_a_cast_time_choice(builder.clauses_mut(), ctx);
     withhold_resolution_timing_from_choices_feeding_printed_targets(builder.clauses_mut());
+    withhold_resolution_timing_before_root_slot_readers(builder.clauses_mut());
     // CR 608.2c: after player tagging, so a producer's player group is final and
     // the object-group stamp cannot suppress it.
     bind_anaphors_across_resolution_choices(builder.clauses_mut(), ctx.body_scope);
