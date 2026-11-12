@@ -18,7 +18,7 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
-use super::elimination::DepartureTriggers;
+use super::elimination::{DepartureResume, DepartureTriggers};
 use super::filter::{matches_target_filter, FilterContext};
 use super::speed::{controls_start_your_engines_in, set_speed};
 use super::zones;
@@ -98,7 +98,18 @@ fn mid_resolution_entry_pauses_sba(state: &GameState) -> bool {
 /// CR 704.3: Run state-based actions in a fixpoint loop until no more actions are performed,
 /// capped at MAX_SBA_ITERATIONS.
 pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller);
+    let _ = run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller);
+}
+
+/// CR 704.3 + CR 117.2e: [`check_state_based_actions`] for the player-loss
+/// safety net, which can run while a resolution is paused on a player's
+/// replacement choice. Reports a departure that canceled that pause, so the
+/// caller finishes the resolution before any player receives priority.
+pub(crate) fn check_state_based_actions_reporting_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> DepartureResume {
+    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller)
 }
 
 /// CR 704.3 + CR 117.5: [`check_state_based_actions`] inside a post-action pass, which places
@@ -107,7 +118,7 @@ pub(crate) fn check_state_based_actions_in_pass(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) {
-    run_state_based_actions(state, events, &[], DepartureTriggers::PlacedByPass);
+    let _ = run_state_based_actions(state, events, &[], DepartureTriggers::PlacedByPass);
 }
 
 /// CR 704.3 + CR 704.5v + CR 510.3a: run state-based actions in a fixpoint loop
@@ -121,7 +132,7 @@ pub(crate) fn check_state_based_actions_with_waiting_triggers(
     events: &mut Vec<GameEvent>,
     waiting: &[crate::game::triggers::PendingTriggerContext],
 ) {
-    run_state_based_actions(state, events, waiting, DepartureTriggers::ScannedByCaller);
+    let _ = run_state_based_actions(state, events, waiting, DepartureTriggers::ScannedByCaller);
 }
 
 fn run_state_based_actions(
@@ -129,7 +140,7 @@ fn run_state_based_actions(
     events: &mut Vec<GameEvent>,
     waiting: &[crate::game::triggers::PendingTriggerContext],
     departures: DepartureTriggers,
-) {
+) -> DepartureResume {
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
     if state.layers_dirty.is_dirty() {
         // Snapshot P/T before layer re-evaluation for delta logging.
@@ -198,12 +209,17 @@ fn run_state_based_actions(
             for &loser in &losers {
                 events.push(GameEvent::PlayerLost { player_id: loser });
             }
-            // Only a concession reports an owed resume; SBA losses never do.
-            let _ = super::elimination::eliminate_players(state, &losers, departures, events);
+            let resume = super::elimination::eliminate_players(state, &losers, departures, events);
 
             // If the game ended (a sole winner or a CR 104.4a draw), stop now.
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-                return;
+                return DepartureResume::Settled;
+            }
+            // CR 704.4 + CR 117.2e: the departure canceled the current pause of a
+            // resolution that is still under way. Its remaining state-based
+            // actions wait for that resolution to finish; the caller resumes it.
+            if resume == DepartureResume::ParkedZoneChangeTail {
+                return resume;
             }
         }
 
@@ -226,7 +242,7 @@ fn run_state_based_actions(
         // `pending_replacement` guard (after lethal-damage) still handles
         // regeneration replacements created *within* this loop.
         if mid_resolution_entry_pauses_sba(state) {
-            return;
+            return DepartureResume::Settled;
         }
 
         // CR 903.9a: A commander in graveyard or exile (since last SBA check) may
@@ -234,7 +250,7 @@ fn run_state_based_actions(
         // ask the player, similar to the legend rule.
         check_commander_zone_return(state);
         if matches!(state.waiting_for, WaitingFor::CommanderZoneChoice { .. }) {
-            return;
+            return DepartureResume::Settled;
         }
 
         let battlefield_snapshot = state.battlefield_phased_in_ids();
@@ -252,7 +268,7 @@ fn run_state_based_actions(
 
         // CR 614.3 / CR 701.19b: If a regeneration replacement choice is pending, pause SBA evaluation.
         if mid_resolution_entry_pauses_sba(state) {
-            return;
+            return DepartureResume::Settled;
         }
 
         if has_battlefield_sbas {
@@ -269,14 +285,14 @@ fn run_state_based_actions(
             if check_legend_rule(state, events, &mut any_performed, &battlefield_snapshot)
                 == SbaPassControl::Stop
             {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5m: If an Aura is attached to an illegal object or player, it is put into
             // its owner's graveyard.
             check_unattached_auras(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5n: If an Equipment or Fortification is attached to an illegal
@@ -289,7 +305,7 @@ fn run_state_based_actions(
             // gone — only attached Roles compete for the per-(host, controller) slot.
             check_role_uniqueness(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5k: If two or more permanents have the world supertype, all but the one
@@ -298,13 +314,13 @@ fn run_state_based_actions(
             // choiceless — modeled on check_role_uniqueness.
             check_world_rule(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5i + CR 306.9: If a planeswalker has loyalty 0, it is put into its owner's graveyard.
             check_zero_loyalty(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5v + CR 310.7: a Siege with defense 0 that isn't the source of an
@@ -319,7 +335,7 @@ fn run_state_based_actions(
                 waiting,
             );
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5p: If a battle or creature is attached to an object or player — or
@@ -338,7 +354,7 @@ fn run_state_based_actions(
             // controller chooses an appropriate protector; graveyard if none can be chosen.
             check_battle_protector(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5s + CR 714.4: If a Saga has lore counters >= its final chapter number,
@@ -351,7 +367,7 @@ fn run_state_based_actions(
                 waiting,
             );
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5q: +1/+1 and -1/-1 counters on the same permanent cancel in pairs.
@@ -371,7 +387,7 @@ fn run_state_based_actions(
                 &battlefield_snapshot,
             );
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5z: A player controlling Start your engines! gets speed 1 if they had none.
@@ -403,7 +419,7 @@ fn run_state_based_actions(
                 Some(crate::game::planechase::PlaneswalkResolution::Deferred)
             )
         {
-            return;
+            return DepartureResume::Settled;
         }
 
         // CR 904.10 / CR 314.6: A face-up non-ongoing scheme with no scheme
@@ -433,6 +449,7 @@ fn run_state_based_actions(
             break;
         }
     }
+    DepartureResume::Settled
 }
 
 /// CR 704.5z + CR 702.179a: If a player controls a permanent with start your engines!

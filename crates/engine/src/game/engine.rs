@@ -2557,6 +2557,44 @@ fn settle_finished_game(state: &mut GameState, result: &mut ActionResult) {
 
 /// CR 704.3: the terminal half of [`reconcile_terminal_result`] — the player-loss SBA safety net
 /// and the game-over check, without the loop-shortcut evaluation.
+/// CR 117.2e + CR 608.2c + CR 117.5: finish a resolution whose current pause a
+/// player's departure canceled (`elimination::DepartureResume`), then settle it
+/// as any action that completed one: the owed final part (CR 608.2n),
+/// state-based actions (CR 704.3), then the queued triggered abilities. The
+/// resume runs in its own buffer, because a drain that stops on another prompt
+/// takes the buffer it is handed into its parked carrier. A departure is never
+/// refused (CR 104.3a), so a failure is reported rather than returned.
+fn settle_resolution_resumed_after_departure(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let resume_start = events.len();
+    let mut resumed = Vec::new();
+    if let Err(error) = resume_pending_continuation_if_priority(state, &mut resumed) {
+        tracing::error!(%error, "a resolution resumed after a departure did not finish");
+        debug_assert!(
+            false,
+            "a resolution resumed after a departure did not finish: {error}"
+        );
+    }
+    events.append(&mut resumed);
+    let provisional = state.waiting_for.clone();
+    match super::engine_priority::run_post_action_pipeline_from(
+        state,
+        events,
+        resume_start,
+        &provisional,
+        false,
+        false,
+    ) {
+        Ok(settled) => sync_waiting_for(state, &settled),
+        Err(error) => {
+            tracing::error!(%error, "a resolution resumed after a departure did not settle");
+            debug_assert!(
+                false,
+                "a resolution resumed after a departure did not settle: {error}"
+            );
+        }
+    }
+}
+
 fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     // Safety net (fixes #962): If a player-loss SBA would eliminate a player,
     // run SBAs now. CR 704.3 normally checks SBAs when a player would receive
@@ -2576,7 +2614,14 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     // the game, so waiting on their choices is not the #962 softlock; prompts
     // owned by a resolution keep the net.
     if sba::has_pending_player_loss_sba(state) && !state.withholds_priority() {
-        sba::check_state_based_actions(state, &mut result.events);
+        // CR 117.2e: the loss may cancel the current pause of a resolution
+        // that is still under way (its chooser left); finish it before any
+        // player receives priority.
+        if sba::check_state_based_actions_reporting_departure(state, &mut result.events)
+            == super::elimination::DepartureResume::ParkedZoneChangeTail
+        {
+            settle_resolution_resumed_after_departure(state, &mut result.events);
+        }
         // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
         // the next living player). Sync the result.
         result.waiting_for = state.waiting_for.clone();
@@ -12628,7 +12673,10 @@ fn apply_action(
     // dispatch entirely — there is no priority/state check. Eliminating the player
     // performs CR 800.4a object cleanup and advances `waiting_for` if the conceder
     // owned it (see `elimination::concede`), and queues what the departure triggered
-    // (CR 603.6c), since no pipeline scans this action's events.
+    // (CR 603.6c), since no pipeline scans the departure's own events. When the
+    // departure canceled the current pause of a resolution still under way, the
+    // resolution is finished and the action settled through the post-action
+    // pipeline (`settle_resolution_resumed_after_departure`).
     if let GameAction::Concede { player_id } = action {
         let mut events = Vec::new();
         match super::elimination::concede(state, player_id, &mut events) {
@@ -12640,23 +12688,7 @@ fn apply_action(
             // (CR 608.2n), state-based actions (CR 704.3), then the triggered
             // abilities the departure queued together with the resumed ones.
             super::elimination::DepartureResume::ParkedZoneChangeTail => {
-                // The resume runs in its own buffer: a drain that stops on
-                // another prompt takes the buffer it is handed into its parked
-                // carrier, which must not be the departure's own events.
-                let resume_start = events.len();
-                let mut resumed = Vec::new();
-                resume_pending_continuation_if_priority(state, &mut resumed)?;
-                events.append(&mut resumed);
-                let provisional = state.waiting_for.clone();
-                let settled = super::engine_priority::run_post_action_pipeline_from(
-                    state,
-                    &mut events,
-                    resume_start,
-                    &provisional,
-                    false,
-                    false,
-                )?;
-                sync_waiting_for(state, &settled);
+                settle_resolution_resumed_after_departure(state, &mut events);
             }
         }
         return Ok(ActionResult::applied(events, state.waiting_for.clone()));

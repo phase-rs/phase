@@ -157,7 +157,10 @@ pub fn eliminate_players_simultaneously(
     players_to_eliminate: &[PlayerId],
     events: &mut Vec<GameEvent>,
 ) {
-    // Only a concession reports an owed resume; this caller's pipeline scans.
+    // CR 104.3e / CR 704.5a callers lose players outside a paused zone-change
+    // pause (none is live while an effect or an ordinary SBA pass runs), so no
+    // resume is owed here; the CR 704.5a safety net uses
+    // `sba::check_state_based_actions_reporting_departure` instead.
     let _ = eliminate_players(
         state,
         players_to_eliminate,
@@ -586,13 +589,12 @@ pub(crate) fn eliminate_players(
         // current replacement-choice pause of a parked zone-change owner (a
         // batch delivery or a ChangeZone iteration, or a merged permanent's
         // component child and the owner that announced it) leaves that owner's
-        // surviving tail owed. No player has priority while it resolves, so a
-        // concession — which no post-action pipeline follows — reports it to the
-        // action, which finishes the resolution and then settles it like any
-        // action that completed one: final part, state-based actions, then the
-        // queue below (CR 608.2n, CR 117.5).
-        if departure_triggers == DepartureTriggers::CollectedByDeparture
-            && zone_change_pause_was_live
+        // surviving tail owed. No player has priority while it resolves, so
+        // the departure reports it — a concession to its action, a player-loss
+        // safety net to its caller — which finishes the resolution and then
+        // settles it like any action that completed one: final part, state-based
+        // actions, then the queue below (CR 608.2n, CR 117.5).
+        if zone_change_pause_was_live
             && state.pending_replacement.is_none()
             && matches!(state.waiting_for, WaitingFor::Priority { .. })
             && state.resolution_stack.active_zone_change_owner_is_parked()
@@ -1283,11 +1285,10 @@ fn abandon_pending_zone_change_member_for_player_left(
             continue;
         }
         // The canceled pause was the sole current resolution operation. Its
-        // surviving carrier tail is resumed by the action that caused the
-        // departure (a concession reports it as `DepartureResume`, the
-        // engine's concede settlement finishes it before priority; a caller
-        // with a pipeline reaches it at its priority boundary). No unrelated
-        // continuation is cleared here.
+        // surviving carrier tail is owed: the departure reports it as
+        // `DepartureResume`, and the concession or player-loss safety net that
+        // caused it finishes it before priority. No unrelated continuation is
+        // cleared here.
         state.waiting_for = WaitingFor::Priority {
             player: players::next_player(state, leaving_player),
         };

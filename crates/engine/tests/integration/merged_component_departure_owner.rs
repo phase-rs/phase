@@ -748,6 +748,70 @@ fn concession_resume_that_ends_the_game_leaves_nothing_owed() {
     assert!(runner.state().pending_replacement.is_none());
 }
 
+/// CR 704.5a + CR 117.2e + CR 608.2n + CR 704.4: the chooser leaves through
+/// the player-loss state-based action instead of conceding. P1 is at 0 life
+/// with Platinum Angel and owns the merged commander pile; P1's graveyard holds
+/// the only graveyard card, and P0 controls Lord of Extinction. Rebuking
+/// Ceremony targets the pile and the Angel, and P1 arranges them (CR 401.4);
+/// the Angel moves first, Circuit Mender follows and Brokkos's CR 903.9b prompt
+/// parks the split. At that action's boundary P1 loses, which cancels the
+/// prompt; the ceremony is
+/// finished and put into P0's graveyard before the remaining state-based
+/// actions, so the Lord survives and nothing is parked when priority is given.
+#[test]
+fn player_loss_during_the_prompt_finishes_the_resolution_before_priority() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let (mender, brokkos) = add_pile(&mut scenario, P1);
+    let angel = scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Circuit Mender", Zone::Graveyard, db);
+    let lord = scenario.add_real_card(P0, "Lord of Extinction", Zone::Battlefield, db);
+    let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
+    scenario.with_life(P1, 0);
+    scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
+    let mut runner = scenario.build();
+    let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
+    assert_eq!(runner.state().objects[&lord].toughness, Some(1));
+
+    cast_until_resolved_or_asked(&mut runner, ceremony, &[pile.survivor, angel]);
+    // CR 401.4: both cards go on top of P1's library, so P1 arranges them.
+    let WaitingFor::EffectZoneChoice {
+        player: P1, cards, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("{:?}", runner.state().waiting_for);
+    };
+    assert_eq!(cards.len(), 2);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![pile.survivor, angel],
+        })
+        .expect("P1 arranges the two cards");
+
+    assert!(
+        runner.state().players[1].is_eliminated,
+        "CR 704.5a: without Platinum Angel, P1 at 0 life loses"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    resolution_finished(runner.state());
+    assert_eq!(runner.state().objects[&ceremony].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&pile.brokkos].zone, Zone::Exile);
+    assert_eq!(
+        runner.state().objects[&lord].zone,
+        Zone::Battlefield,
+        "CR 608.2n + CR 704.4: the ceremony was in a graveyard when the state-based actions ran"
+    );
+    assert_eq!(runner.state().objects[&lord].toughness, Some(1));
+}
+
 /// CR 800.4a + CR 117.2e + CR 730.3: Chaos Warp's owner iteration parks on
 /// Brokkos's CR 903.9b prompt and the owner — the prompt's chooser — concedes.
 /// Every component leaves the game with P1, and the owner iteration and its
