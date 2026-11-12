@@ -1387,6 +1387,7 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(state, &announced_members);
         state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group,
             paused_current,
             remaining: Vec::new(),
@@ -1544,6 +1545,7 @@ fn stash_batch_tail(
         .map(ZoneMoveRequest::into_pending)
         .collect();
     let pending = PendingBatchDeliveries {
+        library_reorder: None,
         logical_zone_change_group,
         paused_current,
         remaining,
@@ -1661,6 +1663,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
             enter_tapped,
             exile_tracking,
             library_placement,
+            library_reorder,
             completion,
             replacement_applied,
             requests,
@@ -1773,6 +1776,13 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                         );
                     }
                 }
+                // CR 701.20d + CR 616.1: every member of this library
+                // placement is now in place, so the whole-library reorder it
+                // performed settles before the completion (reveal-marker
+                // cleanup / continuation) runs.
+                if let Some(library_reorder) = library_reorder {
+                    library_reorder.finish(state);
+                }
                 if let Some(mut completion) = completion {
                     // The parked/settled result is deliberately unused here: the
                     // drain's callers are state-mediated (engine_replacement
@@ -1796,6 +1806,9 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 // completion and external output; never replace that owner.
                 let reparking = ensure_batch_record(state, destination);
                 reparking.completion = completion;
+                // CR 701.20d + CR 616.1: the re-parked tail still owes the
+                // library reorder this instruction performs.
+                reparking.library_reorder = library_reorder;
                 reparking.attempted = attempted;
                 reparking.zone_change_record_start = zone_change_record_start;
                 deferred_events.append(events);
@@ -1859,6 +1872,7 @@ mod paused_search_audience_tests {
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[]);
         state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group,
             paused_current: Some(paused),
             remaining: Vec::new(),
@@ -1944,6 +1958,7 @@ mod paused_search_audience_tests {
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[entrant]);
         state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group,
             paused_current: Some(paused_current),
             remaining: Vec::new(),
@@ -6289,6 +6304,7 @@ mod w3_library_placement_tests {
             .expect("parent batch retains its pre-delivery latch");
         let parent_group_id = parent_group.logical_group_id;
         state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: None,
             logical_zone_change_group: parent_group,
             paused_current: None,
             remaining: Vec::new(),
@@ -8060,5 +8076,102 @@ mod effect_driven_entry_noop_tests {
 
         assert!(matches!(result, ZoneMoveResult::Done), "the move completed");
         assert!(events.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod library_reorder_carrier_tests {
+    use super::*;
+    use crate::game::zones::{create_object, LibraryReorderOperation};
+    use crate::types::game_state::BatchCompletion;
+    use crate::types::identifiers::CardId;
+
+    /// CR 701.20d + CR 616.1: a library placement that paused on a replacement
+    /// ordering choice still owes its whole-library reorder. The operation rides
+    /// the batch resume carrier and settles when the drain completes the
+    /// instruction — before the completion (cleanup / continuation) runs, which
+    /// this witness pins by clearing one member's reveal inside the completion.
+    #[test]
+    fn paused_library_reorder_settles_before_the_batch_completion() {
+        let mut state = GameState::new_two_player(42);
+        let top = create_object(
+            &mut state,
+            CardId(92001),
+            PlayerId(0),
+            "Reorder A".to_string(),
+            Zone::Library,
+        );
+        let bottom = create_object(
+            &mut state,
+            CardId(92002),
+            PlayerId(0),
+            "Reorder B".to_string(),
+            Zone::Library,
+        );
+        state.library_of_mut(PlayerId(0)).push_back(top);
+        state.library_of_mut(PlayerId(0)).push_back(bottom);
+        state.revealed_cards.insert(top);
+        state.revealed_cards.insert(bottom);
+        let top_incarnation = state.objects[&top].incarnation;
+        let bottom_incarnation = state.objects[&bottom].incarnation;
+
+        // The paused delivery's completed arrangement (a genuine reorder).
+        let reorder = LibraryReorderOperation::begin(&state, &[top, bottom]);
+        let reversed: im::Vector<ObjectId> = state
+            .library_of(PlayerId(0))
+            .iter()
+            .rev()
+            .copied()
+            .collect();
+        *state.library_of_mut(PlayerId(0)) = reversed;
+
+        let logical_zone_change_group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[]);
+        state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: Some(reorder),
+            logical_zone_change_group,
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: Zone::Library,
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            // CR 701.20d: this cleanup drops `top`'s public reveal. Settlement
+            // must therefore run first or the retirement finds nothing.
+            completion: Some(BatchCompletion::ManifestDreadCleanup {
+                player: PlayerId(0),
+                revealed: vec![top],
+            }),
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+        });
+        assert!(
+            state.active_batch_delivery().is_some(),
+            "reach guard: the paused carrier is the active batch"
+        );
+
+        let mut events = Vec::new();
+        drain_pending_batch_deliveries(&mut state, &mut events);
+
+        assert!(
+            state.active_batch_delivery().is_none(),
+            "the drained delivery settles its owner"
+        );
+        assert!(
+            state.objects[&top].incarnation > top_incarnation,
+            "CR 701.20d: the reordered member became a new object before cleanup ran"
+        );
+        assert!(
+            state.objects[&bottom].incarnation > bottom_incarnation,
+            "CR 701.20d: every reordered member becomes a new object"
+        );
+        assert!(
+            !state.revealed_cards.contains(&bottom),
+            "a member the completion did not touch is retired too"
+        );
     }
 }

@@ -4838,6 +4838,26 @@ impl PendingZoneChangeDelivery {
     }
 }
 
+/// CR 701.20d: One library placement instruction ("put the revealed cards on
+/// the bottom of your library in a random order") that the zone pipeline
+/// delivers one card at a time. Each delivery only sees its own card, so a
+/// member already in place when it is delivered (C in `[A, B, C]` bottomed as
+/// `[C, A, B]`) stays revealed while later deliveries carry it to a new
+/// position. The operation captures each affected library before the first
+/// delivery and, once every member has been placed, treats the members that
+/// stayed in that library as one reorder.
+///
+/// CR 616.1: a delivery can pause on a replacement ordering choice between the
+/// captures and the settlement, so the operation rides on the delivery's resume
+/// carrier (`PendingChangeZoneIteration::library_reorder` or
+/// `PendingBatchDeliveries::library_reorder`) and is settled by the drain that
+/// completes the instruction — never by the call that started it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryReorderOperation {
+    pub(crate) members: Vec<ObjectId>,
+    pub(crate) libraries: Vec<(PlayerId, Vec<ObjectId>)>,
+}
+
 /// CR 614.12b + CR 614.1c + CR 614.13: Resume state for a multi-target
 /// `ChangeZone` resolution loop paused when one of the moving objects
 /// triggered a per-permanent replacement choice (shock-land "pay 2 life?",
@@ -4916,6 +4936,11 @@ pub struct PendingChangeZoneIteration {
     /// library" still suppresses auto-shuffle on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
+    /// CR 701.20d + CR 616.1: The whole-library reorder this delivery performs,
+    /// carried across a replacement-ordering pause so the resumed tail settles
+    /// reveal retirement exactly once on completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_reorder: Option<LibraryReorderOperation>,
     /// CR 303.4f: Pre-resolved Aura host carried across a paused ChangeZone loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enter_attached_to: Option<AttachTarget>,
@@ -6863,6 +6888,11 @@ pub struct PendingBatchDeliveries {
     /// for newly parked actions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<ObjectId>,
+    /// CR 701.20d + CR 616.1: The whole-library reorder this batch performs,
+    /// carried across a replacement-ordering pause so the resumed tail settles
+    /// reveal retirement exactly once on completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_reorder: Option<LibraryReorderOperation>,
     /// CR 614.1c tap-state re-seeded on each rebuilt tail request (the seek
     /// `enter_tapped` mod survives the pause boundary).
     #[serde(default, skip_serializing_if = "EtbTapState::is_unspecified")]
@@ -42638,6 +42668,7 @@ mod tests {
         paused.face_down_in_exile = crate::types::ability::ExileConcealment::FaceDown;
         let logical_zone_change_group = state.allocate_logical_zone_change_group(&[object]);
         state.push_change_zone_iteration(PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: Some(paused),
@@ -54789,6 +54820,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty immediately-before authority is still explicitly latched");
         let original = PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: None,
@@ -59142,6 +59174,7 @@ mod restored_exact_attack_authority_tests {
                         .latch_immediately_before(Vec::new(), Vec::new())
                         .expect("test batch owner has explicit pre-delivery authority");
                     state.push_batch_delivery(PendingBatchDeliveries {
+                        library_reorder: None,
                         logical_zone_change_group: group,
                         paused_current: None,
                         remaining: Vec::new(),

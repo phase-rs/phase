@@ -4,6 +4,7 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::StaticDefinition;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
+pub(crate) use crate::types::game_state::LibraryReorderOperation;
 use crate::types::game_state::{
     GameState, LinkedExileLki, LinkedExileSnapshot, ResolutionSourceRelatch, StackEntry,
     StackEntryKind, ZoneChangeCombatStatus,
@@ -2767,11 +2768,9 @@ pub(crate) fn retire_reordered_library_reveals(state: &mut GameState, cards: &[O
 /// position. The operation captures each affected library before the first
 /// delivery and, once every member has been placed, treats the members that
 /// stayed in that library as one reorder.
-pub(crate) struct LibraryReorderOperation {
-    members: Vec<ObjectId>,
-    libraries: Vec<(PlayerId, Vec<ObjectId>)>,
-}
-
+///
+/// The carrier itself lives in `types::game_state` so a paused delivery can
+/// resume it; this module owns creating and settling it.
 impl LibraryReorderOperation {
     /// Capture the libraries holding any of `members` before delivery starts.
     pub(crate) fn begin(state: &GameState, members: &[ObjectId]) -> Self {

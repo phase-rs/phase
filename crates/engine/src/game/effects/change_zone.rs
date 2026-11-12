@@ -1581,6 +1581,7 @@ pub fn resolve(
                 .expect("paused ChangeZone retains its explicit delivery prefix");
                 state.push_change_zone_iteration(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        library_reorder: None,
                         pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
@@ -1627,6 +1628,7 @@ pub fn resolve(
                 .expect("paused ChangeZone retains its explicit delivery prefix");
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        library_reorder: None,
                         pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: Some(
@@ -3096,7 +3098,9 @@ pub fn resolve_all(
     }
     // CR 701.20d: the members are delivered one at a time, but the instruction
     // reorders the library once; settle reveal retirement for the whole set.
-    let library_reorder = (dest_zone == Zone::Library)
+    // A CR 616.1 pause inside the loop hands the operation to the resume
+    // carrier, so the drain that completes the instruction settles it.
+    let mut library_reorder = (dest_zone == Zone::Library)
         .then(|| crate::game::zones::LibraryReorderOperation::begin(state, &matching));
 
     let mut moved_count: i32 = 0;
@@ -3194,6 +3198,10 @@ pub fn resolve_all(
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        // CR 701.20d + CR 616.1: the whole-library reorder this
+                        // instruction performs settles when the resumed tail
+                        // completes.
+                        library_reorder: library_reorder.take(),
                         pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: (!entry_target_choice).then(|| {
@@ -3262,6 +3270,10 @@ pub fn resolve_all(
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.push_change_zone_iteration(
                     crate::types::game_state::PendingChangeZoneIteration {
+                        // CR 701.20d + CR 616.1: the whole-library reorder this
+                        // instruction performs settles when the resumed tail
+                        // completes.
+                        library_reorder: library_reorder.take(),
                         pending_return_result_producer: None,
                         logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
@@ -10321,6 +10333,7 @@ mod tests {
         let logical_zone_change_group =
             crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[hero, soldier]);
         state.push_change_zone_iteration(crate::types::game_state::PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group,
             paused_current: None,

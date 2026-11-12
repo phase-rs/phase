@@ -2571,6 +2571,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             mut moved_count,
             face_down_profile,
             library_placement,
+            library_reorder,
             enter_attached_to,
             effect_kind,
         } = pending;
@@ -2714,6 +2715,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     state.replace_active_change_zone_iteration(
                         crate::types::game_state::PendingChangeZoneIteration {
                             logical_zone_change_group,
+                            // CR 701.20d + CR 616.1: carried across the further
+                            // pause; the terminal drain settles it once.
+                            library_reorder: library_reorder.clone(),
                             pending_return_result_producer,
                             paused_current: anticipated_pause.map(|mut boundary| {
                                 boundary.append_delivery_events(&events[delivery_start..]);
@@ -2771,6 +2775,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     state.replace_active_change_zone_iteration_after_child(
                         crate::types::game_state::PendingChangeZoneIteration {
                             logical_zone_change_group,
+                            // CR 701.20d + CR 616.1: carried across the further
+                            // pause; the terminal drain settles it once.
+                            library_reorder: library_reorder.clone(),
                             pending_return_result_producer,
                             paused_current,
                             remaining: remaining[i + 1..].to_vec(),
@@ -2801,6 +2808,12 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                     return;
                 }
             }
+        }
+        // CR 701.20d + CR 616.1: every member of this library placement is now
+        // in place, so the whole-library reorder it performed settles before the
+        // logical cleanup and before the completion/continuation run.
+        if let Some(library_reorder) = library_reorder {
+            library_reorder.finish(state);
         }
         crate::game::triggers::complete_logical_zone_trigger_collection(
             state,
@@ -64340,6 +64353,7 @@ mod entry_observation_settlement_tests {
                 .latch_immediately_before(Vec::new(), Vec::new())
                 .expect("empty batch group retains its pre-delivery latch");
             let pending = PendingBatchDeliveries {
+                library_reorder: None,
                 logical_zone_change_group,
                 paused_current: None,
                 remaining: Vec::new(),
@@ -67117,6 +67131,96 @@ mod parser_oracle_effect_tests {
         assert!(
             !evaluate_condition(&cond, &state, &ability_for(strong)),
             "3/3 is not least power"
+        );
+    }
+}
+
+#[cfg(test)]
+mod library_reorder_iteration_carrier_tests {
+    use super::*;
+    use crate::game::zones::{create_object, LibraryReorderOperation};
+    use crate::types::ability::ExileConcealment;
+    use crate::types::game_state::PendingChangeZoneIteration;
+    use crate::types::identifiers::CardId;
+
+    /// CR 701.20d + CR 616.1: the ChangeZoneAll resume carrier owns the
+    /// whole-library reorder it paused on, so the drain that completes the
+    /// instruction settles reveal retirement exactly once, before its terminal
+    /// `EffectResolved` (cleanup and continuation).
+    #[test]
+    fn paused_library_reorder_settles_when_the_iteration_drains() {
+        let mut state = GameState::new_two_player(42);
+        let top = create_object(
+            &mut state,
+            CardId(93001),
+            PlayerId(0),
+            "Reorder A".to_string(),
+            Zone::Library,
+        );
+        let bottom = create_object(
+            &mut state,
+            CardId(93002),
+            PlayerId(0),
+            "Reorder B".to_string(),
+            Zone::Library,
+        );
+        state.library_of_mut(PlayerId(0)).push_back(top);
+        state.library_of_mut(PlayerId(0)).push_back(bottom);
+        state.revealed_cards.insert(top);
+        state.revealed_cards.insert(bottom);
+        let top_incarnation = state.objects[&top].incarnation;
+        let bottom_incarnation = state.objects[&bottom].incarnation;
+
+        let reorder = LibraryReorderOperation::begin(&state, &[top, bottom]);
+        let reversed: im::Vector<ObjectId> = state
+            .library_of(PlayerId(0))
+            .iter()
+            .rev()
+            .copied()
+            .collect();
+        *state.library_of_mut(PlayerId(0)) = reversed;
+
+        let logical_zone_change_group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[]);
+        state.push_change_zone_iteration(PendingChangeZoneIteration {
+            library_reorder: Some(reorder),
+            logical_zone_change_group,
+            pending_return_result_producer: None,
+            paused_current: None,
+            remaining: Vec::new(),
+            source_id: ObjectId(93001),
+            controller: PlayerId(0),
+            origin: None,
+            destination: Zone::Library,
+            enter_transformed: false,
+            enters_under_player: None,
+            duration: None,
+            track_exiled_by_source: false,
+            face_down_in_exile: ExileConcealment::Public,
+            moved_count: None,
+            face_down_profile: None,
+            library_placement: None,
+            enter_attached_to: None,
+            effect_kind: EffectKind::ChangeZoneAll,
+        });
+
+        let mut events = Vec::new();
+        drain_pending_change_zone_iteration(&mut state, &mut events);
+
+        assert!(
+            state.objects[&top].incarnation > top_incarnation
+                && state.objects[&bottom].incarnation > bottom_incarnation,
+            "CR 701.20d: the completed instruction retires every reordered revealed member"
+        );
+        assert!(
+            !state.revealed_cards.contains(&top) && !state.revealed_cards.contains(&bottom),
+            "no reordered member stays revealed"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::EffectResolved { .. })),
+            "reach guard: the instruction reached its terminal resolution event"
         );
     }
 }

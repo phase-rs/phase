@@ -776,7 +776,16 @@ pub(crate) fn move_rest_then(
             let library_reorder = crate::game::zones::LibraryReorderOperation::begin(state, cards);
             let result =
                 zone_pipeline::move_objects_simultaneously_then(state, reqs, completion, events);
-            if matches!(result, zone_pipeline::BatchMoveResult::Done) {
+            if matches!(result, zone_pipeline::BatchMoveResult::NeedsChoice) {
+                // CR 701.20d + CR 616.1: a pile that pauses on a replacement
+                // ordering choice resumes through the batch drain, so the
+                // reorder rides that record and settles exactly once when the
+                // complete instruction finishes.
+                state
+                    .active_batch_delivery_mut()
+                    .expect("a paused pile owns the active batch record")
+                    .library_reorder = Some(library_reorder);
+            } else {
                 library_reorder.finish(state);
             }
             result
