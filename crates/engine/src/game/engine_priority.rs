@@ -513,7 +513,15 @@ fn run_post_action_pipeline_core(
                 consumed_trigger_events.extend(std::mem::take(
                     &mut state.consumed_before_priority_trigger_events,
                 ));
-                let raw_sba_events: Vec<_> = events[events_before..].to_vec();
+                // CR 603.2c: occurrences a collector claimed for every collector
+                // (a player's departure, collected once against the observers
+                // latched before it) are not offered to the delayed scan again.
+                let raw_sba_events = triggers::filter_consumed_trigger_events_from(
+                    events,
+                    events_before,
+                    triggers::TriggerCollectionRequester::Delayed,
+                    &consumed_trigger_events,
+                );
                 let sba_events = triggers::filter_already_collected_trigger_events_from(
                     state,
                     events,

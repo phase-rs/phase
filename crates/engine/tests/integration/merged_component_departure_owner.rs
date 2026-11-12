@@ -255,27 +255,28 @@ fn shredder_triggers(state: &GameState) -> usize {
         .count()
 }
 
-/// How many of `source`'s waiting triggers name the departure of `object`.
-fn triggers_for_departure_of(state: &GameState, source: ObjectId, object: ObjectId) -> usize {
-    let names_object = |events: &[GameEvent]| {
-        events.iter().any(|event| {
-            matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == object)
-        })
-    };
-    let queued = state.pending_trigger_order.iter().flat_map(|order| {
-        order
-            .groups
-            .iter()
-            .flat_map(|group| group.triggers.iter())
-            .filter(|context| context.pending.source_id == source)
-            .filter(|context| names_object(&context.trigger_events))
-    });
-    let placed = state.stack.iter().filter(|entry| {
-        entry.source_id == source
-            && matches!(&entry.kind, StackEntryKind::TriggeredAbility { trigger_event: Some(event), .. }
-                if names_object(std::slice::from_ref(event)))
-    });
-    queued.count() + placed.count()
+/// CR 603.10a + CR 800.4d: P1 steals `target` with a real control-changing
+/// spell: P0, the active player, passes priority; P1 casts `spell` and it
+/// resolves back to P0. At P1's later departure the stolen permanent is P1's.
+fn steal_for_p1(runner: &mut GameRunner, spell: ObjectId, target: ObjectId) {
+    runner
+        .act(GameAction::PassPriority)
+        .expect("priority passes to P1");
+    runner.cast(spell).target_object(target).resolve();
+    assert_eq!(runner.state().objects[&target].controller, P1);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "the resolved spell returns priority to the active player"
+    );
+}
+
+/// How many Extractor Demon triggers wait: one for each creature that left.
+fn demon_triggers(state: &GameState) -> usize {
+    waiting_triggers(state)
+        .into_iter()
+        .filter(|(_, text)| text.contains("another creature leaves"))
+        .count()
 }
 
 /// The controllers of Ninth Bridge Patrol triggers: each one observed one
@@ -543,13 +544,17 @@ fn rebuking_ceremony_concession_during_the_prompt_places_the_surviving_artifact_
         let (mender, brokkos) = add_pile(&mut scenario, P1);
         let surviving = scenario.add_real_card(P2, "Circuit Mender", Zone::Battlefield, db);
         scenario.add_real_card(P0, "Super Shredder", Zone::Battlefield, db);
+        let stolen_demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
+        let turn_against = scenario.add_real_card(P1, "Turn Against", Zone::Hand, db);
         let ceremony = scenario.add_real_card(P0, "Rebuking Ceremony", Zone::Hand, db);
         scenario.with_library_top(P2, &["Library Card A"]);
         scenario.with_library_top(P1, &["Library Card B"]);
         scenario.with_mana_pool(P0, mana(ManaType::Green, 5));
+        scenario.with_mana_pool(P1, mana(ManaType::Red, 5));
         let mut runner = scenario.build();
         let pile = merge_pile(&mut runner, pile_shape, mender, brokkos, true);
         let label = format!("{pile_shape:?}");
+        steal_for_p1(&mut runner, turn_against, stolen_demon);
 
         // Rebuking Ceremony's top-of-library placement delivers its targets
         // last first, so the merged permanent (second target) moves before the
@@ -567,7 +572,10 @@ fn rebuking_ceremony_concession_during_the_prompt_places_the_surviving_artifact_
         .expect("a player may concede at any time");
 
         assert!(
-            matches!(conceded.waiting_for, WaitingFor::Priority { player: P0 }),
+            matches!(
+                conceded.waiting_for,
+                WaitingFor::Priority { player: P0 } | WaitingFor::OrderTriggers { player: P0, .. }
+            ),
             "{label}: {:?}",
             conceded.waiting_for
         );
@@ -600,6 +608,14 @@ fn rebuking_ceremony_concession_during_the_prompt_places_the_surviving_artifact_
             shredder_triggers(runner.state()),
             2,
             "{label}: Super Shredder saw the merged permanent and the surviving artifact leave, once each"
+        );
+        assert_eq!(
+            demon_triggers(runner.state()),
+            1,
+            "{label}: CR 603.10a + CR 800.4d: the Extractor Demon P1 had stolen looked back to a \
+             source P1 controlled for the merged permanent's retained departure and the parked \
+             component that left with P1, so those triggers were P1's; it triggers once, for the \
+             surviving artifact that left after P1 did"
         );
     }
 }
@@ -886,22 +902,7 @@ fn player_loss_during_the_prompt_finishes_the_resolution_before_priority() {
     let pile = merge_pile(&mut runner, Pile::BrokkosUnderMender, mender, brokkos, true);
     assert_eq!(runner.state().objects[&lord].toughness, Some(1));
 
-    // CR 603.10a + CR 800.4d: P1 steals P0's Extractor Demon with a real
-    // control-changing spell (P0 passes, P1 casts it, and it resolves back
-    // to P0), so at P1's loss that observer is P1's.
-    runner
-        .act(GameAction::PassPriority)
-        .expect("priority passes to P1");
-    runner
-        .cast(turn_against)
-        .target_object(stolen_demon)
-        .resolve();
-    assert_eq!(runner.state().objects[&stolen_demon].controller, P1);
-    assert_eq!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { player: P0 },
-        "the resolved spell returns priority to the active player"
-    );
+    steal_for_p1(&mut runner, turn_against, stolen_demon);
 
     cast_until_resolved_or_asked(&mut runner, ceremony, &[pile.survivor, angel]);
     // CR 401.4: both cards go on top of P1's library, so P1 arranges them.
@@ -921,6 +922,14 @@ fn player_loss_during_the_prompt_finishes_the_resolution_before_priority() {
     assert!(
         runner.state().players[1].is_eliminated,
         "CR 704.5a: without Platinum Angel, P1 at 0 life loses"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ),
+        "{:?}",
+        runner.state().waiting_for
     );
     resolution_finished(runner.state());
     assert_eq!(runner.state().objects[&ceremony].zone, Zone::Graveyard);
@@ -949,16 +958,18 @@ fn player_loss_during_the_prompt_finishes_the_resolution_before_priority() {
          player's Patrol leave, once each"
     );
     assert_eq!(
-        triggers_for_departure_of(runner.state(), shredder, patrol),
-        1,
-        "CR 603.6c: P0's own Super Shredder triggers once for the Patrol that left with P1"
+        shredder_triggers(runner.state()),
+        3,
+        "CR 603.6c: P0's own Super Shredder saw the Angel, the merged permanent and the departed \
+         player's Patrol leave, once each"
     );
     assert_eq!(
-        triggers_for_departure_of(runner.state(), stolen_demon, patrol),
+        demon_triggers(runner.state()),
         0,
-        "CR 603.10a + CR 800.4d: the Extractor Demon P1 had stolen looked back to a source P1 \
-         controlled when the Patrol left the game with P1, so that trigger is P1's and leaves \
-         with P1"
+        "CR 603.10a + CR 603.3a + CR 800.4d: the Extractor Demon P1 had stolen looked back to a \
+         source P1 controlled for the merged permanent's departure, which the resumed owner \
+         collected after P1 left, and for the Patrol that left with P1, so those triggers were \
+         P1's and left with P1"
     );
 }
 
