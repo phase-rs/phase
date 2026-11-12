@@ -5722,8 +5722,9 @@ impl BattlefieldEntrantProjection {
 /// CR 614.12 + CR 702.26b: the board before an entry event: every `absent` object on the
 /// battlefield (a member of the same event) is phased out, so it is treated as though it
 /// does not exist, and the layers are re-derived without it. Borrowed when none is there.
-/// Only a scratch copy is written: no event, no timestamp.
-fn pre_entry_board<'a>(state: &'a GameState, absent: &[ObjectId]) -> Cow<'a, GameState> {
+/// Only a scratch copy is written: no event, no timestamp. Also the board a copy-target
+/// answer reads its acquired entry abilities on (`replacement::copy_entry_board`).
+pub(crate) fn pre_entry_board<'a>(state: &'a GameState, absent: &[ObjectId]) -> Cow<'a, GameState> {
     let present = |id: &ObjectId| {
         state
             .objects

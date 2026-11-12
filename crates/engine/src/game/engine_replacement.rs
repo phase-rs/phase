@@ -3479,8 +3479,14 @@ fn finish_copy_target_choice_entry(
     // characteristics below (enter-tapped, ETB counters) read post-copy state.
     crate::game::layers::mark_layers_full(state);
     crate::game::layers::flush_layers(state);
-    let enter_modifiers =
-        super::replacement::current_self_enter_replacement_modifiers(state, source_id);
+    // CR 614.12 + CR 707.5 + CR 614.1c + CR 122.6: the entrant's acquired "enters with"
+    // counters and tap state, and any quantity they count, are read as it enters — with
+    // the tokens entering in the same event absent (`replacement::copy_entry_board`), so a
+    // co-entering ability remover doesn't strip them and a co-entrant isn't counted.
+    let enter_modifiers = {
+        let board = super::replacement::copy_entry_board(state, source_id);
+        super::replacement::current_self_enter_replacement_modifiers(&board, source_id)
+    };
     if let Some(tapped) = enter_modifiers.enter_tapped {
         if let Some(obj) = state.objects.get_mut(&source_id) {
             obj.tapped = tapped;
@@ -3685,9 +3691,13 @@ fn finish_copy_target_choice_entry_after_counters(
 ) -> Result<Option<WaitingFor>, EngineError> {
     // CR 614.12 + CR 707.9: Surface any mandatory "as this enters, choose ..."
     // replacement choice acquired from entering as a copy before replaying the entry.
-    if let Some(choice) =
-        super::replacement::current_self_enter_replacement_choice(state, source_id)
-    {
+    // CR 707.5: it is read as the entrant enters, with the tokens entering in the same
+    // event absent (`replacement::copy_entry_board`).
+    let choice = {
+        let board = super::replacement::copy_entry_board(state, source_id);
+        super::replacement::current_self_enter_replacement_choice(&board, source_id)
+    };
+    if let Some(choice) = choice {
         if let Some(waiting_for) =
             surface_copy_entry_pause(state, source_id, &counter_pause_post_actions, |state| {
                 apply_post_replacement_effect(
@@ -4098,7 +4108,17 @@ pub(super) fn apply_post_replacement_effect(
         // *write* site), so the stamp stays 0 and the ceiling is Some(0) — never
         // unconstrained None from a missing PendingSpellResolution.
         let max_mana_value = copy_target_mana_value_ceiling(mana_spent_stamp, real_work);
-        let valid_targets = find_copy_targets(state, target, source_id, controller, max_mana_value);
+        let mut valid_targets =
+            find_copy_targets(state, target, source_id, controller, max_mana_value);
+        // CR 614.12a + CR 707.5: the copy choice is made before the entrant enters, so only an
+        // object already on the battlefield can be copied, not one entering in the same event
+        // (Quicksilver Gargantuan ruling 2011-01-01; Phantasmal Image 2017-03-14; Spark Double
+        // 2019-05-03).
+        let co_entrant_set: HashSet<ObjectId> =
+            super::effects::token_copy::entering_token_co_entrants(state, source_id)
+                .into_iter()
+                .collect();
+        valid_targets.retain(|id| !co_entrant_set.contains(id));
         if valid_targets.is_empty() {
             return None;
         }
@@ -10360,5 +10380,157 @@ mod tests {
             }
             other => panic!("expected a RevealChoice prompt, got {:?}", other),
         }
+    }
+
+    /// Drops `removed` from every parked CopyToken owner's `created_ids`, through the
+    /// stack's serialized form (a buried frame has no mutable accessor).
+    /// Returns how many owners listed it.
+    fn unlist_from_parked_copy_token_owners(state: &mut GameState, removed: ObjectId) -> usize {
+        fn walk(value: &mut serde_json::Value, removed: u64, edits: &mut usize) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    // `ResolutionFrame` is adjacently tagged: `{"type": .., "data": ..}`.
+                    let is_owner =
+                        map.get("type").and_then(serde_json::Value::as_str) == Some("CopyToken");
+                    if let Some(serde_json::Value::Array(ids)) = map
+                        .get_mut("data")
+                        .filter(|_| is_owner)
+                        .and_then(|owner| owner.get_mut("created_ids"))
+                    {
+                        let before = ids.len();
+                        ids.retain(|id| id.as_u64() != Some(removed));
+                        *edits += before - ids.len();
+                    }
+                    map.values_mut().for_each(|v| walk(v, removed, edits));
+                }
+                serde_json::Value::Array(items) => {
+                    items.iter_mut().for_each(|v| walk(v, removed, edits))
+                }
+                _ => {}
+            }
+        }
+        let mut value =
+            serde_json::to_value(&state.resolution_stack).expect("the stack serializes");
+        let mut edits = 0;
+        walk(&mut value, removed.0, &mut edits);
+        state.resolution_stack = serde_json::from_value(value).expect("the stack decodes");
+        edits
+    }
+
+    /// F7 (M-f): the copy-target answer reads the entrant's acquired "enters with" on the
+    /// board with its co-entrants absent, and with nothing else absent. Clone Legion over
+    /// P1's [Margle, Quicksilver Gargantuan]; the Gargantuan copy copies P0's Triskelion.
+    /// (a) As driven, the Margle copy co-enters: 3 counters. (b) The same Margle copy, no
+    /// longer listed by the parked owner, is a resident remover at the answer: 0 counters.
+    /// No printed resident remover reaches this read while sparing the copy offer, so the
+    /// resident is made by unlisting it.
+    #[test]
+    fn copy_target_answer_reads_entry_counters_without_co_entrants_and_with_residents() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::ability::TargetRef;
+        use crate::types::mana::ManaCost;
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new_n_player(2, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let trisk = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Triskelion",
+                1,
+                1,
+                "This creature enters with three +1/+1 counters on it.\nRemove a +1/+1 \
+                 counter from this creature: It deals 1 damage to any target.",
+            )
+            .id();
+        scenario.add_creature_from_oracle(
+            P1,
+            "Margle, Cousin of Yargle",
+            5,
+            2,
+            "Other creatures you control lose all abilities, can't gain abilities, and get \
+             +2/+2.",
+        );
+        scenario.add_creature_from_oracle(
+            P1,
+            "Quicksilver Gargantuan",
+            7,
+            7,
+            "You may have this creature enter as a copy of any creature on the battlefield, \
+             except it's 7/7.",
+        );
+        let legion = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Clone Legion",
+                false,
+                "For each creature target player controls, create a token that's a copy of \
+                 that creature.",
+            )
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(legion).target_player(P1).commit();
+        for _ in 0..16 {
+            match &runner.state().waiting_for {
+                WaitingFor::CopyTargetChoice { .. } => break,
+                WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+                WaitingFor::ReplacementChoice { .. } => {
+                    runner.act(GameAction::ChooseReplacement { index: 0 })
+                }
+                other => panic!("unexpected prompt {other:?}"),
+            }
+            .expect("the action is accepted");
+        }
+        let WaitingFor::CopyTargetChoice { source_id, .. } = runner.state().waiting_for.clone()
+        else {
+            panic!("REACH-GUARD: the Gargantuan copy's copy choice");
+        };
+        let margle = runner
+            .state()
+            .objects
+            .values()
+            .find(|obj| obj.is_token && obj.name == "Margle, Cousin of Yargle")
+            .map(|obj| obj.id)
+            .expect("REACH-GUARD: the Margle copy entered first");
+
+        let answer = |mut runner: GameRunner| {
+            assert!(
+                runner.state().objects[&margle].is_phased_in_permanent(),
+                "REACH-GUARD: the Margle copy is on the battlefield, phased in"
+            );
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(trisk)),
+                })
+                .expect("the copy choice is accepted");
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                "the entry completes, got {:?}",
+                runner.state().waiting_for
+            );
+            let counters = runner.state().objects[&source_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0);
+            (runner, counters)
+        };
+
+        let mut resident = runner.state().clone();
+        assert_eq!(
+            unlist_from_parked_copy_token_owners(&mut resident, margle),
+            1,
+            "REACH-GUARD: the parked owner listed the Margle copy"
+        );
+        let (_, co_entering) = answer(runner);
+        assert_eq!(co_entering, 3, "(a) the co-entering Margle copy is absent");
+        let (resident, stripped) = answer(GameRunner::from_state(resident));
+        assert_eq!(
+            resident.state().last_created_token_ids,
+            vec![source_id],
+            "REACH-GUARD (b): the batch lists only the entrant"
+        );
+        assert_eq!(stripped, 0, "(b) the resident Margle copy strips them");
     }
 }

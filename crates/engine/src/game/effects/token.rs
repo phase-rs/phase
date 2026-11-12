@@ -1255,19 +1255,13 @@ fn drive_token_event_delivery(
         pause_event
     };
 
-    // CR 111.1 + CR 614.12: while the owner is held off the resolution stack, the
-    // tokens its earlier batches created (co-entrants of this event's copy batches)
-    // are published for the delivery. The window closes before the owner is
-    // re-parked, at whichever exit the delivery took, so the re-park reads the
-    // frame and the order of the re-park is unchanged.
-    let (delivery, owed) = match held_frame.as_ref() {
-        Some((frame, _)) => super::token_copy::publish_committed_copy_tokens(
-            state,
-            frame.created_ids.clone(),
-            |state| deliver_token_event_positions(state, cursor, pause_event, events),
-        ),
-        None => deliver_token_event_positions(state, cursor, pause_event, events),
-    };
+    // CR 111.1 + CR 614.12: the held owner's tokens are published for the delivery
+    // (`deliver_with_held_copy_owner`). The window closes before the owner is re-parked,
+    // at whichever exit the delivery took, so the re-park reads the frame and the order
+    // of the re-park is unchanged.
+    let (delivery, owed) = deliver_with_held_copy_owner(state, held_frame.as_ref(), |state| {
+        deliver_token_event_positions(state, cursor, pause_event, events)
+    });
     // CR 608.2c: a paused exit hands over what it owes now and settles the
     // offered batch; a completed one hands over the event's ids.
     let completion = if delivery.is_completed() {
@@ -1439,6 +1433,25 @@ fn detach_active_copy_token_frame(
     Some((frame, state.resolution_stack.capture_child_boundary()))
 }
 
+/// CR 111.1 + CR 614.12: run `deliver` while the CopyToken owner `held` is off the
+/// resolution stack, with the tokens its earlier batches created published as the
+/// resolution's co-entrants (`token_copy::publish_committed_copy_tokens`). The window
+/// closes before the owner is re-parked. With no owner held, `deliver` runs as is.
+fn deliver_with_held_copy_owner<R>(
+    state: &mut GameState,
+    held: Option<&(PendingCopyTokenResolution, ChildStackDepth)>,
+    deliver: impl FnOnce(&mut GameState) -> R,
+) -> R {
+    match held {
+        Some((frame, _)) => super::token_copy::publish_committed_copy_tokens(
+            state,
+            frame.created_ids.clone(),
+            deliver,
+        ),
+        None => deliver(state),
+    }
+}
+
 /// CR 608.2c: hand the CopyToken owner that a token event's delivery detached
 /// (a compound event, or a single-batch copy event) the ids that event owes it,
 /// and re-park it — on top, or below the child stack a pause raised
@@ -1540,15 +1553,17 @@ fn apply_create_token_batch(
         // resumes hands its tokens to the owner through the owner's own
         // adoption (`OfferedBatchCustody`), not through this re-park.
         let held = detach_active_copy_token_frame(state);
-        let status = super::token_copy::apply_copy_token_after_replacement(
-            state,
-            owner,
-            *copy,
-            enter_tapped,
-            spec.enter_with_counters.clone(),
-            final_count,
-            events,
-        );
+        let status = deliver_with_held_copy_owner(state, held.as_ref(), |state| {
+            super::token_copy::apply_copy_token_after_replacement(
+                state,
+                owner,
+                *copy,
+                enter_tapped,
+                spec.enter_with_counters.clone(),
+                final_count,
+                events,
+            )
+        });
         let primary_ids = status.created_ids.clone();
         state.last_created_token_ids = status.created_ids;
         repark_event_copy_frame(state, held, primary_ids.clone(), status.completion);

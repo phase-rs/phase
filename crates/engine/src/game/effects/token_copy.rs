@@ -657,9 +657,10 @@ enum CopyBatchDelivery {
 /// CR 111.1 + CR 614.12: run `deliver` with `committed` published as the tokens a copy-token
 /// resolution whose owner frame is off the resolution stack has already created, then restore
 /// the previous publication (a nested resolution can't clobber an outer one). The single
-/// writer of `GameState::active_copy_token_resolution_tokens`; its two windows are the inline
-/// drain (`drain_copy_token_resolution`) and a compound token event's delivery while it
-/// holds the owner (`token::drive_token_event_delivery`).
+/// writer of `GameState::active_copy_token_resolution_tokens`; its windows are the inline
+/// drain (`drain_copy_token_resolution`) and a token event's delivery while it holds the
+/// owner (`token::deliver_with_held_copy_owner`: a compound event, or a single-batch copy
+/// event).
 pub(crate) fn publish_committed_copy_tokens<R>(
     state: &mut GameState,
     committed: Vec<ObjectId>,
@@ -708,6 +709,29 @@ pub(crate) fn copy_token_co_entrants(
         }
     }
     co_entrants
+}
+
+/// CR 614.12 + CR 111.1 (Clone Legion ruling 2015-02-25): the tokens entering in the same
+/// event as `entrant`, a token whose entry is still being decided (a liminal entry: its
+/// batch prefix is the entry's `created_ids`) or completed after its copy-target answer
+/// (committed: its batch is the ledger its finalize published, `last_created_token_ids`,
+/// which lists it, the same ledger the batch continuation resumes from). Unioned with the
+/// copy-token resolution's tokens by [`copy_token_co_entrants`]. Empty for any other
+/// object: a card entrant keeps the live read.
+pub(crate) fn entering_token_co_entrants(state: &GameState, entrant: ObjectId) -> Vec<ObjectId> {
+    if let Some(entry) = state
+        .liminal_entries
+        .get(&entrant)
+        .filter(|entry| entry.object.is_token_projection())
+    {
+        return copy_token_co_entrants(state, entrant, &entry.created_ids);
+    }
+    // The ledger is assigned by this entrant's own finalize, so listing it is what proves
+    // the ledger is its batch; a card, or a placed token at its payment prompt, is never in it.
+    if state.last_created_token_ids.contains(&entrant) {
+        return copy_token_co_entrants(state, entrant, &state.last_created_token_ids);
+    }
+    Vec::new()
 }
 
 /// Park a copy-token owner as the direct paused frame, or below the complete
@@ -7203,6 +7227,78 @@ mod tests {
             copy_token_co_entrants(&state, ObjectId(5), &[ObjectId(5), ObjectId(7)]),
             vec![ObjectId(6), ObjectId(7)]
         );
+    }
+
+    /// A liminal token entry `entry_ref` whose batch already created `created_ids`.
+    fn liminal_token_entry(
+        entry_ref: ObjectId,
+        created_ids: Vec<ObjectId>,
+    ) -> crate::types::game_state::LiminalEntry {
+        let object = GameObject::new(
+            entry_ref,
+            CardId(0),
+            PlayerId(0),
+            "Liminal Copy".to_string(),
+            Zone::Battlefield,
+        );
+        crate::types::game_state::LiminalEntry {
+            object: crate::types::game_state::LiminalEntrant::Token(
+                crate::types::game_state::TokenProjection::materialize(object),
+            ),
+            name: "Liminal Copy".to_string(),
+            source_id: ObjectId(999),
+            controller: PlayerId(0),
+            enters_attacking: false,
+            attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
+            attach_to: None,
+            sacrifice_at: None,
+            remaining_count: 0,
+            created_ids,
+            copy_resume: None,
+            spec_resume: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            kind: crate::types::game_state::LiminalEntryKind::Token,
+            replacement_applied: HashSet::new(),
+        }
+    }
+
+    /// CR 614.12 + CR 111.1: an entering token's co-entrants are the resolution's tokens
+    /// plus its batch: the liminal entry's prefix while its entry is decided (i), and the
+    /// ledger that lists it once it has committed (ii). Anything else, the placed-route
+    /// payment's entrant included, has none (iii).
+    #[test]
+    fn entering_token_co_entrants_reads_the_liminal_prefix_or_the_ledger_that_lists_it() {
+        let (a, b, e) = (ObjectId(1), ObjectId(2), ObjectId(5));
+
+        let mut liminal = GameState::new_two_player(42);
+        liminal.push_copy_token(parked_copy_token_owner(vec![b]));
+        liminal
+            .liminal_entries
+            .insert(e, liminal_token_entry(e, vec![a]));
+        assert_eq!(entering_token_co_entrants(&liminal, e), vec![b, a], "(i)");
+
+        let mut committed = GameState::new_two_player(42);
+        committed.push_copy_token(parked_copy_token_owner(vec![b]));
+        committed.last_created_token_ids = vec![a, e];
+        assert!(
+            committed.liminal_entries.is_empty(),
+            "REACH-GUARD (ii): the entry has committed"
+        );
+        assert_eq!(
+            entering_token_co_entrants(&committed, e),
+            vec![b, a],
+            "(ii)"
+        );
+
+        let mut unlisted = GameState::new_two_player(42);
+        unlisted.push_copy_token(parked_copy_token_owner(vec![b]));
+        unlisted.last_created_token_ids = vec![a];
+        assert!(
+            !copy_token_co_entrants(&unlisted, e, &unlisted.last_created_token_ids).is_empty(),
+            "REACH-GUARD (iii): the frame and the ledger hold tokens"
+        );
+        assert!(entering_token_co_entrants(&unlisted, e).is_empty(), "(iii)");
     }
 
     /// No published slot, no parked frame, and no batch prefix: nothing co-enters.

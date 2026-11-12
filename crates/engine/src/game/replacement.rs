@@ -8498,7 +8498,7 @@ fn object_replacement_candidate_applies(
 /// CR 614.12 + CR 613.1f: whether the entrant `event` puts onto the battlefield still has
 /// its own entry replacement `def` as it would exist there: with the continuous effects
 /// that already exist applied, and the tokens entering in the same event absent
-/// (`token_copy::copy_token_co_entrants`). An ability-removing effect that would apply to
+/// (`token_copy::entering_token_co_entrants`). An ability-removing effect that would apply to
 /// it (Humility, Overwhelming Splendor on its controller) leaves its "as enters" and
 /// "enters with" abilities unapplied (Overwhelming Splendor ruling 2017-09-29).
 /// Token entries only; every other event keeps today's answer (`true`).
@@ -8510,11 +8510,10 @@ pub(crate) fn entrant_retains_own_entry_replacement(
     let ProposedEvent::TokenEntry { entry_ref, .. } = event else {
         return true;
     };
-    let Some(entry) = state.liminal_entries.get(entry_ref) else {
+    if !state.liminal_entries.contains_key(entry_ref) {
         return true;
-    };
-    let co_entrants =
-        super::effects::token_copy::copy_token_co_entrants(state, *entry_ref, &entry.created_ids);
+    }
+    let co_entrants = super::effects::token_copy::entering_token_co_entrants(state, *entry_ref);
     crate::game::filter::BattlefieldEntrantProjection::for_liminal_token(
         state,
         *entry_ref,
@@ -10178,6 +10177,21 @@ fn resolve_self_enters_under_controller(
     }
 }
 
+/// CR 614.12 + CR 707.5 + CR 702.26b: the board a copy-target-choice entrant's acquired
+/// "enters with" / "as enters" abilities are read on: the live, copied board with the tokens
+/// entering in the same event absent (they don't exist yet as it enters). Borrowed (the
+/// live board) when it has no co-entrant on the battlefield, so card entries, placed
+/// tokens and lone tokens read exactly as before.
+pub(super) fn copy_entry_board(
+    state: &GameState,
+    entrant: ObjectId,
+) -> std::borrow::Cow<'_, GameState> {
+    crate::game::filter::pre_entry_board(
+        state,
+        &crate::game::effects::token_copy::entering_token_co_entrants(state, entrant),
+    )
+}
+
 /// CR 614.12 + CR 707.9: When an "enters as a copy" choice is made, the copy
 /// effect determines the object's battlefield characteristics before other
 /// self-replacement effects that modify how it enters are considered. The
@@ -10294,13 +10308,20 @@ pub(crate) fn surface_copied_entry_payment(
         *controller_override = Some(payer);
     }
     let registry = replacement_registry();
-    let rid = find_applicable_replacements(state, &proposed, registry)
-        .into_iter()
-        .filter(|rid| rid.source == source_id)
-        .find(|rid| {
-            replacement_definition_for_id(state, *rid).is_some_and(as_enters_payment_shape)
-        })?;
-    let (max, player) = as_enters_pay_terms(state, &proposed, rid)?;
+    // CR 614.12 + CR 614.12a + CR 707.5: the copied payment applies if the entrant has it as
+    // it enters — with the tokens entering in the same event absent (`copy_entry_board`). Its
+    // answer re-reads on the same board (`pending_entry_payment_is_live`).
+    let found = {
+        let board = copy_entry_board(state, source_id);
+        find_applicable_replacements(&board, &proposed, registry)
+            .into_iter()
+            .filter(|rid| rid.source == source_id)
+            .find(|rid| {
+                replacement_definition_for_id(&board, *rid).is_some_and(as_enters_payment_shape)
+            })
+            .and_then(|rid| as_enters_pay_terms(&board, &proposed, rid).map(|terms| (rid, terms)))
+    };
+    let (rid, (max, player)) = found?;
     if max == 0 {
         // Determined 0 (CR 609.3): latch inline, no prompt.
         if let Some(obj) = state.objects.get_mut(&source_id) {
@@ -12915,7 +12936,17 @@ pub(crate) fn pending_entry_payment_is_live(state: &GameState) -> bool {
     }
     !pending.is_optional
         && !pending.proposed.already_applied(rid)
-        && as_enters_payment_for_entry(state, &pending.proposed, *rid).is_some()
+        // CR 614.12a + CR 707.5: a copy-surface park was found on the entrant's copy-entry
+        // board (`surface_copied_entry_payment`), so its definition is re-read there; a
+        // pre-entry park keeps the live read.
+        && {
+            let board = if parked_entry_payment_is_copy_surface(pending) {
+                copy_entry_board(state, *source_id)
+            } else {
+                std::borrow::Cow::Borrowed(state)
+            };
+            as_enters_payment_for_entry(&board, &pending.proposed, *rid).is_some()
+        }
 }
 
 /// CR 614.12a: mutable access to the latch slot on a battlefield entry
