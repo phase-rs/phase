@@ -3137,15 +3137,47 @@ fn cant_be_attached_static_splits_both_prohibitions() {
     );
 }
 
-/// CR 702.18a: Spectral Shield — "Enchanted creature gets +0/+2 and can't be the
-/// target of spells." must decompose into BOTH the +0/+2 grant AND a
-/// `CantBeTargeted` static sharing the first conjunct's `affected` set.
-/// Previously the targeting restriction was dropped, so the enchanted creature
-/// could still be targeted — the Aura's entire protection was lost.
+/// CR 115.1a + CR 115.1c: Spectral Shield — "Enchanted creature gets +0/+2 and
+/// can't be the target of spells." prohibits only SPELLS. `CantBeTargeted { who }`
+/// cannot name the prohibited sources, so the clause fails closed: the +0/+2 grant
+/// is preserved and the targeting clause surfaces as an inert `StaticMode::Other`
+/// carrying the printed text, never a blanket `CantBeTargeted` (which would stop
+/// Royal Assassin's activated ability from targeting the enchanted creature).
 #[test]
-fn cant_be_targeted_static_splits_from_grant() {
+fn spectral_shield_spells_only_targeting_fails_closed() {
     let defs =
         parse_static_line_multi("Enchanted creature gets +0/+2 and can't be the target of spells.");
+    assert!(
+        !defs
+            .iter()
+            .any(|d| matches!(d.mode, StaticMode::CantBeTargeted { .. })),
+        "a spells-only restriction must not become a blanket CantBeTargeted, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    let gap = defs
+        .iter()
+        .find(|d| matches!(&d.mode, StaticMode::Other(text) if text.contains("can't be the target of spells")))
+        .expect("expected an honest unsupported StaticMode::Other for the qualified clause");
+    assert!(
+        gap.affected.is_some(),
+        "the unsupported clause keeps the enchanted-creature affected set"
+    );
+    assert!(
+        defs.iter().any(|d| matches!(d.mode, StaticMode::Continuous)
+            && d.modifications
+                .contains(&ContinuousModification::AddToughness { value: 2 })),
+        "the +0/+2 grant must be preserved, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 115.1 + CR 702.18a: the UNQUALIFIED "spells or abilities" form keeps the
+/// blanket `CantBeTargeted { AllPlayers }` companion.
+#[test]
+fn cant_be_targeted_unqualified_spells_or_abilities_splits_from_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +0/+2 and can't be the target of spells or abilities.",
+    );
     let targeting = defs
         .iter()
         .find(|d| {
@@ -3157,25 +3189,18 @@ fn cant_be_targeted_static_splits_from_grant() {
             )
         })
         .expect("expected a CantBeTargeted(AllPlayers) static");
-    assert!(
-        targeting.affected.is_some(),
-        "CantBeTargeted companion must share the first clause's affected set"
-    );
-    assert!(
-        defs.iter()
-            .any(|d| matches!(d.mode, StaticMode::Continuous)),
-        "the +0/+2 grant must be preserved, got {:?}",
-        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
-    );
+    assert!(targeting.affected.is_some());
+    assert!(defs
+        .iter()
+        .any(|d| matches!(d.mode, StaticMode::Continuous)));
 }
 
-/// CR 702.11b + CR 109.5: the opponents-only targeting scope in a compound static
-/// produces a CantBeTargeted { who: ProhibitionScope::Opponents } static scoped
-/// to the source object's controller, preserving the +1/+1 boost alongside it.
+/// CR 702.11b + CR 109.5: the unqualified opponents-only scope in a compound
+/// static produces `CantBeTargeted { Opponents }` alongside the +1/+1 boost.
 #[test]
 fn cant_be_targeted_opponents_scope_splits_as_opponents_restriction() {
     let defs = parse_static_line_multi(
-        "Enchanted creature gets +1/+1 and can't be the target of spells your opponents control.",
+        "Enchanted creature gets +1/+1 and can't be the target of spells or abilities your opponents control.",
     );
     assert!(
         defs.iter().any(|d| matches!(d.mode, StaticMode::Continuous)
@@ -3197,6 +3222,77 @@ fn cant_be_targeted_opponents_scope_splits_as_opponents_restriction() {
         )),
         "expected a CantBeTargeted(Opponents) static companion"
     );
+}
+
+/// CR 115.1: every source-kind / source-quality qualifier fails closed on the
+/// standalone self-referential route — Fiendslayer Paladin (black or red spells
+/// your opponents control) and Shanna, Sisay's Legacy (abilities your opponents
+/// control). Neither may become a blanket `CantBeTargeted`.
+#[test]
+fn source_qualified_self_targeting_prohibitions_fail_closed() {
+    for text in [
+        "Fiendslayer Paladin can't be the target of black or red spells your opponents control.",
+        "Shanna can't be the target of abilities your opponents control.",
+        "~ can't be the target of spells or abilities from nongreen sources.",
+    ] {
+        let defs = parse_static_line_multi(text);
+        assert!(
+            !defs
+                .iter()
+                .any(|d| matches!(d.mode, StaticMode::CantBeTargeted { .. })),
+            "{text}: must not emit CantBeTargeted, got {:?}",
+            defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+        );
+        assert!(
+            defs.iter().any(
+                |d| matches!(&d.mode, StaticMode::Other(t) if t.contains("can't be the target"))
+            ),
+            "{text}: must surface an unsupported StaticMode::Other, got {:?}",
+            defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// CR 115.1: the qualifier detection is a typed grammar, not a phrase list.
+#[test]
+fn classify_cant_be_targeted_separates_qualified_from_unqualified() {
+    use crate::parser::oracle_keyword::{
+        classify_cant_be_targeted, is_source_qualified_cant_be_targeted, CantBeTargetedScope,
+    };
+    assert_eq!(
+        classify_cant_be_targeted("can't be the target of spells or abilities"),
+        Some(CantBeTargetedScope::AnyPlayer)
+    );
+    assert_eq!(
+        classify_cant_be_targeted(
+            "can't be the target of spells or abilities your opponents control."
+        ),
+        Some(CantBeTargetedScope::OpponentsOnly)
+    );
+    assert_eq!(
+        classify_cant_be_targeted(
+            "creatures you control can't be the targets of spells or abilities your opponents control this turn"
+        ),
+        Some(CantBeTargetedScope::OpponentsOnly)
+    );
+    assert_eq!(
+        classify_cant_be_targeted("can't be targeted"),
+        Some(CantBeTargetedScope::AnyPlayer)
+    );
+    for qualified in [
+        "can't be the target of spells",
+        "can't be the target of abilities",
+        "can't be the target of spells your opponents control",
+        "can't be the target of black or red spells your opponents control",
+        "can't be the target of spells or abilities from nongreen sources",
+    ] {
+        assert_eq!(classify_cant_be_targeted(qualified), None, "{qualified}");
+        assert!(
+            is_source_qualified_cant_be_targeted(qualified),
+            "{qualified}"
+        );
+    }
+    assert!(!is_source_qualified_cant_be_targeted("flying"));
 }
 
 /// CR 602.5: Viper's Kiss — "Enchanted creature gets -1/-1, and its activated

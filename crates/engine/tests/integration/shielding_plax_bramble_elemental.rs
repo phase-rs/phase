@@ -21,6 +21,7 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::{ProhibitionScope, StaticMode};
 use engine::types::zones::Zone;
+use engine::types::ObjectId;
 use engine::types::TargetRef;
 
 const BRAMBLE_ELEMENTAL: &str =
@@ -1296,18 +1297,31 @@ Target creature can't be the target of spells or abilities your opponents contro
 
     runner.cast(vines).target_object(p1_creature).resolve();
 
-    // The grant reached the creature anchored to the casting player.
+    // CR 611.2c + CR 613.11: the prohibition is a resolution-created rule effect
+    // read off its transient effect, anchored to the caster (CR 109.5). It is NOT
+    // an ability on the creature.
     assert!(
-        runner.state().objects[&p1_creature]
+        runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .any(|tce| tce.controller == P0
+                && tce.modifications.iter().any(|m| matches!(
+                    m,
+                    engine::types::ability::ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantBeTargeted {
+                            who: ProhibitionScope::Opponents
+                        }
+                    }
+                ))),
+        "Vines must install an opponent-scoped CantBeTargeted transient effect controlled by its caster"
+    );
+    assert!(
+        !runner.state().objects[&p1_creature]
             .static_definitions
             .iter_unchecked()
-            .any(|def| matches!(
-                def.mode,
-                StaticMode::CantBeTargeted {
-                    who: ProhibitionScope::Opponents
-                }
-            ) && def.source_controller == Some(P0)),
-        "Vines must graft an opponent-scoped CantBeTargeted anchored to its caster"
+            .any(|def| matches!(def.mode, StaticMode::CantBeTargeted { .. })),
+        "the restriction must not be an ability on the creature"
     );
 
     // P1, the creature's controller and Vines' caster's opponent, can't target it.
@@ -1350,4 +1364,296 @@ Target creature can't be the target of spells or abilities your opponents contro
         runner.state().objects[&p1_creature].tapped,
         "Vines' caster must be able to target the creature it protected"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Source-kind qualifiers fail closed; temporary restrictions are transient rules
+// ---------------------------------------------------------------------------
+
+const SPECTRAL_SHIELD: &str =
+    "Enchant creature\nEnchanted creature gets +0/+2 and can't be the target of spells.";
+const VINES: &str = "Kicker {G}
+Target creature can't be the target of spells or abilities your opponents control this turn. If this spell was kicked, that creature gets +4/+4 until end of turn.";
+const VEILSTONE_AMULET: &str = "Whenever you cast a spell, creatures you control can't be the targets of spells or abilities your opponents control this turn.";
+
+/// Production target announcement: `player` begins `action`, the prompt's legal
+/// targets are read, and the cast/activation is cancelled.
+fn announced_legal_targets(
+    runner: &mut GameRunner,
+    player: PlayerId,
+    action: GameAction,
+) -> Vec<ObjectId> {
+    runner.state_mut().active_player = player;
+    runner.state_mut().priority_player = player;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player };
+    runner.act(action).expect("announcement must start");
+    let WaitingFor::TargetSelection { target_slots, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected production target selection, got {:?}",
+            runner.state().waiting_for
+        )
+    };
+    let legal = target_slots[0]
+        .legal_targets
+        .iter()
+        .filter_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+    runner.act(GameAction::CancelCast).unwrap();
+    legal
+}
+
+fn cast_action(runner: &GameRunner, object_id: ObjectId) -> GameAction {
+    GameAction::CastSpell {
+        object_id,
+        card_id: runner.state().objects[&object_id].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    }
+}
+
+fn tap_object(runner: &mut GameRunner, id: ObjectId) {
+    runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+}
+
+/// Spectral Shield (verified Scryfall Oracle): "Enchanted creature gets +0/+2 and
+/// can't be the target of spells." Royal Assassin: "{T}: Destroy target tapped
+/// creature." CR 115.1a / CR 115.1c: only SPELLS are prohibited, so an activated
+/// ability may still target the enchanted creature. The unqualified Shielding Plax
+/// ("spells or abilities your opponents control") control still blocks it.
+#[test]
+fn royal_assassin_can_target_creature_enchanted_by_spectral_shield() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Shielding Plax's ETB draw must not deck P0.
+    scenario.with_library_top(P0, &["Forest"]);
+    let shielded = scenario.add_creature(P0, "Shield Host", 2, 2).id();
+    let plaxed = scenario.add_creature(P0, "Plax Host", 2, 2).id();
+    let decoy = scenario.add_creature(P0, "Tapped Decoy", 2, 2).id();
+    let assassin = scenario
+        .add_creature(P1, "Royal Assassin", 1, 1)
+        .from_oracle_text("{T}: Destroy target tapped creature.")
+        .id();
+    let shield = scenario
+        .add_spell_to_hand(P0, "Spectral Shield", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text_with_keywords(&["Enchant"], SPECTRAL_SHIELD)
+        .id();
+    let plax = scenario
+        .add_spell_to_hand(P0, "Shielding Plax", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text_with_keywords(&["Enchant"], SHIELDING_PLAX)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(shield).target_object(shielded).resolve();
+    runner.cast(plax).target_object(plaxed).resolve();
+    for id in [shielded, plaxed, decoy] {
+        tap_object(&mut runner, id);
+    }
+
+    let legal = announced_legal_targets(
+        &mut runner,
+        P1,
+        GameAction::ActivateAbility {
+            source_id: assassin,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        },
+    );
+    assert!(legal.contains(&decoy), "nonempty control: {legal:?}");
+    assert!(
+        legal.contains(&shielded),
+        "a spells-only Aura must not stop an activated ability from targeting: {legal:?}"
+    );
+    assert!(
+        !legal.contains(&plaxed),
+        "the unqualified restriction must still block an opponent's targeted ability: {legal:?}"
+    );
+}
+
+/// Veilstone Amulet (verified Scryfall Oracle): "Whenever you cast a spell,
+/// creatures you control can't be the targets of spells or abilities your
+/// opponents control this turn."
+///
+/// CR 611.2c + CR 613.11: the effect modifies the rules, so a creature that
+/// enters AFTER the trigger resolves is protected too. It expires at end of turn;
+/// P0's own spells are unaffected (CR 109.5).
+#[test]
+fn veilstone_amulet_protects_creatures_entering_later_and_expires() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let existing = scenario.add_creature(P0, "Existing Bear", 2, 2).id();
+    let enemy_a = scenario.add_creature(P1, "Enemy A", 2, 2).id();
+    let enemy_b = scenario.add_creature(P1, "Enemy B", 2, 2).id();
+    scenario.add_artifact_from_oracle(P0, "Veilstone Amulet", VEILSTONE_AMULET);
+    let maker = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Token Maker",
+            "{0}: Create a 2/2 green Bear creature token.",
+        )
+        .id();
+    let trigger_spell = scenario
+        .add_spell_to_hand(P0, "Trigger Probe", true)
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text("You gain 1 life.")
+        .id();
+    let p0_tap = scenario
+        .add_spell_to_hand(P0, "Own Tap Probe", true)
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text("Tap target creature.")
+        .id();
+    let p1_tap = scenario
+        .add_spell_to_hand(P1, "Opposing Tap Probe", true)
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text("Tap target creature.")
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(trigger_spell).resolve();
+    // The token enters AFTER the Amulet's trigger resolved, via an ability (no cast).
+    let before: Vec<_> = runner.state().battlefield.iter().copied().collect();
+    runner.activate(maker, 0).resolve();
+    let token = *runner
+        .state()
+        .battlefield
+        .iter()
+        .find(|id| !before.contains(id))
+        .expect("the token must have entered");
+
+    let action = cast_action(&runner, p1_tap);
+    let legal = announced_legal_targets(&mut runner, P1, action);
+    assert!(
+        legal.contains(&enemy_a) && legal.contains(&enemy_b),
+        "{legal:?}"
+    );
+    assert!(
+        !legal.contains(&existing),
+        "creature already present: {legal:?}"
+    );
+    assert!(
+        !legal.contains(&token),
+        "a creature entering after the trigger resolved must be protected (CR 611.2c): {legal:?}"
+    );
+
+    // P0's own spell is unaffected.
+    let action = cast_action(&runner, p0_tap);
+    let own = announced_legal_targets(&mut runner, P0, action);
+    assert!(own.contains(&existing) && own.contains(&token), "{own:?}");
+
+    // CR 514.2: the effect ends with the turn. P0 controls creatures, so the walk
+    // to the next upkeep declares no attackers when asked.
+    for _ in 0..4 {
+        runner.advance_to_upkeep();
+        if runner.state().phase == Phase::Upkeep {
+            break;
+        }
+        runner
+            .declare_attackers(&[])
+            .expect("declaring no attackers must be legal");
+    }
+    assert_eq!(
+        runner.state().phase,
+        Phase::Upkeep,
+        "must reach next upkeep"
+    );
+    let action = cast_action(&runner, p1_tap);
+    let legal = announced_legal_targets(&mut runner, P1, action);
+    assert!(
+        legal.contains(&existing) && legal.contains(&token),
+        "the Amulet's effect must expire: {legal:?}"
+    );
+}
+
+/// Vines of Vastwood: the restriction is bound to the recipient's incarnation and
+/// is not an ability. Turn to Frog ("loses all abilities", cast later) does not
+/// clear it; a blink makes a new object (CR 400.7) and ends it; it expires at end
+/// of turn.
+#[test]
+fn vines_survives_ability_removal_ends_on_blink_and_expires() {
+    for scenario_kind in ["ability_removal", "blink", "expiry"] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let protected = scenario.add_creature(P1, "Opposing Bear", 2, 2).id();
+        let bystander = scenario.add_creature(P1, "Bystander A", 2, 2).id();
+        let second = scenario.add_creature(P1, "Bystander B", 2, 2).id();
+        let vines = scenario
+            .add_spell_to_hand(P0, "Vines of Vastwood", true)
+            .with_mana_cost(ManaCost::generic(0))
+            .from_oracle_text(VINES)
+            .id();
+        let frog = scenario
+            .add_spell_to_hand(P0, "Turn to Frog", true)
+            .with_mana_cost(ManaCost::generic(0))
+            .from_oracle_text("Until end of turn, target creature loses all abilities and becomes a blue Frog with base power and toughness 1/1.")
+            .id();
+        let blink = scenario
+            .add_spell_to_hand(P0, "Flicker Probe", true)
+            .with_mana_cost(ManaCost::generic(0))
+            .from_oracle_text("Exile target creature, then return it to the battlefield under its owner's control.")
+            .id();
+        let p1_tap = scenario
+            .add_spell_to_hand(P1, "Opposing Tap Probe", true)
+            .with_mana_cost(ManaCost::generic(0))
+            .from_oracle_text("Tap target creature.")
+            .id();
+        let mut runner = scenario.build();
+
+        runner.cast(vines).target_object(protected).resolve();
+        let action = cast_action(&runner, p1_tap);
+        let legal = announced_legal_targets(&mut runner, P1, action);
+        assert!(
+            legal.contains(&bystander) && legal.contains(&second),
+            "{legal:?}"
+        );
+        assert!(
+            !legal.contains(&protected),
+            "{scenario_kind}: Vines protects: {legal:?}"
+        );
+
+        runner.state_mut().active_player = P0;
+        runner.state_mut().priority_player = P0;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+        match scenario_kind {
+            "ability_removal" => {
+                runner.cast(frog).target_object(protected).resolve();
+                assert!(
+                    runner.state().objects[&protected]
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|t| t == "Frog"),
+                    "the ability-removal effect must have applied"
+                );
+                let action = cast_action(&runner, p1_tap);
+                let legal = announced_legal_targets(&mut runner, P1, action);
+                assert!(
+                    !legal.contains(&protected),
+                    "later ability removal must not clear Vines' rule effect: {legal:?}"
+                );
+            }
+            "blink" => {
+                runner.cast(blink).target_object(protected).resolve();
+                let action = cast_action(&runner, p1_tap);
+                let legal = announced_legal_targets(&mut runner, P1, action);
+                assert!(
+                    legal.contains(&protected),
+                    "CR 400.7: the blinked creature is a new object, no longer protected: {legal:?}"
+                );
+            }
+            _ => {
+                runner.advance_to_upkeep();
+                let action = cast_action(&runner, p1_tap);
+                let legal = announced_legal_targets(&mut runner, P1, action);
+                assert!(legal.contains(&protected), "Vines must expire: {legal:?}");
+            }
+        }
+    }
 }

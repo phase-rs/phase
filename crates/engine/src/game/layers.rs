@@ -59,7 +59,7 @@ use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::statics::{ProhibitionScope, StaticMode};
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 #[derive(Debug, Clone)]
@@ -9373,13 +9373,19 @@ fn gather_transient_continuous_effects_with(
             // `iter_cast_free_permission_source_ids`, giving one grant two
             // sources. CR 701.15b: `Goaded` is likewise a designation, not
             // an ability on the recipient; combat reads the live TCE directly.
+            // CR 611.2c + CR 613.11: a resolved `CantBeTargeted` rule effect
+            // (Vines of Vastwood, Veilstone Amulet) is read directly off the TCE by
+            // `static_abilities::transient_cant_be_targeted_prohibits`, so it is
+            // not an ability on the recipient and "loses all abilities" cannot
+            // clear it.
             if matches!(
                 modification,
                 ContinuousModification::AddStaticMode {
                     mode: StaticMode::MayLookAtFaceDown
                         | StaticMode::ReduceAbilityCost { .. }
                         | StaticMode::CastFromHandFree { .. }
-                        | StaticMode::Goaded,
+                        | StaticMode::Goaded
+                        | StaticMode::CantBeTargeted { .. },
                 }
             ) {
                 continue;
@@ -10878,7 +10884,7 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 /// than the carrier's controller, so the graft has to snapshot
 /// `effect.controller` as the definition's anchor.
 ///
-/// Three member classes today:
+/// Two member classes today:
 /// - `MustBeBlockedByAll` / `MustBeBlocked` carrying a controller-relative
 ///   blocker filter (`ControllerRef::You`/`Opponent`/… — "your opponents", "you
 ///   control"). Grafted onto a TARGET permanent by a one-shot effect (You Look
@@ -10886,8 +10892,6 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 ///   to the target's controller.
 /// - `MustAttackAwayFromSource`, whose avoided player is the granting effect's
 ///   controller (CR 701.15b).
-/// - `CantBeTargeted` scoped to `Opponents` / `Controller`, whose "your" is the
-///   granting effect's controller (CR 109.5).
 ///
 /// Mirrors `static_mode_uses_chosen_color`.
 fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::StaticMode) -> bool {
@@ -10904,13 +10908,6 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
         // (Maximum Carnage chapter I), so re-deriving it from the carrier would
         // avoid the wrong player.
         StaticMode::MustAttackAwayFromSource => true,
-        // CR 109.5 + CR 611.2c: a granted "can't be the target of spells or
-        // abilities your opponents control" (Vines of Vastwood) scopes "your"
-        // from the granting effect's controller; re-deriving it from the
-        // carrier would protect an opponent's creature from the wrong players.
-        StaticMode::CantBeTargeted {
-            who: ProhibitionScope::Opponents | ProhibitionScope::Controller,
-        } => true,
         _ => false,
     }
 }

@@ -1348,33 +1348,125 @@ pub(crate) enum CantBeTargetedScope {
     OpponentsOnly,
 }
 
+/// How a "can't be the target[ed]" prohibition's source qualifier reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CantBeTargetedShape {
+    /// The prohibition covers every spell and ability, optionally limited to those
+    /// an opponent controls: the only shape `StaticMode::CantBeTargeted { who }`
+    /// can express.
+    Supported(CantBeTargetedScope),
+    /// The prohibition carries a source-kind or source-quality qualifier
+    /// ("of spells", "of abilities", "of black or red spells your opponents
+    /// control", "... from nongreen sources"). `CantBeTargeted` has no axis for the
+    /// prohibited sources, so modeling it would over-block (CR 115.1a spells vs.
+    /// CR 115.1c activated abilities); the caller must decline instead.
+    SourceQualified,
+}
+
+/// CR 115.1 + CR 702.18a: parse what follows a targeting-prohibition phrase.
+/// Only the bare form and the unqualified "spells or abilities [your opponents
+/// control]" form are supported; any other source qualifier is `SourceQualified`.
+fn parse_cant_be_targeted_shape(input: &str) -> OracleResult<'_, CantBeTargetedShape> {
+    // The clause ends here: end of text, punctuation, or a duration / condition /
+    // conjunction that continues the sentence rather than the source phrase.
+    fn clause_end(i: &str) -> OracleResult<'_, ()> {
+        alt((
+            value((), eof),
+            value((), peek(alt((tag("."), tag(","), tag(";"), tag(":"))))),
+            value(
+                (),
+                peek(alt((
+                    tag(" this turn"),
+                    tag(" until "),
+                    tag(" as long as "),
+                    tag(" unless "),
+                    tag(" if "),
+                    tag(" and "),
+                ))),
+            ),
+        ))
+        .parse(i)
+    }
+    alt((
+        // "... of / by spells or abilities [your opponents control]"
+        preceded(
+            alt((tag(" of "), tag(" by "))),
+            terminated(
+                (
+                    alt((
+                        tag("spells or abilities"),
+                        tag("spell or ability"),
+                        tag("spells and abilities"),
+                    )),
+                    // CR 109.5: "your opponents control" anchors to the controller
+                    // of the prohibited source.
+                    opt(alt((
+                        tag(" your opponents control"),
+                        tag(" an opponent controls"),
+                        tag(" opponents control"),
+                    ))),
+                ),
+                clause_end,
+            ),
+        )
+        .map(|(_, opponents)| {
+            CantBeTargetedShape::Supported(if opponents.is_some() {
+                CantBeTargetedScope::OpponentsOnly
+            } else {
+                CantBeTargetedScope::AnyPlayer
+            })
+        }),
+        // Bare form: "~ can't be targeted" / "~ can't be the target".
+        value(
+            CantBeTargetedShape::Supported(CantBeTargetedScope::AnyPlayer),
+            clause_end,
+        ),
+        // Anything else names a source kind or quality.
+        value(CantBeTargetedShape::SourceQualified, nom::combinator::rest),
+    ))
+    .parse(input)
+}
+
+fn analyze_cant_be_targeted(predicate_lower: &str) -> Option<CantBeTargetedShape> {
+    let (_, _, rest) = nom_primitives::scan_preceded(predicate_lower, |i: &str| {
+        // "the target" / "the targets" (plural subject: "creatures you control can't
+        // be the targets of ...") / "targeted".
+        terminated(
+            alt((
+                tag("can't be the target"),
+                tag("can\u{2019}t be the target"),
+                tag("cannot be the target"),
+                tag("can't be targeted"),
+                tag("can\u{2019}t be targeted"),
+                tag("cannot be targeted"),
+            )),
+            opt(tag("s")),
+        )
+        .parse(i)
+    })?;
+    parse_cant_be_targeted_shape(rest)
+        .ok()
+        .map(|(_, shape)| shape)
+}
+
 /// Classify a predicate carrying a "can't be the target[ed]" prohibition.
 ///
-/// Returns `None` when no such prohibition is present, or when its scope is one
-/// this parser does not yet model precisely (e.g. a specific spell type), so a
-/// caller never collapses an unrecognized scope into a blanket restriction.
+/// Returns `None` when no such prohibition is present, or when its source
+/// qualifier is one `StaticMode::CantBeTargeted { who }` cannot express (a
+/// specific spell kind, abilities only, a source quality). A caller therefore
+/// never collapses a qualified restriction into a blanket one; it consults
+/// [`is_source_qualified_cant_be_targeted`] to fail closed instead.
 pub(crate) fn classify_cant_be_targeted(predicate_lower: &str) -> Option<CantBeTargetedScope> {
-    let is_prohibition = scan_contains(predicate_lower, "can't be the target")
-        || scan_contains(predicate_lower, "cannot be the target")
-        || scan_contains(predicate_lower, "can't be targeted")
-        || scan_contains(predicate_lower, "cannot be targeted");
-    if !is_prohibition {
-        return None;
+    match analyze_cant_be_targeted(predicate_lower)? {
+        CantBeTargetedShape::Supported(scope) => Some(scope),
+        CantBeTargetedShape::SourceQualified => None,
     }
-    // CR 702.11a: an opponent-controlled qualifier makes this Hexproof, not Shroud.
-    if scan_contains(predicate_lower, "your opponents control")
-        || scan_contains(predicate_lower, "an opponent controls")
-    {
-        return Some(CantBeTargetedScope::OpponentsOnly);
-    }
-    // CR 702.18a: the bare form ("~ can't be targeted") or the unqualified
-    // "spells or abilities" scope is blanket Shroud. Any other qualifier is left
-    // unclassified so it is not mistreated as a blanket restriction.
-    let bare = !scan_contains(predicate_lower, " of ");
-    let unqualified_scope = scan_contains(predicate_lower, "spells or abilities")
-        || scan_contains(predicate_lower, "spell or ability")
-        || scan_contains(predicate_lower, "spells and abilities");
-    (bare || unqualified_scope).then_some(CantBeTargetedScope::AnyPlayer)
+}
+
+/// True when the predicate is a targeting prohibition whose source-kind or
+/// source-quality qualifier the engine cannot model (see [`CantBeTargetedShape`]).
+pub(crate) fn is_source_qualified_cant_be_targeted(predicate_lower: &str) -> bool {
+    analyze_cant_be_targeted(predicate_lower) == Some(CantBeTargetedShape::SourceQualified)
 }
 
 /// CR 702.168d + CR 118.7a: Parse a disguise line with a trailing generic

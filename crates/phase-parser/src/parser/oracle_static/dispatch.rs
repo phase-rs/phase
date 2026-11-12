@@ -2855,6 +2855,15 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "~ can't be the target" or "~ can't be targeted" ---
+    // CR 115.1: a source-kind / source-quality qualifier ("of spells", "of black
+    // or red spells your opponents control") is not expressible by
+    // `CantBeTargeted { who }`; fail closed rather than emit a blanket mode.
+    if crate::parser::oracle_keyword::is_source_qualified_cant_be_targeted(tp.lower) {
+        return Some(super::evasion::source_qualified_cant_be_targeted_gap(
+            TargetFilter::SelfRef,
+            &text,
+        ));
+    }
     // CR 702.18a / CR 702.11b / CR 109.5: Descriptive targeting prohibition.
     if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(tp.lower) {
         let who = match scope {

@@ -269,6 +269,17 @@ fn evaluate_static_condition_for_ability(
     }
 }
 
+/// CR 611.2c: a resolved "can't be the target of ..." grant is a rule effect read
+/// straight off its transient effect, not an ability on the recipient.
+fn is_cant_be_targeted_rule_effect(modification: &ContinuousModification) -> bool {
+    matches!(
+        modification,
+        ContinuousModification::AddStaticMode {
+            mode: crate::types::statics::StaticMode::CantBeTargeted { .. },
+        }
+    )
+}
+
 /// CR 116.2c: single install point for this module. Threads the (optional)
 /// pay-to-end permission into the state-level construction authority so the
 /// field rides INSIDE the journaled `ResolvedContinuousEffectCommand` rather
@@ -305,6 +316,18 @@ fn install_transient(
                 .map(|occurrence| occurrence.caster),
         );
     }
+    // CR 400.7 + CR 611.2c: a targeted "can't be the target" rule effect applies to
+    // the recipient as it was when the effect resolved; a blinked or otherwise
+    // re-created object is a new object it no longer reaches.
+    let affected_recipient = match &affected {
+        TargetFilter::SpecificObject { id } if modifications.iter().any(is_cant_be_targeted_rule_effect) => {
+            state
+                .objects
+                .get(id)
+                .map(|obj| <crate::types::identifiers::ObjectIncarnationRef as crate::game::game_object::ObjectIncarnationRefExt>::from_object(obj))
+        }
+        _ => None,
+    };
     state.add_transient_continuous_effect_inner(
         ability.source_id,
         ability.controller,
@@ -316,6 +339,7 @@ fn install_transient(
         // CR 201.5a: a granted ability's effect names the object that granted it.
         TransientContinuousEffectBindings {
             granting_object: ability.context.granting_object,
+            affected_recipient,
             ..TransientContinuousEffectBindings::default()
         },
         // CR 113.7a: an event deadline is bound to the creating ability's own
@@ -497,6 +521,34 @@ fn bind_transient_effect(
             }
         )
     }) {
+        if let Some(affected) = static_def.affected.clone() {
+            if !generic_effect_affected_uses_inherited_targets(&affected) {
+                install_transient(
+                    state,
+                    end_permission,
+                    ability,
+                    duration.clone(),
+                    affected,
+                    modifications,
+                    static_def.condition.clone(),
+                );
+                return;
+            }
+        }
+    }
+
+    // CR 611.2c + CR 613.11 + CR 109.5: A duration-bound "creatures you control
+    // can't be the targets of spells or abilities your opponents control this
+    // turn" (Veilstone Amulet) is a rule-changing effect, so it "can affect
+    // objects that weren't affected when that continuous effect began" — a
+    // creature that enters after it resolves is protected too. Keep the affected
+    // filter INTACT on one TCE rather than freezing it to a resolution-time
+    // `SpecificObject` set; the targeting gate reads the TCE directly
+    // (`static_abilities::transient_cant_be_targeted_prohibits`) and `layers.rs`
+    // never grafts it onto an object. A targeted grant (Vines of Vastwood) falls
+    // through to the chosen-target arms, which bind the recipient's incarnation
+    // (see `install_transient`).
+    if modifications.iter().any(is_cant_be_targeted_rule_effect) {
         if let Some(affected) = static_def.affected.clone() {
             if !generic_effect_affected_uses_inherited_targets(&affected) {
                 install_transient(

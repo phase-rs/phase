@@ -1134,6 +1134,15 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         );
     }
 
+    // --- "can't be the target of ..." with a source-kind / quality qualifier ---
+    // CR 115.1: not expressible by `CantBeTargeted { who }`; fail closed.
+    if crate::parser::oracle_keyword::is_source_qualified_cant_be_targeted(body_lower) {
+        return vec![super::evasion::source_qualified_cant_be_targeted_gap(
+            affected,
+            description,
+        )];
+    }
+
     // --- "can't be the target of spells or abilities [your opponents control]" ---
     // CR 702.18a / CR 702.11b / CR 109.5: Descriptive targeting prohibition.
     if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(body_lower) {

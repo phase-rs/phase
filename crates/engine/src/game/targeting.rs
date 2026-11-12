@@ -3879,42 +3879,45 @@ pub fn own_cant_be_targeted_prohibits(
     source_controller: PlayerId,
     state: &GameState,
 ) -> bool {
-    super::functioning_abilities::active_static_definitions(state, obj).any(|def| {
-        let crate::types::statics::StaticMode::CantBeTargeted { ref who } = def.mode else {
-            return false;
-        };
-        let applies = match def.affected {
-            None | Some(TargetFilter::SelfRef) => true,
-            Some(ref filter) => {
-                crate::game::filter::matches_target_filter(
+    // CR 611.2c + CR 613.11: a resolution-created prohibition is read straight off
+    // its transient effect, never from `obj`'s abilities.
+    super::static_abilities::transient_cant_be_targeted_prohibits(state, obj, source_controller)
+        || super::functioning_abilities::active_static_definitions(state, obj).any(|def| {
+            let crate::types::statics::StaticMode::CantBeTargeted { ref who } = def.mode else {
+                return false;
+            };
+            let applies = match def.affected {
+                None | Some(TargetFilter::SelfRef) => true,
+                Some(ref filter) => {
+                    crate::game::filter::matches_target_filter(
+                        state,
+                        obj.id,
+                        filter,
+                        &crate::game::filter::FilterContext::from_source(state, obj.id),
+                    ) && super::static_abilities::static_condition_matches_context(
+                        state,
+                        obj.id,
+                        obj.controller,
+                        def,
+                        &super::static_abilities::StaticCheckContext {
+                            target_id: Some(obj.id),
+                            ..Default::default()
+                        },
+                    )
+                }
+            };
+            // CR 109.5: "your" is scoped from the static's controller — for a
+            // static granted onto `obj` (Vines of Vastwood) the granting source's
+            // controller, anchored at graft time, not `obj`'s.
+            applies
+                && super::static_abilities::prohibition_scope_matches_player_anchored(
+                    who,
+                    source_controller,
+                    obj,
+                    def.source_controller.unwrap_or(obj.controller),
                     state,
-                    obj.id,
-                    filter,
-                    &crate::game::filter::FilterContext::from_source(state, obj.id),
-                ) && super::static_abilities::static_condition_matches_context(
-                    state,
-                    obj.id,
-                    obj.controller,
-                    def,
-                    &super::static_abilities::StaticCheckContext {
-                        target_id: Some(obj.id),
-                        ..Default::default()
-                    },
                 )
-            }
-        };
-        // CR 109.5: "your" is scoped from the static's controller — for a
-        // static granted onto `obj` (Vines of Vastwood) the granting source's
-        // controller, anchored at graft time, not `obj`'s.
-        applies
-            && super::static_abilities::prohibition_scope_matches_player_anchored(
-                who,
-                source_controller,
-                obj,
-                def.source_controller.unwrap_or(obj.controller),
-                state,
-            )
-    })
+        })
 }
 
 /// CR 608.2g: expose a parked resolving spell only while its object is still

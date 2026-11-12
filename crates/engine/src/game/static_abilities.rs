@@ -1155,6 +1155,51 @@ pub(crate) fn transient_grants_static_mode_to_object(
     false
 }
 
+/// CR 611.2c + CR 613.11 + CR 109.5: True iff a live resolution-created effect
+/// ("creatures you control can't be the targets of spells or abilities your
+/// opponents control this turn", "target creature can't be the target of ...")
+/// prohibits `source_controller` from targeting `obj`.
+///
+/// This is the transient arm of the targeting-prohibition authority: the rule is
+/// read DIRECTLY off the effect and is never grafted onto the object, so an
+/// ability-removal effect ("loses all abilities") cannot clear it. A filter-scoped
+/// `affected` is re-evaluated against the live board at every query (CR 611.2c: a
+/// rule-changing effect can affect objects that weren't affected when it began),
+/// and a recipient-bound effect lapses with its incarnation (CR 400.7, via
+/// `transient_effect_is_live`). "Your" in `who` is the effect's controller
+/// (CR 109.5), which a resolved spell or ability retains.
+pub(crate) fn transient_cant_be_targeted_prohibits(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    source_controller: PlayerId,
+) -> bool {
+    state.transient_continuous_effects.iter().any(|tce| {
+        let who = tce.modifications.iter().find_map(|m| match m {
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBeTargeted { who },
+            } => Some(who),
+            _ => None,
+        });
+        let Some(who) = who else {
+            return false;
+        };
+        crate::game::layers::transient_effect_is_live(state, tce)
+            && matches_target_filter(
+                state,
+                obj.id,
+                &tce.affected,
+                &FilterContext::from_source_with_controller(tce.source_id, tce.controller),
+            )
+            && prohibition_scope_matches_player_anchored(
+                who,
+                source_controller,
+                obj,
+                tce.controller,
+                state,
+            )
+    })
+}
+
 /// CR 702.26a + CR 101.2 + CR 611.2b: True iff `object_id` currently has an
 /// *active* `CantPhaseIn` restriction. The Pandorica grants this as a
 /// `SpecificObject` transient continuous effect (`AddStaticMode { CantPhaseIn }`)
