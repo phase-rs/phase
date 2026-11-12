@@ -25031,7 +25031,12 @@ mod resolving_carrier_settle_tests {
             if active_left {
                 // CR 800.4a: P0 leaves through the engine's elimination
                 // authority; the turn continues without an active player.
-                crate::game::elimination::eliminate_player(state, p0, &mut Vec::new());
+                crate::game::elimination::eliminate_player(
+                    state,
+                    p0,
+                    crate::types::events::LossReason::Conceded,
+                    &mut Vec::new(),
+                );
                 assert!(state.players[0].is_eliminated);
                 assert!(state.game_end.is_none());
                 assert_eq!(state.active_player, p0);

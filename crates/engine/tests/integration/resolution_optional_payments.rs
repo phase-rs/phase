@@ -1596,7 +1596,12 @@ fn eliminated_resolution_sacrifice_payer_game_over_drops_staged_resolution() {
     )
     .unwrap();
 
-    eliminate_player(runner.state_mut(), P1, &mut Vec::new());
+    eliminate_player(
+        runner.state_mut(),
+        P1,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
 
     assert!(matches!(
         runner.state().waiting_for,
@@ -1640,7 +1645,12 @@ fn eliminated_resolution_sacrifice_controller_terminates_real_stack_selection_as
         WaitingFor::PayCost { player: P1, .. }
     ));
 
-    eliminate_player(runner.state_mut(), P0, &mut Vec::new());
+    eliminate_player(
+        runner.state_mut(),
+        P0,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
 
     assert!(runner.state().active_optional_effect_frame().is_none());
     assert!(runner.state().active_ability_continuation().is_none());
@@ -1738,7 +1748,12 @@ fn eliminated_resolution_sacrifice_controller_terminates_real_stack_replacement_
     assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
 
     let mut events = Vec::new();
-    eliminate_player(runner.state_mut(), P0, &mut events);
+    eliminate_player(
+        runner.state_mut(),
+        P0,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
     runner.advance_until_stack_empty();
 
     assert!(runner.state().active_optional_effect_frame().is_none());
@@ -1871,7 +1886,12 @@ fn unrelated_elimination_preserves_resolution_sacrifice_root() {
         },
     )
     .unwrap();
-    eliminate_player(runner.state_mut(), p2, &mut Vec::new());
+    eliminate_player(
+        runner.state_mut(),
+        p2,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::PayCost {
@@ -1996,7 +2016,12 @@ fn the_resolution_net_finishes_an_owed_spell_above_the_spell_below_before_it_res
         },
     )
     .unwrap();
-    eliminate_player(runner.state_mut(), P1, &mut Vec::new());
+    eliminate_player(
+        runner.state_mut(),
+        P1,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
 
     // Reach: the instructions are done but the final part is still owed, with
     // the spell below still on the stack.
@@ -2110,7 +2135,12 @@ fn the_resolution_nets_final_part_batch_collects_a_delayed_death_trigger() {
         },
     )
     .unwrap();
-    eliminate_player(runner.state_mut(), P1, &mut Vec::new());
+    eliminate_player(
+        runner.state_mut(),
+        P1,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
     assert_eq!(
         runner
             .state()

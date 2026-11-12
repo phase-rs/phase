@@ -1541,7 +1541,12 @@ mod tests {
         )
         .unwrap();
 
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(0),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(matches!(
             state.waiting_for,
@@ -1579,7 +1584,12 @@ mod tests {
             }
         ));
 
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(0),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(matches!(
             state.waiting_for,
@@ -2018,7 +2028,12 @@ mod tests {
             }
         ));
 
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(0),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(matches!(
             state.waiting_for,

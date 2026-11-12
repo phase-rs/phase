@@ -3873,6 +3873,16 @@ export type PlayerActionKind =
 /** CR 602.2 + CR 605.1a + CR 606.1: which kind of activated ability was activated. */
 export type ActivatedAbilityKind = "Normal" | "Loyalty" | "Mana";
 
+/** CR 104.3: why a player lost the game. */
+export type LossReason =
+  | "LifeTotal"
+  | "DrewFromEmptyLibrary"
+  | "Poison"
+  | "CommanderDamage"
+  | "Conceded"
+  | "EffectStatedLoss"
+  | "OpponentWon";
+
 export type GameEvent =
   | { type: "GameStarted" }
   | {
@@ -3900,7 +3910,7 @@ export type GameEvent =
   | { type: "LifeChanged"; data: { player_id: PlayerId; amount: number; new_total?: number } }
   | { type: "ManaAdded"; data: { player_id: PlayerId; mana_type: ManaType; source_id: ObjectId; tapped_for_mana?: boolean } }
   | { type: "PermanentTapped"; data: { object_id: ObjectId } }
-  | { type: "PlayerLost"; data: { player_id: PlayerId } }
+  | { type: "PlayerLost"; data: { player_id: PlayerId; reasons: LossReason[] } }
   | { type: "MulliganStarted" }
   | { type: "CardsDrawn"; data: { player_id: PlayerId; count: number } }
   | { type: "CardDrawn"; data: { player_id: PlayerId; object_id: ObjectId; nth_in_turn: number; nth_in_step: number } }

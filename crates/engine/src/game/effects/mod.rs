@@ -44112,7 +44112,12 @@ mod tests {
             Some(fan_out_of(source, seats.clone(), seats.clone()));
 
         let mut events = Vec::new();
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
 
         let fan_out = state
             .pending_discard_batch
@@ -55341,7 +55346,12 @@ mod tests {
             "phase_out_player must actually transition P1"
         );
         assert!(state.players[1].is_phased_out());
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(state.players[2].is_eliminated);
 
         let ability = ResolvedAbility::new(Effect::Clash, vec![], ObjectId(1), PlayerId(0));

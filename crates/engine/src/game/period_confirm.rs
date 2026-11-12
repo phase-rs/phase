@@ -36,7 +36,7 @@ use crate::game::play_trace::{
 };
 use crate::types::ability::TargetRef;
 use crate::types::actions::GameAction;
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, LossReason};
 use crate::types::game_state::{
     CostResume, GameState, ManaChoiceContext, PayCostKind, StackEntryKind, WaitingFor, YieldTarget,
 };
@@ -3794,7 +3794,12 @@ fn measure_seat_takes(
     for gone in departed_sets {
         let mut start = s_n.clone();
         for seat in &gone {
-            crate::game::elimination::eliminate_player(&mut start, *seat, &mut Vec::new());
+            crate::game::elimination::eliminate_player(
+                &mut start,
+                *seat,
+                LossReason::LifeTotal,
+                &mut Vec::new(),
+            );
         }
         for seat in opponents
             .iter()
@@ -4838,7 +4843,12 @@ mod tests {
             CycleEnd::Refused(OfferRefusal::NoRecurrence)
         );
         let mut left = cleanup.clone();
-        crate::game::elimination::eliminate_player(&mut left, p0, &mut Vec::new());
+        crate::game::elimination::eliminate_player(
+            &mut left,
+            p0,
+            LossReason::Conceded,
+            &mut Vec::new(),
+        );
         let holder_left = stopped(&left, p0, &started, OfferRefusal::NoRecurrence);
         assert_eq!(
             holder_left,

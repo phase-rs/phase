@@ -562,7 +562,12 @@ fn opponent_who_left_before_resolution_is_not_iterated() {
     let mut runner = scenario.build();
 
     cast_from_exile(&mut runner, meteor);
-    engine::game::elimination::eliminate_player(runner.state_mut(), P1, &mut Vec::new());
+    engine::game::elimination::eliminate_player(
+        runner.state_mut(),
+        P1,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
     let prompts = resolve_with(&mut runner, |_, cards| vec![cards[0]], |_, _| {});
 
     assert_eq!(prompts.len(), 1, "only the live opponent: {prompts:?}");
@@ -1714,7 +1719,12 @@ fn hostile_legacy_pool_prompt_is_rejected_not_rebound() {
         "reach: the queue after P1 is empty"
     );
     make_frame_legacy(&mut runner);
-    engine::game::elimination::eliminate_player(runner.state_mut(), P1, &mut Vec::new());
+    engine::game::elimination::eliminate_player(
+        runner.state_mut(),
+        P1,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
     assert_eq!(
         controller(&runner, stolen),
         P2,
@@ -2532,6 +2542,7 @@ fn simultaneous_departure_of_every_opponent_ends_the_game_with_no_prompt() {
     engine::game::elimination::eliminate_players_simultaneously(
         runner.state_mut(),
         &[P1, P2],
+        engine::types::events::LossReason::Conceded,
         &mut Vec::new(),
     );
     assert_eq!(

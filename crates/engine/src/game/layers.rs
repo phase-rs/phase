@@ -29495,7 +29495,12 @@ mod tests {
         let before_elimination = granted_trigger_ref(&state, recipient);
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(
+            &mut state,
+            PlayerId(1),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         flush_layers(&mut state);
 
         assert!(

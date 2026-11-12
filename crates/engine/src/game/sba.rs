@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::game::functioning_abilities::static_kind_present;
 use crate::game::layers;
@@ -10,7 +10,7 @@ use crate::game::zone_pipeline::{
 use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, LossReason};
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -184,21 +184,10 @@ fn run_state_based_actions(
         }
         // CR 704.5a-c + CR 704.6c: collect every player-loss SBA from this
         // check before applying any of them.
-        let mut losers: Vec<PlayerId> = collect_life_losers(state);
-        losers.extend(collect_draw_from_empty_losers(state));
-        losers.extend(collect_poison_losers(state));
-        losers.extend(collect_commander_damage_losers(state));
-
-        // A player can meet several loss conditions at once — dedup so each is
-        // eliminated (and emits PlayerLost) exactly once.
-        losers.sort_unstable();
-        losers.dedup();
-        if !losers.is_empty() {
+        let losses = player_losses(state);
+        if !losses.is_empty() {
             any_performed = true;
-            for &loser in &losers {
-                events.push(GameEvent::PlayerLost { player_id: loser });
-            }
-            super::elimination::eliminate_players(state, &losers, departures, events);
+            super::elimination::eliminate_players(state, &losses, departures, events);
 
             // If the game ended (a sole winner or a CR 104.4a draw), stop now.
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
@@ -768,6 +757,29 @@ fn static_affects_player(
         None => true,
         _ => false,
     }
+}
+
+/// CR 704.3 + CR 704.5a-c + CR 704.6c: every player a player-loss SBA of this
+/// check removes, with every condition it meets.
+fn player_losses(state: &GameState) -> BTreeMap<PlayerId, BTreeSet<LossReason>> {
+    let mut losses: BTreeMap<PlayerId, BTreeSet<LossReason>> = BTreeMap::new();
+    for (losers, reason) in [
+        (collect_life_losers(state), LossReason::LifeTotal),
+        (
+            collect_draw_from_empty_losers(state),
+            LossReason::DrewFromEmptyLibrary,
+        ),
+        (collect_poison_losers(state), LossReason::Poison),
+        (
+            collect_commander_damage_losers(state),
+            LossReason::CommanderDamage,
+        ),
+    ] {
+        for loser in losers {
+            losses.entry(loser).or_default().insert(reason);
+        }
+    }
+    losses
 }
 
 /// CR 704.5a + CR 810.8c: A player (or, in a team-based format, a team) with 0
@@ -2705,6 +2717,16 @@ mod tests {
         GameState::new_two_player(42)
     }
 
+    fn player_losses_in(events: &[GameEvent]) -> Vec<(PlayerId, BTreeSet<LossReason>)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PlayerLost { player_id, reasons } => Some((*player_id, reasons.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Convert a fresh battlefield object into a zero-defense battle for the
     /// CR 704.5v/w waiting-batch tests below. `siege` selects whether it gets
     /// the Siege battle type.
@@ -3038,12 +3060,30 @@ mod tests {
                 winner: Some(PlayerId(1))
             }
         ));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            GameEvent::PlayerLost {
-                player_id: PlayerId(0)
-            }
-        )));
+        assert_eq!(
+            player_losses_in(&events),
+            [(PlayerId(0), BTreeSet::from([LossReason::LifeTotal]))]
+        );
+    }
+
+    /// CR 704.3: one check finding a player at 0 life with ten poison counters
+    /// records both reasons on one `PlayerLost`.
+    #[test]
+    fn sba_zero_life_and_ten_poison_records_both_reasons() {
+        let mut state = setup();
+        state.players[0].life = 0;
+        state.players[0].poison_counters = 10;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert_eq!(
+            player_losses_in(&events),
+            [(
+                PlayerId(0),
+                BTreeSet::from([LossReason::LifeTotal, LossReason::Poison])
+            )]
+        );
     }
 
     #[test]
@@ -3857,12 +3897,10 @@ mod tests {
                 winner: Some(PlayerId(1))
             }
         ));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            GameEvent::PlayerLost {
-                player_id: PlayerId(0)
-            }
-        )));
+        assert_eq!(
+            player_losses_in(&events),
+            [(PlayerId(0), BTreeSet::from([LossReason::Poison]))]
+        );
     }
 
     #[test]
@@ -4953,17 +4991,16 @@ mod tests {
         state.players[1].is_eliminated = true;
         state.eliminated_players.push(PlayerId(1));
         state.players[1].life = 0;
+        state.players[2].life = 0;
         let mut events = Vec::new();
 
         check_state_based_actions(&mut state, &mut events);
 
-        // No new events for already-eliminated player
-        assert!(!events.iter().any(|e| matches!(
-            e,
-            GameEvent::PlayerLost {
-                player_id: PlayerId(1)
-            }
-        )));
+        // No new events for already-eliminated player; P2's loss is the reach guard.
+        assert_eq!(
+            player_losses_in(&events),
+            [(PlayerId(2), BTreeSet::from([LossReason::LifeTotal]))]
+        );
     }
 
     #[test]
@@ -5044,6 +5081,13 @@ mod tests {
         // Both team A members eliminated
         assert!(state.players[0].is_eliminated);
         assert!(state.players[1].is_eliminated);
+        assert_eq!(
+            player_losses_in(&events),
+            [
+                (PlayerId(0), BTreeSet::from([LossReason::LifeTotal])),
+                (PlayerId(1), BTreeSet::from([LossReason::LifeTotal])),
+            ]
+        );
         // Team B wins
         assert!(matches!(
             state.waiting_for,
@@ -5085,6 +5129,13 @@ mod tests {
 
         assert!(state.players[0].is_eliminated);
         assert!(state.players[1].is_eliminated);
+        assert_eq!(
+            player_losses_in(&events),
+            [
+                (PlayerId(0), BTreeSet::from([LossReason::Poison])),
+                (PlayerId(1), BTreeSet::from([LossReason::Poison])),
+            ]
+        );
         assert!(matches!(
             state.waiting_for,
             WaitingFor::GameOver { winner: Some(_) }
@@ -5124,6 +5175,14 @@ mod tests {
         assert!(state.players[0].is_eliminated);
         assert!(state.players[1].is_eliminated);
         assert!(!state.players[2].is_eliminated);
+        // CR 704.6c for P1; CR 810.8a folds its teammate P0 in.
+        assert_eq!(
+            player_losses_in(&events),
+            [
+                (PlayerId(1), BTreeSet::from([LossReason::CommanderDamage])),
+                (PlayerId(0), BTreeSet::from([LossReason::CommanderDamage])),
+            ]
+        );
         assert!(matches!(
             state.waiting_for,
             WaitingFor::GameOver { winner: Some(_) }
@@ -5597,12 +5656,13 @@ mod tests {
                 winner: Some(PlayerId(1))
             }
         ));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            GameEvent::PlayerLost {
-                player_id: PlayerId(0)
-            }
-        )));
+        assert_eq!(
+            player_losses_in(&events),
+            [(
+                PlayerId(0),
+                BTreeSet::from([LossReason::DrewFromEmptyLibrary])
+            )]
+        );
     }
 
     #[test]

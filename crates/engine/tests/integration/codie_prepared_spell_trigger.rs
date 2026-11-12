@@ -2553,7 +2553,12 @@ fn exile_card_population_leave_the_game_sweep_still_reaches_objects() {
     let copy = exact_linked_copy(runner.state(), emeritus, P0, "Swords to Plowshares");
 
     let state = runner.state_mut();
-    engine::game::elimination::eliminate_player(state, P0, &mut Vec::new());
+    engine::game::elimination::eliminate_player(
+        state,
+        P0,
+        engine::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
     engine::game::sba::check_state_based_actions(state, &mut Vec::new());
 
     assert!(state.exile.contains(&bolt));

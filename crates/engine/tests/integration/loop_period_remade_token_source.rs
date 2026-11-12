@@ -24,7 +24,7 @@ use engine::game::{play_trace_view, NamingCause};
 use engine::types::ability::{AbilityKind, TargetFilter, TargetRef};
 use engine::types::actions::{DebugAction, DebugTokenRequest, GameAction};
 use engine::types::counter::CounterType;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, LossReason};
 use engine::types::game_state::{
     ActionResult, CastPaymentMode, GameState, LoopDetectionMode, ManaChoice, WaitingFor,
 };
@@ -1041,9 +1041,13 @@ fn a_take_of_the_bats_capture_keeps_each_seat_that_leaves_in_an_elided_repetitio
         controller: P0,
         repetition: BOUND,
     });
-    let p2_lost = at(&GameEvent::PlayerLost { player_id: P2 });
+    let lost = |player_id| GameEvent::PlayerLost {
+        player_id,
+        reasons: BTreeSet::from([LossReason::LifeTotal]),
+    };
+    let p2_lost = at(&lost(P2));
     let p2_left = at(&GameEvent::PlayerEliminated { player_id: P2 });
-    let p3_lost = at(&GameEvent::PlayerLost { player_id: P3 });
+    let p3_lost = at(&lost(P3));
     let p3_left = at(&GameEvent::PlayerEliminated { player_id: P3 });
     let over = at(&GameEvent::GameOver { winner: Some(P0) });
     assert!(first < p2_lost && p2_lost < p2_left && p2_left < last);

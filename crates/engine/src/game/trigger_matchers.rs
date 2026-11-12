@@ -5387,7 +5387,7 @@ pub(super) fn match_loses_game(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::PlayerLost { player_id } = event {
+    if let GameEvent::PlayerLost { player_id, .. } = event {
         valid_player_matches(trigger, state, *player_id, source_context)
     } else {
         false
@@ -18203,6 +18203,7 @@ mod tests {
 
         let other = GameEvent::PlayerLost {
             player_id: PlayerId(0),
+            reasons: std::collections::BTreeSet::from([crate::types::events::LossReason::Conceded]),
         };
         assert!(
             !match_vote_resolved(
@@ -18351,6 +18352,7 @@ mod tests {
 
         let opp_lost = GameEvent::PlayerLost {
             player_id: PlayerId(1),
+            reasons: std::collections::BTreeSet::from([crate::types::events::LossReason::Conceded]),
         };
         assert!(
             match_loses_game(
@@ -18364,6 +18366,7 @@ mod tests {
 
         let my_lost = GameEvent::PlayerLost {
             player_id: PlayerId(0),
+            reasons: std::collections::BTreeSet::from([crate::types::events::LossReason::Conceded]),
         };
         assert!(
             match_loses_game(

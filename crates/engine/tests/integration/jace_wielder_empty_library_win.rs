@@ -19,10 +19,13 @@
 //! The fix gates the replacement on `ZoneCardCount(Library) == 0`, so a
 //! non-empty draw no longer matches, stashes, or leaks.
 
+use std::collections::BTreeSet;
+
 use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::{DebugAction, GameAction};
+use engine::types::events::{GameEvent, LossReason};
 use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -164,14 +167,24 @@ fn laboratory_maniac_draw_from_empty_library_wins() {
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
     runner.state_mut().debug_mode = true;
 
-    runner
+    let events = runner
         .act(GameAction::Debug(DebugAction::DrawCards {
             player_id: P0,
             count: 1,
         }))
-        .expect("debug draw must succeed");
+        .expect("debug draw must succeed")
+        .events;
     runner.advance_until_stack_empty();
 
+    // CR 104.2b: the winner's opponent loses the game.
+    let losses: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerLost { player_id, reasons } => Some((*player_id, reasons.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(losses, [(P1, BTreeSet::from([LossReason::OpponentWon]))]);
     assert!(
         matches!(
             runner.state().waiting_for,

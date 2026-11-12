@@ -9012,7 +9012,12 @@ card into your hand at the beginning of your next end step.";
         state
             .attacked_defenders_last_turn
             .insert(PlayerId(1), [PlayerId(0)].into_iter().collect());
-        eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        eliminate_player(
+            &mut state,
+            PlayerId(1),
+            crate::types::events::LossReason::Conceded,
+            &mut Vec::new(),
+        );
 
         assert!(
             state.player_attacked_player_last_turn(PlayerId(1), PlayerId(0)),

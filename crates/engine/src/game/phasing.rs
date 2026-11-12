@@ -1003,7 +1003,7 @@ mod tests {
         );
         assert!(
             !events.iter().any(
-                |e| matches!(e, GameEvent::PlayerLost { player_id } if *player_id == PlayerId(1))
+                |e| matches!(e, GameEvent::PlayerLost { player_id, .. } if *player_id == PlayerId(1))
             ),
             "No PlayerLost event for phased-out player"
         );

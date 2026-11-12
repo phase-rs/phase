@@ -564,7 +564,12 @@ fn apply(state: &mut GameState, change: After) {
         After::Nothing => {}
         After::Hexproof => grant_hexproof(state, P1),
         After::Eliminate => {
-            engine::game::elimination::eliminate_player(state, P1, &mut Vec::new());
+            engine::game::elimination::eliminate_player(
+                state,
+                P1,
+                engine::types::events::LossReason::Conceded,
+                &mut Vec::new(),
+            );
             assert!(!engine::game::players::is_alive(state, P1));
         }
         After::Records => seed_records(state),

@@ -749,7 +749,12 @@ mod tests {
             state.players[1].is_phased_out(),
             "P1 must read as phased out"
         );
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(state.players[2].is_eliminated, "P2 must read as eliminated");
         assert!(
             state.players[1].poison_counters > 0 && state.players[2].poison_counters > 0,

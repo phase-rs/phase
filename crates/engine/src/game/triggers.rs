@@ -6369,7 +6369,7 @@ fn collect_pending_triggers_with_collection(
         // on this path, and when it is non-empty it names unrelated permanents
         // that died in the same pass. Only the recorded attachment identifies
         // the observer as having been attached to THIS losing player.
-        if let GameEvent::PlayerLost { player_id } = event {
+        if let GameEvent::PlayerLost { player_id, .. } = event {
             for observer_event in events {
                 let GameEvent::ZoneChanged {
                     object_id: observer_id,
@@ -29980,7 +29980,12 @@ pub mod tests {
             None,
             "a group the payload declares itself is not the carried player"
         );
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(1),
+            crate::types::events::LossReason::Conceded,
+            &mut Vec::new(),
+        );
         assert_eq!(
             delayed_intervening_if(&state, &payload(Some(PlayerId(1)), false)),
             unbound,
@@ -48304,7 +48309,7 @@ pub mod tests {
         assert!(
             result.events.iter().any(|event| matches!(
                 event,
-                GameEvent::PlayerLost { player_id } if *player_id == OWNER
+                GameEvent::PlayerLost { player_id, .. } if *player_id == OWNER
             )),
             "reach-guard: OWNER loses to the state-based action"
         );

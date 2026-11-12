@@ -3015,7 +3015,12 @@ mod tests {
             state.players[1].is_phased_out(),
             "P1 must read as phased out"
         );
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut setup_events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut setup_events,
+        );
         assert!(state.players[2].is_eliminated, "P2 must read as eliminated");
 
         let card1 = create_object(
@@ -6658,7 +6663,12 @@ mod tests {
             *chooser = Chooser::Opponent.into();
         }
         ability.targets = vec![TargetRef::Player(PlayerId(1))];
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(1),
+            crate::types::events::LossReason::Conceded,
+            &mut Vec::new(),
+        );
         assert!(
             !players::is_alive(&state, PlayerId(1)) && players::is_alive(&state, PlayerId(0)),
             "reach: the targeted chooser left; the controller is still in the game"

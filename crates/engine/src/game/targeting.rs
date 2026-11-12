@@ -9420,7 +9420,12 @@ mod tests {
             read(&state),
             (Some(PlayerId(1)), vec![PlayerId(1)], Some(PlayerId(1)))
         );
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(1),
+            crate::types::events::LossReason::Conceded,
+            &mut Vec::new(),
+        );
         assert_eq!(read(&state), (None, vec![], None));
     }
 

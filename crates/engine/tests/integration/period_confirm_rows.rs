@@ -34,7 +34,8 @@ use engine::types::ability::{
 };
 use engine::types::actions::{GameAction, ResolveAllConsentDecision, ResolveAllScope};
 use engine::types::counter::CounterType;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, LossReason};
+use engine::types::format::FormatConfig;
 use engine::types::game_state::{
     AutoMayChoice, CastPaymentMode, GameEnd, GameState, LoopDetectionMode, ManaChoice,
     MayTriggerAutoChoiceSelector, PersistedGameState, StackEntryKind, WaitingFor,
@@ -2286,6 +2287,17 @@ fn eliminations(events: &[GameEvent]) -> Vec<PlayerId> {
         .collect()
 }
 
+/// Each seat `events` record as losing, with its reasons, in order.
+fn losses_in(events: &[GameEvent]) -> Vec<(PlayerId, BTreeSet<LossReason>)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerLost { player_id, reasons } => Some((*player_id, reasons.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 fn eliminated(state: &GameState) -> Vec<PlayerId> {
     state
         .players
@@ -3814,7 +3826,10 @@ fn an_altar_zulaport_period_on_four_seats_drops_each_seat_at_its_crossing() {
         .expect("marker 6");
     for seat in [P1, P2] {
         for departure in [
-            GameEvent::PlayerLost { player_id: seat },
+            GameEvent::PlayerLost {
+                player_id: seat,
+                reasons: BTreeSet::from([LossReason::LifeTotal]),
+            },
             GameEvent::PlayerEliminated { player_id: seat },
         ] {
             assert!(
@@ -7673,6 +7688,28 @@ fn a_period_spending_its_counters_or_energy_is_offered_at_its_hand_count() {
     }
 }
 
+/// CR 704.5a + CR 732.2a: Walking Ballista's pings take P1 from 5 one life at a time; the take of
+/// the four offered ends the game in the counting loop and records P1's reason.
+#[test]
+fn a_counted_take_ending_the_game_records_its_reason() {
+    let mut board = in_step_hand("Walking Ballista", 30, &[], (20, 5), ping_ability)(
+        LoopDetectionMode::Interactive,
+    );
+    for _ in 0..2000 {
+        if is_offer(board.runner.state()) {
+            break;
+        }
+        (board.step)(&mut board.runner).expect("the board's next action");
+    }
+    let (count, _, _) = offered_parts(&board.runner);
+    assert_eq!(count, IterationCount::Fixed(4), "reach");
+    let events = take(&mut board.runner, 4);
+    assert_eq!(
+        losses_in(&events),
+        [(P1, BTreeSet::from([LossReason::LifeTotal]))]
+    );
+}
+
 /// CR 732.2a: a count stops at the confirmer's cap, which the replay performed, however much
 /// longer the hand game goes on: the Mana Confluence period from 40 life, and Walking Ballista
 /// with sixty counters against P1 at 200.
@@ -8360,9 +8397,9 @@ fn a_counted_offer_states_no_outcome_its_take_does_not_produce() {
 fn a_counted_offer_names_the_threshold_its_ending_crosses() {
     use crate::kilo_live_offer_from_real_dump::{FREED_UNTAP, RELIC_TAP_MANA};
     let Some(db) = shared_card_db() else { return };
-    for (offered_at, repetitions, expected) in [
-        ((2, 8), 1, WinKind::LethalDamage),
-        ((3, 8), 2, WinKind::PoisonLoss),
+    for (offered_at, repetitions, expected, reason) in [
+        ((2, 8), 1, WinKind::LethalDamage, LossReason::LifeTotal),
+        ((3, 8), 2, WinKind::PoisonLoss, LossReason::Poison),
     ] {
         // One live cycle precedes the offer.
         let start = (offered_at.0 + 2, offered_at.1 - 1);
@@ -8402,6 +8439,107 @@ fn a_counted_offer_names_the_threshold_its_ending_crosses() {
             "{offered_at:?}"
         );
         assert_eq!(certificate.win_kind, Some(expected), "{offered_at:?}");
+        let events = take(&mut runner, repetitions);
+        assert_eq!(
+            losses_in(&events),
+            [(P1, BTreeSet::from([reason]))],
+            "{offered_at:?}"
+        );
+    }
+}
+
+/// Phyrexian Altar recurring Gravecrawler as `altar_board_at` builds it, with Ms. Bumbleflower
+/// ("Whenever you cast a spell, target opponent draws a card. …") and `victim`'s library at three
+/// cards; every other library holds ten.
+fn bumbleflower_board(
+    mut scenario: GameScenario,
+    lives: &[i32],
+    victim: PlayerId,
+    db: &CardDatabase,
+) -> (GameRunner, ObjectId, ObjectId) {
+    scenario.at_phase(Phase::PreCombatMain);
+    for (seat, life) in lives.iter().enumerate() {
+        scenario.with_life(PlayerId(seat as u8), *life);
+    }
+    let altar = scenario.add_real_card(P0, "Phyrexian Altar", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Walking Corpse", Zone::Battlefield, db);
+    let gravecrawler = scenario.add_real_card(P0, "Gravecrawler", Zone::Graveyard, db);
+    scenario.add_real_card(P0, "Swamp", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Ms. Bumbleflower", Zone::Battlefield, db);
+    for seat in 0..lives.len() {
+        let seat = PlayerId(seat as u8);
+        let cards = if seat == victim { 3 } else { 10 };
+        for _ in 0..cards {
+            scenario.add_real_card(seat, "Swamp", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    (runner, altar, gravecrawler)
+}
+
+/// Casts Gravecrawler and sacrifices it to the Altar, Bumbleflower aiming its draw at `victim`,
+/// until the engine offers the loop.
+fn deck_to_offer(
+    runner: &mut GameRunner,
+    altar: ObjectId,
+    gravecrawler: ObjectId,
+    victim: PlayerId,
+) {
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action)
+            + chooses_color(ManaType::Black)(action)
+            + 4 * i32::from(matches!(
+                action,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(seat))
+                } if *seat == victim
+            ))
+    };
+    for _ in 0..4 {
+        cast(runner, gravecrawler, vec![], CastPaymentMode::Auto);
+        settle(runner, &score);
+        if is_offer(runner.state()) {
+            return;
+        }
+        let index = ability(runner.state(), altar, true);
+        activate(runner, altar, index);
+        settle(runner, &score);
+        if is_offer(runner.state()) {
+            return;
+        }
+    }
+    panic!("not offered: {:?}", latest_verdict(runner.state()));
+}
+
+/// CR 704.5b: Bumbleflower makes the victim draw from an empty library; CR 810.8a: in
+/// Two-Headed Giant the victim's teammate loses with it, carrying its reason.
+#[test]
+fn a_decking_take_records_its_reason_for_each_leaving_seat() {
+    let Some(db) = shared_card_db() else { return };
+    let decked = BTreeSet::from([LossReason::DrewFromEmptyLibrary]);
+    for (case, scenario, lives, victim, expected) in [
+        (
+            "two players",
+            GameScenario::new(),
+            &[20, 20][..],
+            P1,
+            vec![(P1, decked.clone())],
+        ),
+        (
+            "Two-Headed Giant",
+            GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42),
+            &[30, -3, 15, 15][..],
+            P2,
+            vec![(P2, decked.clone()), (P3, decked.clone())],
+        ),
+    ] {
+        let (mut runner, altar, gravecrawler) = bumbleflower_board(scenario, lives, victim, db);
+        deck_to_offer(&mut runner, altar, gravecrawler, victim);
+        let (count, _, _) = offered_parts(&runner);
+        assert_eq!(count, IterationCount::Fixed(1), "{case}: reach");
+        let events = take(&mut runner, 1);
+        assert_eq!(losses_in(&events), expected, "{case}");
     }
 }
 
