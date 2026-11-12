@@ -3311,6 +3311,14 @@ pub struct PendingExileFromTopUntil {
 }
 
 impl PendingContinuation {
+    /// Install a `player_scope` clause's detached-tail sidecar. `None` keeps the
+    /// sidecar [`Self::new`] cloned from the resolving clause, if any.
+    pub(crate) fn install_player_scope_tail(&mut self, scope: Option<PendingPlayerScopeTail>) {
+        if scope.is_some() {
+            self.player_scope_tail = scope;
+        }
+    }
+
     pub(crate) fn player_scope_queue_end(
         placeholder: Box<ResolvedAbility>,
         state: &GameState,

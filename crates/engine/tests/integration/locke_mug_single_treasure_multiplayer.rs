@@ -184,3 +184,125 @@ fn no_land_milled_creates_no_treasure() {
         "no land card was milled this way, so no Treasure is created"
     );
 }
+
+/// Printed Locke against a defender controlling two Leylines of the Void, with
+/// the milled cards staged.
+///
+/// CR 616.1: each Leyline replaces a card going to an opponent's graveyard, so
+/// Locke's controller (P0, the owner of the affected card) must choose between
+/// them for their own milled card, which is then exiled instead (CR 701.17a: a
+/// card that never reached the graveyard was not milled). Neither Leyline
+/// touches its own controller's cards, so the defender's card, milled by the
+/// later seat after the pause, reaches the graveyard and IS a card milled this
+/// way. Returns the runner after the choice is answered and the stack has
+/// emptied, with the staged cards in seat order.
+fn locke_mill_through_replacement_pause(
+    p0_top_is_land: bool,
+    prompts: &mut usize,
+) -> (GameRunner, Vec<ObjectId>) {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+
+    let db = crate::support::shared_card_db().expect("card database");
+    let mut scenario = GameScenario::new_n_player(2, 9225);
+    scenario.at_phase(Phase::PreCombatMain);
+    let locke = scenario.add_real_card(P0, "Locke, Treasure Hunter", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Leyline of the Void", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Leyline of the Void", Zone::Battlefield, db);
+    let p0_top = if p0_top_is_land {
+        scenario.add_land_to_library_top(P0, "Milled Land").id()
+    } else {
+        scenario
+            .add_spell_to_library_top(P0, "Milled Spell", false)
+            .id()
+    };
+    let p1_top = scenario.add_land_to_library_top(P1, "Milled Land").id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(locke, AttackTarget::Player(P1))])
+        .expect("Locke must be able to attack");
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { .. } => {
+                *prompts += 1;
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("the replacement choice is accepted");
+            }
+            _ => {
+                let state = runner.state();
+                if state.stack.is_empty() && state.resolution_stack.is_empty() {
+                    break;
+                }
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes");
+            }
+        }
+    }
+    (runner, vec![p0_top, p1_top])
+}
+
+/// CR 701.17c + CR 608.2c + CR 616.1: a replacement-choice pause on the first
+/// seat's mill must not strand the later seat's milled card outside "those
+/// cards". The paused seat's card is exiled, so it was not milled and carries no
+/// permission; the defender's land is milled after the pause, so it carries the
+/// cast permission and creates the single Treasure.
+#[test]
+fn a_replacement_pause_still_grants_the_cast_to_the_later_seats_milled_card() {
+    let mut prompts = 0;
+    let (runner, staged) = locke_mill_through_replacement_pause(false, &mut prompts);
+    assert_eq!(
+        prompts, 1,
+        "reach guard: exactly one replacement choice (P0's own card)"
+    );
+    assert_eq!(
+        runner.state().objects[&staged[0]].zone,
+        Zone::Exile,
+        "reach guard: the paused seat's card was exiled instead of milled"
+    );
+    assert_eq!(
+        runner.state().objects[&staged[1]].zone,
+        Zone::Graveyard,
+        "reach guard: the later seat's card was milled after the pause"
+    );
+    eprintln!(
+        "DBG grants={:?} sets={:?} ledger={:?} staged={:?}",
+        staged
+            .iter()
+            .map(|i| holds_mug_cast_grant(&runner, *i))
+            .collect::<Vec<_>>(),
+        runner.state().tracked_object_sets,
+        runner.state().last_zone_changed_ids,
+        staged
+    );
+    assert_eq!(
+        treasure_controllers(&runner),
+        vec![P0],
+        "the later seat's milled land creates the single Treasure"
+    );
+    assert!(
+        holds_mug_cast_grant(&runner, staged[1]),
+        "the later seat's milled card is among \"those cards\" across the pause"
+    );
+    assert!(
+        !holds_mug_cast_grant(&runner, staged[0]),
+        "a card exiled instead of milled is not among \"those cards\""
+    );
+}
+
+/// CR 701.17a + CR 608.2c: the paused seat's card is a land that Leyline exiled
+/// instead of milling. It does not satisfy the "land card was milled" gate; the
+/// defender's land, milled later, does — so exactly one Treasure either way, and
+/// the exiled land never joins "those cards".
+#[test]
+fn a_land_exiled_instead_of_milled_does_not_join_those_cards_across_the_pause() {
+    let mut prompts = 0;
+    let (runner, staged) = locke_mill_through_replacement_pause(true, &mut prompts);
+    assert_eq!(prompts, 1, "reach guard: one replacement choice");
+    assert_eq!(treasure_controllers(&runner), vec![P0]);
+    assert!(holds_mug_cast_grant(&runner, staged[1]));
+    assert!(!holds_mug_cast_grant(&runner, staged[0]));
+}

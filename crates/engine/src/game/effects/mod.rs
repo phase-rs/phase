@@ -3136,14 +3136,29 @@ pub(crate) fn append_to_pending_continuation(
     let Some(tail) = tail else {
         return;
     };
+    append_to_pending_continuation_with_scope(state, tail, None);
+}
 
+/// [`append_to_pending_continuation`] that also installs a `player_scope`
+/// clause's detached-tail sidecar on the frame that ends up holding `tail`.
+///
+/// The frame is not necessarily the active one: a seat paused on a replacement
+/// choice (CR 616.1) leaves its resolution child on top, so the legs park as a
+/// parent beneath it. Installing the sidecar here, where the frame is built or
+/// extended, never has to find that frame again afterwards.
+fn append_to_pending_continuation_with_scope(
+    state: &mut GameState,
+    tail: Box<ResolvedAbility>,
+    scope: Option<PendingPlayerScopeTail>,
+) {
     if let Some(active_occurrence) = state
         .active_ability_continuation()
         .map(|frame| frame.return_result_occurrence)
     {
         if active_occurrence != state.active_return_result_occurrence {
             let current_occurrence = state.active_return_result_occurrence;
-            let pending = PendingContinuation::new(tail, state);
+            let mut pending = PendingContinuation::new(tail, state);
+            pending.install_player_scope_tail(scope);
             // CR 608.2c: A nested post-effect can park a child continuation
             // before the outer return discovers its delayed reader. Occurrence
             // IDs are minted in execution order: the older outer continuation
@@ -3163,6 +3178,9 @@ pub(crate) fn append_to_pending_continuation(
         }
     }
     if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        if scope.is_some() {
+            frame.pending.install_player_scope_tail(scope);
+        }
         let mut cursor = frame.pending.chain.as_mut();
         let tail = Some(tail);
         loop {
@@ -3181,16 +3199,22 @@ pub(crate) fn append_to_pending_continuation(
         .has_active_post_replacement_draw_pair()
     {
         state
-            .insert_ability_continuation_outside_active_post_replacement_draw(
-                PendingContinuation::new(tail, state),
-            )
+            .insert_ability_continuation_outside_active_post_replacement_draw({
+                let mut pending = PendingContinuation::new(tail, state);
+                pending.install_player_scope_tail(scope);
+                pending
+            })
             .expect("paired post-replacement draw must retain its continuation outside the pair");
     } else if active_frame_requires_ability_continuation_parent(state) {
+        let mut pending = PendingContinuation::new(tail, state);
+        pending.install_player_scope_tail(scope);
         state
-            .insert_ability_continuation_parent_of_active(PendingContinuation::new(tail, state))
+            .insert_ability_continuation_parent_of_active(pending)
             .expect("paused child operation must retain its continuation as an immediate parent");
     } else {
-        state.park_ability_continuation(PendingContinuation::new(tail, state));
+        let mut pending = PendingContinuation::new(tail, state);
+        pending.install_player_scope_tail(scope);
+        state.park_ability_continuation(pending);
     }
 }
 
@@ -3347,8 +3371,13 @@ fn prepend_to_pending_continuation_with_producer(
     state.park_ability_continuation(pending);
 }
 
-fn park_player_scope_queue_end(state: &mut GameState, placeholder: ResolvedAbility) {
-    let pending = PendingContinuation::player_scope_queue_end(Box::new(placeholder), state);
+fn park_player_scope_queue_end(
+    state: &mut GameState,
+    placeholder: ResolvedAbility,
+    scope: Option<PendingPlayerScopeTail>,
+) {
+    let mut pending = PendingContinuation::player_scope_queue_end(Box::new(placeholder), state);
+    pending.install_player_scope_tail(scope);
     if active_frame_requires_ability_continuation_parent(state) {
         state
             .insert_ability_continuation_parent_of_active(pending)
@@ -13548,12 +13577,33 @@ fn resolution_next_needs_tracked_set(state: &GameState, producer: &ResolvedAbili
             node.sub_ability.as_deref()
         })
         .all(|node| !crosses_modal_boundary(node))
-            && state
+            && (state
                 .active_ability_continuation()
                 .is_some_and(|continuation| {
                     continuation.chain.source_id == producer.source_id
-                        && chain_references_tracked_set(&continuation.chain)
-                }))
+                        && (chain_references_tracked_set(&continuation.chain)
+                            || continuation
+                                .player_scope_tail
+                                .as_ref()
+                                .is_some_and(|scope| scope_tail_reads_tracked_set(scope, producer)))
+                })
+                || state
+                    .resolving_player_scope_tail
+                    .as_ref()
+                    .is_some_and(|scope| scope_tail_reads_tracked_set(scope, producer))))
+}
+
+/// CR 608.2c + CR 608.2f: does a `player_scope` clause's detached tail, kept on
+/// the continuation sidecar while the clause's seats resume one by one, read the
+/// tracked set `producer` extends? The tail is not part of the parked legs'
+/// chain, so the chain walk above cannot see it; this is the same consumer test
+/// applied to the sidecar's tail, restricted to the clause's own source (another
+/// object's chain resolving during the pause is not this instruction's text).
+fn scope_tail_reads_tracked_set(
+    scope: &PendingPlayerScopeTail,
+    producer: &ResolvedAbility,
+) -> bool {
+    scope.source_id == producer.source_id && chain_references_tracked_set(&scope.after_scope)
 }
 
 /// CR 608.2d + CR 115.10a: does `ability` choose, while it resolves, the
@@ -22855,11 +22905,14 @@ fn resolve_chain_body(
         // choice and the seats that complete after it. This is a known gap,
         // filed separately.
         //
-        // A tail that needs linked exile or reads the created referent is not
-        // linearized: it rides the frame's `player_scope_tail` sidecar, which
-        // that predicate does not read, so on that branch neither the legs nor
-        // the paused seat publish.
+        // A tail that needs linked exile, reads the created referent or reads
+        // the "this way" ledger is not linearized: it rides the frame's
+        // `player_scope_tail` sidecar. `resolution_next_needs_tracked_set` reads
+        // that sidecar's tail too (`scope_tail_reads_tracked_set`), so the
+        // paused seat and every later leg extend the clause's set exactly as on
+        // the linearized route.
         let mut applied_domain_end = matching_players.len();
+        let mut paused_legs: Option<Box<ResolvedAbility>> = None;
         // CR 608.2e: each clause's equalization minimum is fixed when that
         // clause begins; the snapshot is per `player_scope` link, captured
         // before fan-out (the board is now exactly the clause's pre-clause
@@ -23037,7 +23090,12 @@ fn resolve_chain_body(
                 // frozen extremum. The next `player_scope` link's
                 // `capture_clause_minimum_snapshot` overwrites it; `apply()`
                 // disposes of any residue once resolution ends.
-                if tail.is_some() {
+                // A sidecar-owned tail installs its sidecar together with the
+                // legs, once the clause publication below has stamped the
+                // sidecar's ledger.
+                if after_scope_owned_by_sidecar {
+                    paused_legs = tail;
+                } else if tail.is_some() {
                     append_to_pending_continuation(state, tail);
                 }
                 // `i`, not `i + 1`: player `i` is the one who just paused, so
@@ -23093,24 +23151,34 @@ fn resolve_chain_body(
             }
         } else if after_scope_owned_by_sidecar {
             if let Some(after_scope) = after_scope {
-                if state.active_ability_continuation().is_none() {
-                    park_player_scope_queue_end(state, after_scope.as_ref().clone());
-                }
                 // Seeded with the pre-pause span the publication above just
                 // stamped.
                 let zone_changed_this_way = after_scope_needs_zone_change_ledger
                     .then(|| state.last_zone_changed_ids.clone());
-                if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    // CR 608.2f: generated APNAP nodes and their exact per-seat
-                    // results are explicit pause authority. The detached tail
-                    // resolves once only after every generated seat has drained.
-                    frame.pending.player_scope_tail = Some(PendingPlayerScopeTail {
-                        source_id: ability.source_id,
-                        after_scope,
-                        linked_exile_batch: batches.linked_exile,
-                        created_tokens: after_scope_needs_created_union.then_some(seat_results),
-                        zone_changed_this_way,
-                    });
+                // CR 608.2f: generated APNAP nodes and their exact per-seat
+                // results are explicit pause authority. The detached tail
+                // resolves once only after every generated seat has drained.
+                let scope = PendingPlayerScopeTail {
+                    source_id: ability.source_id,
+                    after_scope,
+                    linked_exile_batch: batches.linked_exile,
+                    created_tokens: after_scope_needs_created_union.then_some(seat_results),
+                    zone_changed_this_way,
+                };
+                match paused_legs {
+                    // CR 616.1: the legs may sit beneath a replacement-choice
+                    // child, so the sidecar rides the frame that holds them.
+                    Some(legs) => {
+                        append_to_pending_continuation_with_scope(state, legs, Some(scope));
+                    }
+                    None => {
+                        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                            frame.pending.player_scope_tail = Some(scope);
+                        } else {
+                            let placeholder = scope.after_scope.as_ref().clone();
+                            park_player_scope_queue_end(state, placeholder, Some(scope));
+                        }
+                    }
                 }
             }
         }
@@ -25083,7 +25151,7 @@ fn resolve_chain_body(
         && state.resolving_player_scope_tail.is_some()
         && state.active_ability_continuation().is_none()
     {
-        park_player_scope_queue_end(state, ability.clone());
+        park_player_scope_queue_end(state, ability.clone(), None);
         return Ok(progress);
     }
 
