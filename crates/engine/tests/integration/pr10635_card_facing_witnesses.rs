@@ -257,8 +257,8 @@ const DAKKON_SHADOW_SLAYER: &str = "Dakkon enters with a number of loyalty count
 
 /// CR 701.24a + CR 608.2c: Field of Ruin's "Each player searches their library
 /// for a basic land card, puts it onto the battlefield, then shuffles" shuffles
-/// every player's library, once each. On `main` the shuffle belonged to the
-/// controller alone.
+/// every player's library, once each. This is a base pin: the printed behaviour
+/// is the same at the merge base, where the serialized scope was absent.
 #[test]
 fn field_of_ruin_shuffles_every_players_library_once() {
     let mut scenario = GameScenario::new();
@@ -392,9 +392,10 @@ fn dakkon_ultimate_chooses_its_artifact_at_resolution() {
 const GENESIS_ULTIMATUM: &str = "Look at the top five cards of your library. Put any number of permanent cards from among them onto the battlefield and the rest into your hand. Exile Genesis Ultimatum.";
 
 /// CR 608.2c + CR 400.7: "Exile Genesis Ultimatum." names the spell itself, not
-/// a card the dig put onto the battlefield. On `main` the instruction was
-/// rebound to the moved permanent; the spell must end in exile and the dug
-/// permanent must stay on the battlefield.
+/// a card the dig put onto the battlefield: the spell must end in exile and the
+/// dug permanent must stay on the battlefield. This is a base pin: it passes at
+/// the merge base too (the serialized `forward_result` differs, the outcome does
+/// not).
 #[test]
 fn genesis_ultimatum_exiles_itself_and_leaves_the_dug_permanent() {
     let mut scenario = GameScenario::new();
@@ -442,5 +443,106 @@ fn genesis_ultimatum_exiles_itself_and_leaves_the_dug_permanent() {
         dug.iter()
             .all(|id| state.objects[id].zone != engine::types::zones::Zone::Exile),
         "no dug card is exiled in its place"
+    );
+}
+
+// Oracle text from the repo's card data export.
+const CLOUDSHIFT: &str = "Exile target creature you control, then return that card to the battlefield under your control.";
+
+/// CR 730.3c + CR 400.7e: "Exile target creature you control, then return that
+/// card to the battlefield" finds the new objects a merged permanent became when
+/// it left the battlefield, so the same return is taken on each of them: both
+/// cards of the merged permanent come back, as separate permanents. Passes at the
+/// merge base; it fails without the same-chain departure evidence in
+/// `merge::referent_records_departure`.
+#[test]
+fn cloudshift_returns_every_card_of_a_merged_permanent() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host Creature", 2, 2).id();
+    let component = scenario.add_creature(P0, "Migratory Greathorn", 3, 4).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Cloudshift", true, CLOUDSHIFT)
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.battlefield.retain(|&id| id != component);
+        let mut events = vec![];
+        engine::game::merge::merge_object_onto(
+            state,
+            component,
+            host,
+            engine::game::merge::MergeSide::Top,
+            &mut events,
+        );
+    }
+
+    let outcome = runner.cast(spell).target_object(host).resolve();
+
+    outcome.assert_zone(&[host, component], engine::types::zones::Zone::Battlefield);
+}
+
+// Oracle text from the repo's card data export.
+const THAWING_GLACIERS: &str = "This land enters tapped.\n{1}, {T}: Search your library for a basic land card, put that card onto the battlefield tapped, then shuffle. Return this land to its owner's hand at the beginning of the next cleanup step.";
+
+/// CR 608.2c + CR 400.7: "Return this land to its owner's hand at the beginning
+/// of the next cleanup step" names Thawing Glaciers itself, not the basic land
+/// the search just put onto the battlefield. This is a base pin: it passes at the
+/// merge base too (its serialized `forward_result` differs, the outcome does not).
+#[test]
+fn thawing_glaciers_returns_itself_and_keeps_the_fetched_land() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let glaciers = scenario
+        .add_land_from_oracle(P0, "Thawing Glaciers", THAWING_GLACIERS)
+        .id();
+    let basic = scenario.add_card_to_library_top(P0, "Forest");
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+    {
+        let object = runner.state_mut().objects.get_mut(&basic).unwrap();
+        object.card_types.core_types.push(CoreType::Land);
+        object.card_types.supertypes.push(Supertype::Basic);
+        object.base_card_types = object.card_types.clone();
+    }
+
+    runner.activate(glaciers, 0).search_first_legal().resolve();
+    assert_eq!(
+        runner.state().objects[&basic].zone,
+        engine::types::zones::Zone::Battlefield,
+        "reach guard: the search put the basic land onto the battlefield"
+    );
+
+    let mut passes = 0;
+    while runner.state().objects[&glaciers].zone == engine::types::zones::Zone::Battlefield {
+        match &runner.state().waiting_for {
+            WaitingFor::DiscardToHandSize { .. } => break,
+            _ => {}
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes toward the cleanup step");
+        passes += 1;
+        assert!(passes < 40, "the delayed return must happen at cleanup");
+    }
+
+    assert_eq!(
+        runner.state().objects[&glaciers].zone,
+        engine::types::zones::Zone::Hand,
+        "Thawing Glaciers returns itself"
+    );
+    assert_eq!(
+        runner.state().objects[&basic].zone,
+        engine::types::zones::Zone::Battlefield,
+        "the fetched land stays on the battlefield"
     );
 }

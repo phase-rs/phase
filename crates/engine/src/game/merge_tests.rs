@@ -636,6 +636,59 @@ fn triggering_source_expands_only_for_the_referents_own_departure() {
     );
 }
 
+/// CR 730.3c + CR 400.7 + CR 601.2c: a `ParentTarget` whose announced
+/// incarnation is exactly one behind the referent's current one was moved by an
+/// earlier instruction of the same resolution ("Exile target creature you
+/// control, then return that card"), so it finds every card the merged
+/// permanent became. A selection announced at the incarnation the object still
+/// has (a fresh choice of an already-exiled card) does not, and neither does a
+/// pin for a different object.
+#[test]
+fn announced_incarnation_one_behind_is_a_same_chain_departure() {
+    let (mut state, host, rider, _p0) = two_creatures();
+    state.battlefield.retain(|&id| id != rider);
+    let mut events = Vec::new();
+    merge_object_onto(&mut state, rider, host, MergeSide::Top, &mut events);
+    let announced = ObjectIncarnationRef::from_object(&state.objects[&host]);
+    crate::game::zones::move_to_zone(&mut state, host, Zone::Exile, &mut events);
+    let current = ObjectIncarnationRef::from_object(&state.objects[&host]);
+    assert_eq!(announced.incarnation + 1, current.incarnation);
+
+    let with_pin = |pin: ObjectIncarnationRef| {
+        let mut ability = fresh_reference(host);
+        ability.targets = vec![crate::types::ability::TargetRef::Object(host)];
+        ability.target_pins = vec![Some(pin)];
+        ability
+    };
+    let expand = |ability: &crate::types::ability::ResolvedAbility| {
+        expand_returned_merge_components(
+            &state,
+            ability,
+            vec![host],
+            &crate::types::ability::TargetFilter::ParentTarget,
+        )
+    };
+
+    assert_eq!(
+        expand(&with_pin(announced)),
+        vec![host, rider],
+        "announced one incarnation behind: the same resolution moved it"
+    );
+    assert_eq!(
+        expand(&with_pin(current)),
+        vec![host],
+        "announced at the current incarnation: a fresh selection"
+    );
+    assert_eq!(
+        expand(&with_pin(ObjectIncarnationRef::of(
+            rider,
+            announced.incarnation
+        ))),
+        vec![host],
+        "a pin for a different object is not evidence for this referent"
+    );
+}
+
 /// CR 730.3c + CR 730.3: the returned components come back as SEPARATE, non-merged
 /// objects, and the survivor back-link clears on battlefield entry.
 #[test]

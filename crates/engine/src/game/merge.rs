@@ -635,9 +635,11 @@ fn is_terminal_shuffle_move(effect: &Effect) -> bool {
 /// anaphor. The evidence must name this exact object incarnation:
 ///
 /// * `ParentTarget`/`ParentTargetSlot`: the referent's current incarnation is
-///   pinned by an event/delayed binding (`target_incarnations`) or is a result
-///   of the immediate producer that moved it (`forwarded_result_context`). A
-///   pin or result for any other object is not evidence for this one.
+///   pinned by an event/delayed binding (`target_incarnations`), is a result
+///   of the immediate producer that moved it (`forwarded_result_context`), or
+///   is exactly one past the incarnation announced for it (`target_pins`: an
+///   earlier instruction of this resolution moved it). A pin or result for any
+///   other object is not evidence for this one.
 /// * `TriggeringSource`: the trigger event is this referent's own departure
 ///   from the battlefield.
 /// * `TrackedSet`/`TrackedSetFiltered` and `ExiledBySource` are formed by an
@@ -666,6 +668,15 @@ fn referent_records_departure(
                     .forwarded_result_context
                     .as_ref()
                     .is_some_and(|result| result.object_incarnations.contains(&current))
+                // CR 400.7 + CR 601.2c: the incarnation announced for this
+                // referent is exactly one behind its current one: an earlier
+                // instruction of this same resolution moved it ("Exile target
+                // creature you control, then return that card"). A fresh
+                // selection of an already-departed object announced the
+                // incarnation it still has.
+                || ability.target_pins.iter().flatten().any(|pin| {
+                    pin.object_id == current.object_id && pin.incarnation + 1 == current.incarnation
+                })
         }
         TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
