@@ -2669,6 +2669,7 @@ fn submit_interaction_inner(
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "status")]
 enum InteractionOutcome {
     Applied { result: ActionResult, is_saying: bool },
     Rejected { rejection: ActionRejection },
