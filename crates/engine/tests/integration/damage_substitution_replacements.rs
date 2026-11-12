@@ -20,6 +20,7 @@
 //!   replacement answer reaches it.
 
 use engine::game::combat::AttackTarget;
+use engine::game::effects::attach::attach_to;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{Effect, EffectKind, ResolvedAbility, TargetRef};
 use engine::types::actions::GameAction;
@@ -48,6 +49,8 @@ const SHAKE: &str =
 const PYROCLASM: &str = "Pyroclasm deals 2 damage to each creature.";
 const FLAME_RIFT: &str = "Flame Rift deals 4 damage to each player.";
 const RAKDOS_CHARM: &str = "Choose one —\n• Exile target player's graveyard.\n• Destroy target artifact.\n• Each creature deals 1 damage to its controller.";
+const PARIAH: &str =
+    "Enchant creature\nAll damage that would be dealt to you is dealt to enchanted creature instead.";
 const COORDINATED_CLOBBERING: &str = "Tap one or two target untapped creatures you control. They each deal damage equal to their power to target creature an opponent controls.";
 const ALLIES_AT_LAST: &str = "Affinity for Allies (This spell costs {1} less to cast for each Ally you control.)\nUp to two target creatures you control each deal damage equal to their power to target creature an opponent controls.";
 const FLAME_SLASH: &str = "Flame Slash deals 4 damage to target creature.";
@@ -1400,6 +1403,56 @@ fn a_batch_keeps_its_order_through_an_answer_that_pauses_again() {
         assert_completes_once_after_its_damage(&events, EffectKind::EachSourceDealsDamage, charm);
         assert_at_rest(&runner);
     }
+}
+
+/// Rakdos Charm with a redirect answer. P1's Pariah ("All damage that would be dealt to you is
+/// dealt to enchanted creature instead.") enchants P1's Wall, and P0 controls Furnace of Rath.
+/// P0's lifelink Rhox Faithmender survives first. P1's two Bears each deal 1 to P1, which meets
+/// Pariah and Furnace of Rath, an order P1 chooses (CR 616.1); P1 picks Pariah, which sends the
+/// damage to the Wall. Each redirected portion still waits for the batch's other replacements,
+/// so nothing is dealt before P1's last answer (CR 120.4b), and Rhox Faithmender's gain is asked
+/// in delivery, after both (CR 120.4c).
+#[test]
+fn a_redirected_answer_still_waits_for_the_batch() {
+    let mut scenario = scenario();
+    super::unpreventable_damage_prevention_effects::faithmender_and_leyline(&mut scenario);
+    let wall = scenario.add_creature(P1, "Wall", 0, 20).id();
+    let pariah = scenario
+        .add_enchantment_from_oracle(P1, "Pariah", PARIAH)
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(&["Enchant"], PARIAH)
+        .id();
+    furnace(&mut scenario);
+    scenario.add_creature(P1, "Bear A", 2, 2);
+    scenario.add_creature(P1, "Bear B", 2, 2);
+    let charm = sorcery(&mut scenario, "Rakdos Charm", RAKDOS_CHARM);
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), pariah, wall);
+    let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
+
+    let prompts = answer_batch_prompts(&mut runner, &mut events, |player, _| {
+        (player == P1).then_some(pariah)
+    });
+
+    let p1_orders: Vec<usize> = prompts
+        .iter()
+        .filter(|(kind, player, _)| *kind == "order" && *player == P1)
+        .map(|(_, _, dealt)| *dealt)
+        .collect();
+    assert!(!p1_orders.is_empty(), "{prompts:?}");
+    assert!(p1_orders.iter().all(|dealt| *dealt == 0), "{prompts:?}");
+    let gain = prompts
+        .iter()
+        .position(|(kind, player, _)| *kind == "order" && *player == P0)
+        .expect("Rhox Faithmender's gain asks P0");
+    assert!(
+        prompts[..gain].iter().all(|(_, player, _)| *player == P1),
+        "{prompts:?}"
+    );
+    assert_eq!(life(&runner, P1), 20);
+    assert!(damage(&runner, wall) > 0);
+    assert_completes_once_after_its_damage(&events, EffectKind::EachSourceDealsDamage, charm);
+    assert_at_rest(&runner);
 }
 
 /// Allies at Last: "Up to two target creatures you control each deal damage equal to their

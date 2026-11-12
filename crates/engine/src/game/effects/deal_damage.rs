@@ -1582,6 +1582,11 @@ pub(crate) fn parked_batch_owns_tail(state: &GameState, ability: &ResolvedAbilit
 /// replaced event joins the batch's survivors, delivered after the batch's remaining portions
 /// are replaced, instead of being dealt at once. `false` when the event is not the portion the
 /// active batch awaits, so the caller delivers it.
+///
+/// The portion is known by its source (CR 120.1): a replacement may change its recipient
+/// (Pariah: "All damage that would be dealt to you is dealt to enchanted creature instead.")
+/// and its amount, never the object dealing it. The batch is parked as the active frame
+/// exactly while that portion's choice stands, and one choice stands at a time.
 pub(crate) fn return_answered_portion_to_batch(
     state: &mut GameState,
     ctx: &DamageContext,
@@ -1608,7 +1613,7 @@ pub(crate) fn return_answered_portion_to_batch(
     };
     if !awaiting
         .as_ref()
-        .is_some_and(|portion| portion.source == *source_id && portion.target == *target)
+        .is_some_and(|portion| portion.source == *source_id)
     {
         return false;
     }
