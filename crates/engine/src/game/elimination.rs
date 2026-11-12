@@ -2572,7 +2572,7 @@ mod tests {
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             moved_count: None,
             face_down_profile: None,
-            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+            with_entry_effect: None,
             library_placement: None,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,

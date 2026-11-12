@@ -68,12 +68,17 @@
 //! - Removing the zero-tracking in `zone_pipeline::deliver_replaced_zone_change` leaves Grist on
 //!   the battlefield in R14 (not counter-tracked, base loyalty 3).
 //! - Dropping the carrier from the event across the pause leaves the Troll 1 counter in R13.
-//! - Restoring `Retained` at the `EffectZoneChoice` resume leaves the Ghoul tapped in R19.
+//! - Restoring no with-entry effect (`None`) at the `EffectZoneChoice` resume leaves the Ghoul
+//!   tapped in R19.
+//!
+//! R-L1: Lorcan, Warlock Collector's trigger return carries its Warlock rider through a CR 616.1
+//! ordering pause; removing the triggering-object reading of `MovedObjectsSource::of` leaves the
+//! parked proposal without it.
 
 use engine::game::game_object::AttachTarget;
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{EffectKind, ExileConcealment};
+use engine::types::ability::{ContinuousModification, EffectKind, ExileConcealment};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
@@ -83,7 +88,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
-use engine::types::proposed_event::{EntrantAbilities, EtbTapState};
+use engine::types::proposed_event::{EtbTapState, ProposedEvent, WithEntryEffect};
 use engine::types::zones::Zone;
 
 /// Xu-Ifit, Osteoharmonist {1}{B}{B} Legendary Creature — Human Wizard 2/3 — verbatim.
@@ -1322,8 +1327,12 @@ fn old_growth_troll_copy_return_offers_clones_copy_choice() {
 }
 
 /// A constructed `EffectZoneChoice` for a `ChangeZone` from P0's graveyard to the battlefield,
-/// carrying `entrant`.
-fn change_zone_choice(source: ObjectId, card: ObjectId, entrant: EntrantAbilities) -> WaitingFor {
+/// carrying `with_entry_effect`.
+fn change_zone_choice(
+    source: ObjectId,
+    card: ObjectId,
+    with_entry_effect: Option<Box<WithEntryEffect>>,
+) -> WaitingFor {
     WaitingFor::EffectZoneChoice {
         player: P0,
         cards: vec![card],
@@ -1342,7 +1351,7 @@ fn change_zone_choice(source: ObjectId, card: ObjectId, entrant: EntrantAbilitie
         track_exiled_by_source: false,
         face_down_in_exile: ExileConcealment::Public,
         face_down_profile: None,
-        entrant_abilities: entrant,
+        with_entry_effect,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
@@ -1354,32 +1363,213 @@ fn change_zone_choice(source: ObjectId, card: ObjectId, entrant: EntrantAbilitie
     }
 }
 
-/// R19 — CR 611.2e + CR 614.12: the `EffectZoneChoice` resume restores the carried value and
-/// never re-derives it. Constructed-state seam test: no printed card parks this choice with an
+/// R19 — CR 611.2e + CR 614.12: the `EffectZoneChoice` resume restores the carried with-entry
+/// effect and never re-derives it; the carrier installs nothing itself (the rider instruction
+/// does when it is followed, and the constructed frame has none), so the Ghoul gets no Skeleton
+/// subtype. Constructed-state seam test: no printed card parks this choice with an
 /// ability-removing rider (Xu-Ifit is targeted; every `ReturnAsAura` is a self-return). The
 /// nearest printed card is Path of the Schemer ("Each player mills two cards. Then you put a
 /// creature card from a graveyard onto the battlefield under your control. It's an artifact in
 /// addition to its other types."), whose non-targeted graveyard-to-battlefield `ChangeZone`
-/// carries a `WithEntry` "is" rider without removal. The paired `Retained` choice is the
+/// carries a `WithEntry` "is" rider without removal; Ashiok, Nightmare Weaver's −X parks this
+/// choice with a non-removing rider. The paired choice without a carried effect is the
 /// positive control.
 #[test]
-fn effect_zone_choice_resume_restores_the_carried_entrant_abilities() {
-    for (entrant, tapped) in [
-        (EntrantAbilities::RemovedWithEntry, false),
-        (EntrantAbilities::Retained, true),
-    ] {
+fn effect_zone_choice_resume_restores_the_carried_with_entry_effect() {
+    let skeleton_with_no_abilities = |source| {
+        Some(Box::new(WithEntryEffect {
+            source_id: source,
+            controller: P0,
+            modifications: vec![
+                ContinuousModification::AddSubtype {
+                    subtype: "Skeleton".to_string(),
+                },
+                ContinuousModification::RemoveAllAbilities,
+            ],
+        }))
+    };
+    for (removes_abilities, tapped) in [(true, false), (false, true)] {
         let mut scenario = main_phase();
         let source = scenario.add_creature(P0, "Choice Source", 1, 1).id();
         let ghoul = add_diregraf_ghoul(&mut scenario);
         let mut runner = scenario.build();
-        runner.state_mut().waiting_for = change_zone_choice(source, ghoul, entrant);
+        let carried = removes_abilities
+            .then(|| skeleton_with_no_abilities(source))
+            .flatten();
+        runner.state_mut().waiting_for = change_zone_choice(source, ghoul, carried);
 
         runner
             .act(GameAction::SelectCards { cards: vec![ghoul] })
             .expect("the selected card is a legal choice");
 
         let ghoul_obj = &runner.state().objects[&ghoul];
-        assert_eq!(ghoul_obj.zone, Zone::Battlefield, "{entrant:?}");
-        assert_eq!(ghoul_obj.tapped, tapped, "{entrant:?}");
+        assert_eq!(ghoul_obj.zone, Zone::Battlefield, "{removes_abilities}");
+        assert_eq!(ghoul_obj.tapped, tapped, "{removes_abilities}");
+        let types = subtypes(&runner, ghoul);
+        assert!(
+            !types.iter().any(|t| t == "Skeleton"),
+            "the carrier installs nothing: {types:?}"
+        );
     }
+}
+
+/// Lorcan, Warlock Collector {5}{B}{B} Legendary Creature — Devil 6/6 — verbatim.
+const LORCAN_WARLOCK_COLLECTOR: &str = "Flying\nWhenever a creature card is put into an opponent's graveyard from anywhere, you may pay life equal to its mana value. If you do, put it onto the battlefield under your control. It's a Warlock in addition to its other types.\nIf a Warlock you control would die, exile it instead.";
+/// Orb of Dreams {3} Artifact — verbatim.
+const ORB_OF_DREAMS: &str = "Permanents enter tapped.";
+
+/// A board where every battlefield entry pauses on a CR 616.1 ordering of Orb of Dreams's
+/// "enter tapped" and Archelos's "enter untapped" (both P0's), with Murder and Zombify in P0's
+/// hand. Grizzly Bears ({1}{G} Creature — Bear 2/2, no Oracle text) is on P1's battlefield or in
+/// P0's graveyard.
+fn ordering_pause_board(bears_in_p0_graveyard: bool) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = main_phase();
+    scenario.add_creature_from_oracle(
+        P0,
+        "Lorcan, Warlock Collector",
+        6,
+        6,
+        LORCAN_WARLOCK_COLLECTOR,
+    );
+    scenario.add_creature_from_oracle(P0, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS_LAGOON_MYSTIC);
+    scenario.add_artifact_from_oracle(P0, "Orb of Dreams", ORB_OF_DREAMS);
+    let bears_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Green],
+        generic: 1,
+    };
+    let bears = if bears_in_p0_graveyard {
+        scenario
+            .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+            .with_mana_cost(bears_cost)
+            .with_subtypes(vec!["Bear"])
+            .id()
+    } else {
+        scenario
+            .add_creature(P1, "Grizzly Bears", 2, 2)
+            .with_mana_cost(bears_cost)
+            .with_subtypes(vec!["Bear"])
+            .id()
+    };
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .id();
+    let zombify = scenario
+        .add_spell_to_hand_from_oracle(P0, "Zombify", false, ZOMBIFY)
+        .id();
+    (scenario.build(), bears, murder, zombify)
+}
+
+/// CR 616.1: the Bears' entry is paused on the ordering of Orb of Dreams and Archelos. Returns
+/// the parked proposal's carried with-entry effect and answers the ordering with Orb of Dreams
+/// first, as the prompted player, through the public `GameAction`.
+fn read_pause_and_answer_orb_first(
+    runner: &mut GameRunner,
+    bears: ObjectId,
+) -> Option<WithEntryEffect> {
+    // Reach: the entry has not happened yet.
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+    let index = match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { candidates, .. } => {
+            for source in ["Orb of Dreams", "Archelos, Lagoon Mystic"] {
+                assert!(
+                    candidates.iter().any(|c| c.source_name == source),
+                    "{source} must be offered: {candidates:?}"
+                );
+            }
+            candidates
+                .iter()
+                .position(|c| c.source_name == "Orb of Dreams")
+                .expect("Orb of Dreams must be offered")
+        }
+        other => panic!("expected the CR 616.1 tap-state ordering, got {other:?}"),
+    };
+    let pending = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("the paused entry is parked");
+    let carried = match &pending.proposed {
+        ProposedEvent::ZoneChange {
+            object_id,
+            to: Zone::Battlefield,
+            ..
+        } if *object_id == bears => pending.proposed.with_entry_effect().cloned(),
+        other => panic!("expected the Bears' battlefield entry, got {other:?}"),
+    };
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("answer the tap-state ordering");
+    runner.advance_until_stack_empty();
+    assert_priority_with_empty_stack(runner);
+    carried
+}
+
+/// R-L1 — CR 611.2e + CR 614.12 + CR 616.1 + CR 608.2c: P0's Murder destroys P1's Grizzly
+/// Bears; Lorcan, Warlock Collector's trigger pays 2 life (its mana value) and puts the card onto
+/// the battlefield under P0's control, a `ParentTarget` return bound to the trigger event. Its
+/// "It's a Warlock in addition to its other types" names that same card, so the parked proposal
+/// carries the Warlock rider through the CR 616.1 ordering pause, and after the answer the
+/// Bears is a Warlock Bear under P0's control.
+#[test]
+fn lorcan_trigger_return_carries_its_warlock_rider_through_an_ordering_pause() {
+    let (mut runner, bears, murder, _zombify) = ordering_pause_board(false);
+    let lorcan = runner
+        .state()
+        .objects
+        .values()
+        .find(|o| o.name == "Lorcan, Warlock Collector")
+        .map(|o| o.id)
+        .expect("Lorcan is on the battlefield");
+    let life_before = runner.life(P0);
+
+    let _ = runner
+        .cast(murder)
+        .target_object(bears)
+        .accept_optional()
+        .resolve();
+    // Reach: Lorcan's payment was made and the Bears is in P1's graveyard at the pause.
+    assert_eq!(
+        runner.life(P0),
+        life_before - 2,
+        "paid life equal to its mana value"
+    );
+    assert_eq!(runner.state().objects[&bears].owner, P1);
+
+    let carried = read_pause_and_answer_orb_first(&mut runner, bears);
+    assert_eq!(
+        carried,
+        Some(WithEntryEffect {
+            source_id: lorcan,
+            controller: P0,
+            modifications: vec![ContinuousModification::AddSubtype {
+                subtype: "Warlock".to_string(),
+            }],
+        }),
+        "the parked proposal carries Lorcan's rider"
+    );
+
+    let bears_obj = &runner.state().objects[&bears];
+    assert_eq!(bears_obj.zone, Zone::Battlefield);
+    assert_eq!(bears_obj.controller, P0);
+    let types = subtypes(&runner, bears);
+    for expected in ["Warlock", "Bear"] {
+        assert!(types.iter().any(|t| t == expected), "{expected}: {types:?}");
+    }
+}
+
+/// R-L1n — control: Zombify has no rider, so the same pause carries no with-entry effect and
+/// the Bears returns without becoming a Warlock.
+#[test]
+fn zombify_return_through_the_same_pause_carries_no_rider() {
+    let (mut runner, bears, _murder, zombify) = ordering_pause_board(true);
+
+    let _ = runner.cast(zombify).target_object(bears).resolve();
+
+    let carried = read_pause_and_answer_orb_first(&mut runner, bears);
+    assert_eq!(carried, None, "no rider, nothing carried");
+
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+    let types = subtypes(&runner, bears);
+    assert!(!types.iter().any(|t| t == "Warlock"), "{types:?}");
+    assert!(types.iter().any(|t| t == "Bear"), "{types:?}");
 }

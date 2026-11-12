@@ -715,7 +715,7 @@ fn expected_move_origin(
 
 /// The objects a move acts on: the resolver's subject binding plus, for a
 /// returned merged permanent, its component cards.
-fn bound_move_members(
+pub(crate) fn bound_move_members(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
@@ -921,7 +921,7 @@ pub fn resolve(
     // CR 611.2e + CR 614.12: derived once here, at the instruction's resolver entry, and
     // carried by every route this instruction delivers through (single picks, the
     // `EffectZoneChoice` round-trip, the iteration ctx and its pauses).
-    let entrant_abilities = crate::game::effects::entrant_abilities_with_entry(ability);
+    let with_entry_effect = crate::game::effects::with_entry_effect(state, ability);
     let library_placement = member_library_placement(dest_zone, None, library_shuffle);
 
     let completed_result = |count| {
@@ -1302,7 +1302,7 @@ pub fn resolve(
                 &member.enter_with_counters,
                 face_down_profile.as_ref(),
                 ability.context.face_down_in_exile,
-                entrant_abilities,
+                with_entry_effect.as_deref(),
                 track_exiled_by_source,
                 library_placement.clone(),
                 None,
@@ -1380,7 +1380,7 @@ pub fn resolve(
                 &member.enter_with_counters,
                 face_down_profile.as_ref(),
                 ability.context.face_down_in_exile,
-                entrant_abilities,
+                with_entry_effect.as_deref(),
                 track_exiled_by_source,
                 library_placement.clone(),
                 None,
@@ -1456,9 +1456,9 @@ pub fn resolve(
             // down" selection resumes face down (not face up) when the player
             // resolves the choice.
             face_down_profile: face_down_profile.clone(),
-            // CR 611.2e + CR 614.12: carry the entrant-abilities carrier derived at
-            // resolver entry across the round-trip; the resume never re-derives it.
-            entrant_abilities,
+            // CR 611.2e + CR 614.12: carry the with-entry effect derived at resolver
+            // entry across the round-trip; the resume never re-derives it.
+            with_entry_effect: with_entry_effect.clone(),
             enter_with_counters: effect_enter_with_counters.clone(),
             conditional_enter_with_counters: effect_conditional_enter_with_counters.clone(),
             count_param: 0,
@@ -1491,7 +1491,7 @@ pub fn resolve(
         track_exiled_by_source,
         face_down_in_exile: ability.context.face_down_in_exile,
         face_down_profile: face_down_profile.clone(),
-        entrant_abilities,
+        with_entry_effect,
         library_placement,
         enter_attached_to: forward_result_search_attach_host(state, ability),
     };
@@ -1616,7 +1616,7 @@ pub fn resolve(
                         // the resumed members of a paused face-down return still
                         // enter face down.
                         face_down_profile: ctx.face_down_profile.clone(),
-                        entrant_abilities: ctx.entrant_abilities,
+                        with_entry_effect: ctx.with_entry_effect.clone(),
                         library_placement: ctx.library_placement,
                         enter_attached_to: ctx.enter_attached_to,
                         effect_kind: EffectKind::from(&ability.effect),
@@ -1669,7 +1669,7 @@ pub fn resolve(
                         // the resumed members of a paused face-down return still
                         // enter face down.
                         face_down_profile: ctx.face_down_profile.clone(),
-                        entrant_abilities: ctx.entrant_abilities,
+                        with_entry_effect: ctx.with_entry_effect.clone(),
                         library_placement: ctx.library_placement,
                         enter_attached_to: ctx.enter_attached_to,
                         effect_kind: EffectKind::from(&ability.effect),
@@ -1998,10 +1998,12 @@ pub(crate) struct ChangeZoneIterationCtx {
     /// the battlefield with these characteristics ("return it face down ... It's
     /// a Forest land" — Yedora). `None` = normal face-up entry.
     pub face_down_profile: Option<crate::types::ability::FaceDownProfile>,
-    /// CR 611.2e + CR 614.12: whether a same-resolution "has no abilities"
-    /// effect removes the entrant's abilities with its entry. Derived once at
-    /// the instruction's resolver entry; mirrors `face_down_profile`.
-    pub entrant_abilities: crate::types::proposed_event::EntrantAbilities,
+    /// CR 611.2e + CR 614.12: the same-resolution "is/has" effect that applies
+    /// simultaneously with the entry ([`WithEntryEffect`]). Derived once at the
+    /// instruction's resolver entry; mirrors `face_down_profile`.
+    ///
+    /// [`WithEntryEffect`]: crate::types::proposed_event::WithEntryEffect
+    pub with_entry_effect: Option<Box<crate::types::proposed_event::WithEntryEffect>>,
     /// CR 401.4 + CR 701.24a: When `Some`, suppresses auto-shuffle and places
     /// each object at the specified library position.
     pub library_placement: Option<LibraryPosition>,
@@ -2102,8 +2104,9 @@ pub(crate) fn process_one_zone_move_with_terminal(
         &member.enter_with_counters,
         ctx.face_down_profile.as_ref(),
         ctx.face_down_in_exile,
-        // CR 611.2e + CR 614.12: the carrier derived at the instruction's resolver entry.
-        ctx.entrant_abilities,
+        // CR 611.2e + CR 614.12: the with-entry effect derived at the instruction's
+        // resolver entry.
+        ctx.with_entry_effect.as_deref(),
         ctx.track_exiled_by_source,
         ctx.library_placement.clone(),
         ctx.enter_attached_to,
@@ -2170,7 +2173,7 @@ fn mass_library_order_effect_zone_choice(
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
         // CR 401.4: library placement, no battlefield entry.
-        entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
@@ -2955,7 +2958,7 @@ pub fn resolve_all(
     };
     // CR 611.2e + CR 614.12: derived once at the instruction's resolver entry and carried by
     // every member's move and its pauses.
-    let entrant_abilities = crate::game::effects::entrant_abilities_with_entry(ability);
+    let with_entry_effect = crate::game::effects::with_entry_effect(state, ability);
 
     // Collect matching object IDs from the origin zone.
     // Explicit filter-controller override (e.g., "creature that player controls")
@@ -3172,7 +3175,7 @@ pub fn resolve_all(
             &enter_with_counters,
             face_down_profile.as_ref(),
             ability.context.face_down_in_exile,
-            entrant_abilities,
+            with_entry_effect.as_deref(),
             track_exiled_by_source,
             member_library_placement.clone(),
             None,
@@ -3262,7 +3265,7 @@ pub fn resolve_all(
                         face_down_in_exile: ability.context.face_down_in_exile,
                         moved_count: Some(moved_count + i32::from(entry_target_choice)),
                         face_down_profile: face_down_profile.clone(),
-                        entrant_abilities,
+                        with_entry_effect: with_entry_effect.clone(),
                         library_placement: member_library_placement.clone(),
                         enter_attached_to: None,
                         effect_kind: EffectKind::from(&ability.effect),
@@ -3328,7 +3331,7 @@ pub fn resolve_all(
                         // resumed members of a paused face-down mass return enter
                         // face down.
                         face_down_profile: face_down_profile.clone(),
-                        entrant_abilities,
+                        with_entry_effect: with_entry_effect.clone(),
                         library_placement: member_library_placement.clone(),
                         enter_attached_to: None,
                         effect_kind: EffectKind::from(&ability.effect),
@@ -3957,7 +3960,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: Default::default(),
             face_down_profile: None,
-            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+            with_entry_effect: None,
             library_placement: None,
             enter_attached_to: None,
         };
@@ -10361,7 +10364,7 @@ mod tests {
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             moved_count: None,
             face_down_profile: None,
-            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+            with_entry_effect: None,
             library_placement: None,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,
@@ -13916,7 +13919,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
-            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,

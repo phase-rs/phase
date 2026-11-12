@@ -2570,7 +2570,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             face_down_in_exile,
             mut moved_count,
             face_down_profile,
-            entrant_abilities,
+            with_entry_effect,
             library_placement,
             enter_attached_to,
             effect_kind,
@@ -2667,9 +2667,9 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 // instead of exposing the real object face up. Mirrors the
                 // `enter_transformed`/`enters_under_player` carry-through.
                 face_down_profile: face_down_profile.clone(),
-                // CR 611.2e + CR 614.12: restore the entrant-abilities carrier
-                // derived at the instruction's resolver entry; never re-derived.
-                entrant_abilities,
+                // CR 611.2e + CR 614.12: restore the with-entry effect derived at
+                // the instruction's resolver entry; never re-derived.
+                with_entry_effect: with_entry_effect.clone(),
                 library_placement: library_placement.clone(),
                 enter_attached_to,
             };
@@ -2758,7 +2758,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // CR 708.2a + CR 708.3: preserve the face-down profile
                             // across a further pause so resumed members stay face down.
                             face_down_profile: ctx.face_down_profile.clone(),
-                            entrant_abilities: ctx.entrant_abilities,
+                            with_entry_effect: ctx.with_entry_effect.clone(),
                             library_placement: ctx.library_placement.clone(),
                             enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
@@ -2813,7 +2813,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             // CR 708.2a + CR 708.3: preserve the face-down profile
                             // across a further pause so resumed members stay face down.
                             face_down_profile: ctx.face_down_profile.clone(),
-                            entrant_abilities: ctx.entrant_abilities,
+                            with_entry_effect: ctx.with_entry_effect.clone(),
                             library_placement: ctx.library_placement.clone(),
                             enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
@@ -5581,8 +5581,8 @@ enum LaterInstructionQuery {
     /// CR 608.2c + CR 611.2e: is the instruction one that starts after an entry (not
     /// `WithEntry`) and may act on an object the completing instruction moved? Read without the
     /// completing instruction in hand, so every referent `moved_objects_referent` classifies
-    /// counts, a self-reference included (the conservative answer). A trigger return's
-    /// `TriggeringSource` referent is not read; no printed card puts a later instruction on it.
+    /// counts, a self-reference and a trigger's triggering-object referent included (the
+    /// conservative answer).
     MayActOnEntrantAfterEntry,
 }
 
@@ -5901,7 +5901,9 @@ pub(crate) fn entry_occurrence_collector(
     use crate::game::triggers::EntryOccurrenceCollector;
     let continuation = instruction.and_then(|instruction| instruction.sub_ability.as_deref());
     if resolution_may_still_apply_with_entry(state, continuation)
-        && !instruction.is_some_and(continuation_acts_on_moved_objects_after_entry)
+        && !instruction.is_some_and(|instruction| {
+            continuation_acts_on_moved_objects_after_entry(state, instruction)
+        })
         && !held_later_instruction_matches(state, LaterInstructionQuery::MayActOnEntrantAfterEntry)
     {
         EntryOccurrenceCollector::AfterSimultaneousEntryEffects
@@ -5914,65 +5916,181 @@ pub(crate) fn entry_occurrence_collector(
 /// that instruction's continuation, names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MovedObjectsReferent {
-    /// Every moved object: an "it"/"them" anaphor (`ParentTarget`), or a self-reference when
-    /// the instruction returns its own source.
+    /// Every moved object: an "it"/"them" anaphor (`ParentTarget`), the chain sentinel, or a
+    /// context referent naming the moved object.
     All,
-    /// One of the instruction's target slots (`ParentTargetSlot`), which may name only some of
-    /// the moved objects.
-    Slot,
+    /// May name only some of the moved objects: one of the instruction's target slots
+    /// (`ParentTargetSlot`).
+    Part,
     /// Something other than the moved objects.
     Other,
 }
 
-/// CR 608.2c: what the instruction moves, which decides what a self-reference in its
-/// continuation names.
+/// CR 608.2c: what the instruction moves, which decides what a context referent (a
+/// self-reference, a trigger's triggering object) in its continuation names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MovedObjectsSource {
-    /// The instruction returns its own source ("return it to the battlefield": Bronzehide Lion,
-    /// Princess Yue), so a self-reference names the returned object.
-    OwnSource,
+    /// The instruction moves exactly the object a context referent names, so that referent in
+    /// its continuation names the moved object.
+    ContextReferent(ContextObjectRef),
     /// The instruction moves other objects, so a self-reference names the resolving source
     /// (Storm of Souls' "Exile Storm of Souls.").
     OtherObjects,
-    /// The instruction is not in hand (a frame-held node read at a resume), so a
-    /// self-reference is read conservatively as naming a moved object.
+    /// The instruction is not in hand (a frame-held node read at a resume), so every context
+    /// referent is read conservatively as naming a moved object.
     UnknownInstruction,
+}
+
+/// CR 608.2c: the context referents that can name the object a ChangeZone instruction moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContextObjectRef {
+    /// The resolving source: "return it to the battlefield" (Bronzehide Lion, Princess Yue).
+    Source,
+    /// The trigger's triggering object: "return that card" (Valkyrie's Call), "put it onto the
+    /// battlefield" (Lorcan, Warlock Collector).
+    TriggeringObject,
 }
 
 impl MovedObjectsSource {
     /// CR 608.2c: classify a resolving `ChangeZone` instruction by its moved objects.
-    fn of(instruction: &ResolvedAbility) -> Self {
+    fn of(state: &GameState, instruction: &ResolvedAbility) -> Self {
         match &instruction.effect {
             Effect::ChangeZone {
                 target: TargetFilter::SelfRef,
                 ..
-            } => Self::OwnSource,
+            } => Self::ContextReferent(ContextObjectRef::Source),
+            Effect::ChangeZone { target, .. }
+                if moves_exactly_the_triggering_object(state, instruction, target) =>
+            {
+                Self::ContextReferent(ContextObjectRef::TriggeringObject)
+            }
             _ => Self::OtherObjects,
         }
     }
 
-    fn self_reference_names_moved_object(self) -> bool {
+    /// CR 608.2c: does `referent`, read in this instruction's continuation, name a moved object?
+    fn names_moved_object(self, referent: ContextObjectRef) -> bool {
         match self {
-            Self::OwnSource | Self::UnknownInstruction => true,
+            Self::ContextReferent(moved) => moved == referent,
+            Self::UnknownInstruction => true,
             Self::OtherObjects => false,
         }
     }
 }
 
-/// CR 608.2c: classify `filter` against the objects the instruction moves. A self-reference
-/// names a moved object only as `source` reads it ([`MovedObjectsSource`]); otherwise it names
-/// the resolving source.
+/// CR 608.2c + CR 603.2: does this ChangeZone instruction move exactly its trigger's triggering
+/// object? Read through the resolver's own binding (`bound_move_members`) and the
+/// triggering-object read every `TriggeringSource` install uses, so a `ParentTarget` return
+/// bound to the trigger event (Lorcan, Warlock Collector) and a `TriggeringSource` return
+/// (Valkyrie's Call) read alike.
+fn moves_exactly_the_triggering_object(
+    state: &GameState,
+    instruction: &ResolvedAbility,
+    target: &TargetFilter,
+) -> bool {
+    // Without a trigger event there is no triggering object; this also keeps
+    // `TriggeringSource`'s event-less fallbacks out of the reading.
+    if state.current_trigger_event.is_none() {
+        return false;
+    }
+    match crate::game::targeting::resolve_event_context_target(
+        state,
+        &TargetFilter::TriggeringSource,
+        instruction.source_id,
+    ) {
+        Some(TargetRef::Object(triggering)) => {
+            change_zone::bound_move_members(state, instruction, target) == [triggering]
+        }
+        Some(TargetRef::Player(_)) | None => false,
+    }
+}
+
+/// CR 608.2c: classify `filter` against the objects the instruction moves. A context referent
+/// names a moved object only as `source` reads it ([`MovedObjectsSource`]).
+///
+/// Exhaustive over `TargetFilter`, so a new variant must be classified here.
 fn moved_objects_referent(
     filter: &TargetFilter,
     source: MovedObjectsSource,
 ) -> MovedObjectsReferent {
     match filter {
         TargetFilter::ParentTarget => MovedObjectsReferent::All,
-        TargetFilter::ParentTargetSlot { .. } => MovedObjectsReferent::Slot,
-        TargetFilter::SelfRef if source.self_reference_names_moved_object() => {
+        TargetFilter::SelfRef if source.names_moved_object(ContextObjectRef::Source) => {
             MovedObjectsReferent::All
         }
-        _ => MovedObjectsReferent::Other,
+        TargetFilter::TriggeringSource
+            if source.names_moved_object(ContextObjectRef::TriggeringObject) =>
+        {
+            MovedObjectsReferent::All
+        }
+        // CR 608.2c: the chain sentinel names the set this instruction publishes (Ever After's
+        // "Each of those creatures", Shilgengar's "Those creatures").
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        } => MovedObjectsReferent::All,
+        TargetFilter::ParentTargetSlot { .. } => MovedObjectsReferent::Part,
+        // Players and stack objects: never a moved permanent.
+        TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::Opponent
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell => MovedObjectsReferent::Other,
+        // Object referents and populations this classification does not tie to the moved
+        // objects.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Typed(_)
+        | TargetFilter::Not { .. }
+        | TargetFilter::Or { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. } => MovedObjectsReferent::Other,
     }
 }
 
@@ -6014,27 +6132,44 @@ fn effect_may_name_moved_objects(effect: &Effect, source: MovedObjectsSource) ->
 /// CR 608.2c + CR 611.2e: does a node of `instruction`'s continuation that starts after the
 /// entry (any node not stamped `WithEntry`) act on an object `instruction` moves? A conditional
 /// or optional node counts: it may follow.
-fn continuation_acts_on_moved_objects_after_entry(instruction: &ResolvedAbility) -> bool {
-    let source = MovedObjectsSource::of(instruction);
+fn continuation_acts_on_moved_objects_after_entry(
+    state: &GameState,
+    instruction: &ResolvedAbility,
+) -> bool {
+    let source = MovedObjectsSource::of(state, instruction);
     moved_objects_continuation(instruction)
         .filter(|node| !onset_applies_with_entry(node.entry_onset))
         .any(|node| effect_may_name_moved_objects(&node.effect, source))
 }
 
-/// CR 611.2e + CR 613.1f + CR 614.12: does an "is/has" instruction of this resolution remove all
-/// abilities of every object this ChangeZone instruction puts onto the battlefield,
-/// simultaneously with the entry? (Xu-Ifit and Bronzehide Lion rulings.) Derived once at the
-/// instruction's resolver entry; never re-derived at a resume.
+/// CR 611.2e + CR 613.1 + CR 614.12: the continuous effect that the "is/has" instructions of
+/// this resolution apply to every object this ChangeZone instruction puts onto the battlefield,
+/// simultaneously with the entry (Xu-Ifit's "It's a Skeleton … and has no abilities", Rise
+/// from the Grave's "That creature is a black Zombie", Lorcan, Warlock Collector's "It's a
+/// Warlock"). `None` when no such instruction applies; a `Some` never holds an empty list.
+///
+/// Derived once at the instruction's resolver entry and never re-derived at a resume; each
+/// modification's values are fixed then (CR 608.2h). The modifications of every qualifying
+/// node are concatenated in written order, the order those effects are created in (CR 613.7b).
+/// Each node's list comes from the builder its resolver installs from
+/// ([`node_with_entry_modifications`]). Three resolver steps are outside the carried list: the
+/// `GenericEffect` resolve loop's resolution-context snapshot of `AddDynamic*` values and its
+/// `GrantStaticAbility` freezing (the carried list reads such a value from the state at
+/// resolver entry, so a resolution-context quantity may differ from what the rider installs),
+/// `latch_chosen_text_words` (it consumes the resolution's named choice), and
+/// `install_transient`'s granter latch (CR 201.5a, an install-time binding, not a
+/// characteristic).
 ///
 /// Walks [`moved_objects_continuation`]. The walk also stops at a conditional or optional
 /// `WithEntry` node, whose execution is not guaranteed when the instruction resolves. A
 /// `WhenFollowed` node ("becomes", "gains", "loses") starts after the entry and is skipped
 /// (CR 611.2e).
-pub(crate) fn entrant_abilities_with_entry(
+pub(crate) fn with_entry_effect(
+    state: &GameState,
     instruction: &ResolvedAbility,
-) -> crate::types::proposed_event::EntrantAbilities {
-    use crate::types::proposed_event::EntrantAbilities;
-    let source = MovedObjectsSource::of(instruction);
+) -> Option<Box<crate::types::proposed_event::WithEntryEffect>> {
+    let source = MovedObjectsSource::of(state, instruction);
+    let mut modifications = Vec::new();
     for node in moved_objects_continuation(instruction) {
         // CR 611.2e: a `WhenFollowed` instruction applies only after the entry.
         if !onset_applies_with_entry(node.entry_onset) {
@@ -6044,51 +6179,86 @@ pub(crate) fn entrant_abilities_with_entry(
         if node.condition.is_some() || node.optional {
             break;
         }
-        if node_removes_moved_objects_abilities(node, source) {
-            return EntrantAbilities::RemovedWithEntry;
-        }
+        modifications.extend(node_with_entry_modifications(state, node, source));
     }
-    EntrantAbilities::Retained
+    (!modifications.is_empty()).then(|| {
+        Box::new(crate::types::proposed_event::WithEntryEffect {
+            source_id: instruction.source_id,
+            controller: instruction.controller,
+            modifications,
+        })
+    })
 }
 
-/// CR 613.1f + CR 608.2c: does this `WithEntry` node remove all abilities of the objects the
-/// instruction moves? A `GenericEffect` static counts when it is unconditional, carries
-/// `RemoveAllAbilities`, and its application filter (`generic_effect_application_filter`, CR
-/// 608.2c) names every moved object; a `ReturnAsAura` counts only under a self-return.
-fn node_removes_moved_objects_abilities(
+/// CR 608.2c: does an `Animate` node's target name every moved object? `TargetFilter::None`
+/// binds the resolving source (`animate::resolve_animate_targets`), so it names a moved object
+/// only when the instruction returns its own source.
+fn animate_names_moved_objects(target: &TargetFilter, source: MovedObjectsSource) -> bool {
+    match target {
+        TargetFilter::None => source.names_moved_object(ContextObjectRef::Source),
+        named => moved_objects_referent(named, source) == MovedObjectsReferent::All,
+    }
+}
+
+/// CR 611.2e + CR 608.2c: the modifications this `WithEntry` node applies to every object the
+/// instruction moves, from the builder its resolver installs from. A `GenericEffect` static
+/// counts when it is unconditional and its application filter
+/// (`generic_effect_application_filter`, CR 608.2c) names every moved object; an `Animate`
+/// when its target names every moved object; a `ReturnAsAura` only under a self-return.
+fn node_with_entry_modifications(
+    state: &GameState,
     node: &ResolvedAbility,
     source: MovedObjectsSource,
-) -> bool {
-    let removes_all = |modifications: &[ContinuousModification]| {
-        modifications
-            .iter()
-            .any(|modification| matches!(modification, ContinuousModification::RemoveAllAbilities))
-    };
+) -> Vec<ContinuousModification> {
     match &node.effect {
+        // CR 608.2c: a target slot may name only some of the moved objects (`Part`), so it is
+        // not carried. A conditional static is not carried either (known gap: Dance of the
+        // Manse, "If X is 6 or more, those permanents are 4/4 creatures …").
         Effect::GenericEffect {
             static_abilities,
             target,
             ..
-        } => static_abilities.iter().any(|static_def| {
-            static_def.condition.is_none()
-                && removes_all(&static_def.modifications)
-                // CR 608.2c: a target slot may name only some of the moved objects, so it
-                // keeps `Retained`.
-                && effect::generic_effect_application_filter(
-                    target.as_ref(),
-                    static_def.affected.as_ref(),
-                )
-                .is_some_and(|filter| {
-                    moved_objects_referent(filter, source) == MovedObjectsReferent::All
-                })
-        }),
-        // CR 613.1f: Bronzehide Lion / Harold and Bob — "It's an Aura enchantment ...
-        // and it loses all other abilities" returns the dying source itself.
-        Effect::ReturnAsAura { grants, .. } => {
-            source == MovedObjectsSource::OwnSource && removes_all(grants)
+        } => static_abilities
+            .iter()
+            .filter(|static_def| {
+                static_def.condition.is_none()
+                    && effect::generic_effect_application_filter(
+                        target.as_ref(),
+                        static_def.affected.as_ref(),
+                    )
+                    .is_some_and(|filter| {
+                        moved_objects_referent(filter, source) == MovedObjectsReferent::All
+                    })
+            })
+            .flat_map(|static_def| {
+                effect::snapshot_transient_modifications(state, node, &static_def.modifications)
+            })
+            .collect(),
+        // CR 205.1a + CR 613.1d: the Enduring cycle's "It's an enchantment. (It's not a
+        // creature.)" returns the dying source itself.
+        Effect::Animate { target, .. } => {
+            if animate_names_moved_objects(target, source) {
+                animate::animate_modifications(state, node)
+            } else {
+                Vec::new()
+            }
         }
-        // `WithEntry` kinds with no ability-removal axis (`PerpetualModification` has no removal).
-        Effect::Animate { .. } | Effect::ApplyPerpetual { .. } => false,
+        // CR 303.4 + CR 613.1d + CR 613.1f: Bronzehide Lion / Harold and Bob — "It's an Aura
+        // enchantment ... and it loses all other abilities". Its resolver finds the object
+        // returned under its own source, so it applies only under a self-return.
+        Effect::ReturnAsAura {
+            enchant_filter,
+            grants,
+        } => {
+            if source.names_moved_object(ContextObjectRef::Source) {
+                return_as_aura::aura_modifications(enchant_filter, grants.clone())
+            } else {
+                Vec::new()
+            }
+        }
+        // Perpetual modifications are not layer effects; no printed return chain reaches one
+        // (known gap).
+        Effect::ApplyPerpetual { .. } => Vec::new(),
         // Every other instruction kind: the measured `WithEntry` stamp set (documented on
         // `entry_observation_deferred`) is `GenericEffect`, `Animate`, `ReturnAsAura` and
         // `ApplyPerpetual`. Exhaustive, so a new `Effect` variant must be classified here.
@@ -6326,7 +6496,7 @@ fn node_removes_moved_objects_abilities(
         | Effect::VentureIntoDungeon
         | Effect::Vote { .. }
         | Effect::HordePlayCard { .. }
-        | Effect::WinTheGame { .. } => false,
+        | Effect::WinTheGame { .. } => Vec::new(),
     }
 }
 
@@ -20273,7 +20443,7 @@ fn set_player_scope_sacrifice_waiting_for(
         track_exiled_by_source: false,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
-        entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
@@ -39611,7 +39781,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
-            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -48217,7 +48387,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
-            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -48264,7 +48434,7 @@ mod tests {
                 track_exiled_by_source: false,
                 face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                 face_down_profile: None,
-                entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+                with_entry_effect: None,
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 count_param: 0,
@@ -67649,14 +67819,20 @@ mod parser_oracle_effect_tests {
 }
 
 #[cfg(test)]
-mod entrant_abilities_tests {
-    //! CR 611.2e + CR 613.1f + CR 614.12: the derivation of the entrant-abilities carrier from a
-    //! ChangeZone instruction's own continuation (`entrant_abilities_with_entry`).
+mod with_entry_effect_tests {
+    //! CR 611.2e + CR 613.1 + CR 614.12: the derivation of the with-entry effect from a
+    //! ChangeZone instruction's own continuation (`with_entry_effect`), its derived
+    //! own-abilities view, and the moved-object referent authority it reads.
     use super::*;
     use crate::game::triggers::EntryOccurrenceCollector;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{Comparator, StaticCondition};
+    use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
+    use crate::types::identifiers::CardId;
     use crate::types::keywords::{Keyword, KeywordKind};
-    use crate::types::proposed_event::EntrantAbilities;
+    use crate::types::mana::ManaColor;
+    use crate::types::proposed_event::{EntrantAbilities, WithEntryEffect};
     use crate::types::zones::EtbTapState;
 
     fn node(effect: Effect) -> ResolvedAbility {
@@ -67748,12 +67924,104 @@ mod entrant_abilities_tests {
         instruction
     }
 
-    fn derive(instruction: &ResolvedAbility) -> EntrantAbilities {
-        entrant_abilities_with_entry(instruction)
+    /// A `GenericEffect` rider with no target slot whose static names `affected` (Ever After's
+    /// "Each of those creatures …", Valkyrie's Call's "It has flying and is an Angel …").
+    fn untargeted_generic(
+        affected: TargetFilter,
+        modifications: Vec<ContinuousModification>,
+    ) -> Effect {
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)],
+            duration: None,
+            target: None,
+            end_cost: None,
+        }
+    }
+
+    fn change_zone_all_to_battlefield() -> Effect {
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: Default::default(),
+            random_order: false,
+        }
+    }
+
+    fn subtype(name: &str) -> ContinuousModification {
+        ContinuousModification::AddSubtype {
+            subtype: name.to_string(),
+        }
+    }
+
+    fn derive_in(state: &GameState, instruction: &ResolvedAbility) -> Option<Box<WithEntryEffect>> {
+        with_entry_effect(state, instruction)
+    }
+
+    fn derive(instruction: &ResolvedAbility) -> Option<Box<WithEntryEffect>> {
+        derive_in(&GameState::new_two_player(20), instruction)
+    }
+
+    /// The derived own-abilities view of the carried effect.
+    fn view(instruction: &ResolvedAbility) -> EntrantAbilities {
+        EntrantAbilities::of(derive(instruction).as_deref())
+    }
+
+    /// The carried effect of an instruction whose source is `node`'s (`ObjectId(100)`, P0).
+    fn carried(modifications: Vec<ContinuousModification>) -> Option<Box<WithEntryEffect>> {
+        Some(Box::new(WithEntryEffect {
+            source_id: ObjectId(100),
+            controller: PlayerId(0),
+            modifications,
+        }))
+    }
+
+    /// A state whose current trigger event is card C's death (battlefield to graveyard), with C
+    /// in its owner's graveyard: the event a "whenever a creature … dies" trigger resolves
+    /// under (Valkyrie's Call; Lorcan, Warlock Collector).
+    fn dying_card_state() -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(20);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Graveyard,
+        );
+        let record = ZoneChangeRecord::test_minimal(card, Some(Zone::Battlefield), Zone::Graveyard);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: card,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(record),
+        });
+        (state, card)
+    }
+
+    /// Lorcan, Warlock Collector's return: "put it onto the battlefield under your control",
+    /// a `ParentTarget` move with no announced target, bound to the trigger event.
+    fn lorcan_return() -> ResolvedAbility {
+        node(return_to_battlefield(TargetFilter::ParentTarget))
+    }
+
+    fn warlock_rider() -> ResolvedAbility {
+        with_entry(untargeted_generic(
+            TargetFilter::TriggeringSource,
+            vec![subtype("Warlock")],
+        ))
     }
 
     /// Xu-Ifit, Osteoharmonist: "It's a Skeleton in addition to its other types and has no
-    /// abilities." — a `WithEntry` `ParentTarget` rider removing all abilities.
+    /// abilities." — a `WithEntry` `ParentTarget` rider removing all abilities. The carried
+    /// effect names the instruction's source and controller and the rider's modifications.
     #[test]
     fn xu_ifit_rider_removes_the_returned_cards_abilities() {
         let instruction = chained(
@@ -67763,7 +68031,8 @@ mod entrant_abilities_tests {
                 skeleton_with_no_abilities(),
             )),
         );
-        assert_eq!(derive(&instruction), EntrantAbilities::RemovedWithEntry);
+        assert_eq!(derive(&instruction), carried(skeleton_with_no_abilities()));
+        assert_eq!(view(&instruction), EntrantAbilities::RemovedWithEntry);
     }
 
     /// Bronzehide Lion ("It's an Aura enchantment with ... and it loses all other abilities") and
@@ -67778,8 +68047,16 @@ mod entrant_abilities_tests {
                 grant_static_ability(),
             ],
         ] {
-            let instruction = chained(self_return(), with_entry(return_as_aura(grants)));
-            assert_eq!(derive(&instruction), EntrantAbilities::RemovedWithEntry);
+            let instruction = chained(self_return(), with_entry(return_as_aura(grants.clone())));
+            // CR 303.4 + CR 613.1d/f: the carried list is the resolver's own aura list.
+            assert_eq!(
+                derive(&instruction),
+                carried(return_as_aura::aura_modifications(
+                    &TargetFilter::Any,
+                    grants
+                ))
+            );
+            assert_eq!(view(&instruction), EntrantAbilities::RemovedWithEntry);
         }
     }
 
@@ -67797,7 +68074,7 @@ mod entrant_abilities_tests {
                 vec![ContinuousModification::RemoveAllAbilities],
             )),
         );
-        assert_eq!(derive(&instruction), EntrantAbilities::RemovedWithEntry);
+        assert_eq!(view(&instruction), EntrantAbilities::RemovedWithEntry);
     }
 
     /// CR 608.2c: a SelfRef rider under an instruction that moves another object names the
@@ -67812,7 +68089,7 @@ mod entrant_abilities_tests {
                 vec![ContinuousModification::RemoveAllAbilities],
             )),
         );
-        assert_eq!(derive(&instruction), EntrantAbilities::Retained);
+        assert_eq!(view(&instruction), EntrantAbilities::Retained);
     }
 
     /// A `ReturnAsAura` with removal under an instruction that moves another object. No printed
@@ -67827,7 +68104,7 @@ mod entrant_abilities_tests {
                 grant_ability(),
             ])),
         );
-        assert_eq!(derive(&instruction), EntrantAbilities::Retained);
+        assert_eq!(view(&instruction), EntrantAbilities::Retained);
     }
 
     /// Non-removing siblings stay `Retained`: Old-Growth Troll (`ReturnAsAura` that only grants),
@@ -67839,7 +68116,14 @@ mod entrant_abilities_tests {
             self_return(),
             with_entry(return_as_aura(vec![grant_static_ability()])),
         );
-        assert_eq!(derive(&old_growth_troll), EntrantAbilities::Retained);
+        assert_eq!(
+            derive(&old_growth_troll),
+            carried(return_as_aura::aura_modifications(
+                &TargetFilter::Any,
+                vec![grant_static_ability()]
+            ))
+        );
+        assert_eq!(view(&old_growth_troll), EntrantAbilities::Retained);
 
         let rise_from_the_grave = chained(
             targeted_return(),
@@ -67855,43 +68139,44 @@ mod entrant_abilities_tests {
                 ],
             )),
         );
-        assert_eq!(derive(&rise_from_the_grave), EntrantAbilities::Retained);
+        assert_eq!(
+            derive(&rise_from_the_grave),
+            carried(vec![
+                ContinuousModification::AddColor {
+                    color: ManaColor::Black,
+                },
+                subtype("Zombie"),
+            ])
+        );
+        assert_eq!(view(&rise_from_the_grave), EntrantAbilities::Retained);
 
-        assert_eq!(derive(&targeted_return()), EntrantAbilities::Retained);
+        // Zombify: no rider, nothing carried.
+        assert_eq!(derive(&targeted_return()), None);
+        assert_eq!(view(&targeted_return()), EntrantAbilities::Retained);
     }
 
     /// Storm of Souls: "Return all creature cards from your graveyard to the battlefield. Each of
     /// them is a 1/1 Spirit with flying in addition to its other types." — a `WithEntry` rider
-    /// that removes no abilities under `ChangeZoneAll`.
+    /// that removes no abilities under `ChangeZoneAll`; the card's full list is carried.
     #[test]
     fn storm_of_souls_rider_is_retained() {
+        let spirit_1_1_flying = vec![
+            subtype("Spirit"),
+            ContinuousModification::SetPower { value: 1 },
+            ContinuousModification::SetToughness { value: 1 },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            },
+        ];
         let instruction = chained(
-            node(Effect::ChangeZoneAll {
-                origin: Some(Zone::Graveyard),
-                destination: Zone::Battlefield,
-                target: TargetFilter::Typed(TypedFilter::creature()),
-                enters_under: None,
-                enter_tapped: EtbTapState::Unspecified,
-                enters_attacking: false,
-                enter_with_counters: vec![],
-                face_down_profile: None,
-                library_position: None,
-                library_shuffle: Default::default(),
-                random_order: false,
-            }),
+            node(change_zone_all_to_battlefield()),
             with_entry(generic(
                 TargetFilter::ParentTarget,
-                vec![
-                    ContinuousModification::AddSubtype {
-                        subtype: "Spirit".to_string(),
-                    },
-                    ContinuousModification::AddKeyword {
-                        keyword: Keyword::Flying,
-                    },
-                ],
+                spirit_1_1_flying.clone(),
             )),
         );
-        assert_eq!(derive(&instruction), EntrantAbilities::Retained);
+        assert_eq!(derive(&instruction), carried(spirit_1_1_flying));
+        assert_eq!(view(&instruction), EntrantAbilities::Retained);
     }
 
     /// CR 611.2e: a "loses all abilities" rider is `WhenFollowed` (Retched Wretch: "return it to
@@ -67906,7 +68191,8 @@ mod entrant_abilities_tests {
                 vec![ContinuousModification::RemoveAllAbilities],
             )),
         );
-        assert_eq!(derive(&instruction), EntrantAbilities::Retained);
+        assert_eq!(derive(&instruction), None);
+        assert_eq!(view(&instruction), EntrantAbilities::Retained);
     }
 
     /// CR 608.2c: a `WithEntry` removal through a target slot may name only some of the moved
@@ -67921,7 +68207,8 @@ mod entrant_abilities_tests {
                 skeleton_with_no_abilities(),
             )),
         );
-        assert_eq!(derive(&instruction), EntrantAbilities::Retained);
+        assert_eq!(derive(&instruction), None);
+        assert_eq!(view(&instruction), EntrantAbilities::Retained);
     }
 
     // CR 603.10 + CR 611.2e + CR 608.2c: `entry_occurrence_collector` hands the instruction's
@@ -68136,6 +68423,489 @@ mod entrant_abilities_tests {
                 &chained(targeted_return(), rider())
             ),
             EntryOccurrenceCollector::Owner
+        );
+    }
+
+    // R-U1a: the derivation for every producer shape (CR 611.2e + CR 613.1), the walk's skip and
+    // stop rules, and the context read of what the instruction moves.
+
+    /// Ever After: "Return up to two target creature cards from your graveyard to the
+    /// battlefield. Each of those creatures is a black Zombie in addition to its other colors and
+    /// types." Shilgengar, Sire of Famine: "Return each creature card from your graveyard to the
+    /// battlefield with a finality counter on it. Those creatures are Vampires in addition to
+    /// their other types." The rider names the chain sentinel (`TrackedSet(0)`, CR 608.2c), the
+    /// set the instruction publishes, so it is carried; any other tracked set is not.
+    #[test]
+    fn chain_sentinel_rider_is_carried() {
+        let black_zombie = vec![
+            ContinuousModification::AddColor {
+                color: ManaColor::Black,
+            },
+            subtype("Zombie"),
+        ];
+        let sentinel = || TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        };
+        let ever_after = chained(
+            targeted_return(),
+            with_entry(untargeted_generic(sentinel(), black_zombie.clone())),
+        );
+        assert_eq!(derive(&ever_after), carried(black_zombie.clone()));
+
+        let shilgengar = chained(
+            node(change_zone_all_to_battlefield()),
+            with_entry(untargeted_generic(sentinel(), vec![subtype("Vampire")])),
+        );
+        assert_eq!(derive(&shilgengar), carried(vec![subtype("Vampire")]));
+
+        // Hostile: a tracked set other than the sentinel names something else.
+        let other_set = chained(
+            targeted_return(),
+            with_entry(untargeted_generic(
+                TargetFilter::TrackedSet {
+                    id: TrackedSetId(5),
+                },
+                black_zombie,
+            )),
+        );
+        assert_eq!(derive(&other_set), None);
+    }
+
+    /// Enduring Innocence: "When Enduring Innocence dies, if it was a creature, return it to the
+    /// battlefield under its owner's control. It's an enchantment. (It's not a creature.)" An
+    /// `Animate` with no target binds the resolving source, which a self-return moves, so the
+    /// carried list is the resolver's own builder (CR 205.1a + CR 613.1d).
+    #[test]
+    fn enduring_animate_under_self_return_is_carried() {
+        let animate = with_entry(Effect::Animate {
+            power: None,
+            toughness: None,
+            types: vec!["Enchantment".to_string()],
+            remove_types: vec!["Creature".to_string()],
+            keywords: vec![],
+            target: TargetFilter::None,
+        });
+        let state = GameState::new_two_player(20);
+        let built = animate::animate_modifications(&state, &animate);
+        assert_eq!(
+            built,
+            vec![
+                ContinuousModification::AddType {
+                    core_type: CoreType::Enchantment,
+                },
+                ContinuousModification::RemoveType {
+                    core_type: CoreType::Creature,
+                },
+            ]
+        );
+        let instruction = chained(self_return(), animate);
+        assert_eq!(derive_in(&state, &instruction), carried(built));
+        assert_eq!(view(&instruction), EntrantAbilities::Retained);
+    }
+
+    /// Honor the Past: "Return target creature card with mana value 6 or less from your
+    /// graveyard to the battlefield. It's an artifact. (It's no longer a creature.)" parses as an
+    /// untargeted `Animate`, which `animate::resolve_animate_targets` binds to the resolving
+    /// source, not the returned card (a pre-existing parse defect). The rider installs nothing on
+    /// the entrant, so nothing is carried.
+    #[test]
+    fn untargeted_animate_under_targeted_return_is_not_carried() {
+        let instruction = chained(
+            targeted_return(),
+            with_entry(Effect::Animate {
+                power: None,
+                toughness: None,
+                types: vec!["Artifact".to_string()],
+                remove_types: vec!["Creature".to_string()],
+                keywords: vec![],
+                target: TargetFilter::None,
+            }),
+        );
+        assert_eq!(derive(&instruction), None);
+    }
+
+    /// Lim-Dûl the Necromancer: "If you do, return that card to the battlefield under your
+    /// control. If it's a creature, it's a Zombie in addition to its other creature types." The
+    /// rider is conditional, so its execution is not guaranteed and the walk stops at it. An
+    /// optional rider stops it the same way, and a later unconditional rider is not reached
+    /// (synthetic extensions of the walk rule: no printed card has a rider after a conditional
+    /// one; nearest printed card Lim-Dûl the Necromancer).
+    #[test]
+    fn conditional_or_optional_rider_stops_the_walk() {
+        let lim_dul_condition: AbilityCondition = serde_json::from_value(serde_json::json!({
+            "type": "RevealedHasCardType",
+            "card_types": ["Creature"]
+        }))
+        .expect("Lim-Dûl's rider condition deserializes");
+        let mut conditional =
+            with_entry(generic(TargetFilter::ParentTarget, vec![subtype("Zombie")]));
+        conditional.condition = Some(lim_dul_condition);
+        let mut optional = with_entry(generic(TargetFilter::ParentTarget, vec![subtype("Zombie")]));
+        optional.optional = true;
+        // Positive control: the same rider unconditional and mandatory is carried.
+        let plain = chained(
+            targeted_return(),
+            with_entry(generic(TargetFilter::ParentTarget, vec![subtype("Zombie")])),
+        );
+        assert_eq!(derive(&plain), carried(vec![subtype("Zombie")]));
+
+        for stopping in [conditional, optional] {
+            assert_eq!(derive(&chained(targeted_return(), stopping.clone())), None);
+            let later_rider = sequence(vec![
+                targeted_return(),
+                stopping,
+                with_entry(generic(
+                    TargetFilter::ParentTarget,
+                    skeleton_with_no_abilities(),
+                )),
+            ]);
+            assert_eq!(derive(&later_rider), None);
+        }
+    }
+
+    /// Dance of the Manse: "… If X is 6 or more, those permanents are 4/4 creatures in addition
+    /// to their other types." A conditional static is not carried (known gap); the same static
+    /// without its condition is.
+    #[test]
+    fn conditional_static_is_not_carried() {
+        let creature_4_4 = vec![
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            },
+            ContinuousModification::SetPower { value: 4 },
+            ContinuousModification::SetToughness { value: 4 },
+        ];
+        let rider = |condition: Option<StaticCondition>| {
+            let mut static_def = StaticDefinition::continuous()
+                .affected(TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                })
+                .modifications(creature_4_4.clone());
+            static_def.condition = condition;
+            with_entry(Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: None,
+                target: None,
+                end_cost: None,
+            })
+        };
+        let x_is_6_or_more = StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid,
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 6 },
+        };
+        let instruction =
+            |condition| chained(node(change_zone_all_to_battlefield()), rider(condition));
+        assert_eq!(derive(&instruction(Some(x_is_6_or_more))), None);
+        assert_eq!(derive(&instruction(None)), carried(creature_4_4));
+    }
+
+    /// CR 613.7b: the modifications of every qualifying node are concatenated in written order.
+    /// Synthetic: no printed return chain holds two `WithEntry` nodes; nearest printed cards
+    /// Princess Yue and Admiral Brass, Unsinkable (one `WithEntry` node plus one later node).
+    /// Kept because the derivation is a fold over the walk and must not drop a node.
+    #[test]
+    fn two_riders_are_concatenated_in_written_order() {
+        let instruction = sequence(vec![
+            targeted_return(),
+            with_entry(generic(
+                TargetFilter::ParentTarget,
+                vec![subtype("Skeleton")],
+            )),
+            with_entry(generic(
+                TargetFilter::ParentTarget,
+                vec![ContinuousModification::RemoveAllAbilities],
+            )),
+        ]);
+        assert_eq!(derive(&instruction), carried(skeleton_with_no_abilities()));
+        assert_eq!(view(&instruction), EntrantAbilities::RemovedWithEntry);
+    }
+
+    /// Valkyrie's Call: "Whenever a nontoken, non-Angel creature you control dies, return that
+    /// card to the battlefield under its owner's control with a +1/+1 counter on it. It has
+    /// flying and is an Angel in addition to its other types." A `TriggeringSource` return whose
+    /// rider names the triggering object (CR 608.2c) carries the rider.
+    #[test]
+    fn triggering_source_return_carries_its_triggering_object_rider() {
+        let (state, _card) = dying_card_state();
+        let angel_with_flying = vec![
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying,
+            },
+            subtype("Angel"),
+        ];
+        let instruction = chained(
+            node(return_to_battlefield(TargetFilter::TriggeringSource)),
+            with_entry(untargeted_generic(
+                TargetFilter::TriggeringSource,
+                angel_with_flying.clone(),
+            )),
+        );
+        assert_eq!(derive_in(&state, &instruction), carried(angel_with_flying));
+    }
+
+    /// Lorcan, Warlock Collector: "If you do, put it onto the battlefield under your control.
+    /// It's a Warlock in addition to its other types." The return is a `ParentTarget` move bound
+    /// to the trigger event and the rider names the triggering object; read through the
+    /// resolver's own binding, the return moves exactly that object, so the rider is carried.
+    /// Hostile: without a trigger event, and with an announced target other than the triggering
+    /// object (synthetic; nearest printed card Arbiter of the Ideal, "…reveal the top card of
+    /// your library. If it's an artifact, creature, or land card, you may put it onto the
+    /// battlefield. … It's an enchantment in addition to its other types.", whose return moves
+    /// the revealed card while the trigger event names Arbiter), nothing is carried.
+    #[test]
+    fn parent_target_trigger_return_carries_its_triggering_object_rider() {
+        let (state, _card) = dying_card_state();
+        let instruction = chained(lorcan_return(), warlock_rider());
+        assert_eq!(
+            derive_in(&state, &instruction),
+            carried(vec![subtype("Warlock")])
+        );
+
+        // No trigger event: no triggering object.
+        assert_eq!(derive(&instruction), None);
+
+        // The instruction moves another object than the one the trigger event names.
+        let (mut other_state, _card) = dying_card_state();
+        let other = create_object(
+            &mut other_state,
+            CardId(2),
+            PlayerId(1),
+            "Hill Giant".to_string(),
+            Zone::Graveyard,
+        );
+        let mut moves_other = lorcan_return();
+        moves_other.targets = vec![TargetRef::Object(other)];
+        assert_eq!(
+            derive_in(&other_state, &chained(moves_other, warlock_rider())),
+            None
+        );
+    }
+
+    // R-U1b: the exhaustive referent match's `All` arms and its phase-stable rows.
+
+    const EVERY_SOURCE: [MovedObjectsSource; 4] = [
+        MovedObjectsSource::ContextReferent(ContextObjectRef::Source),
+        MovedObjectsSource::ContextReferent(ContextObjectRef::TriggeringObject),
+        MovedObjectsSource::OtherObjects,
+        MovedObjectsSource::UnknownInstruction,
+    ];
+
+    #[test]
+    fn referent_classification_all_arms() {
+        let sentinel = TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        };
+        for source in EVERY_SOURCE {
+            assert_eq!(
+                moved_objects_referent(&TargetFilter::ParentTarget, source),
+                MovedObjectsReferent::All
+            );
+            assert_eq!(
+                moved_objects_referent(&sentinel, source),
+                MovedObjectsReferent::All
+            );
+            assert_eq!(
+                moved_objects_referent(&TargetFilter::ParentTargetSlot { index: 0 }, source),
+                MovedObjectsReferent::Part
+            );
+            for player_or_stack in [
+                TargetFilter::Controller,
+                TargetFilter::Player,
+                TargetFilter::StackSpell,
+            ] {
+                assert_eq!(
+                    moved_objects_referent(&player_or_stack, source),
+                    MovedObjectsReferent::Other
+                );
+            }
+        }
+
+        let own_source = MovedObjectsSource::ContextReferent(ContextObjectRef::Source);
+        let triggering = MovedObjectsSource::ContextReferent(ContextObjectRef::TriggeringObject);
+        let unknown = MovedObjectsSource::UnknownInstruction;
+        let other_objects = MovedObjectsSource::OtherObjects;
+        for (filter, all_under, other_under) in [
+            (
+                TargetFilter::SelfRef,
+                [own_source, unknown],
+                [other_objects, triggering],
+            ),
+            (
+                TargetFilter::TriggeringSource,
+                [triggering, unknown],
+                [other_objects, own_source],
+            ),
+        ] {
+            for source in all_under {
+                assert_eq!(
+                    moved_objects_referent(&filter, source),
+                    MovedObjectsReferent::All,
+                    "{filter:?} under {source:?}"
+                );
+            }
+            for source in other_under {
+                assert_eq!(
+                    moved_objects_referent(&filter, source),
+                    MovedObjectsReferent::Other,
+                    "{filter:?} under {source:?}"
+                );
+            }
+        }
+    }
+
+    /// Phase-1 base readings, pinned `Other`: another tracked set, a population ("creatures you
+    /// control", the Storm of Souls population shape) and the composites.
+    #[test]
+    fn referent_classification_base_other_rows() {
+        let creatures_you_control =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+        for filter in [
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(5),
+            },
+            creatures_you_control.clone(),
+            TargetFilter::And {
+                filters: vec![TargetFilter::ParentTarget, creatures_you_control.clone()],
+            },
+            TargetFilter::Or {
+                filters: vec![TargetFilter::ParentTarget, creatures_you_control],
+            },
+        ] {
+            for source in EVERY_SOURCE {
+                assert_eq!(
+                    moved_objects_referent(&filter, source),
+                    MovedObjectsReferent::Other,
+                    "{filter:?} under {source:?}"
+                );
+            }
+        }
+    }
+
+    // R-U1e: `MovedObjectsSource::of`, the context read of what the instruction moves.
+
+    #[test]
+    fn moved_objects_source_reads_the_context_referent_moved() {
+        let (state, _card) = dying_card_state();
+        assert_eq!(
+            MovedObjectsSource::of(&state, &self_return()),
+            MovedObjectsSource::ContextReferent(ContextObjectRef::Source)
+        );
+        assert_eq!(
+            MovedObjectsSource::of(
+                &state,
+                &node(return_to_battlefield(TargetFilter::TriggeringSource))
+            ),
+            MovedObjectsSource::ContextReferent(ContextObjectRef::TriggeringObject)
+        );
+        assert_eq!(
+            MovedObjectsSource::of(&state, &lorcan_return()),
+            MovedObjectsSource::ContextReferent(ContextObjectRef::TriggeringObject)
+        );
+
+        // Hostile: no trigger event.
+        let no_event = GameState::new_two_player(20);
+        for instruction in [
+            lorcan_return(),
+            node(return_to_battlefield(TargetFilter::TriggeringSource)),
+        ] {
+            assert_eq!(
+                MovedObjectsSource::of(&no_event, &instruction),
+                MovedObjectsSource::OtherObjects
+            );
+        }
+
+        // Hostile: the instruction's chosen target is not the triggering object (synthetic;
+        // nearest printed card Arbiter of the Ideal, whose return moves the revealed card while
+        // the trigger event names Arbiter).
+        let (mut other_state, _card) = dying_card_state();
+        let other = create_object(
+            &mut other_state,
+            CardId(2),
+            PlayerId(1),
+            "Hill Giant".to_string(),
+            Zone::Graveyard,
+        );
+        let mut typed = node(return_to_battlefield(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )));
+        typed.targets = vec![TargetRef::Object(other)];
+        assert_eq!(
+            MovedObjectsSource::of(&other_state, &typed),
+            MovedObjectsSource::OtherObjects
+        );
+
+        // Hostile: a mass move.
+        assert_eq!(
+            MovedObjectsSource::of(&state, &node(change_zone_all_to_battlefield())),
+            MovedObjectsSource::OtherObjects
+        );
+    }
+
+    // R-U1f: the conservative frame-held read counts a triggering-object referent.
+
+    #[test]
+    fn frame_held_later_instruction_reads_the_triggering_object_conservatively() {
+        let query = LaterInstructionQuery::MayActOnEntrantAfterEntry;
+        let haste_to_triggering = gains_haste(TargetFilter::TriggeringSource);
+        assert!(query.matches(ContinuousEffectOnset::WhenFollowed, &haste_to_triggering));
+        // Negative: a `WithEntry` node naming it is not a later instruction (synthetic: no
+        // printed return chain has a later non-`WithEntry` node naming `TriggeringSource`;
+        // nearest printed card Valkyrie's Call).
+        assert!(!query.matches(ContinuousEffectOnset::WithEntry, &haste_to_triggering));
+        // Negative: a player referent never names a moved object.
+        assert!(!query.matches(
+            ContinuousEffectOnset::WhenFollowed,
+            &gains_haste(TargetFilter::Controller)
+        ));
+    }
+
+    // R-U1g(i): parity, carried == installed.
+
+    /// A3: the carrier and the resolver read the same builder. The rider's `AddDynamicPower` is
+    /// synthetic (no printed with-entry rider carries a dynamic modification; nearest printed
+    /// card Storm of Souls, "Each of them is a 1/1 Spirit with flying …", constant
+    /// `SetPower`/`SetToughness`). Kept because it is the only input on which a raw-copy carrier
+    /// and the shared builder differ.
+    #[test]
+    fn carried_generic_rider_equals_what_the_rider_installs() {
+        let mut state = GameState::new_two_player(20);
+        let returned = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let rider = with_entry(generic(
+            TargetFilter::ParentTarget,
+            vec![
+                subtype("Skeleton"),
+                ContinuousModification::AddDynamicPower {
+                    value: QuantityExpr::Fixed { value: 2 },
+                },
+            ],
+        ));
+        let instruction = chained(targeted_return(), rider.clone());
+        let carried = derive_in(&state, &instruction).expect("the rider is carried");
+        assert_eq!(
+            carried.modifications,
+            vec![
+                subtype("Skeleton"),
+                ContinuousModification::AddPower { value: 2 },
+            ]
+        );
+
+        let mut installing = rider;
+        installing.targets = vec![TargetRef::Object(returned)];
+        let mut events = Vec::new();
+        effect::resolve(&mut state, &installing, &mut events).expect("the rider resolves");
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        assert_eq!(
+            state.transient_continuous_effects[0].modifications,
+            carried.modifications
         );
     }
 }

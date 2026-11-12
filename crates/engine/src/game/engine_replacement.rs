@@ -6142,7 +6142,7 @@ mod tests {
             performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
-            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+            with_entry_effect: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -8503,7 +8503,7 @@ mod tests {
             performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
-            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+            with_entry_effect: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -8714,7 +8714,7 @@ mod tests {
             performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
-            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+            with_entry_effect: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -8841,7 +8841,7 @@ mod tests {
             performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
-            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+            with_entry_effect: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };
@@ -9308,7 +9308,7 @@ mod tests {
             performed_by: None,
             applied: std::collections::HashSet::new(),
             face_down_profile: None,
-            entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+            with_entry_effect: None,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         };

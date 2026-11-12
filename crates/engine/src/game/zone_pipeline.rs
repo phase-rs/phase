@@ -29,7 +29,9 @@ use crate::types::format::EntryOwnership;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{AppliedReplacementKey, EntrantAbilities, ProposedEvent};
+use crate::types::proposed_event::{
+    AppliedReplacementKey, EntrantAbilities, ProposedEvent, WithEntryEffect,
+};
 use crate::types::zones::{EtbTapState, Zone};
 
 use crate::game::effects::change_zone::shuffle_library;
@@ -1178,8 +1180,8 @@ pub(crate) fn move_object_with_terminal(
         &req.mods.enter_with_counters,
         req.mods.face_down_profile.as_ref(),
         req.face_down_in_exile,
-        // No request-route producer removes an entrant's abilities with its entry.
-        EntrantAbilities::Retained,
+        // No request-route producer carries a with-entry effect.
+        None,
         req.mods.chain_referent,
         track_exiled_by_source,
         None,
@@ -4538,7 +4540,7 @@ pub(crate) fn execute_zone_move_with_controller(
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
     face_down_in_exile: ExileConcealment,
-    entrant_abilities: EntrantAbilities,
+    with_entry_effect: Option<&WithEntryEffect>,
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
     enter_attached_to: Option<AttachTarget>,
@@ -4560,7 +4562,7 @@ pub(crate) fn execute_zone_move_with_controller(
         effect_enter_with_counters,
         face_down_profile,
         face_down_in_exile,
-        entrant_abilities,
+        with_entry_effect,
         track_exiled_by_source,
         library_placement,
         enter_attached_to,
@@ -4604,7 +4606,8 @@ pub(crate) fn execute_zone_move_with_terminal(
         effect_enter_with_counters,
         face_down_profile,
         ExileConcealment::Public,
-        EntrantAbilities::Retained,
+        // A raw mover carries no with-entry effect.
+        None,
         track_exiled_by_source,
         library_placement,
         enter_attached_to,
@@ -4629,7 +4632,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
     face_down_in_exile: ExileConcealment,
-    entrant_abilities: EntrantAbilities,
+    with_entry_effect: Option<&WithEntryEffect>,
     track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
     enter_attached_to: Option<AttachTarget>,
@@ -4651,7 +4654,7 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
         effect_enter_with_counters,
         face_down_profile,
         face_down_in_exile,
-        entrant_abilities,
+        with_entry_effect,
         crate::types::zones::ChainReferentIntent::Silent,
         track_exiled_by_source,
         library_placement,
@@ -4687,10 +4690,11 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
 /// resulting object (CR 122.1) and must survive; callers add those after this
 /// seeding. The gate reads the proposal, so the caller must stamp
 /// `face_down_profile` (and `enter_transformed`) on it first. Likewise the
-/// seeding is skipped when the proposal's `entrant_abilities` says a
-/// same-resolution "has no abilities" effect removes the entrant's abilities
-/// with its entry (CR 611.2e; Xu-Ifit, Osteoharmonist) — the caller stamps it
-/// first, and delivery records the withheld kinds at zero.
+/// seeding is skipped when the proposal's carried `with_entry_effect` (read
+/// through the derived [`EntrantAbilities`] view) removes the entrant's
+/// abilities with its entry (CR 611.2e; Xu-Ifit, Osteoharmonist's "has no
+/// abilities") — the caller stamps it first, and delivery records the withheld
+/// kinds at zero.
 ///
 /// CR 712.14a + CR 712.18: A permanent entering transformed (e.g. a
 /// double-faced card exiled and returned with its back face up, like a
@@ -4712,7 +4716,7 @@ pub(crate) fn seed_intrinsic_entry_counters(state: &GameState, proposed: &mut Pr
         enter_transformed,
         face_down_profile: None,
         enter_with_counters,
-        entrant_abilities,
+        with_entry_effect,
         ..
     } = proposed
     else {
@@ -4723,7 +4727,7 @@ pub(crate) fn seed_intrinsic_entry_counters(state: &GameState, proposed: &mut Pr
     // same-resolution "has no abilities" effect removes them before they apply.
     // A Saga's CR 714.3a lore counter is its own replacement and is withheld by
     // the candidate gate in replacement.rs.
-    if !entrant_abilities.own_abilities_apply() {
+    if !EntrantAbilities::of(with_entry_effect.as_deref()).own_abilities_apply() {
         return;
     }
     let Some(obj) = state
@@ -4761,9 +4765,9 @@ fn execute_zone_move_with_applied_terminal(
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
     face_down_in_exile: ExileConcealment,
-    // CR 611.2e + CR 614.12: whether a same-resolution "has no abilities" effect removes the
-    // entrant's abilities with its entry; stamped on the proposal before the seed.
-    entrant_abilities: EntrantAbilities,
+    // CR 611.2e + CR 614.12: the same-resolution "is/has" effect that applies with the
+    // entry; stamped on the proposal before the seed.
+    with_entry_effect: Option<&WithEntryEffect>,
     // CR 608.2c: whether this entry is the producer a following demonstrative
     // anaphor binds to. Only `move_object_with_terminal` forwards a request's
     // intent; the four public `execute_zone_move*` wrappers are raw movers with
@@ -4837,7 +4841,7 @@ fn execute_zone_move_with_applied_terminal(
         face_down_in_exile: ref mut conceal_in_exile,
         chain_referent: ref mut intent,
         performed_by: ref mut performer,
-        entrant_abilities: ref mut entrant,
+        with_entry_effect: ref mut carried,
         ..
     } = &mut proposed
     {
@@ -4847,7 +4851,7 @@ fn execute_zone_move_with_applied_terminal(
         *performer = performed_by;
         // CR 611.2e + CR 614.12: stamped before `seed_intrinsic_entry_counters` and
         // `replace_event` read it, and carried through every replacement pass and pause.
-        *entrant = entrant_abilities;
+        *carried = with_entry_effect.cloned().map(Box::new);
     }
 
     // CR 712.14a: Set enter_transformed on the proposed event so replacement effects

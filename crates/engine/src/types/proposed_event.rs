@@ -508,11 +508,11 @@ pub enum ProposedEvent {
         /// player who becomes the card's owner (`zone_pipeline::entry_receiver`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         performed_by: Option<PlayerId>,
-        /// CR 614.12 + CR 611.2e: carried through the replacement pipeline and
-        /// CR 616.1 pauses so the entrant's own entry abilities stay withheld on
-        /// every pass.
-        #[serde(default, skip_serializing_if = "EntrantAbilities::is_retained")]
-        entrant_abilities: EntrantAbilities,
+        /// CR 614.12 + CR 611.2e: the same-resolution with-entry effect
+        /// ([`WithEntryEffect`]), carried through every replacement pass and
+        /// CR 616.1 pause. Boxed like `face_down_profile`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        with_entry_effect: Option<Box<WithEntryEffect>>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -906,15 +906,26 @@ impl EntryChoices {
     }
 }
 
+/// CR 611.2e + CR 614.12: the continuous effect that an "is/has" instruction of the
+/// resolution putting this permanent onto the battlefield applies simultaneously with the
+/// entry: that instruction's source and controller, and the modifications it applies to the
+/// entrant (types and subtypes, colors, base power/toughness, abilities; CR 613.1d/e/f,
+/// CR 613.4b), in written order. Carried on the proposal so every replacement pass and
+/// CR 616.1 pause sees the entrant as it would exist on the battlefield. It is a description
+/// only: the rider instruction installs the real effect when it is followed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WithEntryEffect {
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    pub modifications: Vec<ContinuousModification>,
+}
+
 /// CR 611.2e + CR 613.1f + CR 614.12: whether a battlefield entrant has its own
-/// abilities as it would exist on the battlefield. "RemovedWithEntry" when an
-/// "is/has" continuous effect of the resolution that puts it there applies
-/// simultaneously with its entry and removes all its abilities (Xu-Ifit,
-/// Osteoharmonist; Bronzehide Lion). Abilities axis only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+/// abilities as it would exist on the battlefield — a view derived from the carried
+/// [`WithEntryEffect`] by [`EntrantAbilities::of`], never stored. Abilities axis only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntrantAbilities {
     /// The entrant enters with its own abilities.
-    #[default]
     Retained,
     /// A same-resolution effect removes all of the entrant's abilities as it
     /// enters, so none of its own entry abilities apply.
@@ -922,17 +933,27 @@ pub enum EntrantAbilities {
 }
 
 impl EntrantAbilities {
+    /// CR 613.1f: `RemovedWithEntry` when the carried effect removes all abilities.
+    pub fn of(effect: Option<&WithEntryEffect>) -> Self {
+        match effect {
+            Some(effect)
+                if effect
+                    .modifications
+                    .iter()
+                    .any(|m| matches!(m, ContinuousModification::RemoveAllAbilities)) =>
+            {
+                Self::RemovedWithEntry
+            }
+            Some(_) | None => Self::Retained,
+        }
+    }
+
     /// Whether the entrant's own abilities exist as it enters.
     pub fn own_abilities_apply(self) -> bool {
         match self {
             EntrantAbilities::Retained => true,
             EntrantAbilities::RemovedWithEntry => false,
         }
-    }
-
-    /// Serde skip predicate: the default is omitted from the wire.
-    pub fn is_retained(&self) -> bool {
-        matches!(self, EntrantAbilities::Retained)
     }
 }
 
@@ -957,7 +978,7 @@ impl ProposedEvent {
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
-            entrant_abilities: EntrantAbilities::Retained,
+            with_entry_effect: None,
             applied: HashSet::new(),
         }
     }
@@ -1043,15 +1064,48 @@ impl ProposedEvent {
         }
     }
 
-    /// CR 614.12 + CR 611.2e: the entrant-abilities carrier of a zone change
-    /// (`Retained` for every other event).
-    pub fn entrant_abilities(&self) -> EntrantAbilities {
+    /// CR 614.12 + CR 611.2e: the with-entry effect a zone change carries. Exhaustive: only a
+    /// `ZoneChange` carries one.
+    pub fn with_entry_effect(&self) -> Option<&WithEntryEffect> {
         match self {
             ProposedEvent::ZoneChange {
-                entrant_abilities, ..
-            } => *entrant_abilities,
-            _ => EntrantAbilities::Retained,
+                with_entry_effect, ..
+            } => with_entry_effect.as_deref(),
+            ProposedEvent::Damage { .. }
+            | ProposedEvent::Draw { .. }
+            | ProposedEvent::SearchFound { .. }
+            | ProposedEvent::Scry { .. }
+            | ProposedEvent::Mill { .. }
+            | ProposedEvent::CoinFlip { .. }
+            | ProposedEvent::RollDice { .. }
+            | ProposedEvent::Explore { .. }
+            | ProposedEvent::Connive { .. }
+            | ProposedEvent::Proliferate { .. }
+            | ProposedEvent::LifeGain { .. }
+            | ProposedEvent::LifeLoss { .. }
+            | ProposedEvent::AddCounter { .. }
+            | ProposedEvent::RemoveCounter { .. }
+            | ProposedEvent::MoveCounter { .. }
+            | ProposedEvent::CreateToken { .. }
+            | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::Discard { .. }
+            | ProposedEvent::Tap { .. }
+            | ProposedEvent::Untap { .. }
+            | ProposedEvent::TurnFaceUp { .. }
+            | ProposedEvent::Destroy { .. }
+            | ProposedEvent::Sacrifice { .. }
+            | ProposedEvent::BeginTurn { .. }
+            | ProposedEvent::BeginPhase { .. }
+            | ProposedEvent::ProduceMana { .. }
+            | ProposedEvent::EmptyManaPool { .. }
+            | ProposedEvent::Planeswalk { .. }
+            | ProposedEvent::Attach { .. } => None,
         }
+    }
+
+    /// CR 614.12 + CR 611.2e + CR 613.1f: the derived view of [`Self::with_entry_effect`].
+    pub fn entrant_abilities(&self) -> EntrantAbilities {
+        EntrantAbilities::of(self.with_entry_effect())
     }
 
     pub fn battlefield_entry_tap_state_mut(&mut self) -> Option<&mut EtbTapState> {
@@ -2007,11 +2061,13 @@ mod tests {
         assert!(!applied.contains(&AppliedReplacementKey::step_end_mana(2)));
     }
 
-    /// CR 614.12 + CR 611.2e: the zone-change entrant-abilities carrier is an
-    /// optional wire field — absent decodes `Retained`, `Retained` is omitted,
-    /// and `RemovedWithEntry` round-trips.
+    /// CR 614.12 + CR 611.2e: the zone-change with-entry effect is an optional
+    /// wire field — absent decodes `None`, `None` is omitted, and a carried
+    /// effect round-trips. The derived view reads `RemovedWithEntry` only when
+    /// the carried effect removes all abilities (CR 613.1f), and every other
+    /// proposal carries none.
     #[test]
-    fn zone_change_entrant_abilities_serde() {
+    fn zone_change_with_entry_effect_serde() {
         let plain = ProposedEvent::zone_change(
             ObjectId(7),
             Zone::Graveyard,
@@ -2020,27 +2076,62 @@ mod tests {
         );
         let value = serde_json::to_value(&plain).expect("serializes");
         assert!(
-            value["ZoneChange"].get("entrant_abilities").is_none(),
-            "Retained must not be serialized: {value}"
+            value["ZoneChange"].get("with_entry_effect").is_none(),
+            "None must not be serialized: {value}"
         );
         let back: ProposedEvent = serde_json::from_value(value).expect("reads without the key");
+        assert_eq!(back.with_entry_effect(), None);
         assert_eq!(back.entrant_abilities(), EntrantAbilities::Retained);
 
-        let mut removed = plain;
-        let ProposedEvent::ZoneChange {
-            entrant_abilities, ..
-        } = &mut removed
-        else {
-            unreachable!("zone_change constructs a ZoneChange");
+        let carrying = |modifications: Vec<ContinuousModification>| {
+            let mut event = plain.clone();
+            let ProposedEvent::ZoneChange {
+                with_entry_effect, ..
+            } = &mut event
+            else {
+                unreachable!("zone_change constructs a ZoneChange");
+            };
+            *with_entry_effect = Some(Box::new(WithEntryEffect {
+                source_id: ObjectId(3),
+                controller: PlayerId(0),
+                modifications,
+            }));
+            event
         };
-        *entrant_abilities = EntrantAbilities::RemovedWithEntry;
+
+        let removed = carrying(vec![
+            ContinuousModification::AddSubtype {
+                subtype: "Skeleton".to_string(),
+            },
+            ContinuousModification::RemoveAllAbilities,
+        ]);
         let value = serde_json::to_value(&removed).expect("serializes");
         assert!(
-            value["ZoneChange"].get("entrant_abilities").is_some(),
-            "RemovedWithEntry must be serialized: {value}"
+            value["ZoneChange"].get("with_entry_effect").is_some(),
+            "a carried effect must be serialized: {value}"
         );
         let back: ProposedEvent = serde_json::from_value(value).expect("round-trips");
-        assert_eq!(back.entrant_abilities(), EntrantAbilities::RemovedWithEntry);
         assert_eq!(back, removed);
+        assert_eq!(back.with_entry_effect(), removed.with_entry_effect());
+        assert_eq!(back.entrant_abilities(), EntrantAbilities::RemovedWithEntry);
+
+        let retained = carrying(vec![
+            ContinuousModification::AddColor {
+                color: ManaColor::Black,
+            },
+            ContinuousModification::AddSubtype {
+                subtype: "Zombie".to_string(),
+            },
+        ]);
+        let back: ProposedEvent =
+            serde_json::from_value(serde_json::to_value(&retained).expect("serializes"))
+                .expect("round-trips");
+        assert_eq!(back, retained);
+        assert!(back.with_entry_effect().is_some());
+        assert_eq!(back.entrant_abilities(), EntrantAbilities::Retained);
+
+        let begin_turn = ProposedEvent::begin_turn(PlayerId(0), false);
+        assert_eq!(begin_turn.with_entry_effect(), None);
+        assert_eq!(begin_turn.entrant_abilities(), EntrantAbilities::Retained);
     }
 }

@@ -84,7 +84,7 @@ pub fn resolve(
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // CR 708.2a: Blight places -1/-1 counters; no face-down entry.
         face_down_profile: None,
-        entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: count,

@@ -4303,10 +4303,11 @@ impl ResolutionStack {
 /// and parked frames, and preserves unavailable announced bindings through coin
 /// outcomes and detached continuations (CR 601.2c + CR 608.2b); coin frames and
 /// unresolved coin abilities from earlier versions are refused.
-/// Version 12 carries the CR 611.2e entrant-abilities carrier on a parked
-/// ChangeZone (`PendingChangeZoneIteration.entrant_abilities`), a paused
+/// Version 12 carries the CR 611.2e with-entry effect (the source, controller
+/// and continuous modifications of a same-resolution "is/has" instruction) on a
+/// parked ChangeZone (`PendingChangeZoneIteration.with_entry_effect`), a paused
 /// `ProposedEvent::ZoneChange` and `WaitingFor::EffectZoneChoice`, omitted when
-/// `Retained`; earlier versions decode it as `Retained`, which is what they meant.
+/// absent; earlier versions decode it as absent, which is what they meant.
 pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 12;
 
 /// Historical full-state resolution wire version accepted only for migration.
@@ -4349,10 +4350,10 @@ const LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION: u64 = 9;
 /// version).
 const LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION: u64 = 10;
 
-/// Last wire version whose parked ChangeZone carrier could not carry the
-/// entrant-abilities profile. No migration is needed: its frames decode as
-/// `EntrantAbilities::Retained`, the only profile that writer could mean.
-const LEGACY_UNPROFILED_ENTRANT_RESOLUTION_STATE_WIRE_VERSION: u64 = 11;
+/// Last wire version whose parked ChangeZone carrier could not carry a
+/// with-entry effect. No migration is needed: its frames decode with none, the
+/// only reading that writer could mean.
+const LEGACY_UNCARRIED_WITH_ENTRY_EFFECT_RESOLUTION_STATE_WIRE_VERSION: u64 = 11;
 
 /// Stable refusal: old coin saves lack the independently announced bindings;
 /// neither today's board nor the old flat target vector can reconstruct them.
@@ -5348,11 +5349,11 @@ impl ResolutionStateWire {
             | LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
-            | LEGACY_UNPROFILED_ENTRANT_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_UNCARRIED_WITH_ENTRY_EFFECT_RESOLUTION_STATE_WIRE_VERSION
             | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNPROFILED_ENTRANT_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNCARRIED_WITH_ENTRY_EFFECT_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
@@ -7330,7 +7331,7 @@ mod tests {
                 face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                 moved_count: None,
                 face_down_profile: None,
-                entrant_abilities: crate::types::proposed_event::EntrantAbilities::Retained,
+                with_entry_effect: None,
                 library_placement: None,
                 enter_attached_to: None,
                 effect_kind: EffectKind::ChangeZone,
@@ -8407,7 +8408,7 @@ mod tests {
     #[test]
     fn resolution_wire_keeps_all_legacy_readers_available() {
         let state = GameState::new_two_player(57);
-        for version in 1..=LEGACY_UNPROFILED_ENTRANT_RESOLUTION_STATE_WIRE_VERSION {
+        for version in 1..=LEGACY_UNCARRIED_WITH_ENTRY_EFFECT_RESOLUTION_STATE_WIRE_VERSION {
             let mut value = if version == LEGACY_RESOLUTION_STATE_WIRE_VERSION {
                 serde_json::to_value(&state).unwrap()
             } else {
@@ -8428,7 +8429,10 @@ mod tests {
     #[test]
     fn resolution_wire_contract_pins_v12_and_the_legacy_readers() {
         assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 12);
-        assert_eq!(LEGACY_UNPROFILED_ENTRANT_RESOLUTION_STATE_WIRE_VERSION, 11);
+        assert_eq!(
+            LEGACY_UNCARRIED_WITH_ENTRY_EFFECT_RESOLUTION_STATE_WIRE_VERSION,
+            11
+        );
         assert_eq!(LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION, 10);
         assert_eq!(
             LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION,
@@ -8449,7 +8453,7 @@ mod tests {
         assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
         // The newest legacy reader sits directly below the writer.
         assert_eq!(
-            LEGACY_UNPROFILED_ENTRANT_RESOLUTION_STATE_WIRE_VERSION + 1,
+            LEGACY_UNCARRIED_WITH_ENTRY_EFFECT_RESOLUTION_STATE_WIRE_VERSION + 1,
             RESOLUTION_STATE_WIRE_VERSION
         );
         let mut v1 = serde_json::to_value(GameState::new_two_player(57)).unwrap();
