@@ -677,8 +677,14 @@ fn metalworker_with_nothing_eligible_ignores_an_earlier_activations_reveal() {
 /// controller's choice. Its production follows a non-Mana clause, so it
 /// resolves in written order on the stack rather than through the immediate
 /// mana-ability resolver (which would produce first and read zero counters).
-#[test]
-fn empowered_autogenerator_counts_the_counter_it_just_placed() {
+/// CR 605.1a + CR 605.3b + CR 608.2c: Empowered Autogenerator's "Put a charge
+/// counter on this artifact. Add X mana of any one color, where X is the number
+/// of charge counters on this artifact." is a mana ability. Activated while a
+/// spell's mana is being paid it resolves at once and in written order: the
+/// counter is placed before the colour prompt, nothing uses the stack, X counts
+/// the counter just placed, and the suspended payment resumes and completes.
+fn autogenerator_pays_spell(prior_counters: u32, spell_cost: u32) {
+    let charge = CounterType::Generic("charge".to_string());
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let autogenerator = scenario
@@ -688,73 +694,105 @@ fn empowered_autogenerator_counts_the_counter_it_just_placed() {
             EMPOWERED_AUTOGENERATOR_ORACLE,
         )
         .id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Juggernaut", true)
+        .with_mana_cost(ManaCost::generic(spell_cost))
+        .id();
     let mut runner = scenario.build();
-    let charge = CounterType::Generic("charge".to_string());
-
-    let tap_for = |runner: &mut GameRunner, color: ManaType| {
+    if prior_counters > 0 {
         runner
             .state_mut()
             .objects
             .get_mut(&autogenerator)
             .unwrap()
-            .tapped = false;
-        runner
-            .act(GameAction::ActivateAbility {
-                source_id: autogenerator,
-                ability_index: 0,
-                payment_mode: CastPaymentMode::Auto,
-            })
-            .expect("activation is legal");
-        while matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
-            && !runner.state().stack.is_empty()
-        {
-            runner
-                .act(GameAction::PassPriority)
-                .expect("passing priority resolves the ability");
-        }
-        match &runner.state().waiting_for {
-            WaitingFor::ChooseManaColor {
-                choice: ManaChoicePrompt::SingleColor { options },
-                ..
-            } => assert!(
-                options.contains(&color),
-                "any one color offers {color:?}, got {options:?}"
-            ),
-            other => panic!("expected the any-one-color prompt, got {other:?}"),
-        }
-        runner
-            .act(GameAction::ChooseManaColor {
-                choice: ManaChoice::SingleColor(color),
-                count: 1,
-            })
-            .expect("choosing the color is legal");
-        assert!(
-            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
-            "the ability finishes resolving, got {:?}",
-            runner.state().waiting_for
-        );
-        assert!(runner.state().stack.is_empty());
-    };
+            .counters
+            .insert(charge.clone(), prior_counters);
+    }
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("manual cast reaches the mana payment prompt");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "expected ManaPayment, got {:?}",
+        runner.state().waiting_for
+    );
 
-    tap_for(&mut runner, ManaType::Blue);
-    assert_eq!(runner.state().objects[&autogenerator].counters[&charge], 1);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: autogenerator,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activation is legal during payment");
+
+    // The colour prompt is reached WITHOUT passing priority, the counter was
+    // placed first, and no ability sits on the stack (only the spell being cast).
+    match &runner.state().waiting_for {
+        WaitingFor::ChooseManaColor {
+            choice: ManaChoicePrompt::SingleColor { options },
+            ..
+        } => assert!(options.contains(&ManaType::Blue), "got {options:?}"),
+        other => panic!("expected the any-one-color prompt, got {other:?}"),
+    }
+    assert_eq!(
+        runner.state().objects[&autogenerator].counters[&charge],
+        prior_counters + 1,
+        "the counter is placed before the colour choice"
+    );
+    assert!(
+        runner.state().stack.iter().all(|entry| matches!(
+            entry.kind,
+            engine::types::game_state::StackEntryKind::Spell { .. }
+        )),
+        "a mana ability never uses the stack: {:?}",
+        runner.state().stack
+    );
+
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .expect("choosing the color is legal");
     assert_eq!(
         runner.state().players[P0.0 as usize]
             .mana_pool
-            .count_color(ManaType::Blue),
-        1,
-        "first tap: one counter, so one mana of the chosen color"
+            .count_color(ManaType::Blue) as u32,
+        prior_counters + 1,
+        "X is the number of charge counters after the new one"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "the suspended payment resumes, got {:?}",
+        runner.state().waiting_for
     );
 
-    tap_for(&mut runner, ManaType::Red);
-    assert_eq!(runner.state().objects[&autogenerator].counters[&charge], 2);
-    assert_eq!(
-        runner.state().players[P0.0 as usize]
-            .mana_pool
-            .count_color(ManaType::Red),
-        2,
-        "second tap: two counters, so two mana of the chosen color"
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the pooled mana pays the spell");
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the cast completes to P0's priority, got {:?}",
+        runner.state().waiting_for
     );
+    assert!(runner.state().pending_cast.is_none(), "payment finalized");
+}
+
+#[test]
+fn empowered_autogenerator_first_activation_counts_the_counter_it_just_placed() {
+    autogenerator_pays_spell(0, 1);
+}
+
+#[test]
+fn empowered_autogenerator_second_activation_adds_two_mana() {
+    autogenerator_pays_spell(1, 2);
 }
 
 /// Walking Ballista (verified Oracle text, Scryfall): {X}{X} artifact creature.

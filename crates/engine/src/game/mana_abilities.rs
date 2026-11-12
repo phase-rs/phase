@@ -600,6 +600,22 @@ pub(super) fn resolve_mana_ability_excluding(
 }
 
 /// Find the `Effect::Mana` node within an ability's root or sub_ability chain.
+/// CR 608.2c: the instructions of a mana ability that precede its production,
+/// in written order — the chain cut just before its first `Effect::Mana` link.
+/// `None` when the production is the root (nothing precedes it).
+fn resolved_before_mana(ability: &ResolvedAbility) -> Option<ResolvedAbility> {
+    if matches!(ability.effect, Effect::Mana { .. }) {
+        return None;
+    }
+    let mut head = ability.clone();
+    head.sub_ability = ability
+        .sub_ability
+        .as_deref()
+        .and_then(resolved_before_mana)
+        .map(Box::new);
+    Some(head)
+}
+
 fn find_mana_effect(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
     let mut curr = Some(ability);
     while let Some(node) = curr {
@@ -3842,6 +3858,30 @@ fn finish_mana_ability_cost_payment(
     );
     super::triggers::collect_activation_event_at_boundary(state, events, activation_event)
         .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    // CR 605.3b + CR 608.2c: a mana ability whose production follows other
+    // instructions (Empowered Autogenerator's counter) performs them now, in
+    // written order, once its costs are paid — before the colour prompt and
+    // production read the state they change, and exactly once (the prompt's
+    // resume produces from the already-changed state).
+    if crate::types::ability::inline_mana_preamble(&ability_def).is_some() {
+        with_bound_mana_activation(
+            state,
+            pending.source_id,
+            pending.player,
+            &ability_def,
+            pending.chosen_x,
+            pending.cost_paid_object.clone(),
+            pending.announced_source_incarnation,
+            pending.cost_removed_counters,
+            |state, resolved| {
+                if let Some(preamble) = resolved_before_mana(resolved) {
+                    run_inline_mana_subresolution(state, |state| {
+                        let _ = super::effects::resolve_ability_chain(state, &preamble, events, 0);
+                    });
+                }
+            },
+        );
+    }
     if !resolves_automatically && pending.color_override.is_none() {
         // CR 605.3b + CR 608.2d: the colour choice this ability offers is sized
         // and gated by this activation's own paid count, under the same binding
@@ -3858,18 +3898,22 @@ fn finish_mana_ability_cost_payment(
             pending.announced_source_incarnation,
             pending.cost_removed_counters,
             |state, resolved_for_prompt| {
+                // The production node — the root for a plain mana ability, a
+                // later link when instructions precede the mana.
+                let production = find_mana_effect(resolved_for_prompt).unwrap_or(resolved_for_prompt);
                 mana_choice_prompt(
-                    &resolved_for_prompt.effect,
+                    &production.effect,
                     state,
                     source_id,
-                    Some(resolved_for_prompt),
-                    Some(resolved_for_prompt),
+                    Some(production),
+                    Some(production),
                 )
             },
         );
         if let Some(choice) = prompt {
             if matches!(choice, ManaChoicePrompt::SingleColor { .. })
                 && cost_resolves_without_choice(&ability_def.cost)
+                && crate::types::ability::inline_mana_preamble(&ability_def).is_none()
             {
                 pending.batch_siblings =
                     batch_eligible_siblings(state, pending.player, pending.source_id, &ability_def);
@@ -4768,15 +4812,16 @@ fn resolve_mana_ability_sub_chain(
     // A non-Mana root (Metalworker's `RevealHand`) has already had its
     // `Effect::Mana` sub-node consumed by `produce_mana_from_ability`; only the
     // tail after that node remains to resolve.
-    let sub = if !matches!(ability.effect, Effect::Mana { .. })
-        && matches!(sub.effect, Effect::Mana { .. })
-    {
-        match sub.sub_ability.as_deref() {
-            Some(tail) => tail,
-            None => return,
-        }
-    } else {
+    let sub = if matches!(ability.effect, Effect::Mana { .. }) {
         sub
+    } else {
+        match find_mana_effect(ability) {
+            Some(production) => match production.sub_ability.as_deref() {
+                Some(tail) => tail,
+                None => return,
+            },
+            None => sub,
+        }
     };
     // CR 605.3b + CR 608.2c: the sub-chain resolves as its own depth-0 chain,
     // whose prelude resets `last_effect_amount`; carry the head's cost-removed
