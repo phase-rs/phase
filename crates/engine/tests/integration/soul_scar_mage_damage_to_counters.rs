@@ -13,6 +13,7 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::ReplacementMode;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -185,6 +186,12 @@ fn damage_to_each_opponent_creature_is_replaced_per_creature() {
     scenario.add_creature_from_oracle(P0, "Soul-Scar Mage", 1, 2, SOUL_SCAR_ORACLE);
     let ogre = scenario.add_creature(P1, "Hill Ogre", 4, 4).id();
     let bear = scenario.add_creature(P1, "Bear", 3, 3).id();
+    // Supplemental synthetic mechanism fixture: the 2026-10-15 local MTGJSON search
+    // found no exact opponent-only two-damage/no-tail sweep. Scouring Sands is
+    // a sorcery with "Scouring Sands deals 1 damage to each creature your
+    // opponents control" plus scry 1. This keeps its recipient scope but changes
+    // one to two and omits scry, isolating two surviving recipients without
+    // damaging the Mage. Printed Vampires' Vengeance remains the tail witness.
     let sweep = scenario
         .add_spell_to_hand_from_oracle(
             P0,
@@ -214,6 +221,13 @@ fn trigger_damage_uses_replaced_amount_not_trigger_event_amount() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_creature_from_oracle(P0, "Soul-Scar Mage", 1, 2, SOUL_SCAR_ORACLE);
+    // Supplemental synthetic mechanism fixture, not a printed card: the local
+    // corpus search found no exact mandatory one-damage opponent-creature sweep
+    // on life gain. The nearest donor, Searing Meditation, is an enchantment:
+    // "Whenever you gain life, you may pay {2}. If you do, this enchantment
+    // deals 2 damage to any target." This 1/1 instead makes mandatory untargeted
+    // damage 1 distinguishable from the trigger's life-gain amount 3, without
+    // introducing payment/target prompts or damaging the Mage.
     scenario.add_creature_from_oracle(
         P0,
         "Lifelinked Pinger",
@@ -224,12 +238,18 @@ fn trigger_damage_uses_replaced_amount_not_trigger_event_amount() {
     );
     let ogre = scenario.add_creature(P1, "Hill Ogre", 4, 4).id();
     let heal = scenario
-        .add_spell_to_hand_from_oracle(P0, "Big Heal", true, "You gain 3 life.")
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Healing Salve",
+            true,
+            "Choose one —\n• Target player gains 3 life.\n• Prevent the next 3 damage \
+             that would be dealt to any target this turn.",
+        )
         .id();
 
     let mut runner = scenario.build();
     give_priority(&mut runner, P0);
-    runner.cast(heal).resolve();
+    runner.cast(heal).modes(&[0]).target_player(P0).resolve();
     runner.advance_until_stack_empty();
 
     let state = runner.state();
@@ -253,7 +273,17 @@ fn damage_cant_be_prevented_does_not_stop_the_substitution() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_creature_from_oracle(P0, "Soul-Scar Mage", 1, 2, SOUL_SCAR_ORACLE);
-    scenario.add_enchantment_from_oracle(P1, "No Mercy Field", "Damage can't be prevented.");
+    // Stage an existing Lynx, so its entry trigger does not fire. This row only
+    // casts Bolt at the Ogre: no life gain reaches its other static ability.
+    scenario.add_creature_from_oracle(
+        P1,
+        "Sunspine Lynx",
+        5,
+        4,
+        "Players can't gain life.\nDamage can't be prevented.\nWhen this creature enters, \
+         it deals damage to each player equal to the number of nonbasic lands that player \
+         controls.",
+    );
     let ogre = scenario.add_creature(P1, "Hill Ogre", 4, 4).id();
     let bolt = scenario.add_bolt_to_hand(P0);
     scenario.with_mana_pool(P0, red_mana());
@@ -273,6 +303,11 @@ fn damage_cant_be_prevented_does_not_stop_the_substitution() {
 /// exists for the prevention — the counters are put.
 #[test]
 fn affected_controller_orders_substitution_and_prevention() {
+    // Supplemental synthetic shield: Cho-Manno, Revolutionary is a legendary
+    // 2/2 Human Rebel with "Prevent all damage that would be dealt to Cho-Manno."
+    // Keep that self-shield grammar on a renamed 4/4 so the substitution's three
+    // counters remain observable; printed Cho-Manno would die. This is not a
+    // printed creature identity or a claim that no other printed shield exists.
     for (prevent_first, expected_counters) in [(true, 0u32), (false, 3u32)] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -404,6 +439,11 @@ fn counter_order_inside_the_substitution_is_asked_per_creature() {
     let vizier = scenario
         .add_creature_from_oracle(P1, "Vizier of Remedies", 2, 1, VIZIER)
         .id();
+    // Supplemental synthetic sorcery: the local corpus search found no exact
+    // opponent-only power-zero sweep. Vampires' Vengeance deals two damage to
+    // each non-Vampire and creates a Blood token; this narrower filter excludes
+    // the 2/1 Vizier and Mage, leaving exactly the two walls' ordering prompts
+    // without adding a token tail. The printed Vengeance witness is separate.
     let sweep = scenario
         .add_spell_to_hand_from_oracle(
             P0,
@@ -444,6 +484,9 @@ fn counter_order_inside_the_substitution_is_asked_per_creature() {
 /// (3 − 1) × 2 = 4.
 #[test]
 fn counter_order_after_choosing_the_substitution_is_still_asked() {
+    // Supplemental synthetic shield, using the Cho-Manno self-prevention donor
+    // disclosed above but a renamed 4/10 body. Four or five minus counters must
+    // remain observable after nested ordering; printed Cho-Manno's 2/2 dies.
     for (season_first, expected) in [(true, 5u32), (false, 4u32)] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -545,6 +588,13 @@ fn targeted_sources_each_ask_their_counter_order() {
 #[test]
 fn filtered_sources_each_ask_their_counter_order() {
     let (mut scenario, _bird3, _bird2, wall, season) = multi_source_board();
+    // Supplemental synthetic sorcery: the local corpus search found no exact
+    // Bird-filtered source sweep. Allies at Last is an instant with affinity
+    // for Allies and "Up to two target creatures you control each deal damage
+    // equal to their power to target creature an opponent controls." Its chosen
+    // sources exercise the separate targeted-source branch. Keeping these two
+    // Birds selected by a filter reaches EachSourceDealsDamage and distinguishes
+    // their powers 3 and 2 across the two required counter-order pauses.
     let spell = scenario
         .add_spell_to_hand_from_oracle(
             P0,
@@ -1015,7 +1065,6 @@ fn replacement_order_choice_runs_the_tail_once() {
 /// typed `ReplacementMode::Optional` boundary no current Oracle line of this
 /// class produces.
 fn make_replacements_optional(runner: &mut engine::game::scenario::GameRunner, id: ObjectId) {
-    use engine::types::ability::ReplacementMode;
     let optional = ReplacementMode::Optional { decline: None };
     let obj = runner
         .state_mut()

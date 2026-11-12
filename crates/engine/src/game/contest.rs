@@ -420,12 +420,14 @@ fn drive<R>(
         return (None, ContestStep::NotInContest);
     };
     let before = visible_signature(contest);
+    let before_contest = (**contest).clone();
     let output = input(contest);
     let terminal = matches!(
         contest.phase,
         ContestPhase::Resolving | ContestPhase::Completed | ContestPhase::Cancelled
     );
     let changed = visible_signature(contest) != before;
+    let moved = **contest != before_contest;
     if terminal {
         settle(state, events);
         publish_state(state);
@@ -434,6 +436,12 @@ fn drive<R>(
         publish_state(state);
         (Some(output), ContestStep::Updated)
     } else {
+        // A change the visible signature excludes (the clock, a contestant's activity, sequence
+        // or click count) is still a change of the delivered prompt: advance the revision, the
+        // clients' staleness key, without publishing a step.
+        if moved {
+            bump_state_revision(state);
+        }
         (Some(output), ContestStep::Unchanged)
     }
 }

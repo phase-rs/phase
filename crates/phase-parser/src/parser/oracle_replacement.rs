@@ -19355,6 +19355,9 @@ mod tests {
     /// creature that would have been dealt damage.
     #[test]
     fn damage_substitute_bare_pronoun_binds_the_object_recipient() {
+        // SHAPE: Soul-Scar Mage supplies the printed "that creature" control;
+        // replacing that anaphor with "it" is a synthetic grammar mutation,
+        // not a printed card or an additional runtime-support claim.
         let by_pronoun = damage_substitute_counter_target(
             "If a source you control would deal noncombat damage to a creature an \
              opponent controls, put that many -1/-1 counters on it instead.",
@@ -19375,6 +19378,10 @@ mod tests {
     /// putting the counters on the replacement's source.
     #[test]
     fn damage_substitute_bare_pronoun_with_player_recipient_binds_the_source() {
+        // SHAPE: synthetic pronoun mutations of Szadek, Lord of Secrets and
+        // Undead Alchemist. Szadek's printed self-name becomes "it"; the Zombie
+        // damage subject from Undead Alchemist is paired with an invented
+        // counter substitute to require fail-closed handling of that binding.
         assert_eq!(
             damage_substitute_counter_target(
                 "If Szadek would deal combat damage to a player, instead put that many \
@@ -19397,6 +19404,10 @@ mod tests {
     /// control so the negatives are not vacuous.
     #[test]
     fn damage_substitute_rejects_unsupported_links() {
+        // SHAPE: printed Soul-Scar Mage/Szadek controls precede deliberately
+        // unprinted mutations (fixed count, controller mill, player counters,
+        // optional substitution and discard tail). They discriminate the
+        // parser's supported-link boundary, not real-card gameplay failures.
         assert!(damage_substitute_counter_target(
             "If a source you control would deal noncombat damage to a creature an \
              opponent controls, put that many -1/-1 counters on that creature instead.",

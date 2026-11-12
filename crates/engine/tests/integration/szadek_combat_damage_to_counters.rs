@@ -11,7 +11,7 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{ReplacementMode, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -190,11 +190,9 @@ fn counter_modifier_does_not_change_mill_amount() {
     let szadek = scenario
         .add_creature_from_oracle(P0, SZADEK_NAME, 5, 5, SZADEK_ORACLE)
         .id();
-    scenario.add_creature_from_oracle(
+    scenario.add_enchantment_from_oracle(
         P0,
-        "Hardened Scales Bearer",
-        0,
-        1,
+        "Hardened Scales",
         "If one or more +1/+1 counters would be put on a creature you control, that many \
          plus one +1/+1 counters are put on it instead.",
     );
@@ -222,8 +220,9 @@ fn mill_amount_holds_when_no_counter_can_be_put() {
         .id();
     scenario.add_enchantment_from_oracle(
         P1,
-        "Counter Ban",
-        "Counters can't be put on artifacts, creatures, enchantments, or lands.",
+        "Solemnity",
+        "Players can't get counters.\nCounters can't be put on artifacts, creatures, \
+         enchantments, or lands.",
     );
     scenario.with_library_top(P1, &["C1", "C2", "C3", "C4", "C5", "C6", "C7"]);
 
@@ -284,7 +283,9 @@ fn two_szadeks_in_one_damage_batch_are_each_replaced() {
 
 const FURNACE_ORACLE: &str = "If a source would deal damage to a permanent or player, it \
 deals double that damage to that permanent or player instead.";
-const COMBAT_WARD_ORACLE: &str = "Prevent all combat damage that would be dealt to you.";
+const SOLITARY_CONFINEMENT_ORACLE: &str = "At the beginning of your upkeep, sacrifice this \
+enchantment unless you discard a card.\nSkip your draw step.\nYou have shroud. (You can't be \
+the target of spells or abilities.)\nPrevent all damage that would be dealt to you.";
 const HARDENED_SCALES_ORACLE: &str = "If one or more +1/+1 counters would be put on a \
 creature you control, that many plus one +1/+1 counters are put on it instead.";
 const DOUBLING_SEASON_ORACLE: &str = "If an effect would create one or more tokens under \
@@ -505,9 +506,9 @@ fn defender_orders_szadek_first_five_counters_and_mill_five() {
     assert_eq!(runner.state().players[1].life, 16);
 }
 
-/// CR 616.1 + CR 615: against "Prevent all combat damage that would be dealt
-/// to you" the defending player orders the two. Prevention first: nothing is
-/// dealt and nothing is substituted. Substitution first: five counters, mill
+/// CR 616.1 + CR 615: against Solitary Confinement's "Prevent all damage that
+/// would be dealt to you" the defending player orders the two. Prevention
+/// first: nothing is dealt and nothing is substituted. Substitution first: five counters, mill
 /// five, and the prevention has no damage left to prevent.
 #[test]
 fn defender_orders_prevention_and_substitution_both_ways() {
@@ -517,8 +518,10 @@ fn defender_orders_prevention_and_substitution_both_ways() {
         let szadek = scenario
             .add_creature_from_oracle(P0, SZADEK_NAME, 5, 5, SZADEK_ORACLE)
             .id();
+        // Only combat advances, stopping before upkeep/draw; no spell or
+        // ability targets P1, so the full card's other abilities are idle.
         let ward = scenario
-            .add_enchantment_from_oracle(P1, "Combat Ward", COMBAT_WARD_ORACLE)
+            .add_enchantment_from_oracle(P1, "Solitary Confinement", SOLITARY_CONFINEMENT_ORACLE)
             .id();
         with_p1_library(&mut scenario, 7);
         let mut runner = scenario.build();
@@ -783,7 +786,13 @@ fn departed_seat_gains_no_life_from_a_batch_parked_in_its_replacement_pass() {
             builder.with_keyword(engine::types::keywords::Keyword::Lifelink);
             builder.id()
         };
-        scenario.add_enchantment_from_oracle(P1, "Combat Ward", COMBAT_WARD_ORACLE);
+        // This row ends in combat, before upkeep/draw, and never targets P1
+        // with a spell or ability. All proposed damage to P1 is combat damage.
+        scenario.add_enchantment_from_oracle(
+            P1,
+            "Solitary Confinement",
+            SOLITARY_CONFINEMENT_ORACLE,
+        );
         with_p1_library(&mut scenario, 7);
         let mut runner = scenario.build();
         runner.advance_to_combat();
@@ -882,7 +891,7 @@ fn surviving_event_ordered_by_defender_keeps_combat_bookkeeping() {
             builder.id()
         };
         let torbran = scenario
-            .add_creature_from_oracle(P0, "Torbran Stand-In", 6, 4, TORBRAN_ORACLE)
+            .add_creature_from_oracle(P0, "Torbran, Thane of Red Fell", 2, 4, TORBRAN_ORACLE)
             .id();
         let furnace = scenario
             .add_enchantment_from_oracle(P1, "Furnace of Rath", FURNACE_ORACLE)
@@ -924,7 +933,6 @@ fn surviving_event_ordered_by_defender_keeps_combat_bookkeeping() {
 /// nothing is substituted.
 #[test]
 fn optional_substitution_accept_performs_counters_and_mill_decline_deals_damage() {
-    use engine::types::ability::ReplacementMode;
     for accept in [true, false] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
