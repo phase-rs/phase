@@ -32526,7 +32526,8 @@ fn apply_anchor_subject(
         // anchor there both draws for the wrong player and surfaces a second
         // target slot.
         Effect::Draw { target, .. }
-            if draw_inherits_anchor
+            if !owner_anchor
+                && draw_inherits_anchor
                 && matches!(
                     *target,
                     TargetFilter::Controller

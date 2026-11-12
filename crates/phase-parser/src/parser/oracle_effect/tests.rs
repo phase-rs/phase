@@ -47061,6 +47061,26 @@ fn owner_anchor_does_not_leak_into_following_search_or_shuffle() {
     assert!(checked > 0, "reach guard: the search/shuffle parsed");
 }
 
+/// CR 608.2c + CR 121.1: a source-owner anchor is not a resolvable Draw actor
+/// in this PR. The shared anchor applier must leave a subjectless Draw on its
+/// controller; only RevealUntil resolves Owner (through the live-or-LKI seam).
+#[test]
+fn owner_anchor_does_not_bind_a_draw_continuation() {
+    let mut draw = Effect::Draw {
+        count: QuantityExpr::Fixed { value: 1 },
+        target: TargetFilter::Controller,
+    };
+    super::apply_anchor_subject(&mut draw, &TargetFilter::Owner, true, false);
+    assert_eq!(
+        draw,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+        "the owner anchor must not reach Draw's unresolvable Owner reference"
+    );
+}
+
 /// CR 109.5 + CR 608.2c: a subjectless conjugated continuation can inherit a
 /// prior actor, but an explicit "your library" possession must survive that
 /// carry. Pair it with "their library" in the same conjugated fixture.
