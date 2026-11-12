@@ -450,7 +450,9 @@ error, and an `Error` it receives answers only its own request. A close, an
 `Error` refusal, an abort or the bound (`SETUP_CONFIRMATION_TIMEOUT_MS`, counted
 from the write) retires both sockets and settles the incumbent's work; the
 bound defers once to a decode already in flight, whose own deadline then
-decides. A draft `DraftActionRejected` adopts the candidate instead, as before:
+decides (a game reconnect can decode its bootstrap Full inside the interval; a
+draft reattach is answered by a plain frame first, so this server never puts a
+decode there). A draft `DraftActionRejected` adopts the candidate instead, as before:
 the server sends it both for refusals and after it has already moved the seat
 to the candidate, so the rejection replays there and rejects the reattach. A
 candidate's terminal codec failure moves the sticky snapshot-only policy: the

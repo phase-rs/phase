@@ -40,7 +40,10 @@ import { frameType } from "./stateCodecSocket";
  * defers once to that decode, whose own deadline (the same value, counted from
  * the decode call) bounds the wait, so the decoder's verdict settles the
  * interval: a delivered bootstrap confirms, and a terminal `decodeFailure`
- * closes the candidate with its failure recorded for the episode.
+ * closes the candidate with its failure recorded for the episode. A game
+ * reconnect can decode its bootstrap `Full` inside the interval; a draft
+ * reattach is answered by a plain frame first (`DraftMatchStart`,
+ * `DraftStateUpdate`), so with this server no decode is in flight there.
  */
 export const SETUP_CONFIRMATION_TIMEOUT_MS = STATE_CODEC_DECODE_TIMEOUT_MS;
 
