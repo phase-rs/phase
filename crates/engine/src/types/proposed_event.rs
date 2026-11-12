@@ -909,8 +909,8 @@ impl EntryChoices {
 /// CR 611.2e + CR 614.12: the continuous effect that an "is/has" instruction of the
 /// resolution putting this permanent onto the battlefield applies simultaneously with the
 /// entry: that instruction's source and controller, and the modifications it applies to the
-/// entrant (types and subtypes, colors, base power/toughness, abilities; CR 613.1d/e/f,
-/// CR 613.4b), in written order. Carried on the proposal so every replacement pass and
+/// entrant in written order, such as types and subtypes, colors, base power/toughness and
+/// abilities (CR 613.1d/e/f, CR 613.4b). Carried on the proposal so every replacement pass and
 /// CR 616.1 pause sees the entrant as it would exist on the battlefield. It is a description
 /// only: the rider instruction installs the real effect when it is followed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
