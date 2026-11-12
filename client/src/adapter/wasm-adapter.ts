@@ -16,6 +16,7 @@ import type {
   FormatConfig,
   GameAction,
   GameEvent,
+  GameLogEntry,
   GameState,
   LegalActionsResult,
   LlmDecisionRequestResult,
@@ -607,9 +608,9 @@ export class WasmAdapter
         ? await this.engine.submitInteraction(actor, submission, atMs)
         : await this.fallback!.submitInteraction(submission, actor, atMs);
       this.invalidateAiDecisionDiagnostics();
-      if ("is_saying" in outcome) {
-        const interactionOutcome = outcome as { status: "applied" | "rejected"; result?: { events?: GameEvent[]; log_entries?: GameLogEntry[] }; is_saying?: boolean; rejection?: unknown };
-        if (interactionOutcome.status === "applied") {
+      if (outcome && typeof outcome === "object" && "status" in outcome) {
+        const interactionOutcome = outcome as { status: "Applied" | "Rejected"; result?: { events?: GameEvent[]; log_entries?: GameLogEntry[] }; is_saying?: boolean; rejection?: unknown };
+        if (interactionOutcome.status === "Applied") {
           return {
             events: interactionOutcome.result?.events ?? [],
             log_entries: interactionOutcome.result?.log_entries ?? [],
