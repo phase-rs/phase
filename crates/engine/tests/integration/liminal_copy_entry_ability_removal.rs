@@ -23,9 +23,9 @@ use std::collections::BTreeMap;
 use crate::support::shared_card_db;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{ChosenAttribute, Effect};
+use engine::types::ability::{ChosenAttribute, Effect, TargetRef};
 use engine::types::actions::GameAction;
-use engine::types::card_type::CoreType;
+use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -33,6 +33,7 @@ use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::proposed_event::ProposedEvent;
 use engine::types::resolution::ResolutionFrame;
 use engine::types::zones::Zone;
 
@@ -56,12 +57,26 @@ const GEMSTONE_MINE: &str = "This land enters with three mining counters on it.\
 const PARALLEL_LIVES: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.";
 const CASE_OF_THE_PILFERED_PROOF: &str = "Whenever a Detective you control enters or is turned face up, put a +1/+1 counter on it.\nTo solve \u{2014} You control three or more Detectives. (If unsolved, solve at the beginning of your end step.)\nSolved \u{2014} If one or more tokens would be created under your control, those tokens plus a Clue token are created instead. (It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")";
 const HALVING_SEASON: &str = "If an opponent would create one or more tokens, they create half that many of each of those kinds of tokens instead, rounded down.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
+const QUICKSILVER_GARGANTUAN: &str = "You may have this creature enter as a copy of any creature on the battlefield, except it's 7/7.";
+const SPARK_DOUBLE: &str = "You may have this creature enter as a copy of a creature or planeswalker you control, except it enters with an additional +1/+1 counter on it if it's a creature, it enters with an additional loyalty counter on it if it's a planeswalker, and it isn't legendary.";
+const CLONE: &str =
+    "You may have this creature enter as a copy of any creature on the battlefield.";
+const HARDENED_SCALES: &str = "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.";
+const BRANCHING_EVOLUTION: &str = "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on that creature instead.";
+const MINION_OF_THE_WASTES: &str = "Trample\nAs this creature enters, pay any amount of life.\nMinion of the Wastes's power and toughness are each equal to the life paid as it entered.";
+const SQUAD_CAPTAIN: &str = "Vigilance (Attacking doesn't cause this creature to tap.)\nThis creature enters with a +1/+1 counter on it for each other creature you control.";
+/// Grizzly Bears has no rules text.
+const GRIZZLY_BEARS: &str = "";
 
 const MARGLE_NAME: &str = "Margle, Cousin of Yargle";
 const TRISKELION_NAME: &str = "Triskelion";
 const VOICE_NAME: &str = "Voice of All";
 const THRONE_NAME: &str = "Roaming Throne";
 const GEMSTONE_NAME: &str = "Gemstone Mine";
+const GARGANTUAN_NAME: &str = "Quicksilver Gargantuan";
+const MINION_NAME: &str = "Minion of the Wastes";
+const SQUAD_CAPTAIN_NAME: &str = "Squad Captain";
+const BEARS_NAME: &str = "Grizzly Bears";
 
 /// A copied permanent: name, Oracle text, printed power and toughness.
 #[derive(Clone, Copy)]
@@ -95,6 +110,25 @@ const THRONE_DONOR: Donor = Donor {
     oracle: ROAMING_THRONE,
     power: 4,
     toughness: 4,
+};
+
+const GARGANTUAN_DONOR: Donor = Donor {
+    name: GARGANTUAN_NAME,
+    oracle: QUICKSILVER_GARGANTUAN,
+    power: 7,
+    toughness: 7,
+};
+const SPARK_DOUBLE_DONOR: Donor = Donor {
+    name: "Spark Double",
+    oracle: SPARK_DOUBLE,
+    power: 0,
+    toughness: 0,
+};
+const BEARS_DONOR: Donor = Donor {
+    name: BEARS_NAME,
+    oracle: GRIZZLY_BEARS,
+    power: 2,
+    toughness: 2,
 };
 
 /// A resident ability remover, placed before the copy is made.
@@ -250,8 +284,66 @@ fn assert_settled(runner: &GameRunner, row: &str) {
 enum Prompt {
     /// An as-enters `NamedChoice`, and the player it went to.
     Named { player: PlayerId },
-    /// A CR 616.1 replacement-order choice.
+    /// A CR 616.1 replacement-order choice, or an optional replacement's offer.
     Replacement,
+    /// A `CopyTargetChoice`: the player choosing, and each legal donor in prompt order.
+    CopyTarget {
+        player: PlayerId,
+        valid: Vec<CopyPick>,
+    },
+    /// An as-enters life payment (`PayAmountChoice`): its payer and range.
+    PayAmount {
+        player: PlayerId,
+        min: u32,
+        max: u32,
+    },
+}
+
+/// A copy donor, as a `CopyTargetChoice` offers it and as a row picks it.
+#[derive(Clone, Debug, PartialEq)]
+struct CopyPick {
+    name: String,
+    controller: PlayerId,
+    token: bool,
+}
+
+impl CopyPick {
+    fn card(name: &str, controller: PlayerId) -> Self {
+        Self {
+            name: name.to_string(),
+            controller,
+            token: false,
+        }
+    }
+
+    fn token(name: &str, controller: PlayerId) -> Self {
+        Self {
+            name: name.to_string(),
+            controller,
+            token: true,
+        }
+    }
+
+    fn of(runner: &GameRunner, id: ObjectId) -> Self {
+        let obj = &runner.state().objects[&id];
+        Self {
+            name: obj.name.clone(),
+            controller: obj.controller,
+            token: obj.is_token,
+        }
+    }
+}
+
+/// How a driven row answers the prompts that take a pick. Anything unscripted takes the
+/// first option (an optional copy offer: accept).
+#[derive(Clone, Default)]
+struct Script {
+    /// Each `CopyTargetChoice`, in turn, picks this donor.
+    copy_targets: Vec<CopyPick>,
+    /// Each `PayAmountChoice`, in turn, pays this much life.
+    pays: Vec<u32>,
+    /// A CR 616.1 order prompt applies this source's replacement first when it offers one.
+    first: Option<&'static str>,
 }
 
 /// How a row carries its pauses: in memory, or through the save/restore wire.
@@ -336,16 +428,19 @@ fn parked_created_ids(runner: &GameRunner) -> Option<Vec<ObjectId>> {
 /// Passes priority and answers every prompt (first option / first replacement) until the
 /// game settles. `observe` sees the state at each prompt, before it is answered.
 fn drive(runner: &mut GameRunner, observe: impl FnMut(&GameRunner, &Prompt)) -> Vec<Prompt> {
-    drive_carried(runner, PauseCarry::Live, observe).prompts
+    drive_carried(runner, PauseCarry::Live, &Script::default(), observe).prompts
 }
 
-/// [`drive`], carrying each prompt per `carry` before it is observed and answered. The
-/// final priority pass is never carried.
+/// [`drive`], carrying each prompt per `carry` before it is observed and answered, and
+/// answering the prompts `script` names. The final priority pass is never carried.
 fn drive_carried(
     runner: &mut GameRunner,
     carry: PauseCarry,
+    script: &Script,
     mut observe: impl FnMut(&GameRunner, &Prompt),
 ) -> Answered {
+    let mut copy_picks = script.copy_targets.iter().cloned();
+    let mut pays = script.pays.iter().copied();
     let mut answered = Answered {
         prompts: Vec::new(),
         parked_created_ids: Vec::new(),
@@ -353,7 +448,10 @@ fn drive_carried(
     for _ in 0..64 {
         if matches!(
             runner.state().waiting_for,
-            WaitingFor::NamedChoice { .. } | WaitingFor::ReplacementChoice { .. }
+            WaitingFor::NamedChoice { .. }
+                | WaitingFor::ReplacementChoice { .. }
+                | WaitingFor::CopyTargetChoice { .. }
+                | WaitingFor::PayAmountChoice { .. }
         ) {
             carry_pause(runner, carry);
         }
@@ -368,10 +466,65 @@ fn drive_carried(
                 },
                 Some(Prompt::Named { player: *player }),
             ),
-            WaitingFor::ReplacementChoice { .. } => (
-                GameAction::ChooseReplacement { index: 0 },
-                Some(Prompt::Replacement),
-            ),
+            WaitingFor::ReplacementChoice { candidates, .. } => {
+                let index = script
+                    .first
+                    .and_then(|first| {
+                        candidates
+                            .iter()
+                            .position(|candidate| candidate.source_name == first)
+                    })
+                    .unwrap_or(0);
+                (
+                    GameAction::ChooseReplacement { index },
+                    Some(Prompt::Replacement),
+                )
+            }
+            WaitingFor::CopyTargetChoice {
+                player,
+                valid_targets,
+                ..
+            } => {
+                let valid: Vec<CopyPick> = valid_targets
+                    .iter()
+                    .map(|id| CopyPick::of(runner, *id))
+                    .collect();
+                let pick = copy_picks
+                    .next()
+                    .unwrap_or_else(|| panic!("an unscripted CopyTargetChoice offering {valid:?}"));
+                let target = valid_targets
+                    .iter()
+                    .zip(&valid)
+                    .find(|(_, donor)| **donor == pick)
+                    .map(|(id, _)| *id)
+                    .unwrap_or_else(|| {
+                        panic!("REACH-GUARD: the copy choice offers {pick:?}, got {valid:?}")
+                    });
+                (
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    },
+                    Some(Prompt::CopyTarget {
+                        player: *player,
+                        valid,
+                    }),
+                )
+            }
+            WaitingFor::PayAmountChoice {
+                player, min, max, ..
+            } => {
+                let amount = pays
+                    .next()
+                    .unwrap_or_else(|| panic!("an unscripted PayAmountChoice"));
+                (
+                    GameAction::SubmitPayAmount { amount },
+                    Some(Prompt::PayAmount {
+                        player: *player,
+                        min: *min,
+                        max: *max,
+                    }),
+                )
+            }
             _ => panic!("unexpected prompt {}", runner.waiting_for_kind()),
         };
         if let Some(prompt) = prompt {
@@ -452,7 +605,7 @@ fn named_prompts(prompts: &[Prompt]) -> Vec<PlayerId> {
         .iter()
         .filter_map(|prompt| match prompt {
             Prompt::Named { player } => Some(*player),
-            Prompt::Replacement => None,
+            Prompt::Replacement | Prompt::CopyTarget { .. } | Prompt::PayAmount { .. } => None,
         })
         .collect()
 }
@@ -751,15 +904,25 @@ fn clone_legion(
     extra: impl FnOnce(&mut GameScenario),
     observe: impl FnMut(&GameRunner, &Prompt),
 ) -> (GameRunner, Vec<Prompt>) {
-    let (runner, answered) = clone_legion_carried(donors, extra, PauseCarry::Live, observe);
+    let (runner, answered) = clone_legion_carried(
+        donors,
+        extra,
+        |_| {},
+        PauseCarry::Live,
+        &Script::default(),
+        observe,
+    );
     (runner, answered.prompts)
 }
 
-/// [`clone_legion`], carrying each prompt per `carry`.
+/// [`clone_legion`], after `before` has run on the built game, carrying each prompt per
+/// `carry` and answering per `script`.
 fn clone_legion_carried(
     donors: &[Donor],
     extra: impl FnOnce(&mut GameScenario),
+    before: impl FnOnce(&mut GameRunner),
     carry: PauseCarry,
+    script: &Script,
     observe: impl FnMut(&GameRunner, &Prompt),
 ) -> (GameRunner, Answered) {
     let mut scenario = board();
@@ -769,8 +932,9 @@ fn clone_legion_carried(
     }
     let spell = free_spell(&mut scenario, "Clone Legion", false, CLONE_LEGION);
     let mut runner = scenario.build();
+    before(&mut runner);
     runner.cast(spell).target_player(P1).commit();
-    let answered = drive_carried(&mut runner, carry, observe);
+    let answered = drive_carried(&mut runner, carry, script, observe);
     (runner, answered)
 }
 
@@ -864,7 +1028,9 @@ fn clone_legion_choice_after_a_pause(carry: PauseCarry) -> RowOutcome {
     let (runner, answered) = clone_legion_carried(
         &[MARGLE_DONOR, VOICE_DONOR, VOICE_DONOR],
         |_| {},
+        |_| {},
         carry,
+        &Script::default(),
         |runner, _| margle_at_prompt.push(battlefield_tokens(runner, MARGLE_NAME).len()),
     );
     assert_eq!(
@@ -906,7 +1072,9 @@ fn clone_legion_doubled_batches(carry: PauseCarry) -> RowOutcome {
         |scenario| {
             scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
         },
+        |_| {},
         carry,
+        &Script::default(),
         |runner, _| margles_at_prompt.push(battlefield_tokens(runner, MARGLE_NAME)),
     );
     assert_eq!(
@@ -958,7 +1126,9 @@ fn clone_legion_non_liminal_batch_after_a_liminal_pause(carry: PauseCarry) -> Ro
     let (runner, answered) = clone_legion_carried(
         &[MARGLE_DONOR, VOICE_DONOR, TRISKELION_DONOR],
         |_| {},
+        |_| {},
         carry,
+        &Script::default(),
         |runner, _| margle_at_prompt.push(battlefield_tokens(runner, MARGLE_NAME).len()),
     );
     assert_eq!(
@@ -1082,18 +1252,27 @@ fn clone_legion_compound_event_delivery(carry: PauseCarry) -> RowOutcome {
     // (CopyToken owner on top, Margle copies, Clues) at each replacement-order prompt.
     let mut replacement_prompts = Vec::new();
     let mut margle_at_named = Vec::new();
-    let answered = drive_carried(&mut runner, carry, |runner, prompt| match prompt {
-        Prompt::Replacement => replacement_prompts.push((
-            runner
-                .state()
-                .resolution_stack
-                .active_copy_token()
-                .is_some(),
-            battlefield_tokens(runner, MARGLE_NAME).len(),
-            battlefield_tokens(runner, "Clue").len(),
-        )),
-        Prompt::Named { .. } => margle_at_named.push(battlefield_tokens(runner, MARGLE_NAME).len()),
-    });
+    let answered =
+        drive_carried(
+            &mut runner,
+            carry,
+            &Script::default(),
+            |runner, prompt| match prompt {
+                Prompt::Replacement => replacement_prompts.push((
+                    runner
+                        .state()
+                        .resolution_stack
+                        .active_copy_token()
+                        .is_some(),
+                    battlefield_tokens(runner, MARGLE_NAME).len(),
+                    battlefield_tokens(runner, "Clue").len(),
+                )),
+                Prompt::Named { .. } => {
+                    margle_at_named.push(battlefield_tokens(runner, MARGLE_NAME).len())
+                }
+                Prompt::CopyTarget { .. } | Prompt::PayAmount { .. } => {}
+            },
+        );
     assert_eq!(
         named_prompts(&answered.prompts),
         vec![P0],
@@ -1127,4 +1306,875 @@ fn clone_legion_compound_event_delivery(carry: PauseCarry) -> RowOutcome {
         .iter()
         .all(|frame| !matches!(frame, ResolutionFrame::CopyToken(_))));
     row_outcome(&runner, answered)
+}
+
+// ---------------------------------------------------------------------------------------
+// A second copy choice inside a copy-token batch (maintainer review 1 on #10767).
+//
+// - Quicksilver Gargantuan: "You may have this creature enter as a copy of any creature on
+//   the battlefield, except it's 7/7." Ruling 2011-01-01: "Any 'as [this creature] enters'
+//   or '[this creature] enters with' abilities of the chosen creature will also work." and
+//   "If Quicksilver Gargantuan somehow enters at the same time as another creature ..., it
+//   can't become a copy of that creature. You may choose only a creature that's already on
+//   the battlefield."
+// - CR 707.5: an object that enters "as a copy" becomes a copy as it enters, and copied
+//   "enters with" / "as enters" abilities take effect. CR 614.12: whether they apply is read
+//   on the permanent as it would exist on the battlefield, where the tokens entering in the
+//   same event (Clone Legion ruling 2015-02-25) don't exist yet.
+// ---------------------------------------------------------------------------------------
+
+/// The kind of each answered prompt, in order.
+fn prompt_kinds(prompts: &[Prompt]) -> Vec<&'static str> {
+    prompts
+        .iter()
+        .map(|prompt| match prompt {
+            Prompt::Named { .. } => "Named",
+            Prompt::Replacement => "Replacement",
+            Prompt::CopyTarget { .. } => "CopyTarget",
+            Prompt::PayAmount { .. } => "PayAmount",
+        })
+        .collect()
+}
+
+/// The donors each `CopyTargetChoice` offered, in order. REACH-GUARD: each went to P0.
+fn copy_offers(prompts: &[Prompt]) -> Vec<&[CopyPick]> {
+    prompts
+        .iter()
+        .filter_map(|prompt| match prompt {
+            Prompt::CopyTarget { player, valid } => {
+                assert_eq!(*player, P0, "REACH-GUARD: P0 makes the copy choice");
+                Some(valid.as_slice())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The source names a CR 616.1 order prompt (or a copy offer) offers, sorted.
+fn replacement_sources(runner: &GameRunner) -> Vec<String> {
+    let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = candidates
+        .iter()
+        .map(|candidate| candidate.source_name.clone())
+        .collect();
+    names.sort();
+    names
+}
+
+/// REACH-GUARD: P0's token named `name`, created by an earlier batch of the resolution, is
+/// on the battlefield and phased in, and the parked CopyToken owner lists it.
+fn assert_co_entrant_parked(runner: &GameRunner, name: &str, row: &str) -> ObjectId {
+    let id = the_token(runner, name);
+    let obj = &runner.state().objects[&id];
+    assert!(
+        obj.is_phased_in_permanent() && obj.controller == P0,
+        "REACH-GUARD {row}: the {name} copy is P0's, on the battlefield, phased in"
+    );
+    let parked = parked_created_ids(runner).unwrap_or_default();
+    assert!(
+        parked.contains(&id),
+        "REACH-GUARD {row}: the parked CopyToken owner lists the {name} copy, got {parked:?}"
+    );
+    id
+}
+
+/// [`clone_legion_carried`] for a row whose first donor's copy, `co_entrant`, co-enters
+/// with the later batches: it is asserted at every prompt by [`assert_co_entrant_parked`].
+/// `observe` sees each prompt afterwards.
+fn clone_legion_beside(
+    co_entrant: &str,
+    donors: &[Donor],
+    extra: impl FnOnce(&mut GameScenario),
+    before: impl FnOnce(&mut GameRunner),
+    carry: PauseCarry,
+    script: &Script,
+    mut observe: impl FnMut(&GameRunner, &Prompt),
+) -> (GameRunner, Answered) {
+    clone_legion_carried(donors, extra, before, carry, script, |runner, prompt| {
+        assert_co_entrant_parked(runner, co_entrant, "co-entrant");
+        observe(runner, prompt);
+    })
+}
+
+/// G1: Clone Legion over P1's [Margle, Quicksilver Gargantuan]. The Gargantuan copy
+/// accepts its copy offer and copies P0's Triskelion. The Margle copy co-enters, so the
+/// copied "enters with three +1/+1 counters" applies (CR 614.12 + CR 707.5), and the
+/// Margle copy isn't a legal donor (Quicksilver Gargantuan ruling 2011-01-01).
+#[test]
+fn clone_legion_gargantuan_copy_of_triskelion_keeps_its_counters_beside_a_co_entering_margle_copy()
+{
+    gargantuan_copy_of_triskelion_beside_margle(PauseCarry::Live);
+}
+
+/// G1 saved and restored at the copy offer and the copy choice: the co-entrant board is
+/// rebuilt from the parked owner and the batch ledger, both serialized.
+#[test]
+fn clone_legion_gargantuan_copy_of_triskelion_keeps_its_counters_beside_a_co_entering_margle_copy_across_save_and_restore(
+) {
+    assert_restored_row_matches_live(gargantuan_copy_of_triskelion_beside_margle, "G1");
+}
+
+fn gargantuan_copy_of_triskelion_beside_margle(carry: PauseCarry) -> RowOutcome {
+    let (runner, answered) = clone_legion_beside(
+        MARGLE_NAME,
+        &[MARGLE_DONOR, GARGANTUAN_DONOR],
+        |scenario| {
+            add_donor(scenario, P0, TRISKELION_DONOR);
+        },
+        |_| {},
+        carry,
+        &Script {
+            copy_targets: vec![CopyPick::card(TRISKELION_NAME, P0)],
+            ..Script::default()
+        },
+        |_, _| {},
+    );
+    assert_eq!(
+        prompt_kinds(&answered.prompts),
+        vec!["Replacement", "CopyTarget"],
+        "REACH-GUARD G1: the copy offer, then the copy choice"
+    );
+    let offers = copy_offers(&answered.prompts);
+    assert!(
+        !offers[0].contains(&CopyPick::token(MARGLE_NAME, P0)),
+        "G1: the co-entering Margle copy is not a legal donor, got {:?}",
+        offers[0]
+    );
+    assert_settled(&runner, "G1");
+    let copy = the_token(&runner, TRISKELION_NAME);
+    assert!(
+        runner.state().objects[&copy]
+            .replacement_definitions
+            .is_empty(),
+        "REACH-GUARD G1: the Margle copy strips the Gargantuan copy once both are there"
+    );
+    assert_eq!(plus_counters(&runner, copy), 3, "G1: the copied counters");
+    assert_eq!(
+        power_toughness(&runner, copy),
+        (Some(12), Some(12)),
+        "G1: 7/7 (CR 707.9b) + three counters + Margle's +2/+2"
+    );
+    row_outcome(&runner, answered)
+}
+
+/// G2: as G1, but the Gargantuan copy copies P0's Voice of All: its copied "as enters,
+/// choose a color" is offered and latched.
+#[test]
+fn clone_legion_gargantuan_copy_of_voice_chooses_beside_a_co_entering_margle_copy() {
+    gargantuan_copy_of_voice_beside_margle(PauseCarry::Live);
+}
+
+/// G2 saved and restored at the copy offer, the copy choice and the color choice.
+#[test]
+fn clone_legion_gargantuan_copy_of_voice_chooses_beside_a_co_entering_margle_copy_across_save_and_restore(
+) {
+    assert_restored_row_matches_live(gargantuan_copy_of_voice_beside_margle, "G2");
+}
+
+fn gargantuan_copy_of_voice_beside_margle(carry: PauseCarry) -> RowOutcome {
+    let (runner, answered) = clone_legion_beside(
+        MARGLE_NAME,
+        &[MARGLE_DONOR, GARGANTUAN_DONOR],
+        |scenario| {
+            add_donor(scenario, P0, VOICE_DONOR);
+        },
+        |_| {},
+        carry,
+        &Script {
+            copy_targets: vec![CopyPick::card(VOICE_NAME, P0)],
+            ..Script::default()
+        },
+        |_, _| {},
+    );
+    assert_eq!(
+        prompt_kinds(&answered.prompts),
+        vec!["Replacement", "CopyTarget", "Named"],
+        "G2: the copied color choice follows the copy choice"
+    );
+    assert_eq!(named_prompts(&answered.prompts), vec![P0]);
+    let offers = copy_offers(&answered.prompts);
+    assert!(
+        !offers[0].contains(&CopyPick::token(MARGLE_NAME, P0)),
+        "G2: the co-entering Margle copy is not a legal donor, got {:?}",
+        offers[0]
+    );
+    assert_settled(&runner, "G2");
+    let copy = the_token(&runner, VOICE_NAME);
+    assert!(has_color_choice(&runner, copy), "G2: the color is latched");
+    assert_eq!(power_toughness(&runner, copy), (Some(9), Some(9)));
+    row_outcome(&runner, answered)
+}
+
+/// G3: P0's Parallel Lives doubles Stolen Identity's copy of P1's Quicksilver Gargantuan.
+/// Copy #1 copies P1's Margle; copy #2 copies P0's Triskelion. #1 co-enters with #2, so
+/// #2's copied counters apply and #1 isn't a legal donor for #2.
+#[test]
+fn doubled_gargantuan_copy_keeps_its_counters_beside_its_co_entering_margle_twin() {
+    let mut scenario = board();
+    scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+    add_donor(&mut scenario, P1, MARGLE_DONOR);
+    let gargantuan = add_donor(&mut scenario, P1, GARGANTUAN_DONOR);
+    add_donor(&mut scenario, P0, TRISKELION_DONOR);
+    let spell = free_spell(&mut scenario, "Stolen Identity", false, STOLEN_IDENTITY);
+    let mut runner = scenario.build();
+    runner.cast(spell).target_object(gargantuan).commit();
+    let mut at_second_choice = None;
+    let mut copy_choices = 0;
+    let answered = drive_carried(
+        &mut runner,
+        PauseCarry::Live,
+        &Script {
+            copy_targets: vec![
+                CopyPick::card(MARGLE_NAME, P1),
+                CopyPick::card(TRISKELION_NAME, P0),
+            ],
+            ..Script::default()
+        },
+        |runner, prompt| {
+            if let Prompt::CopyTarget { .. } = prompt {
+                copy_choices += 1;
+                if copy_choices == 2 {
+                    let twin = the_token(runner, MARGLE_NAME);
+                    assert!(
+                        runner.state().objects[&twin].is_phased_in_permanent(),
+                        "REACH-GUARD G3: copy #1 is on the battlefield at #2's copy choice"
+                    );
+                    at_second_choice = Some((
+                        twin,
+                        parked_created_ids(runner),
+                        runner.state().last_created_token_ids.clone(),
+                    ));
+                }
+            }
+        },
+    );
+    assert_eq!(
+        prompt_kinds(&answered.prompts),
+        vec!["Replacement", "CopyTarget", "Replacement", "CopyTarget"],
+        "REACH-GUARD G3: Parallel Lives doubled the Gargantuan copy"
+    );
+    let (twin, parked, ledger) = at_second_choice.expect("REACH-GUARD G3: a second choice");
+    assert!(
+        ledger.contains(&twin) && !parked.unwrap_or_default().contains(&twin),
+        "REACH-GUARD G3: #1 reaches #2 through its batch (the batch ledger), not the parked owner"
+    );
+    let offers = copy_offers(&answered.prompts);
+    assert!(
+        !offers[1].contains(&CopyPick::token(MARGLE_NAME, P0)),
+        "G3: copy #1 is not a legal donor for #2, got {:?}",
+        offers[1]
+    );
+    assert_settled(&runner, "G3");
+    assert_eq!(power_toughness(&runner, twin), (Some(7), Some(7)), "G3: #1");
+    let copy = the_token(&runner, TRISKELION_NAME);
+    assert_eq!(plus_counters(&runner, copy), 3, "G3: #2's copied counters");
+    assert_eq!(
+        power_toughness(&runner, copy),
+        (Some(12), Some(12)),
+        "G3: #2"
+    );
+}
+
+/// G4: Clone Legion over P1's [Margle, Spark Double]. The Spark Double copy copies P0's
+/// Voice of All; its additional +1/+1 counter (an exception, CR 707.9b) meets P0's
+/// Hardened Scales and Branching Evolution, so P0 orders them (CR 616.1), Hardened Scales
+/// first: (1 + 1) × 2 = 4 counters. The copied color choice is read on that pause's
+/// resume, with the Margle copy co-entering.
+#[test]
+fn clone_legion_spark_double_copy_chooses_after_a_counter_order_beside_a_co_entering_margle_copy() {
+    spark_double_copy_of_voice_beside_margle(PauseCarry::Live);
+}
+
+/// G4 saved and restored at the copy offer, the copy choice, the counter order and the
+/// color choice.
+#[test]
+fn clone_legion_spark_double_copy_chooses_after_a_counter_order_beside_a_co_entering_margle_copy_across_save_and_restore(
+) {
+    assert_restored_row_matches_live(spark_double_copy_of_voice_beside_margle, "G4");
+}
+
+fn spark_double_copy_of_voice_beside_margle(carry: PauseCarry) -> RowOutcome {
+    let mut sources_at_replacement = Vec::new();
+    let (runner, answered) = clone_legion_beside(
+        MARGLE_NAME,
+        &[MARGLE_DONOR, SPARK_DOUBLE_DONOR],
+        |scenario| {
+            add_donor(scenario, P0, VOICE_DONOR);
+            scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
+            scenario.add_enchantment_from_oracle(P0, "Branching Evolution", BRANCHING_EVOLUTION);
+        },
+        |_| {},
+        carry,
+        &Script {
+            copy_targets: vec![CopyPick::card(VOICE_NAME, P0)],
+            first: Some("Hardened Scales"),
+            ..Script::default()
+        },
+        |runner, prompt| {
+            if let Prompt::Replacement = prompt {
+                sources_at_replacement.push(replacement_sources(runner));
+            }
+        },
+    );
+    assert_eq!(
+        prompt_kinds(&answered.prompts),
+        vec!["Replacement", "CopyTarget", "Replacement", "Named"],
+        "G4: the copy offer, the copy choice, the counter order, then the color choice"
+    );
+    assert_eq!(
+        sources_at_replacement[1],
+        vec![
+            "Branching Evolution".to_string(),
+            "Hardened Scales".to_string()
+        ],
+        "REACH-GUARD G4: the counter order is between Hardened Scales and Branching Evolution"
+    );
+    let offers = copy_offers(&answered.prompts);
+    assert!(
+        !offers[0].contains(&CopyPick::token(MARGLE_NAME, P0)),
+        "G4: the co-entering Margle copy is not a legal donor, got {:?}",
+        offers[0]
+    );
+    assert_settled(&runner, "G4");
+    let copy = the_token(&runner, VOICE_NAME);
+    assert!(has_color_choice(&runner, copy), "G4: the color is latched");
+    assert_eq!(plus_counters(&runner, copy), 4, "G4: Hardened Scales first");
+    assert_eq!(
+        power_toughness(&runner, copy),
+        (Some(8), Some(8)),
+        "G4: 2/2 + four counters + Margle's +2/+2"
+    );
+    assert!(
+        !runner.state().objects[&copy]
+            .card_types
+            .supertypes
+            .contains(&Supertype::Legendary),
+        "G4: it isn't legendary"
+    );
+    row_outcome(&runner, answered)
+}
+
+/// P0's Squad Captain. Its keyword line carries reminder text, so the keyword is named
+/// (MTGJSON `keywords`), as the card data names it.
+fn add_squad_captain(scenario: &mut GameScenario) {
+    scenario
+        .add_creature(P0, SQUAD_CAPTAIN_NAME, 2, 2)
+        .from_oracle_text_with_keywords(&["Vigilance"], SQUAD_CAPTAIN);
+}
+
+/// Puts P0's Minion of the Wastes onto the battlefield by casting it, paying 3 life.
+fn cast_minion_paying_three(runner: &mut GameRunner, minion: ObjectId) {
+    runner.cast(minion).commit();
+    let answered = drive_carried(
+        runner,
+        PauseCarry::Live,
+        &Script {
+            pays: vec![3],
+            ..Script::default()
+        },
+        |_, _| {},
+    );
+    assert_eq!(
+        answered.prompts,
+        vec![Prompt::PayAmount {
+            player: P0,
+            min: 0,
+            max: 20
+        }],
+        "REACH-GUARD: the Minion's own payment"
+    );
+    assert_eq!(chosen_number(runner, minion), Some(3));
+    assert_eq!(runner.state().players[0].life, 17, "REACH-GUARD: P0 paid 3");
+}
+
+fn chosen_number(runner: &GameRunner, id: ObjectId) -> Option<u32> {
+    runner.state().objects[&id]
+        .chosen_attributes
+        .iter()
+        .find_map(|attr| match attr {
+            ChosenAttribute::Number(n) => Some(*n),
+            _ => None,
+        })
+}
+
+/// Clone Legion over P1's `donors`, after P0 casts Minion of the Wastes paying 3; the
+/// Gargantuan copy copies the Minion and pays 5 for its copied payment.
+fn gargantuan_copy_of_minion(
+    co_entrant: Option<&str>,
+    donors: &[Donor],
+    carry: PauseCarry,
+    row: &str,
+) -> (GameRunner, Answered, ObjectId) {
+    let minion = std::cell::Cell::new(None);
+    let script = Script {
+        copy_targets: vec![CopyPick::card(MINION_NAME, P0)],
+        pays: vec![5],
+        ..Script::default()
+    };
+    let extra = |scenario: &mut GameScenario| {
+        minion.set(Some(
+            scenario
+                .add_creature_to_hand_from_oracle(P0, MINION_NAME, 0, 0, MINION_OF_THE_WASTES)
+                .with_mana_cost(ManaCost::generic(0))
+                .id(),
+        ));
+    };
+    let before = |runner: &mut GameRunner| {
+        cast_minion_paying_three(runner, minion.get().expect("the Minion is in hand"));
+    };
+    let observe = |runner: &GameRunner, prompt: &Prompt| {
+        let Prompt::PayAmount { .. } = prompt else {
+            return;
+        };
+        let state = runner.state();
+        let WaitingFor::PayAmountChoice { source_id, .. } = &state.waiting_for else {
+            unreachable!("a PayAmount prompt");
+        };
+        assert_eq!(
+            state.objects[source_id].name, MINION_NAME,
+            "REACH-GUARD {row}: the Gargantuan copy pays"
+        );
+        assert!(
+            state.objects[source_id].is_token,
+            "REACH-GUARD {row}: the payer is the token"
+        );
+        assert!(
+            state.last_created_token_ids.contains(source_id),
+            "REACH-GUARD {row}: the ledger lists the paying copy"
+        );
+        let copy_surface = state.pending_replacement.as_ref().is_some_and(|pending| {
+            matches!(
+                pending.proposed,
+                ProposedEvent::ZoneChange {
+                    from: Zone::Battlefield,
+                    to: Zone::Battlefield,
+                    ..
+                }
+            )
+        });
+        assert!(
+            copy_surface,
+            "REACH-GUARD {row}: the payment is parked as a copy surface"
+        );
+        if co_entrant.is_some() {
+            assert!(
+                state.objects[source_id].replacement_definitions.is_empty(),
+                "REACH-GUARD {row}: the live copy has lost its payment to the Margle copy"
+            );
+        }
+    };
+    let (runner, answered) = match co_entrant {
+        Some(name) => clone_legion_beside(name, donors, extra, before, carry, &script, observe),
+        None => clone_legion_carried(donors, extra, before, carry, &script, observe),
+    };
+    let minion = minion.get().expect("the Minion is in hand");
+    (runner, answered, minion)
+}
+
+/// G5: Clone Legion over P1's [Margle, Quicksilver Gargantuan]; the Gargantuan copy copies
+/// P0's Minion of the Wastes. Its copied "As this creature enters, pay any amount of life"
+/// is offered with the Margle copy co-entering (CR 614.12a + CR 707.5), up to P0's life
+/// (CR 119.4), and P0 pays it.
+#[test]
+fn clone_legion_gargantuan_copy_of_minion_pays_beside_a_co_entering_margle_copy() {
+    gargantuan_copy_of_minion_beside_margle(PauseCarry::Live);
+}
+
+/// G5 saved and restored at the copy offer, the copy choice and the copied payment: the
+/// payment's answer re-reads it on the board it was surfaced on.
+#[test]
+fn clone_legion_gargantuan_copy_of_minion_pays_beside_a_co_entering_margle_copy_across_save_and_restore(
+) {
+    assert_restored_row_matches_live(gargantuan_copy_of_minion_beside_margle, "G5");
+}
+
+fn gargantuan_copy_of_minion_beside_margle(carry: PauseCarry) -> RowOutcome {
+    let (runner, answered, minion) = gargantuan_copy_of_minion(
+        Some(MARGLE_NAME),
+        &[MARGLE_DONOR, GARGANTUAN_DONOR],
+        carry,
+        "G5",
+    );
+    assert_eq!(
+        prompt_kinds(&answered.prompts),
+        vec!["Replacement", "CopyTarget", "PayAmount"],
+        "G5: the copied payment follows the copy choice"
+    );
+    assert_eq!(
+        answered.prompts[2],
+        Prompt::PayAmount {
+            player: P0,
+            min: 0,
+            max: 17
+        },
+        "G5: P0 may pay up to their life total"
+    );
+    let offers = copy_offers(&answered.prompts);
+    assert!(
+        !offers[0].contains(&CopyPick::token(MARGLE_NAME, P0)),
+        "G5: the co-entering Margle copy is not a legal donor, got {:?}",
+        offers[0]
+    );
+    assert_settled(&runner, "G5");
+    assert_eq!(runner.state().players[0].life, 12, "G5: P0 paid 5");
+    let copy = the_token(&runner, MINION_NAME);
+    assert_eq!(
+        chosen_number(&runner, copy),
+        Some(5),
+        "G5: the copy's latch"
+    );
+    assert_eq!(
+        chosen_number(&runner, minion),
+        Some(3),
+        "G5: the original's"
+    );
+    row_outcome(&runner, answered)
+}
+
+/// G6: Clone Legion over P1's [Grizzly Bears, Quicksilver Gargantuan]; the Gargantuan copy
+/// copies P0's Squad Captain. The Bears copy co-enters, so it isn't counted (Squad Captain
+/// ruling 2019-07-12: "It counts only creatures that are already on the battlefield") and
+/// isn't a legal donor.
+#[test]
+fn clone_legion_gargantuan_copy_of_squad_captain_does_not_count_a_co_entering_bears_copy() {
+    let (runner, answered) = clone_legion_beside(
+        BEARS_NAME,
+        &[BEARS_DONOR, GARGANTUAN_DONOR],
+        add_squad_captain,
+        |_| {},
+        PauseCarry::Live,
+        &Script {
+            copy_targets: vec![CopyPick::card(SQUAD_CAPTAIN_NAME, P0)],
+            ..Script::default()
+        },
+        |_, _| {},
+    );
+    assert_eq!(
+        prompt_kinds(&answered.prompts),
+        vec!["Replacement", "CopyTarget"]
+    );
+    let offers = copy_offers(&answered.prompts);
+    assert!(
+        !offers[0].contains(&CopyPick::token(BEARS_NAME, P0)),
+        "G6: the co-entering Bears copy is not a legal donor, got {:?}",
+        offers[0]
+    );
+    assert_settled(&runner, "G6");
+    let p0_creatures = runner
+        .state()
+        .objects
+        .values()
+        .filter(|obj| {
+            obj.zone == Zone::Battlefield
+                && obj.controller == P0
+                && obj.card_types.core_types.contains(&CoreType::Creature)
+        })
+        .count();
+    assert_eq!(
+        p0_creatures, 3,
+        "REACH-GUARD G6: Squad Captain, the Bears copy and the Gargantuan copy"
+    );
+    let copy = the_token(&runner, SQUAD_CAPTAIN_NAME);
+    assert_eq!(
+        plus_counters(&runner, copy),
+        1,
+        "G6: only Squad Captain is counted"
+    );
+    assert_eq!(power_toughness(&runner, copy), (Some(8), Some(8)));
+    assert!(runner.state().objects[&copy].has_keyword(&Keyword::Vigilance));
+}
+
+/// G7: P0's Parallel Lives and P1's Halving Season. Clone Legion over P1's [Margle, Voice of
+/// All]: P0 orders the two at each copy's event (CR 616.1e), Parallel Lives first, so each
+/// event creates 1 × 2 ÷ 2 = one copy. The Voice copy's event is applied by the order
+/// answer under the parked owner, with the Margle copy co-entering, so its choice is
+/// offered.
+#[test]
+fn clone_legion_ordered_single_batch_keeps_the_earlier_margle_copy_as_co_entrant() {
+    ordered_single_batch_beside_margle(PauseCarry::Live);
+}
+
+/// G7 saved and restored at both order prompts and the color choice.
+#[test]
+fn clone_legion_ordered_single_batch_keeps_the_earlier_margle_copy_as_co_entrant_across_save_and_restore(
+) {
+    assert_restored_row_matches_live(ordered_single_batch_beside_margle, "G7");
+}
+
+fn ordered_single_batch_beside_margle(carry: PauseCarry) -> RowOutcome {
+    let mut at_replacement = Vec::new();
+    let mut margle_at_named = Vec::new();
+    let (runner, answered) = clone_legion_carried(
+        &[MARGLE_DONOR, VOICE_DONOR],
+        |scenario| {
+            scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+            scenario.add_enchantment_from_oracle(P1, "Halving Season", HALVING_SEASON);
+        },
+        |_| {},
+        carry,
+        &Script {
+            first: Some("Parallel Lives"),
+            ..Script::default()
+        },
+        |runner, prompt| match prompt {
+            Prompt::Replacement => at_replacement.push((
+                replacement_sources(runner),
+                parked_created_ids(runner),
+                battlefield_tokens(runner, MARGLE_NAME),
+            )),
+            Prompt::Named { .. } => {
+                let margle = the_token(runner, MARGLE_NAME);
+                let obj = &runner.state().objects[&margle];
+                assert!(
+                    obj.is_phased_in_permanent() && obj.controller == P0,
+                    "REACH-GUARD G7: the Margle copy is P0's, on the battlefield, phased in"
+                );
+                margle_at_named.push(margle);
+            }
+            Prompt::CopyTarget { .. } | Prompt::PayAmount { .. } => {}
+        },
+    );
+    assert_eq!(
+        prompt_kinds(&answered.prompts[..2]),
+        vec!["Replacement", "Replacement"],
+        "REACH-GUARD G7: an order prompt at each copy's event"
+    );
+    let ordered = vec!["Halving Season".to_string(), "Parallel Lives".to_string()];
+    assert!(
+        at_replacement
+            .iter()
+            .all(|(sources, _, _)| *sources == ordered),
+        "REACH-GUARD G7: each order is between Parallel Lives and Halving Season, got \
+         {at_replacement:?}"
+    );
+    let (_, parked, margles) = &at_replacement[1];
+    assert!(
+        margles.len() == 1 && parked.as_ref().is_some_and(|ids| ids.contains(&margles[0])),
+        "REACH-GUARD G7: at the Voice event's order the parked owner lists the Margle copy, \
+         got {at_replacement:?}"
+    );
+    assert_eq!(
+        named_prompts(&answered.prompts),
+        vec![P0],
+        "G7: the Voice copy's choice"
+    );
+    assert_settled(&runner, "G7");
+    let margle = the_token(&runner, MARGLE_NAME);
+    assert_eq!(margle_at_named, vec![margle]);
+    assert_eq!(power_toughness(&runner, margle), (Some(5), Some(2)));
+    let voice = the_token(&runner, VOICE_NAME);
+    assert!(has_color_choice(&runner, voice), "G7: the color is latched");
+    assert_eq!(power_toughness(&runner, voice), (Some(4), Some(4)));
+    row_outcome(&runner, answered)
+}
+
+/// C1: Clone Legion over P1's [Quicksilver Gargantuan] alone: the copy of P0's Triskelion
+/// gets its counters (10/10), and the copy of P0's Voice of All its choice (7/7).
+#[test]
+fn clone_legion_lone_gargantuan_copy_keeps_its_copied_entry_abilities() {
+    for (donor, name) in [
+        (TRISKELION_DONOR, TRISKELION_NAME),
+        (VOICE_DONOR, VOICE_NAME),
+    ] {
+        let row = format!("C1 {name}");
+        let (runner, answered) = clone_legion_carried(
+            &[GARGANTUAN_DONOR],
+            |scenario| {
+                add_donor(scenario, P0, donor);
+            },
+            |_| {},
+            PauseCarry::Live,
+            &Script {
+                copy_targets: vec![CopyPick::card(name, P0)],
+                ..Script::default()
+            },
+            |_, _| {},
+        );
+        assert_settled(&runner, &row);
+        let copy = the_token(&runner, name);
+        assert_eq!(
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|obj| obj.is_token)
+                .count(),
+            1,
+            "REACH-GUARD {row}: one token"
+        );
+        if name == TRISKELION_NAME {
+            assert_eq!(
+                prompt_kinds(&answered.prompts),
+                vec!["Replacement", "CopyTarget"]
+            );
+            assert_eq!(plus_counters(&runner, copy), 3, "{row}");
+            assert_eq!(
+                power_toughness(&runner, copy),
+                (Some(10), Some(10)),
+                "{row}"
+            );
+        } else {
+            assert_eq!(
+                prompt_kinds(&answered.prompts),
+                vec!["Replacement", "CopyTarget", "Named"]
+            );
+            assert!(has_color_choice(&runner, copy), "{row}");
+            assert_eq!(power_toughness(&runner, copy), (Some(7), Some(7)), "{row}");
+        }
+    }
+}
+
+/// C2: Clone Legion over P1's [Quicksilver Gargantuan, Margle]: the Gargantuan batch comes
+/// first, so no Margle copy exists at its copy choice; it ends as G1 does.
+#[test]
+fn clone_legion_gargantuan_copy_before_the_margle_batch_keeps_its_counters() {
+    let mut margles_at_choice = Vec::new();
+    let (runner, answered) = clone_legion_carried(
+        &[GARGANTUAN_DONOR, MARGLE_DONOR],
+        |scenario| {
+            add_donor(scenario, P0, TRISKELION_DONOR);
+        },
+        |_| {},
+        PauseCarry::Live,
+        &Script {
+            copy_targets: vec![CopyPick::card(TRISKELION_NAME, P0)],
+            ..Script::default()
+        },
+        |runner, prompt| {
+            if let Prompt::CopyTarget { .. } = prompt {
+                margles_at_choice.push(battlefield_tokens(runner, MARGLE_NAME).len());
+            }
+        },
+    );
+    assert_eq!(
+        margles_at_choice,
+        vec![0],
+        "REACH-GUARD C2: no Margle copy yet"
+    );
+    assert_eq!(
+        prompt_kinds(&answered.prompts),
+        vec!["Replacement", "CopyTarget"]
+    );
+    assert_settled(&runner, "C2");
+    let copy = the_token(&runner, TRISKELION_NAME);
+    assert_eq!(plus_counters(&runner, copy), 3);
+    assert_eq!(power_toughness(&runner, copy), (Some(12), Some(12)));
+}
+
+/// C4: P0's Stolen Identity copies P0's Triskelion (token `t`), then P0 casts Clone, which
+/// copies `t`. The batch ledger still lists `t` at Clone's choice, but a card isn't in it,
+/// so `t` stays a legal donor and Clone gets the copied counters.
+#[test]
+fn clone_copying_an_earlier_token_keeps_it_as_a_donor_over_a_stale_ledger() {
+    let mut scenario = board();
+    let trisk = add_donor(&mut scenario, P0, TRISKELION_DONOR);
+    let stolen = free_spell(&mut scenario, "Stolen Identity", false, STOLEN_IDENTITY);
+    let clone = scenario
+        .add_creature_to_hand_from_oracle(P0, "Clone", 0, 0, CLONE)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(stolen).target_object(trisk).commit();
+    drive(&mut runner, |_, _| {});
+    let token = the_token(&runner, TRISKELION_NAME);
+    runner.cast(clone).commit();
+    let mut ledger_at_choice = Vec::new();
+    let answered = drive_carried(
+        &mut runner,
+        PauseCarry::Live,
+        &Script {
+            copy_targets: vec![CopyPick::token(TRISKELION_NAME, P0)],
+            ..Script::default()
+        },
+        |runner, prompt| {
+            if let Prompt::CopyTarget { .. } = prompt {
+                ledger_at_choice.push(runner.state().last_created_token_ids.clone());
+            }
+        },
+    );
+    assert_eq!(
+        ledger_at_choice,
+        vec![vec![token]],
+        "REACH-GUARD C4: the stale ledger lists the earlier token"
+    );
+    let offers = copy_offers(&answered.prompts);
+    assert!(
+        offers[0].contains(&CopyPick::token(TRISKELION_NAME, P0)),
+        "C4: the earlier token is a legal donor, got {:?}",
+        offers[0]
+    );
+    assert_settled(&runner, "C4");
+    assert_eq!(runner.state().objects[&clone].name, TRISKELION_NAME);
+    assert_eq!(plus_counters(&runner, clone), 3);
+    assert_eq!(power_toughness(&runner, clone), (Some(4), Some(4)));
+}
+
+/// C5: under Humility, Clone Legion's copy of P1's Quicksilver Gargantuan has no copy
+/// ability as it would exist on the battlefield (CR 614.12), so nothing is offered: it is a
+/// 1/1 Gargantuan.
+#[test]
+fn clone_legion_gargantuan_copy_under_humility_is_not_offered_its_copy() {
+    let (runner, answered) = clone_legion_carried(
+        &[GARGANTUAN_DONOR],
+        |scenario| {
+            add_remover(scenario, Some(Remover::Humility));
+        },
+        |_| {},
+        PauseCarry::Live,
+        &Script::default(),
+        |_, _| {},
+    );
+    assert!(answered.prompts.is_empty(), "C5: no copy offer");
+    assert_settled(&runner, "C5");
+    let copy = the_token(&runner, GARGANTUAN_NAME);
+    assert_eq!(plus_counters(&runner, copy), 0);
+    assert_eq!(power_toughness(&runner, copy), (Some(1), Some(1)));
+}
+
+/// C6: as G5 with no co-entrant: Clone Legion over P1's [Quicksilver Gargantuan] alone.
+#[test]
+fn clone_legion_lone_gargantuan_copy_of_minion_pays() {
+    let (runner, answered, minion) =
+        gargantuan_copy_of_minion(None, &[GARGANTUAN_DONOR], PauseCarry::Live, "C6");
+    assert_eq!(
+        answered.prompts.last(),
+        Some(&Prompt::PayAmount {
+            player: P0,
+            min: 0,
+            max: 17
+        }),
+        "C6"
+    );
+    assert_settled(&runner, "C6");
+    assert_eq!(runner.state().players[0].life, 12);
+    let copy = the_token(&runner, MINION_NAME);
+    assert_eq!(chosen_number(&runner, copy), Some(5));
+    assert_eq!(chosen_number(&runner, minion), Some(3));
+}
+
+/// C7: as G6 with no co-entrant: Clone Legion over P1's [Quicksilver Gargantuan] alone.
+#[test]
+fn clone_legion_lone_gargantuan_copy_of_squad_captain_counts_the_board() {
+    let (runner, answered) = clone_legion_carried(
+        &[GARGANTUAN_DONOR],
+        add_squad_captain,
+        |_| {},
+        PauseCarry::Live,
+        &Script {
+            copy_targets: vec![CopyPick::card(SQUAD_CAPTAIN_NAME, P0)],
+            ..Script::default()
+        },
+        |_, _| {},
+    );
+    assert_eq!(
+        prompt_kinds(&answered.prompts),
+        vec!["Replacement", "CopyTarget"]
+    );
+    assert_settled(&runner, "C7");
+    let copy = the_token(&runner, SQUAD_CAPTAIN_NAME);
+    assert_eq!(plus_counters(&runner, copy), 1);
+    assert_eq!(power_toughness(&runner, copy), (Some(8), Some(8)));
+    assert!(runner.state().objects[&copy].has_keyword(&Keyword::Vigilance));
 }
