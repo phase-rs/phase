@@ -323,6 +323,15 @@ fn parsed_face(row: &ClassRow) -> CardFace {
         &owned(row.types),
         &owned(row.subtypes),
     );
+    // Merge MTGJSON keywords (from ClassRow) with parser-extracted keywords,
+    // mirroring `merge_extracted_keywords` in synthesis.
+    // Parse MTGJSON keyword strings into Keyword enums (filtering Unknown).
+    let mut keywords: Vec<engine::types::keywords::Keyword> = owned(row.keywords)
+        .iter()
+        .filter_map(|s| s.parse::<engine::types::keywords::Keyword>().ok())
+        .filter(|k| !matches!(k, engine::types::keywords::Keyword::Unknown(_)))
+        .collect();
+    engine::database::synthesis::merge_extracted_keywords(&mut keywords, parsed.extracted_keywords);
     CardFace {
         name: row.name.to_string(),
         card_type: CardType {
@@ -335,10 +344,13 @@ fn parsed_face(row: &ClassRow) -> CardFace {
             subtypes: owned(row.subtypes),
         },
         oracle_text: Some(row.oracle.to_string()),
+        keywords,
         abilities: parsed.abilities,
         triggers: parsed.triggers,
         static_abilities: parsed.statics,
         replacements: parsed.replacements,
+        additional_cost: parsed.additional_cost,
+        parse_warnings: parsed.parse_warnings,
         ..Default::default()
     }
 }

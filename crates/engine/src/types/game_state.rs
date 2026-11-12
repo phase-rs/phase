@@ -11199,6 +11199,17 @@ pub struct PendingManaAbility {
     /// surfaces `WaitingFor::PayManaAbilityMana` for a genuine choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_mana_payment: Option<Vec<ManaType>>,
+    /// CR 602.2b + CR 601.2g-h: the activation's mana-payment preference, the same
+    /// opt-in `GameAction::ActivateAbility` carries. `Manual` stops in
+    /// `WaitingFor::ManaAbilityManaPayment` before a mana sub-cost is paid so the
+    /// player activates mana abilities and directs pool units themself.
+    #[serde(default, skip_serializing_if = "CastPaymentMode::is_auto")]
+    pub payment_mode: CastPaymentMode,
+    /// CR 118.3a: pool units the player directed to pay this mana ability's mana
+    /// sub-cost while its manual window is open — ordering hints for the spend,
+    /// mirroring `PendingCast::pinned_pool_units`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_pool_units: Vec<ManaPipId>,
     /// CR 107.3a (literal "Remove X counters") / CR 107.1c (literal "any
     /// number of" counters): chosen counts for a mana-ability cost's
     /// self-RemoveCounter components that require an announced count. One
@@ -47774,6 +47785,8 @@ mod tests {
                         chosen_tappers,
                         chosen_discards: Vec::new(),
                         chosen_mana_payment: None,
+                        payment_mode: CastPaymentMode::Auto,
+                        pinned_pool_units: Vec::new(),
                         chosen_counter_counts: Vec::new(),
                         chosen_x: None,
                         collected_evidence: Vec::new(),
@@ -47889,6 +47902,8 @@ mod tests {
                     chosen_tappers: None,
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
+                    payment_mode: CastPaymentMode::Auto,
+                    pinned_pool_units: Vec::new(),
                     chosen_counter_counts,
                     chosen_x: None,
                     collected_evidence: Vec::new(),
@@ -51083,6 +51098,8 @@ mod tests {
                 chosen_tappers: None,
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
+                payment_mode: CastPaymentMode::Auto,
+                pinned_pool_units: Vec::new(),
                 chosen_counter_counts: Vec::new(),
                 chosen_x: None,
                 collected_evidence: Vec::new(),
@@ -54394,6 +54411,8 @@ mod tests {
                     chosen_tappers: None,
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
+                    payment_mode: CastPaymentMode::Auto,
+                    pinned_pool_units: Vec::new(),
                     chosen_counter_counts: Vec::new(),
                     chosen_x: None,
                     collected_evidence: Vec::new(),
@@ -54656,6 +54675,8 @@ mod tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -59555,6 +59576,8 @@ mod restored_exact_attack_authority_tests {
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
