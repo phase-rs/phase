@@ -1804,19 +1804,27 @@ fn opponent_can_target_tomik_with_removal() {
 
 const GROUND_SEAL: &str = "Cards in graveyards can't be the targets of spells or abilities.\nWhen this enchantment enters, draw a card.";
 const GRAVEYARD_RETURN: &str = "Return target creature card from a graveyard to its owner's hand.";
+/// Murder (verified against card-data.json): unqualified creature removal.
+const MURDER: &str = "Destroy target creature.";
 const CREATURE_SHIELD: &str =
     "Creatures you control can't be the targets of spells or abilities your opponents control.";
 
-/// Production cast by `player`: the objects the spell may legally target. A
-/// refused announcement ("No legal targets available") yields none; a sole legal
+/// Production cast by `player`: the objects the spell may legally target. Exactly
+/// the refusal "No legal targets available" yields none (any other error
+/// panics); a sole legal
 /// target is auto-selected and read back off the stack entry.
 fn cast_legal_targets(runner: &mut GameRunner, player: PlayerId, spell: ObjectId) -> Vec<ObjectId> {
     runner.state_mut().active_player = player;
     runner.state_mut().priority_player = player;
     runner.state_mut().waiting_for = WaitingFor::Priority { player };
     let action = cast_action(runner, spell);
-    if runner.act(action).is_err() {
-        return vec![];
+    match runner.act(action) {
+        Ok(_) => {}
+        // The announcement itself is refused: no legal target exists.
+        Err(EngineError::ActionNotAllowed(message)) if message == "No legal targets available" => {
+            return vec![];
+        }
+        Err(other) => panic!("unexpected cast failure: {other:?}"),
     }
     if let WaitingFor::TargetSelection { target_slots, .. } = runner.state().waiting_for.clone() {
         return target_slots[0]
@@ -1853,6 +1861,18 @@ fn cast_legal_targets(runner: &mut GameRunner, player: PlayerId, spell: ObjectId
 fn graveyard_return_targets(
     battlefield_static: Option<(&str, &str)>,
 ) -> (Vec<ObjectId>, ObjectId, ObjectId) {
+    spell_targets(battlefield_static, "Graveyard Return", GRAVEYARD_RETURN)
+}
+
+/// P1 casts the instant `spell_name` (`spell_oracle`) with P0's creature card in
+/// P0's graveyard, P0's creature on the battlefield, and `battlefield_static`
+/// (if any) on P0's battlefield; returns the legal targets, the graveyard
+/// card's id and the battlefield creature's id.
+fn spell_targets(
+    battlefield_static: Option<(&str, &str)>,
+    spell_name: &str,
+    spell_oracle: &str,
+) -> (Vec<ObjectId>, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let card = scenario
@@ -1863,7 +1883,7 @@ fn graveyard_return_targets(
         scenario.add_enchantment_from_oracle(P0, name, text);
     }
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P1, "Graveyard Return", true, GRAVEYARD_RETURN)
+        .add_spell_to_hand_from_oracle(P1, spell_name, true, spell_oracle)
         .with_mana_cost(ManaCost::generic(0))
         .id();
     let mut runner = scenario.build();
@@ -1885,29 +1905,28 @@ fn graveyard_card_is_targetable_without_ground_seal() {
     assert!(legal.contains(&card), "positive control: {legal:?}");
 }
 
-/// CR 109.2: "creatures you control" describes permanents, so it does not
-/// protect a creature card in a graveyard.
+/// CR 109.2: "creatures you control" describes permanents. The static really
+/// protects a battlefield creature from Murder (control), yet does not protect a
+/// creature card in a graveyard from a graveyard-targeting spell.
 #[test]
 fn zoneless_creature_static_does_not_protect_graveyard_card() {
-    let (legal, card, on_battlefield) =
-        graveyard_return_targets(Some(("Creature Shield", CREATURE_SHIELD)));
+    let shield = Some(("Creature Shield", CREATURE_SHIELD));
+    let (murder_legal, _, on_battlefield) = spell_targets(shield, "Murder", MURDER);
+    assert!(
+        !murder_legal.contains(&on_battlefield),
+        "control: the static must protect the battlefield creature: {murder_legal:?}"
+    );
+    let (legal, card, _) = graveyard_return_targets(shield);
     assert!(legal.contains(&card), "graveyard card: {legal:?}");
-    assert!(!legal.contains(&on_battlefield), "control: {legal:?}");
 }
 
 /// Ground Seal names graveyards only; battlefield creatures stay targetable.
 #[test]
 fn ground_seal_does_not_protect_battlefield_creatures() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_library_top(P0, &["Forest"]);
-    let bear = scenario.add_creature(P0, "Live Bear", 2, 2).id();
-    scenario.add_enchantment_from_oracle(P0, "Ground Seal", GROUND_SEAL);
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(P1, "Smite", true, "Destroy target creature.")
-        .with_mana_cost(ManaCost::generic(0))
-        .id();
-    let mut runner = scenario.build();
-    let legal = cast_legal_targets(&mut runner, P1, spell);
-    assert!(legal.contains(&bear), "battlefield creature: {legal:?}");
+    let (legal, _, on_battlefield) =
+        spell_targets(Some(("Ground Seal", GROUND_SEAL)), "Murder", MURDER);
+    assert!(
+        legal.contains(&on_battlefield),
+        "battlefield creature: {legal:?}"
+    );
 }

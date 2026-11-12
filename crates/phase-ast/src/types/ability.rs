@@ -29937,6 +29937,29 @@ impl TargetFilter {
         }
     }
 
+    /// CR 109.2 + CR 109.2a: the disjuncts of this filter that EXPLICITLY name
+    /// `zone` (via `InZone`, `InAnyZone`, or a zone-implying variant such as
+    /// `ExiledBySource` / `StackSpell`). A top-level `Or` is flattened, so each
+    /// branch is judged on its own: a bare branch ("creatures you control")
+    /// describes permanents on the battlefield and is never returned for an
+    /// off-battlefield zone, even when a sibling branch names that zone. A `Not`
+    /// names no zone (it excludes one). Empty means "no branch is about `zone`".
+    ///
+    /// The single authority for deciding whether a filter can denote an object in
+    /// a non-default zone; `extract_in_zone` cannot answer that, as it reports one
+    /// zone for the whole filter.
+    pub fn branches_naming_zone(&self, zone: crate::types::zones::Zone) -> Vec<&TargetFilter> {
+        match self {
+            TargetFilter::Or { filters } => filters
+                .iter()
+                .flat_map(|f| f.branches_naming_zone(zone))
+                .collect(),
+            TargetFilter::Not { .. } => Vec::new(),
+            branch if branch.population_zones().contains(&zone) => vec![branch],
+            _ => Vec::new(),
+        }
+    }
+
     /// CR 400.1: Returns the union of explicit zone constraints in this filter.
     /// Preserves the multi-zone semantics of `FilterProp::InAnyZone` (e.g.
     /// "search ... graveyard, hand, and library") that `extract_in_zone` collapses
@@ -46792,6 +46815,37 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&filter).unwrap(),
             r#"{"type":"StackAbility","controller":"You"}"#
+        );
+    }
+
+    #[test]
+    fn branches_naming_zone_is_branch_aware() {
+        use crate::types::zones::Zone;
+        let graveyard_cards =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }]));
+        let bare = TargetFilter::Typed(TypedFilter::creature());
+        let any_zone =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::InAnyZone {
+                    zones: vec![Zone::Exile, Zone::Hand],
+                }]),
+            );
+        // Bare branch first: the zone-naming sibling must not leak onto it.
+        let composite = TargetFilter::Or {
+            filters: vec![bare.clone(), graveyard_cards.clone(), any_zone.clone()],
+        };
+        assert_eq!(
+            composite.branches_naming_zone(Zone::Graveyard),
+            vec![&graveyard_cards]
+        );
+        assert_eq!(composite.branches_naming_zone(Zone::Hand), vec![&any_zone]);
+        assert!(composite.branches_naming_zone(Zone::Library).is_empty());
+        assert!(bare.branches_naming_zone(Zone::Graveyard).is_empty());
+        assert_eq!(
+            graveyard_cards.branches_naming_zone(Zone::Graveyard),
+            vec![&graveyard_cards]
         );
     }
 

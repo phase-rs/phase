@@ -4192,13 +4192,27 @@ fn functioning_static_cant_be_targeted_prohibits(
         let Some(ref filter) = def.affected else {
             return false;
         };
-        (obj.zone == Zone::Battlefield || filter.extract_in_zone() == Some(obj.zone))
-            && crate::game::filter::matches_target_filter(
+        // CR 109.2 + CR 109.2a: off the battlefield, only a branch that explicitly
+        // names `obj`'s zone can denote it, and that branch must itself match
+        // (a bare sibling branch means battlefield permanents). A static with no
+        // off-battlefield zone costs one cheap branch walk.
+        let applies_to_obj = |filter: &TargetFilter| {
+            crate::game::filter::matches_target_filter(
                 state,
                 obj.id,
                 filter,
                 &crate::game::filter::FilterContext::from_source(state, source_obj.id),
             )
+        };
+        let filter_applies = if obj.zone == Zone::Battlefield {
+            applies_to_obj(filter)
+        } else {
+            filter
+                .branches_naming_zone(obj.zone)
+                .into_iter()
+                .any(applies_to_obj)
+        };
+        filter_applies
             && super::static_abilities::static_condition_matches_context(
                 state,
                 source_obj.id,
@@ -5805,6 +5819,74 @@ mod tests {
         let targets_p1 = find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
         assert!(!targets_p0.contains(&TargetRef::Object(c1)));
         assert!(!targets_p1.contains(&TargetRef::Object(c1)));
+    }
+
+    /// CR 109.2 + CR 113.6: an `Or` affected filter "creature cards in graveyards
+    /// or creatures" protects a graveyard card only through its explicit-zone
+    /// branch and a battlefield creature through its bare branch; the bare branch
+    /// alone never protects a graveyard card.
+    #[test]
+    fn cross_object_cant_be_targeted_or_filter_is_branch_aware() {
+        use crate::types::ability::{FilterProp, StaticDefinition, TypedFilter};
+        use crate::types::statics::{ProhibitionScope, StaticMode};
+        let (mut state, _c0, c1) = setup_with_creatures();
+        let grave_id = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(1),
+            "Dead Bear".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&grave_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let source = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(1),
+            "Warding Stone".to_string(),
+            Zone::Battlefield,
+        );
+        let grave_branch =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }]));
+        let bare_branch = TargetFilter::Typed(TypedFilter::creature());
+        let install = |state: &mut GameState, affected: TargetFilter| {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.static_definitions = vec![StaticDefinition::new(StaticMode::CantBeTargeted {
+                who: ProhibitionScope::AllPlayers,
+            })
+            .affected(affected)]
+            .into();
+        };
+        let prohibits = |state: &GameState, id: ObjectId| {
+            functioning_static_cant_be_targeted_prohibits(&state.objects[&id], PlayerId(0), state)
+        };
+
+        // Bare branch listed first: the zone-naming sibling must not leak onto it.
+        install(
+            &mut state,
+            TargetFilter::Or {
+                filters: vec![bare_branch.clone(), grave_branch.clone()],
+            },
+        );
+        assert!(prohibits(&state, grave_id), "explicit graveyard branch");
+        assert!(
+            prohibits(&state, c1),
+            "bare branch protects battlefield creature"
+        );
+
+        install(&mut state, bare_branch);
+        assert!(
+            !prohibits(&state, grave_id),
+            "a bare branch alone denotes permanents, not graveyard cards"
+        );
+        assert!(prohibits(&state, c1));
     }
 
     /// CR 702.18a: A `StaticMode::CantBeTargeted` static (the descriptive Shroud
