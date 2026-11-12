@@ -428,10 +428,14 @@ fn activate_onto_stack(runner: &mut GameRunner, source: ObjectId, index: usize, 
     );
 }
 
-/// CR 400.7j: Assemble from Parts grants "Exile this card from your graveyard:
-/// Shuffle it into its owner's library." The cost moves the source to exile, and
-/// the ability's self-reference binds that public-zone successor, so the card is
-/// shuffled from exile, not skipped as a stale battlefield object.
+/// CR 400.7j: synthetic extension of the Alchemy Assemble from Parts granted
+/// ability ("Exile this card from your graveyard: Shuffle it into its owner's
+/// library"). The nearest printed owner-self-shuffle comparisons are the
+/// graveyard dies-trigger class (Guile, Alabaster Dragon) and the spell
+/// self-shuffles (Beacon cycle, Green Sun's Zenith); neither combines the
+/// public-zone cost successor, so this card is synthetic and exists solely to
+/// exercise that binding. The exiled cost successor must be found and shuffled,
+/// not skipped as a stale battlefield object.
 #[test]
 fn exiled_cost_self_shuffle_finds_the_public_successor() {
     let mut scenario = GameScenario::new();
