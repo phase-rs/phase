@@ -27,6 +27,7 @@ import {
   type DeckCompatibilityResult,
 } from "../../services/deckCompatibility";
 import { draftSubmissionToParsedDeck } from "../../services/draftDeckAutosave";
+import { netCompanionFromPoolSideboard } from "../../services/savedDeckProjection";
 import type {
   DraftCardInstance,
   DraftPlayerView,
@@ -1390,14 +1391,17 @@ function WorkspaceDeckBuilder({
     : (companion ? "Limited" : null);
   const enforceCompatibility = designationRequired || companion !== null;
 
-  // The saved-deck form that submit and the library autosave produce:
-  // commanders leave `main` for the `[Commander]` section.
+  // Use the same deck projection and companion handling as draft autosave.
   const exportableDeck = useMemo(
-    () => draftSubmissionToParsedDeck(
-      projectWorkspacePartition(workspace, pool),
-      commandersRequired > 0 ? commanders : [],
+    () => netCompanionFromPoolSideboard(
+      draftSubmissionToParsedDeck(
+        projectWorkspacePartition(workspace, pool),
+        commandersRequired > 0 ? commanders : [],
+        companion,
+      ),
+      effectiveFormat ?? "Limited",
     ),
-    [workspace, pool, commandersRequired, commanders],
+    [workspace, pool, commandersRequired, commanders, companion, effectiveFormat],
   );
   const compatibility = useCommanderDraftCompatibility({
     enforceCompatibility,

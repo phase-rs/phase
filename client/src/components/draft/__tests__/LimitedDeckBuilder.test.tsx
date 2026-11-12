@@ -3930,7 +3930,7 @@ describe("Limited companion support", () => {
     );
   });
 
-  it("workspace mode: a sideboard copy is designated without pulling the deck copy, and submit carries the companion", async () => {
+  it("workspace mode: designates a sideboard companion and preserves it through export and submission", async () => {
     engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
     compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
     const onWorkspaceChange = vi.fn();
@@ -3991,5 +3991,11 @@ describe("Limited companion support", () => {
     await waitFor(() => {
       expect(onSubmitDeck).toHaveBeenCalledWith([], "Lurrus of the Dream-Den");
     });
+
+    fireEvent.click(screen.getByRole("button", { name: "Export deck" }));
+    const dialog = await screen.findByRole("dialog", { name: "Export Deck" });
+    const text = within(dialog).getByRole<HTMLTextAreaElement>("textbox").value;
+    expect(text).toContain("[Companion]\n1 Lurrus of the Dream-Den\n");
+    expect(text).toContain("[Sideboard]\n1 Lurrus of the Dream-Den\n");
   });
 });

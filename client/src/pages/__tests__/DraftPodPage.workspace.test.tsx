@@ -122,7 +122,7 @@ const store = vi.hoisted(() => {
     addBasicLand: vi.fn(),
     removeBasicLand: vi.fn(),
     autoSuggestLands: vi.fn(),
-    submitDeck: vi.fn(async (_commanders?: string[]) => {}),
+    submitDeck: vi.fn(async (_commanders?: string[], _companion?: string | null) => {}),
     leave: vi.fn(),
     resumeDraft: vi.fn(async () => "absent" as const),
   };
@@ -408,6 +408,24 @@ describe("DraftPodPage workspace", () => {
     expect(store.state.submitDeck).toHaveBeenCalledOnce();
     expect(store.state.submitDeck).toHaveBeenCalledWith(["Commander A"]);
     await vi.waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+  });
+
+  it("submits the selected companion after confirmation", async () => {
+    store.state.phase = "deckbuilding";
+    render(<MemoryRouter><DraftPodPage /></MemoryRouter>);
+    const deckbuilder = captured.deckbuilder;
+    if (!isEditableDeckBuilderController(deckbuilder)) {
+      throw new Error("editable deck builder controller not installed");
+    }
+
+    let submission: Promise<void> | void = undefined;
+    act(() => {
+      submission = deckbuilder.onSubmitDeck([], "Lurrus of the Dream-Den");
+    });
+    expect(store.state.submitDeck).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm Submission" }));
+    await submission;
+    expect(store.state.submitDeck).toHaveBeenCalledWith([], "Lurrus of the Dream-Den");
   });
 
   it("cancels a Casual pod submission without submitting", async () => {

@@ -1385,6 +1385,7 @@ function DraftingPhaseContent({
 /** A deck submission held until the player answers the confirmation dialog. */
 interface PendingDeckSubmission {
   commanders: string[];
+  companion?: string | null;
   resolve: () => void;
   reject: (error: unknown) => void;
 }
@@ -1430,9 +1431,9 @@ function PodDeckBuilder({
   // The deck builder awaits this promise, so its submitting state and error
   // display stay in force until the player answers the dialog: Confirm settles
   // it with the store submission's outcome, Cancel resolves it unsubmitted.
-  const confirmSubmitDeck = (commanders: string[] = []) =>
+  const confirmSubmitDeck = (commanders: string[] = [], companion?: string | null) =>
     new Promise<void>((resolve, reject) => {
-      pendingSubmission.current = { commanders, resolve, reject };
+      pendingSubmission.current = { commanders, companion, resolve, reject };
       setConfirmOpen(true);
     });
   const takePendingSubmission = () => {
@@ -1444,7 +1445,10 @@ function PodDeckBuilder({
   const handleConfirmSubmit = () => {
     const pending = takePendingSubmission();
     if (!pending) return;
-    submitDeck(pending.commanders).then(() => {
+    const submission = pending.companion
+      ? submitDeck(pending.commanders, pending.companion)
+      : submitDeck(pending.commanders);
+    submission.then(() => {
       if (mode.kind === "betweenRounds") mode.onSubmitted();
       pending.resolve();
     }, pending.reject);
