@@ -1543,28 +1543,27 @@ export class ServerDraftAdapter implements EngineAdapter {
       // replies are drained in wire order.
       for (let index = 0; index < setupMessages.length; index++) {
         if (!this.sockets.has(sourceSocket)) return;
-        if (confirmation === null) {
-          handleMessage(setupMessages[index]!);
-          continue;
-        }
-        // A confirmed reattach's buffered frames are the server's answers,
-        // which the merge base delivered to the live socket handler. A throw
-        // there, or a frame that does not parse, does not undo the committed
-        // adoption: it is reported as an uncaught error (as a raw socket's
-        // handler reports it; the gzip and codec transports swallow it on live
-        // delivery) and the adopted socket and the remaining frames carry on.
-        // The exception is a frame that settles the reattach itself (a view, a
-        // rejection) throwing before it did: nothing else would, so it fails the
-        // attachment.
+        // The buffered frames are the server's answers, which the merge base
+        // delivered to the live socket handler. A throw there, or a frame that
+        // does not parse, does not undo a committed attachment: it is reported
+        // as an uncaught error (as a raw socket's handler reports it; the gzip
+        // and codec transports swallow it on live delivery) and the socket and
+        // the remaining frames carry on, so a settled initialization never
+        // outlives its transport. The exception is a frame that settles the
+        // initialization itself (a view, a rejection) throwing before it did:
+        // nothing else would, so it fails the attachment.
         try {
           handleMessage(setupMessages[index]!);
         } catch (error) {
-          // A `DraftMatchStart` confirms the candidate but does not settle the
-          // reattach (its `DraftStateUpdate` does), so a subscriber that throws
-          // on it leaves the bootstrap's remaining frames to settle it.
+          // For a confirmed reattach, a `DraftMatchStart` confirms the candidate
+          // but does not settle the reattach (its `DraftStateUpdate` does), so a
+          // subscriber that throws on it leaves the bootstrap's remaining frames
+          // to settle it. An unconfirmed attachment has no confirming frame: its
+          // pending initialization alone decides.
           const settling = parsedSetupFrames.get(setupMessages[index]!);
-          if (initOwner !== null && this.pendingInit === initOwner
-            && settling !== undefined && settling.type !== "DraftMatchStart") {
+          const mayStillSettle = confirmation === null
+            || (settling !== undefined && settling.type !== "DraftMatchStart");
+          if (initOwner !== null && this.pendingInit === initOwner && mayStillSettle) {
             throw error;
           }
           reportUncaughtError(error);
@@ -1823,14 +1822,22 @@ export class ServerDraftAdapter implements EngineAdapter {
           break;
         }
         const revision = typeof data.state_revision === "number" ? data.state_revision : null;
+        this.acceptedFullKey = data.full_key ?? null;
         if (this.cachedStateRevision !== null && revision !== null
           && revision < this.cachedStateRevision) {
-          // A same-key bootstrap that regresses the applied revision is not
-          // accepted evidence: it must not replace the snapshot, release the
-          // codec's recovery gate, or authorize commands.
+          // A same-key bootstrap that regresses the applied revision must not
+          // roll the snapshot back, release the codec's recovery gate, or be
+          // announced. On a socket that has not yet been accepted (a
+          // replacement whose predecessor's completion already applied a newer
+          // revision) it is still the validated bootstrap, so it authorizes the
+          // socket: the reattach would otherwise settle on a connection that
+          // can never submit.
+          if (this.acceptedGameSocket !== sourceSocket) {
+            this._playerId = data.your_player;
+            this.acceptedGameSocket = sourceSocket;
+          }
           break;
         }
-        this.acceptedFullKey = data.full_key ?? null;
         const started = ServerDraftAdapter.snapshotPair(data);
         const startedSnapshot = this.cacheSnapshot(started.state, started.legalResult, sourceSocket);
         this.cachedStateRevision = revision ?? this.cachedStateRevision;

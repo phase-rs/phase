@@ -6780,6 +6780,54 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       }
     });
 
+    it("keeps an initial join's attachment when a bootstrapDelivered listener throws on a frame buffered during its held setup write", async () => {
+      MockWebSocket.last = null;
+      const codec = scriptedCodec();
+      const adapter = new WebSocketAdapter(
+        "wss://localhost:9374/ws", "join", { main_deck: [], sideboard: [] }, "GAME01",
+        undefined, undefined, undefined,
+        { stateCodecSessionProvider: () => Promise.resolve(codec.session) },
+      );
+      let armed = true;
+      adapter.onEvent((event) => {
+        if (event.type !== "bootstrapDelivered" || !armed) return;
+        armed = false;
+        throw new Error("bootstrapDelivered listener failed");
+      });
+      const onError = (event: ErrorEvent) => { event.preventDefault(); };
+      window.addEventListener("error", onError);
+      const init = observe(adapter.initialize());
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBeNull());
+      const candidate = latestSocket();
+      let release: () => void = () => undefined;
+      candidate.sendReceipt = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
+      try {
+        candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+        await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+        // The server's answer arrives while the write receipt is still held.
+        candidate.dispatchSynthetic("message", JSON.stringify({
+          type: "GameStarted",
+          data: {
+            state_revision: 1, state: createMockState(), your_player: 0,
+            player_token: "codec-token", full_key: REPLY_OWNERSHIP_FULL_KEY,
+          },
+        }));
+        release();
+        await vi.waitFor(() => expect(armed).toBe(false));
+        // The initialization succeeded, so the socket it succeeded on stays.
+        await vi.waitFor(() => expect(init.value()).toMatchObject({ resolvedWith: undefined }));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(candidate.close).not.toHaveBeenCalled();
+        expect(codec.close).not.toHaveBeenCalled();
+        const sent = candidate.send.mock.calls.length;
+        void adapter.submitAction({ type: "PassPriority" } as GameAction, 0).catch(() => undefined);
+        await vi.waitFor(() => expect(candidate.send.mock.calls.length).toBeGreaterThan(sent));
+      } finally {
+        window.removeEventListener("error", onError);
+        adapter.dispose();
+      }
+    });
+
     it.each(["join", "spectate"] as const)(
       "settles an initial %s at once when its candidate closes while its setup receipt is held",
       async (mode) => {

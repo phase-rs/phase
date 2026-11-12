@@ -4559,6 +4559,47 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
+    it("keeps a created draft's attachment when a waitingForPlayers listener throws on a frame buffered during its held setup write", async () => {
+      vi.useFakeTimers();
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter } = await startCodecDraft(session.session);
+      let armed = true;
+      adapter.onEvent((event) => {
+        if (event.type !== "waitingForPlayers" || !armed) return;
+        armed = false;
+        throw new Error("waitingForPlayers listener failed");
+      });
+      const onError = (event: ErrorEvent) => { event.preventDefault(); };
+      window.addEventListener("error", onError);
+      const created = watch(adapter.createDraft({
+        displayName: "Contender", setCodes: ["TST"], kind: "Premier", public: false,
+        tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+      }));
+      await drainArt();
+      const candidate = MockWebSocket.last!;
+      let release: () => void = () => undefined;
+      candidate.sendReceipt = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
+      try {
+        candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+        // The server's answer arrives while the write receipt is still held.
+        receive(candidate, "DraftCreated", {
+          draft_code: "DRAFT1", player_token: "draft-token", seat_index: 0,
+        });
+        release();
+        await vi.waitFor(() => expect(armed).toBe(false));
+        // The create succeeded, so the socket it succeeded on stays.
+        await vi.waitFor(() => expect(created.value()).not.toBe("never settled"));
+        expect(created.value()).not.toMatchObject({ code: expect.anything() });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(candidate.close).not.toHaveBeenCalled();
+      } finally {
+        window.removeEventListener("error", onError);
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
     it.each([
       ["frame count", 65, 1024],
       ["expanded text", 17, 1024 * 1024],
@@ -4779,7 +4820,7 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
         const command = watch(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
         const commandId = lastSubmissionCommandId(ws);
         provider.mockResolvedValueOnce(candidateSession.session);
-        void adapter.reconnectDraft().catch(() => undefined);
+        const reattach = watch(adapter.reconnectDraft());
         await drainArt();
         const candidate = MockWebSocket.last!;
         candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
@@ -4816,6 +4857,20 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
           await vi.waitFor(async () => expect(
             (await adapter.getSnapshot()).state,
           ).toMatchObject({ label: revision === 12 ? "rev12" : "rev11-bootstrap" }));
+          // Either way B's bootstrap authorized it: the reattach settles on B's
+          // view, and B then completes a command of its own.
+          receive(candidate, "DraftStateUpdate", { view: createMockDraftView({ status: "MatchInProgress" }) });
+          await vi.waitFor(() => expect(reattach.value()).toMatchObject({ resolvedWith: undefined }));
+          const next = watch(adapter.submitAction({ type: "PassPriority" } as GameAction, 0));
+          await vi.waitFor(() => expect(submissionTypes(candidate)).toHaveLength(1));
+          const nextId = lastSubmissionCommandId(candidate);
+          candidate.dispatchSynthetic("message", JSON.stringify({
+            type: "StateUpdate", command_id: nextId,
+            data: {
+              state: matchState("rev13"), events: [], state_revision: 13, full_key: FULL_KEY,
+            },
+          }));
+          await vi.waitFor(() => expect(next.value()).toMatchObject({ resolvedWith: expect.anything() }));
         } finally {
           adapter.dispose();
           vi.useRealTimers();

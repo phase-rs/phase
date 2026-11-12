@@ -2950,22 +2950,23 @@ export class WebSocketAdapter implements EngineAdapter {
         // its own reply, which must follow every already-admitted frame.
         for (let index = 0; index < messages.length; index++) {
           if (this.disposed || this.ws !== socket.ws || this.stateCodecPreparation !== preparation) return;
-          if (confirmation === null) {
-            handleSocketMessage(messages[index]!);
-            continue;
-          }
-          // A confirmed reconnect's buffered frames are the server's answers,
-          // which the merge base delivered to the live socket handler. A throw
-          // there does not undo the committed adoption: it is reported as an
-          // uncaught error (as a raw socket's handler reports it; the gzip and
-          // codec transports swallow it on live delivery) and the adopted
-          // socket and the remaining frames carry on. The exception is the
-          // frame that settled the confirmation throwing before it decided the
-          // episode: nothing else would settle it, so it fails the attachment.
+          // The buffered frames are the server's answers, which the merge base
+          // delivered to the live socket handler. A throw there does not undo a
+          // committed attachment: it is reported as an uncaught error (as a raw
+          // socket's handler reports it; the gzip and codec transports swallow
+          // it on live delivery) and the socket and the remaining frames carry
+          // on, so a settled initialization never outlives its transport. The
+          // exception is a frame that was to settle the attachment throwing
+          // before it did (the confirming frame of a reconnect; for an
+          // unconfirmed attachment, the pending initialization): nothing else
+          // would settle it, so it fails the attachment.
           try {
             handleSocketMessage(messages[index]!);
           } catch (error) {
-            if (this.reconnectInFlight && parsedSetupFrames.has(messages[index]!)) throw error;
+            const undecided = confirmation === null
+              ? this.initResolve !== null
+              : this.reconnectInFlight && parsedSetupFrames.has(messages[index]!);
+            if (undecided) throw error;
             reportUncaughtError(error);
           }
         }
