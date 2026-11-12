@@ -1175,6 +1175,27 @@ pub fn submit_deck(
     Ok(to_js(&view))
 }
 
+/// CR 702.139a/b: refuse an ineligible companion designation against the
+/// loaded card database BEFORE the reducer mutates, so the host never
+/// acknowledges (or persists a receipt for) a deck that match admission would
+/// reject. Shared by every wasm submit entry point (local, host, recovered).
+fn check_companion_before_submit(
+    session: &DraftSession,
+    main_deck: &[String],
+    companion: Option<&str>,
+) -> Result<(), String> {
+    CARD_DB
+        .with(|cell| {
+            session::check_submission_companion(
+                session,
+                cell.borrow().as_ref(),
+                main_deck,
+                companion,
+            )
+        })
+        .map_err(deck_submission_message)
+}
+
 /// Pure-Rust core for `submit_deck`, so both halves of the payload boundary are
 /// reachable from `cargo test` without `js_sys::JSON::parse` -- the same reason
 /// `submit_pick_for_seat_inner` exists.
@@ -1194,6 +1215,7 @@ fn submit_deck_inner(
     let companion = companion_designation(companion);
 
     with_draft_mut_inner(|session| {
+        check_companion_before_submit(session, &main_deck, companion.as_deref())?;
         session::apply(
             session,
             DraftAction::SubmitDeck {
@@ -1434,6 +1456,7 @@ fn submit_deck_for_seat_inner(
     let companion = companion_designation(companion);
 
     with_draft_mut_inner(|session| {
+        check_companion_before_submit(session, &main_deck, companion.as_deref())?;
         session::apply(
             session,
             DraftAction::SubmitDeck {
@@ -5951,26 +5974,112 @@ mod create_multiplayer_draft_tests {
         assert!(companion_backed_inner("not json", "[]", "Gyruda, Doom of Depths").is_err());
     }
 
+    /// A card database where `companion` is a Gyruda-class companion (CR
+    /// 702.139b: each nonland card in the starting deck has an even mana value)
+    /// and every `Seat 0 Card i` of the starting deck has mana value 2 -- except
+    /// `odd_card`, which has mana value 3.
+    fn install_gyruda_class_db(companion: &str, odd_card: Option<&str>) {
+        use engine::types::card::CardFace;
+        use engine::types::keywords::{CompanionCondition, Keyword};
+        use engine::types::mana::ManaCost;
+        let mut faces: std::collections::BTreeMap<String, serde_json::Value> = Default::default();
+        let mut add = |face: CardFace| {
+            faces.insert(
+                face.name.to_lowercase(),
+                serde_json::to_value(&face).unwrap(),
+            );
+        };
+        for i in 0..39 {
+            let name = format!("Seat 0 Card {i}");
+            let mana_value = if odd_card == Some(name.as_str()) {
+                3
+            } else {
+                2
+            };
+            add(CardFace {
+                name,
+                mana_cost: ManaCost::generic(mana_value),
+                ..CardFace::default()
+            });
+        }
+        add(CardFace {
+            name: companion.to_string(),
+            keywords: vec![Keyword::Companion(CompanionCondition::EvenManaValues)],
+            ..CardFace::default()
+        });
+        let db = CardDatabase::from_json_str(&serde_json::to_string(&faces).unwrap()).unwrap();
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(db));
+    }
+
+    fn submitted_companion(seat: u8) -> Option<Option<String>> {
+        session_cell::with_installed(|session| {
+            session
+                .submitted_decks
+                .get(&engine::types::player::PlayerId(seat))
+                .map(|submission| submission.companion.clone())
+        })
+    }
+
+    fn companion_test_deck() -> (Vec<String>, String) {
+        let mut deck = seat_deck(0, 39);
+        deck.push("Plains".to_string());
+        (deck, "Seat 0 Card 39".to_string())
+    }
+
     #[test]
     fn submit_deck_inner_carries_companion_to_the_session() {
         clear_state();
         premier_pod(0, 40);
-
-        let mut deck = seat_deck(0, 39);
-        deck.push("Plains".to_string());
-        let companion = "Seat 0 Card 39".to_string();
+        let (deck, companion) = companion_test_deck();
+        install_gyruda_class_db(&companion, None);
 
         submit_deck_inner(&json(&deck), "[]", Some(&companion))
-            .expect("deck with companion in pool submits");
+            .expect("an eligible companion with a drafted copy submits");
 
-        session_cell::with_installed(|session| {
-            let submission = session
-                .submitted_decks
-                .get(&engine::types::player::PlayerId(0))
-                .expect("seat 0's submission inserted");
-            assert_eq!(submission.companion, Some(companion));
-        });
+        assert_eq!(submitted_companion(0), Some(Some(companion)));
+        clear_state();
+    }
 
+    /// CR 702.139b: the draft refuses, before the reducer mutates and so before
+    /// any acknowledgement, a companion whose starting-deck condition the deck
+    /// breaks -- the same verdict match admission would give.
+    #[test]
+    fn submission_refuses_a_companion_the_starting_deck_makes_ineligible() {
+        clear_state();
+        premier_pod(0, 40);
+        let (deck, companion) = companion_test_deck();
+        install_gyruda_class_db(&companion, Some("Seat 0 Card 7"));
+
+        for result in [
+            submit_deck_inner(&json(&deck), "[]", Some(&companion)),
+            submit_deck_for_seat_inner(0, &json(&deck), "[]", Some(&companion)),
+        ] {
+            let error = result.expect_err("an odd mana value breaks the Gyruda condition");
+            assert!(error.contains("not a legal companion"), "{error}");
+        }
+        assert_eq!(
+            submitted_companion(0),
+            None,
+            "a refused deck is not recorded"
+        );
+        // The same deck without the designation is an ordinary legal submission.
+        submit_deck_for_seat_inner(0, &json(&deck), "[]", None).expect("the deck itself is legal");
+        clear_state();
+    }
+
+    /// A designation cannot be verified without a card database, so it is not
+    /// admitted rather than trusted.
+    #[test]
+    fn submission_refuses_a_companion_it_cannot_verify() {
+        clear_state();
+        premier_pod(0, 40);
+        let (deck, companion) = companion_test_deck();
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+
+        let error = submit_deck_for_seat_inner(0, &json(&deck), "[]", Some(&companion))
+            .expect_err("no card database, no verified designation");
+        assert!(error.contains("cannot be verified"), "{error}");
+        assert_eq!(submitted_companion(0), None);
         clear_state();
     }
 

@@ -2094,6 +2094,8 @@ fn validate_deck_list_seats(
 /// Shared body of both initialize entry points. The guard lives in the shells
 /// (they are where `JsValue` envelopes are produced); this function assumes it
 /// has already passed and installs unconditionally.
+// The wasm-bindgen shells pass their JS parameters through unchanged.
+#[allow(clippy::too_many_arguments)]
 fn initialize_game_impl(
     deck_data: JsValue,
     seed: Option<f64>,

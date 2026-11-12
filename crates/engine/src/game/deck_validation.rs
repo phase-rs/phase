@@ -833,6 +833,32 @@ fn printed_in_any_set(db: &CardDatabase, name: &str, sets: &[SetCode]) -> bool {
     })
 }
 
+/// CR 702.139a/b: whether `companion_name` is a legal companion for a Limited
+/// starting deck of `main_deck`, measured against `min_deck_size` (Yorion-class
+/// conditions read the format's own minimum). The single authority for Limited
+/// companion eligibility: the generic deck gate (`evaluate_limited`) and a
+/// draft session's submission check both call it, so an admitted draft deck can
+/// never be refused at match admission. `None` when the companion card does not
+/// resolve in `db` (the caller decides whether that is an unknown-card refusal).
+pub fn limited_companion_eligibility(
+    db: &CardDatabase,
+    main_deck: &[String],
+    companion_name: &str,
+    min_deck_size: usize,
+) -> Option<bool> {
+    let face = db.get_face_by_name(companion_name)?;
+    let companion = DeckEntry::from_resolved_face(db, face, 1);
+    let main = deck_entries_for_names(db, main_deck);
+    let starting = companion_starting_deck(&main, &[], false);
+    Some(is_eligible_companion_with_min_deck_size(
+        &companion,
+        &starting,
+        &[],
+        false,
+        min_deck_size,
+    ))
+}
+
 /// Every name in a Limited deck must resolve before game admission.
 /// A draft session applies its configured minimum at submission; this
 /// generic gate has no session provenance from which to recover that minimum.
@@ -852,24 +878,15 @@ fn evaluate_limited(
             request.companion.len()
         ));
     } else if let Some(companion_name) = request.companion.first() {
-        if let Some(face) = db.get_face_by_name(companion_name) {
-            let companion = DeckEntry::from_resolved_face(db, face, 1);
-            let main = deck_entries_for_names(db, &request.main_deck);
-            let starting = companion_starting_deck(&main, &[], false);
-            // CR 702.139b: Yorion-class conditions measure the starting deck
-            // against this format's own minimum.
-            let min_deck_size = request.companion_min_deck_size(format_rules);
-            if !is_eligible_companion_with_min_deck_size(
-                &companion,
-                &starting,
-                &[],
-                false,
-                min_deck_size,
-            ) {
-                reasons.push(format!(
-                    "{companion_name}: not a legal companion for this starting deck"
-                ));
-            }
+        // CR 702.139b: Yorion-class conditions measure the starting deck
+        // against this format's own minimum.
+        let min_deck_size = request.companion_min_deck_size(format_rules);
+        if limited_companion_eligibility(db, &request.main_deck, companion_name, min_deck_size)
+            == Some(false)
+        {
+            reasons.push(format!(
+                "{companion_name}: not a legal companion for this starting deck"
+            ));
         }
     }
     CompatibilityCheck {

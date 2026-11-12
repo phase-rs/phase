@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
 // public surface, but this phase must not edit that file.
-use engine::game::deck_validation::GrantableCommanderFiller;
+use engine::database::CardDatabase;
+use engine::game::deck_validation::{limited_companion_eligibility, GrantableCommanderFiller};
 
 use crate::types::DeckAddableCards;
 
@@ -89,6 +90,43 @@ pub enum LimitedDeckError {
     /// `CommanderNotInDeck`).
     #[error("{designated} commander(s) designated, but {minimum} are required")]
     TooFewCommanders { designated: usize, minimum: usize },
+    /// CR 702.139b: the companion's deck-construction condition is measured
+    /// against the starting deck (and Yorion-class conditions against the
+    /// session's minimum deck size). A designation the engine would refuse at
+    /// match admission is refused here, at submission.
+    #[error("companion '{name}' is not a legal companion for this starting deck")]
+    IneligibleCompanion { name: String },
+    /// A companion was designated but no card database is available to check
+    /// it against, so the designation cannot be admitted.
+    #[error("companion '{name}' cannot be verified without a loaded card database")]
+    CompanionUnverifiable { name: String },
+}
+
+/// CR 702.139a/b: the engine's Limited companion-eligibility check applied to a
+/// draft submission, so the draft never acknowledges a designation that match
+/// admission (`evaluate_deck_format_gate`) would refuse. Reuses
+/// [`limited_companion_eligibility`] -- the same authority the generic gate
+/// calls -- measured against the session's own `min_deck_size`.
+///
+/// `db` is `None` only where no card database is loaded; a designation then
+/// fails closed, because it cannot be verified.
+pub fn validate_companion_eligibility(
+    db: Option<&CardDatabase>,
+    main_deck: &[String],
+    companion: &str,
+    min_deck_size: usize,
+) -> Result<(), LimitedDeckError> {
+    let Some(db) = db else {
+        return Err(LimitedDeckError::CompanionUnverifiable {
+            name: companion.to_string(),
+        });
+    };
+    match limited_companion_eligibility(db, main_deck, companion, min_deck_size) {
+        Some(true) => Ok(()),
+        Some(false) | None => Err(LimitedDeckError::IneligibleCompanion {
+            name: companion.to_string(),
+        }),
+    }
 }
 
 /// CR 702.139a + CR 100.4b: whether `companion` names a card the player owns

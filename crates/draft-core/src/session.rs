@@ -12,7 +12,7 @@ use crate::pack_source::PackSource;
 use crate::pick_pass;
 use crate::shared_stack;
 use crate::types::*;
-use crate::validation::{validate_limited_deck, LimitedDeckError};
+use crate::validation::{validate_companion_eligibility, validate_limited_deck, LimitedDeckError};
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
 // public surface, but this phase must not edit that file.
 use engine::game::deck_validation::{draft_set_concessions_for, DraftSetConcessions};
@@ -2641,6 +2641,29 @@ pub(crate) fn concession_set_codes(session: &DraftSession) -> Vec<&str> {
         | DraftKind::Sealed
         | DraftKind::Winston => Vec::new(),
     }
+}
+
+/// CR 702.139a/b: the companion half of deck-submission validation, which needs
+/// the card database `apply` does not carry. A submission path that holds one
+/// (draft-wasm's host/local/recovered submits) MUST call this before `apply` so
+/// an ineligible designation is refused before the reducer mutates and before
+/// the draft acknowledges or advances; it reads the session's own
+/// `min_deck_size`, the same minimum match admission measures Yorion against.
+/// A submission without a companion has nothing to check.
+pub fn check_submission_companion(
+    session: &DraftSession,
+    db: Option<&engine::database::CardDatabase>,
+    main_deck: &[String],
+    companion: Option<&str>,
+) -> Result<(), DraftError> {
+    let Some(companion) = companion else {
+        return Ok(());
+    };
+    validate_companion_eligibility(db, main_deck, companion, session.config.min_deck_size).map_err(
+        |error| DraftError::ValidationFailed {
+            errors: vec![error],
+        },
+    )
 }
 
 fn apply_submit_deck(
