@@ -756,3 +756,100 @@ fn empowered_autogenerator_counts_the_counter_it_just_placed() {
         "second tap: two counters, so two mana of the chosen color"
     );
 }
+
+/// Walking Ballista (verified Oracle text, Scryfall): {X}{X} artifact creature.
+/// P0 controls an untapped Metalworker and holds `others` other artifact cards
+/// (plus the Ballista), with no other mana. Returns the runner after casting
+/// has reached the X announcement and the announced maximum.
+fn cast_walking_ballista(others: usize) -> (GameRunner, ObjectId, Vec<ObjectId>, u32) {
+    use engine::types::mana::ManaCostShard;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let metalworker = scenario
+        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
+        .as_artifact()
+        .id();
+    let artifacts: Vec<ObjectId> = (0..others)
+        .map(|i| {
+            scenario
+                .add_creature_to_hand(P0, &format!("Artifact {i}"), 1, 1)
+                .as_artifact()
+                .id()
+        })
+        .collect();
+    let ballista = scenario
+        .add_creature_to_hand(P0, "Walking Ballista", 0, 0)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::X],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&ballista].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: ballista,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting reaches the X announcement");
+    let max = match &runner.state().waiting_for {
+        WaitingFor::ChooseXValue { max, .. } => *max,
+        other => panic!("expected the X announcement, got {other:?}"),
+    };
+    (runner, metalworker, artifacts, max)
+}
+
+/// CR 605.3a + CR 107.1c: a Metalworker that could reveal both other artifact
+/// cards in hand contributes {C}{C} for each, so {X}{X} can announce X=2 and be
+/// paid by revealing them while paying.
+#[test]
+fn metalworker_capacity_counts_the_artifacts_it_could_reveal_for_announced_x() {
+    let (mut runner, _metalworker, artifacts, max) = cast_walking_ballista(2);
+    assert_eq!(
+        max, 2,
+        "four colorless from revealing two artifacts pays X=2"
+    );
+
+    runner
+        .act(GameAction::ChooseX { value: 2 })
+        .expect("announcing X=2 is legal");
+    // Pay by revealing both artifact cards through the mana ability.
+    for _ in 0..6 {
+        match &runner.state().waiting_for {
+            WaitingFor::RevealChoice { .. } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: artifacts.clone(),
+                    })
+                    .expect("revealing both artifacts is legal");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                if colorless(&runner) >= 4 {
+                    runner.act(GameAction::PassPriority).expect("pay");
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id != ObjectId(0)),
+        "Walking Ballista was cast; waiting_for = {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Control: one other artifact card in hand caps X at 1.
+#[test]
+fn metalworker_capacity_with_one_artifact_caps_announced_x_at_one() {
+    let (_runner, _metalworker, _artifacts, max) = cast_walking_ballista(1);
+    assert_eq!(max, 1, "two colorless from revealing one artifact pays X=1");
+}

@@ -17312,7 +17312,13 @@ pub(super) fn max_x_value_excluding(
         .iter()
         .filter(|id| !excluded_sources.contains(id))
         .map(|&id| {
-            let mana = mana_sources::x_ceiling_mana_capacity(state, id, player, spell_ctx.as_ref());
+            let mana = mana_sources::x_ceiling_mana_capacity(
+                state,
+                id,
+                player,
+                spell_ctx.as_ref(),
+                object_id,
+            );
             let tap = pred
                 .filter(|p| state.objects.get(&id).is_some_and(|o| p(o, player)))
                 .map_or(0, |_| 1);

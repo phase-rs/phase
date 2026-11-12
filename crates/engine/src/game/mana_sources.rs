@@ -2402,6 +2402,7 @@ pub(crate) fn x_ceiling_mana_capacity(
     object_id: ObjectId,
     controller: PlayerId,
     payment_context: Option<&PaymentContext<'_>>,
+    casting_spell: Option<ObjectId>,
 ) -> u32 {
     mana_capacity(
         state,
@@ -2409,6 +2410,7 @@ pub(crate) fn x_ceiling_mana_capacity(
         controller,
         payment_context,
         CapacityUse::XCeiling,
+        casting_spell,
     )
 }
 
@@ -2424,6 +2426,7 @@ pub(crate) fn feasible_mana_capacity(
         controller,
         payment_context,
         CapacityUse::Castability,
+        None,
     )
 }
 
@@ -2433,6 +2436,7 @@ fn mana_capacity(
     controller: PlayerId,
     payment_context: Option<&PaymentContext<'_>>,
     capacity_use: CapacityUse,
+    casting_spell: Option<ObjectId>,
 ) -> u32 {
     let Some(obj) = state.objects.get(&object_id) else {
         return 0;
@@ -2456,7 +2460,14 @@ fn mana_capacity(
                 )
         })
         .filter_map(|(_, ability)| {
-            usable_mana_ability_net(state, object_id, controller, ability, capacity_use)
+            usable_mana_ability_net(
+                state,
+                object_id,
+                controller,
+                ability,
+                capacity_use,
+                casting_spell,
+            )
         })
         .max()
         .unwrap_or(0)
@@ -2502,8 +2513,97 @@ fn mana_ability_usable_for_payment(
             object_id,
             payment_context,
         ),
-        _ => false,
+        _ => match reveal_then_mana_shape(ability) {
+            Some(shape) => mana_ability_allowed_for_payment(
+                ability,
+                shape.restrictions,
+                state,
+                object_id,
+                payment_context,
+            ),
+            None => false,
+        },
     }
+}
+
+/// CR 107.1c + CR 701.20a + CR 605.1a: the parts of a mana ability shaped
+/// "reveal any number of [filter] cards in your hand. Add [mana] for each card
+/// revealed this way" (Metalworker, Sacellum Godspeaker) — a root any-number
+/// `RevealHand` whose production is the `Effect::Mana` immediately after it.
+/// Mirrors the shape `produces_mana_on_activation` admits.
+struct RevealThenManaShape<'a> {
+    card_filter: &'a TargetFilter,
+    restrictions: &'a [ManaSpendRestriction],
+}
+
+fn reveal_then_mana_shape(ability: &AbilityDefinition) -> Option<RevealThenManaShape<'_>> {
+    let Effect::RevealHand {
+        card_filter,
+        cardinality: crate::types::ability::ObjectSelectionCardinality::AnyNumber,
+        ..
+    } = &*ability.effect
+    else {
+        return None;
+    };
+    match &*ability.sub_ability.as_deref()?.effect {
+        Effect::Mana { restrictions, .. } => Some(RevealThenManaShape {
+            card_filter,
+            restrictions,
+        }),
+        _ => None,
+    }
+}
+
+/// CR 605.3a + CR 107.1c: the most mana a reveal-then-mana activation can add
+/// for its own controller — the production evaluated as if every card in that
+/// player's own hand matching the reveal filter were revealed. Planned for the
+/// owner's own decisions (their hand is visible to them), never projected to
+/// other viewers.
+fn reveal_then_mana_gross(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    ability: &AbilityDefinition,
+    shape: &RevealThenManaShape<'_>,
+    casting_spell: Option<ObjectId>,
+) -> u32 {
+    use crate::game::filter::{matches_target_filter, FilterContext};
+    let ctx = FilterContext::from_source_with_controller(object_id, controller);
+    let eligible: Vec<ObjectId> = state
+        .players
+        .iter()
+        .find(|p| p.id == controller)
+        .map(|p| {
+            p.hand
+                .iter()
+                .copied()
+                // CR 601.2a: the spell being cast is already on the stack
+                // while its costs are paid, so it is not a card in hand.
+                .filter(|&id| Some(id) != casting_spell)
+                .filter(|&id| matches_target_filter(state, id, shape.card_filter, &ctx))
+                .collect()
+        })
+        .unwrap_or_default();
+    if eligible.is_empty() {
+        return 0;
+    }
+    // The activation resolves its "revealed this way" population as the
+    // tracked set its reveal publishes; size the production against a scratch
+    // state holding exactly that set.
+    let mut scratch = state.clone();
+    scratch.chain_tracked_set_id = None;
+    super::effects::publish_tracked_set(&mut scratch, eligible);
+    let resolved = super::ability_utils::build_resolved_from_def(ability, object_id, controller);
+    let Some(mana_node) =
+        std::iter::successors(Some(&resolved), |node| node.sub_ability.as_deref())
+            .find(|node| matches!(node.effect, Effect::Mana { .. }))
+    else {
+        return 0;
+    };
+    let Effect::Mana { produced, .. } = &mana_node.effect else {
+        return 0;
+    };
+    planned_gross_mana(produced, &scratch, mana_node)
 }
 
 /// CR 605.3b: Net mana one usable activation contributes to planned capacity.
@@ -2513,9 +2613,15 @@ fn usable_mana_ability_net(
     controller: PlayerId,
     ability: &AbilityDefinition,
     capacity_use: CapacityUse,
+    casting_spell: Option<ObjectId>,
 ) -> Option<u32> {
     let Effect::Mana { produced, .. } = &*ability.effect else {
-        return None;
+        let shape = reveal_then_mana_shape(ability)?;
+        let gross =
+            reveal_then_mana_gross(state, object_id, controller, ability, &shape, casting_spell);
+        let activation_cost =
+            mana_abilities::mana_sub_cost_of(&ability.cost).map_or(0, |cost| cost.mana_value());
+        return Some(gross.saturating_sub(activation_cost));
     };
     let sizing = largest_sizing_resolution(state, produced, ability, object_id, controller);
     if capacity_use == CapacityUse::XCeiling
@@ -2857,6 +2963,7 @@ fn activatable_mana_profiles_for_object(
             controller,
             ability,
             CapacityUse::Castability,
+            None,
         ) {
             capacity = capacity.max(net);
         }
@@ -2894,6 +3001,7 @@ fn activatable_mana_profiles_for_object(
                 controller,
                 ability,
                 CapacityUse::Castability,
+                None,
             ) {
                 capacity = capacity.max(net);
             }
