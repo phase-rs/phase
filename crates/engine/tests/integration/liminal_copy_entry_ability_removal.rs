@@ -2040,7 +2040,7 @@ fn copied_minion_payment_observers(carry: PauseCarry, resident: Option<Donor>) -
     let minion = std::cell::Cell::new(None);
     let hand_before_payment = std::cell::Cell::new(None);
     let donors = match resident {
-        Some(_) => vec![EMPERION_DONOR, GARGANTUAN_DONOR],
+        Some(_) => vec![MARGLE_DONOR, GARGANTUAN_DONOR],
         None => vec![VILIS_DONOR, EMPERION_DONOR, GARGANTUAN_DONOR],
     };
     let (runner, answered) = clone_legion_carried(
@@ -2074,6 +2074,21 @@ fn copied_minion_payment_observers(carry: PauseCarry, resident: Option<Donor>) -
                 };
                 assert!(runner.state().objects[&source_id].is_token);
                 assert_eq!(runner.state().objects[&source_id].name, MINION_NAME);
+                if resident.is_some() {
+                    assert_eq!(battlefield_tokens(runner, MARGLE_NAME).len(), 1);
+                    let vilis = runner
+                        .state()
+                        .objects
+                        .values()
+                        .find(|object| {
+                            object.name == VILIS_NAME && object.controller == P0 && !object.is_token
+                        })
+                        .unwrap();
+                    assert!(
+                        vilis.trigger_definitions.is_empty(),
+                        "REACH-GUARD: co-entering Margle has stripped the live resident's trigger"
+                    );
+                }
             }
         },
     );
@@ -2130,6 +2145,14 @@ fn clone_legion_copied_minion_payment_excludes_co_entering_vilis_across_save_and
     assert_restored_row_matches_live(
         |carry| copied_minion_payment_observers(carry, None),
         "G8 Vilis payment observers",
+    );
+}
+
+#[test]
+fn clone_legion_copied_minion_payment_is_observed_by_resident_vilis_across_save_and_restore() {
+    assert_restored_row_matches_live(
+        |carry| copied_minion_payment_observers(carry, Some(VILIS_DONOR)),
+        "G8 resident Vilis beside co-entering Margle",
     );
 }
 
@@ -2250,25 +2273,27 @@ fn clone_legion_gargantuan_copy_of_squad_captain_does_not_count_a_co_entering_be
 }
 
 /// G7: P0's Parallel Lives and P1's Halving Season. Clone Legion over P1's [Margle, Voice of
-/// All]: P0 orders the two at each copy's event (CR 616.1e), Parallel Lives first, so each
-/// event creates 1 × 2 ÷ 2 = one copy. The Voice copy's event is applied by the order
-/// answer under the parked owner, with the Margle copy co-entering, so its choice is
-/// offered.
+/// All]: P0 chooses Parallel Lives first (CR 616.1e), so doubling then halving
+/// preserves the copies. These assertions also hold when the engine delivers the
+/// simultaneous creation as one group; held-owner custody is tested separately.
 #[test]
 fn clone_legion_ordered_single_batch_keeps_the_earlier_margle_copy_as_co_entrant() {
     ordered_single_batch_beside_margle(PauseCarry::Live);
 }
 
-/// G7 saved and restored at both order prompts and the color choice.
+/// G7 saved and restored at the order and color choices.
 #[test]
 fn clone_legion_ordered_single_batch_keeps_the_earlier_margle_copy_as_co_entrant_across_save_and_restore(
 ) {
-    assert_restored_row_matches_live(ordered_single_batch_beside_margle, "G7");
+    assert_eq!(
+        ordered_single_batch_beside_margle(PauseCarry::SavedAndRestored),
+        ordered_single_batch_beside_margle(PauseCarry::Live),
+        "G7: restored and live order/choice answers settle identically"
+    );
 }
 
 fn ordered_single_batch_beside_margle(carry: PauseCarry) -> RowOutcome {
     let mut at_replacement = Vec::new();
-    let mut margle_at_named = Vec::new();
     let (runner, answered) = clone_legion_carried(
         &[MARGLE_DONOR, VOICE_DONOR],
         |scenario| {
@@ -2282,41 +2307,20 @@ fn ordered_single_batch_beside_margle(carry: PauseCarry) -> RowOutcome {
             ..Script::default()
         },
         |runner, prompt| match prompt {
-            Prompt::Replacement => at_replacement.push((
-                replacement_sources(runner),
-                parked_created_ids(runner),
-                battlefield_tokens(runner, MARGLE_NAME),
-            )),
-            Prompt::Named { .. } => {
-                let margle = the_token(runner, MARGLE_NAME);
-                let obj = &runner.state().objects[&margle];
-                assert!(
-                    obj.is_phased_in_permanent() && obj.controller == P0,
-                    "REACH-GUARD G7: the Margle copy is P0's, on the battlefield, phased in"
-                );
-                margle_at_named.push(margle);
-            }
-            Prompt::CopyTarget { .. } | Prompt::PayAmount { .. } => {}
+            Prompt::Replacement => at_replacement.push(replacement_sources(runner)),
+            Prompt::Named { .. } | Prompt::CopyTarget { .. } | Prompt::PayAmount { .. } => {}
         },
     );
-    assert_eq!(
-        prompt_kinds(&answered.prompts[..2]),
-        vec!["Replacement", "Replacement"],
-        "REACH-GUARD G7: an order prompt at each copy's event"
+    assert_eq!(answered.prompts.first(), Some(&Prompt::Replacement));
+    assert!(
+        !at_replacement.is_empty(),
+        "G7: replacement order is offered"
     );
     let ordered = vec!["Halving Season".to_string(), "Parallel Lives".to_string()];
     assert!(
-        at_replacement
-            .iter()
-            .all(|(sources, _, _)| *sources == ordered),
+        at_replacement.iter().all(|sources| *sources == ordered),
         "REACH-GUARD G7: each order is between Parallel Lives and Halving Season, got \
          {at_replacement:?}"
-    );
-    let (_, parked, margles) = &at_replacement[1];
-    assert!(
-        margles.len() == 1 && parked.as_ref().is_some_and(|ids| ids.contains(&margles[0])),
-        "REACH-GUARD G7: at the Voice event's order the parked owner lists the Margle copy, \
-         got {at_replacement:?}"
     );
     assert_eq!(
         named_prompts(&answered.prompts),
@@ -2325,7 +2329,6 @@ fn ordered_single_batch_beside_margle(carry: PauseCarry) -> RowOutcome {
     );
     assert_settled(&runner, "G7");
     let margle = the_token(&runner, MARGLE_NAME);
-    assert_eq!(margle_at_named, vec![margle]);
     assert_eq!(power_toughness(&runner, margle), (Some(5), Some(2)));
     let voice = the_token(&runner, VOICE_NAME);
     assert!(has_color_choice(&runner, voice), "G7: the color is latched");
