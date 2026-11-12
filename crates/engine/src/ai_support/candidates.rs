@@ -9199,6 +9199,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         let actions = candidate_actions_broad(&state);

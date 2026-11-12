@@ -533,6 +533,7 @@ fn open_private_zone_cast_selection(
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
     Ok(())
 }
@@ -670,6 +671,7 @@ fn open_linked_exile_cast_selection(
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
     Ok(())
 }

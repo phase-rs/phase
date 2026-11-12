@@ -3267,6 +3267,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         enters_modified_if: _,
         ref duration,
         performed_by,
+        ref privacy_zones,
     } = state.waiting_for
     {
         // A private-zone choice reveals exactly which cards can be selected,
@@ -3284,8 +3285,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         // is cleared even when unmixed because the eligible subset's size is
         // hand information CR 402.3 withholds; a pure public set is not
         // redacted at all.
-        let privacy_scope = state
-            .effect_zone_choice_privacy_zones
+        // CR 402.3: the prompt owns its producer-captured scope; archived
+        // prompts that predate the field fall back to the exact paused
+        // producer.
+        let privacy_scope = privacy_zones
             .clone()
             .or_else(|| state.effect_zone_choice_privacy_scope());
         let scope_private = privacy_scope
@@ -3325,7 +3328,12 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 && fallback_private
                 && (has_public_card || zone.is_public()));
         let redact_cards = private_scope || library_arrangement;
-        let redact_bounds = private_scope;
+        // CR 401.4: an ordering prompt's bounds are the public batch size, so
+        // they stay visible even when the producer carried a Library scope
+        // (Library is a hidden zone, but the number of cards being ordered is
+        // not). Hidden *eligibility* bounds for non-library prompts stay
+        // redacted.
+        let redact_bounds = private_scope && !library_arrangement;
         if !can_view_private_for_player(player) && redact_cards {
             filtered.waiting_for = WaitingFor::EffectZoneChoice {
                 player,
@@ -3372,6 +3380,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 duration: duration.clone(),
                 // Who performs the move is public, like the duration.
                 performed_by,
+                // The prompt keeps its own classification after projection;
+                // only the viewer-visible members are replaced.
+                privacy_zones: privacy_zones.clone(),
             };
         }
     }
