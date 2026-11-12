@@ -4033,6 +4033,26 @@ struct BattlefieldEntryObservations {
     by_object: std::collections::HashMap<ObjectId, EntryObservation>,
 }
 
+impl BattlefieldEntryObservations {
+    /// CR 614.12a + CR 603.2: an as-enters choice precedes entry, so these
+    /// objects cannot observe any event in this batch, including co-entry spans.
+    fn treat_as_not_yet_entered(
+        &mut self,
+        sources: impl IntoIterator<Item = ObjectId>,
+        event_count: usize,
+    ) {
+        for source in sources {
+            self.by_object.insert(
+                source,
+                EntryObservation {
+                    own_span: event_count..=event_count,
+                    co_entry_spans: Vec::new(),
+                },
+            );
+        }
+    }
+}
+
 /// One battlefield entry occurrence of a resolved batch.
 struct BatchEntry {
     object_id: ObjectId,
@@ -5935,7 +5955,19 @@ fn collect_pending_triggers_with_collection(
     // holds each entrant's co-entry spans: the entries of the objects that
     // entered in the same event as that entry, which it observes only through
     // halves that do not look back (CR 603.6a + CR 603.10a).
-    let battlefield_entry_observations = battlefield_entry_observation_indices(events);
+    let mut battlefield_entry_observations = battlefield_entry_observation_indices(events);
+    // CR 614.12a + CR 603.2: an as-enters payment precedes the whole group's
+    // entry even when earlier tokens have physically moved on a prior action.
+    // Extend the same observation boundary used by both indexed and shadow
+    // scans; no event in this payment batch is inside their entry lifetime.
+    if let Some(entrant) = super::replacement::copy_entry_payment_source(state) {
+        battlefield_entry_observations.treat_as_not_yet_entered(
+            super::effects::token_copy::entering_token_co_entrants(state, entrant)
+                .into_iter()
+                .chain(std::iter::once(entrant)),
+            events.len(),
+        );
+    }
     // CR 603.10a: built on the first co-departure group this pass sees.
     let mut co_departure_index: Option<CoDepartureObserverIndex> = None;
 
