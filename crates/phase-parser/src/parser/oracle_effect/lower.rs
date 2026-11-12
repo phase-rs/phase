@@ -6752,6 +6752,13 @@ pub(super) fn rebind_decline_body_recipient(effect: &mut Effect) {
         | Effect::Mill { target, .. }
         | Effect::DealDamage { target, .. } => rebind(target),
         Effect::Token { owner, .. } => rebind(owner),
+        // CR 608.2c: "that player exiles …" in the body is the scoped opponent's
+        // own move, so its performer follows the same rebind.
+        Effect::ChangeZone { actor, .. } | Effect::ChangeZoneAll { actor, .. } => {
+            if let Some(performer) = actor.player_filter_mut() {
+                rebind(performer);
+            }
+        }
         _ => {}
     }
 }

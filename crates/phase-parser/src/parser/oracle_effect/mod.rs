@@ -29955,6 +29955,19 @@ fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
     chain_prior_player_declaration(clauses).is_some()
 }
 
+/// CR 608.2c: the player the nearest earlier clause of the chain names, as the
+/// antecedent of a later "that player".
+enum PriorPlayerAntecedent<'a> {
+    /// CR 115.1: a clause that announced a player target ("target opponent
+    /// reveals …"), named through the chain's declared-player reference.
+    Declared(&'a ClauseIr),
+    /// CR 506.2 / CR 608.2c: a clause whose player is the defending player or
+    /// the player a per-player scope iterates ("defending player reveals …",
+    /// "each player reveals …"); it announces no target, so a later "that
+    /// player" names the same reference.
+    Reference(TargetFilter),
+}
+
 /// The nearest earlier clause that announces a player, reached only through
 /// clauses that read the same referent, name the controller ("you"), or announce an
 /// object of their own: none of them names another player (CR 608.2c). Each
@@ -29963,6 +29976,59 @@ fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
 /// clause follows; "that player" and "<object> that player controls" take
 /// players only and read the walk as is.
 fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
+    match chain_prior_player_antecedent(clauses)? {
+        PriorPlayerAntecedent::Declared(clause) => Some(clause),
+        PriorPlayerAntecedent::Reference(_) => None,
+    }
+}
+
+/// CR 608.2c: the defending-player or scoped-player reference of the nearest
+/// earlier player-naming clause, for a later "that player" whose chain
+/// announced no player target.
+fn chain_prior_player_reference(clauses: &[ClauseIr]) -> Option<TargetFilter> {
+    match chain_prior_player_antecedent(clauses)? {
+        PriorPlayerAntecedent::Reference(reference) => Some(reference),
+        PriorPlayerAntecedent::Declared(_) => None,
+    }
+}
+
+/// CR 506.2 + CR 608.2c: the one defending-player or scoped-player reference
+/// among the clause's own slots, the player it acts through when it announces
+/// none.
+fn clause_player_reference(effect: &Effect) -> Option<TargetFilter> {
+    let mut found: Option<TargetFilter> = None;
+    let mut ambiguous = false;
+    each_target_filter_mut(&mut effect.clone(), &mut |filter| {
+        if matches!(
+            filter,
+            TargetFilter::DefendingPlayer | TargetFilter::ScopedPlayer
+        ) {
+            match &found {
+                Some(seen) if seen != filter => ambiguous = true,
+                _ => found = Some(filter.clone()),
+            }
+        }
+    });
+    found.filter(|_| !ambiguous)
+}
+
+/// CR 608.2c: a clause that names no player other than the controller: the
+/// controller's own selection among cards the chain already showed ("You
+/// choose one of those cards", Taster of Wares) or a power/toughness change,
+/// which only a creature has (CR 208.1). A later "that player" reads past it.
+fn clause_names_no_other_player(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChooseFromZone {
+            chooser: crate::types::ability::ZoneChoiceChooser::Controller,
+            ..
+        } | Effect::Pump { .. }
+    )
+}
+
+/// The shared walk behind `chain_prior_player_declaration` and
+/// `chain_prior_player_reference`.
+fn chain_prior_player_antecedent(clauses: &[ClauseIr]) -> Option<PriorPlayerAntecedent<'_>> {
     for prev in clauses.iter().rev() {
         if prev.condition.is_some() {
             return None;
@@ -29981,7 +30047,7 @@ fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
             continue;
         }
         if clause_announces_player(&prev.parsed.effect) {
-            return Some(prev);
+            return Some(PriorPlayerAntecedent::Declared(prev));
         }
         if matches!(
             prev.parsed.effect.target_filter(),
@@ -29992,10 +30058,13 @@ fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
                     | TargetFilter::Controller
             )
         ) || has_typed_target_widened(&prev.parsed.effect)
+            || clause_names_no_other_player(&prev.parsed.effect)
         {
             continue;
         }
-        return None;
+        // CR 506.2 + CR 608.2c: a clause that names its player through the
+        // defending-player or scoped-player reference ends the walk with it.
+        return clause_player_reference(&prev.parsed.effect).map(PriorPlayerAntecedent::Reference);
     }
     None
 }
@@ -31017,7 +31086,9 @@ fn lower_subject_predicate_ast_body(
             }
             inject_subject_target(&mut clause.effect, &subject, original_clause);
             // CR 608.2c: the subject performs the zone moves its verb produced.
-            if let Some(player) = subject_performer(&subject, ctx) {
+            // A "that player" the chain later rebinds to its antecedent
+            // (`replace_player_anaphor`) carries the performer with it.
+            if let Some(player) = subject_player_reference(&subject) {
                 stamp_subject_actor(
                     &mut clause.effect,
                     clause.sub_ability.as_deref_mut(),
@@ -32853,24 +32924,6 @@ fn subject_player_reference(subject: &SubjectPhraseAst) -> Option<TargetFilter> 
     (target_filter_can_target_player(&filter)
         || (subject.inherits_parent && filter == TargetFilter::ParentTarget))
         .then_some(filter)
-}
-
-/// CR 608.2c: the player a leading subject proves to be the performer of its
-/// zone moves. A "that player" that fell back to the trigger event's player
-/// (no trigger scope and no player declared by the effect binds it, see
-/// `subject.rs`) is that player only when it opens the effect. After an earlier
-/// clause the nearer antecedent can be a player the parser does not bind —
-/// "defending player reveals the top card of their library. … that player puts
-/// it into their hand" (Goblin Guide), "each player reveals …" (Conundrum
-/// Sphinx) — so the stamp declines and the controller default stays.
-fn subject_performer(subject: &SubjectPhraseAst, ctx: &ParseContext) -> Option<TargetFilter> {
-    let player = subject_player_reference(subject)?;
-    let unproven_trigger_event_player = ctx.chain_prior_clause
-        && ctx.subject.is_some()
-        && ctx.relative_player_scope.is_none()
-        && subject.player_anaphor == Some(nom_target::PlayerAnaphor::ThatPlayer)
-        && player == TargetFilter::TriggeringPlayer;
-    (!unproven_trigger_event_player).then_some(player)
 }
 
 /// CR 608.2c: the player named as the grammatical subject of a conjugated
@@ -40085,6 +40138,7 @@ pub(crate) fn plural_library_shuffle_recall(lower: &str) -> bool {
 /// `Shuffle`, after every member has moved.
 fn rewrite_plural_library_recall_to_tracked_set(effect: &mut Effect) {
     if let Effect::ChangeZone {
+        actor,
         origin,
         destination: Zone::Library,
         target: TargetFilter::ParentTarget,
@@ -40092,7 +40146,9 @@ fn rewrite_plural_library_recall_to_tracked_set(effect: &mut Effect) {
     } = effect
     {
         *effect = Effect::ChangeZoneAll {
-            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            // CR 608.2c: the stamped subject ("they shuffle them into their
+            // library") survives the promotion to the tracked-set move.
+            actor: actor.clone(),
             origin: *origin,
             destination: Zone::Library,
             target: tracked_set_filter(),
@@ -40809,6 +40865,9 @@ pub fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut Targe
         | Effect::Surveil { target, .. }
         | Effect::Dig { player: target, .. }
         | Effect::RevealTop { player: target, .. }
+        // CR 701.20a: the revealing player of "reveals cards … until" is the
+        // same player slot as `RevealTop`'s.
+        | Effect::RevealUntil { player: target, .. }
         | Effect::Manifest { target, .. }
         // CR 701.60a: Suspect acts on a target permanent; expose its filter so
         // anaphor rewrites (e.g. self-targeting "Otherwise, suspect it") reach it.
@@ -40822,15 +40881,21 @@ pub fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut Targe
         // like the library owner, so an anaphor rewrite reaches both alike.
         Effect::ExileTop { player, actor, .. } => {
             f(player);
-            match actor {
-                crate::types::ability::LibraryInstructionActor::Controller
-                | crate::types::ability::LibraryInstructionActor::LibraryPlayer => {}
-                crate::types::ability::LibraryInstructionActor::Player { player } => f(player),
+            if let Some(performer) = actor.player_filter_mut() {
+                f(performer);
             }
         }
         Effect::PutCounter { target, .. } | Effect::RemoveCounter { target, .. } => f(target),
         Effect::GoadAll { target } => f(target),
-        Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => f(target),
+        // CR 608.2c: the move's named performer is rewritten with the moved
+        // objects, so a rebind of "that player" (a replaced draw's drawer, a
+        // scoped seat) reaches who performs the move as well as what moves.
+        Effect::ChangeZone { target, actor, .. } | Effect::ChangeZoneAll { target, actor, .. } => {
+            f(target);
+            if let Some(performer) = actor.player_filter_mut() {
+                f(performer);
+            }
+        }
         Effect::LoseLife {
             target: Some(target),
             ..
@@ -48889,7 +48954,6 @@ fn parse_effect_chain_ir_body(
             // "you may cast that card" driver to a graveyard-chosen target.
             chain_prior_chosen_target: chain_prior_chosen_target_filter,
             chain_prior_targeted_player,
-            chain_prior_clause: !builder.clauses().is_empty(),
             // CR 608.2c + CR 400.7: seed the zone published by an earlier
             // "choose card(s) in <zone>" producer so this chunk's "put those
             // cards onto the battlefield" anaphor binds its `TrackedSet` move to
@@ -50091,6 +50155,16 @@ fn parse_effect_chain_ir_body(
                 )
                 .unwrap_or(TargetFilter::ParentTarget)
             });
+        } else if has_player_anaphoric_reference(&text_lower) {
+            // CR 506.2 + CR 608.2c: "defending player reveals the top card of
+            // their library. If it's a land card, that player puts it into
+            // their hand" (Goblin Guide), "each player reveals … that player
+            // puts it into their hand" (Conundrum Sphinx): with no announced
+            // target, "that player" names the reference the earlier clause
+            // acted through, not the trigger event's player.
+            if let Some(reference) = chain_prior_player_reference(builder.clauses()) {
+                replace_player_anaphor(&mut clause.effect, || reference.clone());
+            }
         }
         // CR 608.2c + CR 115.1: "You look at the top two cards of THEIR library"
         // after a clause that announced a player target ("Target opponent looks

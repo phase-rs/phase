@@ -574,7 +574,8 @@ expression: "&ir"
                     "actor": {
                       "Player": {
                         "player": {
-                          "type": "ParentTargetController"
+                          "type": "DeclaredPlayer",
+                          "group": 2147483649
                         }
                       }
                     },

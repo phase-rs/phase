@@ -20546,15 +20546,18 @@ impl LegacyPaymentCost {
 /// `ChangeZoneAll`). The controller of the spell or ability follows its
 /// instructions, unless the instruction names its subject — and a subject
 /// acting on "their library" is the player whose library it is. Zone moves
-/// carry only `Controller` or `Player`; `declared_target` surfaces a player
-/// target only for `ExileTop`.
+/// carry `Controller`, `Player`, or `LibraryPlayer` (a SearchFound searcher's
+/// exile of a card found in their own library); `declared_target` surfaces a
+/// player target only for `ExileTop`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum LibraryInstructionActor {
     /// "Exile the top card of target player's library" — the controller acts.
     #[default]
     Controller,
     /// "That player exiles the top card of their library" — the player whose
-    /// library it is acts (Uba Mask, Ingest, Crumbling Sanctuary).
+    /// library it is acts (Uba Mask, Ingest, Crumbling Sanctuary). On a zone
+    /// move it is the searcher exiling a card found in their own library
+    /// ("they exile each card they find", Opposition Agent).
     LibraryPlayer,
     /// CR 608.2c: the instruction's named subject is a player other than the
     /// library's owner — "Target opponent looks at the top card of your
@@ -20569,6 +20572,27 @@ impl LibraryInstructionActor {
     /// Serde skip-helper: `Controller` is the default and is omitted from JSON.
     pub fn is_controller(&self) -> bool {
         matches!(self, Self::Controller)
+    }
+
+    /// CR 608.2c: the named subject's player filter, the one slot every
+    /// reader of an effect's player references visits for the performer. `None`
+    /// for the controller and the library owner, which carry no filter of
+    /// their own.
+    pub fn player_filter(&self) -> Option<&TargetFilter> {
+        match self {
+            Self::Player { player } => Some(player),
+            Self::Controller | Self::LibraryPlayer => None,
+        }
+    }
+
+    /// Mutable form of [`Self::player_filter`]: a reference rewrite (an anaphor
+    /// rebound to the replaced event's player, a scope rebind) reaches the
+    /// performer exactly as it reaches the instruction's other player slots.
+    pub fn player_filter_mut(&mut self) -> Option<&mut TargetFilter> {
+        match self {
+            Self::Player { player } => Some(player),
+            Self::Controller | Self::LibraryPlayer => None,
+        }
     }
 
     /// CR 115.1: the subject's player filter when it names a target, so the
@@ -22500,7 +22524,8 @@ pub enum Effect {
     ChangeZone {
         /// CR 608.2c: who performs this move — the player the parser bound
         /// as the subject of the instruction's verb ("that player exiles …"),
-        /// or the controller when the instruction has no subject.
+        /// the searcher for a SearchFound exile (`LibraryPlayer`), or the
+        /// controller when the instruction has no subject.
         #[serde(
             default,
             skip_serializing_if = "LibraryInstructionActor::is_controller"

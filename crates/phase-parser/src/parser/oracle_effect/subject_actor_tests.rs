@@ -46,6 +46,11 @@ fn zone_move_actors(
             walk(execute, 0, &mut out);
         }
     }
+    for replacement in &parsed.replacements {
+        if let Some(execute) = replacement.execute.as_deref() {
+            walk(execute, 0, &mut out);
+        }
+    }
     assert!(!out.is_empty(), "{name} parses a zone move: {parsed:#?}");
     out
 }
@@ -164,21 +169,19 @@ fn carried_subject_binds_the_conjugated_continuation() {
 // --- Binding site: a leading subject restated as a pronoun ------------------
 
 /// "…, then they exile a nonland card from their graveyard." The continuation
-/// restates its subject as a pronoun, which names the targeted opponent's
-/// creature's controller; both moves are the opponent's.
+/// restates its subject as a pronoun; the chain's anaphor rewrite binds it to
+/// the announced opponent, and the performer follows, so both moves are the
+/// opponent's.
 #[test]
 fn pronoun_subject_binds_its_continuation() {
-    assert_eq!(
-        zone_move_actors(
-            "Azula, Cunning Usurper",
-            &["Creature"],
-            "When Azula enters, target opponent exiles a nontoken creature they control, then they exile a nonland card from their graveyard.",
-        ),
-        vec![
-            (1, subject(TargetFilter::ParentTarget)),
-            (2, subject(TargetFilter::ParentTargetController)),
-        ]
+    let actors = zone_move_actors(
+        "Azula, Cunning Usurper",
+        &["Creature"],
+        "When Azula enters, target opponent exiles a nontoken creature they control, then they exile a nonland card from their graveyard.",
     );
+    assert_eq!(actors.len(), 2, "{actors:?}");
+    assert_eq!(actors[0], (1, subject(TargetFilter::ParentTarget)));
+    assert!(declared_subject_at(2)(&actors[1]), "{actors:?}");
 }
 
 /// "That player exiles a card from it, then you exile a card from it." An
@@ -190,12 +193,10 @@ fn an_explicit_you_continuation_keeps_the_controller() {
         &["Sorcery"],
         "Target opponent reveals their hand. That player exiles a card from it, then you exile a card from it. Repeat this process until all cards in that hand have been exiled. That player returns the cards they exiled this way to their hand and puts the rest into their graveyard.",
     );
+    assert!(declared_subject_at(1)(&actors[0]), "{actors:?}");
     assert_eq!(
-        actors[..2],
-        [
-            (1, subject(TargetFilter::ParentTargetController)),
-            (2, LibraryInstructionActor::Controller),
-        ],
+        actors[1],
+        (2, LibraryInstructionActor::Controller),
         "{actors:?}"
     );
 }
@@ -264,49 +265,80 @@ fn trigger_that_player_opening_the_effect_is_the_event_player() {
     );
 }
 
-/// After another player was named ("defending player reveals …", "each player
-/// reveals …", or a target player whose declaration the chain walk does not
-/// reach past "you choose one of those cards"), a "that player" the parser left
-/// on the trigger event's player is not proven to be the performer, so the
-/// stamp declines and the default controller actor stays.
+/// CR 608.2c: the controller's own choice among the revealed cards ("You
+/// choose one of those cards", "You may choose one of those cards") names no
+/// other player, so "that player" still reads the revealing target player
+/// (Taster of Wares, Juggernaut Peddler).
 #[test]
-fn trigger_that_player_after_another_player_declines_the_stamp() {
-    let cases: [(&str, &str, &str); 5] = [
+fn trigger_that_player_reads_past_the_controllers_choice() {
+    let cases: [(&str, &str); 2] = [
         (
             "Taster of Wares",
-            "Creature",
             "When this creature enters, target opponent reveals X cards from their hand, where X is the number of Goblins you control. You choose one of those cards. That player exiles it. If an instant or sorcery card is exiled this way, you may cast it for as long as you control this creature, and mana of any type can be spent to cast that spell.",
         ),
         (
             "Juggernaut Peddler",
-            "Creature",
             "Vigilance\nWhen Juggernaut Peddler enters, target player reveals all nonland cards in their hand. You may choose one of those cards. If you do, that player exiles it and conjures a card named Juggernaut into their hand.",
         ),
+    ];
+    for (name, oracle) in cases {
+        let actors = zone_move_actors(name, &["Creature"], oracle);
+        assert_eq!(actors.len(), 1, "{name}: {actors:?}");
+        assert!(declared_subject_at(2)(&actors[0]), "{name}: {actors:?}");
+    }
+}
+
+/// CR 506.2 + CR 608.2c: with no announced target, "that player" names the
+/// player the earlier clause acted through: the defending player (Goblin Guide;
+/// Trepanation Blade, past the creature's power change) or the player a
+/// per-player scope iterates (Conundrum Sphinx).
+#[test]
+fn trigger_that_player_names_the_earlier_player_reference() {
+    let cases: [(&str, &str, &str, usize, TargetFilter); 3] = [
         (
             "Goblin Guide",
             "Creature",
             "Haste\nWhenever this creature attacks, defending player reveals the top card of their library. If it's a land card, that player puts it into their hand.",
+            1,
+            TargetFilter::DefendingPlayer,
         ),
         (
             "Trepanation Blade",
             "Artifact",
             "Whenever equipped creature attacks, defending player reveals cards from the top of their library until they reveal a land card. The creature gets +1/+0 until end of turn for each card revealed this way. That player puts the revealed cards into their graveyard.\nEquip {2}",
+            2,
+            TargetFilter::DefendingPlayer,
         ),
         (
             "Conundrum Sphinx",
             "Creature",
             "Flying\nWhenever this creature attacks, each player chooses a card name. Then each player reveals the top card of their library. If the card a player revealed has the name they chose, that player puts it into their hand. If it doesn't, that player puts it on the bottom of their library.",
+            2,
+            TargetFilter::ScopedPlayer,
         ),
     ];
-    for (name, card_type, oracle) in cases {
-        let actors = zone_move_actors(name, &[card_type], oracle);
-        assert!(
-            actors
-                .iter()
-                .all(|(_, actor)| *actor == LibraryInstructionActor::Controller),
-            "{name}: {actors:?}"
+    for (name, card_type, oracle, depth, player) in cases {
+        assert_eq!(
+            zone_move_actors(name, &[card_type], oracle),
+            vec![(depth, subject(player))],
+            "{name}"
         );
     }
+}
+
+/// CR 614.1a + CR 608.2c: in a draw replacement, "that player" is the player
+/// who would draw (Shared Fate), and the replacement's referent rewrite
+/// carries the performer with the moved object.
+#[test]
+fn draw_replacement_that_player_performs_as_the_drawer() {
+    assert_eq!(
+        zone_move_actors(
+            "Shared Fate",
+            &["Enchantment"],
+            "If a player would draw a card, that player exiles the top card of one of their opponents' libraries face down instead.\nEach player may look at cards they exiled with this enchantment, and they may play lands and cast spells from among those cards.",
+        ),
+        vec![(0, subject(TargetFilter::PostReplacementDamageTarget))]
+    );
 }
 
 // --- Negative rows: no subject, so the controller performs -----------------
@@ -468,4 +500,74 @@ fn stamp_walks_the_whole_clause_chain() {
         actor_of(&chain.effect),
         &LibraryInstructionActor::Controller
     );
+}
+
+// --- Promotions keep the performer -------------------------------------------
+
+/// CR 701.24c + CR 608.2c: "they shuffle them into their library" promotes the
+/// pronoun's singular move to a mass move over the chain's set; the subject
+/// that performs it survives the promotion. Synthetic actor on the promoted
+/// shape.
+#[test]
+fn plural_library_recall_promotion_keeps_the_actor() {
+    let performer = subject(TargetFilter::ParentTargetController);
+    let mut effect = change_zone(Zone::Library);
+    if let Effect::ChangeZone { actor, target, .. } = &mut effect {
+        *actor = performer.clone();
+        *target = TargetFilter::ParentTarget;
+    }
+    rewrite_plural_library_recall_to_tracked_set(&mut effect);
+    assert!(
+        matches!(effect, Effect::ChangeZoneAll { .. }),
+        "promoted: {effect:?}"
+    );
+    assert_eq!(actor_of(&effect), &performer);
+}
+
+/// CR 608.2c: the shared reference visitor reaches a zone move's performer as
+/// well as its moved objects, so a rebind of the anaphor (the replaced draw's
+/// drawer, a declared player) rewrites both alike.
+#[test]
+fn reference_visitor_reaches_the_zone_move_performer() {
+    for mut effect in [change_zone(Zone::Exile), change_zone_all(Zone::Exile)] {
+        match &mut effect {
+            Effect::ChangeZone { actor, .. } | Effect::ChangeZoneAll { actor, .. } => {
+                *actor = subject(TargetFilter::TriggeringPlayer);
+            }
+            _ => unreachable!(),
+        }
+        each_target_filter_mut(&mut effect, &mut |filter| {
+            if *filter == TargetFilter::TriggeringPlayer {
+                *filter = TargetFilter::PostReplacementDamageTarget;
+            }
+        });
+        assert_eq!(
+            actor_of(&effect),
+            &subject(TargetFilter::PostReplacementDamageTarget)
+        );
+    }
+    // The controller default carries no filter and is left alone.
+    let mut effect = change_zone(Zone::Exile);
+    each_target_filter_mut(&mut effect, &mut |filter| {
+        *filter = TargetFilter::PostReplacementDamageTarget;
+    });
+    assert_eq!(actor_of(&effect), &LibraryInstructionActor::Controller);
+}
+
+/// CR 608.2c: inside a "for each opponent who doesn't" body, "that
+/// player" is the scoped opponent, so a zone move's performer is rebound with
+/// the body's other player references. Synthetic actor: no printed decline
+/// body parses to a subject-form zone move today.
+#[test]
+fn decline_body_rebind_reaches_the_zone_move_performer() {
+    for mut effect in [change_zone(Zone::Exile), change_zone_all(Zone::Exile)] {
+        match &mut effect {
+            Effect::ChangeZone { actor, .. } | Effect::ChangeZoneAll { actor, .. } => {
+                *actor = subject(TargetFilter::TriggeringPlayer);
+            }
+            _ => unreachable!(),
+        }
+        super::lower::rebind_decline_body_recipient(&mut effect);
+        assert_eq!(actor_of(&effect), &subject(TargetFilter::ScopedPlayer));
+    }
 }

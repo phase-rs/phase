@@ -1089,7 +1089,10 @@ fn parse_search_found_replacement(original: &str, lower: &str) -> Option<Replace
     let execute = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
-            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            // CR 608.2c + CR 701.23a: "they exile each card they find" — the
+            // subject agrees with the searcher, who searches their own library,
+            // so the library's player performs the exile.
+            actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
             origin: None,
             destination: parsed.exile.destination,
             target: parsed.exile.target,
@@ -15470,10 +15473,11 @@ fn rewrite_draw_replacement_card_to_last_revealed(def: &mut AbilityDefinition) {
 /// head is rewritten: a later link's "that card" refers to whatever an earlier
 /// link produced (Zur's Weirding reveals first).
 ///
-/// CR 608.2c: the generic effect parser drops the clause's subject, so the
-/// acting player is read here from the head's own text: "that player" / "they"
-/// is the drawing player (whose library it is); "you" or a bare imperative is
-/// the replacement's controller. An unrecognized subject is left unrewritten
+/// CR 608.2c: `ExileTop` names its performer relative to the library owner
+/// (`LibraryPlayer`) rather than through the `ChangeZone` actor the generic
+/// parser stamped, so the acting player is re-derived here from the head's own
+/// text: "that player" / "they" is the drawing player (whose library it is);
+/// "you" or a bare imperative is the replacement's controller. An unrecognized subject is left unrewritten
 /// (fail closed).
 fn rewrite_exile_would_be_drawn_card_to_exile_top(def: &mut AbilityDefinition, text: &str) {
     if !matches!(
@@ -35909,9 +35913,12 @@ mod opposition_agent_parser_tests {
         );
 
         let execute = definition.execute.as_deref().expect("execute definition");
+        // CR 608.2c: "they exile each card they find" — the searcher, whose own
+        // library is searched, performs the exile.
         assert!(matches!(
             execute.effect.as_ref(),
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
