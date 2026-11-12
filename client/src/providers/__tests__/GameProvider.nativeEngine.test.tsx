@@ -1130,7 +1130,7 @@ describe("GameProvider native AI routing", () => {
     render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
     await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
     expect(onNoDeck).not.toHaveBeenCalled();
-    expect(gameStoreState.initGame.mock.calls[0][2].player.companion)
+    expect((gameStoreState.initGame.mock.calls[0][2] as { player: { companion?: string[] } }).player.companion)
       .toEqual(companion ? [companion] : []);
   });
 
@@ -1155,7 +1155,7 @@ describe("GameProvider native AI routing", () => {
       seedSoloRun("run", "game", { companion });
       render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
       await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
-      expect(gameStoreState.initGame.mock.calls[0][2].player.companion)
+      expect((gameStoreState.initGame.mock.calls[0][2] as { player: { companion?: string[] } }).player.companion)
         .toEqual(companion ? [companion] : []);
     });
 
