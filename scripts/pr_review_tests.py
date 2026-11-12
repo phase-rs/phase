@@ -748,35 +748,39 @@ class PrReviewTests(unittest.TestCase):
             "submittedAt": self._days_ago(30),
             "commit": "head",
         }
+        approved = {
+            "reviewDecision": "APPROVED",
+            "reviews": [
+                changes_requested,
+                {
+                    "author": "maintainer",
+                    "state": "APPROVED",
+                    "submittedAt": self._days_ago(2),
+                    "commit": "head",
+                },
+            ],
+        }
+        dismissed = {
+            "reviewDecision": "REVIEW_REQUIRED",
+            "reviews": [{**changes_requested, "state": "DISMISSED"}],
+        }
         cases = (
             (
                 "formal request, warning, then approval",
                 [warning],
-                {
-                    "reviewDecision": "APPROVED",
-                    "reviews": [
-                        changes_requested,
-                        {
-                            "author": "maintainer",
-                            "state": "APPROVED",
-                            "submittedAt": self._days_ago(2),
-                            "commit": "head",
-                        },
-                    ],
-                },
+                approved,
                 False,
                 "approve_ready_for_handler",
             ),
+            ("formal request, warning, then dismissal", [warning], dismissed, False, "review"),
             (
-                "formal request, warning, then dismissal",
-                [warning],
-                {
-                    "reviewDecision": "REVIEW_REQUIRED",
-                    "reviews": [{**changes_requested, "state": "DISMISSED"}],
-                },
+                "logged block, warning, then approval",
+                [block, warning],
+                approved,
                 False,
-                "review",
+                "approve_ready_for_handler",
             ),
+            ("logged block, warning, then dismissal", [block, warning], dismissed, False, "review"),
             ("block, warning, parse-diff update", [block, warning], {}, True, "blocked"),
             (
                 "block, warning, incomplete comment history",
@@ -3116,6 +3120,33 @@ class PrReviewTests(unittest.TestCase):
         )
         self.assertTrue(failing["would_decline"])
         self.assertFalse(failing["decline"])
+
+    def test_artifact_admits_unresolved_final_review_only_with_its_box_unchecked(self) -> None:
+        head = "a" * 40
+        policy = pr_review.Policy(
+            {"admission": {"mode": "audit", "enforced_after": "2026-07-01T00:00:00Z"}}
+        )
+        box = pr_review.FINAL_REVIEW_CHECKBOX_LABEL
+        unresolved_line = self._artifact_body(head).replace(
+            "Final review-impl PASS", "Final review-impl UNRESOLVED"
+        )
+        cases = (
+            ("box unchecked", unresolved_line.replace(f"- [x] {box}", f"- [ ] {box}"), []),
+            ("box still checked", unresolved_line, ["invalid_required_verification_checkboxes"]),
+            (
+                "box missing",
+                unresolved_line.replace(f"- [x] {box}\n", ""),
+                ["invalid_required_verification_checkboxes"],
+            ),
+        )
+        for name, body, failures in cases:
+            with self.subTest(name):
+                profile = pr_review.artifact_profile(
+                    {"headRefOid": head, "createdAt": "2026-07-02T00:00:00Z", "body": body},
+                    policy,
+                )
+                self.assertEqual(profile["failures"], failures)
+                self.assertTrue(profile["final_review_unresolved"])
 
     def test_artifact_enforcement_requires_immutable_cutoff(self) -> None:
         head = "a" * 40

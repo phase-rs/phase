@@ -242,10 +242,11 @@ REQUIRED_ARTIFACT_H2_HEADINGS = (
     "anchored on",
     "final review-impl",
 )
+FINAL_REVIEW_CHECKBOX_LABEL = "Final review-impl below is clean for the current committed head."
 REQUIRED_VERIFICATION_CHECKBOX_LABELS = (
     "Required checks ran clean, or the exact CI-owned alternative is stated below.",
     "Gate A output below is for the current committed head.",
-    "Final review-impl below is clean for the current committed head.",
+    FINAL_REVIEW_CHECKBOX_LABEL,
     "Both anchors cite existing analogous code at the same seam.",
 )
 PROOF_REQUIRED_RISK_FLAGS = {
@@ -1982,9 +1983,12 @@ def artifact_profile(
         section_text(sections, "gate a"),
     )
     review_matches = re.findall(
-        r"(?m)^Final review-impl PASS head=([0-9a-f]{40})$",
+        r"(?m)^Final review-impl (PASS|UNRESOLVED) head=([0-9a-f]{40})$",
         section_text(sections, "final review-impl"),
     )
+    # AI-CONTRIBUTOR.md §5: an UNRESOLVED line claims no clean review, so its
+    # Verification box must be present and unchecked instead of checked.
+    final_review_unresolved = len(review_matches) == 1 and review_matches[0][0] == "UNRESOLVED"
     anchor_pattern = re.compile(r"^-\s+([^\s:][^:]*):([1-9][0-9]*)\s+(?:—|-)\s+.+$")
     anchors = []
     for line in sections.get("anchored on", []):
@@ -2001,10 +2005,13 @@ def artifact_profile(
     for label in REQUIRED_VERIFICATION_CHECKBOX_LABELS:
         checked_line = f"- [x] {label}"
         unchecked_line = f"- [ ] {label}"
-        checked_required[label] = sum(
-            line.strip() == checked_line for line in verification_lines
-        )
-        if any(line.strip() == unchecked_line for line in verification_lines):
+        boxes = [line.strip() for line in verification_lines]
+        if final_review_unresolved and label == FINAL_REVIEW_CHECKBOX_LABEL:
+            # Counted as the one expected box when it is unchecked and never checked.
+            checked_required[label] = boxes.count(unchecked_line) - boxes.count(checked_line)
+            continue
+        checked_required[label] = boxes.count(checked_line)
+        if unchecked_line in boxes:
             unchecked_required.append(unchecked_line)
     required_verification_valid = all(
         count == 1 for count in checked_required.values()
@@ -2049,7 +2056,7 @@ def artifact_profile(
         failures.append("missing_final_review_impl_pass")
     elif len(review_matches) > 1:
         failures.append("duplicate_final_review_impl_pass")
-    elif review_matches[0] != head:
+    elif review_matches[0][1] != head:
         failures.append("stale_final_review_impl_head")
     if len(distinct_anchors) < 2:
         failures.append("fewer_than_two_anchors")
@@ -2073,7 +2080,8 @@ def artifact_profile(
         "decline": timing["enforced"] and bool(failures) and not author_is_repository_writer,
         "failures": failures,
         "gate_a_head": gate_matches[0][0] if len(gate_matches) == 1 else None,
-        "final_review_head": review_matches[0] if len(review_matches) == 1 else None,
+        "final_review_head": review_matches[0][1] if len(review_matches) == 1 else None,
+        "final_review_unresolved": final_review_unresolved,
         "anchors": anchors,
         "unchecked_required": unchecked_required,
         "required_verification_counts": checked_required,
@@ -2682,10 +2690,15 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         pr.get("mergeStateStatus") == "DIRTY" or pr.get("mergeable") == "CONFLICTING"
     )
     # `local_block` reads only the newest event; the first block recorded for this
-    # head keeps a later non-blocking event from erasing it.
+    # head keeps a later non-blocking event from erasing it, until GitHub shows an
+    # approval or a dismissed review on this head.
+    block_cleared_on_github = review_decision == "APPROVED" or any(
+        review.get("state") == "DISMISSED" and review.get("commit") == head
+        for review in pr.get("reviews", [])
+    )
     current_head_blocked = (
         local_block
-        or bool(packet.get("local_first_block_event"))
+        or (bool(packet.get("local_first_block_event")) and not block_cleared_on_github)
         or (
             review_decision == "CHANGES_REQUESTED"
             and (latest_commit is None or latest_commit == head)

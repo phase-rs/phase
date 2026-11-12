@@ -87,7 +87,7 @@ Activated when the scope is a contributor PR. Checkpoint, Phase and Integration 
 **Re-reviews.** When an earlier maintainer review exists (it is in the feedback you were given), review the complete diff and also:
 - **Carry findings forward.** For every finding in an earlier maintainer review that has no explicit disposition, verify it at this head. If it remains, re-raise it as your own numbered finding marked `(carried from <URL>)`; if it is fixed, credit it under ✅ Clean. Re-verifying an open finding is not a new finding.
 - **Late findings.** A new finding is **late** when it is on code the author has not changed since the last reviewed head (you are given that diff). A defect caused by a changed or deleted line is anchored at that change and is not late.
-- **When a late finding is raised:** only when it is must-fix — wrong behaviour for a claimed card, a false CR claim, a test that does not discriminate the PR's claim, security, a hard stop, or a broken build. Name the category.
+- **When a late finding is raised:** only when it is must-fix — wrong behaviour you reproduced or derived step by step on any surface the PR touches, a false CR claim, a test that does not discriminate the PR's claim, security, a hard stop, or a broken build. Name the category.
 - **Late notes:** any other late point is a `Late note:` line. It is non-blocking and never a follow-up.
 - Findings that are not late keep the severity calibration and are fixed at every severity.
 

@@ -89,7 +89,7 @@ REGISTRY: dict[str, tuple[int, str, str]] = {
     "log.warned": (1, "LOG", "Requested-changes warning spells: count, censored, hours."),
     "log.queue_exit": (1, "LOG", "Queued spells followed by a non-terminal state; return and unreturned distributions."),
     "log.assignee_gate": (1, "GH+LOG", "Foreign assignee intervals and the observations and material events inside them."),
-    "log.head_pickup": (1, "GH+LOG", "Hours from a head's arrival to the first logged event on it."),
+    "log.head_pickup": (1, "GH+LOG", "Hours from a head's arrival to the first logged event on it; an upper bound, since a normal push is dated by its commit."),
     "log.maintainer_fixup_pushes": (1, "LOG", "fixup_push events on cohort PRs."),
 }
 SAMPLE_PREFIX = "sample."
@@ -678,13 +678,14 @@ def spells_for(timed: list[tuple[datetime, dict[str, Any]]], close: datetime | N
         if close and t > close:
             break
         state = event_state(event)
-        if state is None:
+        head = event.get("head_sha")
+        if state is None and not (current and head and head != current["head"]):
             continue
-        if current and (state != current["state"] or event.get("head_sha") != current["head"]):
+        if current and (state != current["state"] or head != current["head"]):
             current["end"], current["next"] = t, state
             spells.append(current)
             current = None
-        if current is None and state != "terminal":
+        if current is None and state not in (None, "terminal"):
             current = {"state": state, "head": event.get("head_sha"), "start": t, "next": None}
     if current:
         current["censored"] = close is None
@@ -719,7 +720,11 @@ def foreign_intervals(pr: dict[str, Any], acting: str, end: datetime) -> list[tu
 
 
 def head_arrivals(pr: dict[str, Any]) -> dict[str, datetime]:
-    """A head's arrival: its force-push time, else the committedDate of its first PullRequestCommit."""
+    """A head's arrival: its force-push time, else the committedDate of its first PullRequestCommit.
+
+    GitHub records no push time for a normal push, and a commit can be pushed long
+    after it was made, so latencies from these arrivals are upper bounds.
+    """
     arrivals: dict[str, datetime] = {}
     for node in pr["timelineItems"]["nodes"]:
         if node["__typename"] == "HeadRefForcePushedEvent" and node.get("afterCommit"):

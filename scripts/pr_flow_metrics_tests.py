@@ -793,6 +793,14 @@ class LogFieldTests(Harness):
         )["held"]
         self.assertEqual((held["spells"], held["censored"], held["hours"]["total"], held["over_72h_share"]), (2, 0, 2.0, 0.0))
 
+    def test_spell_ends_when_a_state_neutral_event_arrives_on_a_new_head(self) -> None:
+        held = self.log_block(
+            [pr_node(1)], event(1, "held", "2026-10-27T00:00:00Z", H[1], outcome="held"),
+            event(1, "observation", "2026-10-27T00:30:00Z", H[1]),  # same head: the hold continues
+            event(1, "observation", "2026-10-27T01:00:00Z", H[2]),
+        )["held"]
+        self.assertEqual((held["spells"], held["censored"], held["hours"]["total"]), (1, 0, 1.0))
+
     def test_assignee_intervals_are_clipped_to_the_open_interval(self) -> None:
         assigned = connection([assignment("AssignedEvent", "carol", "2026-10-27T00:00:00Z")])
         gate = self.log_block(
