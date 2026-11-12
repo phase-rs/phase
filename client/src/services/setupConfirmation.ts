@@ -147,9 +147,11 @@ export function classifySetupFrame(surface: "game" | "draft", text: unknown): Se
  *  - `closed`: the candidate closed;
  *  - `timeout`: the bounded wait elapsed (this also bounds a setup write whose
  *    receipt never settles);
- *  - `aborted`: the attachment was cancelled (only once {@link watchAbort} is
- *    armed, because before the frame is written an abort is delivered to the
- *    transport through the write's own signal).
+ *  - `aborted`: the attachment was cancelled once its write receipt settled
+ *    ({@link watchAbort}). An abort that lands earlier, while the receipt is
+ *    pending, is bound by the adapters instead: they retire the candidate and
+ *    release the interval's gate at once, and the receipt's fate (bounded by
+ *    this owner's timeout) still decides the incumbent.
  *
  * A draft `DraftActionRejected` also confirms: it is the server's answer on a
  * candidate that may already hold the seat (see {@link classifySetupFrame}).

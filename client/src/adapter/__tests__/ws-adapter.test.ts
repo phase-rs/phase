@@ -6646,6 +6646,31 @@ describe("WebSocketAdapter — acquired socket ownership", () => {
       }
     });
 
+    it("retires the candidate and releases the gate at once when disposal lands while the setup receipt is pending", async () => {
+      MockWebSocket.last = null;
+      const codec = scriptedCodec();
+      const provider = vi.fn(() => Promise.resolve(codec.session));
+      const { adapter, raw } = await establishCodecAdapter(provider);
+      expect(adapter.tryReconnect(session() as never)).toBe(true);
+      await vi.waitFor(() => expect(MockWebSocket.last).not.toBe(raw));
+      const candidate = latestSocket();
+      // The write receipt never settles: its fate is unknown.
+      candidate.sendReceipt = vi.fn(() => new Promise<void>(() => undefined));
+      try {
+        candidate.dispatchSynthetic("message", CODEC_SESSION_HELLO);
+        await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+        adapter.dispose();
+        await vi.advanceTimersByTimeAsync(0);
+        // Not after the 60 s bound: the candidate and its lease are released
+        // in the same turn, and the interval's gate is down.
+        expect(candidate.close).toHaveBeenCalled();
+        expect(codec.close).toHaveBeenCalled();
+        expect((adapter as unknown as { confirmingPreparation: unknown }).confirmingPreparation).toBeNull();
+      } finally {
+        adapter.dispose();
+      }
+    });
+
     it("fails the attachment when the settling bootstrap throws before it decides the episode", async () => {
       const { adapter, raw, candidate, events } = await sentCandidate();
       try {

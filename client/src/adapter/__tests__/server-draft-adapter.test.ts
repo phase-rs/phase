@@ -4439,6 +4439,43 @@ describe("ServerDraftAdapter — negotiated StateCodecV1", () => {
       }
     });
 
+    it("retires the candidate and releases the gate at once when a create supersedes a reattach whose receipt is pending", async () => {
+      vi.useFakeTimers();
+      const session = draftCodecSession(decodeEnvelope);
+      const { adapter, ws, provider } = await startCodecDraft(session.session);
+      const events: unknown[] = [];
+      adapter.onEvent((event) => events.push(event));
+      await enterCodecMatch(ws, events);
+      provider.mockResolvedValueOnce(draftCodecSession(decodeEnvelope).session);
+      const reconnecting = watch(adapter.reconnectDraft());
+      await drainArt();
+      const candidate = MockWebSocket.last!;
+      // The write receipt never settles: its fate is unknown.
+      candidate.sendReceipt = vi.fn(() => new Promise<void>(() => undefined));
+      try {
+        candidate.dispatchSynthetic("message", CODEC_SERVER_HELLO);
+        await vi.waitFor(() => expect(candidate.sendReceipt).toHaveBeenCalledOnce());
+        provider.mockResolvedValueOnce(draftCodecSession(decodeEnvelope).session);
+        void adapter.createDraft({
+          displayName: "Contender", setCodes: ["TST"], kind: "Premier", public: false,
+          tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
+        }).catch(() => undefined);
+        await drainArt();
+        // The superseded reattach does not wait out the bound: its candidate is
+        // closed and the interval's gate is released in the same turn.
+        await expect(reconnecting.value()).toMatchObject({ code: "WS_CLOSED" });
+        expect(candidate.close).toHaveBeenCalled();
+        expect(() => (adapter as unknown as { assertNoReattachInterval(): void }).assertNoReattachInterval())
+          .not.toThrow();
+        // The incumbent's fate still depends on the unknown receipt: untouched
+        // until the bound says otherwise.
+        expect(ws.close).not.toHaveBeenCalled();
+      } finally {
+        adapter.dispose();
+        vi.useRealTimers();
+      }
+    });
+
     it("leaves a join that supersedes the reattach to its own attachment when the incumbent is retired", async () => {
       vi.useFakeTimers();
       const { adapter, ws, candidate, command, reconnecting } = await sentCandidate();

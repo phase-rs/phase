@@ -1380,9 +1380,25 @@ export class ServerDraftAdapter implements EngineAdapter {
         if (confirmation === null) {
           written = await write;
         } else {
-          // A receipt that never settles is bounded by the same owner.
-          const first = await Promise.race([write, confirmation.settled]);
-          if (typeof first === "boolean") {
+          // A receipt that never settles is bounded by the same owner. An abort
+          // that lands while the receipt is pending releases the interval's
+          // gate and retires the candidate at once, since the successor owns
+          // the attachment now; the incumbent still waits for the receipt's
+          // fate (the same bound applies), as an abort before it settles says
+          // nothing about whether the frame went out.
+          const abortedDuringReceipt = new Promise<"abort">((resolve) => {
+            if (!attachment.controller.signal.aborted) {
+              attachment.controller.signal.addEventListener("abort", () => resolve("abort"), { once: true });
+            }
+          });
+          const first = await Promise.race([write, confirmation.settled, abortedDuringReceipt]);
+          if (first === "abort") {
+            if (this.confirmingAttachment === attachment) this.confirmingAttachment = null;
+            this.abandonCandidate(socket, bootstrap);
+            const fate = await Promise.race([write, confirmation.settled]);
+            written = typeof fate === "boolean" ? fate : true;
+            unconfirmed = written ? "aborted" : null;
+          } else if (typeof first === "boolean") {
             written = first;
           } else if (first === "confirmed") {
             written = await write;
