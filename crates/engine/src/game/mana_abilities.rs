@@ -3927,13 +3927,14 @@ fn finish_mana_ability_cost_payment(
     {
         // The filter is evaluated from the activated ability's source, as
         // the resolver evaluates it from the resolving ability.
-        let ctx = FilterContext::from_source_with_controller(pending.source_id, pending.player);
-        let eligible: Vec<ObjectId> = state.players[pending.player.0 as usize]
-            .hand
-            .iter()
-            .copied()
-            .filter(|&id| matches_target_filter(state, id, card_filter, &ctx))
-            .collect();
+        // CR 601.2a: a spell mid-cast is not a card in hand (shared exclusion).
+        let eligible = super::mana_sources::reveal_eligible_hand_cards(
+            state,
+            pending.source_id,
+            pending.player,
+            card_filter,
+            super::mana_sources::spell_being_cast(state, pending.player),
+        );
         // CR 400.2: hand size is public but which cards are eligible is not,
         // so the prompt's existence must not depend on eligibility — any
         // non-empty hand gets the prompt (with only the empty selection legal

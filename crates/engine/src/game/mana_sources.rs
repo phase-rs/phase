@@ -2554,6 +2554,43 @@ fn reveal_then_mana_shape(ability: &AbilityDefinition) -> Option<RevealThenManaS
     }
 }
 
+/// CR 601.2a: the spell being cast is moved to the stack as it is announced, so
+/// while its costs are paid it is not a card in its caster's hand even though the
+/// engine has not yet relocated the object. The single authority for that exclusion:
+/// planning (`reveal_then_mana_gross`) and the live reveal prompt both call it.
+pub(crate) fn reveal_eligible_hand_cards(
+    state: &GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    card_filter: &TargetFilter,
+    casting_spell: Option<ObjectId>,
+) -> Vec<ObjectId> {
+    use crate::game::filter::{matches_target_filter, FilterContext};
+    let ctx = FilterContext::from_source_with_controller(source_id, controller);
+    state
+        .players
+        .iter()
+        .find(|p| p.id == controller)
+        .map(|p| {
+            p.hand
+                .iter()
+                .copied()
+                .filter(|&id| Some(id) != casting_spell)
+                .filter(|&id| matches_target_filter(state, id, card_filter, &ctx))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// CR 601.2a: the spell `player` is in the middle of casting, if any.
+pub(crate) fn spell_being_cast(state: &GameState, player: PlayerId) -> Option<ObjectId> {
+    state
+        .pending_cast
+        .as_ref()
+        .filter(|pending| pending.ability.controller == player)
+        .map(|pending| pending.object_id)
+}
+
 /// CR 605.3a + CR 107.1c: the most mana a reveal-then-mana activation can add
 /// for its own controller — the production evaluated as if every card in that
 /// player's own hand matching the reveal filter were revealed. Planned for the
@@ -2567,23 +2604,13 @@ fn reveal_then_mana_gross(
     shape: &RevealThenManaShape<'_>,
     casting_spell: Option<ObjectId>,
 ) -> u32 {
-    use crate::game::filter::{matches_target_filter, FilterContext};
-    let ctx = FilterContext::from_source_with_controller(object_id, controller);
-    let eligible: Vec<ObjectId> = state
-        .players
-        .iter()
-        .find(|p| p.id == controller)
-        .map(|p| {
-            p.hand
-                .iter()
-                .copied()
-                // CR 601.2a: the spell being cast is already on the stack
-                // while its costs are paid, so it is not a card in hand.
-                .filter(|&id| Some(id) != casting_spell)
-                .filter(|&id| matches_target_filter(state, id, shape.card_filter, &ctx))
-                .collect()
-        })
-        .unwrap_or_default();
+    let eligible = reveal_eligible_hand_cards(
+        state,
+        object_id,
+        controller,
+        shape.card_filter,
+        casting_spell,
+    );
     if eligible.is_empty() {
         return 0;
     }

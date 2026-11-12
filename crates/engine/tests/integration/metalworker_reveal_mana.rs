@@ -762,6 +762,15 @@ fn empowered_autogenerator_counts_the_counter_it_just_placed() {
 /// (plus the Ballista), with no other mana. Returns the runner after casting
 /// has reached the X announcement and the announced maximum.
 fn cast_walking_ballista(others: usize) -> (GameRunner, ObjectId, Vec<ObjectId>, u32) {
+    let (runner, metalworker, artifacts, _ballista, max) =
+        cast_walking_ballista_with(others, CastPaymentMode::Auto);
+    (runner, metalworker, artifacts, max)
+}
+
+fn cast_walking_ballista_with(
+    others: usize,
+    payment_mode: CastPaymentMode,
+) -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId, u32) {
     use engine::types::mana::ManaCostShard;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -792,14 +801,14 @@ fn cast_walking_ballista(others: usize) -> (GameRunner, ObjectId, Vec<ObjectId>,
             object_id: ballista,
             card_id,
             targets: Vec::new(),
-            payment_mode: CastPaymentMode::Auto,
+            payment_mode,
         })
         .expect("casting reaches the X announcement");
     let max = match &runner.state().waiting_for {
         WaitingFor::ChooseXValue { max, .. } => *max,
         other => panic!("expected the X announcement, got {other:?}"),
     };
-    (runner, metalworker, artifacts, max)
+    (runner, metalworker, artifacts, ballista, max)
 }
 
 /// CR 605.3a + CR 107.1c: a Metalworker that could reveal both other artifact
@@ -852,4 +861,101 @@ fn metalworker_capacity_counts_the_artifacts_it_could_reveal_for_announced_x() {
 fn metalworker_capacity_with_one_artifact_caps_announced_x_at_one() {
     let (_runner, _metalworker, _artifacts, max) = cast_walking_ballista(1);
     assert_eq!(max, 1, "two colorless from revealing one artifact pays X=1");
+}
+
+/// CR 601.2a: the spell being cast has already been moved to the stack when its
+/// costs are paid, so the live reveal prompt must not offer it as a card in hand.
+#[test]
+fn metalworker_reveal_prompt_excludes_the_spell_being_cast() {
+    let (mut runner, metalworker, artifacts, ballista, max) =
+        cast_walking_ballista_with(1, CastPaymentMode::Manual);
+    assert_eq!(max, 1);
+    runner
+        .act(GameAction::ChooseX { value: 1 })
+        .expect("announcing X=1 is legal");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "expected ManaPayment, got {:?}",
+        runner.state().waiting_for
+    );
+    activate(&mut runner, metalworker);
+    match &runner.state().waiting_for {
+        WaitingFor::RevealChoice { cards, .. } => {
+            assert!(
+                !cards.contains(&ballista),
+                "the spell being cast is not a card in hand: {cards:?}"
+            );
+            assert_eq!(cards, &artifacts, "the other artifact card is offered");
+        }
+        other => panic!("expected the mana ability's RevealChoice, got {other:?}"),
+    }
+}
+
+/// Walking Ballista cast with Metalworker out and two other cards in hand, both
+/// artifacts or neither. Returns the runner at the X announcement.
+fn ballista_with_two_hidden_cards(artifacts: bool) -> GameRunner {
+    use engine::types::mana::ManaCostShard;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
+        .as_artifact();
+    for name in ["Hidden A", "Hidden B"] {
+        let mut card = scenario.add_creature_to_hand(P0, name, 1, 1);
+        if artifacts {
+            card.as_artifact();
+        }
+    }
+    let ballista = scenario
+        .add_creature_to_hand(P0, "Walking Ballista", 0, 0)
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::X],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&ballista].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: ballista,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("casting reaches the X announcement");
+    runner
+}
+
+/// CR 402.3 + CR 400.2: the unchosen X bound is computed from the payer's
+/// private hand (Metalworker's capacity is per revealable artifact card), so an
+/// opponent's and a spectator's projection of the X prompt is identical whether
+/// the hidden hand holds artifacts or not; the payer still sees the real bound.
+#[test]
+fn x_announcement_projection_is_independent_of_private_hand_contents() {
+    use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
+    use engine::types::player::PlayerId;
+
+    let rich = ballista_with_two_hidden_cards(true);
+    let poor = ballista_with_two_hidden_cards(false);
+
+    let bound = |state: &engine::types::game_state::GameState| match &state.waiting_for {
+        WaitingFor::ChooseXValue { max, .. } => *max,
+        other => panic!("expected the X announcement, got {other:?}"),
+    };
+    assert_eq!(bound(&filter_state_for_viewer(rich.state(), P0)), 2);
+    assert_eq!(bound(&filter_state_for_viewer(poor.state(), P0)), 0);
+
+    let opponent = PlayerId(1);
+    let json = |state| serde_json::to_string(&state).expect("projection serializes");
+    assert_eq!(
+        json(filter_state_for_viewer(rich.state(), opponent)),
+        json(filter_state_for_viewer(poor.state(), opponent)),
+        "opponent projection must not encode the payer's private hand"
+    );
+    assert_eq!(
+        json(filter_state_for_unseated_viewer(rich.state())),
+        json(filter_state_for_unseated_viewer(poor.state())),
+        "spectator projection must not encode the payer's private hand"
+    );
 }

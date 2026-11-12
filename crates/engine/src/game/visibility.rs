@@ -2606,6 +2606,29 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         }
     }
 
+    // CR 402.3 + CR 400.2: other players may count the cards in a hand but not look
+    // at them. The unchosen X bound of a cast in progress is computed from the
+    // payer's PRIVATE hand (a reveal-for-mana source such as Metalworker contributes
+    // capacity per revealable card), and the per-X payment previews are derived from
+    // the same planner, so both are private to the payer. Any other viewer receives
+    // the redacted form — the bound collapses to the floor and no previews — never
+    // conditioned on what the hand holds, so the projection cannot encode it.
+    if let WaitingFor::ChooseXValue {
+        player,
+        min,
+        max,
+        x_cost_previews,
+        ..
+    } = &mut filtered.waiting_for
+    {
+        let bound_hidden =
+            viewer.is_none_or(|v| !viewer_has_private_access_to_player(state, v, *player));
+        if bound_hidden {
+            *max = *min;
+            x_cost_previews.clear();
+        }
+    }
+
     // CR 701.38 secret ballot (Truth or Consequences): withhold the running
     // tallies and ballots from EVERY viewer until the simultaneous reveal, so
     // neither later voters nor opponents can infer earlier secret votes. The
