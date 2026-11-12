@@ -6575,6 +6575,106 @@ mod tests {
         );
     }
 
+    /// R16 constructed ledger fixture, independent of any spell's batch grouping.
+    /// The earlier batch and owner are seeded; only the next batch is delivered.
+    /// CR 614.6 + CR 609.3: a batch halved to zero creates nothing and cannot
+    /// report an earlier batch's ids as its own.
+    #[test]
+    fn ledger_fixture_zero_commit_copy_batch_reports_no_stale_ids() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = add_copy_source(&mut state, "Ledger donor");
+        let earlier = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Earlier copy".to_string(),
+            Zone::Battlefield,
+        );
+        state.push_copy_token(PendingCopyTokenResolution {
+            created_ids: vec![earlier],
+            remaining: VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id,
+            referent_set: None,
+            offered_batch: OfferedBatchCustody::Settled,
+        });
+        state.last_created_token_ids = vec![earlier];
+        // Construct the token-count replacement directly: this is a ledger
+        // unit fixture, not a printed-card or parser-support claim.
+        let halver = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Ledger halver".to_string(),
+            Zone::Battlefield,
+        );
+        let definition = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .token_owner_scope(ControllerRef::Opponent)
+            .quantity_modification(QuantityModification::Half);
+        let object = state.objects.get_mut(&halver).unwrap();
+        object.base_replacement_definitions = Arc::new(vec![definition.clone()]);
+        object.replacement_definitions = vec![definition].into();
+        let mut copy = named_attack_copy_spec(&state, source_id, Vec::new());
+        copy.tapped = false;
+        copy.enters_attacking = false;
+        copy.attack_request = crate::types::proposed_event::TokenAttackRequest::Unspecified;
+        let spec =
+            super::super::token::copy_probe_spec_for(source_id, PlayerId(0), None, &copy.values);
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: Some(Box::new(copy)),
+            enter_tapped: EtbTapState::from_seeded_tapped(false),
+            count: 1,
+            appended: Vec::new(),
+            applied: Default::default(),
+        };
+        let mut events = Vec::new();
+        let crate::game::replacement::ReplacementResult::Execute(event) =
+            crate::game::replacement::replace_event(&mut state, proposed, &mut events)
+        else {
+            panic!("the constructed halver must settle without a choice");
+        };
+        assert!(
+            matches!(
+                &event,
+                ProposedEvent::CreateToken {
+                    count: 0,
+                    copy: Some(_),
+                    ..
+                }
+            ),
+            "REACH-GUARD: replacement delivers a zero-count copy batch"
+        );
+        assert!(
+            super::super::token::apply_create_token_after_replacement_with_created_ids(
+                &mut state,
+                event,
+                Vec::new(),
+                crate::types::game_state::PendingEffectResolutionEvent::Suppress,
+                &mut events,
+            )
+        );
+        assert!(
+            state.last_created_token_ids.is_empty(),
+            "the zero-commit batch must not republish the earlier batch's ledger"
+        );
+        assert_eq!(
+            state
+                .active_copy_token()
+                .expect("the owner remains parked")
+                .created_ids,
+            vec![earlier],
+            "the owner receives no duplicate or stale ids"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::TokenCreated { .. })),
+            "the zero-count batch commits no tokens"
+        );
+    }
+
     /// H1 state: a parked, unbound owner holding `[t1, t2]`, a referent `A`
     /// that already lists `t1`, and an unrelated chain set `B = [x]` current.
     fn completing_owner_under_a_foreign_chain_set() -> (GameState, [ObjectId; 3], [TrackedSetId; 2])

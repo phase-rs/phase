@@ -77,7 +77,6 @@ const MEMNITE: &str = "Memnite";
 const ARCBOUND_WORKER: &str = "Arcbound Worker";
 const QUICKSILVER_GARGANTUAN: &str = "Quicksilver Gargantuan";
 const JINNIE: &str = "Jinnie Fay, Jetmir's Second";
-const CLONE_LEGION: &str = "Clone Legion";
 const HALVING_SEASON: &str = "Halving Season";
 const KIKI_JIKI: &str = "Kiki-Jiki, Mirror Breaker";
 const RAISE_THE_ALARM: &str = "Raise the Alarm";
@@ -479,46 +478,6 @@ fn activate_saheeli(artifacts: &[&str], board: &[(PlayerId, &str)]) -> Option<Dr
         named_choices: 0,
         producer_set_at_pause: None,
     }))
-}
-
-/// Cast Clone Legion targeting P0 over `board` (P0's creatures are two Grizzly
-/// Bears), answering each prompt with `answer`, and settle it.
-fn cast_clone_legion_with(
-    board: &[(PlayerId, &str)],
-    answer: impl FnMut(&WaitingFor, &mut Driven) -> Option<GameAction>,
-) -> Option<Driven> {
-    let db = shared_card_db()?;
-    let (mut scenario, sources) = build_board(&[BEARS, BEARS], board)?;
-    let legion = scenario.add_real_card(P0, CLONE_LEGION, Zone::Hand, db);
-    // Clone Legion {7}{U}{U}.
-    let mut pool = vec![
-        ManaUnit::new(ManaType::Blue, legion, false, vec![]),
-        ManaUnit::new(ManaType::Blue, legion, false, vec![]),
-    ];
-    pool.extend((0..7).map(|_| ManaUnit::new(ManaType::Colorless, legion, false, vec![])));
-    scenario.with_mana_pool(P0, pool);
-    let mut runner = scenario.build();
-    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-    let pre = runner.state().battlefield.iter().copied().collect();
-    let cast = runner
-        .cast(legion)
-        .target_player(P0)
-        .try_resolve()
-        .expect("Clone Legion must be castable");
-    let actions = vec![cast.events().to_vec()];
-    Some(settle_with(
-        Driven {
-            runner,
-            producer: legion,
-            sources,
-            pre,
-            actions,
-            orderings: Vec::new(),
-            named_choices: 0,
-            producer_set_at_pause: None,
-        },
-        answer,
-    ))
 }
 
 /// The tokens now on the battlefield that the resolution created.
@@ -1389,74 +1348,6 @@ fn r15_ledger_successive_offered_batches_handoff_once() {
         "the referent lists the copies in TokenCreated order"
     );
     assert_end_step_exiles_every_token(driven);
-}
-
-/// R16 LEDGER fixture: a later offered batch reduced to zero reports no ids.
-/// Clone Legion supplies the engine's current per-target delivery shape, a
-/// known grouping defect tracked separately. This is deliberately a scoped
-/// ledger witness, not an assertion that per-target replacement application
-/// is rules-correct. The first offered batch commits a copy; the next commits
-/// nothing and must not report the earlier batch's stale ledger.
-#[test]
-fn r16_ledger_zero_commit_batch_reports_nothing() {
-    // The owner's list at each ordering prompt.
-    let mut owner_at_prompt: Vec<Option<Vec<ObjectId>>> = Vec::new();
-    let board = [(P0, PARALLEL_LIVES), (P1, HALVING_SEASON)];
-    let driven = cast_clone_legion_with(&board, |waiting, driven| {
-        let WaitingFor::ReplacementChoice { candidates, .. } = waiting else {
-            return None;
-        };
-        let mut names: Vec<String> = candidates
-            .iter()
-            .map(|candidate| candidate.source_name.clone())
-            .collect();
-        let first = match owner_at_prompt.len() {
-            0 => PARALLEL_LIVES,
-            1 => HALVING_SEASON,
-            _ => return None,
-        };
-        let index = names
-            .iter()
-            .position(|name| name == first)
-            .expect("REACH-GUARD: both token replacements are candidates");
-        names.sort();
-        driven.orderings.push(names);
-        owner_at_prompt.push(copy_token_owner_ids(&driven.runner));
-        Some(GameAction::ChooseReplacement { index })
-    });
-    let Some(driven) = driven else {
-        return;
-    };
-    let want: Vec<String> = [HALVING_SEASON, PARALLEL_LIVES]
-        .iter()
-        .map(|name| name.to_string())
-        .collect();
-    assert_eq!(
-        driven.orderings,
-        vec![want.clone(), want],
-        "REACH-GUARD: each copy's event is ordered between Parallel Lives and Halving Season"
-    );
-    let tokens = driven.created_tokens();
-    assert_eq!(
-        tokens.len(),
-        1,
-        "REACH-GUARD: the first ordering yields one copy and the second none"
-    );
-    assert_eq!(
-        driven.runner.state().objects[&tokens[0]].name,
-        BEARS,
-        "REACH-GUARD: the one token is a Bears copy"
-    );
-    assert_eq!(
-        owner_at_prompt[1],
-        Some(tokens.clone()),
-        "at the second ordering the owner lists the first copy once"
-    );
-    assert_eq!(
-        driven.runner.state().last_created_token_ids,
-        tokens,
-        "LastCreated lists the one copy once; the zero-token batch republishes nothing"
-    );
 }
 
 /// A Kiki-Jiki, Mirror Breaker board: P0 controls Kiki-Jiki and `target`, and
