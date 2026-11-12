@@ -3144,6 +3144,7 @@ impl ReflexiveGateParent {
             | Effect::ChangeSpeed { .. }
             | Effect::DealDamage { .. }
             | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
             | Effect::EachDealsDamageEqualToPower { .. }
             | Effect::EachSourceDealsDamage { .. }
             | Effect::Draw { .. }

@@ -70974,6 +70974,7 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }

@@ -723,7 +723,14 @@ fn handle_replacement_choice_inner(
                     // leg still gains the combined lifelink total.
                     ctx.excess_recipient = parked_excess_recipient;
                     ctx.lifelink_bonus = parked_lifelink_bonus;
-                    let _ = apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
+                    // CR 120.4b + CR 120.4c: a portion of a parked two-phase batch rejoins the
+                    // batch, which finishes its other portions' replacement before delivering.
+                    if !super::effects::deal_damage::return_answered_portion_to_batch(
+                        state, &ctx, &damage,
+                    ) {
+                        let _ =
+                            apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
+                    }
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
                 // Corpsejack Menace doubler on a prompted counter-placement).

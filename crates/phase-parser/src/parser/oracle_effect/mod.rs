@@ -41893,6 +41893,7 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }

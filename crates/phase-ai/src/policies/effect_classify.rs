@@ -496,6 +496,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Amass { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::ApplySticker { .. }
         | Effect::AssembleContraptionOnSprocket { .. }
         | Effect::AssembleContraptions { .. }

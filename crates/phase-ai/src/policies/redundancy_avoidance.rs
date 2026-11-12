@@ -346,6 +346,7 @@ fn redundancy_delta(
             /* delta= */ -3.0,
         ),
         Effect::ApplyPostReplacementDamage { .. } => None,
+        Effect::ResumeDamageBatch { .. } => None,
         Effect::CombineHost { .. } | Effect::ChooseAugmentAndCombineWithHost { .. } => None,
         Effect::Draw { count, .. } => zero_quantity_redundancy(
             state,

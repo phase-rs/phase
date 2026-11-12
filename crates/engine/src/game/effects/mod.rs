@@ -5430,6 +5430,7 @@ fn effect_enters_battlefield(effect: &Effect) -> bool {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
@@ -8088,6 +8089,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
@@ -9518,6 +9520,7 @@ fn effect_fields_read_filter_population(
         // duration, cost or choice: only their quantities (read above) and
         // nested definitions (the nested walk's) can read.
         Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::Explore
         | Effect::Investigate
         | Effect::Tribute { .. }
@@ -13112,6 +13115,9 @@ fn resolve_legacy_effect(
         Effect::DealDamage { .. } => deal_damage::resolve(state, ability, events),
         Effect::ApplyPostReplacementDamage { .. } => {
             deal_damage::resolve_post_replacement(state, ability, events)
+        }
+        Effect::ResumeDamageBatch { .. } => {
+            deal_damage::resolve_resume_damage_batch(state, ability, events)
         }
         Effect::EachDealsDamageEqualToPower { .. } => {
             deal_damage::resolve_each_deals_equal_to_power(state, ability, events)
@@ -25611,6 +25617,10 @@ fn resolve_chain_body(
             && state.active_ability_continuation().is_some_and(|pending| {
                 pending.parent_kind == Some(EffectKind::from(&ability.effect))
             });
+        // CR 120.4b + CR 616.1e: a two-phase damage batch that paused with no child frame
+        // parked its later instructions beneath its own resumable batch.
+        let damage_resolver_owns_tail =
+            damage_resolver_owns_tail || deal_damage::parked_batch_owns_tail(state, ability);
         if damage_resolver_owns_tail {
             return Ok(progress);
         }

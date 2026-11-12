@@ -599,6 +599,12 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             target: _,
             amount: _,
             is_combat: _,
+        }
+        | Effect::ResumeDamageBatch {
+            kind: _,
+            replaced: _,
+            remaining: _,
+            awaiting: _,
         } => Axes::NONE,
         Effect::EachDealsDamageEqualToPower {
             sources,
@@ -7313,6 +7319,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
         | Effect::RevealChosenNumbers { .. }
@@ -7742,6 +7749,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
         | Effect::RevealChosenNumbers { .. }

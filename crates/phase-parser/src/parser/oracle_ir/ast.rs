@@ -3223,6 +3223,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }

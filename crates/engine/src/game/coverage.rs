@@ -2919,7 +2919,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("amount".into(), fmt_quantity(amount)));
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::ApplyPostReplacementDamage { .. } => {}
+        Effect::ApplyPostReplacementDamage { .. } | Effect::ResumeDamageBatch { .. } => {}
         Effect::EachDealsDamageEqualToPower {
             sources,
             recipient,
@@ -10145,6 +10145,7 @@ fn damage_rider_effect_asks_a_choice(effect: &Effect, targets: RiderTargets) -> 
         | Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
@@ -11208,7 +11209,7 @@ fn extract_effect_quantity_features(
 ) {
     match effect {
         Effect::DealDamage { amount, .. } => extract_quantity_features(amount, features),
-        Effect::ApplyPostReplacementDamage { .. } => {}
+        Effect::ApplyPostReplacementDamage { .. } | Effect::ResumeDamageBatch { .. } => {}
         Effect::Draw { count, .. } => extract_quantity_features(count, features),
         Effect::Mill { count, .. } => extract_quantity_features(count, features),
         Effect::GainLife { amount, .. } => extract_quantity_features(amount, features),

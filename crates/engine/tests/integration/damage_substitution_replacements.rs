@@ -48,6 +48,8 @@ const SHAKE: &str =
 const PYROCLASM: &str = "Pyroclasm deals 2 damage to each creature.";
 const FLAME_RIFT: &str = "Flame Rift deals 4 damage to each player.";
 const RAKDOS_CHARM: &str = "Choose one —\n• Exile target player's graveyard.\n• Destroy target artifact.\n• Each creature deals 1 damage to its controller.";
+const COORDINATED_CLOBBERING: &str = "Tap one or two target untapped creatures you control. They each deal damage equal to their power to target creature an opponent controls.";
+const ALLIES_AT_LAST: &str = "Affinity for Allies (This spell costs {1} less to cast for each Ally you control.)\nUp to two target creatures you control each deal damage equal to their power to target creature an opponent controls.";
 const FLAME_SLASH: &str = "Flame Slash deals 4 damage to target creature.";
 const HYMN: &str = "Kicker {W} (You may pay an additional {W} as you cast this spell.)\nHurloon Battle Hymn deals 4 damage to target creature or planeswalker. If this spell was kicked, you gain 4 life.";
 const AARDVARK_SLOTH: &str =
@@ -1165,6 +1167,295 @@ fn a_last_sources_rider_prompt_survives_an_earlier_lifelink_choice() {
     assert_eq!(damage(&runner, rhox), 0);
     assert_eq!(damage(&runner, bear), 0);
     assert_at_rest(&runner);
+}
+
+/// Rakdos Charm: "Each creature deals 1 damage to its controller." Every portion goes through
+/// replacement before any is dealt (CR 120.4b: damage is dealt "as modified by replacement and
+/// prevention effects that interact with damage"; CR 120.4c then processes it "into its
+/// results"), and a pause keeps that order. P0's Rhox Faithmender (lifelink) is first: its
+/// portion survives, and its gain will meet Rhox Faithmender and Leyline of Hope. P1's Bear is
+/// next: Nefarious Lich asks which card to exile. P2's Hill Giant is last: P2's 1 meets Force
+/// Bubble and Delaying Shield, an order P2 chooses (CR 616.1). The prompts come in that order,
+/// no damage is dealt before P2's answer, and the instruction completes once, after the last.
+#[test]
+fn a_paused_batch_finishes_its_replacements_before_dealing_damage() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    super::unpreventable_damage_prevention_effects::faithmender_and_leyline(&mut scenario);
+    nefarious_lich(&mut scenario, 3);
+    scenario.add_creature(P1, "Bear", 2, 2);
+    scenario.add_creature(p2, "Hill Giant", 3, 3);
+    let bubble = force_bubble(&mut scenario, p2);
+    scenario.add_enchantment_from_oracle(p2, "Delaying Shield", DELAYING_SHIELD);
+    let charm = sorcery(&mut scenario, "Rakdos Charm", RAKDOS_CHARM);
+    let mut runner = scenario.build();
+    let action = cast_action(&runner, charm);
+    let mut events = runner.act(action).expect("cast Rakdos Charm").events;
+    answer(
+        &mut runner,
+        GameAction::SelectModes { indices: vec![2] },
+        &mut events,
+    );
+
+    let mut prompts = Vec::new();
+    let mut dealt_before_last_replacement_answer = 0;
+    for _ in 0..6 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::EffectZoneChoice { player, .. } => {
+                prompts.push(("exile", player));
+                take_offered(&mut runner, &mut events);
+            }
+            WaitingFor::ReplacementChoice { player, .. } if player == p2 => {
+                prompts.push(("order", player));
+                dealt_before_last_replacement_answer = dealt(&events);
+                choose_source(&mut runner, &mut events, bubble);
+            }
+            WaitingFor::ReplacementChoice { player, .. } => {
+                prompts.push(("gain", player));
+                answer(
+                    &mut runner,
+                    GameAction::ChooseReplacement { index: 0 },
+                    &mut events,
+                );
+            }
+            _ => break,
+        }
+    }
+
+    assert_eq!(prompts, vec![("exile", P1), ("order", p2), ("gain", P0)]);
+    assert_eq!(dealt_before_last_replacement_answer, 0);
+    assert_eq!(dealt(&events), 1, "only Rhox Faithmender's 1 is dealt");
+    assert_eq!(counters(&runner, bubble, &depletion()), 1);
+    let p0 = life(&runner, P0);
+    assert!([22, 23].contains(&p0), "got {p0}");
+    let completions: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(
+                e,
+                GameEvent::EffectResolved { kind: EffectKind::EachSourceDealsDamage, source_id, .. }
+                    if *source_id == charm
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(completions.len(), 1, "one completion for the instruction");
+    let last_dealt = events
+        .iter()
+        .rposition(|e| matches!(e, GameEvent::DamageDealt { .. }))
+        .expect("damage was dealt");
+    assert!(completions[0] > last_dealt);
+    assert_at_rest(&runner);
+}
+
+/// What a batch's prompts were, in order: the prompt kind, who answered, and how many
+/// `DamageDealt` events had happened by then.
+type BatchPrompts = Vec<(&'static str, PlayerId, usize)>;
+
+/// Answer every prompt a resolving batch raises: an exile choice with the first offered cards,
+/// an order choice by the candidate `pick` returns (else the first), and record each.
+fn answer_batch_prompts(
+    runner: &mut GameRunner,
+    events: &mut Vec<GameEvent>,
+    pick: impl Fn(PlayerId, &[ReplacementCandidateSummary]) -> Option<ObjectId>,
+) -> BatchPrompts {
+    let mut prompts = Vec::new();
+    for _ in 0..12 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::EffectZoneChoice { player, .. } => {
+                prompts.push(("exile", player, dealt(events)));
+                take_offered(runner, events);
+            }
+            WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } => {
+                prompts.push(("order", player, dealt(events)));
+                let index = pick(player, &candidates)
+                    .and_then(|source| candidates.iter().position(|c| c.source_id == source))
+                    .unwrap_or(0);
+                answer(runner, GameAction::ChooseReplacement { index }, events);
+            }
+            _ => break,
+        }
+    }
+    prompts
+}
+
+/// The instruction's completion events: `kind` from `source`.
+fn completions(events: &[GameEvent], kind: EffectKind, source: ObjectId) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(e, GameEvent::EffectResolved { kind: k, source_id, .. }
+                if *k == kind && *source_id == source)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// The instruction completes once, after its last damage.
+#[track_caller]
+fn assert_completes_once_after_its_damage(
+    events: &[GameEvent],
+    kind: EffectKind,
+    source: ObjectId,
+) {
+    let completions = completions(events, kind, source);
+    assert_eq!(completions.len(), 1, "{completions:?}");
+    if let Some(last_dealt) = events
+        .iter()
+        .rposition(|e| matches!(e, GameEvent::DamageDealt { .. }))
+    {
+        assert!(completions[0] > last_dealt);
+    }
+}
+
+fn cast_rakdos_charm_damage_mode(runner: &mut GameRunner, charm: ObjectId) -> Vec<GameEvent> {
+    let action = cast_action(runner, charm);
+    let mut events = runner.act(action).expect("cast Rakdos Charm").events;
+    answer(
+        runner,
+        GameAction::SelectModes { indices: vec![2] },
+        &mut events,
+    );
+    events
+}
+
+/// Rakdos Charm with two lifelink survivors under Rhox Faithmender and Leyline of Hope: each
+/// survivor's gain asks P0 an order (CR 616.1), in delivery (CR 120.4c). The instruction
+/// completes once, after the second answer; with only the last survivor asking, once after its
+/// answer.
+#[test]
+fn a_batchs_delivery_choices_keep_its_single_completion() {
+    for second_lifelinker in [true, false] {
+        let mut scenario = scenario();
+        super::unpreventable_damage_prevention_effects::faithmender_and_leyline(&mut scenario);
+        if second_lifelinker {
+            scenario
+                .add_creature(P0, "Vampire", 2, 2)
+                .with_keyword(Keyword::Lifelink);
+        }
+        let charm = sorcery(&mut scenario, "Rakdos Charm", RAKDOS_CHARM);
+        let mut runner = scenario.build();
+        let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
+
+        let prompts = answer_batch_prompts(&mut runner, &mut events, |_, _| None);
+
+        let gains = if second_lifelinker { 2 } else { 1 };
+        assert_eq!(prompts.len(), gains, "{prompts:?}");
+        assert!(prompts
+            .iter()
+            .all(|(kind, player, _)| *kind == "order" && *player == P0));
+        assert_eq!(dealt(&events), gains);
+        assert_completes_once_after_its_damage(&events, EffectKind::EachSourceDealsDamage, charm);
+        assert_at_rest(&runner);
+    }
+}
+
+/// Rakdos Charm: P0's Rhox Faithmender survives first. P1's Bear meets P1's Nefarious Lich and
+/// Force Bubble; P1 orders the Lich first, so its exile asks which card next (CR 616.1, CR
+/// 615.5). P2's Hill Giant, last, still goes through replacement before anything is dealt.
+/// With P2 under Force Bubble and Delaying Shield too, P2 orders after P1 (two order choices).
+#[test]
+fn a_batch_keeps_its_order_through_an_answer_that_pauses_again() {
+    for p2_orders in [false, true] {
+        let p2 = PlayerId(2);
+        let mut scenario = GameScenario::new_n_player(3, 11);
+        scenario.at_phase(Phase::PreCombatMain);
+        super::unpreventable_damage_prevention_effects::faithmender_and_leyline(&mut scenario);
+        let lich = nefarious_lich(&mut scenario, 3);
+        force_bubble(&mut scenario, P1);
+        scenario.add_creature(P1, "Bear", 2, 2);
+        scenario.add_creature(p2, "Hill Giant", 3, 3);
+        let p2_bubble = p2_orders.then(|| {
+            scenario.add_enchantment_from_oracle(p2, "Delaying Shield", DELAYING_SHIELD);
+            force_bubble(&mut scenario, p2)
+        });
+        let charm = sorcery(&mut scenario, "Rakdos Charm", RAKDOS_CHARM);
+        let mut runner = scenario.build();
+        let mut events = cast_rakdos_charm_damage_mode(&mut runner, charm);
+
+        let prompts = answer_batch_prompts(&mut runner, &mut events, |player, _| {
+            if player == P1 {
+                Some(lich)
+            } else if player == p2 {
+                p2_bubble
+            } else {
+                None
+            }
+        });
+
+        let mut expected: Vec<(&str, PlayerId, usize)> = vec![("order", P1, 0), ("exile", P1, 0)];
+        if p2_orders {
+            expected.push(("order", p2, 0));
+        }
+        // Rhox Faithmender's gain is asked in delivery, after every replacement answer, once
+        // its own 1 is dealt.
+        expected.push(("order", P0, 1));
+        assert_eq!(prompts, expected, "p2 orders {p2_orders}");
+        assert_eq!(player(&runner, P1).graveyard.len(), 2);
+        assert_completes_once_after_its_damage(&events, EffectKind::EachSourceDealsDamage, charm);
+        assert_at_rest(&runner);
+    }
+}
+
+/// Allies at Last: "Up to two target creatures you control each deal damage equal to their
+/// power to target creature an opponent controls." Coordinated Clobbering: "Tap one or two
+/// target untapped creatures you control. They each deal damage equal to their power to target
+/// creature an opponent controls." P0's lifelink Vampire's 2 meets only Furnace of Rath, and
+/// survives; P0's red Hound's 2 meets Furnace of Rath and Torbran, Thane of Red Fell, an order P1
+/// chooses for P1's creature (CR 616.1). Nothing is dealt before that answer (CR 120.4b), then
+/// both are dealt and the Vampire's lifelink gains (CR 120.4c).
+#[test]
+fn a_targeted_source_batch_finishes_its_replacements_before_dealing_damage() {
+    for (name, text, kind) in [
+        (
+            "Allies at Last",
+            ALLIES_AT_LAST,
+            EffectKind::EachDealsDamageEqualToPower,
+        ),
+        (
+            "Coordinated Clobbering",
+            COORDINATED_CLOBBERING,
+            EffectKind::DealDamage,
+        ),
+    ] {
+        let mut scenario = scenario();
+        let vampire = scenario
+            .add_creature(P0, "Vampire", 2, 2)
+            .with_keyword(Keyword::Lifelink)
+            .id();
+        let hound = scenario
+            .add_creature(P0, "Hound", 2, 2)
+            .with_color(vec![ManaColor::Red])
+            .id();
+        let recipient = scenario.add_creature(P1, "Wall", 0, 20).id();
+        furnace(&mut scenario);
+        scenario.add_creature_from_oracle(P0, "Torbran, Thane of Red Fell", 2, 4, TORBRAN);
+        let spell = sorcery(&mut scenario, name, text);
+        let mut runner = scenario.build();
+        let mut events = cast(
+            &mut runner,
+            spell,
+            vec![
+                object_target(vampire),
+                object_target(hound),
+                object_target(recipient),
+            ],
+        );
+
+        let prompts = answer_batch_prompts(&mut runner, &mut events, |_, _| None);
+
+        assert_eq!(prompts, vec![("order", P1, 0)], "{name}");
+        assert_eq!(dealt(&events), 2, "{name}");
+        assert!(damage(&runner, recipient) >= 4 + 6, "{name}");
+        assert_eq!(life(&runner, P0), 24, "{name}");
+        assert_completes_once_after_its_damage(&events, kind, spell);
+        assert_at_rest(&runner);
+    }
 }
 
 /// Pyroclasm: "deals 2 damage to each creature." A rider's prompt doesn't stop the other

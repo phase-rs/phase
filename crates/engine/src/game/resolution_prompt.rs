@@ -295,6 +295,7 @@ pub(crate) fn effect_offers_choice(e: &Effect) -> bool {
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }

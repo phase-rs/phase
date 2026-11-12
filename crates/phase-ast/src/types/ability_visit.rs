@@ -823,6 +823,7 @@ where
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         // CR 120.1: leaf effect — the source/recipient filters carry no nested
         // ability or effect to walk.
         | Effect::EachDealsDamageEqualToPower { .. }

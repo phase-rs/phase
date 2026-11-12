@@ -730,6 +730,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
@@ -4076,6 +4077,7 @@ impl ResolvedAbility {
             | Effect::ChangeSpeed { .. }
             | Effect::DealDamage { .. }
             | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
             | Effect::EachDealsDamageEqualToPower { .. }
             | Effect::EachSourceDealsDamage { .. }
             | Effect::Draw { .. }
