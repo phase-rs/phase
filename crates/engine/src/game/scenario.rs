@@ -2083,6 +2083,7 @@ impl GameRunner {
             WaitingFor::GameOver { .. } => "GameOver",
             WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
             WaitingFor::EntryControllerChoice { .. } => "EntryControllerChoice",
+            WaitingFor::ReplacementDecisionOrder { .. } => "ReplacementDecisionOrder",
             WaitingFor::OrderTriggers { .. } => "OrderTriggers",
             WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
             WaitingFor::ExploreChoice { .. } => "ExploreChoice",

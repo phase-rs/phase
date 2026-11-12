@@ -18,10 +18,11 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     BatchCompletion, BatchDeliveryStage, EnteringAuraAuthority, ExileLinkKind, GameState,
-    LibraryPlacementContinuation, LiminalEntryKind, LogicalZoneChangeGroup, MassLibraryOrderBatch,
-    MassLibraryOrderMember, MergedCardComponentRoute, PendingBatchDeliveries,
-    PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest, PendingComponentDeliveryParent,
-    PendingCounterPostAction, PendingLiminalEntryResume, PendingZoneChangeDelivery,
+    HeldDecisionPrompt, HeldReplacementDecision, LibraryPlacementContinuation, LiminalEntryKind,
+    LogicalZoneChangeGroup, MassLibraryOrderBatch, MassLibraryOrderMember,
+    MergedCardComponentRoute, PendingBatchDeliveries, PendingBatchZoneChangeCause,
+    PendingBatchZoneMoveRequest, PendingComponentDeliveryParent, PendingCounterPostAction,
+    PendingLiminalEntryResume, PendingReplacement, PendingZoneChangeDelivery,
     PostReplacementDrainOwner, StagedArrangementStatus, StagedBatchDelivery, StagedBatchMember,
     StagedBatchMemberState, StagedDestroyOperation, StagedDestroyOuterApproval,
     StagedLibraryArrangement, StagedMemberOperation, StagedMemberOutcome, WaitingFor,
@@ -1824,6 +1825,8 @@ fn new_staged_batch(
                 terminal: None,
                 operation: StagedMemberOperation::ZoneMove,
                 approved_post_replacement: None,
+                held_decision: None,
+                blocked: false,
             }
         })
         .collect();
@@ -1831,6 +1834,7 @@ fn new_staged_batch(
         stage: BatchDeliveryStage::Approving,
         members,
         cursor: 0,
+        asking: None,
         arrangements,
         arrangement_cursor: 0,
         population_devour_snapshot: None,
@@ -2014,7 +2018,7 @@ fn run_staged_batch(
         };
         match stage {
             BatchDeliveryStage::Approving => {
-                match consult_next_staged_member(state, owner, events) {
+                match drive_staged_approval(state, owner, events) {
                     StagedConsult::Continue => continue,
                     StagedConsult::Paused => {
                         // A paused batch is a savable state: project the
@@ -2052,6 +2056,694 @@ fn run_staged_batch(
     }
 }
 
+/// The index of the staged member a frozen identity names.
+fn staged_member_index(
+    owner: &PendingBatchDeliveries,
+    identity: ObjectIncarnationRef,
+) -> Option<usize> {
+    owner
+        .staged
+        .as_ref()?
+        .members
+        .iter()
+        .position(|member| member.identity == identity)
+}
+
+/// The index of the member whose decision is published (CR 616.1).
+fn staged_asking_index(owner: &PendingBatchDeliveries) -> Option<usize> {
+    let asking = owner.staged.as_ref()?.asking?;
+    staged_member_index(owner, asking)
+}
+
+/// Clear [`StagedBatchDelivery::asking`] when it names this member.
+fn release_staged_asking(owner: &mut PendingBatchDeliveries, index: usize) {
+    if let Some(staged) = owner.staged.as_mut() {
+        if staged
+            .members
+            .get(index)
+            .is_some_and(|member| staged.asking == Some(member.identity))
+        {
+            staged.asking = None;
+        }
+    }
+}
+
+/// Whether a replacement decision is published and waiting for its answer.
+fn staged_decision_is_published(state: &GameState) -> bool {
+    state.pending_replacement.is_some() || !matches!(state.waiting_for, WaitingFor::Priority { .. })
+}
+
+/// CR 616.1 + CR 101.4: one step of the approval stage. The asking member
+/// first finishes its own consultation; then every member is consulted once,
+/// in announcement order, and a member whose consultation parks a decision is
+/// held while the sweep goes on; finally the scheduler asks the outstanding
+/// decisions in APNAP order (CR 101.4), letting one player order their own
+/// (CR 101.4c), and starts that order again after every answer (CR 101.4d).
+fn drive_staged_approval(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+    events: &mut Vec<GameEvent>,
+) -> StagedConsult {
+    // The asking member continues only its own consultation: an answered
+    // outer Destroy runs its inner move next.
+    if let Some(index) = staged_asking_index(owner) {
+        if staged_decision_is_published(state) {
+            return StagedConsult::Paused;
+        }
+        let member = owner.staged.as_ref().expect("asking is staged").members[index].clone();
+        if let (
+            StagedMemberOperation::Destroy(operation),
+            StagedBatchMemberState::InnerConsulting,
+            None,
+        ) = (member.operation, member.state, &member.pending_outcome)
+        {
+            let point = state.resolution_stack.consult_drain_point();
+            let result = consult_staged_destroy_inner(state, owner, events, member, operation);
+            return settle_staged_consult(state, owner, index, result, point);
+        }
+        release_staged_asking(owner, index);
+        return StagedConsult::Continue;
+    }
+    refresh_staged_blocking(state, owner);
+    let staged = owner.staged.as_ref().expect("approving owner is staged");
+    // A member blocked by a decision that has since resolved is consulted now.
+    let deferred = staged.members[..staged.cursor.min(staged.members.len())]
+        .iter()
+        .position(|member| member.state == StagedBatchMemberState::Unconsulted && !member.blocked);
+    if let Some(index) = deferred {
+        let point = state.resolution_stack.consult_drain_point();
+        let result = consult_staged_member(state, owner, events, index);
+        return settle_staged_consult(state, owner, index, result, point);
+    }
+    let cursor = staged.cursor;
+    if let Some(member) = staged.members.get(cursor) {
+        if member.state == StagedBatchMemberState::Unconsulted && member.blocked {
+            owner.staged.as_mut().expect("staged").cursor = cursor + 1;
+            return StagedConsult::Continue;
+        }
+        let point = state.resolution_stack.consult_drain_point();
+        let result = consult_staged_member(state, owner, events, cursor);
+        return settle_staged_consult(state, owner, cursor, result, point);
+    }
+    schedule_staged_decisions(state, owner)
+}
+
+/// After one member's consultation: a parked decision is held when it can be
+/// restored exactly, so the sweep continues; otherwise it stays published and
+/// the member is the asking one, as before the scheduler existed.
+fn settle_staged_consult(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+    index: usize,
+    result: StagedConsult,
+    point: (crate::types::resolution::ChildStackDepth, Option<usize>),
+) -> StagedConsult {
+    if result != StagedConsult::Paused {
+        return result;
+    }
+    let kind = match owner
+        .staged
+        .as_ref()
+        .map(|staged| staged.members[index].state)
+    {
+        Some(StagedBatchMemberState::PreventedWithChild) => ParkedDecisionKind::LiveChild,
+        _ => ParkedDecisionKind::Own,
+    };
+    let held = hold_parked_decision(state, owner, index, point, kind);
+    let staged = owner.staged.as_mut().expect("approving owner is staged");
+    if staged.cursor == index {
+        staged.cursor = index + 1;
+    }
+    if held {
+        release_staged_asking(owner, index);
+        StagedConsult::Continue
+    } else {
+        staged.asking = Some(staged.members[index].identity);
+        StagedConsult::Paused
+    }
+}
+
+/// CR 616.1: detach the decision the replacement pipeline just parked for
+/// member `index` (its pending replacement, the member's pause boundary, the
+/// consultation's ready drain and the prompt) and hold it on the member.
+///
+/// Only a park that can be put back exactly is held: a pending replacement
+/// whose prompt is a replacement-family prompt, no paused cost or discard
+/// carrier, nothing left above the consultation's drain point once its ready
+/// drain is taken, and no drain under a prevention's live child. Any other park
+/// is left published (returns `false`).
+fn hold_parked_decision(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+    index: usize,
+    point: (crate::types::resolution::ChildStackDepth, Option<usize>),
+    kind: ParkedDecisionKind,
+) -> bool {
+    if state.replacement_may_cost_paused
+        || state.pending_cost_move_resume.is_some()
+        || state.pending_single_discard.is_some()
+    {
+        return false;
+    }
+    let Some(pending) = state.pending_replacement.clone() else {
+        return false;
+    };
+    let (chooser, prompt) = match &state.waiting_for {
+        WaitingFor::ReplacementChoice { player, .. } => (*player, HeldDecisionPrompt::Replacement),
+        waiting @ WaitingFor::EntryControllerChoice { player, .. } => (
+            *player,
+            HeldDecisionPrompt::Raised(Box::new(waiting.clone())),
+        ),
+        waiting
+            if replacement::pending_entry_named_choice_is_live(state)
+                || replacement::pending_entry_payment_is_live(state) =>
+        {
+            let Some(player) = waiting.acting_player() else {
+                return false;
+            };
+            (
+                player,
+                HeldDecisionPrompt::Raised(Box::new(waiting.clone())),
+            )
+        }
+        _ => return false,
+    };
+    if owner
+        .staged
+        .as_ref()
+        .and_then(|staged| staged.members.get(index))
+        .is_none()
+    {
+        return false;
+    }
+    let live_child = kind == ParkedDecisionKind::LiveChild;
+    let drain = state
+        .resolution_stack
+        .retain_consultation_post_replacement(point);
+    let residue = state.resolution_stack.capture_child_boundary() != point.0;
+    if residue || (live_child && drain.is_some()) {
+        if let Some(drain) = drain {
+            state.resolution_stack.push_post_replacement(drain);
+        }
+        return false;
+    }
+    let decision = HeldReplacementDecision {
+        pending,
+        chooser,
+        prompt,
+        boundary: if live_child {
+            None
+        } else {
+            owner.paused_current.take()
+        },
+        drain,
+    };
+    withdraw_dependent_holds(state, owner, index, &decision);
+    let member = &mut owner.staged.as_mut().expect("staged").members[index];
+    member.held_decision = Some(Box::new(decision));
+    state.pending_replacement = None;
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    true
+}
+
+/// Whether a parked decision is the member's own event or a live child parked
+/// inside a replacement applied for it (Umbra armor destroying its Aura).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParkedDecisionKind {
+    Own,
+    LiveChild,
+}
+
+/// The object a decision is about: the member's own object, or for a live
+/// child the object whose event parked (an Umbra's Aura).
+fn decision_subject(pending: &PendingReplacement) -> Option<ObjectId> {
+    pending.proposed.affected_object_id()
+}
+
+/// CR 616.1: whether member `object`'s own move depends on a decision: the
+/// decision is about it, or offers a replacement whose application moves it
+/// (CR 702.89a: Umbra armor destroys its own Aura).
+fn decision_depends_on(state: &GameState, pending: &PendingReplacement, object: ObjectId) -> bool {
+    decision_subject(pending) == Some(object)
+        || pending.candidates.iter().any(|candidate| {
+            candidate.source == object
+                && replacement::replacement_moves_its_source(state, *candidate)
+        })
+}
+
+/// A newly held decision of member `index` decides every other member it
+/// depends on: their own held decisions are withdrawn and they wait.
+fn withdraw_dependent_holds(
+    state: &GameState,
+    owner: &mut PendingBatchDeliveries,
+    index: usize,
+    decision: &HeldReplacementDecision,
+) {
+    let Some(staged) = owner.staged.as_mut() else {
+        return;
+    };
+    for (other, member) in staged.members.iter_mut().enumerate() {
+        if other == index
+            || member.held_decision.is_none()
+            || !decision_depends_on(state, &decision.pending, member.identity.object_id)
+        {
+            continue;
+        }
+        member.held_decision = None;
+        member.state = StagedBatchMemberState::Unconsulted;
+        member.pending_outcome = None;
+        member.approved_post_replacement = None;
+        member.blocked = true;
+        if let StagedMemberOperation::Destroy(operation) = member.operation {
+            member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
+                outer: StagedDestroyOuterApproval::Unapproved,
+                ..operation
+            });
+        }
+    }
+}
+
+/// CR 616.1: recompute which unconsulted members wait on an outstanding
+/// decision (held, or the published one).
+fn refresh_staged_blocking(state: &GameState, owner: &mut PendingBatchDeliveries) {
+    let asking = staged_asking_index(owner);
+    let Some(staged) = owner.staged.as_mut() else {
+        return;
+    };
+    let outstanding: Vec<(usize, &PendingReplacement)> = staged
+        .members
+        .iter()
+        .enumerate()
+        .filter_map(|(index, member)| {
+            member
+                .held_decision
+                .as_ref()
+                .map(|decision| (index, &decision.pending))
+        })
+        .chain(asking.zip(state.pending_replacement.as_ref()).into_iter())
+        .collect();
+    let blocked: Vec<bool> = staged
+        .members
+        .iter()
+        .enumerate()
+        .map(|(index, member)| {
+            member.state == StagedBatchMemberState::Unconsulted
+                && outstanding.iter().any(|(owner_index, pending)| {
+                    *owner_index != index
+                        && decision_depends_on(state, pending, member.identity.object_id)
+                })
+        })
+        .collect();
+    for (member, blocked) in staged.members.iter_mut().zip(blocked) {
+        member.blocked = blocked;
+    }
+}
+
+/// CR 101.4 + CR 101.4c + CR 616.1: ask the outstanding decisions. The
+/// APNAP-first chooser goes first; a chooser holding two or more decisions
+/// chooses which to make first. With nothing outstanding, approval is done.
+fn schedule_staged_decisions(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+) -> StagedConsult {
+    retire_moved_held_members(state, owner);
+    let staged = owner.staged.as_ref().expect("approving owner is staged");
+    let held: Vec<(usize, PlayerId, ObjectId)> = staged
+        .members
+        .iter()
+        .enumerate()
+        .filter_map(|(index, member)| {
+            let decision = member.held_decision.as_ref()?;
+            Some((
+                index,
+                decision.chooser,
+                decision_subject(&decision.pending).unwrap_or(member.identity.object_id),
+            ))
+        })
+        .collect();
+    if held.is_empty() {
+        return StagedConsult::AllConsulted;
+    }
+    let apnap = crate::game::players::apnap_order(state);
+    let rank = |player: PlayerId| {
+        apnap
+            .iter()
+            .position(|seat| *seat == player)
+            .unwrap_or(usize::MAX)
+    };
+    let chooser = held
+        .iter()
+        .map(|(_, chooser, _)| *chooser)
+        .min_by_key(|chooser| rank(*chooser))
+        .expect("held is not empty");
+    let mine: Vec<&(usize, PlayerId, ObjectId)> = held
+        .iter()
+        .filter(|(_, player, _)| *player == chooser)
+        .collect();
+    if let [(index, _, _)] = mine.as_slice() {
+        publish_held_decision(state, owner, *index);
+    } else {
+        state.waiting_for = WaitingFor::ReplacementDecisionOrder {
+            player: chooser,
+            objects: mine.iter().map(|(_, _, object)| *object).collect(),
+        };
+    }
+    StagedConsult::Paused
+}
+
+/// CR 400.7: a held member whose own object moved or changed incarnation while
+/// another decision was asked cannot undergo its move; its decision is dropped.
+/// A live child's host keeps its decision: the child's event is another
+/// object's.
+fn retire_moved_held_members(state: &GameState, owner: &mut PendingBatchDeliveries) {
+    let Some(staged) = owner.staged.as_ref() else {
+        return;
+    };
+    let moved: Vec<usize> = staged
+        .members
+        .iter()
+        .enumerate()
+        .filter(|(_, member)| {
+            member
+                .held_decision
+                .as_ref()
+                .is_some_and(|decision| decision.boundary.is_some())
+                && !staged_member_is_live(state, member)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    for index in moved {
+        if let Some(member) = owner
+            .staged
+            .as_mut()
+            .and_then(|staged| staged.members.get_mut(index))
+        {
+            member.held_decision = None;
+        }
+        mark_staged_member_preempted(owner, index);
+    }
+}
+
+/// CR 400.7: the member's frozen incarnation is still the live object.
+fn staged_member_is_live(state: &GameState, member: &StagedBatchMember) -> bool {
+    state
+        .objects
+        .get(&member.identity.object_id)
+        .map(ObjectIncarnationRef::from_object)
+        == Some(member.identity)
+}
+
+/// Publish member `index`'s held decision: put back exactly what the
+/// replacement pipeline left, and make it the asking member.
+fn publish_held_decision(state: &mut GameState, owner: &mut PendingBatchDeliveries, index: usize) {
+    let staged = owner.staged.as_mut().expect("approving owner is staged");
+    let member = &mut staged.members[index];
+    let decision = *member
+        .held_decision
+        .take()
+        .expect("only a held decision is published");
+    staged.asking = Some(member.identity);
+    state.pending_replacement = Some(decision.pending);
+    owner.paused_current = decision.boundary;
+    if let Some(drain) = decision.drain {
+        state.resolution_stack.push_post_replacement(drain);
+    }
+    state.waiting_for = match decision.prompt {
+        HeldDecisionPrompt::Replacement => {
+            replacement::replacement_choice_waiting_for(decision.chooser, state)
+        }
+        HeldDecisionPrompt::Raised(waiting) => *waiting,
+    };
+}
+
+/// CR 101.4d + CR 616.1: an answer to the asking member's decision left its
+/// event needing a further choice (a re-park, such as Progenitus's redirect
+/// exposing its owner's CR 903.9b choice). Hold that choice like any other and
+/// ask again in APNAP order. Returns the next prompt, or `None` when the
+/// choice cannot be held and stays published as the pipeline left it.
+pub(crate) fn hold_answer_repark(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    run_start: usize,
+) -> Option<WaitingFor> {
+    let group = state
+        .active_batch_delivery()
+        .or_else(|| {
+            state
+                .resolution_stack
+                .batch_delivery_below_ready_post_replacement()
+        })
+        .filter(|batch| {
+            batch.staged.as_ref().is_some_and(|staged| {
+                staged.stage == BatchDeliveryStage::Approving && staged.asking.is_some()
+            })
+        })?
+        .logical_zone_change_group
+        .logical_group_id;
+    let drain = state
+        .resolution_stack
+        .take_ready_post_replacement_above_batch(group);
+    let Some(mut owner) = state
+        .resolution_stack
+        .take_active_batch_delivery()
+        .ok()
+        .flatten()
+    else {
+        if let Some(drain) = drain {
+            state.resolution_stack.push_post_replacement(drain);
+        }
+        return None;
+    };
+    let boundary = state.resolution_stack.capture_child_boundary();
+    let restore =
+        |state: &mut GameState,
+         owner: PendingBatchDeliveries,
+         drain: Option<crate::types::game_state::PostReplacementDrainStack>| {
+            state.repark_batch_owner_below_children(owner, boundary);
+            if let Some(drain) = drain {
+                state.resolution_stack.push_post_replacement(drain);
+            }
+        };
+    let Some(index) = staged_asking_index(&owner) else {
+        restore(state, owner, drain);
+        return None;
+    };
+    let kind = if owner.paused_current.is_some() {
+        ParkedDecisionKind::Own
+    } else {
+        ParkedDecisionKind::LiveChild
+    };
+    let point = state.resolution_stack.consult_drain_point();
+    if !hold_parked_decision(state, &mut owner, index, point, kind) {
+        restore(state, owner, drain);
+        return None;
+    }
+    if let Some(drain) = drain {
+        let decision = owner.staged.as_mut().expect("staged").members[index]
+            .held_decision
+            .as_mut()
+            .expect("just held");
+        match decision.drain.as_mut() {
+            Some(existing) => existing.append_retained(drain),
+            None => decision.drain = Some(drain),
+        }
+    }
+    release_staged_asking(&mut owner, index);
+    match continue_staged_batch_after_answer(state, owner, events, run_start, boundary) {
+        StagedConsultationHandback::Parked(waiting) => Some(*waiting),
+        StagedConsultationHandback::Settled | StagedConsultationHandback::NotOwned => {
+            Some(state.waiting_for.clone())
+        }
+    }
+}
+
+/// Checked restore: a save written before the scheduler existed parks the
+/// member being asked AT the approval cursor. That member is the asking one;
+/// the cursor moves past it. A mid-consultation member at the cursor with no
+/// published decision is not resumable.
+pub(crate) fn upgrade_restored_staged_asking(state: &mut GameState) -> Result<(), String> {
+    let published = staged_decision_is_published(state);
+    for owner in state.resolution_stack.staged_batch_owners_mut() {
+        let paused_member = owner.paused_current.as_ref().map(|paused| paused.member);
+        let Some(staged) = owner.staged.as_mut() else {
+            continue;
+        };
+        if staged.stage != BatchDeliveryStage::Approving || staged.asking.is_some() {
+            continue;
+        }
+        let cursor = staged.cursor;
+        let Some(member) = staged.members.get(cursor) else {
+            continue;
+        };
+        let own = paused_member == Some(member.identity)
+            && matches!(
+                member.state,
+                StagedBatchMemberState::OuterConsulting | StagedBatchMemberState::InnerConsulting
+            );
+        let child = member.state == StagedBatchMemberState::PreventedWithChild
+            && paused_member.is_none()
+            && published;
+        let mid_consult = matches!(
+            member.state,
+            StagedBatchMemberState::OuterConsulting
+                | StagedBatchMemberState::InnerConsulting
+                | StagedBatchMemberState::PreventedWithChild
+        );
+        if own || child {
+            staged.asking = Some(member.identity);
+            staged.cursor = cursor + 1;
+        } else if mid_consult {
+            return Err(
+                "a staged member mid-consultation at the approval cursor has no published decision"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Checked restore of the replacement-choice scheduler (CR 616.1 + CR 101.4):
+/// every held decision has a living chooser in seat range and a present
+/// subject, an as-enters prompt is still live for its pending replacement,
+/// the asking member has a published decision, every blocked member waits on
+/// an outstanding decision, and a selection prompt offers exactly its
+/// APNAP-first chooser's held decisions.
+pub(crate) fn validate_restored_staged_scheduler(state: &GameState) -> Result<(), String> {
+    let published = staged_decision_is_published(state);
+    for owner in state.resolution_stack.staged_batch_owners() {
+        let Some(staged) = owner.staged.as_ref() else {
+            continue;
+        };
+        if staged.asking.is_some() && !published {
+            return Err("the asking staged member has no published decision".to_string());
+        }
+        for member in &staged.members {
+            let Some(decision) = &member.held_decision else {
+                continue;
+            };
+            if decision.chooser.0 as usize >= state.players.len()
+                || !crate::game::players::is_alive(state, decision.chooser)
+            {
+                return Err("a held staged decision's chooser is not in the game".to_string());
+            }
+            if decision_subject(&decision.pending)
+                .is_some_and(|subject| !state.objects.contains_key(&subject))
+            {
+                return Err("a held staged decision is about an object that is gone".to_string());
+            }
+            if let HeldDecisionPrompt::Raised(prompt) = &decision.prompt {
+                if prompt.acting_player() != Some(decision.chooser) {
+                    return Err("a held staged prompt is not its chooser's".to_string());
+                }
+                if !matches!(**prompt, WaitingFor::EntryControllerChoice { .. }) {
+                    let mut probe = state.clone();
+                    probe.pending_replacement = Some(decision.pending.clone());
+                    probe.waiting_for = (**prompt).clone();
+                    if !replacement::pending_entry_named_choice_is_live(&probe)
+                        && !replacement::pending_entry_payment_is_live(&probe)
+                    {
+                        return Err(
+                            "a held as-enters prompt is not live for its replacement".to_string()
+                        );
+                    }
+                }
+            }
+        }
+        let mut recomputed = owner.clone();
+        refresh_staged_blocking(state, &mut recomputed);
+        let blocked_now: Vec<bool> = recomputed
+            .staged
+            .as_ref()
+            .map(|staged| staged.members.iter().map(|member| member.blocked).collect())
+            .unwrap_or_default();
+        if staged
+            .members
+            .iter()
+            .zip(&blocked_now)
+            .any(|(member, blocked)| member.blocked && !blocked)
+        {
+            return Err("a blocked staged member waits on no outstanding decision".to_string());
+        }
+    }
+    if let WaitingFor::ReplacementDecisionOrder { player, objects } = &state.waiting_for {
+        let owner = state
+            .resolution_stack
+            .staged_batch_owners()
+            .last()
+            .ok_or_else(|| "a replacement decision order has no staged batch".to_string())?;
+        let staged = owner.staged.as_ref().expect("staged owner");
+        if staged.asking.is_some() {
+            return Err(
+                "a replacement decision order is open while a decision is asked".to_string(),
+            );
+        }
+        let held: Vec<(PlayerId, ObjectId)> = staged
+            .members
+            .iter()
+            .filter_map(|member| {
+                let decision = member.held_decision.as_ref()?;
+                Some((
+                    decision.chooser,
+                    decision_subject(&decision.pending).unwrap_or(member.identity.object_id),
+                ))
+            })
+            .collect();
+        let apnap = crate::game::players::apnap_order(state);
+        let rank = |chooser: PlayerId| {
+            apnap
+                .iter()
+                .position(|seat| *seat == chooser)
+                .unwrap_or(usize::MAX)
+        };
+        let first = held
+            .iter()
+            .map(|(chooser, _)| *chooser)
+            .min_by_key(|c| rank(*c));
+        let mine: Vec<ObjectId> = held
+            .iter()
+            .filter(|(chooser, _)| Some(*chooser) == first)
+            .map(|(_, object)| *object)
+            .collect();
+        if first != Some(*player) || mine.len() < 2 || mine != *objects {
+            return Err(
+                "a replacement decision order does not offer its first chooser's decisions"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// CR 101.4c: `player` chose which of their held decisions to make first.
+/// Publishes it on the active staged owner and returns the prompt.
+pub(crate) fn publish_selected_staged_decision(
+    state: &mut GameState,
+    object: ObjectId,
+) -> Option<WaitingFor> {
+    let index = state.active_batch_delivery().and_then(|owner| {
+        owner.staged.as_ref()?.members.iter().position(|member| {
+            member.held_decision.as_ref().is_some_and(|decision| {
+                decision_subject(&decision.pending).unwrap_or(member.identity.object_id) == object
+            })
+        })
+    })?;
+    let mut owner = state
+        .resolution_stack
+        .take_active_batch_delivery()
+        .ok()
+        .flatten()?;
+    let boundary = state.resolution_stack.capture_child_boundary();
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    publish_held_decision(state, &mut owner, index);
+    sync_staged_requests(&mut owner);
+    state.repark_batch_owner_below_children(owner, boundary);
+    Some(state.waiting_for.clone())
+}
+
 /// CR 400.7: the frozen identity and the producer's origin
 /// snapshot both still describe the live object, so a replacement may be
 /// offered for this member.
@@ -2080,6 +2772,7 @@ fn staged_member_is_consultable(
 /// same logical action (CR 702.89a: an Umbra's armor destroys the Aura), and an
 /// off-battlefield member has no battlefield slot at all.
 fn mark_staged_member_preempted(owner: &mut PendingBatchDeliveries, index: usize) {
+    release_staged_asking(owner, index);
     let Some(staged) = owner.staged.as_mut() else {
         return;
     };
@@ -2093,21 +2786,20 @@ fn mark_staged_member_preempted(owner: &mut PendingBatchDeliveries, index: usize
     member.approved_post_replacement = None;
 }
 
-/// CR 616.1: consult one member. Approval never delivers: an
-/// `Execute` result is retained as the exact final event and the cursor moves
-/// on. A `NeedsChoice` parks the exact boundary and the batch frame.
-fn consult_next_staged_member(
+/// CR 616.1: consult one member through the replacement pipeline. Approval
+/// never delivers: an `Execute` result is retained as the exact final event. A
+/// `NeedsChoice` parks the exact boundary; [`drive_staged_approval`] then holds
+/// that decision so the sweep can go on, or publishes it.
+fn consult_staged_member(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
     events: &mut Vec<GameEvent>,
+    index: usize,
 ) -> StagedConsult {
-    // The approval cursor IS the member being asked: consultation and delivery
-    // walk the same announcement order (the producer's APNAP-adjusted order),
-    // so every park/answer/restore site can key on `cursor`.
     let Some(member) = owner
         .staged
         .as_ref()
-        .and_then(|staged| staged.members.get(staged.cursor))
+        .and_then(|staged| staged.members.get(index))
         .cloned()
     else {
         return StagedConsult::AllConsulted;
@@ -2456,6 +3148,7 @@ fn record_staged_member_approval(
     index: usize,
     event: ProposedEvent,
 ) {
+    release_staged_asking(owner, index);
     if let Some(staged) = owner.staged.as_mut() {
         if let Some(member) = staged.members.get_mut(index) {
             member.state = StagedBatchMemberState::Approved;
@@ -2530,6 +3223,7 @@ fn mark_staged_member_terminal_witnessed(
     };
     let mut destroyed = None;
     let mut change_zone_bookkeeping = None;
+    release_staged_asking(owner, index);
     if let Some(staged) = owner.staged.as_mut() {
         if let Some(member) = staged.members.get_mut(index) {
             if let StagedMemberOperation::Destroy(StagedDestroyOperation {
@@ -3119,6 +3813,7 @@ fn staged_delivery_pause(
 }
 
 fn advance_staged_cursor(owner: &mut PendingBatchDeliveries, index: usize) {
+    release_staged_asking(owner, index);
     if let Some(staged) = owner.staged.as_mut() {
         staged.cursor = staged.cursor.max(index + 1);
     }
@@ -3411,12 +4106,22 @@ pub(crate) fn staged_approval_owner_for(
     identity: ObjectIncarnationRef,
     expected_event: &ProposedEvent,
 ) -> Option<(LogicalZoneChangeGroupId, bool)> {
-    let batch = state.active_batch_delivery()?;
+    // CR 616.1: the owner is on top, or directly below the asking member's own
+    // ready drain (put back when its held decision was published).
+    let batch = state.active_batch_delivery().or_else(|| {
+        state
+            .resolution_stack
+            .batch_delivery_below_ready_post_replacement()
+    })?;
     let staged = batch.staged.as_ref()?;
     if staged.stage != BatchDeliveryStage::Approving {
         return None;
     }
-    let member = staged.members.get(staged.cursor)?;
+    let asking = staged.asking?;
+    let member = staged
+        .members
+        .iter()
+        .find(|member| member.identity == asking)?;
     let paused = batch.paused_current.as_ref()?;
     if paused.terminal_completion.is_some()
         || !paused.captures(identity, expected_event)
@@ -3464,6 +4169,9 @@ pub(crate) fn record_staged_batch_consultation_result(
     run_start: usize,
 ) -> StagedConsultationHandback {
     // CR 616.1: detach the approved drain before checking for its batch owner.
+    state
+        .resolution_stack
+        .drop_empty_post_replacement_above_batch(group_id);
     let mut retained = if matches!(outcome, StagedMemberOutcome::Approved(_)) {
         state
             .resolution_stack
@@ -3514,8 +4222,12 @@ pub(crate) fn record_staged_batch_consultation_result(
         refuse(state, owner, retained);
         return StagedConsultationHandback::NotOwned;
     }
+    // CR 616.1: the result belongs to the asking member, by identity.
+    let Some(cursor) = staged_asking_index(&owner) else {
+        refuse(state, owner, retained);
+        return StagedConsultationHandback::NotOwned;
+    };
     let staged = owner.staged.as_mut().expect("checked staged");
-    let cursor = staged.cursor;
     let Some(member) = staged.members.get_mut(cursor) else {
         refuse(state, owner, retained);
         return StagedConsultationHandback::NotOwned;
@@ -3539,11 +4251,25 @@ pub(crate) fn record_staged_batch_consultation_result(
                 member.state = StagedBatchMemberState::PreventedWithChild;
             }
         }
-        let waiting = state.waiting_for.clone();
-        let approval_end = events.len();
-        park_staged_run_events(state, &mut owner, events, run_start, approval_end);
-        state.repark_batch_owner_below_children(owner, boundary);
-        return StagedConsultationHandback::Parked(Box::new(waiting));
+        // CR 101.4d + CR 616.1: the answer exposed a new decision (a live
+        // child). Hold it like any other and ask again in APNAP order; one
+        // that cannot be held stays published, as before.
+        let point = state.resolution_stack.consult_drain_point();
+        if !hold_parked_decision(
+            state,
+            &mut owner,
+            cursor,
+            point,
+            ParkedDecisionKind::LiveChild,
+        ) {
+            let waiting = state.waiting_for.clone();
+            let approval_end = events.len();
+            park_staged_run_events(state, &mut owner, events, run_start, approval_end);
+            state.repark_batch_owner_below_children(owner, boundary);
+            return StagedConsultationHandback::Parked(Box::new(waiting));
+        }
+        release_staged_asking(&mut owner, cursor);
+        return continue_staged_batch_after_answer(state, owner, events, run_start, boundary);
     }
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
@@ -3557,6 +4283,18 @@ pub(crate) fn record_staged_batch_consultation_result(
     if let Some(drain) = retained.take() {
         attach_member_drain(&mut owner, cursor, drain);
     }
+    continue_staged_batch_after_answer(state, owner, events, run_start, boundary)
+}
+
+/// Run a staged owner on after an answer settled its asking member: the
+/// scheduler asks the next decision, or the batch arranges and delivers.
+fn continue_staged_batch_after_answer(
+    state: &mut GameState,
+    mut owner: PendingBatchDeliveries,
+    events: &mut Vec<GameEvent>,
+    run_start: usize,
+    boundary: crate::types::resolution::ChildStackDepth,
+) -> StagedConsultationHandback {
     let stop = run_staged_batch(state, &mut owner, events, run_start);
     if stop == StagedStop::Delivered {
         let deferred_events = owner.deferred_events.clone();
@@ -3590,10 +4328,18 @@ fn finalize_staged_pending_outcome_on(
     if staged.stage != BatchDeliveryStage::Approving {
         return false;
     }
-    let cursor = staged.cursor;
-    let Some(member) = staged.members.get_mut(cursor) else {
+    // CR 616.1: the asking member's retained outcome, by identity.
+    let Some(asking) = staged.asking else {
         return false;
     };
+    let Some(cursor) = staged
+        .members
+        .iter()
+        .position(|member| member.identity == asking)
+    else {
+        return false;
+    };
+    let member = &mut staged.members[cursor];
     // CR 800.4b + CR 616.1: an exact paused entry can finish as Remained
     // without an Execute/Prevented consultation handback when its intended
     // controller leaves. Consume that retained terminal through the same
@@ -3634,7 +4380,7 @@ fn finalize_staged_pending_outcome_on(
             member.approved_event = Some(event);
             member.state = StagedBatchMemberState::Approved;
             member.pending_outcome = None;
-            staged.cursor = cursor + 1;
+            staged.asking = None;
             owner.paused_current = None;
             true
         }
@@ -3656,7 +4402,7 @@ fn finalize_staged_pending_outcome_on(
             member.terminal = Some(ZoneMoveCompletion::Prevented);
             member.state = StagedBatchMemberState::Terminal;
             member.pending_outcome = None;
-            staged.cursor = cursor + 1;
+            staged.asking = None;
             owner.paused_current = None;
             if let Some((object_id, source_id)) = destroyed {
                 // CR 701.8a: an inner prevention after outer approval still
@@ -3859,12 +4605,25 @@ pub(crate) fn prune_staged_member_for_player_left(
     else {
         return;
     };
+    if staged.asking == Some(identity) {
+        staged.asking = None;
+    }
     let owner = &mut staged.members[index];
     owner.approved_post_replacement = None;
     owner.state = StagedBatchMemberState::Abandoned;
     owner.approved_event = None;
     owner.pending_outcome = None;
     owner.terminal = None;
+    owner.blocked = false;
+    // CR 800.4a: a held live child whose own object survives stays with its
+    // abandoned host and is still asked; the host's own decision does not.
+    if owner
+        .held_decision
+        .as_ref()
+        .is_some_and(|decision| decision.boundary.is_some())
+    {
+        owner.held_decision = None;
+    }
     if index == staged.cursor {
         staged.cursor += 1;
     }
@@ -4011,17 +4770,49 @@ fn reconcile_staged_owner(
             player: state.active_player,
         };
     }
+    // CR 101.4c: this batch's selection prompt stays while its chooser and
+    // every offered decision remain; otherwise the scheduler asks again.
+    if let WaitingFor::ReplacementDecisionOrder { player, objects } = &state.waiting_for {
+        let held_subjects: Vec<ObjectId> = owner
+            .staged
+            .as_ref()
+            .map(|staged| {
+                staged
+                    .members
+                    .iter()
+                    .filter_map(|member| {
+                        let decision = member.held_decision.as_ref()?;
+                        (decision.chooser == *player).then(|| {
+                            decision_subject(&decision.pending).unwrap_or(member.identity.object_id)
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let ours = objects.iter().any(|object| held_subjects.contains(object));
+        if ours {
+            if crate::game::players::is_alive(state, *player)
+                && objects.iter().all(|object| held_subjects.contains(object))
+            {
+                return false;
+            }
+            state.waiting_for = WaitingFor::Priority {
+                player: state.active_player,
+            };
+        }
+    }
 
     let live = owner.staged.as_ref().is_some_and(|staged| {
         staged.members.iter().any(|member| {
-            matches!(
-                member.state,
-                StagedBatchMemberState::Unconsulted
-                    | StagedBatchMemberState::OuterConsulting
-                    | StagedBatchMemberState::InnerConsulting
-                    | StagedBatchMemberState::Approved
-                    | StagedBatchMemberState::PreventedWithChild
-            )
+            member.held_decision.is_some()
+                || matches!(
+                    member.state,
+                    StagedBatchMemberState::Unconsulted
+                        | StagedBatchMemberState::OuterConsulting
+                        | StagedBatchMemberState::InnerConsulting
+                        | StagedBatchMemberState::Approved
+                        | StagedBatchMemberState::PreventedWithChild
+                )
         })
     });
     if !live {
@@ -12434,6 +13225,8 @@ mod staged_batch_tests {
             terminal: None,
             operation: StagedMemberOperation::ZoneMove,
             approved_post_replacement: None,
+            held_decision: None,
+            blocked: false,
         }
     }
 
@@ -12491,6 +13284,7 @@ mod staged_batch_tests {
             arrangements: Vec::new(),
             arrangement_cursor: 0,
             population_devour_snapshot: None,
+            asking: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             component_delivery_parent: None,
@@ -13037,7 +13831,7 @@ mod staged_batch_tests {
         let mut events = Vec::new();
         let mut owner = take_owner(&mut state, group_id);
         assert_eq!(
-            consult_next_staged_member(&mut state, &mut owner, &mut events),
+            drive_staged_approval(&mut state, &mut owner, &mut events),
             StagedConsult::Continue
         );
         put_owner(&mut state, owner);
@@ -13057,7 +13851,7 @@ mod staged_batch_tests {
 
         let mut owner = take_owner(&mut state, group_id);
         assert_eq!(
-            consult_next_staged_member(&mut state, &mut owner, &mut events),
+            drive_staged_approval(&mut state, &mut owner, &mut events),
             StagedConsult::Continue
         );
         put_owner(&mut state, owner);
@@ -13772,6 +14566,7 @@ mod staged_batch_tests {
             arrangements: Vec::new(),
             arrangement_cursor: 0,
             population_devour_snapshot: None,
+            asking: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             component_delivery_parent: None,

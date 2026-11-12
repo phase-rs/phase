@@ -1223,6 +1223,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ChooseDungeonRoom { .. }
             | WaitingFor::SpecializeColor { .. }
             | WaitingFor::ChooseLegend { .. }
+            | WaitingFor::ReplacementDecisionOrder { .. }
             | WaitingFor::MutateMergeChoice { .. }
             | WaitingFor::CipherEncodeChoice { .. }
             | WaitingFor::CommanderZoneChoice { .. }
@@ -9059,6 +9060,31 @@ pub(super) fn handle_resolution_choice(
                 state, player, object_id, &options, color, events,
             )?;
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        // CR 101.4c + CR 616.1: the chooser picks which of their held
+        // decisions to make first; that decision is then asked.
+        (
+            WaitingFor::ReplacementDecisionOrder { objects, .. },
+            GameAction::SelectCards { cards },
+        ) => {
+            let [object] = cards.as_slice() else {
+                return Err(EngineError::InvalidAction(
+                    "Choose exactly one replacement decision to make first".to_string(),
+                ));
+            };
+            if !objects.contains(object) {
+                return Err(EngineError::InvalidAction(
+                    "That object has no replacement decision to make".to_string(),
+                ));
+            }
+            let waiting =
+                crate::game::zone_pipeline::publish_selected_staged_decision(state, *object)
+                    .ok_or_else(|| {
+                        EngineError::InvalidAction(
+                            "No staged replacement decision is held for that object".to_string(),
+                        )
+                    })?;
+            ResolutionChoiceOutcome::WaitingFor(waiting)
         }
         (WaitingFor::ChooseLegend { candidates, .. }, GameAction::ChooseLegend { keep }) => {
             if !candidates.contains(&keep) {

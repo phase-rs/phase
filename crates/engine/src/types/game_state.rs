@@ -7410,30 +7410,59 @@ impl PendingBatchDeliveries {
     /// CR 608.2c + CR 616.1: finish every consultation before arrangement or
     /// delivery. This is the exhaustive member-state/stage table:
     ///
-    /// | Member state | Approving: before / at / after cursor | Arranging or Delivering: before / at-or-after cursor |
+    /// | Member state | Approving: before / at-or-after cursor | Arranging or Delivering: before / at-or-after cursor |
     /// | --- | --- | --- |
-    /// | Unconsulted | no / yes / yes | no / no |
-    /// | OuterConsulting, InnerConsulting, PreventedWithChild | no / yes / no | no / no |
-    /// | Approved, Terminal | yes / no / no | Terminal only / yes |
-    /// | Abandoned | yes / yes / yes | yes / yes |
+    /// | Unconsulted | only while `blocked` / yes | no / no |
+    /// | OuterConsulting, InnerConsulting, PreventedWithChild | held XOR asking / no | no / no |
+    /// | Approved, Terminal | yes / no | Terminal only / yes |
+    /// | Abandoned | yes / yes | yes / yes |
     ///
-    /// Approval advances only after recording Approved or Terminal. A prevented
-    /// member with a live child is unfinished: child settlement first changes
-    /// it to Terminal and only then advances. Terminal also represents an early
-    /// prevented/remained consultation; abandonment can affect any frozen slot
-    /// during a concession. Neither requires another consultation or delivery.
+    /// The approval cursor is the sweep position: every member before it was
+    /// consulted once. A member whose consultation parked a decision either
+    /// holds it or is the one asking member (CR 616.1 + CR 101.4); an
+    /// unconsulted member before the cursor waits on another member's
+    /// outstanding decision. An abandoned host may keep a held live child.
     /// Per-member payload validation remains independent of this table.
     fn validate_staged_stage(&self, staged: &StagedBatchDelivery) -> Result<(), String> {
         let members = &staged.members;
+        let approving = staged.stage == BatchDeliveryStage::Approving;
+        if let Some(asking) = staged.asking {
+            let Some(member) = members.iter().find(|member| member.identity == asking) else {
+                return Err("the asking staged member is not in the cohort".to_string());
+            };
+            if !approving {
+                return Err("a staged batch past approval still names an asking member".to_string());
+            }
+            if member.held_decision.is_some() {
+                return Err("the asking staged member also holds its decision".to_string());
+            }
+        }
         for (index, member) in members.iter().enumerate() {
+            let asking = staged.asking == Some(member.identity);
+            if member.held_decision.is_some()
+                && !(approving
+                    && index < staged.cursor
+                    && matches!(
+                        member.state,
+                        StagedBatchMemberState::OuterConsulting
+                            | StagedBatchMemberState::InnerConsulting
+                            | StagedBatchMemberState::PreventedWithChild
+                            | StagedBatchMemberState::Abandoned
+                    ))
+            {
+                return Err("a staged member holds a decision outside its consultation".to_string());
+            }
+            if member.blocked && member.state != StagedBatchMemberState::Unconsulted {
+                return Err("a consulted staged member is still marked blocked".to_string());
+            }
             let allowed = match member.state {
                 StagedBatchMemberState::Unconsulted => {
-                    staged.stage == BatchDeliveryStage::Approving && index >= staged.cursor
+                    approving && (index >= staged.cursor || member.blocked)
                 }
                 StagedBatchMemberState::OuterConsulting
                 | StagedBatchMemberState::InnerConsulting
                 | StagedBatchMemberState::PreventedWithChild => {
-                    staged.stage == BatchDeliveryStage::Approving && index == staged.cursor
+                    approving && index < staged.cursor && (member.held_decision.is_some() != asking)
                 }
                 StagedBatchMemberState::Approved => match staged.stage {
                     BatchDeliveryStage::Approving => index < staged.cursor,
@@ -7441,9 +7470,7 @@ impl PendingBatchDeliveries {
                         index >= staged.cursor
                     }
                 },
-                StagedBatchMemberState::Terminal => {
-                    staged.stage != BatchDeliveryStage::Approving || index < staged.cursor
-                }
+                StagedBatchMemberState::Terminal => !approving || index < staged.cursor,
                 StagedBatchMemberState::Abandoned => true,
             };
             if !allowed {
@@ -7472,15 +7499,44 @@ impl PendingBatchDeliveries {
         }
         match staged.stage {
             BatchDeliveryStage::Approving => {
-                // A parked boundary belongs to the cursor member; the member
+                // A parked boundary belongs to the asking member; the member
                 // itself may still have no terminal (a bare `NeedsChoice`).
                 if let Some(paused) = &self.paused_current {
-                    let Some(member) = members.get(staged.cursor) else {
-                        return Err("a staged batch paused past its member cohort".to_string());
-                    };
-                    if paused.member != member.identity {
-                        return Err("a staged approval pause does not capture the cursor member"
+                    if staged.asking != Some(paused.member) {
+                        return Err("a staged approval pause does not capture the asking member"
                             .to_string());
+                    }
+                }
+                for member in members {
+                    let Some(decision) = &member.held_decision else {
+                        continue;
+                    };
+                    if decision
+                        .boundary
+                        .as_ref()
+                        .is_some_and(|boundary| boundary.member != member.identity)
+                    {
+                        return Err(
+                            "a held staged decision's boundary is another member's".to_string()
+                        );
+                    }
+                    if decision.boundary.is_none()
+                        && member.state != StagedBatchMemberState::PreventedWithChild
+                        && member.state != StagedBatchMemberState::Abandoned
+                    {
+                        return Err(
+                            "a held staged decision without a boundary is not a live child"
+                                .to_string(),
+                        );
+                    }
+                    if decision.drain.as_ref().is_some_and(|drain| {
+                        drain.frame_id().is_some()
+                            || drain.is_empty()
+                            || drain.drains().any(|d| d.ready_continuation().is_none())
+                    }) {
+                        return Err(
+                            "a held staged decision keeps a drain that is not ready".to_string()
+                        );
                     }
                 }
             }
@@ -7772,12 +7828,17 @@ pub struct StagedBatchDelivery {
     pub stage: BatchDeliveryStage,
     /// Original membership in announcement order; fixed length after entry.
     pub members: Vec<StagedBatchMember>,
-    /// Next member to consult (`Approving`) or deliver (`Delivering`).
-    /// Consultation walks the members in announcement order, as the
-    /// per-member producers did before staging, so while `Approving` the
-    /// member at the cursor is the one being asked and the only one a pause
-    /// can park.
+    /// Next member to consult for the first time (`Approving`) or to deliver
+    /// (`Delivering`). The approval sweep walks the members in announcement
+    /// order; a member whose consultation parks a decision is held and the
+    /// sweep moves on, so the member being asked is [`Self::asking`], never
+    /// the cursor.
     pub cursor: usize,
+    /// CR 616.1 + CR 101.4: the one member whose replacement decision is
+    /// published, identified by its frozen incarnation. Every answer, restore,
+    /// concession and settlement route reads this, not a position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asking: Option<ObjectIncarnationRef>,
     /// Owner/position groups derived from final approvals, in prompt order.
     pub arrangements: Vec<StagedLibraryArrangement>,
     /// Next arrangement group to prompt (`Arranging`).
@@ -7863,6 +7924,47 @@ pub struct StagedBatchMember {
     /// CR 616.1: approved replacement work retained until member delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_post_replacement: Option<PostReplacementDrainStack>,
+    /// CR 616.1 + CR 101.4: the decision this member's consultation parked,
+    /// held while another member's decision is asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_decision: Option<Box<HeldReplacementDecision>>,
+    /// CR 616.1: this member's own move depends on another member's
+    /// outstanding decision (it is that decision's subject, or the source of a
+    /// candidate that moves its own source, such as an Umbra's armor), so it
+    /// is not consulted until that decision resolves.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
+}
+
+/// CR 616.1 + CR 101.4: a staged member's replacement decision exactly as the
+/// replacement pipeline parked it, detached so the other simultaneous
+/// decisions can be discovered and asked in APNAP order. Publishing it puts
+/// back what the pipeline left: the pending replacement, the member's pause
+/// boundary, the consultation's ready post-replacement drain and the prompt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeldReplacementDecision {
+    pub pending: PendingReplacement,
+    /// The player the pipeline asked (CR 616.1: the affected object's
+    /// controller, or the replacement's own chooser).
+    pub chooser: PlayerId,
+    pub prompt: HeldDecisionPrompt,
+    /// The member's own pause boundary; `None` for a live child parked inside
+    /// a prevention (Umbra armor's Aura), whose event is another object's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<PendingZoneChangeDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain: Option<PostReplacementDrainStack>,
+}
+
+/// How a held decision's prompt is restored when it is published.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum HeldDecisionPrompt {
+    /// A `ReplacementChoice`, re-derived from the pending replacement by
+    /// `replacement::replacement_choice_waiting_for`.
+    Replacement,
+    /// CR 614.12a: an entry-controller, as-enters named or as-enters payment
+    /// prompt, raised once by the pipeline and restored as raised.
+    Raised(Box<WaitingFor>),
 }
 
 /// The current-member consultation and delivery states. The Destroy adapter
@@ -17860,6 +17962,10 @@ pub enum PersistedRestoreError {
     /// them, so the save is refused rather than resumed in a guessed order.
     #[error("persisted batch pause for {member:?} is held by two unlinked batch deliveries and is not resumable")]
     UnresumableSharedBatchPause { member: ObjectIncarnationRef },
+    /// CR 616.1 + CR 101.4: a staged population's held or asked replacement
+    /// decisions are inconsistent with the restored game.
+    #[error("persisted staged replacement decisions cannot be restored: {0}")]
+    InvalidStagedScheduler(String),
 }
 
 impl PreparedPersistedGameState {
@@ -18102,6 +18208,10 @@ impl PersistedGameState {
         if let Some(member) = state.resolution_stack.unresumable_shared_batch_pause() {
             return Err(PersistedRestoreError::UnresumableSharedBatchPause { member });
         }
+        crate::game::zone_pipeline::upgrade_restored_staged_asking(&mut state)
+            .map_err(PersistedRestoreError::InvalidStagedScheduler)?;
+        crate::game::zone_pipeline::validate_restored_staged_scheduler(&state)
+            .map_err(PersistedRestoreError::InvalidStagedScheduler)?;
         let recovered_terminal_rest =
             crate::game::engine::recover_terminal_resolution_rest_on_restore(&mut state)?;
         // Priority-time recovery gets first chance to retire the exact terminal
@@ -18743,6 +18853,15 @@ pub enum WaitingFor {
         /// Engine-owned conservative eligibility and identity; absent for payment/search prompts.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remember_identity: Option<ReplacementAutoChoiceKey>,
+    },
+    /// CR 101.4c + CR 616.1: `player` holds two or more simultaneous
+    /// replacement decisions of one staged population and chooses which to
+    /// make first. `objects` are the objects those decisions are about, in
+    /// announcement order. Answered by `GameAction::SelectCards` with exactly
+    /// one of them; that decision is then asked.
+    ReplacementDecisionOrder {
+        player: PlayerId,
+        objects: Vec<ObjectId>,
     },
     /// CR 614.12a: choose the opponent that a permanent enters under before
     /// the zone change is delivered. `candidates` is captured at replacement
@@ -21830,6 +21949,7 @@ impl WaitingFor {
             WaitingFor::GameOver { .. } => "GameOver",
             WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
             WaitingFor::EntryControllerChoice { .. } => "EntryControllerChoice",
+            WaitingFor::ReplacementDecisionOrder { .. } => "ReplacementDecisionOrder",
             WaitingFor::OrderTriggers { .. } => "OrderTriggers",
             WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
             WaitingFor::ExploreChoice { .. } => "ExploreChoice",
@@ -22001,6 +22121,7 @@ impl WaitingFor {
             | WaitingFor::EnlistChoice { player, .. }
             | WaitingFor::ReplacementChoice { player, .. }
             | WaitingFor::EntryControllerChoice { player, .. }
+            | WaitingFor::ReplacementDecisionOrder { player, .. }
             | WaitingFor::OrderTriggers { player, .. }
             | WaitingFor::CopyTargetChoice { player, .. }
             | WaitingFor::ExploreChoice { player, .. }
@@ -22372,6 +22493,7 @@ impl WaitingFor {
             | WaitingFor::GameOver { .. }
             | WaitingFor::ReplacementChoice { .. }
             | WaitingFor::EntryControllerChoice { .. }
+            | WaitingFor::ReplacementDecisionOrder { .. }
             | WaitingFor::OrderTriggers { .. }
             | WaitingFor::SpellCopyOrderChoice { .. }
             | WaitingFor::CopyTargetChoice { .. }
@@ -22575,6 +22697,7 @@ impl WaitingFor {
             | WaitingFor::GameOver { .. }
             | WaitingFor::ReplacementChoice { .. }
             | WaitingFor::EntryControllerChoice { .. }
+            | WaitingFor::ReplacementDecisionOrder { .. }
             | WaitingFor::OrderTriggers { .. }
             | WaitingFor::CopyTargetChoice { .. }
             | WaitingFor::ExploreChoice { .. }
@@ -29533,6 +29656,7 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::GameOver { .. }
         | WaitingFor::ReplacementChoice { .. }
         | WaitingFor::EntryControllerChoice { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::OrderTriggers { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::EquipTarget { .. }
@@ -54687,6 +54811,8 @@ mod tests {
                 outer: StagedDestroyOuterApproval::Approved,
             }),
             approved_post_replacement: None,
+            held_decision: None,
+            blocked: false,
         };
         PendingBatchDeliveries::validate_staged_member(&member)
             .expect("concession-pruned destroy member with its outer approval is legal");
@@ -54738,6 +54864,8 @@ mod tests {
             terminal,
             operation: StagedMemberOperation::ZoneMove,
             approved_post_replacement: None,
+            held_decision: None,
+            blocked: false,
         }
     }
 
@@ -54931,6 +55059,7 @@ mod tests {
                 arrangements: Vec::new(),
                 arrangement_cursor: 0,
                 population_devour_snapshot: None,
+                asking: None,
             }),
         }
     }

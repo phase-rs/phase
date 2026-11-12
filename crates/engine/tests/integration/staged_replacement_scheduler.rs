@@ -1,0 +1,410 @@
+//! CR 616.1 + CR 101.4: the staged population's live replacement-choice
+//! scheduler. Every member is consulted once; a member whose consultation parks
+//! a decision holds it; the outstanding decisions are asked in APNAP order
+//! (CR 101.4); a player with several chooses which comes first (CR 101.4c); and
+//! the order restarts after every answer (CR 101.4d). Printed Oracle text is
+//! quoted from the card data.
+//!
+//! Infrastructure exception: Auras are attached and control is changed by
+//! setting the objects directly, instead of casting them; every destruction
+//! population is produced by a public cast.
+
+use engine::game::game_object::AttachTarget;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::actions::GameAction;
+use engine::types::game_state::{PersistedGameState, WaitingFor};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaCost;
+use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
+
+const WRATH_OF_GOD: &str = "Destroy all creatures. They can't be regenerated.";
+const DAY_OF_JUDGMENT: &str = "Destroy all creatures.";
+const HYENA_UMBRA: &str = "Enchant creature\nEnchanted creature gets +1/+1 and has first strike.\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)";
+const SPIDER_UMBRA: &str = "Enchant creature\nEnchanted creature gets +1/+1 and has reach. (It can block creatures with flying.)\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)";
+const FELIDAR_UMBRA: &str = "Enchant creature\nEnchanted creature has lifelink.\n{1}{W}: Attach this Aura to target creature you control.\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)";
+const DAUTHI_VOIDWALKER: &str = "Shadow (This creature can block or be blocked by only creatures with shadow.)\nIf a card would be put into an opponent's graveyard from anywhere, instead exile it with a void counter on it.\n{T}, Sacrifice this creature: Choose an exiled card an opponent owns with a void counter on it. You may play it this turn without paying its mana cost.";
+const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
+const PROGENITUS: &str = "Protection from everything\nIf Progenitus would be put into a graveyard from anywhere, reveal Progenitus and shuffle it into its owner's library instead.";
+
+fn zero_cost_spell(scenario: &mut GameScenario, name: &str, oracle: &str) -> ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(P0, name, false, oracle)
+        .with_mana_cost(ManaCost::zero())
+        .id()
+}
+
+fn umbra(scenario: &mut GameScenario, owner: PlayerId, name: &str, oracle: &str) -> ObjectId {
+    scenario
+        .add_enchantment_from_oracle(owner, name, oracle)
+        .with_subtypes(vec!["Aura"])
+        .id()
+}
+
+fn attach(runner: &mut GameRunner, aura: ObjectId, host: ObjectId) {
+    engine::game::effects::attach::attach_to(runner.state_mut(), aura, host);
+}
+
+fn zone(runner: &GameRunner, id: ObjectId) -> Zone {
+    runner.state().objects[&id].zone
+}
+
+fn attached_to(runner: &GameRunner, aura: ObjectId) -> Option<ObjectId> {
+    match runner.state().objects[&aura].attached_to {
+        Some(AttachTarget::Object(host)) => Some(host),
+        _ => None,
+    }
+}
+
+/// Save at the current prompt, validate it at rest, and reopen it.
+fn round_trip(runner: &mut GameRunner) {
+    runner
+        .state()
+        .resolution_stack
+        .validate_at_rest(&runner.state().waiting_for)
+        .expect("the prompt validates before the save");
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the prompt serializes");
+    let restored = serde_json::from_str::<PersistedGameState>(&saved)
+        .expect("the prompt decodes")
+        .into_game_state()
+        .expect("the prompt restores through checked restore");
+    restored
+        .resolution_stack
+        .validate_at_rest(&restored.waiting_for)
+        .expect("the reopened prompt validates");
+    *runner.state_mut() = restored;
+}
+
+/// Cast `spell` and pass priority until the population's first decision.
+fn cast_until_decision(runner: &mut GameRunner, spell: ObjectId) {
+    runner.cast(spell).commit();
+    for _ in 0..8 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes");
+    }
+}
+
+/// The asked replacement choice: its chooser and the object its event is about.
+fn asked_choice(runner: &GameRunner) -> (PlayerId, ObjectId) {
+    let WaitingFor::ReplacementChoice { player, .. } = runner.state().waiting_for else {
+        panic!(
+            "expected a replacement choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let subject = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.proposed.affected_object_id())
+        .expect("the published decision is about an object");
+    (player, subject)
+}
+
+/// Apply the replacement whose source is `source`.
+fn choose_source(runner: &mut GameRunner, source: ObjectId) {
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    else {
+        panic!("expected a replacement choice");
+    };
+    let index = candidates
+        .iter()
+        .position(|candidate| candidate.source_id == source)
+        .expect("the source is offered");
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("the chooser answers");
+}
+
+fn select_decision(runner: &mut GameRunner, object: ObjectId) {
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![object],
+        })
+        .expect("the chooser selects which decision to make first");
+}
+
+fn finish(runner: &mut GameRunner) {
+    for _ in 0..8 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes");
+    }
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_replacement.is_none());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "{:?}",
+        state.resolution_stack
+    );
+    state
+        .resolution_stack
+        .validate_at_rest(&state.waiting_for)
+        .expect("the population settles");
+}
+
+/// CR 101.4c + CR 616.1 + CR 702.89a: Wrath of God says "Destroy all
+/// creatures. They can't be regenerated." P1's two creatures each wear Hyena
+/// Umbra and Felidar Umbra, so P1 has two simultaneous choices of which armor
+/// applies. P1 chooses which creature's choice to make first: the second.
+/// Each answer destroys exactly the chosen Aura; the other stays attached.
+#[test]
+fn wrath_of_god_lets_one_player_order_their_umbra_choices() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let first_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let first_felidar = umbra(&mut scenario, P1, "Felidar Umbra", FELIDAR_UMBRA);
+    let second = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let second_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let second_felidar = umbra(&mut scenario, P1, "Felidar Umbra", FELIDAR_UMBRA);
+    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+    let mut runner = scenario.build();
+    attach(&mut runner, first_hyena, first);
+    attach(&mut runner, first_felidar, first);
+    attach(&mut runner, second_hyena, second);
+    attach(&mut runner, second_felidar, second);
+    engine::game::layers::flush_layers(runner.state_mut());
+
+    cast_until_decision(&mut runner, wrath);
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P1,
+            objects: vec![first, second],
+        },
+        "P1 holds both choices and chooses which to make first"
+    );
+    round_trip(&mut runner);
+    select_decision(&mut runner, second);
+    assert_eq!(asked_choice(&runner), (P1, second));
+    choose_source(&mut runner, second_felidar);
+    // One decision is left, so it is asked without a selection.
+    assert_eq!(asked_choice(&runner), (P1, first));
+    round_trip(&mut runner);
+    choose_source(&mut runner, first_hyena);
+    finish(&mut runner);
+
+    assert_eq!(zone(&runner, first), Zone::Battlefield);
+    assert_eq!(zone(&runner, second), Zone::Battlefield);
+    assert_eq!(zone(&runner, second_felidar), Zone::Graveyard);
+    assert_eq!(attached_to(&runner, second_hyena), Some(second));
+    assert_eq!(zone(&runner, first_hyena), Zone::Graveyard);
+    assert_eq!(attached_to(&runner, first_felidar), Some(first));
+    assert_eq!(zone(&runner, wrath), Zone::Graveyard);
+}
+
+/// Wrath of God over P0's two Umbra-armored creatures: C1 wears P1's Hyena
+/// Umbra and P0's Spider Umbra, C2 wears P0's Hyena Umbra and Spider Umbra.
+/// P0 controls Dauthi Voidwalker; Rest in Peace is on the battlefield. Returns
+/// the runner at its first decision and (c1, p1_hyena, c2, c2_hyena).
+fn active_player_umbra_board() -> (GameRunner, [ObjectId; 4]) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER);
+    scenario.add_enchantment_from_oracle(P0, "Rest in Peace", REST_IN_PEACE);
+    let c1 = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let p1_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let c1_spider = umbra(&mut scenario, P0, "Spider Umbra", SPIDER_UMBRA);
+    let c2 = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+    let c2_hyena = umbra(&mut scenario, P0, "Hyena Umbra", HYENA_UMBRA);
+    let c2_spider = umbra(&mut scenario, P0, "Spider Umbra", SPIDER_UMBRA);
+    let wrath = zero_cost_spell(&mut scenario, "Wrath of God", WRATH_OF_GOD);
+    let mut runner = scenario.build();
+    attach(&mut runner, p1_hyena, c1);
+    attach(&mut runner, c1_spider, c1);
+    attach(&mut runner, c2_hyena, c2);
+    attach(&mut runner, c2_spider, c2);
+    engine::game::layers::flush_layers(runner.state_mut());
+    cast_until_decision(&mut runner, wrath);
+    (runner, [c1, p1_hyena, c2, c2_hyena])
+}
+
+/// CR 101.4 + CR 101.4d + CR 616.1: P0, the active player, holds two armor
+/// choices. Applying P1's Hyena Umbra to C1 destroys that Aura, and its move to
+/// P1's graveyard asks P1 to choose between Dauthi Voidwalker ("If a card would
+/// be put into an opponent's graveyard from anywhere, instead exile it with a
+/// void counter on it") and Rest in Peace. With APNAP restarted, P0's
+/// remaining choice for C2 still comes before P1's.
+#[test]
+fn active_player_finishes_their_choices_before_one_their_answer_exposes() {
+    let (mut runner, [c1, p1_hyena, c2, c2_hyena]) = active_player_umbra_board();
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P0,
+            objects: vec![c1, c2],
+        }
+    );
+    select_decision(&mut runner, c1);
+    assert_eq!(asked_choice(&runner), (P0, c1));
+    choose_source(&mut runner, p1_hyena);
+    round_trip(&mut runner);
+    assert_eq!(
+        asked_choice(&runner),
+        (P0, c2),
+        "P0 still has a choice, so P1's newly exposed choice waits"
+    );
+    choose_source(&mut runner, c2_hyena);
+    assert_eq!(asked_choice(&runner), (P1, p1_hyena));
+    let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    else {
+        unreachable!()
+    };
+    assert_eq!(candidates.len(), 2, "Dauthi Voidwalker vs Rest in Peace");
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P1 answers");
+    finish(&mut runner);
+    assert_eq!(zone(&runner, c1), Zone::Battlefield);
+    assert_eq!(zone(&runner, c2), Zone::Battlefield);
+    assert_eq!(zone(&runner, p1_hyena), Zone::Exile);
+    assert_eq!(zone(&runner, c2_hyena), Zone::Exile);
+}
+
+/// Day of Judgment over P1's two Umbra-armored creatures: C1 wears P0's Hyena
+/// Umbra and P1's Spider Umbra, C2 wears P1's Hyena Umbra and Spider Umbra.
+/// P1 controls Dauthi Voidwalker; Rest in Peace is on the battlefield.
+///
+/// CR 101.4d + CR 616.1: P1 holds both armor choices. Applying P0's Hyena Umbra
+/// to C1 destroys that Aura, and its move to P0's graveyard asks P0, an
+/// earlier seat, to choose between Dauthi Voidwalker and Rest in Peace. APNAP
+/// order restarts: P0 is asked before P1's remaining choice for C2.
+#[test]
+fn an_answer_that_exposes_an_earlier_seats_choice_restarts_apnap() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P1, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER);
+    scenario.add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE);
+    let c1 = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let p0_hyena = umbra(&mut scenario, P0, "Hyena Umbra", HYENA_UMBRA);
+    let c1_spider = umbra(&mut scenario, P1, "Spider Umbra", SPIDER_UMBRA);
+    let c2 = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let c2_hyena = umbra(&mut scenario, P1, "Hyena Umbra", HYENA_UMBRA);
+    let c2_spider = umbra(&mut scenario, P1, "Spider Umbra", SPIDER_UMBRA);
+    let judgment = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
+    let mut runner = scenario.build();
+    attach(&mut runner, p0_hyena, c1);
+    attach(&mut runner, c1_spider, c1);
+    attach(&mut runner, c2_hyena, c2);
+    attach(&mut runner, c2_spider, c2);
+    engine::game::layers::flush_layers(runner.state_mut());
+    cast_until_decision(&mut runner, judgment);
+
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementDecisionOrder {
+            player: P1,
+            objects: vec![c1, c2],
+        }
+    );
+    select_decision(&mut runner, c1);
+    choose_source(&mut runner, p0_hyena);
+    assert_eq!(
+        asked_choice(&runner),
+        (P0, p0_hyena),
+        "P0's newly exposed choice comes before P1's remaining one"
+    );
+    round_trip(&mut runner);
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P0 answers");
+    assert_eq!(asked_choice(&runner), (P1, c2));
+    choose_source(&mut runner, c2_hyena);
+    finish(&mut runner);
+    assert_eq!(zone(&runner, c1), Zone::Battlefield);
+    assert_eq!(zone(&runner, c2), Zone::Battlefield);
+    assert_eq!(zone(&runner, p0_hyena), Zone::Exile);
+}
+
+/// CR 903.9b + CR 101.4 + CR 616.1: Day of Judgment says "Destroy all
+/// creatures." Each player's commander is a Progenitus ("If Progenitus would be
+/// put into a graveyard from anywhere, reveal Progenitus and shuffle it into
+/// its owner's library instead"), and each player controls the other's. The
+/// redirect exposes CR 903.9b ("its owner may put it into the command zone
+/// instead"), so both owners choose: P0, the active player, first, although
+/// P1's commander is earlier on the battlefield. Either answer is that member's
+/// approval, so the batch goes on to P1 and both commanders land where their
+/// owners chose, once each. The game is saved and reopened at the first choice.
+#[test]
+fn day_of_judgment_asks_exchanged_progenitus_commanders_in_apnap_order() {
+    for p0_takes_command in [true, false] {
+        let case = format!("p0_takes_command={p0_takes_command}");
+        let mut scenario =
+            GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let progenitus = |scenario: &mut GameScenario, owner: PlayerId| {
+            scenario
+                .add_creature_from_oracle(owner, "Progenitus", 10, 10, PROGENITUS)
+                .as_legendary()
+                .with_subtypes(vec!["Hydra", "Avatar"])
+                .commander()
+                .id()
+        };
+        let p1_commander = progenitus(&mut scenario, P1);
+        let p0_commander = progenitus(&mut scenario, P0);
+        let judgment = zero_cost_spell(&mut scenario, "Day of Judgment", DAY_OF_JUDGMENT);
+        let mut runner = scenario.build();
+        // Infrastructure exception: the exchanged control (an Insurrection-style
+        // effect) is set on the objects directly.
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&p1_commander)
+            .unwrap()
+            .controller = P0;
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&p0_commander)
+            .unwrap()
+            .controller = P1;
+        engine::game::layers::flush_layers(runner.state_mut());
+
+        cast_until_decision(&mut runner, judgment);
+        round_trip(&mut runner);
+        let mut asked = Vec::new();
+        for _ in 0..4 {
+            let WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } = runner.state().waiting_for.clone()
+            else {
+                break;
+            };
+            asked.push(player);
+            let take_command = if player == P0 {
+                p0_takes_command
+            } else {
+                !p0_takes_command
+            };
+            let index = candidates
+                .iter()
+                .position(|candidate| {
+                    (candidate.description == "Move to command zone") == take_command
+                })
+                .expect("both CR 903.9b branches are offered");
+            runner
+                .act(GameAction::ChooseReplacement { index })
+                .expect("the owner answers");
+        }
+        assert_eq!(asked, vec![P0, P1], "{case}: owners choose APNAP");
+        finish(&mut runner);
+        let (command, library) = if p0_takes_command {
+            (p0_commander, p1_commander)
+        } else {
+            (p1_commander, p0_commander)
+        };
+        assert_eq!(zone(&runner, command), Zone::Command, "{case}");
+        assert_eq!(zone(&runner, library), Zone::Library, "{case}");
+    }
+}

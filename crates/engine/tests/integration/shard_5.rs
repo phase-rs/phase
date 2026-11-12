@@ -182,6 +182,7 @@ mod stack_entry_declared_targets;
 mod stack_entry_node_reach;
 mod stack_object_keyword_grants;
 mod stack_session_batch_authority;
+mod staged_replacement_scheduler;
 mod stargaze_dynamic_keep;
 mod starting_intensity_keyword;
 mod state_trigger_source_anaphor_recheck_and_self_suppression;

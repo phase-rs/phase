@@ -2210,9 +2210,20 @@ fn handle_replacement_choice_inner(
                     pending.inherit_delivery_boundary(boundary);
                 }
             }
-            Ok(super::replacement::replacement_choice_waiting_for(
-                player, state,
-            ))
+            state.waiting_for = super::replacement::replacement_choice_waiting_for(player, state);
+            // CR 101.4d + CR 616.1: a staged member's answer exposed a further
+            // choice on its own event; the batch holds it and asks again in
+            // APNAP order.
+            if same_event_repark && staged_consult_owner.is_some() {
+                if let Some(waiting) = crate::game::zone_pipeline::hold_answer_repark(
+                    state,
+                    events,
+                    replacement_action_event_start,
+                ) {
+                    return Ok(waiting);
+                }
+            }
+            Ok(state.waiting_for.clone())
         }
         super::replacement::ReplacementResult::Prevented => {
             // CR 614.6: a prevented move never happened, so the paused discard

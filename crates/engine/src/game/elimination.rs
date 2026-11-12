@@ -5607,6 +5607,8 @@ mod r4b_staged_elimination_tests {
             terminal: None,
             operation: StagedMemberOperation::ZoneMove,
             approved_post_replacement: None,
+            held_decision: None,
+            blocked: false,
         }
     }
 
@@ -5695,6 +5697,7 @@ mod r4b_staged_elimination_tests {
                 arrangements: arrangements.clone(),
                 arrangement_cursor: 1,
                 population_devour_snapshot: None,
+                asking: None,
             }),
         };
         let mut child = parent.clone();
@@ -5778,6 +5781,7 @@ mod r4b_staged_elimination_tests {
             arrangements,
             arrangement_cursor: 0,
             population_devour_snapshot: None,
+            asking: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             component_delivery_parent: None,
@@ -5922,6 +5926,7 @@ mod r4b_staged_elimination_tests {
                 arrangements,
                 arrangement_cursor: 0,
                 population_devour_snapshot: None,
+                asking: None,
             }),
         });
         state.waiting_for = WaitingFor::new_dig_rest_split_for_batch(

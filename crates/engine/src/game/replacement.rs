@@ -209,6 +209,34 @@ fn is_umbra_armor_replacement(rid: ReplacementId) -> bool {
     rid.index == UMBRA_ARMOR_DESTROY_INDEX
 }
 
+/// CR 616.1 + CR 702.89a: whether applying this replacement moves its own
+/// source: Umbra armor destroys "this Aura", and a printed replacement whose
+/// instruction destroys, sacrifices or moves "this" permanent does the same.
+/// A simultaneous decision offering such a replacement decides its source's
+/// own move, so a staged population asks it before the source's own choice.
+pub(crate) fn replacement_moves_its_source(state: &GameState, rid: ReplacementId) -> bool {
+    if is_umbra_armor_replacement(rid) {
+        return true;
+    }
+    let Some(definition) = replacement_definition_for_id(state, rid) else {
+        return false;
+    };
+    let mut ability = definition.execute.as_deref();
+    while let Some(current) = ability {
+        let moves_self = match &*current.effect {
+            Effect::Destroy { target, .. }
+            | Effect::Sacrifice { target, .. }
+            | Effect::ChangeZone { target, .. } => matches!(target, TargetFilter::SelfRef),
+            _ => false,
+        };
+        if moves_self {
+            return true;
+        }
+        ability = current.sub_ability.as_deref();
+    }
+    false
+}
+
 /// CR 614.10 + CR 614.10a: virtual replacement id for the turn-scoped combat
 /// skip. The affected `PlayerId` is encoded into the sentinel `ObjectId` the
 /// same way `compleated_replacement_id` carries its host object id.

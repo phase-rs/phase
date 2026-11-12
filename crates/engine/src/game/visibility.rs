@@ -142,6 +142,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::GameOver { .. }
         | WaitingFor::ReplacementChoice { .. }
         | WaitingFor::EntryControllerChoice { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::OrderTriggers { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }

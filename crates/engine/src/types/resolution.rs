@@ -2182,26 +2182,87 @@ impl ResolutionStack {
         &mut self,
         group: crate::types::identifiers::LogicalZoneChangeGroupId,
     ) -> Option<PostReplacementDrainStack> {
+        if !self
+            .batch_delivery_below_ready_post_replacement()
+            .is_some_and(|batch| batch.logical_zone_change_group.logical_group_id == group)
+        {
+            return None;
+        }
+        match self.frames.pop() {
+            Some(ResolutionFrame::PostReplacement(drains)) => {
+                (!drains.is_empty()).then_some(drains)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Discard an emptied, unstamped PostReplacement frame directly above the
+    /// BatchDelivery owner of `group`: it carries no work.
+    pub(crate) fn drop_empty_post_replacement_above_batch(
+        &mut self,
+        group: crate::types::identifiers::LogicalZoneChangeGroupId,
+    ) {
+        let empty_top = self.frames.top().is_some_and(|top| {
+            matches!(
+                self.frames.get(top),
+                Some(ResolutionFrame::PostReplacement(drains))
+                    if drains.is_empty() && drains.frame_id().is_none()
+            )
+        });
+        if empty_top
+            && self
+                .batch_delivery_below_ready_post_replacement()
+                .is_some_and(|batch| batch.logical_zone_change_group.logical_group_id == group)
+        {
+            let _ = self.frames.pop();
+        }
+    }
+
+    /// Every staged BatchDelivery owner on the stack, for checked restore.
+    pub(crate) fn staged_batch_owners_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut PendingBatchDeliveries> {
+        self.frames.iter_mut().filter_map(|frame| match frame {
+            ResolutionFrame::BatchDelivery(batch) if batch.staged.is_some() => Some(&mut **batch),
+            _ => None,
+        })
+    }
+
+    /// Every staged BatchDelivery owner on the stack, bottom first.
+    pub(crate) fn staged_batch_owners(&self) -> impl Iterator<Item = &PendingBatchDeliveries> {
+        self.frames.iter().filter_map(|frame| match frame {
+            ResolutionFrame::BatchDelivery(batch) if batch.staged.is_some() => Some(&**batch),
+            _ => None,
+        })
+    }
+
+    /// CR 616.1 + CR 614.6: the BatchDelivery owner directly below a ready
+    /// PostReplacement drain on the stack top. A staged member's consultation
+    /// can leave such a drain above its owner (a redirect that carries its own
+    /// follow-up, such as Progenitus's "shuffle it into its owner's library"),
+    /// and publishing a held decision puts it back there; it is the drain
+    /// `take_ready_post_replacement_above_batch` detaches when the answer's
+    /// approved result is recorded.
+    pub(crate) fn batch_delivery_below_ready_post_replacement(
+        &self,
+    ) -> Option<&PendingBatchDeliveries> {
         let top = self.frames.top()?;
         let ResolutionFrame::PostReplacement(drains) = self.frames.get(top)? else {
             return None;
         };
-        if drains.is_empty()
-            || drains.frame_id().is_some()
+        // An emptied drain (its follow-up no longer applies, such as
+        // Progenitus's shuffle after its owner chose the command zone) carries
+        // no work and does not bury the owner.
+        if drains.frame_id().is_some()
             || drains
                 .drains()
                 .any(|drain| drain.ready_continuation().is_none())
         {
             return None;
         }
-        let below = self.frames.below(top)?;
-        if !matches!(self.frames.get(below), Some(ResolutionFrame::BatchDelivery(b)) if b.logical_zone_change_group.logical_group_id == group)
-        {
-            return None;
-        }
-        match self.frames.pop() {
-            Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
-            _ => unreachable!(),
+        match self.frames.get(self.frames.below(top)?)? {
+            ResolutionFrame::BatchDelivery(batch) => Some(batch),
+            _ => None,
         }
     }
 
