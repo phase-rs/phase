@@ -607,7 +607,7 @@ class PrReviewTests(unittest.TestCase):
                 "head_sha": "head",
                 "timestamp": self._days_ago(8),
             },
-            "local_first_block_event": {
+            "local_latest_block_event": {
                 "event_type": "blocked",
                 "outcome": "blocked",
                 "head_sha": "head",
@@ -677,7 +677,7 @@ class PrReviewTests(unittest.TestCase):
                     "classification": {"hard_stop_paths": [], "surface": "backend"},
                     "latest_maintainer_review_commit": "head",
                     "local_current_event": warning_event,
-                    "local_first_block_event": {
+                    "local_latest_block_event": {
                         "event_type": "blocked",
                         "outcome": "blocked",
                         "head_sha": "head",
@@ -725,7 +725,7 @@ class PrReviewTests(unittest.TestCase):
             "classification": {"hard_stop_paths": [], "surface": "backend"},
             "latest_maintainer_review_commit": "head",
             "local_current_event": local_event,
-            "local_first_block_event": pr_review.first_block_events_by_pr_head(events).get(
+            "local_latest_block_event": pr_review.latest_block_events_by_pr_head(events).get(
                 (5110, "head")
             ),
             "parse_diff": {"present": True, "updated_at": self._days_ago(0)}
@@ -781,6 +781,18 @@ class PrReviewTests(unittest.TestCase):
                 "approve_ready_for_handler",
             ),
             ("logged block, warning, then dismissal", [block, warning], dismissed, False, "review"),
+            (
+                "logged block, warning, approval, then a dequeued approved_enqueued record",
+                [block, warning, {"event_type": "approved_enqueued", "outcome": "approved_enqueued"}],
+                {
+                    "reviewDecision": "APPROVED",
+                    "reviews": [
+                        {**changes_requested, "state": "APPROVED", "submittedAt": self._days_ago(19)}
+                    ],
+                },
+                False,
+                "approve_ready_for_handler",
+            ),
             (
                 "approval older than the logged block",
                 [block, {"event_type": "review"}],
@@ -1118,7 +1130,7 @@ class PrReviewTests(unittest.TestCase):
                     self.assertEqual((code, result["inserted"], result["forced"]), (0, True, True))
             self.assertEqual(len(pr_review.all_events(state_dir)), 4)
 
-    def test_first_block_events_by_pr_head_keeps_earliest_and_ignores_non_blocks(self) -> None:
+    def test_latest_block_events_by_pr_head_keeps_latest_and_ignores_non_blocks(self) -> None:
         events = [
             {"pr": 1, "head_sha": "h", "outcome": "review", "timestamp": "2026-07-01T00:00:00Z"},
             {"pr": 1, "head_sha": "h", "outcome": "blocked", "timestamp": "2026-07-02T00:00:00Z"},
@@ -1126,13 +1138,13 @@ class PrReviewTests(unittest.TestCase):
             {"pr": 1, "head_sha": "other", "outcome": "blocked", "timestamp": "2026-07-05T00:00:00Z"},
         ]
 
-        first = pr_review.first_block_events_by_pr_head(events)
+        latest = pr_review.latest_block_events_by_pr_head(events)
 
-        self.assertEqual(first[(1, "h")]["timestamp"], "2026-07-02T00:00:00Z")
-        self.assertEqual(first[(1, "other")]["timestamp"], "2026-07-05T00:00:00Z")
+        self.assertEqual(latest[(1, "h")]["timestamp"], "2026-07-09T00:00:00Z")
+        self.assertEqual(latest[(1, "other")]["timestamp"], "2026-07-05T00:00:00Z")
 
     def test_is_block_event_covers_every_routing_block_shape(self) -> None:
-        """The first-block lookup must recognize exactly the events routing calls blocking."""
+        """The latest-block lookup must recognize exactly the events routing calls blocking."""
         for event_type in pr_review.LOCAL_BLOCK_EVENT_TYPES:
             self.assertTrue(pr_review.is_block_event({"event_type": event_type}), event_type)
         for outcome in pr_review.LOCAL_BLOCK_OUTCOMES:
@@ -1143,8 +1155,8 @@ class PrReviewTests(unittest.TestCase):
         self.assertFalse(pr_review.is_block_event({"outcome": "approved_enqueued"}))
         self.assertFalse(pr_review.is_block_event(None))
 
-    def test_review_blocked_event_counts_as_first_block(self) -> None:
-        """`review_blocked` routes as a block, so it must also count as the first block."""
+    def test_review_blocked_event_counts_as_latest_block(self) -> None:
+        """`review_blocked` routes as a block, so it must also count as the latest block."""
         events = [
             {
                 "pr": 7,
@@ -1154,7 +1166,7 @@ class PrReviewTests(unittest.TestCase):
             },
         ]
 
-        self.assertIn((7, "h"), pr_review.first_block_events_by_pr_head(events))
+        self.assertIn((7, "h"), pr_review.latest_block_events_by_pr_head(events))
 
     def test_proof_profile_flags_agent_coauthored_incomplete_template(self) -> None:
         profile = pr_review.proof_profile(

@@ -81,7 +81,7 @@ NON_MATERIAL_EVENT_TYPES = frozenset({"observation", "quality_entry", "tracker_r
 # is in the contributor's court" — see the pr-review-loop SKILL.md guard doc.
 MEMBER_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 # Local events that mean "this head is blocked". Single authority for both the
-# newest-event routing decision and the first-block lookup — two copies would drift.
+# newest-event routing decision and the latest-block lookup — two copies would drift.
 LOCAL_BLOCK_EVENT_TYPES = {"review_blocked", "changes_requested", "blocked"}
 LOCAL_BLOCK_OUTCOMES = {"changes_requested", "reviewed_request_changes", "blocked"}
 TERMINAL_STATES = SUCCESS_STATES | BLOCK_STATES | {"closed"}
@@ -757,23 +757,23 @@ def is_block_event(event: dict[str, Any] | None) -> bool:
     return event.get("event_type") in LOCAL_BLOCK_EVENT_TYPES or outcome in LOCAL_BLOCK_OUTCOMES
 
 
-def first_block_events_by_pr_head(
+def latest_block_events_by_pr_head(
     events: list[dict[str, Any]],
 ) -> dict[tuple[int, str], dict[str, Any]]:
-    """Earliest blocking event per (pr, head).
+    """Latest blocking event per (pr, head).
 
     Routing reads only the newest event on a head, so a later non-blocking event
-    would otherwise erase a block the head still carries; this records that the
-    head was blocked at all.
+    would otherwise erase a block the head still carries; this records the block
+    a later approval has to postdate.
     """
-    first: dict[tuple[int, str], dict[str, Any]] = {}
+    latest: dict[tuple[int, str], dict[str, Any]] = {}
     for event in events:  # append-only log; file order is chronological
         pr = event.get("pr")
         head_sha = event.get("head_sha")
         if pr is None or not head_sha or not is_block_event(event):
             continue
-        first.setdefault((int(pr), str(head_sha)), event)
-    return first
+        latest[(int(pr), str(head_sha))] = event
+    return latest
 
 
 def event_sort_key(event: dict[str, Any]) -> tuple[str, str]:
@@ -2691,10 +2691,10 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     conflicts_with_base = (
         pr.get("mergeStateStatus") == "DIRTY" or pr.get("mergeable") == "CONFLICTING"
     )
-    # `local_block` reads only the newest event; the first block recorded for this
-    # head keeps a later non-blocking event from erasing it, until GitHub shows an
-    # approval or a dismissed review on this head.
-    # The approval must postdate every logged event on the head, or it predates the block.
+    # `local_block` reads only the newest event; the latest block recorded for this
+    # head keeps a later non-blocking event from erasing it, until GitHub shows a
+    # dismissed review on this head or an approval submitted after that block.
+    logged_block = packet.get("local_latest_block_event") or {}
     block_cleared_on_github = any(
         review.get("commit") == head
         and (
@@ -2702,14 +2702,14 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
             or (
                 review_decision == "APPROVED"
                 and review.get("state") == "APPROVED"
-                and timestamp_after(review.get("submittedAt"), local_event_timestamp)
+                and timestamp_after(review.get("submittedAt"), logged_block.get("timestamp"))
             )
         )
         for review in pr.get("reviews", [])
     )
     current_head_blocked = (
         local_block
-        or (bool(packet.get("local_first_block_event")) and not block_cleared_on_github)
+        or (bool(logged_block) and not block_cleared_on_github)
         or (
             review_decision == "CHANGES_REQUESTED"
             and (latest_commit is None or latest_commit == head)
@@ -3045,7 +3045,7 @@ def make_packet(
     local_event: dict[str, Any] | None = None,
     contributor_summary: dict[str, Any] | None = None,
     gittensor: dict[str, Any] | None = None,
-    first_block_event: dict[str, Any] | None = None,
+    latest_block_event: dict[str, Any] | None = None,
     required_check_names: set[str] | None = None,
     author_is_repository_writer: bool = False,
 ) -> dict[str, Any]:
@@ -3156,7 +3156,7 @@ def make_packet(
             )
         ],
         "local_current_event": local_event,
-        "local_first_block_event": first_block_event,
+        "local_latest_block_event": latest_block_event,
     }
     packet["recommendation"] = recommend_from_packet(packet)
     return packet
@@ -3748,7 +3748,7 @@ class ReviewContext:
     local_latest_observations: dict[int, dict[str, Any]]
     local_latest_looks: dict[int, dict[str, Any]]
     local_latest_actions: dict[int, dict[str, Any]]
-    first_block_events: dict[tuple[int, str], dict[str, Any]]
+    latest_block_events: dict[tuple[int, str], dict[str, Any]]
     analytics_model: dict[str, Any]
     signal_occurrences: dict[str, list[dict[str, Any]]]
     gittensor_index: dict[str, dict[str, Any]]
@@ -3770,7 +3770,7 @@ def load_review_context(args: argparse.Namespace) -> ReviewContext:
         local_latest_observations=latest_observations_by_pr(events),
         local_latest_looks=latest_looks_by_pr(events),
         local_latest_actions=latest_material_actions_by_pr(events),
-        first_block_events=first_block_events_by_pr_head(events),
+        latest_block_events=latest_block_events_by_pr_head(events),
         analytics_model=build_analytics_model(
             events,
             days=None,
@@ -3798,7 +3798,7 @@ def packet_for_pr(
     local_latest_observation = context.local_latest_observations.get(pr_number)
     local_latest_look = context.local_latest_looks.get(pr_number)
     local_latest_action = context.local_latest_actions.get(pr_number)
-    first_block_event = context.first_block_events.get(head_key)
+    latest_block_event = context.latest_block_events.get(head_key)
     author_login = (pr.get("author") or {}).get("login")
     contributor_summary = build_contributor_summary(
         author_login,
@@ -3821,7 +3821,7 @@ def packet_for_pr(
         local_event,
         contributor_summary,
         gittensor,
-        first_block_event,
+        latest_block_event,
         required_check_names,
         author_is_repository_writer=bool(author_login)
         and fold_login(author_login) in context.repository_writers,
