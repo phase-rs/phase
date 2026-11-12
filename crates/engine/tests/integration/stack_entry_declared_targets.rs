@@ -478,6 +478,146 @@ fn a_per_opponent_trigger_targets_only_the_permanents_it_is_aimed_at() {
     );
 }
 
+/// CR 115.7a + CR 115.9a: with one opponent, Riptide Gearhulk's "for each
+/// opponent, put up to one target nonland permanent that player controls into
+/// its owner's library third from the top" chooses one permanent, so Bolt Bend
+/// can target the trigger. Its retarget offers that permanent's own slot, not
+/// the opponent the fanout pairs it with, against "that player controls" for
+/// that opponent: P1's other creature is offered, and neither P1's hexproof
+/// creature nor P0's Gearhulk is. The change keeps the opponent and moves only
+/// the new permanent.
+#[test]
+fn bolt_bend_changes_only_the_permanent_a_per_opponent_trigger_chose() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario.add_creature(P1, "First Bear", 2, 2).id();
+    let second = scenario.add_creature(P1, "Second Bear", 2, 2).id();
+    let shrouded = scenario
+        .add_creature(P1, "Hexproof Bear", 2, 2)
+        .with_keyword(Keyword::Hexproof)
+        .id();
+    let gearhulk = scenario
+        .add_creature_to_hand_from_oracle(P0, "Riptide Gearhulk", 4, 4, RIPTIDE_GEARHULK)
+        .from_oracle_text_with_keywords(&["Double strike", "Prowess"], RIPTIDE_GEARHULK)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let bend = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bolt Bend", true, BOLT_BEND)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    scenario.with_library_top(P1, &["Forest", "Forest", "Forest", "Forest"]);
+    let mut runner = scenario.build();
+    runner.cast(gearhulk).commit();
+    for _ in 0..12 {
+        match &runner.state().waiting_for {
+            WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(first)),
+                    })
+                    .expect("aim the trigger at the first Bear");
+            }
+            _ if runner.state().stack.iter().any(|e| {
+                e.source_id == gearhulk && matches!(e.kind, StackEntryKind::TriggeredAbility { .. })
+            }) =>
+            {
+                break;
+            }
+            _ => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+        }
+    }
+    let entry = trigger_of(&mut runner, gearhulk);
+    let stored = |runner: &GameRunner| {
+        runner
+            .state()
+            .stack
+            .iter()
+            .find(|e| e.id == entry)
+            .and_then(|e| e.ability())
+            .expect("the trigger")
+            .targets
+            .clone()
+    };
+    assert_eq!(
+        stored(&runner),
+        vec![TargetRef::Player(P1), TargetRef::Object(first)],
+        "reach guard: the fanout pairs the opponent with its permanent"
+    );
+    assert_eq!(
+        both(runner.state(), entry).1,
+        vec![TargetRef::Object(first)]
+    );
+    let card_id = runner.state().objects[&bend].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bend,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Bolt Bend");
+    // Prowess triggers above Bolt Bend and resolves first.
+    let spell = runner
+        .state()
+        .stack
+        .iter()
+        .find(|e| e.source_id == bend)
+        .expect("reach guard: Bolt Bend was cast with no target prompt");
+    assert_eq!(
+        spell.ability().expect("a spell").targets,
+        vec![TargetRef::Object(entry)],
+        "the trigger has a single target"
+    );
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::RetargetChoice { .. }
+        ) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+    let WaitingFor::RetargetChoice {
+        current_targets,
+        slots,
+        legal_new_targets,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("a retarget prompt: {:?}", runner.state().waiting_for);
+    };
+    assert_eq!(current_targets, &vec![TargetRef::Object(first)]);
+    assert_eq!(slots.len(), 1);
+    assert_eq!(
+        slots[0].slot, 1,
+        "the permanent's own address, not the opponent's"
+    );
+    assert!(legal_new_targets.contains(&TargetRef::Object(second)));
+    assert!(
+        !legal_new_targets.contains(&TargetRef::Object(gearhulk)),
+        "\"that player controls\" is the opponent's"
+    );
+    assert!(
+        !legal_new_targets.contains(&TargetRef::Object(shrouded)),
+        "CR 702.11b: hexproof against P0's ability"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(second)),
+        })
+        .expect("change the permanent");
+    assert_eq!(
+        stored(&runner),
+        vec![TargetRef::Player(P1), TargetRef::Object(second)],
+        "the opponent stays paired with the new permanent"
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&second].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+}
+
 fn crimes(state: &GameState, player: PlayerId) -> u32 {
     state
         .players

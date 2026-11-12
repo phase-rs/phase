@@ -8319,13 +8319,24 @@ fn per_opponent_fanout_constraint_targets(
 }
 
 fn per_opponent_fanout_object_filter(ability: &ResolvedAbility) -> Option<TargetFilter> {
+    per_opponent_fanout_object_filter_as(ability, ControllerRef::You)
+}
+
+/// The fanout's object filter with its "that player" controller read as
+/// `player`: `You` where the filter is evaluated with the paired opponent as
+/// its controller, or `SpecificPlayer` where it is evaluated for the
+/// ability's controller (a retarget's slot pool).
+fn per_opponent_fanout_object_filter_as(
+    ability: &ResolvedAbility,
+    player: ControllerRef,
+) -> Option<TargetFilter> {
     let mut filter = ability.effect.target_filter()?.clone();
     // CR 109.5 + CR 108.3: each paired opponent changes the control context,
     // while original ownership keeps the declaring authority.
     if !super::filter::bind_declaring_owner_authority(&mut filter, ability.controller) {
         return None;
     }
-    Some(rewrite_declared_target_player(&filter, ControllerRef::You))
+    Some(rewrite_declared_target_player(&filter, player))
 }
 
 fn per_opponent_fanout_legal_object_targets(
@@ -11958,6 +11969,10 @@ fn emit_node(
     if positions.is_empty() {
         return;
     }
+    if is_per_opponent_target_fanout(node) {
+        emit_fanout_objects(node, path, &positions, bindings);
+        return;
+    }
     let binding = |slot: usize, enforcement, run| RetargetSlotBinding {
         address: RetargetSlotAddress {
             path: path.to_vec(),
@@ -12006,11 +12021,47 @@ fn emit_node(
     }
 }
 
+/// CR 115.7a + CR 115.9a: a per-opponent fanout's object targets, each at its
+/// own stored address and checked against "that player controls" for the
+/// opponent its preceding player binder names. The binders are the iteration,
+/// not targets, so none is offered.
+fn emit_fanout_objects(
+    node: &ResolvedAbility,
+    path: &[ChainStep],
+    positions: &[usize],
+    bindings: &mut Vec<RetargetSlotBinding>,
+) {
+    for &slot in positions {
+        let Some(TargetRef::Player(bound)) = node.targets[..slot]
+            .iter()
+            .rev()
+            .find(|target| matches!(target, TargetRef::Player(_)))
+        else {
+            continue;
+        };
+        let Some(filter) = per_opponent_fanout_object_filter_as(
+            node,
+            ControllerRef::SpecificPlayer { id: *bound },
+        ) else {
+            continue;
+        };
+        bindings.push(RetargetSlotBinding {
+            address: RetargetSlotAddress {
+                path: path.to_vec(),
+                slot,
+            },
+            enforcement: SlotEnforcement::Filtered(filter),
+            current: node.targets[slot].clone(),
+            run: None,
+        });
+    }
+}
+
 /// CR 601.2c + CR 115.10a: the positions of each node's targets that are
-/// declared ones, by path, as [`walk_declared_slots`] numbers them. A node the
-/// numbering doesn't declare positions for (a per-opponent fanout, whose
-/// numbering compacts its slots, or a node it reads through a delegate) keeps
-/// every position it holds.
+/// declared ones, by path, as [`walk_declared_slots`] numbers them, and a
+/// per-opponent fanout's object positions. A node the numbering doesn't
+/// declare positions for (one it reads through a delegate) keeps every
+/// position it holds.
 struct DeclaredPositions(Vec<(Vec<ChainStep>, Vec<usize>)>);
 
 impl DeclaredPositions {
@@ -12021,9 +12072,14 @@ impl DeclaredPositions {
             DeclaredNumbering::of(root),
             &mut |node, path, declared| {
                 if let Some(declared) = declared {
-                    if !is_per_opponent_target_fanout(node) {
-                        nodes.push((path.to_vec(), declared.positions.clone()));
-                    }
+                    // A fanout's numbering compacts its slots; its object
+                    // targets are the positions it holds past its binders.
+                    let positions = if is_per_opponent_target_fanout(node) {
+                        chain_node_positions(node)
+                    } else {
+                        declared.positions.clone()
+                    };
+                    nodes.push((path.to_vec(), positions));
                 }
             },
         );
