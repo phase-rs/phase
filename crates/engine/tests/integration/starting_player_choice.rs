@@ -23,6 +23,7 @@ use engine::game::match_flow::handle_game_over_transition;
 use engine::game::zones::create_object;
 use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
+use engine::types::custom_format::CustomFormatDef;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -654,6 +655,92 @@ fn departure_during_the_real_prompt_passes_the_choice_on() {
     );
     choose(&mut state, next, next).expect("the new chooser answers");
     assert_reached_opening_hands(&state);
+}
+
+/// A custom four-seat format with two teams on shared team turns (CR 805).
+/// Unlike Two-Headed Giant (CR 810.8b) its teams share no life, so a member
+/// who concedes leaves alone (CR 104.3a) and the teammate plays on.
+fn shared_turn_teams() -> FormatConfig {
+    let mut source = FormatConfig::free_for_all();
+    source.team_based = true;
+    source.min_players = 4;
+    source.max_players = 4;
+    let def = CustomFormatDef::from_lobby_config("Shared-turn teams".to_string(), &source)
+        .expect("a team-based free-for-all is saveable as a custom format");
+    FormatConfig::for_custom_rules(&def.rules)
+}
+
+/// CR 103.1a + CR 800.4a: a side whose representative concedes during the real
+/// prompt keeps its living member as its candidate, so either team can still
+/// be named the starting team.
+#[test]
+fn shared_turn_team_keeps_a_candidate_when_its_representative_concedes() {
+    let new_state = |seed| {
+        let mut state = GameState::new(shared_turn_teams(), 4, seed);
+        seed_forest_libraries(&mut state);
+        state
+    };
+    let seed = seed_whose_winner(new_state, |winner| winner == P0 || winner == P1);
+    let mut state = new_state(seed);
+    start_game(&mut state);
+    assert_eq!(
+        state.waiting_for,
+        WaitingFor::ChooseStartingPlayer {
+            player: P0,
+            candidates: vec![P0, P2],
+        },
+        "reach: the real prompt offers one representative per team"
+    );
+
+    concede(&mut state, P2);
+
+    assert!(
+        state.players[P2.0 as usize].is_eliminated && !state.players[P3.0 as usize].is_eliminated,
+        "reach: the representative left alone; its teammate plays on"
+    );
+    assert_eq!(
+        state.waiting_for,
+        WaitingFor::ChooseStartingPlayer {
+            player: P0,
+            candidates: vec![P0, P3],
+        },
+        "CR 103.1a: the team whose representative left is still a starting-team candidate"
+    );
+    choose(&mut state, P0, P3).expect("the chooser names the remaining team");
+    assert_reached_opening_hands(&state);
+    assert_eq!(state.current_starting_player, P3);
+}
+
+/// CR 800.4h: the next player in turn order inherits a departed chooser's
+/// choice even when it is not its team's representative; the prompt still
+/// issues its own team's representative as an answer.
+#[test]
+fn inherited_choice_issues_the_new_choosers_team() {
+    let mut state = seeded_prompt(shared_turn_teams(), 4, P2, vec![P0, P2]);
+    state.turn_direction = TurnDirection::Reversed;
+
+    concede(&mut state, P2);
+
+    assert_eq!(
+        state.waiting_for,
+        WaitingFor::ChooseStartingPlayer {
+            player: P1,
+            candidates: vec![P0, P3],
+        },
+        "CR 800.4h: P1 inherits the choice; each team keeps one candidate"
+    );
+    let issued = legal_actions(&state);
+    assert!(
+        issued.contains(&GameAction::ChooseStartingPlayer { player: P0 }),
+        "the chooser's own team is an issued answer, got {issued:?}"
+    );
+    assert!(
+        !issued.contains(&GameAction::ChooseStartingPlayer { player: P1 }),
+        "the chooser's own seat is not its team's representative, got {issued:?}"
+    );
+    choose(&mut state, P1, P0).expect("the new chooser names its own team");
+    assert_eq!(state.current_starting_player, P0);
+    assert_eq!(state.next_game_chooser, Some(P1));
 }
 
 /// CR 103.1: "If the previous game was a draw, the player who made the choice

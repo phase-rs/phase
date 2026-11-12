@@ -825,19 +825,21 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // resumes at the agenda step; the companion walk is already done.
             state.waiting_for = super::conspiracy::agenda_choices_or_mulligan(state, events);
         }
-        // CR 800.4a: a departed seat is no longer a candidate to take the first turn.
+        // CR 800.4a + CR 103.1a: a departed seat is no longer a candidate to take
+        // the first turn. The candidates are re-derived from the living side
+        // representatives, so a shared-turn side whose representative left is
+        // still offered through a living member.
         // CR 800.4h: a departed chooser's choice passes to the next player in turn order.
-        WaitingFor::ChooseStartingPlayer { player, candidates } => {
-            let candidates: Vec<_> = candidates
-                .into_iter()
-                .filter(|p| players::is_alive(state, *p))
-                .collect();
+        WaitingFor::ChooseStartingPlayer { player, .. } => {
             let player = if players::is_alive(state, player) {
                 player
             } else {
                 players::next_player_in_turn_order(state, player)
             };
-            state.waiting_for = WaitingFor::ChooseStartingPlayer { player, candidates };
+            state.waiting_for = WaitingFor::ChooseStartingPlayer {
+                player,
+                candidates: super::topology::turn_representatives(state),
+            };
         }
         WaitingFor::OpeningHandBottomCards { pending, reason } => {
             let alive: Vec<_> = pending

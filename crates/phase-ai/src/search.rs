@@ -2390,7 +2390,7 @@ pub fn fallback_action(
 
         // CR 103.1: the chooser elects to take the first turn (game one and between games); sideboard: submit the deck unchanged.
         WaitingFor::BetweenGamesChoosePlayDraw { .. } | WaitingFor::ChooseStartingPlayer { .. } => {
-            first_turn_election(&state.waiting_for)
+            first_turn_election(state)
         }
         WaitingFor::BetweenGamesSideboard { player, .. } => {
             // Submit the current deck unchanged (no sideboarding).
@@ -2887,14 +2887,23 @@ pub fn fallback_action(
 }
 
 /// CR 103.1: the AI chooser elects to take the first turn.
-fn first_turn_election(waiting_for: &WaitingFor) -> Option<GameAction> {
-    match waiting_for {
+fn first_turn_election(state: &GameState) -> Option<GameAction> {
+    match &state.waiting_for {
         WaitingFor::BetweenGamesChoosePlayDraw { .. } => {
             Some(GameAction::ChoosePlayDraw { play_first: true })
         }
-        WaitingFor::ChooseStartingPlayer { player, .. } => {
-            Some(GameAction::ChooseStartingPlayer { player: *player })
-        }
+        // CR 103.1a + CR 800.4h: a chooser who inherited the choice need not be
+        // its side's representative, so when its own seat is not a candidate it
+        // names the candidate representing its team as the starting team.
+        WaitingFor::ChooseStartingPlayer { player, candidates } => candidates
+            .iter()
+            .find(|&seat| seat == player)
+            .or_else(|| {
+                let teammates = engine::game::players::teammates(state, *player);
+                candidates.iter().find(|seat| teammates.contains(seat))
+            })
+            .or_else(|| candidates.first())
+            .map(|&seat| GameAction::ChooseStartingPlayer { player: seat }),
         _ => None,
     }
 }
@@ -4588,7 +4597,7 @@ pub(crate) fn deterministic_choice(
         return Some(action);
     }
 
-    if let Some(action) = first_turn_election(&state.waiting_for) {
+    if let Some(action) = first_turn_election(state) {
         return Some(action);
     }
 
@@ -5824,6 +5833,7 @@ mod tests {
     use engine::types::card::LayoutKind;
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
+    use engine::types::custom_format::CustomFormatDef;
     use engine::types::format::FormatConfig;
     use engine::types::game_state::{
         CastPaymentMode, CastingVariant, NamedChoiceSource, NamedChoiceSourceBinding,
@@ -5835,7 +5845,7 @@ mod tests {
         AbilityActivationScope, ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaType,
         ManaUnit,
     };
-    use engine::types::phase::Phase;
+    use engine::types::phase::{Phase, TurnDirection};
     use engine::types::replacements::ReplacementEvent;
     use engine::types::statics::{CostModifyMode, StaticMode};
     use engine::types::triggers::TriggerMode;
@@ -6705,6 +6715,55 @@ mod tests {
             deterministic_choice(&state, P1, &config, &[], None),
             Some(GameAction::ChoosePlayDraw { play_first: true })
         );
+    }
+
+    /// CR 103.1a + CR 800.4h: a chooser who inherited the choice from a departed
+    /// representative is not its team's representative, so its own seat is not
+    /// an issued answer; the AI elects the candidate representing its team.
+    #[test]
+    fn first_turn_election_names_the_choosers_team_when_its_seat_is_not_a_candidate() {
+        let mut source = FormatConfig::free_for_all();
+        source.team_based = true;
+        source.min_players = 4;
+        source.max_players = 4;
+        let def = CustomFormatDef::from_lobby_config("Shared-turn teams".to_string(), &source)
+            .expect("a team-based free-for-all is saveable as a custom format");
+        let mut state = GameState::new(FormatConfig::for_custom_rules(&def.rules), 4, 42);
+        state.turn_direction = TurnDirection::Reversed;
+        state.waiting_for = WaitingFor::ChooseStartingPlayer {
+            player: PlayerId(2),
+            candidates: vec![P0, PlayerId(2)],
+        };
+        engine::game::engine::apply(
+            &mut state,
+            PlayerId(2),
+            GameAction::Concede {
+                player_id: PlayerId(2),
+            },
+        )
+        .expect("CR 104.3a: the representative concedes during the prompt");
+        let WaitingFor::ChooseStartingPlayer { player, candidates } = &state.waiting_for else {
+            panic!(
+                "the prompt survives the departure, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert!(
+            *player == P1 && !candidates.contains(&P1),
+            "reach: CR 800.4h hands the choice to P1, which is not a candidate"
+        );
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let expected = GameAction::ChooseStartingPlayer { player: P0 };
+        assert!(
+            test_contract(&state).contains_action(&state, &expected),
+            "the chooser's team representative is an issued answer"
+        );
+        assert_eq!(
+            deterministic_choice(&state, P1, &config, &[], None),
+            Some(expected.clone())
+        );
+        assert_eq!(fallback_action_default(&state), Some(expected));
     }
 
     /// T8 — the combat production wiring at `deterministic_choice`'s combat
