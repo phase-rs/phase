@@ -4,6 +4,7 @@
 //! names where an object went never sees it. An object a leaving player
 //! controls but doesn't own is exiled, and both kinds of observer see that.
 
+use engine::game::combat::AttackTarget;
 use engine::game::game_object::{PhaseOutCause, PhaseStatus};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -1055,5 +1056,85 @@ fn two_players_losing_at_zero_life_at_once_each_trigger_the_survivors_observer_o
         triggers_from(runner, board.stolen_demon),
         0,
         "CR 800.4d: the stolen Demon's triggers were P2's"
+    );
+}
+
+/// CR 510.2 + CR 704.5a + CR 603.10a: the combat-damage route. P1 steals one of
+/// P0's two Extractor Demons, owns a bear, and loses to P0's unblocked attacker
+/// at the combat-damage state-based-action check. The bear leaves in the same
+/// event that ends P1's control effects, so P0's other Demon triggers once and
+/// the stolen Demon triggers for nothing.
+#[test]
+fn combat_damage_loss_after_stealing_an_observer_retires_the_stolen_observers_trigger() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let stolen_demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
+    let unstolen_demon = scenario.add_real_card(P0, "Extractor Demon", Zone::Battlefield, db);
+    // SYNTHETIC: a vanilla 2/2 P1 owns, and a vanilla 3/3 attacker.
+    let bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    let raider = scenario.add_creature(P0, "Raider", 3, 3).id();
+    let turn_against = scenario.add_real_card(P1, "Turn Against", Zone::Hand, db);
+    scenario.with_mana_pool(P1, red_mana(5));
+    scenario.with_life(P1, 3);
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("priority passes to P1");
+    runner
+        .cast(turn_against)
+        .target_object(stolen_demon)
+        .resolve();
+    assert_eq!(runner.state().objects[&stolen_demon].controller, P1);
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority passes toward combat");
+    }
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(raider, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("P0 attacks P1");
+    for _ in 0..12 {
+        if runner.state().players[1].is_eliminated {
+            break;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    })
+                    .expect("no blocks");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes toward combat damage");
+            }
+            other => panic!("unexpected prompt in combat: {other:?}"),
+        }
+    }
+    assert!(runner.state().players[1].is_eliminated);
+    assert_eq!(zone(&runner, bear), Zone::Exile);
+    assert_eq!(runner.state().objects[&stolen_demon].controller, P0);
+    drive_trigger_prompts(&mut runner);
+    assert_eq!(
+        triggers_from(&runner, unstolen_demon),
+        1,
+        "CR 603.6c: P0's Demon sees the bear leave once"
+    );
+    assert_eq!(
+        triggers_from(&runner, stolen_demon),
+        0,
+        "CR 603.10a + CR 800.4d: the stolen Demon's trigger was P1's"
     );
 }
