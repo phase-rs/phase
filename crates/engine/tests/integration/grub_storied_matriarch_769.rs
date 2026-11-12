@@ -31,6 +31,8 @@
 //! doors, so it functions with both doors locked.
 //! CR 709.4: a Room card off the battlefield has both halves' characteristics,
 //! so a token copy of it has each half's text under its own door.
+//! CR 730.2i + CR 730.2a: a turned merged component changes the pile's copiable values.
+//! CR 702.26b: day/night waits until a phased-out permanent exists again.
 //! CR 111.10i: an Incubator token is double-faced, and a reloaded copy of one
 //! keeps its stored face's identity.
 //! CR 701.27g: a "transformed permanent" is a double-faced permanent on the battlefield
@@ -66,6 +68,7 @@ use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::card::LayoutKind;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{
     CastPaymentMode, DayNight, GameState, ReplacementChoiceKind, StackEntryKind, WaitingFor,
 };
@@ -85,6 +88,7 @@ const AUNTIE: &str = "Grub, Notorious Auntie";
 const GOBLIN: &str = "Goblin Piker";
 const SOLEMNITY: &str = "Solemnity";
 const SLIP: &str = "Slip Out the Back";
+const SLIP_ORACLE: &str = "Put a +1/+1 counter on target creature. It phases out. (Treat it and anything attached to it as though they don't exist until its controller's next turn.)";
 const CONCEALMENT: &str = "Clever Concealment";
 const CHIEFTAIN: &str = "Goblin Chieftain";
 const GRAVEDIGGER: &str = "Gravedigger";
@@ -104,6 +108,7 @@ const HORROR: &str = "Awoken Horror";
 const KIKI: &str = "Kiki-Jiki, Mirror Breaker";
 const CACKLING: &str = "Cackling Counterpart";
 const MIRRORWEAVE: &str = "Mirrorweave";
+const ELITE_VANGUARD: &str = "Elite Vanguard";
 const MYSTIC_REFLECTION: &str = "Mystic Reflection";
 const RAISE_THE_ALARM: &str = "Raise the Alarm";
 const DOUBLING_SEASON: &str = "Doubling Season";
@@ -4244,26 +4249,23 @@ fn a_mutated_pile_is_never_a_transformed_permanent() {
     );
 }
 
-/// CR 730.2i + CR 111.10i: "If a merged permanent contains one or more double-faced
-/// components that can transform …, transforming … that permanent causes each of those
-/// double-faced components to turn so that its other face is up", and "An Incubator token is
-/// a double-faced token". Converter Beast ("When this creature enters, incubate 5. …") makes
-/// an Incubator, Karn's Touch ("Target noncreature artifact becomes an artifact creature with
-/// power and toughness each equal to its mana value until end of turn. …") animates it, and
-/// Gemrazer is cast for its mutate cost under it. The pile, with the front-face-up Incubator
-/// on top, transforms through the Incubator's own "{2}: Transform this token."
-#[test]
-fn a_mutated_pile_with_an_incubator_on_top_transforms() {
-    let (mut runner, (beast, touch, gemrazer)) = board(Phase::PreCombatMain, |scenario, db| {
-        assert_oracle(db, CONVERTER_BEAST, CONVERTER_BEAST_ORACLE);
-        assert_oracle(db, KARNS_TOUCH, KARNS_TOUCH_ORACLE);
-        assert_oracle(db, GEMRAZER, GEMRAZER_ORACLE);
-        (
-            scenario.add_real_card(P0, CONVERTER_BEAST, Zone::Hand, db),
-            scenario.add_real_card(P0, KARNS_TOUCH, Zone::Hand, db),
-            scenario.add_real_card(P0, GEMRAZER, Zone::Hand, db),
-        )
-    });
+/// Builds a real mutated Incubator through casting and the merge choice.
+fn mutated_incubator<T>(
+    side: MergeSide,
+    stage: impl FnOnce(&mut GameScenario, &'static CardDatabase) -> T,
+) -> (GameRunner, ObjectId, ObjectId, T) {
+    let (mut runner, (beast, touch, gemrazer, staged)) =
+        board(Phase::PreCombatMain, |scenario, db| {
+            assert_oracle(db, CONVERTER_BEAST, CONVERTER_BEAST_ORACLE);
+            assert_oracle(db, KARNS_TOUCH, KARNS_TOUCH_ORACLE);
+            assert_oracle(db, GEMRAZER, GEMRAZER_ORACLE);
+            (
+                scenario.add_real_card(P0, CONVERTER_BEAST, Zone::Hand, db),
+                scenario.add_real_card(P0, KARNS_TOUCH, Zone::Hand, db),
+                scenario.add_real_card(P0, GEMRAZER, Zone::Hand, db),
+                stage(scenario, db),
+            )
+        });
     fund(&mut runner, ManaType::Green, 4);
     runner.cast(beast).resolve();
     settle(&mut runner);
@@ -4305,24 +4307,48 @@ fn a_mutated_pile_with_an_incubator_on_top_transforms() {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::ChooseMutateMergeSide {
-            side: MergeSide::Bottom,
-        })
-        .expect("putting Gemrazer under must succeed");
+        .act(GameAction::ChooseMutateMergeSide { side })
+        .expect("merging Gemrazer must succeed");
     settle(&mut runner);
     assert_settled(&runner);
     let pile = &runner.state().objects[&incubator];
     assert_eq!(pile.merge_kind, Some(MergeKind::Mutate));
     assert_eq!(
         pile.merged_components,
-        vec![incubator, gemrazer],
-        "reach-guard: the Incubator is on top, Gemrazer under it"
+        match side {
+            MergeSide::Top => vec![gemrazer, incubator],
+            MergeSide::Bottom => vec![incubator, gemrazer],
+        },
+        "reach-guard: the chosen component is on top"
     );
     assert!(
         !pile.transformed,
         "reach-guard: the Incubator is front face up"
     );
 
+    assert_eq!(
+        pile.abilities
+            .iter()
+            .filter(|a| matches!(*a.effect, Effect::Transform { .. }))
+            .count(),
+        1,
+        "reach guard: the Incubator supplies exactly one transform ability"
+    );
+    (runner, incubator, gemrazer, staged)
+}
+
+/// CR 730.2i + CR 111.10i: "If a merged permanent contains one or more double-faced
+/// components that can transform …, transforming … that permanent causes each of those
+/// double-faced components to turn so that its other face is up", and "An Incubator token is
+/// a double-faced token". Converter Beast ("When this creature enters, incubate 5. …") makes
+/// an Incubator, Karn's Touch ("Target noncreature artifact becomes an artifact creature with
+/// power and toughness each equal to its mana value until end of turn. …") animates it, and
+/// Gemrazer is cast for its mutate cost under it. The pile, with the front-face-up Incubator
+/// on top, transforms through the Incubator's own "{2}: Transform this token."
+#[test]
+fn a_mutated_pile_with_an_incubator_on_top_transforms() {
+    let (mut runner, incubator, _, ()) = mutated_incubator(MergeSide::Bottom, |_, _| ());
+    assert_eq!(runner.state().objects[&incubator].name, "Incubator");
     fund(&mut runner, ManaType::Colorless, 2);
     activate(&mut runner, incubator);
     assert!(
@@ -4333,6 +4359,8 @@ fn a_mutated_pile_with_an_incubator_on_top_transforms() {
         "reach-guard: the Incubator's transform ability is on the stack; stack: {:?}",
         runner.state().stack
     );
+    let mut replay = runner.state().clone();
+    let journal_start = replay.resolved_rules_journal.entries().len();
     let mut events = Vec::new();
     for _ in 0..2 {
         events.extend(
@@ -4355,6 +4383,236 @@ fn a_mutated_pile_with_an_incubator_on_top_transforms() {
         "CR 730.2i: the Incubator component is back face up"
     );
     assert_eq!(pile.merge_kind, Some(MergeKind::Mutate));
+    // CR 730.2a + CR 702.140e + CR 111.10i: the top component has turned,
+    // while Gemrazer still supplies its abilities.
+    assert_eq!(pile.name, "Phyrexian Token");
+    assert!(pile.card_types.core_types.contains(&CoreType::Artifact));
+    assert!(pile.card_types.core_types.contains(&CoreType::Creature));
+    assert_eq!(pile.card_types.subtypes, vec!["Phyrexian"]);
+    assert!(!pile
+        .abilities
+        .iter()
+        .any(|a| matches!(*a.effect, Effect::Transform { .. })));
+    assert!(pile.keywords.contains(&Keyword::Reach));
+    assert!(pile.keywords.contains(&Keyword::Trample));
+    assert!(pile
+        .trigger_definitions
+        .iter_all()
+        .any(|e| e.definition.mode == TriggerMode::Mutates));
+
+    let command = runner
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(journal_start)
+        .filter_map(|entry| entry.command.clone())
+        .find_map(|command| match command {
+            ResolvedRulesCommand::ObjectTransform(command)
+                if command.object.object_id == incubator =>
+            {
+                Some(command)
+            }
+            _ => None,
+        })
+        .expect("reach guard: the transform is journaled");
+    engine::game::transform::apply_resolved_transform(&mut replay, &command)
+        .expect("the replay applies");
+    evaluate_layers(&mut replay);
+    assert_eq!(replay.objects[&incubator].name, "Phyrexian Token");
+}
+
+/// CR 730.2i + CR 702.140e: a buried Incubator turns, and its front-face
+/// transform ability is lost while Gemrazer remains the topmost component.
+#[test]
+fn a_buried_incubator_transforms_with_the_mutated_pile() {
+    let (mut runner, incubator, gemrazer, ()) = mutated_incubator(MergeSide::Top, |_, _| ());
+    assert_eq!(
+        runner.state().objects[&incubator].merged_components,
+        vec![gemrazer, incubator]
+    );
+    assert_eq!(
+        (
+            stored_face(&runner, incubator).name.as_str(),
+            stored_face(&runner, incubator).layout_kind
+        ),
+        ("Phyrexian Token", None)
+    );
+    fund(&mut runner, ManaType::Colorless, 2);
+    activate(&mut runner, incubator);
+    top_of_stack_from(&runner, incubator);
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority must succeed")
+                .events,
+        );
+    }
+    settle(&mut runner);
+    assert_settled(&runner);
+    assert_eq!(transformed_events(&events, incubator), 1);
+    let pile = &runner.state().objects[&incubator];
+    assert!(pile.transformed);
+    assert_eq!(pile.name, "Gemrazer");
+    assert!(!pile
+        .abilities
+        .iter()
+        .any(|a| matches!(*a.effect, Effect::Transform { .. })));
+    assert!(pile.keywords.contains(&Keyword::Reach));
+    assert!(pile.keywords.contains(&Keyword::Trample));
+}
+
+/// Advances through public actions, observing every action before the next one.
+fn pass_into_next_upkeep(
+    runner: &mut GameRunner,
+    mut observe: impl FnMut(&GameRunner, &[GameEvent]),
+) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..60 {
+        if runner.state().active_player == P1 && runner.state().phase == Phase::Upkeep {
+            return events;
+        }
+        let action = match runner.state().waiting_for {
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            ref other => panic!("unexpected prompt before the next upkeep: {other:?}"),
+        };
+        let result = runner
+            .act(action)
+            .expect("advancing to the next upkeep must succeed");
+        observe(runner, &result.events);
+        events.extend(result.events);
+    }
+    panic!("never reached P1's upkeep; at {:?}", runner.state().phase);
+}
+
+/// CR 613.7 + CR 730.2a: a later copy effect wins over the merge, but its
+/// characteristics do not survive its own duration in the merge snapshot.
+#[test]
+fn a_later_copy_effect_applies_over_and_ends_apart_from_the_mutated_pile() {
+    let (mut runner, incubator, _, (vanguard, weave, moonmist)) =
+        mutated_incubator(MergeSide::Bottom, |scenario, db| {
+            assert_oracle(db, MIRRORWEAVE, MIRRORWEAVE_ORACLE);
+            assert_oracle(db, MOONMIST, MOONMIST_ORACLE);
+            let face = db
+                .get_face_by_name(ELITE_VANGUARD)
+                .expect("Elite Vanguard is in the fixture");
+            assert!(face.oracle_text.is_none());
+            assert_eq!(face.card_type.core_types, vec![CoreType::Creature]);
+            assert_eq!(face.card_type.subtypes, vec!["Human", "Soldier"]);
+            (
+                scenario.add_real_card(P1, ELITE_VANGUARD, Zone::Battlefield, db),
+                scenario.add_real_card(P0, MIRRORWEAVE, Zone::Hand, db),
+                scenario.add_real_card(P0, MOONMIST, Zone::Hand, db),
+            )
+        });
+    fund(&mut runner, ManaType::Blue, 4);
+    runner.cast(weave).target_object(vanguard).resolve();
+    settle(&mut runner);
+    assert_eq!(runner.state().objects[&incubator].name, ELITE_VANGUARD);
+    fund(&mut runner, ManaType::Green, 2);
+    runner.cast(moonmist).resolve();
+    settle(&mut runner);
+    assert_settled(&runner);
+    let pile = &runner.state().objects[&incubator];
+    assert!(
+        pile.transformed,
+        "reach guard: Moonmist turned the Human copy"
+    );
+    assert_eq!(pile.name, ELITE_VANGUARD);
+    assert!(!pile.keywords.contains(&Keyword::Reach));
+    assert!(!pile.keywords.contains(&Keyword::Trample));
+    assert!(!pile
+        .trigger_definitions
+        .iter_all()
+        .any(|e| e.definition.mode == TriggerMode::Mutates));
+
+    pass_into_next_upkeep(&mut runner, |_, _| {});
+    assert_eq!(runner.state().active_player, P1);
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    let pile = &runner.state().objects[&incubator];
+    assert_eq!(pile.zone, Zone::Battlefield);
+    // CR 111.10i + CR 702.140e: the turned Incubator and Gemrazer's abilities remain.
+    assert_eq!(pile.name, "Phyrexian Token");
+    assert!(pile.card_types.core_types.contains(&CoreType::Artifact));
+    assert!(pile.card_types.core_types.contains(&CoreType::Creature));
+    assert_eq!(pile.card_types.subtypes, vec!["Phyrexian"]);
+    assert!(pile.keywords.contains(&Keyword::Reach));
+    assert!(pile.keywords.contains(&Keyword::Trample));
+    assert!(pile
+        .trigger_definitions
+        .iter_all()
+        .any(|e| e.definition.mode == TriggerMode::Mutates));
+    assert!(!pile
+        .abilities
+        .iter()
+        .any(|a| matches!(*a.effect, Effect::Transform { .. })));
+}
+
+/// CR 702.26b + CR 702.26d + CR 702.145e + CR 702.145f: nightbound waits while phased out, then
+/// agrees with day after the permanent phases in (CR 702.26c).
+#[test]
+fn a_phased_out_nightbound_permanent_does_not_transform_until_it_phases_in() {
+    let (mut runner, (celestus, marauder, slip)) = board(Phase::PreCombatMain, |scenario, db| {
+        assert_oracle(db, CELESTUS, CELESTUS_ORACLE);
+        assert_oracle(db, SCOUNDREL, SCOUNDREL_ORACLE);
+        assert_oracle(db, MARAUDER, MARAUDER_ORACLE);
+        assert_oracle(db, SLIP, SLIP_ORACLE);
+        (
+            scenario.add_real_card(P0, CELESTUS, Zone::Battlefield, db),
+            scenario.add_real_card(P1, SCOUNDREL, Zone::Battlefield, db),
+            scenario.add_real_card(P0, SLIP, Zone::Hand, db),
+        )
+    });
+    runner.state_mut().day_night = Some(DayNight::Night);
+    turn(&mut runner, marauder, MARAUDER);
+    assert!(runner.state().objects[&marauder].transformed);
+    fund(&mut runner, ManaType::Blue, 1);
+    runner.cast(slip).target_object(marauder).resolve();
+    settle(&mut runner);
+    assert!(runner.state().objects[&marauder].is_phased_out());
+    assert_eq!(plus_counters(&runner, marauder), 1);
+    activate_celestus(&mut runner, celestus);
+    let obj = &runner.state().objects[&marauder];
+    assert!(obj.is_phased_out());
+    assert!(obj.transformed);
+    assert_eq!(obj.name, MARAUDER);
+
+    let mut phased_in = false;
+    let events = pass_into_next_upkeep(&mut runner, |runner, events| {
+        phased_in |= events.iter().any(
+            |e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == marauder),
+        );
+        if !phased_in {
+            assert!(
+                runner.state().objects[&marauder].transformed,
+                "CR 702.26b: no checkpoint may turn the phased-out permanent"
+            );
+        }
+    });
+    assert_eq!(runner.state().day_night, Some(DayNight::Day));
+    assert_eq!(runner.state().active_player, P1);
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    let obj = &runner.state().objects[&marauder];
+    assert!(obj.is_phased_in());
+    assert!(!obj.transformed);
+    assert_eq!(obj.name, SCOUNDREL);
+    let phased_in_at = events
+        .iter()
+        .position(
+            |e| matches!(e, GameEvent::PermanentPhasedIn { object_id } if *object_id == marauder),
+        )
+        .expect("reach guard: the permanent phased in");
+    let transformed_at = events
+        .iter()
+        .position(|e| matches!(e, GameEvent::Transformed { object_id } if *object_id == marauder))
+        .expect("the nightbound permanent transforms after phasing in");
+    assert!(phased_in_at < transformed_at);
 }
 
 // ===== CR 702.145b/e: daybound and nightbound read the face that is up =====

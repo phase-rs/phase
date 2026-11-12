@@ -1310,6 +1310,13 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_merge_is_token: Option<bool>,
 
+    /// CR 730.2e: this object's own face-down status as a component of the merged
+    /// permanent it survives as, while `face_down` holds the topmost component's
+    /// status, and the two differ. `None` otherwise. Written by
+    /// `merge::merge_object_onto`; read through `is_face_down_component`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_face_down: Option<bool>,
+
     /// CR 730.3c: When a merged permanent leaves the battlefield it "becomes"
     /// multiple new objects (CR 730.3 / CR 400.7). Each absorbed component records
     /// the incarnation the surviving object holds after its leave move (CR 400.7)
@@ -1983,6 +1990,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         merge_kind: _,
         merge_layer_effect_id: _,
         pre_merge_is_token: _,
+        component_face_down: _,
         split_from_merge_survivor: _,
         cleave_form: _,
         unimplemented_mechanics: _,
@@ -3326,6 +3334,7 @@ impl GameObject {
             merged_components: Vec::new(),
             merge_kind: None,
             pre_merge_is_token: None,
+            component_face_down: None,
             merge_layer_effect_id: None,
             split_from_merge_survivor: None,
             cleave_form: None,
@@ -3935,6 +3944,8 @@ impl GameObject {
         // this reset runs; clear it defensively so a re-entering object never
         // carries a stale override value.
         self.pre_merge_is_token = None;
+        // CR 730.2e + CR 400.7: component status belongs to this battlefield object.
+        self.component_face_down = None;
         // CR 730.3 + CR 400.7: merge copy effects are battlefield-scoped and are
         // pruned at the battlefield-exit seam before this reset. Clear the stored
         // id so a re-entering object cannot point at a stale transient effect.
@@ -4116,6 +4127,11 @@ impl GameObject {
     /// permanents instead of re-deriving it.
     pub fn is_phased_in_permanent(&self) -> bool {
         self.zone == Zone::Battlefield && self.is_phased_in()
+    }
+
+    /// CR 730.2e + CR 708.2: the component's own status, before adopting its topmost's.
+    pub fn is_face_down_component(&self) -> bool {
+        self.component_face_down.unwrap_or(self.face_down)
     }
 
     pub fn has_keyword_kind(&self, kind: KeywordKind) -> bool {

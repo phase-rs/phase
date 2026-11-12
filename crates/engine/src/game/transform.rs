@@ -129,12 +129,13 @@ pub(crate) fn stored_double_face(obj: &GameObject) -> Option<&BackFaceData> {
 
 /// CR 712.1 + CR 111.10i: the gates of [`stored_double_face`] that read one object's own
 /// stored face and status, leaving out its merge structure. [`is_double_faced_permanent`]'s
-/// merged arm reads them for a pile whose topmost component is the survivor itself.
+/// merged arm reads them for the survivor component of a merged permanent.
 fn own_stored_double_face(obj: &GameObject) -> Option<&BackFaceData> {
     use crate::types::card::LayoutKind;
     let face = obj.back_face.as_ref()?;
-    // CR 708.2 + CR 712.15: a face-down object's `back_face` is its face-down stash.
-    if obj.face_down {
+    // CR 708.2 + CR 712.15a + CR 730.2e: a face-down component's stored face is
+    // its face-down stash, even if the topmost component makes the pile face up.
+    if obj.is_face_down_component() {
         return None;
     }
     // Specialize (digital-only, no CR rule): the stash is the face before specializing.
@@ -275,6 +276,9 @@ fn swap_displayed_face(state: &mut GameState, object_id: ObjectId) {
     let obj = state.objects.get_mut(&object_id).unwrap();
     swap_object_faces(obj);
     obj.transformed = !obj.transformed;
+    // CR 730.2i + CR 730.2a: the turned component determines new merge values.
+    crate::game::merge::rederive_merge_layer_effect(state, object_id);
+    let obj = state.objects.get_mut(&object_id).unwrap();
 
     let reference = ObjectIncarnationRef::from_object(obj);
     let resulting_transformed = obj.transformed;
@@ -342,6 +346,8 @@ pub fn apply_resolved_transform(
     obj.transformed = command.resulting_transformed;
     obj.timestamp = command.resulting_timestamp;
     obj.transformation_count = command.resulting_transformation_count;
+    // CR 730.2i + CR 730.2a: replay derives the same merge values at its timestamp.
+    crate::game::merge::rederive_merge_layer_effect(state, command.object.object_id);
 
     // CR 613.7g: the transform drew this timestamp during the original
     // execution, so replay installs it rather than drawing a fresh one — and
@@ -410,23 +416,14 @@ pub(crate) fn is_transformed_permanent(obj: &GameObject) -> bool {
 /// either face and after any number of transforms.
 pub fn is_double_faced_permanent(obj: &crate::game::game_object::GameObject) -> bool {
     use crate::game::game_object::MergeKind;
-    use crate::types::card::LayoutKind;
     match obj.merge_kind {
         // CR 730.2j: a face-up melded permanent contains a double-faced component.
         Some(MergeKind::Meld) => true,
         // CR 730.2j: a merged permanent keeps its own reading of a double-faced component.
         Some(MergeKind::Mutate | MergeKind::Augment) => {
-            // CR 730.2a + CR 730.2e: the survivor's face-down status is its topmost
-            // component's. When the survivor is that component, its stored face and status
-            // are its own, so the unmerged gates read them. A front-face-up Incubator token
-            // on top keeps its Phyrexian face with no layout (CR 111.10i).
-            let survivor_is_topmost = obj.merged_components.first() == Some(&obj.id);
-            (survivor_is_topmost && own_stored_double_face(obj).is_some())
-                || matches!(
-                    obj.back_face.as_ref().and_then(|b| b.layout_kind),
-                    Some(LayoutKind::Transform | LayoutKind::Modal | LayoutKind::Meld)
-                )
-                || obj.transformed
+            // CR 730.2e + CR 730.2i + CR 730.2j: the survivor retains its own face identity
+            // wherever it sits in the pile; its status is distinct from the topmost's.
+            own_stored_double_face(obj).is_some()
         }
         // CR 712.16 + CR 707.8a + CR 701.27a: the same face identity copying and the
         // transform stash use, so a permanent stays double-faced on either face, after any
@@ -1133,8 +1130,8 @@ mod tests {
     /// `owner_printing_projection` pile of a face-up creature mutated over a face-down morph.
     ///
     /// Revert-failing: the layout-only check admitted (j) and (h). A merged arm that reads
-    /// the stored layout alone refuses (p). (a), (n), (k) and (p) are the positive rows; (q)
-    /// and (r) show the merged arm still refuses a face-down stash; (o) shows the CR 701.27d
+    /// the stored layout alone refuses (p) and (q2); (q) and (r) show it still refuses
+    /// a face-down component; (o) shows the CR 701.27d
     /// conjunct is kept.
     #[test]
     fn can_transform_requires_a_physical_other_face() {
@@ -1243,10 +1240,21 @@ mod tests {
             true,
         ));
         let stash_under = pile(&mut state, "Morph", false);
+        state
+            .objects
+            .get_mut(&stash_under)
+            .unwrap()
+            .component_face_down = Some(true);
         rows.push((
             "(q) Mutate pile, layout-less face under",
             stash_under,
             false,
+        ));
+        let incubator_under = pile(&mut state, "Incubator", false);
+        rows.push((
+            "(q2) Mutate pile, Incubator face under",
+            incubator_under,
+            true,
         ));
         let face_down_top = pile(&mut state, "Morph", true);
         state.objects.get_mut(&face_down_top).unwrap().face_down = true;

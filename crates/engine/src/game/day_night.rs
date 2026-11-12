@@ -24,6 +24,7 @@ pub(crate) fn face_disagrees_with(obj: &GameObject, designation: DayNight) -> bo
 /// CR 702.145b + CR 702.145c + CR 702.145e + CR 702.145f: transforms every permanent whose face
 /// disagrees with `designation` (`face_disagrees_with`). CR 701.27c + CR 712.9: a permanent that
 /// isn't a double-faced token or card is left as it is (`transform_permanent` refuses it).
+/// CR 702.26b + CR 702.26d: phased-out permanents neither exist nor are controlled.
 fn transform_disagreeing_permanents(
     state: &mut GameState,
     designation: DayNight,
@@ -34,10 +35,9 @@ fn transform_disagreeing_permanents(
         .iter()
         .copied()
         .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .is_some_and(|obj| face_disagrees_with(obj, designation))
+            state.objects.get(id).is_some_and(|obj| {
+                obj.is_phased_in_permanent() && face_disagrees_with(obj, designation)
+            })
         })
         .collect();
     for id in to_transform {
