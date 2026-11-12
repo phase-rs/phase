@@ -59,6 +59,9 @@ const NECRAVOLVER: &str = "Kicker {1}{G} and/or {W} (You may pay an additional {
 /// carries the quoted can-attack static.
 const PRISON_BARRICADE: &str = "Defender (This creature can't attack.)\nKicker {1}{W} (You may pay an additional {1}{W} as you cast this spell.)\nIf this creature was kicked, it enters with a +1/+1 counter on it and with \"This creature can attack as though it didn't have defender.\"";
 
+/// Hardened Scales {G} — full verbatim Oracle text.
+const HARDENED_SCALES: &str = "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.";
+
 fn pool(colors: &[ManaType]) -> Vec<ManaUnit> {
     colors
         .iter()
@@ -115,6 +118,49 @@ fn resolve_to_battlefield(runner: &mut GameRunner, id: ObjectId) {
 fn cast_with_kickers(runner: &mut GameRunner, id: ObjectId, decisions: &[bool]) {
     announce_cast_with_kickers(runner, id, decisions);
     resolve_to_battlefield(runner, id);
+}
+
+/// Drive a dual-kicked cast to the battlefield through priority passes,
+/// answering the CR 616.1 ordering prompt black-first. Any other prompt is a
+/// test bug. The lookup is by description so the test pins the offered order
+/// explicitly rather than assuming candidate positions.
+fn resolve_dual_kicked_to_battlefield(runner: &mut GameRunner, id: ObjectId) {
+    let mut ordered = false;
+    while runner.state().objects.get(&id).map(|o| o.zone) != Some(Zone::Battlefield) {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority to resolve the creature");
+            }
+            WaitingFor::ReplacementChoice {
+                player,
+                candidates,
+                kind,
+                ..
+            } => {
+                assert_eq!(*player, P0, "P0 orders its own entry replacements");
+                assert!(
+                    matches!(kind, ReplacementChoiceKind::Order),
+                    "two applicable mandatory replacements force ordering, got {kind:?}"
+                );
+                assert_eq!(candidates.len(), 2, "both kicked halves offered");
+                let black = candidates
+                    .iter()
+                    .position(|c| c.description.contains("{1}{B}"))
+                    .expect("the black rider is offered");
+                runner
+                    .act(GameAction::ChooseReplacement { index: black })
+                    .expect("order the black rider first");
+                ordered = true;
+            }
+            other => panic!("unexpected waiting state while resolving: {other:?}"),
+        }
+    }
+    assert!(
+        ordered,
+        "both kickers paid must force a CR 616.1 ordering choice"
+    );
 }
 
 fn counters(runner: &GameRunner, id: ObjectId) -> u32 {
@@ -270,45 +316,8 @@ fn degavolver_both_kickers_keep_all_counters_and_both_grants() {
         vec![KickerVariant::First, KickerVariant::Second]
     );
     // CR 616.1: both replacements apply to the same entry, so P0 orders them.
-    // Black first; the drain must still preserve the red half. The lookup is
-    // by description so the test pins the offered order explicitly rather
-    // than assuming candidate positions.
-    let mut ordered = false;
-    while runner.state().objects.get(&degavolver).map(|o| o.zone) != Some(Zone::Battlefield) {
-        match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } => {
-                runner
-                    .act(GameAction::PassPriority)
-                    .expect("pass priority to resolve the creature");
-            }
-            WaitingFor::ReplacementChoice {
-                player,
-                candidates,
-                kind,
-                ..
-            } => {
-                assert_eq!(*player, P0, "P0 orders its own entry replacements");
-                assert!(
-                    matches!(kind, ReplacementChoiceKind::Order),
-                    "two applicable mandatory replacements force ordering, got {kind:?}"
-                );
-                assert_eq!(candidates.len(), 2, "both kicked halves offered");
-                let black = candidates
-                    .iter()
-                    .position(|c| c.description.contains("{1}{B}"))
-                    .expect("the black rider is offered");
-                runner
-                    .act(GameAction::ChooseReplacement { index: black })
-                    .expect("order the black rider first");
-                ordered = true;
-            }
-            other => panic!("unexpected waiting state while resolving: {other:?}"),
-        }
-    }
-    assert!(
-        ordered,
-        "both kickers paid must force a CR 616.1 ordering choice"
-    );
+    // Black first; the drain must still preserve the red half.
+    resolve_dual_kicked_to_battlefield(&mut runner, degavolver);
     assert_eq!(
         counters(&runner, degavolver),
         3,
@@ -326,6 +335,78 @@ fn degavolver_both_kickers_keep_all_counters_and_both_grants() {
     assert!(
         has_regeneration_shield(&runner, degavolver),
         "the paid {{1}}{{B}} half must grant an activatable regenerate ability"
+    );
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "activation must resolve cleanly, got {:?}",
+        outcome.final_waiting_for()
+    );
+}
+
+/// Degavolver in P0's hand with Hardened Scales already on the battlefield;
+/// built, not yet cast. Scales is real parsed Oracle text, not a seeded
+/// replacement, and the pool still covers the base cost plus both kickers.
+fn degavolver_ready_with_hardened_scales() -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
+    let degavolver = scenario
+        .add_creature_to_hand_from_oracle(P0, "Degavolver", 1, 1, DEGAVOLVER)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::White],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        pool(&[
+            ManaType::White,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]),
+    );
+    (scenario.build(), degavolver)
+}
+
+/// DUAL-KICKER COALESCING (CR 122.6 + CR 614.5). Both kickers paid with
+/// Hardened Scales out: the (2, 1) same-kind contributions form ONE entry
+/// placement, so Scales applies once (3 + 1 = 4 counters), not once per
+/// kicker row (5). Both granted riders still land.
+///
+/// REVERT DISCRIMINATOR: without entry coalescing each kicker row opens its
+/// own replacement consultation and Scales fires twice, so the count is 5 —
+/// the assertion below fails while the 616.1 ordering and both grants still
+/// pass.
+#[test]
+fn degavolver_both_kickers_with_hardened_scales_place_four_counters() {
+    let (mut runner, degavolver) = degavolver_ready_with_hardened_scales();
+    announce_cast_with_kickers(&mut runner, degavolver, &[true, true]);
+    assert_eq!(
+        runner.state().objects[&degavolver].kickers_paid,
+        vec![KickerVariant::First, KickerVariant::Second]
+    );
+    resolve_dual_kicked_to_battlefield(&mut runner, degavolver);
+    assert_eq!(
+        counters(&runner, degavolver),
+        4,
+        "CR 122.6 + CR 614.5: one placement of 3 plus Scales' one — 5 means \
+         Scales applied per kicker row, 3 means it never applied"
+    );
+    assert!(
+        runner.state().objects[&degavolver].has_keyword(&Keyword::FirstStrike),
+        "the paid {{R}} half must still grant first strike"
+    );
+    let index = ability_index(&runner, degavolver, |e| {
+        matches!(e, Effect::Regenerate { .. })
+    });
+    let outcome = runner.activate(degavolver, index).resolve();
+    assert_eq!(outcome.life_delta(P0), -3);
+    assert!(
+        has_regeneration_shield(&runner, degavolver),
+        "the paid {{1}}{{B}} half must still grant an activatable regenerate ability"
     );
     assert!(
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),

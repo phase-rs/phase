@@ -4379,6 +4379,14 @@ pub(crate) fn deliver_replaced_zone_change(
                 Some(object_id)
             };
             counters_to_apply.extend(pending);
+            // CR 614.1c + CR 122.6 + CR 614.5: all entry contributions of one
+            // kind form ONE placement, so a counter replacement gets one
+            // opportunity — not one per contributing row. Dual-kicker
+            // Degavolver's (2, 1) rows consult Hardened Scales once as 3
+            // (4 total), not twice (5 total). Mirrors the copy-entry
+            // boundary, which coalesces before its own apply call.
+            let counters_to_apply =
+                crate::game::effects::counters::coalesce_entry_counters(counters_to_apply);
             if !counters_to_apply.is_empty()
                 && !crate::game::engine_replacement::apply_etb_counters(
                     state,
