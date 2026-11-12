@@ -1143,6 +1143,11 @@ pub(super) fn handle_unless_payment(
     {
         return handle_player_scope_token_unless_payment(state, waiting_for, pay, events);
     }
+    // CR 702.24a: the continuation of a repeated draw payment already begun is
+    // not a fresh choice: none of the checks on choosing to pay apply to it.
+    if payment_continuation_prompt(state).is_some_and(|prompt| prompt == waiting_for) {
+        return continue_repeated_draw_payment(state, pay, events);
+    }
     let WaitingFor::UnlessPayment {
         player,
         cost,
@@ -2122,13 +2127,17 @@ struct RepeatedDrawUnlessPayment {
 ///   replaying it reproduces the state;
 /// - a replacement that ends the game (Laboratory Maniac, CR 104.1);
 /// - a pause on a replacement choice, which parks the exact owed cursor under
-///   this owner ([`park_owed_instructions`]).
+///   this owner ([`park_owed_instructions`]);
+/// - the end of a work slice ([`WORK_SLICE_INSTRUCTIONS`] game-changing
+///   instructions): a continuation boundary. The exact owed cursor is parked
+///   under this owner as at a pause, and the payer is asked to continue
+///   ([`payment_continuation_prompt`]).
 ///
-/// No other limit applies inside the payment: no instruction is refused, none
-/// is left unperformed, and no player receives priority until the payment
-/// ends (CR 117.2e; CR 702.24a: partial payments aren't allowed). A
-/// replacement that changes the game on every draw (Notion Thief,
-/// Hullbreacher's Treasure) is performed once per owed instruction.
+/// No instruction is refused and none is left unperformed (CR 702.24a: partial
+/// payments aren't allowed), and no player receives priority until the payment
+/// ends (CR 117.2e): a replacement that changes the game on every draw (Notion
+/// Thief, Hullbreacher's Treasure) is performed once per owed instruction,
+/// one work slice per dispatch.
 fn pay_repeated_draw_unless_cost(
     state: &mut GameState,
     payment: RepeatedDrawUnlessPayment,
@@ -2137,6 +2146,7 @@ fn pay_repeated_draw_unless_cost(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let mut owed = owed.get();
+    let mut performed_in_slice = 0u32;
     // The game before the current instruction, kept while the previous one
     // emitted nothing a trigger can key on: only such an instruction can be a
     // fixed point.
@@ -2182,6 +2192,18 @@ fn pay_repeated_draw_unless_cost(
                 .is_some_and(|before| instruction_changed_nothing(before, state))
         {
             break;
+        }
+        // The work slice ends: a continuation boundary inside this owner. The
+        // exact owed cursor is parked as at a pause, the slice's triggers are
+        // collected, and the payer is asked only to continue; no player
+        // receives priority (CR 117.2e).
+        performed_in_slice += 1;
+        if owed > 0 && performed_in_slice == WORK_SLICE_INSTRUCTIONS {
+            park_owed_instructions(state, payment, owed, payment_event_start, events);
+            let prompt = payment_continuation_prompt(state)
+                .expect("the owed instructions were just parked under their owner");
+            state.waiting_for = prompt.clone();
+            return Ok(prompt);
         }
         quiet_before = quiet.then(|| state.clone());
     }
@@ -2234,6 +2256,99 @@ fn park_owed_instructions(
             })
         }),
     });
+}
+
+/// The most game-changing instructions one dispatch of a repeated draw payment
+/// performs: one work slice. An engine work limit, not a rule: it sits far
+/// above a library's cards (the payments a game produces end inside one
+/// slice, at a fixed point or a game end) and keeps a replacement that creates
+/// an object for every draw of an enormous count (Hullbreacher's Treasure)
+/// from growing the board without bound inside one dispatch.
+pub(crate) const WORK_SLICE_INSTRUCTIONS: u32 = 1_024;
+
+/// CR 702.24a + CR 117.2e: the continuation prompt of a repeated draw payment
+/// whose work slice ended with instructions still owed. It is derived from the
+/// parked owner ([`PendingCostMoveResume::CounterAdditionUnlessPayment`] with a
+/// repeated remainder), which keeps the exact owed cursor: the payer's
+/// unless-payment prompt for the instructions still owed. Its only answer is to
+/// continue ([`continue_repeated_draw_payment`]); the choice to pay was made
+/// when the payment began.
+pub(crate) fn payment_continuation_prompt(state: &GameState) -> Option<WaitingFor> {
+    let Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+        unpaid_suffix: Some(suffix),
+    }) = &state.pending_cost_move_resume
+    else {
+        return None;
+    };
+    let UnpaidCostRemainder::Repeated(owed) = &suffix.remainder else {
+        return None;
+    };
+    Some(WaitingFor::UnlessPayment {
+        player: suffix.payer,
+        repeat: Some(owed.get()),
+        cost: cost.clone(),
+        pending_effect: pending_effect.clone(),
+        trigger_event: trigger_event.clone(),
+        effect_description: effect_description.clone(),
+        remaining: remaining.clone(),
+    })
+}
+
+/// Whether the game waits on a repeated draw payment's continuation prompt.
+pub(crate) fn awaits_payment_continuation(state: &GameState) -> bool {
+    payment_continuation_prompt(state).is_some_and(|prompt| prompt == state.waiting_for)
+}
+
+/// CR 702.24a: answer a repeated draw payment's continuation prompt. "Partial
+/// payments aren't allowed": part of the payment is performed, so declining is
+/// not an answer; paying performs the next work slice of the owed instructions.
+fn continue_repeated_draw_payment(
+    state: &mut GameState,
+    pay: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    if !pay {
+        return Err(EngineError::InvalidAction(
+            "CR 702.24a: a repeated payment already begun is completed; partial payments \
+             aren't allowed"
+                .to_string(),
+        ));
+    }
+    let Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+        unpaid_suffix: Some(suffix),
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("a continuation prompt is derived from its parked owner");
+    };
+    let UnpaidCostRemainder::Repeated(owed) = suffix.remainder else {
+        unreachable!("a continuation prompt is derived from a repeated remainder");
+    };
+    let payment_event_start = events.len();
+    let waiting_for = pay_repeated_draw_unless_cost(
+        state,
+        RepeatedDrawUnlessPayment {
+            payer: suffix.payer,
+            cost,
+            pending_effect,
+            trigger_event,
+            effect_description,
+            remaining,
+        },
+        owed,
+        Some(payment_event_start),
+        events,
+    )?;
+    Ok(action_result(events, waiting_for))
 }
 
 /// CR 603.2c: whether the action ended at a prompt inside an unless payment of

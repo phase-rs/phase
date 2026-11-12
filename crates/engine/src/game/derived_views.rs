@@ -634,6 +634,21 @@ pub struct UnlessDrawCostView {
     pub cards: u32,
     /// Printed instructions the payment performs, each drawing `cards`.
     pub instructions: u32,
+    /// Whether the payer may still decline.
+    pub stage: UnlessDrawPaymentStage,
+}
+
+/// CR 702.24a: where a draw unless-payment prompt stands. "Either the entire set
+/// of costs is paid, or none of them is paid": once part of a repeated payment
+/// is performed, the prompt only continues it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnlessDrawPaymentStage {
+    /// The payer chooses whether to pay.
+    #[default]
+    Offered,
+    /// The payer chose to pay and part of the payment is performed; the prompt
+    /// continues the instructions still owed and cannot be declined.
+    Continuing,
 }
 
 /// CR 510.1a + CR 702.4b + CR 120.3a/b: display-only projection, at the current
@@ -2356,9 +2371,15 @@ fn unless_draw_cost(state: &GameState) -> Option<UnlessDrawCostView> {
     };
     let resolved =
         crate::game::quantity::resolve_quantity_with_targets(state, count, pending_effect);
+    let stage = if crate::game::engine_payment_choices::awaits_payment_continuation(state) {
+        UnlessDrawPaymentStage::Continuing
+    } else {
+        UnlessDrawPaymentStage::Offered
+    };
     Some(UnlessDrawCostView {
         cards: u32::try_from(resolved).unwrap_or(0),
         instructions: repeat.unwrap_or(1),
+        stage,
     })
 }
 
@@ -10238,6 +10259,7 @@ mod tests {
                 Some(UnlessDrawCostView {
                     cards: expected.0,
                     instructions: expected.1,
+                    stage: UnlessDrawPaymentStage::Offered,
                 })
             );
         }
@@ -10264,6 +10286,7 @@ mod tests {
             Some(UnlessDrawCostView {
                 cards: 4,
                 instructions: 1,
+                stage: UnlessDrawPaymentStage::Offered,
             })
         );
         // A non-draw unless cost has no draw view.

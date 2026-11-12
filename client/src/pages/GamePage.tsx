@@ -208,6 +208,7 @@ import {
   stripCostPrefix,
   stripLoyaltyCostPrefix,
   unlessDrawCostLabel,
+  unlessPaymentCanBeDeclined,
 } from "../viewmodel/costLabel.ts";
 import { renderDescription } from "../utils/description.ts";
 import { LoyaltyBadge } from "../components/ui/LoyaltyBadge.tsx";
@@ -4008,14 +4009,16 @@ function UnlessPaymentPanel() {
                 size="sm"
               />
             </button>
-            <button
-              onClick={() =>
-                dispatch({ type: "PayUnlessCost", data: { pay: false } })
-              }
-              className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
-            >
-              {t("gamePage.unlessPayment.dontPay")}
-            </button>
+            {unlessPaymentCanBeDeclined(drawCost) && (
+              <button
+                onClick={() =>
+                  dispatch({ type: "PayUnlessCost", data: { pay: false } })
+                }
+                className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
+              >
+                {t("gamePage.unlessPayment.dontPay")}
+              </button>
+            )}
           </div>
         </div>
       </motion.div>

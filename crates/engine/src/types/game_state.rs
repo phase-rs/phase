@@ -16576,6 +16576,19 @@ impl GameState {
     /// smuggle an out-of-range actor/owner through serde and into the ordinary
     /// action boundary.
     fn validate_payment_transaction(&self) -> Result<(), String> {
+        // CR 702.24a: an unless-payment prompt saved over a parked repeated
+        // draw payment is that payment's continuation, derived from its owner
+        // and its exact owed cursor; any other prompt there would be answered
+        // as a fresh choice over a payment already begun.
+        if matches!(self.waiting_for, WaitingFor::UnlessPayment { .. })
+            && crate::game::engine_payment_choices::payment_continuation_prompt(self)
+                .is_some_and(|prompt| prompt != self.waiting_for)
+        {
+            return Err(
+                "unless-payment prompt does not match the repeated payment parked under it"
+                    .to_string(),
+            );
+        }
         let Some(transaction) = self.payment_transaction.as_deref() else {
             return Ok(());
         };
@@ -16980,54 +16993,6 @@ pub(crate) fn recovered_prompt_names_live_objects(probe: &GameState) -> bool {
     }
 }
 
-/// CR 400.7 + CR 800.4a: rebuild a parked object-naming prompt on the board a
-/// departure left: every named object that left the zone its prompt draws from
-/// (a departing owner's objects leave the game) is dropped, so the prompt offers
-/// only what the board still holds. Whether the rest can still meet the
-/// prompt's count is [`recovered_prompt_names_live_objects`].
-pub(crate) fn drop_prompt_choices_that_left(state: &mut GameState) {
-    let retained: Option<Vec<ObjectId>> = match &state.waiting_for {
-        WaitingFor::DiscardChoice { player, cards, .. } => {
-            let hand = state.players.iter().find(|seat| seat.id == *player);
-            Some(
-                cards
-                    .iter()
-                    .copied()
-                    .filter(|card| hand.is_some_and(|seat| seat.hand.contains(card)))
-                    .collect(),
-            )
-        }
-        WaitingFor::PayCost { kind, choices, .. } => {
-            let zones = pay_cost_choice_zones(kind);
-            Some(
-                choices
-                    .iter()
-                    .copied()
-                    .filter(|id| object_is_in_zones(state, *id, zones))
-                    .collect(),
-            )
-        }
-        WaitingFor::EffectZoneChoice { cards, zone, .. } => Some(
-            cards
-                .iter()
-                .copied()
-                .filter(|id| object_is_in_zones(state, *id, std::slice::from_ref(zone)))
-                .collect(),
-        ),
-        _ => None,
-    };
-    let Some(retained) = retained else {
-        return;
-    };
-    match &mut state.waiting_for {
-        WaitingFor::PayCost { choices, .. } => *choices = retained,
-        WaitingFor::DiscardChoice { cards, .. } | WaitingFor::EffectZoneChoice { cards, .. } => {
-            *cards = retained
-        }
-        _ => {}
-    }
-}
-
 /// CR 400.7: whether `id` is still an object in one of `zones`.
 fn object_is_in_zones(probe: &GameState, id: ObjectId, zones: &[Zone]) -> bool {
     probe
@@ -17043,9 +17008,11 @@ fn pay_cost_choice_zones(kind: &PayCostKind) -> &[Zone] {
         PayCostKind::Discard | PayCostKind::Reveal { .. } => &[Zone::Hand],
         // CR 701.21a + CR 701.26a: sacrificed and tapped permanents (and the
         // returned, exiled and unattached ones, and those counters are removed
-        // from) are on the battlefield. Whether each is still eligible (an
-        // untapped creature, a matching filter) is the answer handler's check,
-        // which the admission probe runs.
+        // from) are on the battlefield. Eligibility beyond the zone (an untapped
+        // creature, a matching filter) is fixed by the cost authority when it
+        // builds the prompt; a departure, the one action that can change it
+        // while the prompt is parked, drops the checkpoint instead
+        // (`payment_transaction::departure_can_change_parked_prompt`).
         PayCostKind::Sacrifice
         | PayCostKind::ReturnToHand
         | PayCostKind::ExilePermanent { .. }

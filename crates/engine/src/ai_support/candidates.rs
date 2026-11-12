@@ -2924,18 +2924,20 @@ pub fn candidate_actions_broad_with_probe(
             .collect(),
         // CR 118.12: "Counter unless pays" — opponent chooses pay or decline.
         WaitingFor::UnlessPayment { player, .. } => {
-            vec![
-                candidate(
-                    GameAction::PayUnlessCost { pay: true },
-                    TacticalClass::Selection,
-                    Some(*player),
-                ),
-                candidate(
+            let mut answers = vec![candidate(
+                GameAction::PayUnlessCost { pay: true },
+                TacticalClass::Selection,
+                Some(*player),
+            )];
+            // CR 702.24a: a repeated payment already begun only continues.
+            if !crate::game::engine_payment_choices::awaits_payment_continuation(state) {
+                answers.push(candidate(
                     GameAction::PayUnlessCost { pay: false },
                     TacticalClass::Selection,
                     Some(*player),
-                ),
-            ]
+                ));
+            }
+            answers
         }
         // CR 118.12a: Disjunctive unless-cost — paying player chooses **which**
         // sub-cost (by index) or declines all. One `ChooseUnlessCostBranch`

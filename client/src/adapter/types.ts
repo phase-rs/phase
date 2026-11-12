@@ -4482,10 +4482,15 @@ export interface SharedPilesView {
  * themselves (CLAUDE.md: engine owns all logic). Mirrors
  * `engine::game::derived_views::DerivedViews`.
  */
+/** Mirrors `engine::game::derived_views::UnlessDrawPaymentStage`. */
+export type UnlessDrawPaymentStage = "Offered" | "Continuing";
+
 /** Mirrors `engine::game::derived_views::UnlessDrawCostView`. */
 export interface UnlessDrawCostView {
   cards: number;
   instructions: number;
+  /** "Continuing": part of the payment is performed, so it cannot be declined. */
+  stage: UnlessDrawPaymentStage;
 }
 
 export interface DerivedViews {

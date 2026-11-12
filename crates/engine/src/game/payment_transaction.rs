@@ -535,9 +535,23 @@ pub(crate) fn settle_after_outside_action(
     pre_action: Option<&GameState>,
     departing: PlayerId,
 ) -> Result<Option<ActionResult>, EngineError> {
-    let Some(transaction) = state.payment_transaction.as_deref().cloned() else {
+    let Some(mut transaction) = state.payment_transaction.as_deref().cloned() else {
         return Ok(None);
     };
+
+    // A checkpoint parked on a prompt outside the checkpoint contract
+    // ([`departure_can_change_parked_prompt`]) is dropped: the payment
+    // re-materializes on the departed base below, as on main.
+    if transaction
+        .recovered
+        .as_deref()
+        .is_some_and(|checkpoint| departure_can_change_parked_prompt(&checkpoint.state))
+    {
+        transaction.recovered = None;
+        if let Some(live) = state.payment_transaction.as_deref_mut() {
+            live.recovered = None;
+        }
+    }
 
     // CR 614.17a + CR 118.12: a live checkpoint already holds the accepted
     // prefix and its cursor. Mirror this departure onto it; replaying the root
@@ -559,16 +573,6 @@ pub(crate) fn settle_after_outside_action(
         // failed recovery; the caller's failed-recovery boundary retires the
         // checkpoint instead of keeping one from before the departure.
         resettle_parked_replacement_after_departure(&mut shadow, &mut events, &mut log_entries)?;
-        if !rebuild_parked_object_prompt_after_departure(&mut shadow) {
-            return settle_replay_outcome(
-                state,
-                transaction,
-                ReplayOutcome::Failed {
-                    recorded_failure: recorded_failure(&shadow),
-                },
-            )
-            .map(Some);
-        }
         shadow.payment_transaction_replay = false;
         return settle_recovered_outcome(state, transaction, shadow, events, log_entries).map(Some);
     }
@@ -585,7 +589,10 @@ pub(crate) fn settle_after_outside_action(
         }
     }
 
-    // No pre-action base: the departure-adjusted replay is the fallback.
+    // No preserved prefix (no pre-action base, or a parked prompt outside the
+    // checkpoint contract): the departure-adjusted replay is the fallback. It
+    // re-materializes the payment on the departed base, where the cost
+    // authority derives each prompt afresh.
     let outcome = match replay(state, &transaction) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -622,6 +629,9 @@ fn settle_accepted_prefix_after_departure(
     else {
         return Ok(None);
     };
+    if departure_can_change_parked_prompt(&shadow) {
+        return Ok(None);
+    }
     shadow.payment_transaction = None;
     shadow.payment_transaction_replay = true;
     shadow.payment_transaction_just_handled = false;
@@ -638,16 +648,6 @@ fn settle_accepted_prefix_after_departure(
     // recovery, as on the checkpoint branch: the caller's failed-recovery
     // boundary retires the payment instead of replaying on the changed base.
     resettle_parked_replacement_after_departure(&mut shadow, &mut events, &mut log_entries)?;
-    if !rebuild_parked_object_prompt_after_departure(&mut shadow) {
-        return settle_replay_outcome(
-            state,
-            transaction.clone(),
-            ReplayOutcome::Failed {
-                recorded_failure: recorded_failure(&shadow),
-            },
-        )
-        .map(Some);
-    }
     shadow.payment_transaction_replay = false;
     settle_recovered_outcome(state, transaction.clone(), shadow, events, log_entries).map(Some)
 }
@@ -948,17 +948,22 @@ fn resettle_parked_replacement_after_departure(
     Ok(())
 }
 
-/// CR 400.7 + CR 800.4a + CR 614.17a: a departure removes the departed
-/// player's objects, not the payment. A parked object-naming prompt (a discard,
-/// a `PayCost` selection, an effect-cost zone choice) is rebuilt on the
-/// departed board without the objects that left, and the accepted prefix is
-/// kept. Returns false when the rest can no longer meet the prompt's count: the
-/// cost can no longer be paid, and the caller settles it as the failed payment
-/// a replay on the departed base reaches (the printed continuation for an
-/// unpaid cost runs).
-fn rebuild_parked_object_prompt_after_departure(shadow: &mut GameState) -> bool {
-    crate::types::game_state::drop_prompt_choices_that_left(shadow);
-    crate::types::game_state::recovered_prompt_names_live_objects(shadow)
+/// The checkpoint contract. A departure keeps a staged payment's accepted
+/// prefix on a checkpoint only while the prompt it is parked on is one another
+/// player's departure cannot change: a replacement choice (re-settled through
+/// the replacement authority), a choice among the payer's own cards (CR 400.3:
+/// a hand or graveyard holds only its owner's cards), or a prompt that names no
+/// object. A `PayCost` selection among battlefield permanents is outside it:
+/// which permanents it may list depends on control and characteristics that
+/// effects of other players grant, and those end when their player leaves
+/// (CR 800.4a). No printed card reaches that shape: the five resolution-time
+/// `PayCost { Composite }` nodes in the card data are all `[Mana, PayLife]`.
+/// The guard routes it to the behaviour main has for every staged payment: no
+/// checkpoint, and the payment re-materializes on the departed base, where the
+/// cost authority derives the prompt and its eligible objects afresh and a
+/// cost that can no longer be paid fails whole.
+fn departure_can_change_parked_prompt(shadow: &GameState) -> bool {
+    matches!(shadow.waiting_for, WaitingFor::PayCost { .. })
 }
 
 /// CR 104.3a: a concession must stand even when the staged payment's recovery or

@@ -18,8 +18,7 @@ use std::sync::Arc;
 use engine::game::ledger::resolve_and_apply_cards_drawn;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, DrawReplacementScope, Effect, EffectKind,
-    ManaContribution, ManaProduction, QuantityExpr, ReplacementDefinition, TargetFilter,
+    AbilityCost, Effect, EffectKind, ManaContribution, ManaProduction, QuantityExpr, TargetFilter,
 };
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::counter::CounterType;
@@ -32,7 +31,6 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::replacements::ReplacementEvent;
 use engine::types::resolved_commands::{
     ResolvedLedgerEdit, ResolvedLedgerEditCommand, ResolvedRulesCommand,
 };
@@ -2196,40 +2194,295 @@ fn treasures_of(runner: &GameRunner, player: PlayerId) -> usize {
         .count()
 }
 
-/// CR 702.24a + CR 118.11: "for each age counter on it" — a replacement that
-/// creates an object for every draw (Hullbreacher) changes the game on every
-/// instruction and never reaches a fixed point, yet a count of 1,025 is paid in
-/// full: every draw becomes a Treasure for P1 and the upkeep is paid.
+/// One work slice of a repeated draw payment (the engine's
+/// `WORK_SLICE_INSTRUCTIONS`).
+const WORK_SLICE: u32 = 1_024;
+
+/// How many times `events` report Psychic Vortex's upkeep ability resolving.
+fn upkeep_resolutions(events: &[GameEvent], vortex: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Sacrifice,
+                    source_id,
+                    ..
+                } if *source_id == vortex
+            )
+        })
+        .count()
+}
+
+/// The game waits on P0's continuation of the payment: the unless-payment
+/// prompt for exactly `owed` instructions, with that cursor parked under the
+/// payment's owner. Continuing is the only answer: declining is refused and
+/// leaves the game unchanged, and no other player may act (CR 117.2e).
+fn assert_continuation_boundary(runner: &mut GameRunner, owed: u32, context: &str) {
+    let WaitingFor::UnlessPayment { player, repeat, .. } = &runner.state().waiting_for else {
+        panic!(
+            "{context}: the payer is asked to continue, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        (*player, *repeat),
+        (P0, Some(owed)),
+        "{context}: owed cursor"
+    );
+    assert_eq!(
+        parked_unpaid_suffix(runner),
+        owed_instructions(owed),
+        "{context}: the owner holds the same cursor"
+    );
+    let answers: Vec<GameAction> = engine::ai_support::legal_actions(runner.state())
+        .into_iter()
+        .filter(|action| {
+            matches!(
+                action,
+                GameAction::PayUnlessCost { .. } | GameAction::PassPriority
+            )
+        })
+        .collect();
+    assert_eq!(
+        answers,
+        vec![GameAction::PayUnlessCost { pay: true }],
+        "{context}: continuing is the only answer"
+    );
+    let before = runner.state().clone();
+    let refused = runner.act(GameAction::PayUnlessCost { pay: false });
+    assert!(
+        matches!(
+            &refused,
+            Err(engine::game::engine::EngineError::InvalidAction(reason))
+                if reason.contains("partial payments aren't allowed")
+        ),
+        "{context}: declining is refused: {refused:?}"
+    );
+    assert_eq!(
+        runner.state().waiting_for,
+        before.waiting_for,
+        "{context}: the refused decline leaves the prompt"
+    );
+    assert_eq!(parked_unpaid_suffix(runner), owed_instructions(owed));
+    engine::game::engine::apply(runner.state_mut(), P1, GameAction::PassPriority)
+        .expect_err("no other player has priority inside the payment");
+}
+
+/// CR 702.24a + CR 117.2e + CR 118.11: a replacement that creates an object
+/// for every draw (Hullbreacher) changes the game on every instruction and
+/// never reaches a fixed point. A payment of two work slices and one more
+/// instruction is performed one slice per dispatch: at each boundary the exact
+/// owed cursor stays with the payment's owner, the payer can only continue,
+/// and no player receives priority. Every draw becomes a Treasure for P1 and
+/// the upkeep resolves exactly once.
 #[test]
-fn a_payment_past_a_thousand_instructions_is_performed_in_full() {
-    const AGE: u32 = 1_025;
+fn a_payment_past_a_work_slice_continues_at_a_boundary_without_priority() {
+    const AGE: u32 = 2 * WORK_SLICE + 1;
     let (mut runner, vortex, ()) = vortex_board(AGE - 1, &STAGED_LIBRARY, |scenario| {
         scenario.add_creature_from_oracle(P1, "Hullbreacher", 3, 2, HULLBREACHER_ORACLE);
     });
     advance_through_upkeep(&mut runner);
     assert_draw_cost_prompt(&runner, AGE as usize, 1);
     let before = ZoneSizes::of(&runner, P0);
+    let mut resolutions = 0;
+    for slice in 1..=2 {
+        let result = runner
+            .act(GameAction::PayUnlessCost { pay: true })
+            .expect("paying is never refused");
+        resolutions += upkeep_resolutions(&result.events, vortex);
+        assert_eq!(
+            treasures_of(&runner, P1),
+            (slice * WORK_SLICE) as usize,
+            "slice {slice}: one Treasure per instruction performed"
+        );
+        assert_continuation_boundary(
+            &mut runner,
+            AGE - slice * WORK_SLICE,
+            &format!("after slice {slice}"),
+        );
+    }
+    assert_eq!(resolutions, 0, "the upkeep waits for the whole payment");
     let result = runner
         .act(GameAction::PayUnlessCost { pay: true })
-        .expect("a bounded payment is never refused");
+        .expect("the last instruction is paid");
     assert_eq!(
         treasures_of(&runner, P1),
         AGE as usize,
-        "one Treasure per instruction"
+        "every age counter is paid"
+    );
+    assert_eq!(
+        upkeep_resolutions(&result.events, vortex),
+        1,
+        "the upkeep resolves exactly once"
     );
     assert_eq!(ZoneSizes::of(&runner, P0), before, "P0 draws nothing");
-    assert!(
-        upkeep_ability_resolved(&result.events, vortex),
-        "the upkeep is paid"
-    );
     assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
     assert!(
-        !result
-            .events
-            .iter()
-            .any(|event| matches!(event, GameEvent::ResolutionHalted { .. })),
-        "a bounded payment is not halted"
+        runner.state().pending_cost_move_resume.is_none(),
+        "nothing is owed"
     );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "priority follows the paid upkeep: {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 702.24a: a payment parked at a work-slice boundary survives a checked
+/// save and restore with its exact owed cursor, and continues to the end. A
+/// save whose prompt disagrees with the cursor its owner holds is refused.
+#[test]
+fn a_payment_at_a_work_slice_boundary_survives_a_checked_restore() {
+    const AGE: u32 = WORK_SLICE + 2;
+    let (mut runner, vortex, ()) = vortex_board(AGE - 1, &STAGED_LIBRARY, |scenario| {
+        scenario.add_creature_from_oracle(P1, "Hullbreacher", 3, 2, HULLBREACHER_ORACLE);
+    });
+    advance_through_upkeep(&mut runner);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("paying is never refused");
+    assert_continuation_boundary(&mut runner, 2, "before the save");
+
+    let restore = |state: &GameState| {
+        let saved = serde_json::to_string(&PersistedGameState::Raw(Box::new(state.clone())))
+            .expect("the boundary serializes");
+        serde_json::from_str::<PersistedGameState>(&saved)
+            .expect("the save decodes")
+            .into_game_state()
+    };
+    let mut forged = runner.state().clone();
+    let WaitingFor::UnlessPayment { repeat, .. } = &mut forged.waiting_for else {
+        panic!("reach guard: the continuation prompt is open");
+    };
+    *repeat = Some(1);
+    let refused = restore(&forged);
+    assert!(
+        refused.as_ref().is_err_and(|error| error
+            .to_string()
+            .contains("repeated payment parked under it")),
+        "a prompt that disagrees with its owner's cursor is refused: {:?}",
+        refused.as_ref().err()
+    );
+
+    *runner.state_mut() = restore(runner.state()).expect("the boundary restores");
+    assert_continuation_boundary(&mut runner, 2, "after the restore");
+    let result = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the restored payment continues");
+    assert_eq!(treasures_of(&runner, P1), AGE as usize);
+    assert_eq!(upkeep_resolutions(&result.events, vortex), 1);
+    assert!(
+        runner.state().pending_cost_move_resume.is_none(),
+        "nothing is owed"
+    );
+}
+
+/// Three players: P0's Psychic Vortex at one work slice plus two age counters
+/// and P1's Hullbreacher. P0 pays and the first slice ends at its boundary.
+fn three_player_boundary() -> (GameRunner, ObjectId) {
+    const AGE: u32 = WORK_SLICE + 2;
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::Untap);
+    scenario.with_library_top(P0, &STAGED_LIBRARY);
+    let vortex = scenario
+        .add_enchantment_from_oracle(P0, "Psychic Vortex", PSYCHIC_VORTEX_ORACLE)
+        .id();
+    scenario.add_creature_from_oracle(P1, "Hullbreacher", 3, 2, HULLBREACHER_ORACLE);
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&vortex)
+        .expect("Psychic Vortex exists")
+        .counters
+        .insert(CounterType::Age, AGE - 1);
+    advance_through_upkeep(&mut runner);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("paying is never refused");
+    assert_continuation_boundary(&mut runner, 2, "three players");
+    (runner, vortex)
+}
+
+fn concede(runner: &mut GameRunner, player: PlayerId) {
+    engine::game::engine::apply(
+        runner.state_mut(),
+        player,
+        GameAction::Concede { player_id: player },
+    )
+    .expect("a player can concede at any time");
+}
+
+/// CR 104.3a + CR 702.24a: another player's concession at a work-slice
+/// boundary leaves the payment where it is: the same continuation, the same
+/// owed cursor, and the payment completes.
+#[test]
+fn another_players_concession_at_a_work_slice_boundary_keeps_the_payment() {
+    let (mut runner, vortex) = three_player_boundary();
+    concede(&mut runner, PlayerId(2));
+    assert_continuation_boundary(&mut runner, 2, "after the concession");
+    let result = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the payment continues");
+    assert_eq!(treasures_of(&runner, P1), (WORK_SLICE + 2) as usize);
+    assert_eq!(upkeep_resolutions(&result.events, vortex), 1);
+}
+
+/// CR 104.3a + CR 800.4a: the payer's own concession at a work-slice boundary
+/// takes the owed instructions with it: no payment and no continuation prompt
+/// remain, and a living player has priority.
+#[test]
+fn the_payers_concession_at_a_work_slice_boundary_retires_the_payment() {
+    let (mut runner, _) = three_player_boundary();
+    concede(&mut runner, P0);
+    let state = runner.state();
+    assert!(state.players[P0.0 as usize].is_eliminated);
+    assert!(state.pending_cost_move_resume.is_none(), "nothing is owed");
+    let WaitingFor::Priority { player } = state.waiting_for else {
+        panic!("a living player has priority: {:?}", state.waiting_for);
+    };
+    assert_ne!(player, P0);
+    engine::game::engine::apply(runner.state_mut(), player, GameAction::PassPriority)
+        .expect("the game goes on");
+}
+
+/// CR 603.2c: a payment that crosses a work-slice boundary queues each draw's
+/// trigger exactly once: one work slice's Psychosis Crawler triggers at the
+/// boundary, and one per age counter when the payment ends.
+#[test]
+fn a_payment_across_a_work_slice_boundary_queues_each_draw_trigger_once() {
+    const AGE: u32 = WORK_SLICE + 6;
+    let names = library_names(AGE as usize + 50);
+    let library: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (mut runner, vortex, crawler) = vortex_board(AGE - 1, &library, |scenario| {
+        let crawler = scenario
+            .add_creature(P0, "Psychosis Crawler", 1, 1)
+            .from_oracle_text(PSYCHOSIS_CRAWLER_ORACLE)
+            .id();
+        keep_psychosis_crawler_alive(scenario);
+        crawler
+    });
+    advance_through_upkeep(&mut runner);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the payment is legal");
+    assert_continuation_boundary(&mut runner, 6, "after the first slice");
+    assert_eq!(
+        queued_triggers_from(&runner, crawler),
+        WORK_SLICE as usize,
+        "one trigger per draw of the first slice"
+    );
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the payment continues");
+    assert_eq!(
+        queued_triggers_from(&runner, crawler),
+        AGE as usize,
+        "one trigger per draw of the whole payment"
+    );
+    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
 }
 
 /// Laboratory Maniac, verbatim Oracle text.
@@ -2258,86 +2511,6 @@ fn laboratory_maniac_wins_a_payment_past_a_thousand_instructions() {
         ),
         "P0 wins instead of drawing: {:?}",
         runner.state().waiting_for
-    );
-}
-
-/// A mandatory replacement of its controller's draw with a gain of 1 life
-/// ("If you would draw a card, you gain 1 life instead"). Synthetic: the
-/// nearest printed card is Words of Worship ("The next time you would draw a
-/// card this turn, you gain 5 life instead"), a one-shot shield; no printed
-/// card replaces every draw with life. Each replaced draw changes the game
-/// without growing the board.
-fn install_every_draw_gains_life(runner: &mut GameRunner, holder: ObjectId) {
-    let replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
-        .draw_scope(DrawReplacementScope::IndividualDraw)
-        .execute(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::GainLife {
-                amount: QuantityExpr::Fixed { value: 1 },
-                player: TargetFilter::Controller,
-            },
-        ));
-    let object = runner
-        .state_mut()
-        .objects
-        .get_mut(&holder)
-        .expect("the replacement's holder exists");
-    Arc::make_mut(&mut object.base_replacement_definitions).push(replacement.clone());
-    object.replacement_definitions.push(replacement);
-}
-
-/// CR 702.24a + CR 117.2e: a payment whose replacement changes the game on
-/// every draw is performed for every age counter inside its resolution, past
-/// the 50,000-event ceiling the auto-pass drive applies between resolutions
-/// (three events per instruction). The payment is neither refused, halted nor
-/// settled partly paid, and no player receives priority before the upkeep
-/// resolves.
-#[test]
-fn a_payment_past_the_auto_pass_event_ceiling_completes_in_its_resolution() {
-    const AGE: u32 = 16_668;
-    let (mut runner, vortex, holder) = vortex_board(AGE - 1, &STAGED_LIBRARY, |scenario| {
-        scenario
-            .add_creature(P0, "Synthetic Life Source", 1, 1)
-            .id()
-    });
-    install_every_draw_gains_life(&mut runner, holder);
-    advance_through_upkeep(&mut runner);
-    assert_draw_cost_prompt(&runner, AGE as usize, 1);
-    let life_before = runner.life(P0);
-    let before = ZoneSizes::of(&runner, P0);
-    let paid = runner
-        .act(GameAction::PayUnlessCost { pay: true })
-        .expect("paying is never refused");
-    assert!(
-        paid.events.len() > 50_000,
-        "reach guard: the payment's events pass the auto-pass ceiling: {}",
-        paid.events.len()
-    );
-    assert!(
-        !paid
-            .events
-            .iter()
-            .any(|event| matches!(event, GameEvent::ResolutionHalted { .. })),
-        "the payment is not halted"
-    );
-    assert_eq!(
-        (runner.life(P0) - life_before) as u32,
-        AGE,
-        "every age counter is paid in this action"
-    );
-    assert_eq!(
-        ZoneSizes::of(&runner, P0),
-        before,
-        "every draw was replaced"
-    );
-    assert!(
-        upkeep_ability_resolved(&paid.events, vortex),
-        "the upkeep is paid"
-    );
-    assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
-    assert!(
-        runner.state().pending_cost_move_resume.is_none(),
-        "nothing is owed"
     );
 }
 
@@ -2415,13 +2588,14 @@ fn a_quiet_instruction_that_uses_up_a_shield_is_not_a_fixed_point() {
 const HUMILITY_ORACLE: &str =
     "All creatures lose all abilities and have base power and toughness 1/1.";
 
-/// Three players: P0's Psychic Vortex at 1,025 age counters with Stinkweed Imp
-/// in P0's graveyard, P1's Hullbreacher muted by P2's Humility. P0 pays, and
+/// Three players: P0's Psychic Vortex at one work slice plus two age counters
+/// with Stinkweed Imp in P0's graveyard, P1's Hullbreacher muted by P2's
+/// Humility. P0 pays, and
 /// the first draw parks on Dredge (the only replacement that applies). P2
 /// concedes, so Humility leaves the game (CR 800.4a) and Hullbreacher applies
 /// again while the payment is parked.
 fn hullbreacher_unmuted_mid_payment() -> (GameRunner, ObjectId, ObjectId) {
-    const AGE: u32 = 1_025;
+    const AGE: u32 = WORK_SLICE + 2;
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::Untap);
     scenario.with_library_top(P0, &STAGED_LIBRARY);
@@ -2469,24 +2643,33 @@ fn hullbreacher_unmuted_mid_payment() -> (GameRunner, ObjectId, ObjectId) {
     (runner, vortex, hullbreacher)
 }
 
-/// CR 118.12 + CR 702.24a + CR 800.4a: after the departure, accepting Dredge
+/// CR 702.24a + CR 117.2e + CR 800.4a: after the departure, accepting Dredge
 /// replaces the parked draw, and every later instruction is replaced by
-/// Hullbreacher: the payment is performed in full and the upkeep is paid.
+/// Hullbreacher. The resumed suffix is one work slice and one more instruction:
+/// it runs to the slice boundary, where the payer continues, and the payment
+/// is performed in full.
 #[test]
 fn accepting_dredge_after_a_departure_unmutes_hullbreacher_completes_the_payment() {
     let (mut runner, vortex, _) = hullbreacher_unmuted_mid_payment();
-    let result = runner
+    let resumed = runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("accepting Dredge is never refused");
     assert_eq!(
         treasures_of(&runner, P1),
-        1_024,
-        "every later draw is a Treasure"
+        WORK_SLICE as usize,
+        "the resumed suffix performs one work slice"
     );
-    assert!(
-        upkeep_ability_resolved(&result.events, vortex),
-        "the upkeep is paid"
+    assert_eq!(upkeep_resolutions(&resumed.events, vortex), 0);
+    assert_continuation_boundary(&mut runner, 1, "the resumed suffix");
+    let result = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the payment continues");
+    assert_eq!(
+        treasures_of(&runner, P1),
+        (WORK_SLICE + 1) as usize,
+        "every draw after the Dredge is a Treasure"
     );
+    assert_eq!(upkeep_resolutions(&result.events, vortex), 1);
     assert_eq!(zone_of(&runner, vortex), Zone::Battlefield);
     assert!(
         runner.state().pending_cost_move_resume.is_none(),
@@ -2496,8 +2679,8 @@ fn accepting_dredge_after_a_departure_unmutes_hullbreacher_completes_the_payment
 
 /// CR 616.1 + CR 702.24a + CR 800.4a: after the same departure, declining
 /// Dredge lets Hullbreacher replace the draw; every later draw again offers
-/// Dredge and Hullbreacher, and choosing Hullbreacher each time pays all 1,025
-/// instructions with no answer refused.
+/// Dredge and Hullbreacher, and choosing Hullbreacher each time pays every
+/// instruction with no answer refused.
 #[test]
 fn declining_dredge_after_a_departure_unmutes_hullbreacher_completes_the_payment() {
     let (mut runner, vortex, hullbreacher) = hullbreacher_unmuted_mid_payment();
@@ -2518,8 +2701,12 @@ fn declining_dredge_after_a_departure_unmutes_hullbreacher_completes_the_payment
             .events;
         orders += 1;
     }
-    assert_eq!(orders, 1_024, "each later draw asks for an order");
-    assert_eq!(treasures_of(&runner, P1), 1_025, "every draw is a Treasure");
+    assert_eq!(orders, WORK_SLICE + 1, "each later draw asks for an order");
+    assert_eq!(
+        treasures_of(&runner, P1),
+        (WORK_SLICE + 2) as usize,
+        "every draw is a Treasure"
+    );
     assert!(
         upkeep_ability_resolved(&events, vortex),
         "the upkeep is paid"

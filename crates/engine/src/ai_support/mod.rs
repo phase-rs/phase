@@ -2377,6 +2377,12 @@ pub fn auto_pass_recommended_for_viewer(
         && auto_pass_recommended(state, actions)
 }
 
+/// CR 702.24a: whether the open unless-payment prompt continues a repeated
+/// payment already begun, so paying is its only answer.
+pub fn unless_payment_only_continues(state: &GameState) -> bool {
+    crate::game::engine_payment_choices::awaits_payment_continuation(state)
+}
+
 /// Returns the legal actions for the current game state.
 ///
 /// Mana actions are omitted from the flat list returned by [`legal_actions`].

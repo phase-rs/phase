@@ -822,3 +822,12 @@ export function unlessDrawCostLabel(draw: UnlessDrawCostView): string {
     : i18n.t("game:gamePage.cost.drawCount", { count: draw.cards });
   return draw.instructions > 1 ? `${instruction} × ${draw.instructions}` : instruction;
 }
+
+/**
+ * CR 702.24a: whether the open unless-payment prompt offers a decline. The
+ * engine reports the stage (`derived.unless_draw_cost.stage`): a repeated draw
+ * payment that is already partly performed only continues.
+ */
+export function unlessPaymentCanBeDeclined(draw: UnlessDrawCostView | undefined): boolean {
+  return draw?.stage !== "Continuing";
+}

@@ -2062,10 +2062,12 @@ pub fn fallback_action(
             ..
         } => Some(GameAction::DecideOptionalEffect { accept: false }),
 
-        // Unless payment: pay a zero-Mana Counter cost (CR 118.5);
-        // decline every other unless payment.
+        // Unless payment: pay a zero-Mana Counter cost (CR 118.5) and
+        // continue a repeated payment already begun (CR 702.24a: its prompt
+        // has no decline); decline every other unless payment.
         WaitingFor::UnlessPayment { player, .. } => Some(GameAction::PayUnlessCost {
-            pay: zero_counter_payment_owed_by(state, *player),
+            pay: zero_counter_payment_owed_by(state, *player)
+                || engine::ai_support::unless_payment_only_continues(state),
         }),
 
         WaitingFor::ActivationCostOneOfChoice { .. } => {

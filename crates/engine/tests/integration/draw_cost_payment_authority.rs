@@ -2424,9 +2424,10 @@ fn a_departure_that_removes_a_parked_candidate_keeps_a_restorable_checkpoint() {
     assert!(matches!(restored.waiting_for, WaitingFor::Priority { .. }));
 }
 
-/// `recovered_dredge_checkpoint` with `second` as the cost's second leg: leg 1
-/// declines Dredge, leg 2 opens its own prompt, and P2's concession parks that
-/// prompt on a recovery checkpoint. P0 has a second creature and a second
+/// `recovered_dredge_checkpoint` with `second` as the cost's second leg: P2
+/// concedes during leg 1's Dredge prompt, which parks the payment on a
+/// recovery checkpoint; P0 then declines Dredge, and leg 2 opens its own
+/// prompt on that checkpoint. P0 has a second creature and a second
 /// graveyard card, so tapping a creature or a graveyard exile asks which.
 fn recovered_second_leg_checkpoint(second: AbilityCost) -> GameRunner {
     let mut scenario = GameScenario::new_n_player(3, 42);
@@ -2451,8 +2452,6 @@ fn recovered_second_leg_checkpoint(second: AbilityCost) -> GameRunner {
     );
     let state = runner.state_mut();
     resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
-    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
-        .expect("declining leg 1's Dredge accepts the draw");
     apply(
         state,
         PlayerId(2),
@@ -2461,12 +2460,14 @@ fn recovered_second_leg_checkpoint(second: AbilityCost) -> GameRunner {
         },
     )
     .expect("a player can concede at any time");
+    apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+        .expect("declining leg 1's Dredge accepts the draw");
     assert!(
         state
             .payment_transaction
             .as_ref()
             .is_some_and(|transaction| transaction.recovered.is_some()),
-        "the concession parks leg 2's prompt on a recovery checkpoint"
+        "leg 2's prompt is parked on the recovery checkpoint"
     );
     runner
 }
@@ -2696,14 +2697,19 @@ fn an_unrepresentable_gain_in_the_replayed_prefix_rejects_the_completing_answer(
     assert_eq!(state.payment_transaction, before.payment_transaction);
 }
 
-/// Four players: P0's staged `PayCost{Composite[Draw 1; tap a creature you
-/// control]}` declines leg 1's Dredge and parks leg 2's prompt, which lists a
-/// creature P2 owns but P0 controls; P3 then concedes, so the prefix parks on
-/// a recovery checkpoint. Synthetic control: the nearest printed card is
-/// Control Magic ("You control enchanted creature."). With `own_creature`, P0
-/// also controls a creature of its own. Returns the runner, the lent creature,
-/// and P0's creature if any.
-fn lent_creature_checkpoint(own_creature: bool) -> (GameRunner, ObjectId, Option<ObjectId>) {
+/// P0's staged `PayCost{Composite[Draw 1; tap a creature you control]}`
+/// declines leg 1's Dredge and parks leg 2's prompt, which lists a creature P2
+/// owns but P0 controls. Synthetic: no printed card has a resolution-time
+/// composite cost with a draw or a tap-creatures leg (the five printed ones
+/// are all `[Mana, PayLife]`); the nearest printed control effect is Control
+/// Magic ("You control enchanted creature."). With `own_creature`, P0 also
+/// controls a creature of its own. With `checkpoint`, P3 concedes during the
+/// Dredge prompt first, so leg 2's prompt is parked on a recovery checkpoint.
+/// Returns the runner, the lent creature, and P0's creature if any.
+fn lent_creature_tap_prompt(
+    own_creature: bool,
+    checkpoint: bool,
+) -> (GameRunner, ObjectId, Option<ObjectId>) {
     let mut scenario = GameScenario::new_n_player(4, 42);
     scenario.at_phase(Phase::PreCombatMain);
     for player in 0..4 {
@@ -2750,30 +2756,35 @@ fn lent_creature_checkpoint(own_creature: bool) -> (GameRunner, ObjectId, Option
     );
     let state = runner.state_mut();
     resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
+    if checkpoint {
+        apply(
+            state,
+            PlayerId(3),
+            GameAction::Concede {
+                player_id: PlayerId(3),
+            },
+        )
+        .expect("a player can concede at any time");
+    }
     apply(state, P0, GameAction::ChooseReplacement { index: 1 })
         .expect("declining leg 1's Dredge accepts the draw");
-    apply(
-        state,
-        PlayerId(3),
-        GameAction::Concede {
-            player_id: PlayerId(3),
-        },
-    )
-    .expect("a player can concede at any time");
-    let listed = match &state
-        .payment_transaction
-        .as_ref()
-        .and_then(|transaction| transaction.recovered.as_ref())
-        .expect("reach guard: the first concession parks a recovery checkpoint")
-        .state
-        .waiting_for
-    {
-        WaitingFor::PayCost { choices, .. } => choices.clone(),
-        other => panic!("reach guard: leg 2 asks which creature to tap: {other:?}"),
+    let WaitingFor::PayCost { choices, .. } = &state.waiting_for else {
+        panic!(
+            "reach guard: leg 2 asks which creature to tap: {:?}",
+            state.waiting_for
+        );
     };
     assert!(
-        listed.contains(&lent),
+        choices.contains(&lent),
         "reach guard: the lent creature is listed"
+    );
+    assert_eq!(
+        state
+            .payment_transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.recovered.is_some()),
+        checkpoint,
+        "reach guard: the prompt is parked on a checkpoint only after a concession"
     );
     (runner, lent, own)
 }
@@ -2786,44 +2797,36 @@ fn concede_lender(runner: &mut GameRunner) {
             player_id: PlayerId(2),
         },
     )
-    .expect("CR 104.3a: the second concession stands");
+    .expect("CR 104.3a: the concession stands");
     assert!(
         published.events.iter().any(|event| matches!(
             event,
             GameEvent::PlayerEliminated { player_id } if *player_id == PlayerId(2)
         )),
-        "the second departure is published"
+        "the departure is published"
     );
 }
 
-/// CR 800.4a + CR 400.7 + CR 614.17a: P2 concedes and the lent creature leaves
-/// the game with its owner. The departure removes the creature, not the
-/// payment: the parked prompt is rebuilt to list only P0's own creature, the
-/// save restores, and tapping it completes the payment with the card drawn
-/// through the declined Dredge.
-#[test]
-fn a_concession_that_removes_a_listed_creature_keeps_the_payment() {
-    let (mut runner, lent, own) = lent_creature_checkpoint(true);
-    let own = own.expect("P0 controls a creature of its own");
-    let hand_before = runner.state().players[P0.0 as usize].hand.len();
-    concede_lender(&mut runner);
+/// The lender has left: the payment holds no checkpoint, its prompt was derived
+/// afresh by the cost authority and lists only P0's own creature, the save
+/// restores, and tapping that creature completes the payment with the card
+/// drawn through the declined Dredge.
+fn assert_tap_prompt_was_rederived(runner: &GameRunner, lent: ObjectId, own: ObjectId) {
     let state = runner.state();
+    let hand_before = state.players[P0.0 as usize].hand.len();
     assert!(
         state
             .payment_transaction
             .as_ref()
-            .is_some_and(|transaction| transaction.recovered.is_some()),
-        "the payment keeps its accepted prefix"
+            .is_some_and(|transaction| transaction.recovered.is_none()),
+        "the payment is kept without a checkpoint"
     );
     let WaitingFor::PayCost { choices, .. } = &state.waiting_for else {
         panic!("leg 2 still asks: {:?}", state.waiting_for);
     };
     assert_eq!(choices, &vec![own], "only P0's own creature is listed");
-    assert!(!state
-        .objects
-        .get(&lent)
-        .is_some_and(|object| object.zone == Zone::Battlefield));
-    let mut restored = checked_round_trip(state).expect("the rebuilt prompt restores");
+    assert_ne!(state.objects[&lent].zone, Zone::Battlefield);
+    let mut restored = checked_round_trip(state).expect("the re-derived prompt restores");
     apply(
         &mut restored,
         P0,
@@ -2842,13 +2845,35 @@ fn a_concession_that_removes_a_listed_creature_keeps_the_payment() {
     );
 }
 
-/// CR 800.4a + CR 118.12: the same departure when the lent creature was the
-/// only one listed. Leg 2 can no longer be paid, so the payment fails as a
-/// replay on the departed base would: the staged prefix is not committed, no
-/// prompt remains, and the save restores.
+/// CR 800.4a + CR 400.7: a tap-creatures selection is outside the checkpoint
+/// contract, because what it may list depends on control another player's
+/// effect grants. When the lender concedes, the guard routes the payment to
+/// main's behaviour: it re-materializes on the departed board, where the cost
+/// authority lists only P0's own creature, and the payment completes.
 #[test]
-fn a_concession_that_removes_the_only_listed_creature_fails_the_payment() {
-    let (mut runner, _, _) = lent_creature_checkpoint(false);
+fn a_concession_that_removes_a_listed_creature_rederives_the_tap_prompt() {
+    let (mut runner, lent, own) = lent_creature_tap_prompt(true, false);
+    concede_lender(&mut runner);
+    assert_tap_prompt_was_rederived(&runner, lent, own.expect("P0 controls its own creature"));
+}
+
+/// The same departure when the prompt is parked on a recovery checkpoint from
+/// an earlier concession: the guard drops the checkpoint and the payment
+/// re-materializes on the departed board in the same way.
+#[test]
+fn a_concession_that_removes_a_listed_creature_drops_the_checkpoint() {
+    let (mut runner, lent, own) = lent_creature_tap_prompt(true, true);
+    concede_lender(&mut runner);
+    assert_tap_prompt_was_rederived(&runner, lent, own.expect("P0 controls its own creature"));
+}
+
+/// CR 800.4a + CR 601.2h: the same departure when the lent creature was the only
+/// one listed. Re-materialized on the departed board, the cost can no longer be
+/// paid, and it fails whole as a staged cost does on main: nothing of the
+/// payment is committed, no prompt remains, and the save restores.
+#[test]
+fn a_concession_that_removes_the_only_listed_creature_fails_the_payment_whole() {
+    let (mut runner, _, _) = lent_creature_tap_prompt(false, false);
     let hand_before = runner.state().players[P0.0 as usize].hand.len();
     concede_lender(&mut runner);
     let state = runner.state();
@@ -2864,7 +2889,7 @@ fn a_concession_that_removes_the_only_listed_creature_fails_the_payment() {
     assert_eq!(
         state.players[P0.0 as usize].hand.len(),
         hand_before,
-        "the failed staged payment commits none of its prefix"
+        "a failed staged cost commits none of its legs"
     );
     checked_round_trip(state).expect("the settled state restores");
 }
