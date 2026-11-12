@@ -3019,6 +3019,213 @@ fn later_member_returned_as_a_new_incarnation_is_never_offered() {
     ));
 }
 
+/// The staged member for `object` at the current pause.
+fn staged_member_of(
+    runner: &GameRunner,
+    object: ObjectId,
+) -> engine::types::game_state::StagedBatchMember {
+    runner
+        .state()
+        .active_batch_delivery()
+        .and_then(|pending| pending.staged.as_ref())
+        .expect("the staged owner is parked at the choice")
+        .members
+        .iter()
+        .find(|member| member.identity.object_id == object)
+        .cloned()
+        .expect("the object is a staged member")
+}
+
+/// Infrastructure exception: preattach the full-Oracle Auras instead of casting
+/// them; the destruction population is produced by the public cast.
+fn two_umbras_on(scenario: &mut GameScenario, owner: PlayerId) -> [ObjectId; 2] {
+    [("Hyena Umbra", HYENA_UMBRA), ("Spider Umbra", SPIDER_UMBRA)].map(|(name, oracle)| {
+        scenario
+            .add_enchantment_from_oracle(owner, name, oracle)
+            .with_subtypes(vec!["Aura"])
+            .id()
+    })
+}
+
+/// CR 400.7 + CR 616.1: a member that waits on another member's decision is
+/// consulted only after that decision is answered. If it has become a new
+/// object by then, the consultation refuses it before any replacement is
+/// offered for the new object.
+///
+/// Akroma's Vengeance says "Destroy all artifacts, creatures, and
+/// enchantments." P1's Grizzly Bears wears Hyena Umbra and Spider Umbra, so P1
+/// chooses which armor applies (CR 616.1), and both Auras, whose own
+/// destruction that choice decides (CR 702.89a), wait unconsulted.
+///
+/// Synthetic step, as in the test above: while P1 is deciding, Spider Umbra is
+/// moved out and back by direct zone moves (no printed effect acts during a
+/// replacement choice), is attached again, and is given the fixture's optional
+/// replacement, which would prompt if the new object were consulted.
+#[test]
+fn waiting_member_returned_as_a_new_incarnation_is_never_offered() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let watcher = scenario.add_creature(P0, "Watcher of P0", 1, 1).id();
+    let host = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let [hyena, spider] = two_umbras_on(&mut scenario, P1);
+    let vengeance = zero_cost_spell(&mut scenario, "Akroma's Vengeance", AKROMAS_VENGEANCE);
+
+    let mut runner = scenario.build();
+    for aura in [hyena, spider] {
+        engine::game::effects::attach::attach_to(runner.state_mut(), aura, host);
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    runner.cast(vengeance).commit();
+    resolve_to_first_replacement_choice(&mut runner);
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!("expected P1's Umbra choice");
+    };
+    assert_eq!(player, P1);
+    let waiting = staged_member_of(&runner, spider);
+    assert!(
+        waiting.state == engine::types::game_state::StagedBatchMemberState::Unconsulted
+            && waiting.blocked,
+        "premise: Spider Umbra waits unconsulted on its host's decision"
+    );
+
+    let mut moved = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), spider, Zone::Hand, &mut moved);
+    engine::game::zones::move_to_zone(runner.state_mut(), spider, Zone::Battlefield, &mut moved);
+    engine::game::effects::attach::attach_to(runner.state_mut(), spider, host);
+    add_source_authority_optional_replacement_for(
+        runner.state_mut(),
+        watcher,
+        "Spider Umbra",
+        engine::types::ability::TypeFilter::Enchantment,
+    );
+
+    let hyena_index = candidates
+        .iter()
+        .position(|candidate| candidate.source_id == hyena)
+        .expect("Hyena Umbra is offered");
+    runner
+        .act(GameAction::ChooseReplacement { index: hyena_index })
+        .expect("P1 applies Hyena Umbra");
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the new incarnation is never offered: {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        zone_of_state(runner.state(), spider),
+        Zone::Battlefield,
+        "the returned object is untouched by the frozen population"
+    );
+    assert_eq!(zone_of_state(runner.state(), host), Zone::Battlefield);
+    assert_eq!(zone_of_state(runner.state(), hyena), Zone::Graveyard);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().resolution_stack.is_empty());
+}
+
+/// CR 400.7 + CR 616.1: a held decision whose own object has become a new
+/// object is dropped unasked, and the members that waited on it are then
+/// consulted in their own right.
+///
+/// Akroma's Vengeance says "Destroy all artifacts, creatures, and
+/// enchantments." P0's Grizzly Bears and P1's Runeclaw Bear each wear Hyena
+/// Umbra and Spider Umbra. The active player P0 is asked first (CR 101.4); P1's
+/// decision is held and P1's two Auras wait on it (CR 702.89a).
+///
+/// Synthetic step, as in the tests above: while P0 is deciding, P1's bear is
+/// moved out and back by direct zone moves and its Auras are attached again.
+/// The frozen population holds the old bear, so P1 is never asked, the returned
+/// bear stays, and both of P1's Auras are destroyed as the enchantments they
+/// are.
+#[test]
+fn held_member_returned_as_a_new_incarnation_releases_the_members_waiting_on_it() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let p0_host = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let p0_auras = two_umbras_on(&mut scenario, P0);
+    let p1_host = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let p1_auras = two_umbras_on(&mut scenario, P1);
+    let vengeance = zero_cost_spell(&mut scenario, "Akroma's Vengeance", AKROMAS_VENGEANCE);
+
+    let mut runner = scenario.build();
+    for (host, auras) in [(p0_host, p0_auras), (p1_host, p1_auras)] {
+        for aura in auras {
+            engine::game::effects::attach::attach_to(runner.state_mut(), aura, host);
+        }
+    }
+    engine::game::layers::flush_layers(runner.state_mut());
+    runner.cast(vengeance).commit();
+    resolve_to_first_replacement_choice(&mut runner);
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!("expected P0's Umbra choice");
+    };
+    assert_eq!(player, P0, "CR 101.4: the active player is asked first");
+    assert!(
+        staged_member_of(&runner, p1_host).held_decision.is_some(),
+        "premise: P1's decision is held"
+    );
+    for aura in p1_auras {
+        let waiting = staged_member_of(&runner, aura);
+        assert!(
+            waiting.state == engine::types::game_state::StagedBatchMemberState::Unconsulted
+                && waiting.blocked,
+            "premise: P1's Auras wait unconsulted on the held decision"
+        );
+    }
+
+    let mut moved = Vec::new();
+    engine::game::zones::move_to_zone(runner.state_mut(), p1_host, Zone::Hand, &mut moved);
+    engine::game::zones::move_to_zone(runner.state_mut(), p1_host, Zone::Battlefield, &mut moved);
+    for aura in p1_auras {
+        engine::game::effects::attach::attach_to(runner.state_mut(), aura, p1_host);
+    }
+
+    let hyena_index = candidates
+        .iter()
+        .position(|candidate| candidate.source_id == p0_auras[0])
+        .expect("P0's Hyena Umbra is offered");
+    let answered = runner
+        .act(GameAction::ChooseReplacement { index: hyena_index })
+        .expect("P0 applies Hyena Umbra");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "P1 is never asked about the old bear: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().resolution_stack.is_empty());
+    assert_eq!(
+        zone_of_state(runner.state(), p1_host),
+        Zone::Battlefield,
+        "the returned bear is untouched by the frozen population"
+    );
+    for aura in p1_auras {
+        assert_eq!(
+            zone_of_state(runner.state(), aura),
+            Zone::Graveyard,
+            "P1's Aura is destroyed as a member in its own right"
+        );
+        assert_eq!(destroyed_reports_of(&answered.events, aura), 1);
+    }
+    assert_eq!(zone_of_state(runner.state(), p0_host), Zone::Battlefield);
+    assert_eq!(zone_of_state(runner.state(), p0_auras[0]), Zone::Graveyard);
+    assert_eq!(
+        zone_of_state(runner.state(), p0_auras[1]),
+        Zone::Graveyard,
+        "the unchosen Aura is destroyed directly"
+    );
+}
+
 const HYENA_UMBRA: &str = "Enchant creature\nEnchanted creature gets +1/+1 and has first strike.\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)";
 
 /// CR 616.1 + CR 800.4a + CR 701.8a: a Destroy member whose outer consultation
@@ -3268,6 +3475,21 @@ fn staged_member_that_left_during_a_pause_is_not_consulted() {
 /// where the choice authority is the replacement source's controller under
 /// CR 616.1. Used here to park a real replacement choice, not to test ordering.
 fn add_source_authority_optional_replacement(state: &mut GameState, watcher: ObjectId, card: &str) {
+    add_source_authority_optional_replacement_for(
+        state,
+        watcher,
+        card,
+        engine::types::ability::TypeFilter::Creature,
+    );
+}
+
+/// The same fixture for a named card of another type.
+fn add_source_authority_optional_replacement_for(
+    state: &mut GameState,
+    watcher: ObjectId,
+    card: &str,
+    card_type: engine::types::ability::TypeFilter,
+) {
     state
         .objects
         .get_mut(&watcher)
@@ -3277,7 +3499,7 @@ fn add_source_authority_optional_replacement(state: &mut GameState, watcher: Obj
             ReplacementDefinition::new(ReplacementEvent::Moved)
                 .mode(ReplacementMode::Optional { decline: None })
                 .valid_card(TargetFilter::Typed(engine::types::ability::TypedFilter {
-                    type_filters: vec![engine::types::ability::TypeFilter::Creature],
+                    type_filters: vec![card_type],
                     controller: None,
                     properties: vec![engine::types::ability::FilterProp::Named {
                         name: card.to_string(),
