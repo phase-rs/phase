@@ -71,8 +71,10 @@ import {
   type ActionRejection,
   type AiActionProposal,
   type GameAction,
+  type FormatConfig,
   type GameEvent,
 } from "./types";
+import { splitDraftSessionAuthority } from "../services/draftFormatConfig";
 import type {
   InteractionPreviewRequest,
   InteractionSubmission,
@@ -382,13 +384,15 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           );
           break;
         }
+        const launch = splitDraftSessionAuthority(msg.formatConfig as FormatConfig | null);
         const gameResult = initialize_game(
           msg.deckData ?? null,
           msg.seed,
-          msg.formatConfig ?? null,
+          launch.formatConfig,
           msg.matchConfig ?? null,
           msg.playerCount ?? undefined,
           msg.firstPlayer ?? undefined,
+          launch.draftSessionMinDeckSize,
         );
         const failure = classifyInitFailure(gameResult);
         if (failure) {
@@ -413,13 +417,15 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         // The host entry point refuses an engine that already holds a game and
         // claims the multiplayer flag alongside the install — both inside this
         // one synchronous handler, so no other posted message can interleave.
+        const launch = splitDraftSessionAuthority(msg.formatConfig as FormatConfig | null);
         const gameResult = initialize_multiplayer_host_game(
           msg.deckData ?? null,
           msg.seed,
-          msg.formatConfig ?? null,
+          launch.formatConfig,
           msg.matchConfig ?? null,
           msg.playerCount ?? undefined,
           msg.firstPlayer ?? undefined,
+          launch.draftSessionMinDeckSize,
         );
         const failure = classifyInitFailure(gameResult);
         if (failure) {

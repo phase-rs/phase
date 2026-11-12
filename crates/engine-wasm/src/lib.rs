@@ -265,6 +265,33 @@ fn resolve_and_validate_initialize_format_config(
     Ok(format_config)
 }
 
+/// The draft-match initializer's format authority (CR 100.2b): the generic
+/// declared config is resolved and validated exactly as for any game (which
+/// refuses a payload that already claims a draft session's deck-size
+/// authority), and only THEN, when the caller is a draft-match launch holding
+/// the accepted session's resolved minimum, is that minimum conferred through
+/// `FormatConfig::with_draft_session_minimum`. `None` is every non-draft
+/// caller, which therefore can never reach a non-registry Limited deck size.
+fn resolve_initialize_format_config(
+    decoded_format_config: Option<FormatConfig>,
+    resolved_player_count: u8,
+    draft_session_min_deck_size: Option<u32>,
+) -> Result<FormatConfig, String> {
+    let config = resolve_and_validate_initialize_format_config(
+        decoded_format_config,
+        resolved_player_count,
+    )?;
+    match draft_session_min_deck_size {
+        None => Ok(config),
+        Some(minimum) => {
+            let minimum = u16::try_from(minimum).map_err(|_| {
+                format!("draft session minimum deck size {minimum} is out of range")
+            })?;
+            config.with_draft_session_minimum(minimum)
+        }
+    }
+}
+
 fn parse_initialize_format_config(
     decoded: Result<FormatConfig, String>,
 ) -> Result<FormatConfig, serde_json::Value> {
@@ -1925,6 +1952,7 @@ pub fn initialize_game(
     match_config_js: JsValue,
     player_count: Option<u8>,
     first_player: Option<u8>,
+    draft_session_min_deck_size: Option<u32>,
 ) -> JsValue {
     if let Err(reason) = init_guard(InitSessionKind::Local) {
         return occupied_refusal(reason);
@@ -1936,6 +1964,7 @@ pub fn initialize_game(
         match_config_js,
         player_count,
         first_player,
+        draft_session_min_deck_size,
         InitSessionKind::Local,
     )
 }
@@ -1963,6 +1992,7 @@ pub fn initialize_multiplayer_host_game(
     match_config_js: JsValue,
     player_count: Option<u8>,
     first_player: Option<u8>,
+    draft_session_min_deck_size: Option<u32>,
 ) -> JsValue {
     if let Err(reason) = init_guard(InitSessionKind::MultiplayerHost) {
         return occupied_refusal(reason);
@@ -1974,6 +2004,7 @@ pub fn initialize_multiplayer_host_game(
         match_config_js,
         player_count,
         first_player,
+        draft_session_min_deck_size,
         InitSessionKind::MultiplayerHost,
     )
 }
@@ -2070,6 +2101,7 @@ fn initialize_game_impl(
     match_config_js: JsValue,
     player_count: Option<u8>,
     first_player: Option<u8>,
+    draft_session_min_deck_size: Option<u32>,
     kind: InitSessionKind,
 ) -> JsValue {
     let seed = seed.map(|s| s as u64).unwrap_or(42);
@@ -2091,16 +2123,19 @@ fn initialize_game_impl(
     } else {
         None
     };
-    let format_config =
-        match resolve_and_validate_initialize_format_config(decoded_format_config, count) {
-            Ok(config) => config,
-            Err(reason) => {
-                return to_js(&serde_json::json!({
-                    "error": true,
-                    "reasons": [reason],
-                }));
-            }
-        };
+    let format_config = match resolve_initialize_format_config(
+        decoded_format_config,
+        count,
+        draft_session_min_deck_size,
+    ) {
+        Ok(config) => config,
+        Err(reason) => {
+            return to_js(&serde_json::json!({
+                "error": true,
+                "reasons": [reason],
+            }));
+        }
+    };
 
     let mut state = GameState::new(format_config.clone(), count, seed);
     // Read the posture from `kind`, not from `is_multiplayer_mode()`: the flag
@@ -6371,6 +6406,7 @@ mod tests {
             JsValue::NULL,
             Some(2),
             None,
+            None,
         );
         let error: serde_json::Value =
             serde_wasm_bindgen::from_value(result).expect("initializer error is a JS object");
@@ -9363,16 +9399,24 @@ mod deck_list_seat_validation_tests {
         }
     }
 
-    /// A draft-session Limited config round-tripped through the SAME decoder the
-    /// WASM boundary applies (`FormatConfig::deserialize`), then resolved and
-    /// validated by the initializer's own helpers.
-    fn init_format_config(config: &FormatConfig) -> Result<FormatConfig, String> {
+    /// A declared config round-tripped through the SAME decoder the WASM
+    /// boundary applies (`FormatConfig::deserialize`), then resolved by the
+    /// initializer's own authority with the draft session's minimum, if any.
+    fn init_format_config(
+        config: &FormatConfig,
+        draft_session_min_deck_size: Option<u32>,
+    ) -> Result<FormatConfig, String> {
         let decoded: Result<FormatConfig, String> =
             serde_json::from_value(serde_json::to_value(config).unwrap())
                 .map_err(|error| error.to_string());
         let decoded = parse_initialize_format_config(decoded)
             .map_err(|envelope| envelope["reasons"][0].as_str().unwrap().to_string())?;
-        resolve_and_validate_initialize_format_config(Some(decoded), 2)
+        resolve_initialize_format_config(Some(decoded), 2, draft_session_min_deck_size)
+    }
+
+    /// The draft-match launch: the base Limited config plus the session minimum.
+    fn draft_match_config(minimum: u32) -> Result<FormatConfig, String> {
+        init_format_config(&FormatConfig::limited(), Some(minimum))
     }
 
     fn yorion() -> CardFace {
@@ -9413,7 +9457,7 @@ mod deck_list_seat_validation_tests {
     fn cube_session_minimum_initializes_a_game_without_a_companion() {
         let db = test_db();
         for minimum in [20u16, 50] {
-            let config = init_format_config(&FormatConfig::limited_for_draft_session(minimum))
+            let config = draft_match_config(u32::from(minimum))
                 .unwrap_or_else(|reason| panic!("minimum {minimum} refused: {reason}"));
             let state = GameState::new(config.clone(), 2, 42);
             assert_eq!(
@@ -9440,8 +9484,7 @@ mod deck_list_seat_validation_tests {
     fn cube_session_minimum_initializes_a_game_with_a_valid_yorion() {
         let db = yorion_db();
         for (minimum, deck_size) in [(50u16, 70usize), (20, 40)] {
-            let config =
-                init_format_config(&FormatConfig::limited_for_draft_session(minimum)).unwrap();
+            let config = draft_match_config(u32::from(minimum)).unwrap();
             let check = |main| {
                 let deck = forest_deck_with_companion(main, Some("Yorion, Sky Nomad"));
                 validate_deck_list_seats(
@@ -9465,31 +9508,36 @@ mod deck_list_seat_validation_tests {
         }
     }
 
-    /// The session's minimum is authorized by provenance, not by the number: a
-    /// plain Limited config claiming a sub-40 minimum is still refused, and the
-    /// draft-session claim is admitted for Limited alone.
+    /// The session's minimum is authorized by the draft-match initializer, not
+    /// by the payload: a generic config claiming a sub-40 Limited minimum, with
+    /// or without the session-provenance tag, is refused, and the draft
+    /// authority itself admits Limited alone.
     #[test]
-    fn limited_minimum_without_session_provenance_is_refused_at_initialization() {
+    fn limited_minimum_without_the_draft_initializer_is_refused() {
         for minimum in [20u16, 39, 50] {
             let mut hand_edited = FormatConfig::limited();
             hand_edited.deck_size = engine::types::format::DeckSizeRule::Minimum(minimum);
-            let reason = init_format_config(&hand_edited)
+            let reason = init_format_config(&hand_edited, None)
                 .expect_err("a Limited minimum with Registry provenance must be refused");
             assert!(
                 reason.contains("Format config deserialization failed")
                     && reason.contains("deck_size"),
                 "{reason}"
             );
+            // A payload that forges the session tag is refused at ingress too.
+            let forged = FormatConfig::limited()
+                .with_draft_session_minimum(minimum)
+                .unwrap();
+            assert!(init_format_config(&forged, None)
+                .expect_err("a payload cannot grant itself the session authority")
+                .contains("conferred by a draft match"),);
         }
         let mut standard = FormatConfig::standard();
         standard.deck_size_origin = engine::types::format::DeckSizeOrigin::DraftSession;
-        assert!(init_format_config(&standard)
-            .expect_err("only Limited admits the draft-session claim")
-            .contains("DraftSession"));
-        let mut exact = FormatConfig::limited_for_draft_session(40);
-        exact.deck_size = engine::types::format::DeckSizeRule::Exactly(40);
-        assert!(init_format_config(&exact).is_err());
-        assert!(init_format_config(&FormatConfig::limited_for_draft_session(0)).is_err());
+        assert!(init_format_config(&standard, None).is_err());
+        assert!(init_format_config(&FormatConfig::standard(), Some(20)).is_err());
+        assert!(draft_match_config(0).is_err());
+        assert!(draft_match_config(u32::from(u16::MAX) + 1).is_err());
     }
 
     #[test]

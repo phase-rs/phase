@@ -1557,9 +1557,12 @@ fn default_deck_copy_limit_fallback() -> DeckCopyLimit {
 /// CR 100.2b: a Limited deck has a minimum size, and a Cube draft session
 /// configures that minimum when the draft is set up (it may be 20 or 50 rather
 /// than 40). That is a session decision, not a registry rule, so it is carried
-/// as typed provenance rather than by loosening Limited's registry check: a
-/// payload claims the session's authority explicitly, and only a Limited
-/// payload may.
+/// as typed provenance rather than by loosening Limited's registry check. The
+/// field exists so an engine-produced state round-trips (save/restore, host
+/// resume); it is NEVER an ingress claim: only
+/// [`FormatConfig::with_draft_session_minimum`] (a draft-match initializer)
+/// sets it, and [`FormatConfig::validate_for_player_count`] refuses a config
+/// that arrives already carrying it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeckSizeOrigin {
     /// The format registry's own deck-size rule (or a closed option list it
@@ -1930,10 +1933,12 @@ fn built_in_axes_no_looser_than_rules(config: &FormatConfig) -> Result<(), Strin
     // (`game::match_flow`).
     //
     // SESSION-AUTHORIZED MAGNITUDE — CR 100.2b: a Cube draft session
-    // configures its own minimum deck size. A payload claims that with
-    // `DeckSizeOrigin::DraftSession`, which only Limited admits and only on
-    // the `Minimum` shape (the discriminant stays locked), with at least one
-    // card. Without the claim, Limited is held to the registry's 40.
+    // configures its own minimum deck size, recorded as
+    // `DeckSizeOrigin::DraftSession` by `with_draft_session_minimum`. The
+    // decoder admits it for engine-produced state (restore round-trip) on
+    // Limited only, on the `Minimum` shape (the discriminant stays locked),
+    // with at least one card; ingress refuses it in `validate_for_player_count`.
+    // Without the origin, Limited is held to the registry's 40.
     let deck_size_ok = match (config.deck_size, rules.deck_size) {
         // Same discriminant: fall through to the magnitude rule.
         (DeckSizeRule::Minimum(declared), DeckSizeRule::Minimum(registry))
@@ -4127,6 +4132,18 @@ impl FormatConfig {
     /// `from_persisted` is deliberate and accepted as-is; this paragraph is
     /// disclosure only.
     pub fn validate_for_player_count(&self, player_count: u8) -> Result<(), String> {
+        // CR 100.2b: a draft session's deck-size authority is conferred by a
+        // draft-match initializer through `with_draft_session_minimum`, never
+        // claimed by the payload being validated. Every ingress (WASM
+        // initializers, lobby broker, server Full settings, session creation)
+        // validates the config it was SENT through this function, so a
+        // `DraftSession` claim here is a payload granting itself the exception.
+        if self.deck_size_origin == DeckSizeOrigin::DraftSession {
+            return Err(
+                "FormatConfig.deck_size_origin DraftSession is conferred by a draft match,                  never declared by a format payload"
+                    .to_string(),
+            );
+        }
         // CR 100.1a / CR 100.1b / CR 800.1: a two-player game begins with two
         // players and a multiplayer game with more than two; the exact seat
         // count a format admits is the engine registry's, not the
@@ -4665,16 +4682,29 @@ impl FormatConfig {
         }
     }
 
-    /// Limited under a draft session's configured minimum deck size (CR 100.2b).
-    /// The session, not the registry, decided `minimum`, so the config says so
-    /// through `DeckSizeOrigin::DraftSession`; `FormatConfig`'s decoder admits
-    /// that claim for Limited alone.
-    pub fn limited_for_draft_session(minimum: u16) -> Self {
-        FormatConfig {
-            deck_size: DeckSizeRule::Minimum(minimum),
-            deck_size_origin: DeckSizeOrigin::DraftSession,
-            ..Self::limited()
+    /// This Limited config under a draft session's configured minimum deck
+    /// size (CR 100.2b). The single constructor of [`DeckSizeOrigin::DraftSession`]:
+    /// the session, not the registry, decided `minimum`, and only a draft-match
+    /// initializer (which holds the accepted session's value) calls this. A
+    /// generic format payload cannot reach it, because
+    /// [`FormatConfig::validate_for_player_count`] refuses any config that
+    /// already claims the session's authority.
+    pub fn with_draft_session_minimum(mut self, minimum: u16) -> Result<Self, String> {
+        if self.format != GameFormat::Limited {
+            return Err(format!(
+                "a draft session configures only Limited deck sizes, not {}",
+                self.format
+            ));
         }
+        if !matches!(self.deck_size, DeckSizeRule::Minimum(_)) || minimum == 0 {
+            return Err(format!(
+                "a draft session's minimum deck size must be at least 1 on Limited's Minimum                  rule, got {minimum} on {:?}",
+                self.deck_size
+            ));
+        }
+        self.deck_size = DeckSizeRule::Minimum(minimum);
+        self.deck_size_origin = DeckSizeOrigin::DraftSession;
+        Ok(self)
     }
 
     /// Limited format with an enabled command zone (CR 905: Conspiracy Draft).
@@ -7886,5 +7916,26 @@ mod tests {
             WaveCount::Snaking { min: 3, max: 1 }.nontokens_for_turn(7),
             3
         );
+    }
+
+    /// CR 100.2b: the draft session's deck-size authority is conferred only by
+    /// `with_draft_session_minimum`; a payload that arrives already claiming it
+    /// is refused by the ingress authority, and the constructor admits Limited
+    /// alone.
+    #[test]
+    fn draft_session_authority_is_conferred_never_declared() {
+        let conferred = FormatConfig::limited().with_draft_session_minimum(20).unwrap();
+        assert_eq!(conferred.deck_size, DeckSizeRule::Minimum(20));
+        assert_eq!(conferred.deck_size_origin, DeckSizeOrigin::DraftSession);
+        // Engine-produced state still round-trips through the decoder.
+        let round_tripped: FormatConfig =
+            serde_json::from_value(serde_json::to_value(&conferred).unwrap()).unwrap();
+        assert_eq!(round_tripped, conferred);
+        // Ingress validation refuses the claim.
+        assert!(conferred.validate_for_player_count(2).is_err());
+        assert!(FormatConfig::limited().validate_for_player_count(2).is_ok());
+        // Only Limited's Minimum rule, with at least one card.
+        assert!(FormatConfig::standard().with_draft_session_minimum(20).is_err());
+        assert!(FormatConfig::limited().with_draft_session_minimum(0).is_err());
     }
 }

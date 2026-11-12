@@ -464,7 +464,7 @@ export function init_panic_hook(): void;
  * very worker, and overwriting its game would destroy the authoritative state
  * its guests are playing against.
  */
-export function initialize_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count?: number | null, first_player?: number | null): any;
+export function initialize_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count?: number | null, first_player?: number | null, draft_session_min_deck_size?: number | null): any;
 
 /**
  * Initialize a new game *and* claim this engine for a multiplayer host
@@ -483,7 +483,7 @@ export function initialize_game(deck_data: any, seed: number | null | undefined,
  *    a failed init leaves the flag set on an engine it never took. Mirrors
  *    `resume_multiplayer_host_state`, the resume-side sibling of this call.
  */
-export function initialize_multiplayer_host_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count?: number | null, first_player?: number | null): any;
+export function initialize_multiplayer_host_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count?: number | null, first_player?: number | null, draft_session_min_deck_size?: number | null): any;
 
 /**
  * Whether the named card can serve as this format's command-zone leader.
@@ -899,8 +899,8 @@ export interface InitOutput {
     readonly get_viewer_transition_snapshot_js: (a: number, b: any) => any;
     readonly has_replay_recording: () => number;
     readonly init_panic_hook: () => void;
-    readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
-    readonly initialize_multiplayer_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
+    readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number, h: number, i: number) => any;
+    readonly initialize_multiplayer_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number, h: number, i: number) => any;
     readonly isCardCommanderEligibleForFormat: (a: number, b: number, c: any) => number;
     readonly is_card_commander_eligible: (a: number, b: number) => number;
     readonly is_multiplayer_mode: () => number;

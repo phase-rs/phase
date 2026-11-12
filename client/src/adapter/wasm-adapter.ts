@@ -2,6 +2,7 @@ import { PLAYER_ID } from "../constants/game";
 import { boundedDiagnosticProbe, recordDiagnostic, registerEngineDiagnostics } from "../services/troubleshooting";
 import type { EngineDiagnosticSnapshot } from "../services/troubleshooting";
 import { trackEvent } from "../services/telemetry";
+import { splitDraftSessionAuthority } from "../services/draftFormatConfig";
 import type {
   AiActionProposal,
   AiDecisionDiagnosticReceipt,
@@ -1948,13 +1949,15 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       firstPlayer?: number,
     ) =>
       enqueue(() => {
+        const launch = splitDraftSessionAuthority(formatConfig);
         const r = wasm.initialize_game(
           deckData,
           seed,
-          formatConfig,
+          launch.formatConfig,
           matchConfig,
           playerCount ?? undefined,
           firstPlayer ?? undefined,
+          launch.draftSessionMinDeckSize,
         );
         throwInitFailure(r);
         return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
@@ -1970,13 +1973,15 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       owner?: HostSessionOwner,
     ) =>
       enqueue(() => {
+        const launch = splitDraftSessionAuthority(formatConfig);
         const r = wasm.initialize_multiplayer_host_game(
           deckData,
           seed,
-          formatConfig,
+          launch.formatConfig,
           matchConfig,
           playerCount ?? undefined,
           firstPlayer ?? undefined,
+          launch.draftSessionMinDeckSize,
         );
         throwInitFailure(r);
         if (owner) {

@@ -549,6 +549,12 @@ export interface FormatConfig {
   deck_size: DeckSizeRule;
   /** Absent means `Registry` (the engine skips serializing the default). */
   deck_size_origin?: DeckSizeOrigin;
+  /**
+   * Client-side carrier for a draft match's resolved minimum deck size
+   * (CR 100.2b). Never an engine payload field: `splitDraftSessionAuthority`
+   * strips it and passes it as the draft-match initializer's own parameter.
+   */
+  draft_session_min_deck_size?: number;
   singleton: boolean;
   command_zone: boolean;
   commander_damage_threshold: number | null;
