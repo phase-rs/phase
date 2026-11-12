@@ -1657,8 +1657,21 @@ fn fold_combat_leg_amount(
         }
     }
 
-    // Combat-only bookkeeping (not part of the shared damage pipeline):
-    if let TargetRef::Player(player_id) = &leg.target {
+    // Combat-only bookkeeping (not part of the shared damage pipeline).
+    // CR 614.6: a replaced event never happens, so the bookkeeping follows the
+    // SURVIVING event's recipient, not the assigned one — a hit redirected
+    // away from the player credits that player nothing. CR 120.8: a source
+    // that would deal 0 damage deals no damage at all, so a zero delivered
+    // amount (fully replaced or prevented) records no hit either; CR 903.10a
+    // and the Ring level-four trigger count damage actually dealt.
+    let delivered_player = match leg.survivor.as_ref() {
+        Some(ProposedEvent::Damage {
+            target: TargetRef::Player(player_id),
+            ..
+        }) if actual_amount > 0 => Some(*player_id),
+        _ => None,
+    };
+    if let Some(player_id) = &delivered_player {
         let source_id = leg.ctx.source_id;
         // CR 510.2: Track per-source amounts for this step. Each source
         // appears at most once per player per step; dedup guards any edge
@@ -1857,6 +1870,46 @@ fn complete_combat_phase_c_remnant(
     }
 }
 
+/// CR 616.1 + CR 101.4 + CR 510.2: combat damage is dealt simultaneously, so
+/// the order in which attackers were declared and their damage assigned
+/// carries no rules weight; when several players must each choose among
+/// replacement effects for the batch, "choices are made in APNAP order". The
+/// pass proposes events one at a time and re-evaluates each against the
+/// current state after every answer, so ordering the batch by the APNAP rank
+/// of each event's affected player (a damaged player, or the controller of a
+/// damaged permanent — the chooser CR 616.1 names) makes the prompts arrive
+/// active player first, then each nonactive player in turn order. The sort is
+/// stable: one seat's events keep their assignment order, and `entries` stays
+/// aligned 1:1 with the events.
+fn order_batch_by_affected_seat(
+    state: &GameState,
+    entries: &mut Vec<PendingCombatDamageEntry>,
+    proposed_events: &mut VecDeque<ProposedEvent>,
+) {
+    let seats = super::players::apnap_order(state);
+    let rank = |event: &ProposedEvent| -> usize {
+        let ProposedEvent::Damage { target, .. } = event else {
+            return usize::MAX;
+        };
+        let affected = match target {
+            TargetRef::Player(player) => Some(*player),
+            TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
+        };
+        affected
+            .and_then(|player| seats.iter().position(|seat| *seat == player))
+            .unwrap_or(usize::MAX)
+    };
+    let mut paired: Vec<(PendingCombatDamageEntry, ProposedEvent)> = std::mem::take(entries)
+        .into_iter()
+        .zip(std::mem::take(proposed_events))
+        .collect();
+    paired.sort_by_key(|(_, event)| rank(event));
+    for (entry, event) in paired {
+        entries.push(entry);
+        proposed_events.push_back(event);
+    }
+}
+
 pub(crate) fn apply_combat_damage(
     state: &mut GameState,
     assignments: &[(ObjectId, DamageAssignment)],
@@ -1932,6 +1985,10 @@ pub(crate) fn apply_combat_damage(
             proposed_events.push_back(proposed);
         }
     }
+
+    // CR 616.1 + CR 101.4: the batch's replacement prompts follow APNAP order
+    // of the affected seats, not assignment order.
+    order_batch_by_affected_seat(state, &mut entries, &mut proposed_events);
 
     // --- Phase B: Batch replacement (CR 510.2 + CR 615.7) ---
     let record = PendingCombatLifelink {
@@ -3706,7 +3763,13 @@ mod tests {
     /// `fire_combat_prevention_riders` and the first two indices invert.
     #[test]
     fn completed_batch_emits_gain_then_aggregate_then_prevention_rider() {
-        let mut state = setup();
+        // CR 120.8: a fully prevented hit deals no damage, so the aggregate
+        // needs a hit that is actually dealt — the lifelinker attacks a second
+        // defender (P2) who has no shield, while the Ogre's hit on P1 is
+        // prevented by P1's Inkshield.
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
         install_inkshield(&mut state, PlayerId(1));
         let prevented = create_creature(&mut state, PlayerId(0), "Ogre", 3, 3);
         let lifelinker = create_creature(&mut state, PlayerId(0), "Vampire", 3, 3);
@@ -3716,12 +3779,15 @@ mod tests {
             .unwrap()
             .keywords
             .push(Keyword::Lifelink);
-        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
-        setup_combat(
-            &mut state,
-            vec![prevented, lifelinker],
-            vec![(prevented, vec![]), (lifelinker, vec![blocker])],
-        );
+        setup_combat(&mut state, vec![prevented, lifelinker], Vec::new());
+        if let Some(info) = state.combat.as_mut().and_then(|combat| {
+            combat
+                .attackers
+                .iter_mut()
+                .find(|a| a.object_id == lifelinker)
+        }) {
+            *info = AttackerInfo::attacking_player(lifelinker, PlayerId(2));
+        }
 
         let mut events = Vec::new();
         resolve_combat_damage(&mut state, &mut events);

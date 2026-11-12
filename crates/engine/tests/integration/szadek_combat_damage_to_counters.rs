@@ -984,3 +984,62 @@ fn optional_substitution_accept_performs_counters_and_mill_decline_deals_damage(
         }
     }
 }
+
+/// CR 616.1 + CR 101.4 + CR 510.2: three players, P0 attacks. The attacks are
+/// declared in REVERSE seat order — Szadek at P2 first, a red 2/2 at P1 second
+/// — so assignment order would raise P2's prompt first. Both defenders have a
+/// real CR 616.1 choice (Furnace of Rath against Szadek's substitution for P2;
+/// Furnace of Rath against Torbran's +2 for P1), and "if two or more players
+/// have to make these choices at the same time, choices are made in APNAP
+/// order": P1 (next in turn order after the active player) is asked before P2.
+/// Each answer is applied to its own seat's hit and the batch completes.
+#[test]
+fn simultaneous_replacement_prompts_follow_apnap_by_affected_seat() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let szadek = scenario
+        .add_creature_from_oracle(P0, SZADEK_NAME, 5, 5, SZADEK_ORACLE)
+        .id();
+    let red_bear = {
+        let mut builder = scenario.add_creature(P0, "Red Bear", 2, 2);
+        builder.with_color(vec![engine::types::mana::ManaColor::Red]);
+        builder.id()
+    };
+    let torbran = scenario
+        .add_creature_from_oracle(P0, "Torbran, Thane of Red Fell", 2, 4, TORBRAN_ORACLE)
+        .id();
+    let furnace = scenario
+        .add_enchantment_from_oracle(P1, "Furnace of Rath", FURNACE_ORACLE)
+        .id();
+    let p2 = PlayerId(2);
+    let names = library_of(12);
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    scenario.with_library_top(p2, &names);
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (szadek, AttackTarget::Player(p2)),
+            (red_bear, AttackTarget::Player(P1)),
+        ])
+        .expect("declare attackers");
+    run_to_prompt(&mut runner);
+
+    // P1 is asked first even though P2's hit was assigned first.
+    choose_replacement_from(&mut runner, P1, torbran);
+    assert!(
+        runner.state().pending_combat_lifelink.is_some(),
+        "the batch is still parked on P2's prompt"
+    );
+    choose_replacement_from(&mut runner, p2, furnace);
+    assert_batch_completed_by_the_answer(&runner);
+    finish_combat(&mut runner);
+
+    // Torbran first: (2 + 2) x 2 = 8 to P1.
+    assert_eq!(runner.state().players[1].life, 12, "P1's own answer");
+    // Furnace first: Szadek's 5 becomes 10 before it is substituted.
+    assert_eq!(counters_on(&runner, szadek), 10, "P2's own answer");
+    assert_eq!(runner.state().players[2].life, 20);
+    assert_eq!(runner.state().players[2].graveyard.len(), 10);
+    assert_eq!(runner.state().players[2].library.len(), 2);
+}

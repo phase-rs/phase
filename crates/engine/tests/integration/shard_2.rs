@@ -230,6 +230,7 @@ mod collector_ouphe_mana_ability_prohibition;
 mod colorless_spell_cost_reduction;
 mod combat_damage_stack_object;
 mod combat_history_mass_effects;
+mod combat_hit_bookkeeping_follows_delivery;
 mod combat_target_support;
 mod combined_creature_coverage_honesty;
 mod combustible_gearhulk;
