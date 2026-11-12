@@ -19,6 +19,7 @@ pub(crate) enum InstructionStep {
     ElseAbility,
     DelayedPayload,
     Mode(usize),
+    ChoiceBranch(usize),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -38,6 +39,10 @@ impl InstructionPath {
                     _ => return None,
                 },
                 InstructionStep::Mode(index) => def.mode_abilities.get(*index)?,
+                InstructionStep::ChoiceBranch(index) => match def.effect.as_ref() {
+                    Effect::ChooseOneOf { branches, .. } => branches.get(*index)?,
+                    _ => return None,
+                },
             };
         }
         Some(def)
@@ -168,6 +173,11 @@ fn walk(
     }
     if let Effect::CreateDelayedTrigger { effect, .. } = def.effect.as_ref() {
         child(InstructionStep::DelayedPayload, effect);
+    }
+    if let Effect::ChooseOneOf { branches, .. } = def.effect.as_ref() {
+        for (index, branch) in branches.iter().enumerate() {
+            child(InstructionStep::ChoiceBranch(index), branch);
+        }
     }
     for (index, mode) in def.mode_abilities.iter().enumerate() {
         child(InstructionStep::Mode(index), mode);
@@ -386,6 +396,12 @@ mod tests {
                     def.else_ability.as_deref_mut().expect("else instruction")
                 }
                 InstructionStep::Mode(index) => def.mode_abilities.get_mut(*index).expect("mode"),
+                InstructionStep::ChoiceBranch(index) => match def.effect.as_mut() {
+                    Effect::ChooseOneOf { branches, .. } => {
+                        branches.get_mut(*index).expect("choice branch")
+                    }
+                    other => panic!("choice branch, got {other:?}"),
+                },
                 InstructionStep::DelayedPayload => match def.effect.as_mut() {
                     Effect::CreateDelayedTrigger { effect, .. } => effect,
                     other => panic!("delayed payload, got {other:?}"),
@@ -413,6 +429,58 @@ mod tests {
             }
             other => panic!("population carrier, got {other:?}"),
         }
+    }
+
+    /// A choice branch owns its own history clause: the audit resolves the record's
+    /// `ChoiceBranch` locator and reads only that branch's operands. Constructed: no
+    /// printed card reaches the three-branch "unless that player" choice with a history
+    /// clause, so the branch tree wraps a lowered "Tap all creatures ~ blocked this turn."
+    /// with its record re-located onto branch 0. The parser-side transport through
+    /// `try_parse_unless_three_branch_choice` is pinned in the oracle_effect tests.
+    #[test]
+    fn choice_branch_keeps_its_own_history_producer() {
+        let text = "Tap all creatures ~ blocked this turn.";
+        let tap = lower(text, source_context());
+        assert_eq!(tap.history.len(), 1, "{tap:?}");
+        let other = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: bare(),
+                    scope: crate::types::ability::EffectScope::All,
+                    state: crate::types::ability::TapStateChange::Untap,
+                },
+            )
+        };
+        let mut record = tap.history[0].clone();
+        record.locator = Some(InstructionPath(vec![InstructionStep::ChoiceBranch(0)]));
+        let mut lowered = Lowered {
+            value: AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: crate::types::ability::PlayerFilter::Controller,
+                    branches: vec![tap.value.clone(), other(), other()],
+                    kind: crate::types::ability::ChooseOneOfKind::Ordinary,
+                },
+            ),
+            history: vec![record],
+        };
+        assert!(
+            !flagged(text, &lowered),
+            "positive choice witness: {lowered:?}"
+        );
+        let path = InstructionPath(vec![InstructionStep::ChoiceBranch(0)]);
+        let original = crate::parser::oracle_effect::own_instruction_populations(
+            &resolve_mut(&path, &mut lowered.value).effect,
+        )[0]
+        .clone();
+        replace_population(resolve_mut(&path, &mut lowered.value), bare());
+        let other_branch = InstructionPath(vec![InstructionStep::ChoiceBranch(1)]);
+        replace_population(resolve_mut(&other_branch, &mut lowered.value), original);
+        assert!(
+            flagged(text, &lowered),
+            "another branch cannot vouch for the clause"
+        );
     }
 
     #[test]

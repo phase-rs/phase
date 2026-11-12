@@ -7238,19 +7238,35 @@ fn try_parse_unless_three_branch_choice(
         return None;
     }
 
-    let mut default_def = ability_definition_from_clause(AbilityKind::Spell, default_clause);
+    let (mut default_def, default_history) =
+        ability_definition_from_clause(AbilityKind::Spell, default_clause);
     default_def.description = Some(default_orig.to_string());
-    let mut alt1_def = ability_definition_from_clause(AbilityKind::Spell, alt1_clause);
+    let (mut alt1_def, alt1_history) =
+        ability_definition_from_clause(AbilityKind::Spell, alt1_clause);
     alt1_def.description = Some(alt1_deconj);
-    let mut alt2_def = ability_definition_from_clause(AbilityKind::Spell, alt2_clause);
+    let (mut alt2_def, alt2_history) =
+        ability_definition_from_clause(AbilityKind::Spell, alt2_clause);
     alt2_def.description = Some(alt2_deconj);
 
     // Branch order mirrors oracle text: default consequence first, then avoidance options.
-    Some(parsed_clause(Effect::ChooseOneOf {
+    let mut clause = parsed_clause(Effect::ChooseOneOf {
         chooser: PlayerFilter::Controller, // Rebound to scoped opponent via player_scope
         branches: vec![default_def, alt1_def, alt2_def],
         kind: ChooseOneOfKind::Ordinary,
-    }))
+    });
+    // The choice container owns no printed population; each branch owns its text.
+    clause.head_text = Some(String::new());
+    for (index, history) in [default_history, alt1_history, alt2_history]
+        .into_iter()
+        .enumerate()
+    {
+        carry_nested_clause_history(
+            &mut clause.history,
+            history,
+            crate::parser::oracle_ir::history_provenance::InstructionStep::ChoiceBranch(index),
+        );
+    }
+    Some(clause)
 }
 
 /// CR 111.2 + CR 608.2d: Token-choice clauses can elide the repeated verb:
@@ -8244,6 +8260,7 @@ fn try_parse_put_counter_choice(
         });
 
     let mut branches: Vec<AbilityDefinition> = Vec::with_capacity(branch_clauses.len());
+    let mut history = Vec::new();
     for (mut clause, description) in branch_clauses {
         clause.multi_target = None;
         // P3-B: an untargeted DESCRIBED recipient keeps its own parsed
@@ -8257,7 +8274,14 @@ fn try_parse_put_counter_choice(
                 retarget_put_counter_to_parent(&mut clause.effect);
             }
         }
-        let mut def = ability_definition_from_clause(AbilityKind::Spell, clause);
+        let (mut def, branch_history) = ability_definition_from_clause(AbilityKind::Spell, clause);
+        carry_nested_clause_history(
+            &mut history,
+            branch_history,
+            crate::parser::oracle_ir::history_provenance::InstructionStep::ChoiceBranch(
+                branches.len(),
+            ),
+        );
         def.description = Some(description);
         if suppress_lift {
             // CR 115.10a + CR 608.2d: `ability_definition_from_clause` does not
@@ -8312,11 +8336,13 @@ fn try_parse_put_counter_choice(
         // uncastable (Dismantle ruling 1: it targets only the destroyed
         // artifact). The leading counter-threshold gate (if any) attaches to
         // this clause's `condition` in the caller's effect-clause loop.
-        return Some(parsed_clause(Effect::ChooseOneOf {
+        let mut clause = parsed_clause(Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches,
             kind: ChooseOneOfKind::Ordinary,
-        }));
+        });
+        clause.history = history;
+        return Some(clause);
     }
 
     let mut choice = AbilityDefinition::new(
@@ -8334,6 +8360,11 @@ fn try_parse_put_counter_choice(
     });
     clause.multi_target = shared_multi_target;
     clause.sub_ability = Some(Box::new(choice));
+    carry_nested_clause_history(
+        &mut clause.history,
+        history,
+        crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+    );
     Some(clause)
 }
 
@@ -8729,6 +8760,18 @@ fn parse_life_lost_villainous_choice_chooser(input: &str) -> OracleResult<'_, Pl
     ))
 }
 
+/// Move parser-only records alongside a definition nested in an enclosing clause.
+fn carry_nested_clause_history(
+    destination: &mut Vec<crate::parser::oracle_ir::history_provenance::PendingHistory>,
+    mut history: Vec<crate::parser::oracle_ir::history_provenance::PendingHistory>,
+    step: crate::parser::oracle_ir::history_provenance::InstructionStep,
+) {
+    for record in &mut history {
+        record.prepend(step.clone());
+    }
+    destination.extend(history);
+}
+
 /// Lift of a lowered clause onto a fresh definition, for the seven sites that need a
 /// `ParsedEffectClause` as a nested branch/sub-definition rather than as a chain link:
 /// `try_parse_unless_three_branch_choice` (×3, one per branch), `try_parse_put_counter_choice`,
@@ -8755,6 +8798,8 @@ fn parse_life_lost_villainous_choice_chooser(input: &str) -> OracleResult<'_, Pl
 ///     test's census note), so carrying it moves no corpus card's parse; it closes the seam
 ///     for the next clause shape routed through a branch site rather than leaving a live
 ///     modifier to be dropped without a word.
+///   * `history` — CARRIED beside the definition. The caller prepends its typed
+///     nesting step and transfers every record to the enclosing clause.
 ///   * `head_text` — DROPPED: parser bookkeeping for the block-history guard, which
 ///     has already run on the clause; it lowers to nothing.
 ///   * `unlowered_guard` — DELIBERATELY DROPPED. This is the SECOND fail-open path for a
@@ -8768,7 +8813,10 @@ fn parse_life_lost_villainous_choice_chooser(input: &str) -> OracleResult<'_, Pl
 fn ability_definition_from_clause(
     kind: AbilityKind,
     clause: ParsedEffectClause,
-) -> AbilityDefinition {
+) -> (
+    AbilityDefinition,
+    Vec<crate::parser::oracle_ir::history_provenance::PendingHistory>,
+) {
     let ParsedEffectClause {
         effect,
         duration,
@@ -8784,8 +8832,7 @@ fn ability_definition_from_clause(
         unlowered_guard: _,
         // Parser bookkeeping the block-history guard has already read; nothing to lower.
         head_text: _,
-        // Parser provenance for the audit; a branch definition built here carries none.
-        history: _,
+        history,
         entry_onset,
     } = clause;
     let mut def = AbilityDefinition::new(kind, effect);
@@ -8800,7 +8847,7 @@ fn ability_definition_from_clause(
     def.distribute = distribute;
     def.unless_pay = unless_pay;
     def.entry_onset = entry_onset;
-    def
+    (def, history)
 }
 
 fn parse_event_context_ref_with_ctx<'a>(
@@ -26222,15 +26269,15 @@ fn try_parse_physical_contest(text: &str, ctx: &mut ParseContext) -> Option<Pars
     let Some(target) = application.target else {
         return Some(contest);
     };
-    Some(ParsedEffectClause {
-        history: Vec::new(),
-        head_text: None,
-        sub_ability: Some(Box::new(ability_definition_from_clause(
-            AbilityKind::Spell,
-            contest,
-        ))),
-        ..parsed_clause(Effect::TargetOnly { target })
-    })
+    let (definition, history) = ability_definition_from_clause(AbilityKind::Spell, contest);
+    let mut clause = parsed_clause(Effect::TargetOnly { target });
+    clause.sub_ability = Some(Box::new(definition));
+    carry_nested_clause_history(
+        &mut clause.history,
+        history,
+        crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+    );
+    Some(clause)
 }
 
 /// CR 109.5 + CR 608.2c + CR 608.2e: "<A> and <B> each <body>". Two paths:
@@ -26409,24 +26456,15 @@ fn try_parse_compound_subject_each(
     let Some(target) = declares_target else {
         return Some(distributed);
     };
-    Some(ParsedEffectClause {
-        history: Vec::new(),
-        head_text: None,
-        optional_targeting: false,
-        unlowered_guard: None,
-        effect: Effect::TargetOnly { target },
-        duration: None,
-        sub_ability: Some(Box::new(ability_definition_from_clause(
-            AbilityKind::Spell,
-            distributed,
-        ))),
-        distribute: None,
-        multi_target: None,
-        condition: None,
-        optional: false,
-        unless_pay: None,
-        entry_onset: ContinuousEffectOnset::WhenFollowed,
-    })
+    let (definition, history) = ability_definition_from_clause(AbilityKind::Spell, distributed);
+    let mut clause = parsed_clause(Effect::TargetOnly { target });
+    clause.sub_ability = Some(Box::new(definition));
+    carry_nested_clause_history(
+        &mut clause.history,
+        history,
+        crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+    );
+    Some(clause)
 }
 
 /// CR 608.2c + CR 608.2e: Bind a parsed coordinated body to the player set
@@ -27414,6 +27452,32 @@ mod instruction_drops_block_partner_tests {
         assert!(
             matches!(&*bare.effect, Effect::ExploreAll { .. }),
             "{bare:?}"
+        );
+    }
+
+    /// The three-branch "unless that player" choice carries each branch's history
+    /// record at that branch (`InstructionStep::ChoiceBranch`), and the container
+    /// owns none. Hand-built: no printed card reaches this parser with a history clause.
+    #[test]
+    fn a_choice_branch_carries_its_own_history_record() {
+        use crate::parser::oracle_ir::history_provenance::InstructionStep;
+        let text = "Tap all creatures ~ blocked this turn unless that player draws a card or gains 3 life.";
+        let lower = text.to_lowercase();
+        let clause = super::try_parse_unless_three_branch_choice(
+            crate::parser::oracle_util::TextPair::new(text, &lower),
+            &mut source_ctx(),
+        )
+        .expect("the three-branch choice");
+        assert!(
+            matches!(clause.effect, Effect::ChooseOneOf { .. }),
+            "{:?}",
+            clause.effect
+        );
+        assert_eq!(clause.history.len(), 1, "{:?}", clause.history);
+        assert_eq!(
+            clause.history[0].instruction.0,
+            vec![InstructionStep::ChoiceBranch(0)],
+            "the default branch wrote the clause"
         );
     }
 

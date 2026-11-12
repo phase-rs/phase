@@ -1873,7 +1873,13 @@ fn try_parse_source_and_other_restriction_clause(
     let primary_clause = build_restriction_clause(primary_application.clone(), predicate)?;
     let mut secondary_clause = build_restriction_clause(secondary_application, predicate)?;
     secondary_clause.multi_target = secondary_multi;
-    let secondary_def = super::ability_definition_from_clause(AbilityKind::Spell, secondary_clause);
+    let (secondary_def, history) =
+        super::ability_definition_from_clause(AbilityKind::Spell, secondary_clause);
+    // This recognizer constructs restriction clauses directly, before history capture.
+    assert!(
+        history.is_empty(),
+        "constructed restriction has no captured history"
+    );
 
     Some(ClauseAst::SubjectPredicate {
         subject: Box::new(SubjectPhraseAst {
@@ -1995,7 +2001,13 @@ fn try_parse_target_and_same_name_pump_clause(
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     };
-    let mass_def = super::ability_definition_from_clause(AbilityKind::Spell, mass_clause);
+    let (mass_def, history) =
+        super::ability_definition_from_clause(AbilityKind::Spell, mass_clause);
+    // The mass clause is constructed above with empty parser provenance.
+    assert!(
+        history.is_empty(),
+        "constructed pump has no captured history"
+    );
 
     Some(ClauseAst::SubjectPredicate {
         subject: Box::new(SubjectPhraseAst {
