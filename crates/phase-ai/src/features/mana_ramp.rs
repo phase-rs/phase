@@ -26,8 +26,8 @@
 
 use engine::game::DeckEntry;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, CostCategory, Effect, StaticDefinition,
-    TargetFilter, TypeFilter,
+    extract_target_filter_from_effect, AbilityDefinition, AbilityKind, ControllerRef, CostCategory,
+    Effect, StaticDefinition, TargetFilter, TypeFilter,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
@@ -248,11 +248,15 @@ pub(crate) fn chain_has_mana_effect(ability: &AbilityDefinition) -> bool {
 }
 
 /// Return true if the ability's effect chain includes `Effect::SearchLibrary`
-/// of the controller's own library whose filter references a Land (not
-/// any-card tutors, and not "search target opponent's library" such as Eternal
-/// Dominion, which takes a card away from the opponent rather than fixing the
-/// controller's mana).
+/// that can search the controller's own library for a Land card (not any-card
+/// tutors, and not a search that is fixed to another player's library such as
+/// "search target opponent's library" — Eternal Dominion takes a card away
+/// from the opponent rather than fixing the controller's mana).
 pub(crate) fn chain_searches_for_land(ability: &AbilityDefinition) -> bool {
+    // CR 608.2c: "its controller" names the controller of the clause's parent
+    // target, so the parent filter decides whether the searcher can be the
+    // ability's controller (Cleansing Wildfire can target your own land).
+    let parent_target = extract_target_filter_from_effect(&ability.effect);
     collect_chain_effects(ability).iter().any(|e| {
         matches!(
             e,
@@ -260,19 +264,48 @@ pub(crate) fn chain_searches_for_land(ability: &AbilityDefinition) -> bool {
                 filter,
                 target_player,
                 ..
-            } if searches_own_library(target_player) && target_filter_references_land(filter)
+            } if search_can_be_controllers_library(target_player, parent_target)
+                && target_filter_references_land(filter)
         )
     })
 }
 
-/// CR 701.23a: a search serves the controller's mana only when it searches the
-/// controller's own library. An explicit `target_player` names another player's
-/// library; `None` is the controller's own.
-fn searches_own_library(target_player: &Option<TargetFilter>) -> bool {
-    matches!(
-        target_player,
-        None | Some(TargetFilter::Controller | TargetFilter::SourceController)
-    )
+/// CR 701.23a + CR 608.2c: whether the search can look through the controller's
+/// own library. `None`, `Controller` and `SourceController` are the
+/// controller's own library. `ParentTargetController` ("its controller may
+/// search") names the controller of the parent target: when that target can be
+/// a permanent the ability's controller controls, the search can be theirs —
+/// Cleansing Wildfire targeting your own indestructible land keeps the land and
+/// adds a basic (CR 702.12b: indestructible permanents can't be destroyed). Any
+/// scope that is fixed to another player fails closed.
+fn search_can_be_controllers_library(
+    target_player: &Option<TargetFilter>,
+    parent_target: Option<&TargetFilter>,
+) -> bool {
+    match target_player {
+        None | Some(TargetFilter::Controller | TargetFilter::SourceController) => true,
+        Some(TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner) => {
+            parent_target.is_some_and(target_can_be_controllers_permanent)
+        }
+        Some(_) => false,
+    }
+}
+
+/// Whether `filter` can name a permanent the ability's controller controls.
+/// `None` on a typed filter's controller is the parser's "any controller",
+/// which includes the ability's controller.
+fn target_can_be_controllers_permanent(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any => true,
+        TargetFilter::Typed(typed) => !matches!(
+            typed.controller,
+            Some(ControllerRef::Opponent | ControllerRef::TargetOpponent)
+        ),
+        TargetFilter::Or { filters } => filters.iter().any(target_can_be_controllers_permanent),
+        // CR 109.3: every constraint of an `And` must hold for the match.
+        TargetFilter::And { filters } => filters.iter().all(target_can_be_controllers_permanent),
+        _ => false,
+    }
 }
 
 /// Return true if the chain puts the found card to the battlefield or hand.
@@ -746,5 +779,104 @@ mod tests {
 
         let feature = detect(&deck);
         assert!((feature.commitment - 1.0).abs() < 1e-5);
+    }
+
+    /// A face built through the production MTGJSON → parser → synthesis path.
+    fn oracle_face(name: &str, mana_cost: &str, card_type: &str, text: &str) -> CardFace {
+        let atomic: engine::database::mtgjson::AtomicCard =
+            serde_json::from_value(serde_json::json!({
+                "name": name,
+                "manaCost": mana_cost,
+                "manaValue": 2.0,
+                "colors": [],
+                "colorIdentity": [],
+                "layout": "normal",
+                "type": card_type,
+                "types": [card_type],
+                "keywords": [],
+                "identifiers": {},
+                "text": text,
+            }))
+            .expect("valid AtomicCard fixture");
+        engine::database::synthesis::build_oracle_face(&atomic, None)
+    }
+
+    #[test]
+    fn self_targeted_parent_controller_land_fetch_is_fixing() {
+        // Cleansing Wildfire (ZNR): "Destroy target land. Its controller may
+        // search their library for a basic land card, put it onto the
+        // battlefield tapped, then shuffle. Draw a card." CR 608.2c binds "its
+        // controller" to the target land's controller. Targeting your own
+        // indestructible land (CR 702.12b: a permanent with indestructible
+        // can't be destroyed) keeps that land and adds a basic, so the search
+        // can be of the controller's own library.
+        let face = oracle_face(
+            "Cleansing Wildfire",
+            "{1}{R}",
+            "Sorcery",
+            "Destroy target land. Its controller may search their library for a basic land card, put it onto the battlefield tapped, then shuffle.\nDraw a card.",
+        );
+        let search = face
+            .abilities
+            .iter()
+            .flat_map(collect_chain_effects)
+            .find_map(|effect| match effect {
+                Effect::SearchLibrary {
+                    filter,
+                    target_player,
+                    ..
+                } => Some((filter, target_player)),
+                _ => None,
+            })
+            .expect("positive guard: the spell exports a library search");
+        assert!(
+            target_filter_references_land(search.0),
+            "positive guard: the search filter admits a land card"
+        );
+        assert!(
+            matches!(search.1, Some(TargetFilter::ParentTargetController)),
+            "positive guard: the search names the parent target's controller"
+        );
+        assert!(face.abilities.iter().any(chain_searches_for_land));
+        assert!(is_land_fetch_spell(&face));
+
+        let feature = detect(&[entry(face, 1)]);
+        assert_eq!(feature.land_fetch_count, 1);
+    }
+
+    #[test]
+    fn opponent_only_parent_controller_land_search_not_fixing() {
+        // Assassin's Trophy: "Destroy target permanent an opponent controls.
+        // Its controller may search their library for a basic land card, put it
+        // onto the battlefield, then shuffle." The parent target is fixed to an
+        // opponent, so the search is never the controller's own.
+        let face = oracle_face(
+            "Assassin's Trophy",
+            "{B}{G}",
+            "Instant",
+            "Destroy target permanent an opponent controls. Its controller may search their library for a basic land card, put it onto the battlefield, then shuffle.",
+        );
+        let destroy = face
+            .abilities
+            .first()
+            .map(|ability| ability.effect.as_ref())
+            .expect("positive guard: the spell exports its leading effect");
+        let Effect::Destroy { target, .. } = destroy else {
+            panic!("positive guard: Assassin's Trophy destroys a permanent, got {destroy:?}");
+        };
+        assert!(
+            matches!(
+                target,
+                TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::Opponent),
+                    ..
+                })
+            ),
+            "positive guard: the parent target is an opponent's permanent"
+        );
+        assert!(!face.abilities.iter().any(chain_searches_for_land));
+
+        let feature = detect(&[entry(face, 1)]);
+        assert_eq!(feature.land_fetch_count, 0);
     }
 }
