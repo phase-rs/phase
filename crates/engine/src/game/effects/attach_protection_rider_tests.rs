@@ -1673,8 +1673,9 @@ fn entrant_reached_by_a_granted_rider_takes_the_full_pass() {
         )));
 }
 
-/// CR 702.16p: only a source on the battlefield holds a start snapshot, as at
-/// the merge base, which snapshotted battlefield statics only. Synthetic: a
+/// CR 702.16p: only a source on the battlefield holds a start snapshot: the
+/// prune and the legacy migration visit battlefield sources only, and leaving
+/// the battlefield clears the map (CR 400.7). Synthetic: a
 /// graveyard object whose ridered static functions from the graveyard (no
 /// printed card has one; the printed rider is Benevolent Blessing's, on an
 /// Aura on the battlefield) gives Grizzly Bears protection from white. It holds

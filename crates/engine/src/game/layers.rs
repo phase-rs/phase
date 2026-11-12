@@ -9606,19 +9606,24 @@ fn transient_duration_condition(tce: &TransientContinuousEffect) -> Option<&Stat
 /// duration reads, never whether it holds, and they stay variant-safe through
 /// `ability_scan`'s exhaustive matches rather than through this authority.
 ///
-/// Gate-blind consumers are a tracked pre-existing gap, not an exemption:
-/// `casting::apply_static_activated_ability_cost_reduction` and
-/// `effects::attach::protection_blocks_attachment` apply a transient effect
-/// without consulting either gate, so a lapsed condition still reduces a cost
-/// or blocks an attachment. Routing them through here changes behavior and
-/// needs its own CR analysis and tests, so it is out of scope here.
+/// A gate-blind consumer is a tracked pre-existing gap, not an exemption:
+/// `casting::apply_static_activated_ability_cost_reduction` applies a
+/// transient effect without consulting either gate, so a lapsed condition
+/// still reduces a cost. Routing it through here changes behavior and needs
+/// its own CR analysis and tests, so it is out of scope here.
+///
+/// Attachment legality (`effects::attach::protection_blocks_attachment`) is
+/// not such a consumer: it reads the protection abilities layer 6 left on the
+/// host (`keywords` and `protection_provenance`), so a transient whose
+/// condition lapsed is already gone from what it reads. It must not iterate
+/// `transient_continuous_effects` itself.
 ///
 /// The grep that surfaces a new offender is `for tce in
 /// &state.transient_continuous_effects` — the iteration site, not
 /// `Duration::ForAsLongAs`. The latter only matches sites that already
-/// destructure the duration, so it cannot see the gate-blind pair above. A new
-/// iteration site that decides liveness by hand instead of calling this is the
-/// regression to look for.
+/// destructure the duration, so it cannot see the gate-blind consumer above.
+/// A new iteration site that decides liveness by hand instead of calling this
+/// is the regression to look for.
 ///
 /// Permanent expiry uses the same duration predicate after layer derivation;
 /// the separate retained condition may become true again without ending it.
