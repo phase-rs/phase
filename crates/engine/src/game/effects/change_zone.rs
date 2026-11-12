@@ -469,8 +469,8 @@ fn resolution_zone_candidates(
                 // CR 108.2 + CR 109.1: a zone scan chooses among the cards in
                 // the zone; the CR 722.3c retained prepare copy is not one.
                 && object.is_card_population_member()
-                // CR 730.2 + CR 730.2b: a merged component is part of one
-                // permanent, not a permanent the player can choose by itself.
+                // CR 730.2: a merged component is part of one permanent, not a
+                // permanent the player can choose by itself.
                 // Applied to the move component of a terminal shuffle, whose
                 // chosen merged permanent this branch delivers whole; every
                 // other scan keeps the merge-base population (#10759).
