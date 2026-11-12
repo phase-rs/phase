@@ -269,6 +269,13 @@ fn test_waterbending_tap_to_pay() {
 
     // Set up ManaPayment state with Waterbend mode.
     runner.enter_mana_payment(P0, Some(ConvokeMode::Waterbend));
+    // CR 701.67a: the waterbend tap cap needs generic mana to tap toward.
+    runner
+        .state_mut()
+        .pending_cast
+        .as_mut()
+        .expect("synthetic payment")
+        .cost = ManaCost::generic(1);
 
     let result = runner
         .act(GameAction::TapForConvoke {
@@ -468,6 +475,13 @@ fn test_ai_waterbend_candidates() {
     let mut runner = scenario.build();
 
     runner.enter_mana_payment(P0, Some(ConvokeMode::Waterbend));
+    // CR 701.67a: the waterbend tap cap needs generic mana to tap toward.
+    runner
+        .state_mut()
+        .pending_cast
+        .as_mut()
+        .expect("synthetic payment")
+        .cost = ManaCost::generic(1);
 
     let actions = candidate_actions(runner.state());
 
@@ -533,6 +547,13 @@ fn test_ai_convoke_ignores_summoning_sickness() {
 
     let mut runner = scenario.build();
     runner.enter_mana_payment(P0, Some(ConvokeMode::Waterbend));
+    // CR 701.67a: the waterbend tap cap needs generic mana to tap toward.
+    runner
+        .state_mut()
+        .pending_cast
+        .as_mut()
+        .expect("synthetic payment")
+        .cost = ManaCost::generic(1);
 
     let actions = candidate_actions(runner.state());
 
@@ -752,6 +773,13 @@ fn test_waterbend_tap_does_emit_waterbend_event() {
     let mut runner = scenario.build();
 
     runner.enter_mana_payment(P0, Some(ConvokeMode::Waterbend));
+    // CR 701.67a: the waterbend tap cap needs generic mana to tap toward.
+    runner
+        .state_mut()
+        .pending_cast
+        .as_mut()
+        .expect("synthetic payment")
+        .cost = ManaCost::generic(1);
 
     let result = runner
         .act(GameAction::TapForConvoke {
@@ -961,6 +989,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
 
     let change_zone_ability = ResolvedAbility {
         effect: Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -978,6 +1007,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -1302,6 +1332,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
 
     let change_zone_ability = ResolvedAbility {
         effect: Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -1319,6 +1350,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -2143,6 +2175,7 @@ fn build_earthbend_ability(
     let return_effect_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::TriggeringSource,

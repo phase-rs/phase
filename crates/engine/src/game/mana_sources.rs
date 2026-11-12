@@ -447,6 +447,54 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
     actions
 }
 
+/// CR 605.3a + CR 701.26b + CR 122.1d: whether untapping `source` gives `player`
+/// its mana a second time, a priority hint read from `source` alone (it takes
+/// no game state): whether it is a phased-in permanent, its controller, tap
+/// state, counters and effective abilities, with no other object,
+/// static or cost leg consulted and nothing activated, paid or copied. `source`
+/// must be untapped with no stun counter (an untap would remove the counter
+/// instead), and have, among its effective abilities, a {T} mana ability whose
+/// cost doesn't move it off the battlefield (Treasure, Lotus Petal, Mirrored
+/// Lotus). Effective means after layers: a basic land type's intrinsic "{T}:
+/// Add" is there (CR 305.6), and an ability a layer-6 effect removed (Humble)
+/// isn't (CR 613.1f). Whatever that leaves
+/// unchecked (summoning sickness, an activation prohibition or restriction, a
+/// cost leg such as Celestial Prism's {2} or Springleaf Drum's creature to tap)
+/// counts toward holding, so the hold can stop once where a use turns out
+/// impossible, and never passes one the source's own mana ability allows. The
+/// live activation stays the authority on what can actually be activated.
+pub(crate) fn untap_would_repeat_mana(
+    source: &crate::game::game_object::GameObject,
+    player: PlayerId,
+) -> bool {
+    // CR 702.26b: a phased-out permanent is treated as though it doesn't exist.
+    if !source.is_phased_in_permanent()
+        || source.controller != player
+        || source.tapped
+        || source
+            .counters
+            .get(&crate::types::counter::CounterType::Stun)
+            .is_some_and(|stun| *stun > 0)
+    {
+        return false;
+    }
+    source.abilities.iter().any(|ability| {
+        ability.kind == AbilityKind::Activated
+            && mana_abilities::is_mana_ability(ability)
+            && has_tap_component(&ability.cost)
+            && mana_abilities::is_renewable_mana_ability(ability)
+            && !cost_has_component(&ability.cost, |component| {
+                matches!(
+                    component,
+                    AbilityCost::Exile {
+                        filter: Some(TargetFilter::SelfRef),
+                        ..
+                    }
+                )
+            })
+    })
+}
+
 /// The `TapLandForMana` rows [`activatable_mana_actions_for_player`] emits for
 /// one land, without sweeping the rest of the battlefield.
 ///
@@ -2226,16 +2274,7 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
         })
         .max();
 
-    // CR 605.1b + CR 106.12a: add aura TapsForMana bonus to the land's yield
-    // so X-value choosers and castability gates account for Wild Growth etc.
-    // Each outer element of `taps_for_mana_aura_bonus` is one aura that adds
-    // exactly one mana unit; the inner vec holds the color alternatives (1 for
-    // Fixed, N for AnyOneColor) — only the count of auras matters here.
-    let aura_bonus = if obj.card_types.core_types.contains(&CoreType::Land) {
-        taps_for_mana_aura_bonus(state, object_id, controller).len() as u32
-    } else {
-        0
-    };
+    let aura_bonus = land_tap_aura_bonus(state, obj, object_id, controller);
 
     match explicit_max {
         Some(amount) => amount + aura_bonus,
@@ -2246,6 +2285,59 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
         }
         None => aura_bonus,
     }
+}
+
+/// CR 605.1b + CR 106.12a: add aura TapsForMana bonus to a land's yield
+/// so X-value choosers and castability gates account for Wild Growth etc.
+/// Each outer element of `taps_for_mana_aura_bonus` is one aura that adds
+/// exactly one mana unit; the inner vec holds the color alternatives (1 for
+/// Fixed, N for AnyOneColor) — only the count of auras matters here.
+/// Non-lands contribute no bonus.
+fn land_tap_aura_bonus(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    object_id: ObjectId,
+    controller: PlayerId,
+) -> u32 {
+    if obj.card_types.core_types.contains(&CoreType::Land) {
+        taps_for_mana_aura_bonus(state, object_id, controller).len() as u32
+    } else {
+        0
+    }
+}
+
+/// Per-permanent upper bound of the mana obtainable for a resolution-time
+/// effect payment (CR 118.1) via mana abilities (CR 605.3a), including the
+/// TapsForMana aura bonus (CR 605.1b + CR 106.12a).
+///
+/// Colour-dependent sources (Nyx Lotus) are covered because
+/// [`CapacityUse::Castability`] does not exclude them; they are sized at their
+/// best colour, unlike [`x_ceiling_mana_capacity`]. Mana-multiplying
+/// replacement effects are NOT included, same as the previous X-based bound.
+/// This is the floor of `casting::effect_payment_ceiling` (which raises it with
+/// the simulated production) and the input that sizes its probe.
+/// Over-estimation is safe because the caller gates every offered amount
+/// through the exact auto-tap affordability check.
+///
+/// The result is the larger of the feasible-capacity branch (adds non-tap
+/// sources such as Treasure / KCI and colour-dependent sources, with the aura
+/// bonus gated on the land's own usable capacity) and [`max_mana_yield`]
+/// (covers subtype-only basics that carry no explicit mana ability).
+pub(crate) fn effect_payment_mana_capacity(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+) -> u32 {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return 0;
+    };
+    let feasible = feasible_mana_capacity(state, object_id, controller, None);
+    let aura_bonus = if feasible > 0 {
+        land_tap_aura_bonus(state, obj, object_id, controller)
+    } else {
+        0
+    };
+    (feasible + aura_bonus).max(max_mana_yield(state, object_id, controller))
 }
 
 /// CR 117.1d + CR 601.2g: Maximum net mana this permanent could contribute via

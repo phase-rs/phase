@@ -37,6 +37,7 @@ import type {
   DraftKind,
   SharedStackPileDecision,
 } from "./draft-adapter";
+import { draftViewPresentation } from "./draft-adapter";
 import { SubmissionSlot } from "./submissionSlot";
 import type { FullSessionKey, ServerInfo } from "./ws-adapter";
 
@@ -45,6 +46,7 @@ import type { FullSessionKey, ServerInfo } from "./ws-adapter";
 export type DraftPhase =
   | "lobby"
   | "drafting"
+  | "review"
   | "deckbuilding"
   | "match"
   | "between_rounds"
@@ -1236,32 +1238,32 @@ export class ServerDraftAdapter implements EngineAdapter {
    * Called after receiving DraftJoined and DraftStateUpdate.
    */
   private updatePhaseFromView(view: DraftPlayerView): void {
-    switch (view.status) {
-      case "Lobby":
+    switch (draftViewPresentation(view).podPhase) {
+      case "lobby":
         this.phase = "lobby";
         break;
-      case "Drafting":
+      case "drafting":
         this.phase = "drafting";
         break;
-      case "Deckbuilding":
+      case "review":
+        this.phase = "review";
+        break;
+      case "deckbuilding":
         this.phase = "deckbuilding";
         break;
-      case "Pairing":
-      case "RoundComplete":
+      case "pairing":
+      case "roundComplete":
         this.phase = "between_rounds";
         break;
-      case "MatchInProgress":
+      case "matchInProgress":
         // Don't override "match" — DraftMatchStart sets it with game details.
         if (this.phase !== "match") {
           this.phase = "between_rounds";
         }
         break;
-      case "Complete":
-      case "Abandoned":
+      case "complete":
+      case "error":
         this.phase = "complete";
-        break;
-      case "Paused":
-        // Keep current phase during pause.
         break;
     }
   }

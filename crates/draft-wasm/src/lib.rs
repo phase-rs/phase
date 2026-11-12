@@ -1439,20 +1439,80 @@ pub fn export_draft_session() -> Result<String, JsValue> {
     })?
 }
 
+/// Why a saved session cannot be restored under the legacy admission.
+enum RestoreRefusal {
+    /// The text does not deserialize as a draft session.
+    Unreadable(serde_json::Error),
+    /// The session deserializes and the legacy admission refuses it, with the
+    /// admission's own message.
+    Incompatible(String),
+}
+
+/// The first two steps of restoring a saved session, shared by the restore and
+/// the check: deserialize the text as a draft session, then apply the legacy
+/// admission.
+fn admitted_session_from_json(json: &str) -> Result<DraftSession, RestoreRefusal> {
+    let session: DraftSession = serde_json::from_str(json).map_err(RestoreRefusal::Unreadable)?;
+    admit_legacy_runtime(&session).map_err(RestoreRefusal::Incompatible)?;
+    Ok(session)
+}
+
 /// Decode only snapshot shapes this client can safely present after a restore.
 ///
 /// Player and spectator projections own the privacy boundary for a Chaos
 /// layout: the persisted snapshot remains host-local, while all ordinary views
 /// expose only `DraftSourceView`'s redacted metadata.
 fn restorable_draft_session_from_json(json: &str) -> Result<DraftSession, String> {
-    let mut session: DraftSession = serde_json::from_str(json)
-        .map_err(|error| format!("Failed to deserialize draft session: {error}"))?;
-    admit_legacy_runtime(&session)?;
+    let mut session = admitted_session_from_json(json).map_err(|refusal| match refusal {
+        RestoreRefusal::Unreadable(error) => {
+            format!("Failed to deserialize draft session: {error}")
+        }
+        RestoreRefusal::Incompatible(error) => error,
+    })?;
     session.config = enforce_procedure_minimum_deck_size(session.config);
     session
         .validate_persisted_snapshot()
         .map_err(|error| format!("Invalid draft snapshot: {error}"))?;
     Ok(session)
+}
+
+/// The draft engine's answer to whether a saved session could be restored
+/// under its legacy admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "type")]
+enum RestorableDraftSessionVerdict {
+    /// The session deserializes and the legacy admission accepts it.
+    Admitted,
+    /// The session deserializes and the legacy admission refuses it.
+    Incompatible,
+    /// The text does not deserialize as a draft session.
+    Unreadable,
+}
+
+/// Pure-Rust core for `check_restorable_draft_session`, so the verdict is
+/// reachable from `cargo test` without `js_sys::JSON::parse`. It takes the
+/// restore's first two steps from `admitted_session_from_json` and nothing
+/// else: the procedure minimum and the snapshot validation stay the import's.
+fn restorable_draft_session_verdict(json: &str) -> RestorableDraftSessionVerdict {
+    match admitted_session_from_json(json) {
+        Ok(_) => RestorableDraftSessionVerdict::Admitted,
+        Err(RestoreRefusal::Incompatible(_)) => RestorableDraftSessionVerdict::Incompatible,
+        Err(RestoreRefusal::Unreadable(_)) => RestorableDraftSessionVerdict::Unreadable,
+    }
+}
+
+/// Check a saved draft session against the draft engine's legacy admission
+/// without restoring it.
+///
+/// Returns `{ type: "Admitted" }` when the session deserializes and the
+/// admission accepts it, `{ type: "Incompatible" }` when it deserializes and
+/// the admission refuses it, and `{ type: "Unreadable" }` when it does not
+/// deserialize as a draft session. It never throws, and it reads and writes no
+/// installed session, random state, pack generator, difficulty or card
+/// database.
+#[wasm_bindgen]
+pub fn check_restorable_draft_session(json: &str) -> JsValue {
+    to_js(&restorable_draft_session_verdict(json))
 }
 
 /// Restore a DraftSession from a persisted JSON snapshot.
@@ -4067,6 +4127,216 @@ mod create_multiplayer_draft_tests {
         assert!(import_draft_session_inner(&serde_json::to_string(&fifo).unwrap(), 0).is_err());
         assert_eq!(guard_cells_snapshot(), before);
         DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+    }
+
+    /// A legacy session, as draft-core serializes it, passes the check.
+    #[test]
+    fn restorable_session_check_admits_a_legacy_session() {
+        let legacy = dormant_fixture(DraftFlow::LegacyBarrier, DraftStatus::Drafting);
+        let json = serde_json::to_string(&legacy).unwrap();
+        // Reach: the text deserializes to the same session, which the legacy
+        // admission itself accepts.
+        assert_eq!(serde_json::from_str::<DraftSession>(&json).unwrap(), legacy);
+        assert!(legacy.validate_legacy_admission().is_ok());
+        assert_eq!(
+            restorable_draft_session_verdict(&json),
+            RestorableDraftSessionVerdict::Admitted
+        );
+    }
+
+    /// Every session the legacy admission refuses, as draft-core serializes
+    /// it, is reported incompatible rather than unreadable.
+    #[test]
+    fn restorable_session_check_refuses_what_the_legacy_admission_refuses() {
+        let legacy = dormant_fixture(DraftFlow::LegacyBarrier, DraftStatus::Drafting);
+        let mut legacy_review = legacy.clone();
+        legacy_review.status = DraftStatus::Review;
+        let mut burn_policy = legacy.clone();
+        burn_policy.config.selection_policy = DraftSelectionPolicy {
+            burns_per_pick: 1,
+            discard_threshold: 0,
+        };
+        let mut pick_clock = legacy.clone();
+        pick_clock.config.clock_policy = DraftClockPolicy {
+            pick: PickClockPolicy::Fixed { duration_ms: 1000 },
+            review_duration_ms: 0,
+        };
+        let mut review_duration = legacy;
+        review_duration.config.clock_policy = DraftClockPolicy {
+            pick: PickClockPolicy::Off,
+            review_duration_ms: 1000,
+        };
+        let refused = [
+            dormant_fixture(DraftFlow::FifoAsync, DraftStatus::Drafting),
+            dormant_fixture(DraftFlow::FifoAsync, DraftStatus::Review),
+            legacy_review,
+            burn_policy,
+            pick_clock,
+            review_duration,
+        ];
+        let verdicts: Vec<_> = refused
+            .iter()
+            .map(|session| {
+                let json = serde_json::to_string(session).unwrap();
+                // Reach: the text deserializes to the same session, which the
+                // legacy admission itself refuses.
+                assert_eq!(
+                    &serde_json::from_str::<DraftSession>(&json).unwrap(),
+                    session
+                );
+                assert!(session.validate_legacy_admission().is_err());
+                restorable_draft_session_verdict(&json)
+            })
+            .collect();
+        assert_eq!(verdicts, [RestorableDraftSessionVerdict::Incompatible; 6]);
+    }
+
+    /// Text that does not deserialize as a draft session is unreadable, not a
+    /// refusal.
+    #[test]
+    fn restorable_session_check_reports_text_that_is_not_a_session_as_unreadable() {
+        let legacy = serde_json::to_value(dormant_fixture(
+            DraftFlow::LegacyBarrier,
+            DraftStatus::Drafting,
+        ))
+        .unwrap();
+        // Paired positive: the unedited session deserializes, so the refusal
+        // below is about the unknown flow.
+        assert!(serde_json::from_value::<DraftSession>(legacy.clone()).is_ok());
+        let mut unknown_flow = legacy;
+        unknown_flow["config"]["flow"] = "FutureFlow".into();
+        let unreadable = ["{".to_string(), "[]".to_string(), unknown_flow.to_string()];
+        let verdicts: Vec<_> = unreadable
+            .iter()
+            .map(|json| {
+                assert!(serde_json::from_str::<DraftSession>(json).is_err());
+                restorable_draft_session_verdict(json)
+            })
+            .collect();
+        assert_eq!(verdicts, [RestorableDraftSessionVerdict::Unreadable; 3]);
+    }
+
+    #[test]
+    fn restorable_session_check_verdicts_are_type_tagged_objects() {
+        for (verdict, tag) in [
+            (RestorableDraftSessionVerdict::Admitted, "Admitted"),
+            (RestorableDraftSessionVerdict::Incompatible, "Incompatible"),
+            (RestorableDraftSessionVerdict::Unreadable, "Unreadable"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(verdict).unwrap(),
+                serde_json::json!({ "type": tag })
+            );
+        }
+    }
+
+    /// The check installs nothing, and leaves an installed session, the random
+    /// state, the pack generator, the difficulty and the card database as they
+    /// were.
+    #[test]
+    fn restorable_session_check_reads_and_writes_no_thread_local() {
+        let installed = dormant_fixture(DraftFlow::LegacyBarrier, DraftStatus::Drafting);
+        let mut checked = installed.clone();
+        checked.draft_code = "checked-draft".into();
+        let inputs = [
+            serde_json::to_string(&checked).unwrap(),
+            serde_json::to_string(&dormant_fixture(
+                DraftFlow::FifoAsync,
+                DraftStatus::Drafting,
+            ))
+            .unwrap(),
+            "{".to_string(),
+        ];
+        let check_inputs = || {
+            let verdicts: Vec<_> = inputs
+                .iter()
+                .map(String::as_str)
+                .map(restorable_draft_session_verdict)
+                .collect();
+            // Reach: the legacy text is admitted, the FIFO text reaches the
+            // admission, and the malformed text is unreadable.
+            assert_eq!(verdicts[0], RestorableDraftSessionVerdict::Admitted);
+            assert_ne!(verdicts[1], RestorableDraftSessionVerdict::Unreadable);
+            assert_eq!(verdicts[2], RestorableDraftSessionVerdict::Unreadable);
+        };
+
+        clear_state();
+        let empty = guard_cells_snapshot();
+        check_inputs();
+        assert!(!session_cell::is_installed());
+        assert_eq!(guard_cells_snapshot(), empty);
+
+        install_guard_cells(installed);
+        let export = session_cell::with_installed(|draft| serde_json::to_string(draft).unwrap());
+        let before = guard_cells_snapshot();
+        check_inputs();
+        assert_eq!(
+            session_cell::with_installed(|draft| serde_json::to_string(draft).unwrap()),
+            export
+        );
+        assert_eq!(guard_cells_snapshot(), before);
+        clear_state();
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+    }
+
+    /// The shared fixture's saved sessions, which the client's saved-host tests
+    /// read with the draft engine's recorded answers.
+    fn shared_saved_sessions() -> serde_json::Value {
+        let shared: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/draft-contract/fifo_legacy_admission.json"
+        ))
+        .unwrap();
+        shared["saved_sessions"].clone()
+    }
+
+    /// Each saved session in the shared fixture is draft-core's serialization of
+    /// a session built here, or of one with a field set to a value draft-core
+    /// cannot read, and the check gives it the verdict the fixture records.
+    #[test]
+    fn shared_fixture_saved_sessions_are_draft_core_sessions_with_their_verdicts() {
+        let legacy = dormant_fixture(DraftFlow::LegacyBarrier, DraftStatus::Drafting);
+        let fifo = dormant_fixture(DraftFlow::FifoAsync, DraftStatus::Drafting);
+        let mut legacy_review = legacy.clone();
+        legacy_review.status = DraftStatus::Review;
+        let mut legacy_carrying_fifo = legacy;
+        legacy_carrying_fifo.fifo = fifo.fifo.clone();
+        let mut fifo_complete = fifo.clone();
+        fifo_complete.status = DraftStatus::Complete;
+        let mut fifo_abandoned = fifo.clone();
+        fifo_abandoned.status = DraftStatus::Abandoned;
+        let value = |session: &DraftSession| serde_json::to_value(session).unwrap();
+        let mut legacy_review_unknown_flow = value(&legacy_review);
+        legacy_review_unknown_flow["config"]["flow"] = "FutureFlow".into();
+        let built = [
+            ("fifo_drafting", value(&fifo)),
+            ("legacy_review", value(&legacy_review)),
+            ("legacy_carrying_fifo", value(&legacy_carrying_fifo)),
+            ("fifo_complete", value(&fifo_complete)),
+            ("fifo_abandoned", value(&fifo_abandoned)),
+            ("legacy_review_unknown_flow", legacy_review_unknown_flow),
+        ];
+        let shared = shared_saved_sessions();
+        // Reach: the fixture holds exactly these saved sessions.
+        let mut names: Vec<&str> = shared
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        names.sort_unstable();
+        let mut expected: Vec<&str> = built.iter().map(|(name, _)| *name).collect();
+        expected.sort_unstable();
+        assert_eq!(names, expected);
+        for (name, session) in &built {
+            let saved = &shared[*name];
+            assert_eq!(&saved["session"], session, "{name}");
+            let verdict = restorable_draft_session_verdict(&saved["session"].to_string());
+            assert_eq!(
+                serde_json::to_value(verdict).unwrap(),
+                saved["verdict"],
+                "{name}"
+            );
+        }
     }
 
     /// V26. A public backup strips `shared_stack` at the trust boundary, and

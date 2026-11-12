@@ -583,9 +583,10 @@ pub enum ManaRestriction {
     /// remains attached to the produced mana rather than being dropped so the
     /// resulting unit is unspendable instead of accidentally unrestricted.
     Impossible,
-    /// CR 702.51a: Internal marker for a convoke tap that substitutes for
-    /// paying mana. The payment algorithm may consume it for the current spell,
-    /// but cast-spent metrics and mana-added triggers must ignore it.
+    /// CR 702.51a + CR 702.126a + CR 702.66a + CR 701.67a: Internal marker for a
+    /// tap (or delve exile) that substitutes for paying mana. The payment
+    /// algorithm may consume it for a spell or in a waterbend activation's
+    /// payment window, but cast-spent metrics and mana-added triggers must ignore it.
     ConvokePayment,
 }
 

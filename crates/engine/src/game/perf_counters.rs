@@ -111,6 +111,30 @@ pub struct PriorTargetBindingCounters {
     pub selection_bindings: u64,
 }
 
+/// Test-only counter for the CR 704.5a life-crossing read in `analysis::resource::PeriodicDelta`:
+/// how many repetitions' life charges were computed, by the one closure every reader of those
+/// charges goes through. It pins that an offer's work does not grow with a life total. Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above: that struct's
+/// serialized field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeclaredLifeChargeCounters {
+    pub reads: u64,
+}
+
+/// Test-only counters for work a bounded reader, such as the untap priority
+/// hold, must never reach: the game copies the ability-mana affordability probe
+/// (`casting::can_pay_ability_mana_cost_after_auto_tap_excluding`) takes to run
+/// an auto-payment, and the battlefield objects the "tap untapped creatures"
+/// cost check (`cost_payability::has_enough_tap_creatures`) visits. Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BoundedReaderCounters {
+    pub state_clones: u64,
+    pub tap_creature_cost_visits: u64,
+}
+
 /// Test-only counters for the CR 601.2f + CR 602.2b activation cost-determination
 /// routes. They pin that a target-first activation's mana leg is priced at the
 /// settlement write-back, and that the separate "is there mana left to pay?"
@@ -533,6 +557,17 @@ thread_local! {
         })
     };
     #[cfg(feature = "test-support")]
+    static DECLARED_LIFE_CHARGE_COUNTERS: Cell<DeclaredLifeChargeCounters> = const {
+        Cell::new(DeclaredLifeChargeCounters { reads: 0 })
+    };
+    #[cfg(feature = "test-support")]
+    static BOUNDED_READER_COUNTERS: Cell<BoundedReaderCounters> = const {
+        Cell::new(BoundedReaderCounters {
+            state_clones: 0,
+            tap_creature_cost_visits: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
     static ATTACK_DECLARATION_SOLVER_COUNTERS: Cell<AttackDeclarationSolverCounters> = const {
         Cell::new(AttackDeclarationSolverCounters {
             target_table_builds: 0,
@@ -717,6 +752,38 @@ pub fn record_prior_target_binding_selection() {
     PRIOR_TARGET_BINDING_COUNTERS.with(|cell| {
         let mut counters = cell.get();
         counters.selection_bindings += 1;
+        cell.set(counters);
+    });
+}
+
+/// CR 704.5a: recorded once per repetition's life charge that `analysis::resource::PeriodicDelta`
+/// computes, in the closure every reader of those charges calls.
+#[cfg(feature = "test-support")]
+pub fn record_declared_life_charge_read() {
+    DECLARED_LIFE_CHARGE_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.reads += 1;
+        cell.set(counters);
+    });
+}
+
+/// Recorded once per game copy the ability-mana affordability probe takes.
+#[cfg(feature = "test-support")]
+pub fn record_ability_mana_auto_tap_probe_clone() {
+    BOUNDED_READER_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.state_clones += 1;
+        cell.set(counters);
+    });
+}
+
+/// Recorded once per battlefield object the "tap untapped creatures" cost check
+/// visits.
+#[cfg(feature = "test-support")]
+pub fn record_tap_creature_cost_visit() {
+    BOUNDED_READER_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.tap_creature_cost_visits += 1;
         cell.set(counters);
     });
 }
@@ -986,6 +1053,16 @@ pub fn prior_target_binding_snapshot() -> PriorTargetBindingCounters {
     PRIOR_TARGET_BINDING_COUNTERS.with(Cell::get)
 }
 
+#[cfg(feature = "test-support")]
+pub fn declared_life_charge_snapshot() -> DeclaredLifeChargeCounters {
+    DECLARED_LIFE_CHARGE_COUNTERS.with(Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+pub fn bounded_reader_snapshot() -> BoundedReaderCounters {
+    BOUNDED_READER_COUNTERS.with(Cell::get)
+}
+
 /// One targeted-cast offer witness run: its spend, and whether it certified.
 #[cfg(feature = "test-support")]
 pub fn record_targeted_offer_witness(witness: &crate::ai_support::TargetedCastWitness) {
@@ -1186,6 +1263,12 @@ pub fn reset_prior_target_binding_counters() {
 }
 
 #[cfg(feature = "test-support")]
+pub fn reset_declared_life_charge_counters() {
+    DECLARED_LIFE_CHARGE_COUNTERS
+        .with(|counters| counters.set(DeclaredLifeChargeCounters::default()));
+}
+
+#[cfg(feature = "test-support")]
 fn with_take_cost(f: impl FnOnce(&mut TakeCostCounters)) {
     TAKE_COST_COUNTERS.with(|cell| {
         let mut counters = cell.get();
@@ -1318,6 +1401,10 @@ pub fn reset() {
         .with(|counters| counters.set(HomogeneousTargetWalkCacheCounters::default()));
     #[cfg(feature = "test-support")]
     reset_prior_target_binding_counters();
+    #[cfg(feature = "test-support")]
+    reset_declared_life_charge_counters();
+    #[cfg(feature = "test-support")]
+    BOUNDED_READER_COUNTERS.with(|counters| counters.set(BoundedReaderCounters::default()));
     #[cfg(feature = "test-support")]
     ATTACK_DECLARATION_SOLVER_COUNTERS
         .with(|counters| counters.set(AttackDeclarationSolverCounters::default()));

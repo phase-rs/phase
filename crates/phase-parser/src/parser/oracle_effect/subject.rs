@@ -21,7 +21,7 @@ use crate::types::ability::{
     ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRecipient, Duration,
     EachDamageRecipient, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope,
     PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr, StaticCondition,
-    StaticDefinition, TargetFilter, ThisWayCause, TypedFilter,
+    StaticDefinition, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::game_state_kinds::DayNight;
 use crate::types::identifiers::TrackedSetId;
@@ -1965,7 +1965,18 @@ fn try_parse_target_and_same_name_pump_clause(
             toughness,
             target: mass_target,
         },
-        duration: duration.clone().or(Some(Duration::UntilEndOfTurn)),
+        // CR 611.2a: emit the parsed window VERBATIM. This link states no window
+        // of its own unless its own predicate printed one, and `None` is the only
+        // value that says so: an injected `UntilEndOfTurn` is byte-identical to a
+        // printed one, so neither the sentence-window distribution
+        // (`oracle_ir::ast::with_clause_chain_duration`,
+        // `oracle_effect::assembly`'s sentence-scoped stamp) nor the resolver would
+        // be able to tell that this link printed nothing. The end-of-turn fallback
+        // for a windowless link already exists downstream and is the single
+        // authority for it (`game/effects/pump.rs`'s `.unwrap_or`). Measured
+        // corpus-neutral: no card reaching this recognizer prints a window that
+        // this site had been overriding — see issue #7962.
+        duration: duration.clone(),
         sub_ability: None,
         distribute: None,
         multi_target: None,
@@ -1987,7 +1998,8 @@ fn try_parse_target_and_same_name_pump_clause(
         }),
         predicate: Box::new(PredicateAst::Continuous {
             effect: primary_effect,
-            duration: duration.or(Some(Duration::UntilEndOfTurn)),
+            // CR 611.2a: verbatim, for the reason stated on the mass link above.
+            duration,
             sub_ability: Some(Box::new(mass_def)),
             // CR 608.2c: "get -N/-M" is not an "is/has" statement.
             onset: ContinuousEffectOnset::WhenFollowed,
@@ -2684,11 +2696,11 @@ fn try_parse_can_block_additional(
     ))
     .parse(predicate_lower)
     .ok()?;
-    let duration = if subject_text.trim().is_empty() {
-        duration.or(Some(Duration::UntilEndOfTurn))
-    } else {
-        duration
-    };
+    // CR 611.2a: the parsed window stands alone — a suffix-free grant (the
+    // subjectless, inherited-subject form) states NO window and must stay `None`
+    // so an enclosing printed window can distribute onto it. The end-of-turn
+    // fallback for a genuinely windowless grant lives in the resolver
+    // (`game/effects/effect.rs`), which already applies `.unwrap_or`.
     let mode = StaticMode::ExtraBlockers { count };
     let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
@@ -4326,7 +4338,25 @@ fn parse_subject_application_for(
             );
             let binds_declared_target =
                 consumer == AnaphorConsumer::AffectedObject && names_declared_target;
-            if ctx.subject.is_some() && !binds_declared_target {
+            // CR 608.2c: an earlier "exile cards … until you exile a <type> card"
+            // loop of this chain introduces the card it found as the antecedent of
+            // a later "that <type> card" (Q, Stacking the Deck: "That nonland card
+            // gains …"), which the runtime hands to the next instruction as its
+            // targets. The anaphor names that card, never the trigger source, when
+            // every type it names is one the loop's stop filter requires.
+            let names_exile_until_hit = matches!(
+                (ctx.chain_prior_exile_until_match.as_ref(), &filter),
+                (Some(TargetFilter::Typed(found)), TargetFilter::Typed(anaphor))
+                    if anaphor
+                        .type_filters
+                        .iter()
+                        .any(|t| !matches!(t, TypeFilter::Card))
+                        && anaphor
+                            .type_filters
+                            .iter()
+                            .all(|t| matches!(t, TypeFilter::Card) || found.type_filters.contains(t))
+            );
+            if ctx.subject.is_some() && !binds_declared_target && !names_exile_until_hit {
                 return Some(SubjectApplication {
                     affected: filter,
                     target: Some(TargetFilter::TriggeringSource),
@@ -4384,7 +4414,17 @@ fn parse_subject_application_for(
     .parse(lower.as_str())
     .is_ok()
     {
-        return subject_filter_application(TargetFilter::ParentTarget, false);
+        // CR 608.2c + CR 508.5: "that player" is the player the trigger's own
+        // condition named, so bind the possessive through the shared
+        // condition-anaphor authority. An attack trigger ("attacks a player",
+        // Master of Cruelties) names the DEFENDING player: the bare
+        // `ParentTarget` default resolved to the trigger event's attacker — the
+        // ATTACKING player — and set the wrong player's life total. A condition
+        // that names no player (or no trigger context at all) keeps the CR 608.2c
+        // "previously named target" reading.
+        let affected =
+            relative_player_scope_anaphor_filter(ctx).unwrap_or(TargetFilter::ParentTarget);
+        return subject_filter_application(affected, false);
     }
 
     // CR 611.2c: a single effect may name SEVERAL subjects sharing one
@@ -4728,6 +4768,45 @@ fn declared_player_slot_indexes(ctx: &ParseContext) -> Vec<usize> {
         .collect()
 }
 
+/// CR 608.2c + CR 109.4: Share the existing bare-player pronoun grammar's
+/// supported scope bindings with possessive life-total subjects.
+///
+/// `None` when no relative-player scope is present or its binding is not
+/// handled here; callers retain their established fallback. `ScopedPlayer` is
+/// the each-player / iterated frame; its continuous-modification escape
+/// (`resolve_they_pronoun`'s object-set rule) remains owned by that caller.
+fn relative_player_scope_anaphor_filter(ctx: &ParseContext) -> Option<TargetFilter> {
+    match ctx.relative_player_scope.as_ref()? {
+        // CR 506.2 + CR 508.5: an attack trigger's player is the DEFENDING player
+        // — the player (or the attacked planeswalker's controller) the source is
+        // attacking — not the attacking player carried by the attack event.
+        ControllerRef::DefendingPlayer => Some(TargetFilter::DefendingPlayer),
+        // CR 120.3: the damaged / acting player the trigger event
+        // carries ("deals [combat] damage to a player", Unstoppable Slasher).
+        ControllerRef::TargetPlayer | ControllerRef::TriggeringPlayer => {
+            Some(TargetFilter::TriggeringPlayer)
+        }
+        // CR 608.2c: the iterating player of an each-player / each-upkeep frame.
+        ControllerRef::ScopedPlayer => Some(TargetFilter::ScopedPlayer),
+        // CR 115.1d + CR 608.2c: the parent instruction's named target.
+        ControllerRef::ParentTargetController => Some(TargetFilter::ParentTargetController),
+        ControllerRef::ParentTargetOwner => Some(TargetFilter::ParentTargetOwner),
+        // CR 608.2c + CR 109.4: "that player" after a `Choose(Player)` clause
+        // refers to the chosen player — a player-only `Typed` filter carrying the
+        // chosen scope (Gluntch's "choose a player. They put two +1/+1 counters …").
+        scope @ ControllerRef::ChosenPlayer { .. } => chosen_player_anaphor_filter(Some(scope)),
+        ControllerRef::You
+        | ControllerRef::Opponent
+        | ControllerRef::TargetOpponent
+        | ControllerRef::EventTargetController
+        | ControllerRef::DeclaredPlayer { .. }
+        | ControllerRef::SourceChosenPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer
+        | ControllerRef::SpecificPlayer { .. } => None,
+    }
+}
+
 fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> TargetFilter {
     // CR 608.2c + CR 611.2c: an iterated-player frame (a fan-out vote body, an
     // each-player or each-upkeep scope) is the referent of a bare "they" unless
@@ -4747,55 +4826,16 @@ fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> Ta
                 return TargetFilter::ScopedPlayer;
             }
         }
-    }
-    // CR 608.2c + CR 109.4 (issue #1670, #3659): "they" after body "its
-    // controller may … if they do, they draw" refers to that creature's
-    // controller, not the damaged opponent from the trigger condition.
-    if matches!(
-        ctx.relative_player_scope,
-        Some(ControllerRef::ParentTargetController)
-    ) {
-        return TargetFilter::ParentTargetController;
-    }
-    if matches!(
-        ctx.relative_player_scope,
-        Some(ControllerRef::ParentTargetOwner)
-    ) {
-        return TargetFilter::ParentTargetOwner;
-    }
-    // CR 506.2 + CR 508.5: An attack-trigger intervening-if that names
-    // "defending player" (`condition_introduces_defending_player`) stamps
-    // `relative_player_scope = DefendingPlayer` — the nonactive player being
-    // attacked, not a chosen or previously-targeted player. "They" inside
-    // such an effect ("they may reveal their hand" — Smart Ass) refers to
-    // that combat-relative player. Without this arm, "they" fell through to
-    // the generic `ParentTarget` default, which has no defending-player
-    // referent to inherit and left the effect unbound.
-    if matches!(
-        ctx.relative_player_scope,
-        Some(ControllerRef::DefendingPlayer)
-    ) {
-        return TargetFilter::DefendingPlayer;
-    }
-    // CR 120.3 + CR 506.2: A "deals [combat] damage to a player" or
-    // "attacks a player" trigger introduces the damaged/attacked player as the
-    // event referent (the parser stamps `relative_player_scope = TargetPlayer`).
-    // "They" inside such an effect ("they lose half their life") refers to that
-    // event player, which auto-resolves from the triggering event
-    // (`TriggeringPlayer`) — NOT a chosen target. Without this, "they" fell
-    // through to `ParentTarget`, leaving the effect with no player to act on
-    // (Unstoppable Slasher's half-life loss silently resolved as "lose 0").
-    if matches!(
-        ctx.relative_player_scope,
-        Some(ControllerRef::TargetPlayer | ControllerRef::TriggeringPlayer)
-    ) {
-        return TargetFilter::TriggeringPlayer;
-    }
-    // CR 608.2c + CR 109.4: "They" after a `Choose(Player)` clause refers to
-    // the chosen player — a player-only `Typed` filter carrying the chosen
-    // scope (Gluntch's "choose a player. They put two +1/+1 counters …").
-    if let Some(filter) = chosen_player_anaphor_filter(ctx.relative_player_scope.as_ref()) {
-        return filter;
+    } else if let Some(anaphor) = relative_player_scope_anaphor_filter(ctx) {
+        // CR 608.2c + CR 109.4 (issue #1670, #3659): "they" after a body "its
+        // controller may … if they do, they draw" names that creature's
+        // controller; an attack trigger's names the DEFENDING player (Smart
+        // Ass); a damage trigger's names the damaged player (Unstoppable
+        // Slasher). The condition→anaphor binding is the shared authority, so
+        // the possessive subject grammar ("that player's life total") binds the
+        // same player instead of falling through to `ParentTarget`, which has
+        // no player referent to inherit.
+        return anaphor;
     }
     // CR 608.2c: after a multi-target declaration, a bare "They" can name the
     // unique earlier player slot even when a later object slot intervenes.
@@ -11832,6 +11872,52 @@ mod tests {
         let result = parse_subject_application("that player", &mut ctx);
         assert!(result.is_some());
         assert_eq!(result.unwrap().affected, TargetFilter::TriggeringPlayer);
+    }
+
+    /// CR 508.5 + CR 119.5: an attack trigger's "that player's life total" is
+    /// the DEFENDING player. Issue #8082: the possessive bound the bare
+    /// `ParentTarget` anaphor, which resolved to the trigger event's attacker —
+    /// the attacking player — so Master of Cruelties set its own controller's
+    /// life total to 1.
+    #[test]
+    fn parse_subject_that_player_life_total_binds_attack_defender() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            relative_player_scope: Some(ControllerRef::DefendingPlayer),
+            ..ParseContext::default()
+        };
+        let application = parse_subject_application("that player's life total", &mut ctx)
+            .expect("the possessive life-total subject must parse");
+        assert_eq!(
+            application.affected,
+            TargetFilter::DefendingPlayer,
+            "the attacked player's life total, not the trigger event's attacker"
+        );
+    }
+
+    /// Sibling scope: a damage trigger's "their life total" is the damaged player
+    /// carried by the trigger event, through the same condition→anaphor authority.
+    #[test]
+    fn parse_subject_their_life_total_binds_triggering_player() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            relative_player_scope: Some(ControllerRef::TriggeringPlayer),
+            ..ParseContext::default()
+        };
+        let application = parse_subject_application("their life total", &mut ctx)
+            .expect("the possessive life-total subject must parse");
+        assert_eq!(application.affected, TargetFilter::TriggeringPlayer);
+    }
+
+    /// Control: with no relative player established by the condition (and no
+    /// trigger context at all) the possessive keeps its CR 608.2c reading — a
+    /// previously named target — so the fix widens nothing outside trigger bodies.
+    #[test]
+    fn parse_subject_that_player_life_total_without_scope_stays_parent_target() {
+        let mut ctx = ParseContext::default();
+        let application = parse_subject_application("that player's life total", &mut ctx)
+            .expect("the possessive life-total subject must parse");
+        assert_eq!(application.affected, TargetFilter::ParentTarget);
     }
 
     #[test]

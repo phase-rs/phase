@@ -1295,7 +1295,8 @@ pub fn candidate_actions_broad_with_probe(
         // them in any order (CR 401.4). `bounded_select_card_permutations` yields
         // bounded permutations (identity, reverse, and variants up to output cap).
         WaitingFor::RippleBottomOrder { player, cards, .. }
-        | WaitingFor::RevealUntilBottomOrder { player, cards, .. } => {
+        | WaitingFor::RevealUntilBottomOrder { player, cards, .. }
+        | WaitingFor::DigBottomOrder { player, cards, .. } => {
             bounded_select_card_permutations(*player, cards)
         }
         WaitingFor::ArrangePlanarDeckTopChoice {
@@ -2243,6 +2244,23 @@ pub fn candidate_actions_broad_with_probe(
             }
             actions
         }
+        // Turtle Team-Up hero-choice: the same SelectCards combinations as a
+        // discard (all valid sizes when up_to). No unless-filter shape.
+        WaitingFor::HeroEventChoice {
+            player,
+            count,
+            cards,
+            up_to,
+            min,
+            ..
+        } => {
+            let sizes = if *up_to {
+                (*min..=*count).collect()
+            } else {
+                vec![*count]
+            };
+            bounded_select_card_candidates(*player, cards, sizes)
+        }
         WaitingFor::OptionalCostChoice { player, .. } => vec![
             candidate(
                 GameAction::DecideOptionalCost { pay: true },
@@ -3154,6 +3172,27 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
+        // CR 702.106a / CR 702.106f: Secret agenda names are one atomic answer.
+        WaitingFor::SecretAgendaChoice {
+            player, name_count, ..
+        } => {
+            let mut seen = HashSet::new();
+            let names: Vec<String> = card_name_choice_candidates(state, *player, None)
+                .into_iter()
+                .chain(state.all_card_names.iter().cloned())
+                .filter(|name| seen.insert(name.to_lowercase()))
+                .take(usize::from(*name_count))
+                .collect();
+            if names.len() == usize::from(*name_count) {
+                vec![candidate(
+                    GameAction::ChooseSecretAgendaNames { names },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )]
+            } else {
+                Vec::new()
+            }
+        }
         // CR 702.139a: Companion reveal candidates
         WaitingFor::CompanionReveal {
             player,
@@ -5040,6 +5079,21 @@ pub(crate) fn priority_actions_with_probe(
         }
     }
 
+    // CR 702.106c / CR 116.2j / CR 905.4a: turning a face-down hidden agenda conspiracy in
+    // the command zone face up is a special action available any time its
+    // controller has priority.
+    for &object_id in &state.command_zone {
+        if let Some(crate::game::morph::TurnFaceUpOffer::Ready) =
+            crate::game::morph::turn_face_up_offer(state, player, object_id)
+        {
+            actions.push(candidate(
+                GameAction::TurnFaceUp { object_id, x: 0 },
+                TacticalClass::Ability,
+                Some(player),
+            ));
+        }
+    }
+
     // CR 702.143a-b: Foretell is a priority-time special action from hand
     // during the player's own turn. It does not use the stack; the runtime
     // handler pays {2}, exiles the card, marks it foretold, and grants the
@@ -6094,6 +6148,10 @@ fn mana_payment_actions(
         // iterating `state.battlefield` (rather than every object in the game)
         // is behavior-preserving and avoids scanning hand/library/graveyard
         // objects on go-wide token boards.
+        let waterbend_taps_remaining = match mode {
+            ConvokeMode::Waterbend => crate::game::casting::waterbend_taps_remaining(state, player),
+            ConvokeMode::Convoke | ConvokeMode::Improvise | ConvokeMode::Delve => 0,
+        };
         for &obj_id in &state.battlefield {
             let Some(obj) = state.objects.get(&obj_id) else {
                 continue;
@@ -6105,7 +6163,10 @@ fn mana_payment_actions(
                 continue;
             }
             match mode {
-                ConvokeMode::Waterbend if obj.is_waterbend_eligible(player) => {
+                // CR 701.67a: no tap past the waterbend cost's generic count.
+                ConvokeMode::Waterbend
+                    if obj.is_waterbend_eligible(player) && waterbend_taps_remaining > 0 =>
+                {
                     // Waterbend: always colorless
                     actions.push(candidate(
                         GameAction::TapForConvoke {
@@ -10553,6 +10614,7 @@ mod tests {
         let mut ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SelfRef,

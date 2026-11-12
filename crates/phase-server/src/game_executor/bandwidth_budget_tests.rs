@@ -646,6 +646,7 @@ impl ScriptedGame {
             | WaitingFor::RippleRevealChoice { .. }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
@@ -732,6 +733,7 @@ impl ScriptedGame {
             | WaitingFor::SeparatePilesChooseOpponent { .. }
             | WaitingFor::SeparatePilesPartition { .. }
             | WaitingFor::SeparatePilesChoice { .. }
+            | WaitingFor::SecretAgendaChoice { .. }
             | WaitingFor::CompanionReveal { .. }
             | WaitingFor::ChooseLegend { .. }
             | WaitingFor::CommanderZoneChoice { .. }
@@ -752,7 +754,10 @@ impl ScriptedGame {
             | WaitingFor::PayAmountChoice { .. }
             | WaitingFor::RetargetChoice { .. }
             | WaitingFor::CombatTaxPayment { .. }
-            | WaitingFor::PhyrexianPayment { .. } => panic!(
+            | WaitingFor::PhyrexianPayment { .. }
+            // Turtle Team-Up hero-choice prompt: unreachable in this scripted
+            // non-Horde game; fails loudly with the other unscripted prompts.
+            | WaitingFor::HeroEventChoice { .. } => panic!(
                 "unscripted prompt WaitingFor::{} on turn {}; extend the script deliberately",
                 self.runner.waiting_for_kind(),
                 state.turn_number

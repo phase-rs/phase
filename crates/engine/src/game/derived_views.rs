@@ -19,12 +19,16 @@ use std::num::NonZeroUsize;
 
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::{declared_targets_in_chain, flatten_targets_in_chain};
+use crate::game::combat::{active_attack_target, AttackTarget};
+use crate::game::combat_damage::combat_damage_to_defender;
+use crate::game::effects::deal_damage::DamageContext;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{AttachTarget, DisplaySource, GameObject};
 use crate::game::stack::{
     effective_stack_ability, stack_display_groups, stack_display_groups_revealing,
     stack_revealed_card_names, StackDisplayGroup,
 };
+use crate::game::topology::Side;
 use crate::types::ability::{
     ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
     RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
@@ -36,6 +40,7 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_entries, CounterType};
 use crate::types::display_only::{CanonicalDigest, DisplayOnly};
 use crate::types::events::GameEvent;
+use crate::types::format::TurnStructure;
 use crate::types::game_state::{
     CastingVariant, CombatDamageSubStep, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
     SyntheticTriggerProvenance, TriggerSourceRead, WaitingFor,
@@ -493,10 +498,16 @@ pub struct TurnOrderSlotView {
     /// display classification rather than comparing player IDs themselves.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_viewer: bool,
-    /// Whether this projected slot is the game's starting player. It is only
-    /// true while that player is also the current turn representative.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub is_starting_player: bool,
+}
+
+/// CR 103.1 + CR 103.1a: whether the viewer's side takes the first turn of a
+/// game with exactly two sides — the starting player's side ("on the play") or
+/// the other side ("on the draw"). Display classification only; no rules path
+/// reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayDrawPosition {
+    OnThePlay,
+    OnTheDraw,
 }
 
 /// A card identity deliberately exposed to the debug library browser. This
@@ -622,6 +633,19 @@ pub struct SharedPilesView {
     pub library: Option<PlayerId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graveyard: Option<PlayerId>,
+}
+
+/// CR 510.1a + CR 702.4b + CR 120.3a/b: display-only projection, at the current
+/// state, of what a creature that may attack would do to a player if it attacks
+/// and is not blocked. Computed before replacement and prevention effects
+/// (CR 614.1 / CR 615.1), which apply only as the damage event happens.
+/// Not a game action; recomputed on every snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnblockedAttackPreview {
+    /// CR 510.1a + CR 702.4b: combat damage across every damage step it would assign in.
+    pub damage: u32,
+    /// CR 120.3a / CR 120.3b: life loss that damage causes a player (0 for infect).
+    pub life_loss: u32,
 }
 
 /// Engine-authored projections used by the display layer. Keep this struct
@@ -912,15 +936,26 @@ pub struct DerivedViews {
     /// multiplayer turn-order slots. Empty for one-on-one games because the
     /// existing active-player ring is sufficient; populated by engine-owned
     /// projection so the frontend never computes extra/skipped/controlled turn
-    /// order from raw state.
+    /// order from raw state. Empty until the starting player is determined
+    /// (CR 103.1: there is no turn order before the starting player).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turn_order: Vec<TurnOrderSlotView>,
 
     /// One-based projected turn position for the viewing player. This keeps
     /// player-specific turn-order interpretation in the engine while allowing
-    /// the client to render "You take turn N" directly.
+    /// the client to render "You take turn N" directly. Empty until the
+    /// starting player is determined (CR 103.1: there is no turn order before
+    /// the starting player).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewer_turn_number: Option<u8>,
+
+    /// CR 103.1 + CR 103.1a + CR 805.3: the viewer's side relative to the starting
+    /// side, for a game of exactly two sides that each take one turn per round
+    /// (two-player, Two-Headed Giant, Archenemy, Horde). `None` for an unseated
+    /// viewer, before the starting player is determined, and in every other
+    /// multiplayer game — where `viewer_turn_number` carries the viewer's position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_play_draw: Option<PlayDrawPosition>,
 
     /// CR 732.2a: the `∞` HUD rows — one per (attributed player, pumped axis) of
     /// every unbounded-resource loop in `GameState::unbounded_resources`. The
@@ -1013,6 +1048,18 @@ pub struct DerivedViews {
     /// `Life` axis for that seat is rising; only non-`Finite` entries are emitted.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub life_magnitude: BTreeMap<PlayerId, DisplayMagnitude>,
+
+    /// CR 508.1a + CR 510.1a + CR 120.3a/b: per-candidate-attacker projection of unblocked
+    /// damage, published only while the attack declaration prompt is open; keyed by attacker
+    /// id. Display-only; before replacement and prevention effects (CR 614.1 / CR 615.1).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub unblocked_attack_previews: HashMap<ObjectId, UnblockedAttackPreview>,
+
+    /// CR 506.4c: each attacking creature's current attack target, keyed by attacker id. An
+    /// attacker whose relation has ended is absent: it is still an attacking creature, but it
+    /// is not attacking any player, planeswalker, or battle.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub attack_targets: HashMap<ObjectId, AttackTarget>,
 }
 
 /// Serialize-only wrapper. The wire shape is
@@ -1545,6 +1592,8 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         current_target_kind: current_target_kind(state),
         dungeon_rooms: dungeon_rooms(state),
         storm_count: storm_count(state),
+        unblocked_attack_previews: unblocked_attack_previews(state),
+        attack_targets: attack_targets(state),
         ..DerivedViews::default()
     };
 
@@ -1818,6 +1867,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     let (turn_order, viewer_turn_number) = turn_order_views(state, viewer);
     views.turn_order = turn_order;
     views.viewer_turn_number = viewer_turn_number;
+    views.viewer_play_draw = viewer_play_draw(state, viewer);
 
     // WHY THE THREE ∞ SURFACE CHANNELS BELOW ARE UNCONDITIONAL — the accept→boundary window.
     //
@@ -2214,6 +2264,50 @@ fn storm_count(state: &GameState) -> u32 {
         .unwrap_or_else(|| spells_cast_this_turn(state))
 }
 
+/// CR 508.1a: one unblocked-attack projection per creature the open attack
+/// declaration prompt lets attack; empty in every other state (just-in-time).
+fn unblocked_attack_previews(state: &GameState) -> HashMap<ObjectId, UnblockedAttackPreview> {
+    let WaitingFor::DeclareAttackers {
+        valid_attacker_ids, ..
+    } = &state.waiting_for
+    else {
+        return HashMap::new();
+    };
+    valid_attacker_ids
+        .iter()
+        .filter_map(|&id| {
+            // CR 510.1b + CR 702.4b: unblocked attacker's damage over both damage steps — the
+            // shared authority.
+            let damage = combat_damage_to_defender(state, id, &[]).max(0) as u32;
+            let has_infect = DamageContext::from_source(state, id)?.has_infect;
+            let life_loss = if has_infect {
+                // CR 120.3b: infect damage to a player is poison counters, not life loss.
+                0
+            } else {
+                // CR 120.3a: damage to a player without infect is that much life loss.
+                damage
+            };
+            Some((id, UnblockedAttackPreview { damage, life_loss }))
+        })
+        .collect()
+}
+
+/// CR 400.7 + CR 506.4c: each attacker's relation read through the combat authority, which
+/// drops a planeswalker or battle removed from combat (CR 506.4) and a player who has left
+/// the game; empty outside combat.
+fn attack_targets(state: &GameState) -> HashMap<ObjectId, AttackTarget> {
+    let Some(combat) = &state.combat else {
+        return HashMap::new();
+    };
+    combat
+        .attackers
+        .iter()
+        .filter_map(|info| {
+            active_attack_target(state, info).map(|(target, _)| (info.object_id, target))
+        })
+        .collect()
+}
+
 /// The table-wide count of spells actually cast this turn. This is intentionally
 /// private: public Storm presentation must use [`storm_count`] so an active
 /// Storm trigger uses its cast-time snapshot rather than including itself.
@@ -2331,10 +2425,51 @@ fn unique_authorized_submitter(state: &GameState) -> Option<PlayerId> {
     (submitters.len() == 1).then(|| submitters[0])
 }
 
+/// CR 103.1: the starting player of the game this state describes, once it has
+/// been determined. `current_starting_player` alone cannot answer this: it is
+/// non-optional and `GameState::new` seeds it with a format default before any
+/// determination. Turn 1 is established in the same step that assigns the
+/// starter (`engine::start_game_with_starting_player`,
+/// `engine::start_game_skip_mulligan`), so a state still on turn 0 has none.
+fn determined_starting_player(state: &GameState) -> Option<PlayerId> {
+    (state.turn_number > 0).then_some(state.current_starting_player)
+}
+
+/// CR 103.1 + CR 103.1a + CR 805.4: the viewer's play/draw position — see
+/// `DerivedViews::viewer_play_draw`. Sides come from `topology::sides`, which
+/// includes departed seats, so the position stays fixed for the whole game.
+fn viewer_play_draw(state: &GameState, viewer: Option<PlayerId>) -> Option<PlayDrawPosition> {
+    let viewer = viewer?;
+    let starter = determined_starting_player(state)?;
+    let sides = crate::game::topology::sides(state);
+    let [first, second] = sides.as_slice() else {
+        return None;
+    };
+    // CR 805.4: a side takes one turn per round when it is a single seat or
+    // takes shared team turns; any other side makes the game multiplayer-ordered.
+    let one_turn_per_round = |side: &Side| {
+        side.seats.len() == 1 || side.turn_structure == TurnStructure::SharedTeamTurns
+    };
+    if !(one_turn_per_round(first) && one_turn_per_round(second)) {
+        return None;
+    }
+    let side_index = |player| sides.iter().position(|side| side.seats.contains(&player));
+    Some(if side_index(viewer)? == side_index(starter)? {
+        PlayDrawPosition::OnThePlay
+    } else {
+        PlayDrawPosition::OnTheDraw
+    })
+}
+
 fn turn_order_views(
     state: &GameState,
     viewer: Option<PlayerId>,
 ) -> (Vec<TurnOrderSlotView>, Option<u8>) {
+    // CR 103.1: no turn order exists before the starting player is determined.
+    if determined_starting_player(state).is_none() {
+        return (Vec::new(), None);
+    }
+
     let mut seen = BTreeSet::new();
     let representatives: Vec<PlayerId> = state
         .seat_order
@@ -2363,7 +2498,6 @@ fn turn_order_views(
                 turns_from_now: slot_index,
                 turn_number: slot_index + 1,
                 is_viewer: viewer == Some(player),
-                is_starting_player: slot_index == 0 && player == state.current_starting_player,
             }
         })
         .collect();
@@ -5224,7 +5358,17 @@ mod tests {
 
     #[test]
     fn turn_order_hidden_for_two_or_fewer_live_representatives() {
-        let state = GameState::new(FormatConfig::standard(), 2, 42);
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        // A game in progress: the starting player is determined (CR 103.1), so
+        // the representative count and not determination is what hides turn order.
+        state.turn_number = 1;
+
+        assert!(
+            derive_views(&state, Some(PlayerId(0)))
+                .viewer_play_draw
+                .is_some(),
+            "the determination guard passed, so the <= 2 branch hides turn order"
+        );
 
         let views = derive_views(&state, None);
 
@@ -5244,6 +5388,8 @@ mod tests {
     #[test]
     fn turn_order_duplicates_survive_wire_round_trip() {
         let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
+        // A game in progress: the starting player is determined (CR 103.1).
+        state.turn_number = 1;
         state.active_player = PlayerId(0);
         state.extra_turns.push(crate::types::game_state::ExtraTurn {
             player: PlayerId(2),
@@ -5265,7 +5411,6 @@ mod tests {
                     turns_from_now: 0,
                     turn_number: 1,
                     is_viewer: false,
-                    is_starting_player: true,
                 },
                 TurnOrderSlotView {
                     player: PlayerId(0),
@@ -5273,7 +5418,6 @@ mod tests {
                     turns_from_now: 1,
                     turn_number: 2,
                     is_viewer: false,
-                    is_starting_player: false,
                 },
             ],
             "same player can be both NOW and NEXT when an extra turn is queued"

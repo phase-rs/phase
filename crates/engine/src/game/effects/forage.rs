@@ -88,6 +88,7 @@ fn exile_three_branch() -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Exile,
             target: TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Owned {
