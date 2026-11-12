@@ -1163,6 +1163,152 @@ fn a_pinless_latch_still_cannot_state_a_zone_the_object_never_left() {
     }
 }
 
+/// CR 601.2c + CR 115.4: the POSITIVE witness that the slot-filter check does not over-refuse.
+///
+/// Lightning Bolt's declared slot is unrestricted ("any target"), so an enchantment-only
+/// snapshot legitimately satisfies it: this control rewrites the recorded type exactly as the
+/// Doom Blade control does, and the save is ADMITTED. That is the stated limit — for an `Any`
+/// slot no filter-based check can discriminate — and this test pins it so the guard cannot
+/// later be tightened into refusing it.
+#[test]
+fn an_unrestricted_slot_admits_a_restated_type() {
+    let MidPaymentBoard { runner, heliod, .. } = bolt_announced_at_a_creature_heliod_mid_payment();
+
+    let mut state = runner.state().clone();
+    let parked = state
+        .pending_cast
+        .as_deref_mut()
+        .expect("reach-guard: the ManaPayment prompt owns the cast");
+    let latched = parked
+        .committed_target_facts
+        .as_deref_mut()
+        .expect("reach-guard: the engine-written park carries its announced-target latch");
+    let fact = latched
+        .iter_mut()
+        .find(|fact| matches!(fact, ActivationTargetFact::Object { id, .. } if *id == heliod))
+        .expect("reach-guard: the latch names Heliod");
+    let ActivationTargetFact::Object { lki, .. } = fact else {
+        unreachable!("filtered to the object fact above");
+    };
+    lki.card_types.retain(|kind| *kind != CoreType::Creature);
+
+    admitted(persisted_json(&state)).expect(
+        "CR 115.4: an unrestricted slot satisfies an enchantment-only snapshot, so this save is \
+         admitted — the guard must not be tightened past what the filter can decide",
+    );
+}
+
+/// CR 601.2c + CR 115.4: the same target id, the pin still current, the zone still the
+/// battlefield — only the recorded TYPE rewritten to what the object looks like after the
+/// effects that made it a legal target have gone. Identity, zone and pin all still check
+/// out, so only the declaring slot's own filter can catch it.
+///
+/// Printed **Doom Blade** is `{1}{B}` — "Destroy target creature." — so its declared slot
+/// constrains the type. Heliod, Sun-Crowned is that creature at five devotion; the forged
+/// snapshot drops `Creature`, which the slot's filter never admitted in either direction.
+/// The honest twin is admitted: the Lightning Bolt witness above is the same mechanism on an
+/// UNRESTRICTED ("any target") slot, which an enchantment-only snapshot legitimately
+/// satisfies — that case is the positive control that the check does not over-refuse.
+#[test]
+fn a_type_constrained_slot_refuses_a_snapshot_restating_the_post_payment_type() {
+    let db = shared_card_db().expect("the checked-in card fixture contains these cards");
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let spell = sc.add_real_card(P0, "Doom Blade", Zone::Hand, db);
+    let heliod = sc.add_real_card(P0, "Heliod, Sun-Crowned", Zone::Battlefield, db);
+    sc.add_real_card(P0, "Benalish Marshal", Zone::Battlefield, db);
+    sc.add_real_card(P0, "Savannah Lions", Zone::Battlefield, db);
+    let mut runner = sc.build();
+    rehydrate_game_from_card_db(runner.state_mut(), db);
+    assert!(
+        is_creature(runner.state(), heliod),
+        "reach-guard: Heliod is a creature at announcement, so Doom Blade may target it"
+    );
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("Doom Blade is announced");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "reach-guard: the cast asks for its target, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(heliod)],
+        })
+        .expect("Heliod is a legal target for Doom Blade");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach-guard: the cast parks on the manual mana payment, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // The honest twin restores.
+    admitted(persisted_json(runner.state())).expect("reach-guard: the honest pack is admitted");
+
+    let mut state = runner.state().clone();
+    let parked = state
+        .pending_cast
+        .as_deref_mut()
+        .expect("reach-guard: the ManaPayment prompt owns the cast");
+    let latched = parked
+        .committed_target_facts
+        .as_deref_mut()
+        .expect("reach-guard: the engine-written park carries its announced-target latch");
+    let fact = latched
+        .iter_mut()
+        .find(|fact| matches!(fact, ActivationTargetFact::Object { id, .. } if *id == heliod))
+        .expect("reach-guard: the latch names Heliod");
+    let ActivationTargetFact::Object { id, zone, lki, .. } = fact else {
+        unreachable!("filtered to the object fact above");
+    };
+    let target = *id;
+    assert_eq!(
+        *zone,
+        AnnouncedTargetZone::Known(Zone::Battlefield),
+        "reach-guard: the honest fact says battlefield, and this control changes only the type"
+    );
+    assert!(
+        lki.card_types.contains(&CoreType::Creature),
+        "reach-guard: the honest snapshot records the creature the slot's filter required"
+    );
+    // CR 613.1d: the post-payment type line — an enchantment, which "target creature" never
+    // admitted.
+    lki.card_types.retain(|kind| *kind != CoreType::Creature);
+
+    match PersistedGameState::capture(state).into_game_state() {
+        Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+            spell_object_id,
+            reason:
+                AnnouncedTargetFactConflict::SnapshotContradictsDeclaredFilter {
+                    target: TargetRef::Object(refused),
+                },
+        }) => {
+            assert_eq!(
+                spell_object_id, spell,
+                "the refusal names the cast it is about"
+            );
+            assert_eq!(
+                refused, target,
+                "and the target whose snapshot was rewritten"
+            );
+        }
+        other => panic!(
+            "CR 601.2c + CR 115.4: a type-constrained slot must refuse a snapshot restating the \
+             post-payment type, got {other:?}"
+        ),
+    }
+}
+
 /// CR 601.2d: Printed **Violent Eruption** is "{1}{R}{R}{R} — Violent Eruption
 /// deals 4 damage divided as you choose among any number of targets." (Scryfall,
 /// oracle text verified).

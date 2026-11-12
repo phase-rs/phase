@@ -2997,6 +2997,13 @@ pub fn declared_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeclaredTargetEntry {
     pub(crate) target: TargetRef,
+    /// CR 601.2c + CR 115.4: the filter the DECLARING node used for this slot, recovered by
+    /// re-walking the effect tree in lockstep with the slot builder. `TargetSelectionSlot` is
+    /// attribution-free by design, so this cannot be recovered from the persisted slot; the
+    /// node the walk visits still carries its effect, and every position one node declares
+    /// shares that node's filter ("two target creatures"). `None` where the node declares no
+    /// stack-time filter — callers must skip that position rather than invent one.
+    pub(crate) filter: Option<crate::types::ability::TargetFilter>,
     /// The announced pin of THIS occurrence, read positionally from the
     /// declaring node (`ResolvedAbility::target_pin_at`). Two declared
     /// positions holding the same object carry their own pins. `None` for a
@@ -3022,6 +3029,13 @@ pub(crate) fn declared_target_entries_in_chain(
                         .map(|&position| DeclaredTargetEntry {
                             target: node.targets[position].clone(),
                             pin: node.target_pin_at(position),
+                            filter: if node.target_choice_timing
+                                == crate::types::ability::TargetChoiceTiming::Stack
+                            {
+                                extract_target_filter_from_effect(&node.effect).cloned()
+                            } else {
+                                None
+                            },
                         }),
                 );
             }

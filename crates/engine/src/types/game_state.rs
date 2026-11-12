@@ -12726,6 +12726,15 @@ pub enum AnnouncedTargetFactConflict {
     /// cast resumes — Heliod, Sun-Crowned at five devotion, then a white permanent
     /// sacrificed for mana. Refusing that drift would reject an honest save; the
     /// announcement-time characteristics live only in the latch and are not re-derivable.
+    /// CR 601.2c + CR 115.4: the fact's recorded snapshot does not satisfy the filter that
+    /// declared this slot, so it records a target the spell could not have announced. The
+    /// slot's filter is recovered by re-walking the effect tree in lockstep with the slot
+    /// builder; the snapshot is evaluated against it as recorded, never against the live
+    /// object, so legitimate characteristics drift is not refused.
+    SnapshotContradictsDeclaredFilter {
+        /// The declared target whose recorded snapshot fails its own slot's filter.
+        target: TargetRef,
+    },
     ZoneContradictsAnnouncement {
         /// The declared target whose announcement zone the latch contradicts.
         target: TargetRef,
@@ -12749,6 +12758,11 @@ impl std::fmt::Display for AnnouncedTargetFactConflict {
                 "its announced-target latch omits the declared target {target:?}, which the \
                  save still holds, so the record would state a declaration the cast did not \
                  make (CR 601.2c + CR 115.1)"
+            ),
+            Self::SnapshotContradictsDeclaredFilter { target } => write!(
+                f,
+                "its announced-target latch records characteristics for {target:?} that the \
+                 filter declaring that slot never admitted (CR 601.2c + CR 115.4)"
             ),
             Self::ZoneContradictsAnnouncement {
                 target,
@@ -19916,6 +19930,46 @@ impl GameState {
                 let Some(object) = state.objects.get(id) else {
                     continue;
                 };
+                // CR 601.2c + CR 115.4: the fact's recorded snapshot must satisfy the filter
+                // that DECLARED this slot. This is not a live-object comparison — the
+                // snapshot is the announcement's own record — so honest drift still passes:
+                // Heliod announced as a creature satisfies "any target" and "target
+                // creature" on its recorded snapshot even after devotion drops. A save that
+                // rewrites the snapshot to the post-payment type does not.
+                if let Some(filter) = entry.filter.as_ref() {
+                    let ActivationTargetFact::Object {
+                        id: fact_id, lki, ..
+                    } = fact
+                    else {
+                        unreachable!("filtered to the object fact above");
+                    };
+                    // CR 601.2c: the announcing cast is the filter's source authority — the
+                    // spell itself, controlled by its controller. Nothing else is bound: this
+                    // asks only what the recorded snapshot looks like.
+                    let context = crate::game::filter::FilterContext {
+                        source_id: pending.object_id,
+                        source_controller: Some(pending.ability.controller),
+                        ability: Some(&pending.ability),
+                        ability_targets: None,
+                        trigger_source: None,
+                        recipient_id: None,
+                        scoped_iteration_player: None,
+                        triggering_object: None,
+                        declared_slot_view: None,
+                        granting_object: None,
+                    };
+                    if !crate::game::filter::matches_target_filter_on_lki_snapshot(
+                        state, *fact_id, lki, filter, &context,
+                    ) {
+                        return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+                            spell_object_id: pending.object_id,
+                            reason:
+                                AnnouncedTargetFactConflict::SnapshotContradictsDeclaredFilter {
+                                    target: TargetRef::Object(*fact_id),
+                                },
+                        });
+                    }
+                }
                 if *zone != AnnouncedTargetZone::Known(object.zone) {
                     return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
                         spell_object_id: pending.object_id,
