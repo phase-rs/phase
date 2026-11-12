@@ -1254,9 +1254,9 @@ impl TournamentMeta {
     /// registration — once no pairing can ever be hosted again (hosting and deck
     /// resubmission both refuse on a terminal status), the decks are dead weight.
     /// Dropping them reclaims their bytes from the single-key broker snapshot so a
-    /// terminal event stops charging the shared [`MAX_AGGREGATE_DECK_ENCODED_BYTES`]
-    /// budget and can never block an unrelated event — and makes the whole-snapshot
-    /// deck cost bounded by the *live* events alone. The derived `deck_submitted`
+    /// terminal event stops charging its [`MAX_EVENT_DECK_ENCODED_BYTES`] budget and
+    /// the complete-snapshot bound ([`crate::broker::MAX_SNAPSHOT_ENCODED_BYTES`]),
+    /// keeping the persisted deck cost bounded by the *live* events alone. The derived `deck_submitted`
     /// readiness flag on a terminal event's `PlayerSummary` consequently reads
     /// false, which is correct: readiness is moot once nothing can be hosted. Pure
     /// bookkeeping — pairing results, standings, and drop history are untouched.
@@ -2170,58 +2170,36 @@ pub enum TournamentExpiryEvent {
     Abandoned(String),
 }
 
-/// Aggregate budget for the encoded bytes of every persisted deck this manager
-/// holds, across all tournaments, enforced at [`TournamentManager::submit_deck`]
-/// admission. The lobby Durable Object serializes the ENTIRE broker — the lobby
-/// registry plus every tournament and its retained decks — as one JSON value
-/// under a single SQLite key, and Cloudflare caps a SQLite key+value at 8 MB. The
-/// per-deck wire bounds ([`crate::inbound_guard::validate_deck_payload`])
-/// individually accept decks whose *persisted* size sums far past a safe share of
-/// that cap in aggregate: the maxed name lists are ~2.46 MB of names alone, and the
-/// separately-bounded `printings` sidecar independently admits
-/// [`MAX_DECK_PRINTING_ENTRIES`](engine::types::card_printing::MAX_DECK_PRINTING_ENTRIES)
-/// entries (~256 B name + 32 B set code + 32 B collector number each) per list
-/// with no matching name-list entry — so one empty-name deck can still serialize
-/// past its fair share. This is the GLOBAL safety net: it caps the summed
-/// *encoded* deck bytes (every persisted field, JSON escaping and per-entry
-/// overhead; see [`deck_encoded_bytes`]) of every retained deck across all events
-/// at 4 MiB — half the 8 MB hard limit, leaving the other half for the lobby
-/// registry and tournament metadata (whose count is independently bounded by
-/// [`crate::broker::MAX_TOURNAMENT_ENTRIES`]). It is the Durable-Object snapshot
-/// backstop, not the fairness gate: [`MAX_EVENT_DECK_ENCODED_BYTES`] isolates one
-/// event from another and [`MAX_SINGLE_DECK_ENCODED_BYTES`] bounds any one
-/// entrant's share. Since each event is capped at 1/8 of this, no single event can
-/// consume the capacity other live events need. A refused submission leaves every
-/// retained deck and its readiness unchanged (the check precedes the single
-/// mutation).
-pub const MAX_AGGREGATE_DECK_ENCODED_BYTES: usize = 8 * MAX_EVENT_DECK_ENCODED_BYTES;
-
 /// Per-EVENT deck budget: the summed encoded bytes of a *single* tournament's
-/// retained decks, enforced at [`TournamentManager::submit_deck`] admission before
-/// the global [`MAX_AGGREGATE_DECK_ENCODED_BYTES`] net. This is the event-isolation
-/// gate. The public Worker routes every tournament to one global lobby instance,
-/// entrant keys are caller-chosen, and a Swiss field is unbounded — so without a
-/// per-event cap the entrants of one live event could fill the whole shared budget
-/// and deny every *other* live event a submission (the gap the global-only budget
-/// left open). Capping each event at 512 KiB — eight entrants at the
-/// [`MAX_SINGLE_DECK_ENCODED_BYTES`] abuse ceiling, or ~34 legitimate ~15 KB decks —
-/// bounds one event's footprint to 1/8 of the global net, so other live events
-/// always have room. An event whose legitimate field exceeds this (a very large
-/// Swiss) refuses only its own later submissions; no other event is affected.
-/// Measured with the same [`deck_encoded_bytes`] codec as the global budget.
+/// retained decks, enforced at [`TournamentManager::submit_deck`] admission. This
+/// is the event-isolation gate. The public Worker routes every tournament to one
+/// global lobby instance, entrant keys are caller-chosen, and a Swiss field is
+/// unbounded — so without a per-event cap the entrants of one live event could
+/// consume capacity other live events need. Capping each event at 512 KiB — eight
+/// entrants at the [`MAX_SINGLE_DECK_ENCODED_BYTES`] abuse ceiling, or ~34
+/// legitimate ~15 KB decks — makes each event's deck footprint wholly its own: an
+/// event whose legitimate field exceeds this (a very large Swiss) refuses only its
+/// own later submissions, and no other event is ever counted against it. There is
+/// no shared cross-event deck pool (an earlier design summed decks across all
+/// events against one cap, which handed a shared budget to whichever submission
+/// arrived first). The complementary bound is on the *total* persisted value — the
+/// whole broker under one Durable Object key — enforced on the complete snapshot
+/// by the caller against [`crate::broker::MAX_SNAPSHOT_ENCODED_BYTES`], because
+/// entrant/pairing metadata in that same value grows independently of deck bytes
+/// and no deck sub-budget can bound it. Measured with the [`deck_encoded_bytes`]
+/// codec.
 pub const MAX_EVENT_DECK_ENCODED_BYTES: usize = 8 * MAX_SINGLE_DECK_ENCODED_BYTES;
 
 /// Per-deck ceiling on a single entrant's encoded deck, enforced at
-/// [`TournamentManager::submit_deck`] admission before the per-event and global
-/// checks. A budget alone (per-event or global) lets one entrant submit a deck
-/// sized to the entire budget and so deny every other entrant in the event a
-/// submission. This caps any one deck at 1/8 of [`MAX_EVENT_DECK_ENCODED_BYTES`],
-/// guaranteeing at least eight entrants can always submit per event while sitting
-/// far above any
+/// [`TournamentManager::submit_deck`] admission before the per-event check. The
+/// per-event budget alone lets one entrant submit a deck sized to the entire event
+/// budget and so deny every other entrant in the event a submission. This caps any
+/// one deck at 1/8 of [`MAX_EVENT_DECK_ENCODED_BYTES`], guaranteeing at least eight
+/// entrants can always submit per event while sitting far above any
 /// legitimate deck: a full Commander or Oathbreaker deck with a printing for every
 /// card encodes to ~15 KB, an oversized supplementary deck to well under 64 KB. It
 /// is an abuse ceiling, not an expected size. Measured with the same
-/// [`deck_encoded_bytes`] codec as the aggregate.
+/// [`deck_encoded_bytes`] codec as the per-event budget.
 pub const MAX_SINGLE_DECK_ENCODED_BYTES: usize = 64 * 1024;
 
 /// The exact byte cost `deck` adds to the persisted broker snapshot: its
@@ -2231,7 +2209,7 @@ pub const MAX_SINGLE_DECK_ENCODED_BYTES: usize = 64 * 1024;
 /// field (the `printings` sidecar included, which a name-list sum omits entirely),
 /// JSON string escaping and per-entry / collection overhead, and stays correct
 /// when `DeckData` grows a field. Serialization is infallible for `DeckData`; a
-/// hypothetical failure charges `usize::MAX`, so the aggregate check refuses rather
+/// hypothetical failure charges `usize::MAX`, so the budget check refuses rather
 /// than under-counts.
 fn deck_encoded_bytes(deck: &DeckData) -> usize {
     serde_json::to_vec(deck).map_or(usize::MAX, |bytes| bytes.len())
@@ -2782,25 +2760,17 @@ impl TournamentManager {
     ) -> Result<(), String> {
         let now = env.now_ms() / 1000;
         let incoming_bytes = deck_encoded_bytes(&deck);
-        // Sum the encoded bytes of every OTHER persisted deck — both this event's
-        // (for the per-event isolation gate) and all events' (for the global
-        // DO-snapshot net) — minus the (code, player_key) slot this submission
-        // overwrites, while the shared registry is still borrowed immutably so both
-        // budgets below are checked before any mutation. A resubmission replaces
-        // its own deck, so its old bytes are excluded here, not double-counted.
-        let retained_global_bytes: usize = self
-            .tournaments
-            .iter()
-            .flat_map(|(t_code, meta)| {
-                meta.players.iter().filter_map(move |p| {
-                    let is_overwritten_slot = t_code == code && p.player_key == player_key;
-                    p.deck
-                        .as_ref()
-                        .filter(|_| !is_overwritten_slot)
-                        .map(deck_encoded_bytes)
-                })
-            })
-            .sum();
+        // Sum the encoded bytes of every OTHER retained deck IN THIS EVENT — for the
+        // per-event isolation gate — minus the (code, player_key) slot this
+        // submission overwrites, while the registry is still borrowed immutably so
+        // the gate below is checked before any mutation. A resubmission replaces its
+        // own deck, so its old bytes are excluded here, not double-counted. There is
+        // deliberately no cross-event sum: each event's deck budget is isolated, so
+        // one live event's footprint never counts against another's. The bound on
+        // the *total* persisted value (decks + unbounded entrant/pairing metadata +
+        // lobby) is enforced once, on the complete snapshot, by the caller
+        // ([`crate::broker::Broker::handle_submit_tournament_deck`] against
+        // [`crate::broker::MAX_SNAPSHOT_ENCODED_BYTES`]).
         let retained_event_bytes: usize = self
             .tournaments
             .get(code)
@@ -2834,8 +2804,8 @@ impl TournamentManager {
             .ok_or_else(|| format!("Player {player_key} is not registered in {code}"))?;
         // Individual charge cap: refuse a single deck larger than one entrant's
         // fair share, so no one submission can consume its event's budget and deny
-        // every other entrant. Checked before the per-event and global budgets so
-        // an abusive payload gets the specific per-deck error.
+        // every other entrant. Checked before the per-event budget so an abusive
+        // payload gets the specific per-deck error.
         if incoming_bytes > MAX_SINGLE_DECK_ENCODED_BYTES {
             return Err(format!(
                 "Deck rejected: its encoded size exceeds the per-deck limit \
@@ -2844,26 +2814,16 @@ impl TournamentManager {
         }
         // Per-event isolation gate: one tournament's retained decks may not exceed
         // its own budget, so a single live event cannot consume the capacity other
-        // live events need. Checked before the global net so an event that overruns
-        // its own share gets the specific per-event error. `saturating_add` so a
-        // deck that failed to serialize (`usize::MAX`) refuses instead of
-        // overflowing.
+        // live events need — each event's budget is wholly its own. `saturating_add`
+        // so a deck that failed to serialize (`usize::MAX`) refuses instead of
+        // overflowing. The complementary bound — that the whole persisted broker
+        // stays under the single Durable Object key's size ceiling — is enforced on
+        // the complete snapshot by the caller, not here, because entrant/pairing
+        // metadata in the same value grows independently of deck bytes.
         if retained_event_bytes.saturating_add(incoming_bytes) > MAX_EVENT_DECK_ENCODED_BYTES {
             return Err(format!(
                 "Deck rejected: it would exceed this event's deck budget \
                  ({MAX_EVENT_DECK_ENCODED_BYTES} encoded bytes per tournament)"
-            ));
-        }
-        // Global DO-snapshot net: the whole broker serializes under one 8 MB
-        // Durable Object key, so admit the deck only if the summed encoded bytes of
-        // every retained deck across all events stay under the (deliberately
-        // conservative) budget. `saturating_add` as above. Checked last, right
-        // before the single mutation, so a refusal leaves every retained deck and
-        // its readiness unchanged.
-        if retained_global_bytes.saturating_add(incoming_bytes) > MAX_AGGREGATE_DECK_ENCODED_BYTES {
-            return Err(format!(
-                "Deck rejected: it would exceed the server's aggregate tournament deck \
-                 budget ({MAX_AGGREGATE_DECK_ENCODED_BYTES} encoded bytes across all events)"
             ));
         }
         player.deck = Some(deck);
@@ -3080,7 +3040,8 @@ impl TournamentManager {
         }
         meta.status = TournamentStatus::Completed;
         // Reclaim retained decks the moment the event is terminal — nothing can be
-        // hosted again, so they stop charging the shared aggregate budget.
+        // hosted again, so they stop charging this event's deck budget and the
+        // complete-snapshot bound.
         meta.release_retained_decks();
         meta.last_activity_at = now;
         Ok(())
@@ -3112,7 +3073,8 @@ impl TournamentManager {
                         meta.status = TournamentStatus::Abandoned;
                         // Reclaim retained decks on the terminal transition, same as
                         // `complete_tournament` — an abandoned event hosts nothing
-                        // more, so its decks must stop charging the aggregate budget.
+                        // more, so its decks must stop charging this event's deck
+                        // budget and the complete-snapshot bound.
                         meta.release_retained_decks();
                         // The transition is itself a state change, so it bumps
                         // `last_activity_at` — which is what starts the 30-day
@@ -4404,12 +4366,12 @@ mod tests {
     }
 
     /// `submit_deck` refuses a single deck larger than [`MAX_SINGLE_DECK_ENCODED_BYTES`]
-    /// even when the aggregate budget is otherwise empty — so one entrant cannot
-    /// submit a deck sized to the whole shared budget and deny everyone else. The
-    /// witness is over the per-deck cap but under the aggregate, proving the
-    /// individual cap (not the aggregate) is what fires, and the refusal leaves the
-    /// slot unchanged. REVERT-FAIL: drop the per-deck check and this deck stores,
-    /// consuming a fifth of the global budget from one entrant.
+    /// even when the event budget is otherwise empty — so one entrant cannot submit
+    /// a deck sized to the whole event budget and deny everyone else. The witness is
+    /// over the per-deck cap but under the per-event budget, proving the individual
+    /// cap (not the per-event gate) is what fires, and the refusal leaves the slot
+    /// unchanged. REVERT-FAIL: drop the per-deck check and this deck stores,
+    /// consuming an eighth of its event's budget from one entrant.
     #[test]
     fn submit_deck_refuses_a_single_deck_over_the_per_deck_cap() {
         let env = FakeEnv::new();
@@ -4417,7 +4379,7 @@ mod tests {
         mgr.generate_pairings("T", &env).expect("round 1");
         // ~300 maxed printing entries: well over the 64 KiB per-deck cap, well
         // under the 512 KiB per-event budget — so only the individual cap can
-        // refuse it (neither the per-event nor the global gate would fire first).
+        // refuse it (the per-event gate would not fire first).
         let oversized = printings_only_deck(300);
         let encoded = deck_encoded_bytes(&oversized);
         assert!(
@@ -4442,10 +4404,11 @@ mod tests {
     }
 
     /// Completing a tournament reclaims every retained deck: once terminal nothing
-    /// can be hosted, so the decks are dropped and stop charging the aggregate
-    /// budget. REVERT-FAIL: drop the `release_retained_decks` call in
-    /// `complete_tournament` and the decks persist, charging the shared budget for
-    /// the full 30-day retention window with no way to replace them.
+    /// can be hosted, so the decks are dropped and stop charging this event's deck
+    /// budget and the complete-snapshot bound. REVERT-FAIL: drop the
+    /// `release_retained_decks` call in `complete_tournament` and the decks persist,
+    /// holding budget for the full 30-day retention window with no way to replace
+    /// them.
     #[test]
     fn completing_a_tournament_reclaims_retained_decks() {
         let env = FakeEnv::new();

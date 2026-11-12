@@ -608,6 +608,47 @@ mod tests {
         }
     }
 
+    /// CR 123.2a shared-guard proof on the CASUAL ingress path. A constructed
+    /// sticker pool "must start the game with at least ten sticker sheets... There
+    /// is no maximum". Eleven distinct sheets — one past the legal floor — pass BOTH
+    /// casual deck-carrying guards (create-game and join-with-password), confirming
+    /// the raised [`MAX_STICKER_SHEET_ENTRIES`] ceiling is the *shared* behavior and
+    /// not only the tournament submission path's; only an abusive count past the
+    /// ceiling is refused, naming the section. REVERT-FAIL: a sticker cap of ten
+    /// rejects the legal eleven-sheet pool on casual ingress.
+    #[test]
+    fn sticker_sheets_follow_cr_123_2a_on_casual_ingress() {
+        let mut legal = deck(1, 0);
+        legal.sticker_sheets = (0..11).map(|i| format!("Sticker Sheet {i}")).collect();
+        let (create, join) = guard_both(&legal);
+        assert_eq!(
+            create,
+            Ok(()),
+            "eleven distinct sticker sheets are a legal pool on create (CR 123.2a)"
+        );
+        assert_eq!(
+            join,
+            Ok(()),
+            "eleven distinct sticker sheets are a legal pool on join (CR 123.2a)"
+        );
+
+        let mut over = deck(1, 0);
+        over.sticker_sheets = vec!["Sheet".to_string(); MAX_STICKER_SHEET_ENTRIES + 1];
+        let (create, join) = guard_both(&over);
+        let expected =
+            format!("deck.sticker_sheets must contain at most {MAX_STICKER_SHEET_ENTRIES} entries");
+        assert_eq!(
+            create,
+            Err(expected.clone()),
+            "a count past the ceiling is refused on create"
+        );
+        assert_eq!(
+            join,
+            Err(expected),
+            "a count past the ceiling is refused on join"
+        );
+    }
+
     fn printing(
         name: &str,
         set_code: &str,

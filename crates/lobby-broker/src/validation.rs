@@ -737,8 +737,9 @@ mod tests {
     /// same ones a casual `CreateGameWithSettings` is, `sticker_sheets` now included
     /// (every `DeckData` name list is bounded there). Persistence is bounded on two
     /// further axes by `tournament`: `MAX_SINGLE_DECK_ENCODED_BYTES` caps one deck's
-    /// encoded size and `MAX_AGGREGATE_DECK_ENCODED_BYTES` the summed encoded bytes of
-    /// every retained deck (every field included).
+    /// encoded size, `MAX_EVENT_DECK_ENCODED_BYTES` the summed encoded bytes of one
+    /// event's retained decks, and `broker::MAX_SNAPSHOT_ENCODED_BYTES` the complete
+    /// persisted broker (every field included).
     #[test]
     fn submit_tournament_deck_bounds_every_supplementary_list() {
         let cases = [
