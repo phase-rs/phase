@@ -2170,7 +2170,9 @@
   "replacementDecisionOrder": {
     "title": "Choose Which Decision First",
     "subtitle": "These replacement choices happen at the same time. Choose which one to make first.",
-    "unknownObject": "Unknown object"
+    "unknownObject": "Unknown object",
+    "attachedTo": "On {{host}}",
+    "attachments": "With {{names}}"
   },
   "optionalCost": {
     "gift": {

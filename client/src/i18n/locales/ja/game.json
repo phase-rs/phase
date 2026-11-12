@@ -2170,7 +2170,9 @@
   "replacementDecisionOrder": {
     "title": "先に行う選択を選ぶ",
     "subtitle": "これらの置換の選択は同時に行われます。先に行う選択を選んでください。",
-    "unknownObject": "不明なオブジェクト"
+    "unknownObject": "不明なオブジェクト",
+    "attachedTo": "{{host}}についている",
+    "attachments": "{{names}}がついている"
   },
   "optionalCost": {
     "gift": {

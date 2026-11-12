@@ -2132,7 +2132,9 @@
   "replacementDecisionOrder": {
     "title": "Elige qué decisión tomar primero",
     "subtitle": "Estas elecciones de reemplazo ocurren a la vez. Elige cuál tomar primero.",
-    "unknownObject": "Objeto desconocido"
+    "unknownObject": "Objeto desconocido",
+    "attachedTo": "En {{host}}",
+    "attachments": "Con {{names}}"
   },
   "optionalCost": {
     "gift": {
