@@ -524,9 +524,8 @@ fn thawing_glaciers_returns_itself_and_keeps_the_fetched_land() {
 
     let mut passes = 0;
     while runner.state().objects[&glaciers].zone == engine::types::zones::Zone::Battlefield {
-        match &runner.state().waiting_for {
-            WaitingFor::DiscardToHandSize { .. } => break,
-            _ => {}
+        if let WaitingFor::DiscardToHandSize { .. } = &runner.state().waiting_for {
+            break;
         }
         runner
             .act(GameAction::PassPriority)
