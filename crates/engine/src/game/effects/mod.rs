@@ -64446,6 +64446,9 @@ mod entry_observation_settlement_tests {
     /// even when it defers the entry observation (D3: a phase trigger stamps every
     /// node with its player), but not between the seat legs of a player-scope
     /// clause still in progress, whose seats' actions are one simultaneous event.
+    /// Synthetic: the sidecar is installed by hand. No printed card reaches the
+    /// seat-leg case today (Kambal, Profiteering Mayor's "for each of them" is
+    /// parsed as a single `CopyTokenOf`), so the building block is pinned here.
     #[test]
     fn boundary_records_the_completed_instruction_bound_outside_seat_legs() {
         let mut seat_scoped = node(put_counter());

@@ -16350,6 +16350,7 @@ fn apply_non_priority_pass_action(
             let pending = pending_effect.clone();
             let returned = *returned_id;
             let active_player = *player;
+            let action_event_start = events.len();
             let (filter, grants) = match &pending.effect {
                 crate::types::ability::Effect::ReturnAsAura {
                     enchant_filter,
@@ -16393,6 +16394,17 @@ fn apply_non_priority_pass_action(
                         super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
                     }
                     resume_pending_continuation_if_priority(state, &mut events)?;
+                    // CR 603.2 + CR 603.6a + CR 303.4f: this answer puts the Aura
+                    // entrant onto the battlefield (its entry tail was stashed behind
+                    // the host prompt) and returns without the post-action pipeline,
+                    // so its battlefield entries go to the entry gate here: held
+                    // while a co-entrant's host prompt is pending, matched once when
+                    // the last entrant has entered.
+                    triggers::collect_and_drain_entry_observer_triggers_if_settled(
+                        state,
+                        &mut events,
+                        action_event_start,
+                    );
                     return Ok(ActionResult::applied(events, state.waiting_for.clone()));
                 }
             };
@@ -17039,12 +17051,17 @@ fn apply_non_priority_pass_action(
                         {
                             completed_resolution = carrier;
                         }
-                    } else {
+                    } else if state.pending_trigger.is_none()
+                        && state.pending_trigger_order.is_none()
+                    {
                         // CR 603.6a + CR 614.12a: an answer that puts an entrant onto the
                         // battlefield and stops on a co-entrant's prompt (a copied
                         // "as this creature enters, choose …" answered before the next
                         // token's copy offer) reaches no pipeline; its battlefield entries
                         // go to the entry gate, as a replacement or copy-choice answer's do.
+                        // An answer that already collected its slice and drained it to a
+                        // trigger prompt (a pending trigger, or an ordering choice) has had
+                        // it checked, and the queued-context witnesses are gone by now.
                         state.waiting_for = waiting_for.clone();
                         triggers::park_entry_observer_triggers_if_paused(
                             state,

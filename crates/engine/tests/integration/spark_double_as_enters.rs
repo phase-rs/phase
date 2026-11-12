@@ -2820,7 +2820,9 @@ mod feldon_tokens {
     /// The same event when the opponent pays the Tribute and its counter stops
     /// on its Hardened Scales / Doubling Season order: the order's answer puts
     /// the copy onto the battlefield and hands its entry to the event, so Soul
-    /// Warden sees both copies.
+    /// Warden sees both copies. Not a clean Tribute witness: the second copy is
+    /// not asked for its own Tribute (see the reach guard), which is the state
+    /// of the merge base.
     #[test]
     fn a_paid_tribute_whose_counter_is_ordered_keeps_its_entrant_in_the_event() {
         let (copies, gained) = fanatic_copies_and_warden_life(2, P1, true);
@@ -2898,6 +2900,126 @@ mod feldon_tokens {
             library - runner.state().players[0].library.len(),
             1,
             "one draw for the one entry event"
+        );
+    }
+
+    const MYTHOS_OF_ILLUNA: &str = "Create a token that's a copy of target permanent. If {R}{G} was spent to cast this spell, instead create a token that's a copy of that permanent, except the token has \"When this token enters, if it's a creature, it fights up to one target creature you don't control.\"";
+    const ALTAR_OF_THE_BROOD: &str =
+        "Whenever another permanent you control enters, each opponent mills a card.";
+
+    /// Mythos of Illuna copies Pacifism (an Aura): each Aura token's host is
+    /// chosen as it enters (CR 303.4f), so each token's entry follows its own
+    /// host prompt. Returns the cards milled by Altar of the Brood ("Whenever
+    /// another permanent you control enters, each opponent mills a card.") and
+    /// the draws Mister Fantastic offered ("Whenever one or more tokens you
+    /// control enter, you may draw a card."), with and without Doubling Season.
+    fn aura_token_entries(season: bool) -> (usize, usize, usize) {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Plains", "Island", "Swamp", "Mountain"]);
+        scenario.with_library_top(
+            P1,
+            &["Forest", "Island", "Swamp", "Mountain", "Plains", "Forest"],
+        );
+        scenario.with_mana_pool(
+            P0,
+            (0..4)
+                .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let db = crate::support::shared_card_db().expect("integration card database");
+        // Board setup: Grizzly Bears is Pacifism's only legal host while it
+        // enters, so the real card attaches without a prompt; a second creature
+        // then gives each token copy a host choice.
+        scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+        let pacifism = scenario.add_real_card(P0, "Pacifism", Zone::Battlefield, db);
+        let host = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+        scenario.add_artifact_from_oracle(P0, "Altar of the Brood", ALTAR_OF_THE_BROOD);
+        let fantastic = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Mister Fantastic, Reed Richards",
+                2,
+                4,
+                "Reach\nWhenever one or more tokens you control enter, you may draw a card.",
+            )
+            .as_legendary()
+            .id();
+        if season {
+            scenario.add_enchantment_from_oracle(P0, "Doubling Season", SEASON);
+        }
+        let mythos = scenario
+            .add_spell_to_hand_from_oracle(P0, "Mythos of Illuna", false, MYTHOS_OF_ILLUNA)
+            .id();
+        let mut runner = scenario.build();
+        let library = runner.state().players[1].library.len();
+        runner.cast(mythos).target_object(pacifism).resolve();
+        let (mut hosts, mut offers) = (0, 0);
+        for _ in 0..20 {
+            match &runner.state().waiting_for {
+                WaitingFor::ReturnAsAuraTarget { legal_targets, .. } => {
+                    let target = legal_targets
+                        .iter()
+                        .find(|target| matches!(target, TargetRef::Object(id) if *id == host))
+                        .cloned()
+                        .expect("Hill Giant is a legal host");
+                    hosts += 1;
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(target),
+                        })
+                        .unwrap();
+                }
+                WaitingFor::OptionalEffectChoice { source_id, .. } => {
+                    assert_eq!(*source_id, fantastic);
+                    offers += 1;
+                    runner
+                        .act(GameAction::DecideOptionalEffect { accept: true })
+                        .unwrap();
+                }
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    let order = (0..triggers.len()).collect();
+                    runner.act(GameAction::OrderTriggers { order }).unwrap();
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).unwrap();
+                }
+                other => panic!("unexpected prompt: {other:?}"),
+            }
+        }
+        let tokens = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.is_token && object.zone == Zone::Battlefield && object.name == "Pacifism"
+            })
+            .count();
+        // Reach guard: each Aura token asked for its own host.
+        assert_eq!((hosts, tokens), if season { (2, 2) } else { (1, 1) });
+        (
+            library - runner.state().players[1].library.len(),
+            offers,
+            tokens,
+        )
+    }
+
+    /// CR 603.2 + CR 603.6a + CR 303.4f: an Aura token's entry is checked when
+    /// its host is chosen. Both tokens under Doubling Season are one entry event:
+    /// Altar mills once for each (two), and Mister Fantastic's "one or more"
+    /// ability triggers once for the event, not once per token.
+    #[test]
+    fn aura_token_entries_are_checked_once_each_across_their_host_prompts() {
+        assert_eq!(
+            aura_token_entries(false),
+            (1, 1, 1),
+            "positive control: a single Aura token is checked"
+        );
+        assert_eq!(
+            aura_token_entries(true),
+            (2, 1, 2),
+            "two entries, one batched trigger"
         );
     }
 

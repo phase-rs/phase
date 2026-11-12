@@ -35,6 +35,7 @@ use crate::types::keywords::WardCost;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::phase::Phase;
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::resolved_commands::{
     ResolvedDelayedTriggerCommand, ResolvedDelayedTriggerReplayInvariantError,
     ResolvedTriggerCollection, ResolvedTriggerCollectionCommand,
@@ -9642,8 +9643,10 @@ fn collect_answer_slice_matching(
 /// ([`settle_entry_batch_scan`]); everything else is queued exactly as
 /// [`collect_triggers_into_deferred`] queues it.
 ///
-/// Only for collectors that run as the action ends: the gate reads the action's
-/// wait, which is stale or provisional in the middle of a handler.
+/// The gate reads the action's wait (`state.waiting_for`) to decide whether the
+/// action has settled, so the caller must have installed the wait it is about to
+/// return: entries are held only while that wait is not `Priority`, and are
+/// released by the first collector that runs once it is.
 pub(crate) fn collect_action_end_triggers_into_deferred(
     state: &mut GameState,
     events: &[GameEvent],
@@ -9690,13 +9693,16 @@ fn action_has_settled(state: &GameState) -> bool {
 /// replacement that modifies an entry ([`parked_replacement_modifies_an_entry`]:
 /// an ordering choice, a copy offer, an entry-controller choice), an entrant
 /// held liminal for its copy choice, a token committed before its entry
-/// record, and an entry parked for its own mid-entry choice. A pause that
-/// holds none of them belongs to a later event, not to an entry.
+/// record, an entry parked for its own mid-entry choice, and an entering Aura's
+/// host choice (CR 303.4f: it is made as the Aura enters, and its entry tail is
+/// stashed behind the prompt). A pause that holds none of them belongs to a later
+/// event, not to an entry.
 pub(crate) fn battlefield_entry_in_progress(state: &GameState) -> bool {
     state
         .pending_replacement
         .as_ref()
         .is_some_and(|pending| parked_replacement_modifies_an_entry(state, &pending.proposed))
+        || matches!(state.waiting_for, WaitingFor::ReturnAsAuraTarget { .. })
         || !state.liminal_entries.is_empty()
         || state.pending_token_battlefield_entry.is_some()
         || !state.deferred_entry_events.is_empty()
@@ -9713,11 +9719,7 @@ pub(crate) fn battlefield_entry_in_progress(state: &GameState) -> bool {
 /// after its zone-change record, so they do not count here; a card entering
 /// with co-entrants is delivered by a logical zone-change group, whose entries
 /// this gate passes through unheld (see [`settle_entry_batch_scan`]).
-fn parked_replacement_modifies_an_entry(
-    state: &GameState,
-    proposed: &crate::types::proposed_event::ProposedEvent,
-) -> bool {
-    use crate::types::proposed_event::ProposedEvent;
+fn parked_replacement_modifies_an_entry(state: &GameState, proposed: &ProposedEvent) -> bool {
     match proposed {
         ProposedEvent::ZoneChange { to, .. } => *to == Zone::Battlefield,
         ProposedEvent::TokenEntry { .. } | ProposedEvent::CreateToken { .. } => true,
