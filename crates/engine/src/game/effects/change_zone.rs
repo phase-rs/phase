@@ -1707,7 +1707,13 @@ pub fn resolve(
     // CR 603.10 + CR 611.2e + CR 608.2c: when a later "is/has" instruction of this resolution may
     // still apply with this entry and no later instruction acts on a moved object after the entry,
     // its triggers are checked once that effect exists; otherwise the owner checks them now.
-    let collector = crate::game::effects::entry_occurrence_collector(state, Some(ability));
+    // CR 603.2c: the hand-off covers the whole group, so a member that ends outside the
+    // battlefield keeps every occurrence with the owner.
+    let collector = crate::game::effects::entry_occurrence_collector(state, Some(ability))
+        .for_group(
+            &logical_zone_change_group,
+            &events[logical_group_event_start..],
+        );
     crate::game::triggers::complete_logical_zone_trigger_collection_for(
         state,
         &mut logical_zone_change_group,
@@ -3355,7 +3361,13 @@ pub fn resolve_all(
     // CR 603.10 + CR 611.2e + CR 608.2c: when a later "is/has" instruction of this resolution may
     // still apply with this entry and no later instruction acts on a moved object after the entry,
     // its triggers are checked once that effect exists; otherwise the owner checks them now.
-    let collector = crate::game::effects::entry_occurrence_collector(state, Some(ability));
+    // CR 603.2c: the hand-off covers the whole group, so a member that ends outside the
+    // battlefield keeps every occurrence with the owner.
+    let collector = crate::game::effects::entry_occurrence_collector(state, Some(ability))
+        .for_group(
+            &logical_zone_change_group,
+            &events[logical_group_event_start..],
+        );
     crate::game::triggers::complete_logical_zone_trigger_collection_for(
         state,
         &mut logical_zone_change_group,

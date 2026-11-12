@@ -2580,19 +2580,15 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // effect exists — unless a parked instruction that starts after the entry may act on a
         // moved object (CR 608.2c); the instruction is not in hand here, so that is read
         // conservatively. CR 603.2c: the hand-off goes to the collector of the action that
-        // completes this owner. A resume with members still to deliver may pause again, so it
-        // keeps its entries, as does an owner holding an entry delivered by an earlier action.
+        // completes this owner, and covers the whole group or none of it. A resume with members
+        // still to deliver may pause again, so it keeps its entries, as does an owner holding an
+        // entry delivered by an earlier action or an occurrence that ends outside the battlefield.
         let collector = if remaining.is_empty() {
             crate::game::effects::entry_occurrence_collector(state, None).within_action(
-                logical_zone_change_group
-                    .all_origin_occurrences
+                &logical_zone_change_group,
+                paused_current
                     .iter()
-                    .map(|occurrence| &occurrence.event)
-                    .chain(
-                        paused_current
-                            .iter()
-                            .flat_map(|paused| paused.delivery_events.iter()),
-                    ),
+                    .flat_map(|paused| paused.delivery_events.iter()),
                 events,
             )
         } else {
@@ -5894,7 +5890,9 @@ fn held_later_instruction_matches(state: &GameState, query: LaterInstructionQuer
 /// `instruction`'s own continuation is read through its moved-object referents
 /// ([`continuation_acts_on_moved_objects_after_entry`]). A frame-held later instruction cannot
 /// be tied to the moved objects without the instruction, so it is read conservatively
-/// ([`LaterInstructionQuery::MayActOnEntrantAfterEntry`]).
+/// ([`LaterInstructionQuery::MayActOnEntrantAfterEntry`]). Each completion site then narrows the
+/// result to the logical group it completes (`EntryOccurrenceCollector::for_group` /
+/// `within_action`, CR 603.2c).
 pub(crate) fn entry_occurrence_collector(
     state: &GameState,
     instruction: Option<&ResolvedAbility>,

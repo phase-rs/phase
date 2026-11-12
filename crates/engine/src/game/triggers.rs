@@ -4840,24 +4840,58 @@ pub(crate) enum EntryOccurrenceCollector {
 }
 
 impl EntryOccurrenceCollector {
-    /// CR 603.2c + CR 603.10: the hand-off goes to the post-action collector of the action
-    /// that completes the owner, and that collector checks only this action's events
-    /// (`action_events`). If an entry among `owned_occurrences` was delivered by an earlier
-    /// action of a paused owner, no later collector would check it, so the owner keeps every
-    /// entry. The split is all-or-nothing because the owner's latched batched pass and the
-    /// post-action collector would each see "one or more" of the entries, and a batched
-    /// trigger must trigger only once for the event.
+    /// The collector for one logical zone-change `group` that the current action delivers
+    /// whole: its retained occurrences plus `unretained_events`, the delivery output not yet
+    /// appended to it. See [`Self::for_group_delivered_by`].
+    pub(crate) fn for_group<'a>(
+        self,
+        group: &'a LogicalZoneChangeGroup,
+        unretained_events: impl IntoIterator<Item = &'a GameEvent>,
+    ) -> Self {
+        self.for_group_delivered_by(group, unretained_events, |_| true)
+    }
+
+    /// [`Self::for_group`] for a resumed owner: the hand-off goes to the post-action collector
+    /// of the action that completes the owner, and that collector checks only this action's
+    /// events (`action_events`). If an entry was delivered by an earlier action of a paused
+    /// owner, no later collector would check it, so the owner keeps every occurrence.
     pub(crate) fn within_action<'a>(
         self,
-        owned_occurrences: impl IntoIterator<Item = &'a GameEvent>,
+        group: &'a LogicalZoneChangeGroup,
+        unretained_events: impl IntoIterator<Item = &'a GameEvent>,
         action_events: &[GameEvent],
+    ) -> Self {
+        self.for_group_delivered_by(group, unretained_events, |event| {
+            action_events.contains(event)
+        })
+    }
+
+    /// CR 603.2c + CR 603.10a: the hand-off is all-or-nothing per logical group. The group's
+    /// zone changes are one event, and the owner's latched batched pass and the post-action
+    /// collector would each see "one or more" of its occurrences, but a batched trigger triggers
+    /// only once for the event. So the owner hands off only when every zone-change occurrence
+    /// of the group is a battlefield entry delivered by this action; one that ends in another
+    /// zone (Storm of Souls' return with one member exiled instead) or was delivered by an
+    /// earlier action keeps the whole group with the owner.
+    fn for_group_delivered_by<'a>(
+        self,
+        group: &'a LogicalZoneChangeGroup,
+        unretained_events: impl IntoIterator<Item = &'a GameEvent>,
+        delivered_by_this_action: impl Fn(&GameEvent) -> bool,
     ) -> Self {
         match self {
             Self::Owner => Self::Owner,
             Self::AfterSimultaneousEntryEffects => {
-                if owned_occurrences.into_iter().all(|event| {
-                    owner_collects_occurrence(self, event) || action_events.contains(event)
-                }) {
+                let hands_off_whole_group = group
+                    .all_origin_occurrences
+                    .iter()
+                    .map(|occurrence| &occurrence.event)
+                    .chain(unretained_events)
+                    .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+                    .all(|event| {
+                        !owner_collects_occurrence(self, event) && delivered_by_this_action(event)
+                    });
+                if hands_off_whole_group {
                     Self::AfterSimultaneousEntryEffects
                 } else {
                     Self::Owner
@@ -4869,8 +4903,10 @@ impl EntryOccurrenceCollector {
 
 /// CR 603.10 + CR 611.2e: does the logical owner itself check `event`'s ordinary triggers?
 /// Only moves to the battlefield are handed off. A move to the battlefield from a graveyard is
-/// handed off whole, its CR 603.10a leaves-the-graveyard half included; departures to any other
-/// zone keep their CR 603.10a look-back with the owner.
+/// handed off whole, its CR 603.10a leaves-the-graveyard half included. The completion sites
+/// pick the collector through [`EntryOccurrenceCollector::for_group`] /
+/// [`EntryOccurrenceCollector::within_action`], so under `AfterSimultaneousEntryEffects` every
+/// zone-change occurrence of the group is a battlefield entry and the owner keeps none of them.
 fn owner_collects_occurrence(collector: EntryOccurrenceCollector, event: &GameEvent) -> bool {
     match collector {
         EntryOccurrenceCollector::Owner => true,
@@ -4914,7 +4950,9 @@ pub(crate) fn complete_logical_zone_trigger_collection(
 /// resolution's simultaneous "is/has" effects exist when no instruction pauses before applying
 /// one (a multi-host ReturnAsAura host choice is a known gap). It is chosen only when no
 /// instruction that starts after the entry acts on a moved object, so that collector reads no
-/// change CR 608.2c makes after the entry (`effects::entry_occurrence_collector`).
+/// change CR 608.2c makes after the entry (`effects::entry_occurrence_collector`), and only for
+/// a group whose every zone-change occurrence is such an entry
+/// ([`EntryOccurrenceCollector::for_group`], CR 603.2c).
 pub(crate) fn complete_logical_zone_trigger_collection_for(
     state: &mut GameState,
     group: &mut LogicalZoneChangeGroup,

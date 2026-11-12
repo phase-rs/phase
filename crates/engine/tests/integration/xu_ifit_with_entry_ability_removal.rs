@@ -23,7 +23,9 @@
 //! (R8c). Such an entry is then also checked before the "is/has" effect exists (known gap). R8c
 //! keeps Soul Warden on the board: when no observer matches at the owner's check, the owner
 //! queues no collection witness and the post-action collector checks the entry again after the
-//! counter (an older gap, outside this hand-off).
+//! counter (an older gap, outside this hand-off). The hand-off covers a whole logical group or
+//! none of it (CR 603.2c): when a member ends outside the battlefield, the owner keeps every
+//! occurrence, so a batched observer triggers once for the event (R8m, R9m).
 //!
 //! Consequence (b) — CR 113.6h + CR 614.12 + CR 611.2e: an ability of the entrant that modifies
 //! how it enters functions as it enters, checked as the permanent would exist on the battlefield,
@@ -44,6 +46,9 @@
 //!   Dreadnought's ETB triggers) and keeps Haste and Trample in R5.
 //! - Dropping handed-off entries instead of handing them on fails R4d and R8.
 //! - Reverting only the `resolve_all` call site to the `Owner` delegate leaves R9 at P0 +1.
+//! - Dropping the destination check from `triggers::EntryOccurrenceCollector::for_group` gives
+//!   two Zombie tokens in R8m and R9m; dropping only the `for_group` call at the
+//!   `change_zone::resolve` / `resolve_all` site gives two in R8m / R9m.
 //! - Dropping the moved-object check from `effects::entry_occurrence_collector` makes Watcher of
 //!   the Spheres trigger in R8c (Watcher 3/3).
 //! - Reverting the resumed completion in `drain_pending_change_zone_iteration` to the `Owner`
@@ -1006,6 +1011,106 @@ fn zombify_returned_grist_enters_with_loyalty() {
         grist_obj.counters.get(&CounterType::Loyalty).copied(),
         Some(3)
     );
+}
+
+/// Tormod, the Desecrator {3}{B} Legendary Creature — Zombie Wizard 2/2 — verbatim.
+const TORMOD_THE_DESECRATOR: &str = "Whenever one or more cards leave your graveyard, create a tapped 2/2 black Zombie creature token.\nPartner (You can have two commanders if both have partner.)";
+/// Synthetic: Containment Priest's ("If a nontoken creature would enter and it wasn't cast, exile
+/// it instead.") replacement narrowed to Bears.
+const BEAR_CONTAINMENT: &str =
+    "If a nontoken Bear would enter and it wasn't cast, exile it instead.";
+
+/// Ever After {4}{B}{B} Sorcery — verbatim.
+const EVER_AFTER: &str = "Return up to two target creature cards from your graveyard to the battlefield. Each of those creatures is a black Zombie in addition to its other colors and types. Put Ever After on the bottom of its owner's library.";
+
+/// A board for one return of Hill Giant and Grizzly Bears from P0's graveyard in which the Bears
+/// is exiled instead, observed by Tormod, the Desecrator.
+///
+/// Synthetic redirect: the printed board is Containment Priest with Grist, the Hunger Tide ("As
+/// long as Grist isn't on the battlefield, it's a 1/1 Insect creature in addition to its other
+/// types.") and Grizzly Bears, where Grist would not be a creature on the battlefield (CR 614.12),
+/// so the Priest exiles only the Bears. The engine exiles Grist too, so that board puts no member
+/// on the battlefield.
+fn mixed_destination_board() -> (GameScenario, ObjectId, ObjectId) {
+    let mut scenario = main_phase();
+    scenario
+        .add_creature_from_oracle(P0, "Tormod, the Desecrator", 2, 2, TORMOD_THE_DESECRATOR)
+        .with_subtypes(vec!["Zombie", "Wizard"])
+        .as_legendary();
+    scenario.add_creature_from_oracle(P0, "Bear Containment", 2, 2, BEAR_CONTAINMENT);
+    let giant = scenario
+        .add_creature_to_graveyard(P0, "Hill Giant", 3, 3)
+        .with_subtypes(vec!["Giant"])
+        .id();
+    let bears = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    (scenario, giant, bears)
+}
+
+/// CR 603.2c + CR 603.10a + CR 614.6: the Giant entered with the rider's `subtype`, the Bears was
+/// exiled instead, and both left the graveyard in one event, so Tormod ("Whenever one or more
+/// cards leave your graveyard") triggered once: exactly one Zombie token.
+fn assert_one_batched_trigger(
+    runner: &GameRunner,
+    giant: ObjectId,
+    bears: ObjectId,
+    subtype: &str,
+) {
+    // Reach: one member entered with the rider applied and the other was exiled instead.
+    let giant_obj = &runner.state().objects[&giant];
+    assert_eq!(giant_obj.zone, Zone::Battlefield);
+    assert!(giant_obj.card_types.subtypes.iter().any(|s| s == subtype));
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    let zombie_tokens = runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| {
+            object.is_token
+                && object.zone == Zone::Battlefield
+                && object.card_types.subtypes.iter().any(|s| s == "Zombie")
+        })
+        .count();
+    assert_eq!(zombie_tokens, 1, "Tormod triggers once for the one event");
+    assert_priority_with_empty_stack(runner);
+}
+
+/// R9m — a mixed-destination group at the mass (`ChangeZoneAll`) owner: Storm of Souls returns
+/// both cards, and the Giant enters as a Spirit.
+#[test]
+fn storm_of_souls_mixed_destination_return_triggers_a_batched_observer_once() {
+    let (mut scenario, giant, bears) = mixed_destination_board();
+    let storm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Storm of Souls", false, STORM_OF_SOULS)
+        .id();
+    let mut runner = scenario.build();
+
+    let _ = runner.cast(storm).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_one_batched_trigger(&runner, giant, bears, "Spirit");
+}
+
+/// R8m — a mixed-destination group at the targeted (`ChangeZone`) owner: Ever After targets both
+/// cards, and the Giant enters as a Zombie.
+#[test]
+fn ever_after_mixed_destination_return_triggers_a_batched_observer_once() {
+    let (mut scenario, giant, bears) = mixed_destination_board();
+    let ever_after = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ever After", false, EVER_AFTER)
+        .id();
+    let mut runner = scenario.build();
+
+    let _ = runner
+        .cast(ever_after)
+        .target_object(giant)
+        .target_object(bears)
+        .resolve();
+    runner.advance_until_stack_empty();
+
+    assert_one_batched_trigger(&runner, giant, bears, "Zombie");
 }
 
 fn add_boot_nipper(scenario: &mut GameScenario) -> ObjectId {
