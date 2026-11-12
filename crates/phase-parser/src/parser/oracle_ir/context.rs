@@ -415,11 +415,11 @@ pub enum ResolvedChainRoot {
     Unproven,
     /// Set by a top-level entry point whose chain is its ability's resolved
     /// root with its printed targets (a triggered ability's body, an activated
-    /// ability's effect, the spell line of a card whose only non-keyword line
-    /// it is and whose spell is not rewritten at cast). The activated-ability
-    /// proof assumes the cast never nests an activated first ability under
-    /// another node; `synthesize_gift` wraps a gift card's first ability of any
-    /// kind, and no printed gift card has an activated ability.
+    /// ability's effect on a card without a gift keyword, the spell line of a
+    /// card whose only non-keyword line it is and whose spell is not rewritten
+    /// at cast). A gift card is excluded for activated abilities too: the
+    /// engine wraps its first ability of any kind under a `GiftDelivery` root
+    /// (`synthesize_gift`; Starforged Sword's synthesized Equip sits under it).
     Proven,
 }
 
@@ -947,6 +947,12 @@ pub struct ParseContext {
     /// nested chain parsed inside it, or on a clone made afterwards, sees
     /// `Unproven`. Never serialized.
     pub resolved_chain_root: ResolvedChainRoot,
+    /// CR 608.2c: the card-level proof for the effects of this card's activated
+    /// abilities ([`ResolvedChainRoot`]), set once by the pipeline from the
+    /// card's printed keyword lines and read by the activated-ability entry
+    /// point. `Unproven` by default, so a context built elsewhere proves
+    /// nothing. Never serialized.
+    pub activated_chain_root: ResolvedChainRoot,
     /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
     /// "put those cards / put them onto the battlefield" anaphor (a
     /// `TargetFilter::TrackedSet`) must scan. Set by a producer clause that

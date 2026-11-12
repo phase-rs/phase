@@ -6026,6 +6026,19 @@ fn parse_normalized_oracle_ir(
     } else {
         ResolvedChainRoot::Proven
     };
+    // CR 702.174j: the engine wraps a gift card's FIRST ability, of any kind,
+    // under a `GiftDelivery` root (`synthesize_gift`), so a gift card's
+    // activated ability is no resolved root either. The other rewrites above
+    // touch only the spell ability.
+    ctx.activated_chain_root = if printed_keyword_lines
+        .iter()
+        .flatten()
+        .any(|keyword| matches!(keyword, Keyword::Gift(_)))
+    {
+        ResolvedChainRoot::Unproven
+    } else {
+        ResolvedChainRoot::Proven
+    };
 
     // CR 201.4b: A card's Oracle text uses its name to refer to itself.
     // Normalize self-references to `~` once, at the single parser entry point,
@@ -13684,11 +13697,13 @@ fn any_unimplemented(def: &AbilityDefinition, matches_name: &dyn Fn(&str) -> boo
 }
 
 /// CR 602.2 + CR 608.2c: parse an activated ability's effect, which resolves
-/// as that ability's root node, handing the chain parse the resolved-root
-/// proof ([`ResolvedChainRoot`]). The proof is cleared afterwards even when the
-/// parse never reached a chain body, because `ctx` outlives this one parse.
+/// as that ability's root node, handing the chain parse the card's
+/// resolved-root proof for activated abilities
+/// ([`ParseContext::activated_chain_root`]). The proof is cleared afterwards
+/// even when the parse never reached a chain body, because `ctx` outlives this
+/// one parse.
 fn parse_activated_effect_ir(text: &str, ctx: &mut ParseContext) -> AbilityIr {
-    ctx.resolved_chain_root = ResolvedChainRoot::Proven;
+    ctx.resolved_chain_root = ctx.activated_chain_root;
     let ir = parse_ability_ir_with_context(text, AbilityKind::Activated, ctx);
     ctx.resolved_chain_root = ResolvedChainRoot::Unproven;
     ir

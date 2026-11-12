@@ -12764,6 +12764,62 @@ mod tests {
         }
     }
 
+    /// CR 702.174j + CR 608.2c: the engine wraps a gift card's first ability,
+    /// of any kind, under a `GiftDelivery` root (`synthesize_gift`; Starforged
+    /// Sword's synthesized Equip sits under it), so an activated ability's
+    /// effect on a gift card is no resolved root and its suffix is an explicit
+    /// gap. Synthetic text: Long River's Pull's printed gift line with
+    /// `target_controller_suffix_on_an_activated_ability_binds`'s activated
+    /// ability. The reach guard parses the same activated line without the gift
+    /// line and asserts it binds, and that the router types the gift line.
+    #[test]
+    fn target_controller_suffix_on_a_gift_cards_activated_ability_is_an_explicit_gap() {
+        let condition = "its controller controls no creatures";
+        let activated = format!("{{T}}: Destroy target artifact if {condition}.");
+        let (plain, warnings) = parse_single_ability(&activated, "Synthetic", &["Creature"], &[]);
+        assert!(warnings.is_empty(), "reach guard: {warnings:?}");
+        assert!(
+            plain.condition.is_some(),
+            "reach guard: it binds without gift"
+        );
+
+        let gift = "Gift a card (You may promise an opponent a gift as you cast this spell. If \
+                    you do, they draw a card before its other effects.)";
+        let lower = crate::parser::oracle_util::strip_reminder_text(gift)
+            .trim()
+            .to_lowercase();
+        assert!(
+            matches!(
+                crate::parser::oracle_keyword::parse_router_keyword_fragment(&lower),
+                Some(Keyword::Gift(_))
+            ),
+            "reach guard: the router types the gift line"
+        );
+        let text = format!("{gift}\n{activated}");
+        let parsed = parse_oracle_text(
+            &text,
+            "Synthetic",
+            &["Gift".to_owned()],
+            &["Creature".to_owned()],
+            &[],
+        );
+        let definitions = all_chain_definitions(&parsed);
+        assert!(
+            definitions
+                .iter()
+                .any(|def| def.kind == AbilityKind::Activated
+                    && matches!(
+                        &*def.effect,
+                        Effect::Destroy { target, .. } if !target.is_context_ref()
+                    )),
+            "reach guard: the activated ability parsed: {definitions:?}"
+        );
+        for def in &definitions {
+            assert_eq!(def.condition, None, "{:?}", def.effect);
+        }
+        assert_only_condition_gap(&parsed, condition);
+    }
+
     /// CR 608.2c: the assembled-chain check is total. If the first clause no
     /// longer carries the gate it was asked to vouch for (a later composition
     /// re-homed it, here under an `And`), the check cannot prove the gate is
