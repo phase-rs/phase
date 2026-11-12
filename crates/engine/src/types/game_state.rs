@@ -19939,26 +19939,22 @@ impl GameState {
                 else {
                     continue;
                 };
-                // CR 400.7: a pin that is present AND stale proves the object left the
-                // announced zone since CR 601.2c, so its live zone is not comparable and the
-                // latch is the only surviving record. An ABSENT pin is NOT that case: the
-                // save simply dropped the pin, and skipping on absence made this whole
-                // check optional-by-payload — drop `target_pins` (or null one slot) and a
-                // forged zone publishes freely. Absence therefore falls through to the same
-                // comparison, which an honest pinless save passes (its stated zone IS the
-                // live zone, because nothing moved it) and a forged one fails.
-                if entry.pin.as_ref().is_some_and(|pin| !pin.is_current(state)) {
-                    continue;
-                }
-                let Some(object) = state.objects.get(id) else {
-                    continue;
-                };
                 // CR 601.2c + CR 115.4: the fact's recorded snapshot must satisfy the filter
                 // that DECLARED this slot. This is not a live-object comparison — the
                 // snapshot is the announcement's own record — so honest drift still passes:
                 // Heliod announced as a creature satisfies "any target" and "target
                 // creature" on its recorded snapshot even after devotion drops. A save that
                 // rewrites the snapshot to the post-payment type does not.
+                //
+                // CR 400.7: this check runs BEFORE the stale-pin skip below. A pin that
+                // proves the object moved makes the LIVE zone comparison invalid; it does not
+                // make the RECORDED requirement optional. Bone Splinters ("As an additional
+                // cost to cast this spell, sacrifice a creature. / Destroy target creature.")
+                // can announce the caster's own creature and then lose it to a cost, so the
+                // honest park has a stale pin and a still-binding recorded creature
+                // requirement: the creature it recorded is exactly what the declaring slot
+                // admitted, and a save that restates it as anything else was not this
+                // announcement.
                 if let Some(filter) = entry.filter.as_ref() {
                     let ActivationTargetFact::Object {
                         id: fact_id, lki, ..
@@ -20004,6 +20000,23 @@ impl GameState {
                         });
                     }
                 }
+                // CR 400.7: a pin that is present AND stale proves the object left the
+                // announced zone since CR 601.2c, so its live zone is not comparable and the
+                // latch is the only surviving record. An ABSENT pin is NOT that case: the
+                // save simply dropped the pin, and skipping on absence made this whole
+                // check optional-by-payload — drop `target_pins` (or null one slot) and a
+                // forged zone publishes freely. Absence therefore falls through to the same
+                // comparison, which an honest pinless save passes (its stated zone IS the
+                // live zone, because nothing moved it) and a forged one fails.
+                //
+                // Only the LIVE comparison is skipped here: the recorded-announcement check
+                // above already ran, because a stale pin cannot make it optional.
+                if entry.pin.as_ref().is_some_and(|pin| !pin.is_current(state)) {
+                    continue;
+                }
+                let Some(object) = state.objects.get(id) else {
+                    continue;
+                };
                 if *zone != AnnouncedTargetZone::Known(object.zone) {
                     return Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
                         spell_object_id: pending.object_id,

@@ -58,7 +58,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{
     ActivationTargetFact, AnnouncedTargetFactConflict, AnnouncedTargetZone, CastPaymentMode,
-    GameState, PersistedGameState, PersistedRestoreError, SpellCastRecord, WaitingFor,
+    GameState, PayCostKind, PersistedGameState, PersistedRestoreError, SpellCastRecord, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -1746,6 +1746,300 @@ fn a_bushwhack_park_with_its_two_fighters_swapped_is_refused() {
         other => panic!(
             "CR 601.2c: a save that hands the subject slot a creature you don't control must be \
              refused, got {other:?}"
+        ),
+    }
+}
+
+/// The Bone Splinters park: its announced target has been SACRIFICED to pay part
+/// of the spell's mana, so the announcement pin is stale at the mana-payment park.
+struct BoneSplintersPark {
+    runner: GameRunner,
+    spell: ObjectId,
+    target: ObjectId,
+    additional_cost_creature: ObjectId,
+}
+
+/// CR 601.2c + CR 601.2g-h: printed **Bone Splinters** is `{B}` for "As an
+/// additional cost to cast this spell, sacrifice a creature. / Destroy target
+/// creature." (Scryfall, oracle text verified; the checked-in fixture carries the
+/// same oracle text and additional cost). The caster announces its OWN Grizzly
+/// Bears as the target, names Savannah Lions for the additional sacrifice, and
+/// then sacrifices the announced Bears to Ashnod's Altar for `{C}{C}` before the
+/// mana payment, so the cast is parked with an already-moved target.
+///
+/// The additional-cost sacrifice itself cannot supply this shape: the engine pays
+/// it at commit, after mana payment (`can_defer_spell_sacrifice_until_mana_payment`
+/// defers every spell sacrifice to `pay_deferred_spell_sacrifices_at_commit`), so
+/// answering that prompt leaves the permanent on the battlefield. A sacrifice to a
+/// mana ability inside the payment window is the reachable way a legal Bone
+/// Splinters cast loses its own target before the cast finishes, and the guard it
+/// exercises — a stale pin beside a recorded creature requirement — is the same.
+///
+/// Reach guards pin the shape: the target was announced through the public
+/// prompt, the additional cost was named through its own prompt, the sacrifice
+/// really moved the announced Bears to the graveyard, the announcement pin is
+/// stale, and the latch still records the creature the slot's filter admitted.
+fn bone_splinters_parked_after_sacrificing_its_target() -> BoneSplintersPark {
+    let db = shared_card_db().expect("the checked-in card fixture contains these cards");
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let spell = sc.add_real_card(P0, "Bone Splinters", Zone::Hand, db);
+    let target = sc.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let additional_cost_creature = sc.add_real_card(P0, "Savannah Lions", Zone::Battlefield, db);
+    let altar = sc.add_real_card(P0, "Ashnod's Altar", Zone::Battlefield, db);
+    let swamp = sc.add_real_card(P0, "Swamp", Zone::Battlefield, db);
+    // The second legal target keeps the engine from auto-selecting the only one,
+    // so the announcement goes through the public prompt.
+    sc.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let mut runner = sc.build();
+    rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("Bone Splinters is announced");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "reach guard: the cast asks for its target, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(target)],
+        })
+        .expect("P0's own Bears is a legal target for Bone Splinters");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                ..
+            }
+        ),
+        "reach guard: the additional sacrifice cost is asked for, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![additional_cost_creature],
+        })
+        .expect("Savannah Lions pays the additional sacrifice cost");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: the cast parks on the manual mana payment, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // CR 601.2g: mana abilities may be activated inside the payment window, and
+    // the Altar's own cost sacrifices a creature.
+    let altar_index = runner.state().objects[&altar]
+        .abilities
+        .iter()
+        .position(is_mana_ability)
+        .expect("Ashnod's Altar has its mana ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: altar,
+            ability_index: altar_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the Altar's mana ability begins");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::PayCost { .. }),
+        "reach guard: the Altar asks for the creature it sacrifices, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![target],
+        })
+        .expect("the announced target pays the Altar's cost");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: the spell's mana is still owed, so the cast is still parked on the payment \
+         window; got {:?}",
+        runner.state().waiting_for
+    );
+    tap_land_for_mana(&mut runner, swamp);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: the black mana is floating and the cast is still parked, got {:?}",
+        runner.state().waiting_for
+    );
+
+    assert_eq!(
+        runner.state().objects[&target].zone,
+        Zone::Graveyard,
+        "reach guard: the announced target really was sacrificed"
+    );
+    let parked = runner
+        .state()
+        .pending_cast
+        .as_deref()
+        .expect("reach guard: the ManaPayment prompt owns the cast");
+    let pin = parked
+        .ability
+        .target_pins
+        .first()
+        .copied()
+        .flatten()
+        .expect("reach guard: the announced target carries an incarnation pin");
+    assert!(
+        !pin.is_current(runner.state()),
+        "reach guard: the sacrificed target already moved, so its live zone is not comparable"
+    );
+    let latched = parked
+        .committed_target_facts
+        .as_deref()
+        .expect("reach guard: the engine-written park carries its announced-target latch");
+    let latched_fact = latched
+        .iter()
+        .find(|fact| matches!(fact, ActivationTargetFact::Object { id, .. } if *id == target))
+        .unwrap_or_else(|| {
+            panic!("reach guard: the latch names the announced Bears; got {latched:?}")
+        });
+    assert!(
+        fact_core_types(latched_fact).contains(&CoreType::Creature),
+        "reach guard: the latch recorded the announced creature: {:?}",
+        fact_core_types(latched_fact)
+    );
+
+    BoneSplintersPark {
+        runner,
+        spell,
+        target,
+        additional_cost_creature,
+    }
+}
+
+/// CR 601.2c + CR 601.2i + CR 400.7: the honest save. Bone Splinters announced
+/// P0's own creature and that creature was sacrificed to pay part of the spell's
+/// cost, so the target's announcement pin is stale at the mana-payment park. A
+/// stale pin makes the LIVE zone comparison invalid — it does not make the
+/// RECORDED announcement optional — so the save must still be admitted, and the
+/// resumed cast must publish the announced creature as its CR 601.2i history.
+#[test]
+fn a_bone_splinters_park_after_sacrificing_its_target_restores() {
+    let BoneSplintersPark {
+        runner,
+        spell,
+        target,
+        additional_cost_creature,
+    } = bone_splinters_parked_after_sacrificing_its_target();
+
+    let restored = admitted(persisted_json(runner.state())).map_err(|error| {
+        format!("an honest stale-pin park carrying its announcement must be admitted: {error:?}")
+    });
+    let restored_state = restored.expect("reach: the honest stale-pin park is admitted");
+
+    let mut resumed = GameRunner::from_state(restored_state);
+    assert!(
+        matches!(resumed.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "reach guard: the restored state still owes the interactive mana payment, got {:?}",
+        resumed.state().waiting_for
+    );
+    resumed
+        .act(GameAction::PassPriority)
+        .expect("the restored save pays its locked cost");
+    assert!(
+        resumed.state().stack.iter().any(|entry| entry.id == spell),
+        "reach guard: the resumed save put the spell on the stack"
+    );
+    assert_eq!(
+        resumed.state().objects[&additional_cost_creature].zone,
+        Zone::Graveyard,
+        "reach guard: the resumed save paid the additional sacrifice cost"
+    );
+
+    let fact = declared_object_fact(resumed.state(), spell);
+    assert_eq!(
+        fact_object_id(&fact),
+        target,
+        "the resumed save's cast history names the announced target"
+    );
+    assert!(
+        fact_core_types(&fact).contains(&CoreType::Creature),
+        "the resumed save's cast history keeps the announced creature: {:?}",
+        fact_core_types(&fact)
+    );
+}
+
+/// CR 601.2c + CR 115.4: the same pack with the RECORDED type rewritten. Target
+/// id, stated zone, token bit and every other field are the honest ones; only the
+/// announcement snapshot's `Creature` is dropped. "Destroy target creature" never
+/// admitted a non-creature, so this is a recorded contradiction — and the stale
+/// pin (the target really did move) must not turn the recorded requirement into an
+/// optional check, or the forged snapshot publishes as CR 601.2i cast history.
+#[test]
+fn a_bone_splinters_park_after_sacrificing_its_target_refuses_a_restated_type() {
+    let BoneSplintersPark {
+        runner,
+        spell,
+        target,
+        ..
+    } = bone_splinters_parked_after_sacrificing_its_target();
+
+    // The control: this exact pack, unmodified, is admitted.
+    admitted(persisted_json(runner.state())).expect("reach-guard: the honest pack is admitted");
+
+    let mut state = runner.state().clone();
+    let parked = state
+        .pending_cast
+        .as_deref_mut()
+        .expect("reach-guard: the ManaPayment prompt owns the cast");
+    let latched = parked
+        .committed_target_facts
+        .as_deref_mut()
+        .expect("reach-guard: the engine-written park carries its announced-target latch");
+    let fact = latched
+        .iter_mut()
+        .find(|fact| matches!(fact, ActivationTargetFact::Object { id, .. } if *id == target))
+        .expect("reach-guard: the latch names the announced Bears");
+    let ActivationTargetFact::Object { id, zone, lki, .. } = fact else {
+        unreachable!("filtered to the object fact above");
+    };
+    let refused_target = *id;
+    assert_eq!(
+        *zone,
+        AnnouncedTargetZone::Known(Zone::Battlefield),
+        "reach-guard: the honest fact states the battlefield it was announced on"
+    );
+    assert!(
+        lki.card_types.contains(&CoreType::Creature),
+        "reach-guard: the honest snapshot records the creature the slot's filter required"
+    );
+    // CR 613.1d: a recorded type line "target creature" never admitted, restated
+    // for the same object in the same recorded zone.
+    lki.card_types.retain(|kind| *kind != CoreType::Creature);
+
+    match PersistedGameState::capture(state).into_game_state() {
+        Err(PersistedRestoreError::ContradictoryAnnouncedTargetFacts {
+            spell_object_id,
+            reason:
+                AnnouncedTargetFactConflict::SnapshotContradictsDeclaredFilter {
+                    target: TargetRef::Object(refused),
+                },
+        }) => {
+            assert_eq!(
+                spell_object_id, spell,
+                "the refusal names the cast it is about"
+            );
+            assert_eq!(
+                refused, refused_target,
+                "and the target whose recorded type was rewritten"
+            );
+        }
+        other => panic!(
+            "CR 601.2c + CR 115.4: a stale pin does not make the recorded creature requirement \
+             optional; a snapshot restating the moved target's type must be refused, got {other:?}"
         ),
     }
 }
