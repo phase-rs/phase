@@ -80717,6 +80717,26 @@ fn bare_choose_repeated_per_opponent_keeps_base_timing() {
         vec![TargetChoiceTiming::Stack],
         "{text}: {def:#?}"
     );
+    // The object-and-player choice is not a bare choice: it keeps the `Resolution`
+    // its producer has always declared, repeated or not, at the head and as a
+    // compound continuation (Risky Move's "choose a creature you control and an
+    // opponent"). Synthetic repeats.
+    for text in [
+        "For each opponent, choose a creature you control and an opponent.",
+        "For each opponent, destroy target artifact and choose a creature you control and an opponent.",
+    ] {
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        assert!(
+            ir.clauses.iter().any(|clause| clause.repeat_for.is_some()),
+            "{text}: reach guard for the repeat: {ir:#?}"
+        );
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(
+            target_only_chain_timings(&def),
+            vec![TargetChoiceTiming::Resolution],
+            "{text}: {def:#?}"
+        );
+    }
     let control = parse_effect_chain("Choose a creature you control.", AbilityKind::Spell);
     assert_eq!(control.target_choice_timing, TargetChoiceTiming::Resolution);
 }

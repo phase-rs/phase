@@ -453,8 +453,8 @@ fn sakashima_avatar_announces_copy_source_then_prompts_recipient_at_resolution()
         })
         .unwrap();
     // This test covers choice timing only, not the BecomeCopy result. The
-    // recipient does not yet become the copy; whether the same holds on main with
-    // a Stack-timed recipient has not been run.
+    // recipient does not become the copy; the same holds on upstream main with a
+    // Stack-timed recipient (#10687).
     assert!(runner.state().stack.is_empty());
     assert!(matches!(
         runner.state().waiting_for,

@@ -29425,20 +29425,22 @@ fn withhold_resolution_timing_beside_a_cast_time_choice(
     ctx: &ParseContext,
 ) {
     let holds_cast_time_choice = clauses.iter().any(|clause| {
+        let has_cast_time_bare_choice = cast_time_bare_choice(
+            &clause.parsed.effect,
+            clause.declared_target_choice_timing.unwrap_or_default(),
+        ) || std::iter::successors(
+            clause.parsed.sub_ability.as_deref(),
+            |node| node.sub_ability.as_deref(),
+        )
+        .any(|node| cast_time_bare_choice(&node.effect, node.target_choice_timing));
         // A clause that prints "target" announces that target at cast, which is
         // not a choice made out of order, unless the word is only another
         // player's target subject ("Target opponent chooses a creature you
         // control"): that player's bare choice is a cast-time pick too.
-        (lower::PrintedTargetWord::from_clauses(std::slice::from_ref(clause))
-            == lower::PrintedTargetWord::Absent
-            || clause_names_another_player(clause, ctx))
-            && (cast_time_bare_choice(
-                &clause.parsed.effect,
-                clause.declared_target_choice_timing.unwrap_or_default(),
-            ) || std::iter::successors(clause.parsed.sub_ability.as_deref(), |node| {
-                node.sub_ability.as_deref()
-            })
-            .any(|node| cast_time_bare_choice(&node.effect, node.target_choice_timing)))
+        has_cast_time_bare_choice
+            && (lower::PrintedTargetWord::from_clauses(std::slice::from_ref(clause))
+                == lower::PrintedTargetWord::Absent
+                || clause_names_another_player(clause, ctx))
     });
     if !holds_cast_time_choice {
         return;
@@ -29463,9 +29465,10 @@ fn withhold_resolution_timing_beside_a_cast_time_choice(
     }
 }
 
-/// CR 608.2d: whether the clause's own leading subject is a player other than the
+/// CR 608.2d: whether the clause's own leading subject is anything other than the
 /// controller or the source ("Target opponent chooses ...", "An opponent
-/// chooses ..."). Probes a throwaway context because subject parsing may record
+/// chooses ..."; an object subject counts too, which only ever holds a choice at
+/// its base timing). Probes a throwaway context because subject parsing may record
 /// target state on it.
 fn clause_names_another_player(clause: &ClauseIr, ctx: &ParseContext) -> bool {
     clause.source.fragment().is_some_and(|fragment| {
@@ -29480,20 +29483,25 @@ fn clause_names_another_player(clause: &ClauseIr, ctx: &ParseContext) -> bool {
 /// A bare choice repeated once per player or object ("For each opponent, choose a
 /// creature you control.") keeps the timing it had before the bare-choice
 /// producer existed: no printed card repeats one, and the resolution-time
-/// prompt's resume through the repeat loop is not exercised.
+/// prompt's resume through the repeat loop is not exercised. Only the bare
+/// choice is withdrawn: the object-and-player choice chains its player choice as a
+/// sub-ability and keeps the `Resolution` its producer has always declared.
 fn withhold_resolution_timing_from_repeated_choices(clauses: &mut [ClauseIr]) {
     for clause in clauses
         .iter_mut()
         .filter(|clause| clause.repeat_for.is_some())
     {
-        if matches!(clause.parsed.effect, Effect::TargetOnly { .. }) {
+        if matches!(clause.parsed.effect, Effect::TargetOnly { .. })
+            && clause.parsed.sub_ability.is_none()
+        {
             clause.declared_target_choice_timing = None;
         }
         // A compound continuation's choice ("For each opponent, exile all
         // graveyards and choose a creature you control.") repeats with its clause.
         let mut node = clause.parsed.sub_ability.as_deref_mut();
         while let Some(def) = node {
-            if matches!(def.effect.as_ref(), Effect::TargetOnly { .. }) {
+            if matches!(def.effect.as_ref(), Effect::TargetOnly { .. }) && def.sub_ability.is_none()
+            {
                 def.target_choice_timing = TargetChoiceTiming::Stack;
             }
             node = def.sub_ability.as_deref_mut();
