@@ -4,11 +4,12 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
-use engine::types::card_type::CoreType;
+use engine::types::card_type::{CoreType, Supertype};
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 
 // Oracle text from the repo's card data export (the combat trigger line only).
@@ -248,4 +249,198 @@ fn each_player_search_that_finds_nothing_still_shuffles_every_players_library() 
         })
         .collect();
     assert_eq!(shuffled, vec![P0, P1]);
+}
+
+// Oracle texts from the repo's card data export.
+const FIELD_OF_RUIN: &str = "{T}: Add {C}.\n{2}, {T}, Sacrifice this land: Destroy target nonbasic land an opponent controls. Each player searches their library for a basic land card, puts it onto the battlefield, then shuffles.";
+const DAKKON_SHADOW_SLAYER: &str = "Dakkon enters with a number of loyalty counters on him equal to the number of lands you control.\n[+1]: Surveil 2.\n[\u{2212}3]: Exile target creature.\n[\u{2212}6]: You may put an artifact card from your hand or graveyard onto the battlefield.";
+
+/// CR 701.24a + CR 608.2c: Field of Ruin's "Each player searches their library
+/// for a basic land card, puts it onto the battlefield, then shuffles" shuffles
+/// every player's library, once each. On `main` the shuffle belonged to the
+/// controller alone.
+#[test]
+fn field_of_ruin_shuffles_every_players_library_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let field = scenario
+        .add_land_from_oracle(P0, "Field of Ruin", FIELD_OF_RUIN)
+        .id();
+    let victim = scenario
+        .add_land_from_oracle(P1, "Victim Land", "{T}: Add {C}.")
+        .id();
+    let forest = scenario.add_card_to_library_top(P0, "Forest");
+    let island = scenario.add_card_to_library_top(P1, "Island");
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    for id in [forest, island] {
+        let object = runner.state_mut().objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Land);
+        object.card_types.supertypes.push(Supertype::Basic);
+        object.base_card_types = object.card_types.clone();
+    }
+
+    let outcome = runner
+        .activate(field, 1)
+        .target_object(victim)
+        .search_first_legal()
+        .resolve();
+
+    let shuffled: Vec<_> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shuffled,
+        vec![P0, P1],
+        "each player shuffles their own library once"
+    );
+}
+
+/// CR 608.2d + CR 115.1: Dakkon's "[\u{2212}6]: You may put an artifact card
+/// from your hand or graveyard onto the battlefield" names no target, so the
+/// choice is announced while the ability resolves, not when it is activated:
+/// activating completes without any prompt, resolving offers both cards, and
+/// the chosen one enters.
+#[test]
+fn dakkon_ultimate_chooses_its_artifact_at_resolution() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dakkon = scenario
+        .add_planeswalker_from_oracle(
+            P0,
+            "Dakkon, Shadow Slayer",
+            "Dakkon",
+            6,
+            DAKKON_SHADOW_SLAYER,
+        )
+        .id();
+    let in_hand = scenario
+        .add_artifact_from_oracle(P0, "Hand Artifact", "{T}: Add {C}.")
+        .id();
+    let in_graveyard = scenario
+        .add_artifact_from_oracle(P0, "Graveyard Artifact", "{T}: Add {C}.")
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        for (id, zone) in [
+            (in_hand, engine::types::zones::Zone::Hand),
+            (in_graveyard, engine::types::zones::Zone::Graveyard),
+        ] {
+            state.battlefield.retain(|&b| b != id);
+            let mut events = vec![];
+            engine::game::zones::move_to_zone(state, id, zone, &mut events);
+        }
+    }
+    let ultimate = runner.state().objects[&dakkon].abilities.len() - 1;
+
+    let activated = runner
+        .activate(dakkon, ultimate)
+        .stop_at_optional()
+        .resolve();
+
+    assert!(
+        matches!(
+            activated.final_waiting_for(),
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "the printed \"You may\" is asked first, with no target or zone prompt at activation"
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("the player accepts the optional put");
+    match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice { cards, .. } => {
+            let mut offered = cards.clone();
+            offered.sort_by_key(|id| id.0);
+            let mut expected = vec![in_hand, in_graveyard];
+            expected.sort_by_key(|id| id.0);
+            assert_eq!(offered, expected, "both zones are offered at resolution");
+        }
+        other => panic!("expected the resolution-time artifact choice, got {other:?}"),
+    }
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![in_graveyard],
+        })
+        .expect("the graveyard artifact is chosen");
+    assert_eq!(
+        runner.state().objects[&in_graveyard].zone,
+        engine::types::zones::Zone::Battlefield
+    );
+    assert_eq!(
+        runner.state().objects[&in_hand].zone,
+        engine::types::zones::Zone::Hand
+    );
+}
+
+const GENESIS_ULTIMATUM: &str = "Look at the top five cards of your library. Put any number of permanent cards from among them onto the battlefield and the rest into your hand. Exile Genesis Ultimatum.";
+
+/// CR 608.2c + CR 400.7: "Exile Genesis Ultimatum." names the spell itself, not
+/// a card the dig put onto the battlefield. On `main` the instruction was
+/// rebound to the moved permanent; the spell must end in exile and the dug
+/// permanent must stay on the battlefield.
+#[test]
+fn genesis_ultimatum_exiles_itself_and_leaves_the_dug_permanent() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let dug: Vec<_> = (0..5)
+        .map(|i| scenario.add_card_to_library_top(P0, &format!("Dug Card {i}")))
+        .collect();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Genesis Ultimatum", false, GENESIS_ULTIMATUM)
+        .id();
+    let mut runner = scenario.build();
+    for id in &dug {
+        let object = runner.state_mut().objects.get_mut(id).unwrap();
+        object.card_types.core_types.push(CoreType::Creature);
+        object.base_card_types = object.card_types.clone();
+    }
+
+    runner.cast(spell).resolve();
+    let mut guard = 0;
+    while !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+        let cards: Vec<ObjectId> = match &runner.state().waiting_for {
+            WaitingFor::DigChoice { cards, .. } => vec![cards[0]],
+            WaitingFor::EffectZoneChoice { cards, .. } => vec![cards[0]],
+            other => panic!("unexpected prompt {other:?}"),
+        };
+        runner
+            .act(GameAction::SelectCards { cards })
+            .expect("a permanent is chosen");
+        guard += 1;
+        assert!(guard < 6);
+    }
+
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&spell].zone,
+        engine::types::zones::Zone::Exile,
+        "the spell exiles itself"
+    );
+    assert!(
+        dug.iter()
+            .any(|id| state.objects[id].zone == engine::types::zones::Zone::Battlefield),
+        "the chosen permanent stays on the battlefield"
+    );
+    assert!(
+        dug.iter()
+            .all(|id| state.objects[id].zone != engine::types::zones::Zone::Exile),
+        "no dug card is exiled in its place"
+    );
 }
