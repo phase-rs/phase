@@ -142,6 +142,40 @@ pub(crate) fn object_has_devour_replacement(state: &GameState, id: ObjectId) -> 
     })
 }
 
+/// CR 614.12 + CR 614.1c: whether `id`'s own as-enters replacement reads the
+/// battlefield population as it was before the entry — a self-scoped
+/// "enters with N counters" whose count is a dynamic quantity ("for each
+/// +1/+1 counter among other creatures you control"). Such an entrant must not
+/// count permanents entering in the same simultaneous event, so the mass-entry
+/// loops snapshot the pre-entry battlefield for it, exactly as for Devour.
+pub(crate) fn object_has_pre_entry_population_replacement(state: &GameState, id: ObjectId) -> bool {
+    state.objects.get(&id).is_some_and(|obj| {
+        obj.replacement_definitions.iter_all().any(|def| {
+            def.valid_card == Some(TargetFilter::SelfRef) && {
+                let mut current = def.execute.as_deref();
+                let mut dynamic = false;
+                while let Some(exec) = current {
+                    dynamic |= matches!(
+                        &*exec.effect,
+                        Effect::PutCounter { count, .. }
+                            if !matches!(count, crate::types::ability::QuantityExpr::Fixed { .. })
+                    );
+                    current = exec.sub_ability.as_deref();
+                }
+                dynamic
+            }
+        })
+    })
+}
+
+/// CR 614.12a + CR 614.13a + CR 614.1c: whether a co-entering member needs the
+/// pre-entry battlefield snapshot — a Devour sacrifice pool or a
+/// population-counting as-enters replacement.
+pub(crate) fn object_needs_pre_entry_battlefield(state: &GameState, id: ObjectId) -> bool {
+    object_has_devour_replacement(state, id)
+        || object_has_pre_entry_population_replacement(state, id)
+}
+
 /// CR 701.50a + CR 614.5 + CR 616.1f: drain a deferred connive whose leading
 /// Draw link parked a replacement-ordering choice. Runs only when the dedicated
 /// stack-owned Connive re-entry is set (the connive applier's parked-draw

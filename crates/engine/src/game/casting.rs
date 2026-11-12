@@ -1385,6 +1385,7 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                         triggering_object: None,
                         declared_slot_view: None,
                         granting_object: None,
+                        pre_entry_battlefield: None,
                     },
                 ),
                 None => true,
@@ -25929,6 +25930,7 @@ fn apply_mana_spell_grants(
                 triggering_object: None,
                 declared_slot_view: None,
                 granting_object: None,
+                pre_entry_battlefield: None,
             };
             if !crate::game::filter::matches_target_filter(
                 rider_view.as_ref().unwrap_or(state),

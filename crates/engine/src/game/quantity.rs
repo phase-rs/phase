@@ -4931,6 +4931,14 @@ fn resolve_ref(
     };
     filter_ctx.recipient_id = ctx.recipient;
     filter_ctx.ability_targets = ability_targets;
+    // CR 614.12 + CR 614.1c: a quantity read for an ENTERING object's replacement
+    // (`ctx.entering`) counts the battlefield as it was before the simultaneous
+    // entry, so permanents entering in the same event are excluded from every
+    // population read (object counts, counters among objects, aggregates) at
+    // this single boundary. Every other read keeps the live battlefield.
+    filter_ctx.pre_entry_battlefield = ctx
+        .entering
+        .and(state.active_pre_entry_battlefield_snapshot());
     let player = state.players.iter().find(|p| p.id == controller);
     match qty {
         // CR 402: hand size for the scoped player(s).
@@ -5550,7 +5558,8 @@ fn resolve_ref(
                         Some(a) => FilterContext::from_ability_with_controller(a, p.id),
                         None => FilterContext::from_source_with_controller(source_id, p.id)
                             .with_granting_object(ctx.granting_object),
-                    };
+                    }
+                    .with_pre_entry_battlefield(filter_ctx.pre_entry_battlefield);
                     usize_to_i32_saturating(
                         zone_ids
                             .iter()

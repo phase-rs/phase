@@ -1493,9 +1493,9 @@ pub fn resolve(
     // themselves) is excluded regardless of iteration order.
     if dest_zone == Zone::Battlefield
         && state.active_devour_eligible_snapshot().is_none()
-        && targeted_objects
-            .iter()
-            .any(|id| crate::game::engine_replacement::object_has_devour_replacement(state, *id))
+        && targeted_objects.iter().any(|id| {
+            crate::game::engine_replacement::object_needs_pre_entry_battlefield(state, *id)
+        })
     {
         state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
     }
@@ -3040,6 +3040,9 @@ pub fn resolve_all(
         state.tracked_set_member_origins.remove(id);
     }
 
+    // CR 614.12 + CR 614.1c: the same snapshot also serves population-counting
+    // as-enters replacements (Ascendant Acolyte), which must not count a
+    // co-entrant's counters or presence.
     // CR 614.12a + CR 614.13a: when a mass entry brings in one or more devourers
     // simultaneously, snapshot the eligible pool BEFORE any co-entering member
     // enters — `state.objects` is unordered, so an ordinary co-arriver may be
@@ -3050,9 +3053,9 @@ pub fn resolve_all(
     // event-completion paths below.
     if dest_zone == Zone::Battlefield
         && state.active_devour_eligible_snapshot().is_none()
-        && matching
-            .iter()
-            .any(|id| crate::game::engine_replacement::object_has_devour_replacement(state, *id))
+        && matching.iter().any(|id| {
+            crate::game::engine_replacement::object_needs_pre_entry_battlefield(state, *id)
+        })
     {
         state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
     }

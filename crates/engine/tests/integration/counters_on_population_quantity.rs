@@ -414,6 +414,132 @@ fn ascendant_acolyte_enters_with_counters_among_your_other_creatures() {
     assert_eq!(counters(&runner, acolyte, &CounterType::Plus1Plus1), 3);
 }
 
+// ── Simultaneous co-entry (CR 614.12 + CR 122.6, issue #9509) ────────────────
+
+const IRON_APPRENTICE: &str = "Iron Apprentice enters with a +1/+1 counter on it.
+When Iron Apprentice dies, if it had counters on it, put those counters on target creature you control.";
+const LIVING_DEATH: &str = "Each player exiles all creature cards from their graveyard, then sacrifices all creatures they control, then puts all cards they exiled this way onto the battlefield.";
+const RETURN_ALL_CREATURES: &str =
+    "Return all creature cards from your graveyard to the battlefield.";
+/// The object-count class of the as-enters population read (not a printed
+/// card): a counter per OTHER creature the entrant's controller controls.
+const ENTERS_PER_OTHER_CREATURE: &str =
+    "This creature enters with a +1/+1 counter on it for each other creature you control.";
+
+/// Stage Acolyte and Apprentice in P0's graveyard (in the requested id order,
+/// which drives delivery order), plus any battlefield `setup`, then resolve the
+/// mass-return `oracle` through the production effect chain.
+fn co_entry_with(
+    acolyte_first: bool,
+    acolyte_text: &str,
+    oracle: &str,
+    setup: impl FnOnce(&mut GameScenario),
+) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    setup(&mut scenario);
+    let (acolyte, apprentice);
+    if acolyte_first {
+        let mut b = scenario.add_creature_to_graveyard(P0, "Ascendant Acolyte", 1, 1);
+        b.from_oracle_text(acolyte_text);
+        acolyte = b.id();
+        let mut b = scenario.add_creature_to_graveyard(P0, "Iron Apprentice", 1, 1);
+        b.from_oracle_text(IRON_APPRENTICE);
+        apprentice = b.id();
+    } else {
+        let mut b = scenario.add_creature_to_graveyard(P0, "Iron Apprentice", 1, 1);
+        b.from_oracle_text(IRON_APPRENTICE);
+        apprentice = b.id();
+        let mut b = scenario.add_creature_to_graveyard(P0, "Ascendant Acolyte", 1, 1);
+        b.from_oracle_text(acolyte_text);
+        acolyte = b.id();
+    }
+    let source = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Black);
+    let mut runner = scenario.build();
+    let def = engine::parser::oracle_effect::parse_effect_chain(
+        oracle,
+        engine::types::ability::AbilityKind::Spell,
+    );
+    let ability = engine::game::ability_utils::build_resolved_from_def(&def, source, P0);
+    let mut events = Vec::new();
+    engine::game::effects::resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("mass return must resolve");
+    (runner, acolyte, apprentice)
+}
+
+/// CR 614.12: Acolyte's as-enters count reads the battlefield as it was BEFORE
+/// the simultaneous entry, so Iron Apprentice's entering counter is not
+/// counted — in either delivery order.
+#[test]
+fn acolyte_ignores_counters_other_creatures_enter_with_under_living_death() {
+    for acolyte_first in [true, false] {
+        let (runner, acolyte, apprentice) =
+            co_entry_with(acolyte_first, ASCENDANT_ACOLYTE, LIVING_DEATH, |_| {});
+        assert_eq!(runner.state().objects[&acolyte].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&apprentice].zone, Zone::Battlefield);
+        assert_eq!(
+            counters(&runner, apprentice, &CounterType::Plus1Plus1),
+            1,
+            "Apprentice still enters with its own counter (acolyte_first={acolyte_first})"
+        );
+        assert_eq!(
+            counters(&runner, acolyte, &CounterType::Plus1Plus1),
+            0,
+            "Acolyte must not count a co-entrant's counter (acolyte_first={acolyte_first})"
+        );
+    }
+}
+
+/// Control: counters on creatures already on the battlefield before the mass
+/// return survive it and ARE counted; the co-entrant's counter is not.
+#[test]
+fn acolyte_counts_preexisting_counters_but_not_co_entrants_in_mass_return() {
+    for acolyte_first in [true, false] {
+        let mut ally = None;
+        let (runner, acolyte, _) = co_entry_with(
+            acolyte_first,
+            ASCENDANT_ACOLYTE,
+            RETURN_ALL_CREATURES,
+            |s| {
+                let id = s.add_creature(P0, "Ally", 2, 2).id();
+                s.with_counter(id, CounterType::Plus1Plus1, 2);
+                ally = Some(id);
+            },
+        );
+        assert_eq!(
+            runner.state().objects[&ally.unwrap()].zone,
+            Zone::Battlefield
+        );
+        assert_eq!(
+            counters(&runner, acolyte, &CounterType::Plus1Plus1),
+            2,
+            "only the pre-existing Ally's counters count (acolyte_first={acolyte_first})"
+        );
+    }
+}
+
+/// The object-count class of the same read: a co-entrant is not "another
+/// creature you control" for an as-enters count.
+#[test]
+fn as_enters_object_count_excludes_simultaneous_co_entrants() {
+    for acolyte_first in [true, false] {
+        let (runner, counter_entrant, _) = co_entry_with(
+            acolyte_first,
+            ENTERS_PER_OTHER_CREATURE,
+            RETURN_ALL_CREATURES,
+            |s| {
+                s.add_creature(P0, "Ally A", 2, 2);
+                s.add_creature(P0, "Ally B", 2, 2);
+            },
+        );
+        assert_eq!(
+            counters(&runner, counter_entrant, &CounterType::Plus1Plus1),
+            2,
+            "two creatures were on the battlefield before the entry (acolyte_first={acolyte_first})"
+        );
+    }
+}
+
 // ── Resolution effects (CR 608.2h) ───────────────────────────────────────────
 
 /// Chong and Lily, Nomads, mode two: +1/+0 for each lore counter among

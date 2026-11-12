@@ -30625,6 +30625,14 @@ impl GameState {
             .and_then(|frame| frame.devour_eligible_snapshot.as_ref())
     }
 
+    /// CR 614.12 + CR 614.1c: the battlefield as it stood before the active
+    /// simultaneous entry began, when the entry captured one (a co-entering
+    /// Devour sacrifice pool or population-counting as-enters replacement).
+    /// The same frame-owned snapshot as [`Self::active_devour_eligible_snapshot`].
+    pub fn active_pre_entry_battlefield_snapshot(&self) -> Option<&HashSet<ObjectId>> {
+        self.active_devour_eligible_snapshot()
+    }
+
     /// Begins a Devour co-entry in a frame that remains authoritative even
     /// when the ordinary iteration owner is absent.
     pub fn push_devour_change_zone_snapshot(&mut self, snapshot: HashSet<ObjectId>) {
